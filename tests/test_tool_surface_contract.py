@@ -13,9 +13,10 @@ from fastmcp.exceptions import ToolError
 from starlette.testclient import TestClient
 
 from exomem import commands, semantic_authoring, semantic_index
-from exomem import vault as vault_module
 from exomem import server as server_module
+from exomem import vault as vault_module
 from exomem.__main__ import main
+from exomem.governance import principal as principal_module
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 AUTHORING_TOOLS = (
@@ -66,14 +67,20 @@ def _mcp_tools(mcp) -> dict[str, dict]:
 
 
 def _call_bootstrap(mcp) -> dict:
-    result = asyncio.run(mcp.call_tool("bootstrap", {}, run_middleware=False))
+    with principal_module.request_scope(
+        principal_module.owner_principal(surface="mcp")
+    ):
+        result = asyncio.run(mcp.call_tool("bootstrap", {}, run_middleware=False))
     if isinstance(result.structured_content, dict):
         return result.structured_content
     return json.loads(result.content[0].text)
 
 
 def _call_tool(mcp, name: str, arguments: dict) -> dict:
-    result = asyncio.run(mcp.call_tool(name, arguments, run_middleware=False))
+    with principal_module.request_scope(
+        principal_module.owner_principal(surface="mcp")
+    ):
+        result = asyncio.run(mcp.call_tool(name, arguments, run_middleware=False))
     if isinstance(result.structured_content, dict):
         return result.structured_content
     return json.loads(result.content[0].text)
@@ -277,6 +284,28 @@ def test_govern_memory_response_detail_default_is_command_scoped(
     assert tools["remember"]["inputSchema"]["properties"]["response_detail"][
         "default"
     ] == "compact"
+
+
+def test_govern_memory_schema_exposes_closed_session_action_selector(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mcp = _build_server(tmp_path, monkeypatch)
+    schema = _mcp_tools(mcp)["govern_memory"]["inputSchema"]
+
+    assert "session" in schema["properties"]["operation"]["enum"]
+    assert schema["properties"]["session_action"]["anyOf"][0]["enum"] == [
+        "open",
+        "status",
+        "rotate",
+        "close",
+    ]
+    for caller_identity in (
+        "principal",
+        "principal_scope",
+        "issuer_family",
+        "internal_session_id",
+    ):
+        assert caller_identity not in schema["properties"]
 
 
 def test_govern_memory_destructive_annotation_tracks_operation_registry() -> None:

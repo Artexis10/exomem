@@ -45,6 +45,14 @@ FORBIDDEN_COMMANDS = {
 MCP_SCHEMA_FIXTURE = Path(__file__).parent / "fixtures" / "mcp_tool_schemas.json"
 
 
+def _without_mcp_transport_credential(schema: dict[str, object]) -> dict[str, object]:
+    normalized = json.loads(json.dumps(schema))
+    properties = normalized.get("properties")
+    assert isinstance(properties, dict)
+    properties.pop("authorization_session_credential", None)
+    return normalized
+
+
 def test_hosted_alpha_agent_profile_is_exact_and_fail_closed() -> None:
     resolver = getattr(commands, "product_commands_for_profile", None)
     assert resolver is not None, "missing canonical product surface-profile resolver"
@@ -109,6 +117,7 @@ def test_agent_contract_is_mcp_ready_deterministic_and_additive() -> None:
         "protocol_version",
         "exomem_release",
         "compatibility",
+        "authorization_session",
         "trusted_headers",
         "envelopes",
         "transfer_grant",
@@ -128,7 +137,9 @@ def test_agent_contract_is_mcp_ready_deterministic_and_additive() -> None:
         assert base_entry == legacy_entries[name]
         assert mcp_tool["name"] == name
         assert mcp_tool["description"] == fixture[name]["description"]
-        assert mcp_tool["inputSchema"] == fixture[name]["inputSchema"]
+        assert mcp_tool["inputSchema"] == _without_mcp_transport_credential(
+            fixture[name]["inputSchema"]
+        )
         expected_annotations = command_surface.mcp_tool_annotations(
             name,
             read_only=canonical_commands[name].read_only,
@@ -155,7 +166,9 @@ def test_hosted_alpha_mcp_tools_omit_absent_optional_fields_without_losing_schem
         assert "execution" not in mcp_tool
         assert all(value is not None for value in mcp_tool.values())
         assert mcp_tool["description"] == fixture[entry["name"]]["description"]
-        assert mcp_tool["inputSchema"] == fixture[entry["name"]]["inputSchema"]
+        assert mcp_tool["inputSchema"] == _without_mcp_transport_credential(
+            fixture[entry["name"]]["inputSchema"]
+        )
         assert mcp_tool["annotations"]
         assert mcp_tool["outputSchema"]
 

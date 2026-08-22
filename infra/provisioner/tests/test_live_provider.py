@@ -18,6 +18,7 @@ from exomem_provisioner.config import (
 from exomem_provisioner.driver import DriverPending, EffectContext
 from exomem_provisioner.lifecycle import (
     CellLifecycleDriver,
+    LifecycleConfig,
     MetadataConflict,
     OpaqueProviderMetadata,
 )
@@ -66,27 +67,52 @@ def _deployment_lock(tmp_path: Path) -> Path:
         "runtimeImage": f"ghcr.io/artexis10/exomem@sha256:{digest}",
         "sourceCommit": commit,
     }
-    legacy_release_set = [
-        {"releaseVersion": "0.22.0", "protocolVersion": "exomem-hosted.v1"}
-    ]
+    legacy_release_set = [{"releaseVersion": "0.22.0", "protocolVersion": "exomem-hosted.v1"}]
     payload = {
         "artifact": "exomem-hosted-deployment-lock",
         "schemaVersion": 2,
         "admissionMode": "expand",
         "components": {
-            "runtime": {"image": f"ghcr.io/artexis10/exomem@sha256:{digest}", "sourceCommit": commit, "candidateSha256": digest},
-            "provisioner": {"image": f"ghcr.io/artexis10/exomem-provisioner@sha256:{'e' * 64}", "sourceCommit": commit, "candidateSha256": "e" * 64, "wireProtocol": "exomem-cell-provisioner.v2"},
+            "runtime": {
+                "image": f"ghcr.io/artexis10/exomem@sha256:{digest}",
+                "sourceCommit": commit,
+                "candidateSha256": digest,
+            },
+            "provisioner": {
+                "image": f"ghcr.io/artexis10/exomem-provisioner@sha256:{'e' * 64}",
+                "sourceCommit": commit,
+                "candidateSha256": "e" * 64,
+                "wireProtocol": "exomem-cell-provisioner.v2",
+            },
         },
         "runtimeTarget": target,
         "composition": {
             "commit": commit,
-            "sourceClosure": {name: {"candidateCommit": commit, "compositionCommit": commit, "paths": ["src/**"]} for name in ("runtime", "provisioner")},
+            "sourceClosure": {
+                name: {"candidateCommit": commit, "compositionCommit": commit, "paths": ["src/**"]}
+                for name in ("runtime", "provisioner")
+            },
             "forwardContractSha256": digest,
             "authoritativeLegacyReleaseSetSha256": "f" * 64,
-            "legacyCatalog": [{"releaseVersion": "0.22.0", "protocolVersion": "exomem-hosted.v1", "runtimeImage": f"ghcr.io/artexis10/exomem@sha256:{digest}", "sourceCommit": commit, "contractSha256": _canonical_sha256(legacy_contract), "contract": legacy_contract}],
+            "legacyCatalog": [
+                {
+                    "releaseVersion": "0.22.0",
+                    "protocolVersion": "exomem-hosted.v1",
+                    "runtimeImage": f"ghcr.io/artexis10/exomem@sha256:{digest}",
+                    "sourceCommit": commit,
+                    "contractSha256": _canonical_sha256(legacy_contract),
+                    "contract": legacy_contract,
+                }
+            ],
             "legacyReleaseSetSha256": _canonical_sha256(legacy_release_set),
         },
-        "rollback": {"provisionerImage": f"ghcr.io/artexis10/exomem-provisioner@sha256:{'e' * 64}", "provisionerSourceCommit": commit, "v1CorpusSha256": digest, "legacyManifestSha256": digest, "substrateV1ConsumerCommit": commit},
+        "rollback": {
+            "provisionerImage": f"ghcr.io/artexis10/exomem-provisioner@sha256:{'e' * 64}",
+            "provisionerSourceCommit": commit,
+            "v1CorpusSha256": digest,
+            "legacyManifestSha256": digest,
+            "substrateV1ConsumerCommit": commit,
+        },
     }
     path.write_text(json.dumps(payload), encoding="utf-8")
     return path
@@ -166,7 +192,9 @@ def test_live_worker_settings_require_one_selected_lock_and_bound_internal_origi
         _settings()
 
 
-def test_live_worker_loads_the_selected_lock_and_rejects_an_unavailable_lock(tmp_path: Path) -> None:
+def test_live_worker_loads_the_selected_lock_and_rejects_an_unavailable_lock(
+    tmp_path: Path,
+) -> None:
     settings = _settings(
         capacity_contract_path=str(_capacity_contract(tmp_path)),
         deployment_lock_path=str(_deployment_lock(tmp_path)),
@@ -181,7 +209,9 @@ def test_live_worker_loads_the_selected_lock_and_rejects_an_unavailable_lock(tmp
         _ = missing.deployment_lock
 
 
-def test_deployment_lock_requires_exact_legacy_v1_or_exact_forward_v2_target(tmp_path: Path) -> None:
+def test_deployment_lock_requires_exact_legacy_v1_or_exact_forward_v2_target(
+    tmp_path: Path,
+) -> None:
     path = _deployment_lock(tmp_path)
     payload = json.loads(path.read_text(encoding="utf-8"))
     payload["runtimeTarget"]["releaseVersion"] = "0.39.2"
@@ -466,6 +496,127 @@ def test_production_factory_wires_the_live_plane_without_a_fake_selection_path(
     assert components.driver._plane is components.plane
     assert components.driver._volumes is None
     assert components.capacity is components.plane._capacity
+    assert components.plane._fingerprint._image == components.lock.components.provisioner.image
+
+
+@pytest.mark.asyncio
+async def test_live_rollforward_uses_target_fingerprint_and_original_helm_authority() -> None:
+    current = OpaqueProviderMetadata("tenant-alpha", "cell-alpha", "rollforward-alpha", 8)
+    owner = OpaqueProviderMetadata("tenant-alpha", "cell-alpha", "original-provision", 7)
+    target = {
+        "releaseVersion": "0.57.2",
+        "protocolVersion": "1",
+        "agentProfile": "hosted-alpha-agent-v2",
+        "gatewayContractDigest": "a" * 64,
+        "commandFingerprint": "b" * 64,
+        "schemaDigest": "c" * 64,
+        "compatibilityDigest": "e" * 64,
+    }
+    config = LifecycleConfig(
+        image="ghcr.io/artexis10/exomem@sha256:" + "d" * 64,
+        chart_path="chart",
+        chart_version="0.1.0",
+        helm_version="3.19.4",
+        control_hostname="control.example.invalid",
+        transfer_hostname="transfer.example.invalid",
+        browser_origin="https://substratesystems.io",
+        release_version="0.57.2",
+        protocol_version="1",
+        contract_digest="a" * 64,
+        location="fsn1",
+        runtime_target=target,
+        compatibility_digest="e" * 64,
+        migration_mode="binding-v1-to-v2",
+    )
+    original_request = {
+        "provisionMode": "serve",
+        "workerPolicy": {"workerCount": 2, "semantic": True, "media": False},
+        "runtimeTarget": {
+            **target,
+            "releaseVersion": "0.54.1",
+            "protocolVersion": "legacy-protocol",
+        },
+        "_providerRecoveryEnvelopes": {"initJob": "original-init-envelope"},
+    }
+    request = {
+        "serviceCredential": "credential-current",
+        "workerPolicy": {"workerCount": 2, "semantic": True, "media": False},
+        "runtimeTarget": target,
+        "compatibilityDigest": "e" * 64,
+    }
+    fingerprints: list[tuple[OpaqueProviderMetadata, str, str]] = []
+    transitions: list[tuple[OpaqueProviderMetadata, dict[str, object], str]] = []
+    rollbacks: list[tuple[OpaqueProviderMetadata, str]] = []
+    quiesced_protocols: list[str] = []
+
+    class Fingerprint:
+        async def fingerprint(self, metadata, *, operation_id, phase, recovery_envelope):
+            assert recovery_envelope == "current-init-envelope"
+            fingerprints.append((metadata, operation_id, phase))
+            return "f" * 64
+
+    class Helm:
+        async def transition_release(self, metadata, values, *, operation_id):
+            transitions.append((metadata, values, operation_id))
+
+        async def rollback_release(self, metadata, *, operation_id):
+            rollbacks.append((metadata, operation_id))
+
+    class Registry:
+        async def inspect(self, current_metadata, owner_metadata):
+            assert (current_metadata, owner_metadata) == (current, owner)
+            return SimpleNamespace(routes=(False, False))
+
+    class Runtime:
+        async def quiesce(self, metadata, *, credential, protocol_version, operation_id):
+            assert metadata == owner
+            assert credential == "credential-current"
+            assert operation_id == "rollforward-alpha"
+            quiesced_protocols.append(protocol_version)
+
+    plane = LiveLifecyclePlane(
+        repository=SimpleNamespace(),  # type: ignore[arg-type]
+        registry=Registry(),  # type: ignore[arg-type]
+        cell=SimpleNamespace(),  # type: ignore[arg-type]
+        helm=Helm(),  # type: ignore[arg-type]
+        runtime=Runtime(),  # type: ignore[arg-type]
+        routes=SimpleNamespace(),  # type: ignore[arg-type]
+        maintenance=SimpleNamespace(),  # type: ignore[arg-type]
+        capacity=SimpleNamespace(),  # type: ignore[arg-type]
+        identity_verifier=IDENTITY_CODEC.verifier(),
+        config=config,
+        fingerprint=Fingerprint(),  # type: ignore[arg-type]
+    )
+    key = plane._key(current)
+    plane._owned[key] = owner
+    plane._helm_requests[key] = original_request
+    plane._recovery_envelopes[key] = {"initJob": "current-init-envelope"}
+
+    assert (
+        await plane.canonical_vault_fingerprint(
+            current, request, "rollforward-alpha", phase="before"
+        )
+        == "f" * 64
+    )
+    await plane.quiesce(current, request, "rollforward-alpha")
+    await plane.run_runtime_migration(current, request, config, "rollforward-alpha")
+    await plane.upgrade_runtime(current, request, config, "rollforward-alpha")
+    await plane.rollback_runtime(current, "rollforward-alpha")
+
+    assert fingerprints == [(current, "rollforward-alpha", "before")]
+    assert quiesced_protocols == ["legacy-protocol"]
+    assert [values["workloadMode"] for _owner, values, _operation in transitions] == [
+        "migrate",
+        "serve",
+    ]
+    for transition_owner, values, operation in transitions:
+        assert transition_owner == owner
+        assert operation == "rollforward-alpha"
+        assert values["image"] == config.image
+        assert values["providerRecoveryEnvelopes"] == {"initJob": "original-init-envelope"}
+        assert values["routes"]["enabled"] is False
+    assert transitions[0][1]["initOperationId"] == "rollforward-alpha"
+    assert rollbacks == [(owner, "rollforward-alpha")]
 
 
 @pytest.mark.asyncio
@@ -650,9 +801,15 @@ async def test_legacy_credential_promotion_uses_the_catalog_unit_after_mutation(
         "gatewayContractDigest": "e" * 64,
     }
     plane = LiveLifecyclePlane(
-        repository=SimpleNamespace(), registry=SimpleNamespace(), cell=Cell(), helm=SimpleNamespace(),
-        runtime=Runtime(), routes=SimpleNamespace(), maintenance=SimpleNamespace(),
-        capacity=SimpleNamespace(), identity_verifier=IDENTITY_CODEC.verifier(),
+        repository=SimpleNamespace(),
+        registry=SimpleNamespace(),
+        cell=Cell(),
+        helm=SimpleNamespace(),
+        runtime=Runtime(),
+        routes=SimpleNamespace(),
+        maintenance=SimpleNamespace(),
+        capacity=SimpleNamespace(),
+        identity_verifier=IDENTITY_CODEC.verifier(),
         config=SimpleNamespace(runtime_target_for=lambda _request, **_kwargs: target),  # type: ignore[arg-type]
     )
     request = {
@@ -971,7 +1128,9 @@ async def test_recovery_reader_authenticates_init_job_and_stabilizes_helm_record
         await registry.authenticate_recovery_record(metadata)
 
 
-def _init_snapshot(*, present: bool, complete: bool = False, failed: bool = False, serving: bool = False):
+def _init_snapshot(
+    *, present: bool, complete: bool = False, failed: bool = False, serving: bool = False
+):
     return SimpleNamespace(
         namespace=True,
         release=True,
@@ -1066,12 +1225,8 @@ async def test_initialize_replays_absent_init_job_with_original_authenticated_re
     assert [owner for owner, _values in helm_calls] == [original_owner, original_owner]
     assert [values["workloadMode"] for _owner, values in helm_calls] == ["initialize", "serve"]
     assert helm_calls[0][1]["workerPolicyDigest"] == helm_calls[1][1]["workerPolicyDigest"]
-    assert helm_calls[0][1]["providerRecoveryEnvelopes"] == {
-        "initJob": "original-init-envelope"
-    }
-    assert helm_calls[1][1]["providerRecoveryEnvelopes"] == {
-        "initJob": "original-init-envelope"
-    }
+    assert helm_calls[0][1]["providerRecoveryEnvelopes"] == {"initJob": "original-init-envelope"}
+    assert helm_calls[1][1]["providerRecoveryEnvelopes"] == {"initJob": "original-init-envelope"}
 
 
 @pytest.mark.asyncio
@@ -1081,7 +1236,9 @@ async def test_initialize_keeps_present_running_init_job_pending_without_helm_re
     )
 
     initialized = await plane.initialize(
-        metadata, _init_recovery_request(envelope="current-envelope"), _init_recovery_config()  # type: ignore[arg-type]
+        metadata,
+        _init_recovery_request(envelope="current-envelope"),
+        _init_recovery_config(),  # type: ignore[arg-type]
     )
 
     assert initialized is False
@@ -1095,7 +1252,9 @@ async def test_initialize_keeps_replayed_pending_init_job_pending_without_servin
     )
 
     initialized = await plane.initialize(
-        metadata, _init_recovery_request(envelope="current-envelope"), _init_recovery_config()  # type: ignore[arg-type]
+        metadata,
+        _init_recovery_request(envelope="current-envelope"),
+        _init_recovery_config(),  # type: ignore[arg-type]
     )
 
     assert initialized is False
@@ -1110,7 +1269,9 @@ async def test_initialize_raises_for_failed_replayed_init_job_without_serving() 
 
     with pytest.raises(MetadataConflict, match="cell storage initialization failed"):
         await plane.initialize(
-            metadata, _init_recovery_request(envelope="current-envelope"), _init_recovery_config()  # type: ignore[arg-type]
+            metadata,
+            _init_recovery_request(envelope="current-envelope"),
+            _init_recovery_config(),  # type: ignore[arg-type]
         )
 
     assert [values["workloadMode"] for _owner, values in helm_calls] == ["initialize"]
@@ -1162,7 +1323,9 @@ async def test_initializing_checkpoint_recovers_deleted_init_job_without_looping
     plane._repository = Repository()  # type: ignore[assignment]
     plane._cell = Cell()  # type: ignore[assignment]
     driver = CellLifecycleDriver(
-        plane=plane, volume_worker=None, config=_init_recovery_config()  # type: ignore[arg-type]
+        plane=plane,
+        volume_worker=None,
+        config=_init_recovery_config(),  # type: ignore[arg-type]
     )
 
     outcome = await driver.execute(

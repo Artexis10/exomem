@@ -26,6 +26,7 @@ REGISTRY_VERSION = 1
 
 _SQLITE_SUFFIXES = ("", "-wal", "-shm", "-journal")
 _REVIEW_TEMP_RE = re.compile(r"^\.\.review-state\.json\.[a-z0-9_]{8}\.tmp$", re.ASCII)
+_DUE_TEMP_RE = re.compile(r"^\.\.due-state\.json\.[a-z0-9_]{8}\.tmp$", re.ASCII)
 _LEXICAL_REBUILD_RE = re.compile(
     r"^\.lexical\.sqlite\.rebuild-[0-9a-f]{32}\.tmp(?:-(?:wal|shm|journal))?$",
     re.ASCII,
@@ -390,6 +391,12 @@ _REGISTRY = (
         "review_state",
         exact=(".review-state.json",),
         patterns=(_REVIEW_TEMP_RE,),
+    ),
+    InternalStateDescriptor(
+        "due-state",
+        "due_state",
+        exact=(".due-state.json",),
+        patterns=(_DUE_TEMP_RE,),
     ),
     InternalStateDescriptor(
         "lexical-rebuild", "lexstore", patterns=(_LEXICAL_REBUILD_RE,)
@@ -842,6 +849,7 @@ def publish_generic_bytes(
     data: bytes,
     *,
     expected_identity: held_fs.StableIdentity | None,
+    expected_sha256: str | None = None,
     identities: IdentityCatalogue | None = None,
 ) -> held_fs.StableIdentity:
     """Publish one ordinary file through a retained parent and exact leaf CAS.
@@ -902,6 +910,7 @@ def publish_generic_bytes(
                     leaf,
                     data,
                     expected_identity=expected_identity,
+                    expected_sha256=expected_sha256,
                 )
                 if not published.ok:
                     code = (

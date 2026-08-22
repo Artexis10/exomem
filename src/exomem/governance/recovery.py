@@ -14,6 +14,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
+from .. import reserved_paths
 from . import policy as policy_module
 from . import receipts, store
 from .operations import RECOVERY_STRATEGY_KEYS, journal_variant, recovery_strategy
@@ -311,6 +312,18 @@ def _actual_component_value(
     expected: Mapping[str, Any] | None = None,
     event_id: str | None = None,
 ) -> dict[str, Any]:
+    if kind == "companion":
+        try:
+            snapshot = reserved_paths.read_generic_bytes(vault_root, key)
+        except reserved_paths.ReservedPathLeafError as error:
+            return {
+                "status": "absent" if error.code == "MISSING" else "unsafe"
+            }
+        return {
+            "path_hash": hashlib.sha256(key.encode("utf-8")).hexdigest(),
+            "sha256": hashlib.sha256(snapshot.data).hexdigest(),
+            "size": len(snapshot.data),
+        }
     if kind == "yaml":
         return {"hash": _content_hash(policy_module.governance_root(vault_root) / key)}
     if kind == "archive":
@@ -420,7 +433,10 @@ def _actual_component_value(
 
 
 def _proposal_guard_actual(
-    vault_root: Path, conn: sqlite3.Connection, proposal_id: str, event_id: str | None
+    vault_root: Path,
+    conn: sqlite3.Connection,
+    proposal_id: str,
+    event_id: str | None,
 ) -> dict[str, Any]:
     """Rebuild the proposal's pre-image before testing its live membership proof."""
     try:
@@ -457,8 +473,20 @@ def _proposal_guard_actual(
             prior_documents[path] = prior_bytes.decode("utf-8")
         if set(prior_documents) != set(documents):
             return {"status": "invalid"}
-        prior = policy_module.compile_prospective(vault_root, prior_documents)
-        prospective = policy_module.compile_prospective(vault_root, documents)
+        prior_compile = policy_module.compile_prospective(
+            vault_root,
+            prior_documents,
+            _expected_pending_event_id=event_id,
+        )
+        prospective_compile = policy_module.compile_prospective(
+            vault_root,
+            documents,
+            _expected_pending_event_id=event_id,
+        )
+        if prior_compile is None or prospective_compile is None:
+            return {"status": "invalid"}
+        prior = prior_compile.policy
+        prospective = prospective_compile.policy
         if prior.blocked or prospective.blocked:
             return {"status": "invalid"}
         if (
@@ -764,6 +792,7 @@ def _activate_composite_dependents(
 
 _RECOVERY_ACTIVATORS: Mapping[str, Any] = MappingProxyType(
     {
+        "composite_companion": _activate_composite_yaml,
         "composite_yaml": _activate_composite_yaml,
         "compound_grant": _activate_compound_grant,
         "composite_sidecar": _activate_composite_sidecar,

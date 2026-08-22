@@ -22,6 +22,7 @@ from exomem import command_surface, writer_lease
 from exomem import server as server_module
 from exomem import vault as vault_module
 from exomem.cli_ops import OpError
+from exomem.governance import principal as principal_module
 
 #: The wall-clock shape of every contention test in this file.
 #:
@@ -49,6 +50,16 @@ from exomem.cli_ops import OpError
 #: These are not latency claims. Nothing here asserts the product is fast.
 _HOLD_SECONDS = 45.0
 _OBSERVE_SECONDS = 15.0
+
+
+@pytest.fixture(autouse=True)
+def _bind_trusted_mcp_principal():
+    """Direct wrapper tests model the principal installed by MCP middleware."""
+
+    with principal_module.request_scope(
+        principal_module.owner_principal(surface="mcp")
+    ):
+        yield
 
 
 @pytest.mark.parametrize(

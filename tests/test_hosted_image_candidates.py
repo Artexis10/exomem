@@ -506,3 +506,145 @@ def test_runtime_storage_uri_must_be_canonical_release_asset(tmp_path: Path) -> 
 
     with pytest.raises(candidate.CandidateError, match="storage"):
         candidate.record_candidate(record, bundle, tmp_path / "candidate.json")
+
+
+def _runtime_target_fixture_files(tmp_path: Path) -> tuple[Path, Path]:
+    agent = tmp_path / "agent-contract-fixture.json"
+    agent.write_text(
+        json.dumps(
+            {
+                "sourceCommit": COMMIT,
+                "sourceRelease": "0.35.1",
+                "compatibility": {
+                    "profile": "hosted-alpha-agent-v1",
+                    "command_surface_sha256": "c" * 64,
+                    "schema_contract_sha256": "d" * 64,
+                    "compatibility_sha256": "e" * 64,
+                },
+            }
+        )
+    )
+    gateway = tmp_path / "gateway-contract-0-35-1.json"
+    gateway.write_text(
+        json.dumps(
+            {
+                "exomem_release": "0.35.1",
+                "protocol_version": "1",
+                "digest": {"algorithm": "sha256", "value": "f" * 64},
+            }
+        )
+    )
+    return agent, gateway
+
+
+def _successful_verification(monkeypatch: pytest.MonkeyPatch, candidate_path: Path) -> None:
+    class Result:
+        returncode = 0
+        stderr = ""
+
+    def fake_run(argv: list[str], **_: object) -> Result:
+        result = Result()
+        if argv[3].startswith("oci://"):
+            result.stdout = _statement("ghcr.io/artexis10/exomem", DIGEST)
+        else:
+            result.stdout = _statement(
+                candidate_path.name,
+                hashlib.sha256(candidate_path.read_bytes()).hexdigest(),
+            )
+        return result
+
+    monkeypatch.setattr(candidate.subprocess, "run", fake_run)
+
+
+def test_verify_cli_emits_one_exact_runtime_target_after_both_attestations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle = tmp_path / "image-bundle"
+    candidate_bundle = tmp_path / "candidate-bundle"
+    record = _record()
+    record["attestation"]["bundleSha256"] = _write_bundle(bundle)  # type: ignore[index]
+    candidate_path = tmp_path / "candidate.json"
+    candidate.record_candidate(record, bundle, candidate_path)
+    _write_bundle(candidate_bundle)
+    agent, gateway = _runtime_target_fixture_files(tmp_path)
+    output = tmp_path / "target.json"
+    _successful_verification(monkeypatch, candidate_path)
+
+    assert (
+        candidate.main(
+            [
+                "verify",
+                "--candidate",
+                str(candidate_path),
+                "--candidate-bundle",
+                str(candidate_bundle),
+                "--bundle",
+                str(bundle),
+                "--agent-contract-fixture",
+                str(agent),
+                "--gateway-contract-fixture",
+                str(gateway),
+                "--runtime-target-output",
+                str(output),
+            ]
+        )
+        == 0
+    )
+    assert json.loads(output.read_text()) == {
+        "releaseVersion": "0.35.1",
+        "sourceCommit": COMMIT,
+        "runtimeImage": f"ghcr.io/artexis10/exomem@sha256:{DIGEST}",
+        "runtimeCandidateSha256": hashlib.sha256(candidate_path.read_bytes()).hexdigest(),
+        "protocolVersion": "1",
+        "agentProfile": "hosted-alpha-agent-v1",
+        "gatewayContractDigest": "f" * 64,
+        "commandFingerprint": "c" * 64,
+        "schemaDigest": "d" * 64,
+        "compatibilityDigest": "e" * 64,
+    }
+    assert output.stat().st_mode & 0o777 == 0o600
+
+
+def test_verify_cli_refuses_partial_or_mismatched_runtime_target_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle = tmp_path / "image-bundle"
+    candidate_bundle = tmp_path / "candidate-bundle"
+    record = _record()
+    record["attestation"]["bundleSha256"] = _write_bundle(bundle)  # type: ignore[index]
+    candidate_path = tmp_path / "candidate.json"
+    candidate.record_candidate(record, bundle, candidate_path)
+    _write_bundle(candidate_bundle)
+    agent, gateway = _runtime_target_fixture_files(tmp_path)
+    agent_value = json.loads(agent.read_text())
+    agent_value["sourceCommit"] = "0" * 40
+    agent.write_text(json.dumps(agent_value))
+    output = tmp_path / "target.json"
+    _successful_verification(monkeypatch, candidate_path)
+    base = [
+        "verify",
+        "--candidate",
+        str(candidate_path),
+        "--candidate-bundle",
+        str(candidate_bundle),
+        "--bundle",
+        str(bundle),
+    ]
+
+    assert candidate.main([*base, "--runtime-target-output", str(output)]) == 2
+    assert not output.exists()
+    assert (
+        candidate.main(
+            [
+                *base,
+                "--agent-contract-fixture",
+                str(agent),
+                "--gateway-contract-fixture",
+                str(gateway),
+                "--runtime-target-output",
+                str(output),
+            ]
+        )
+        == 2
+    )
+    assert not output.exists()

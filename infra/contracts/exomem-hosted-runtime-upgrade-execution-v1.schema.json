@@ -1,0 +1,195 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Artexis10/exomem/blob/main/infra/contracts/exomem-hosted-runtime-upgrade-execution-v1.schema.json",
+  "title": "Exomem Hosted runtime upgrade execution v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "artifact",
+    "schemaVersion",
+    "executionId",
+    "phase",
+    "target",
+    "repositories",
+    "locks",
+    "inventory",
+    "cells",
+    "evidence",
+    "result",
+    "createdAt",
+    "updatedAt"
+  ],
+  "properties": {
+    "artifact": {"const": "exomem-hosted-runtime-upgrade-execution"},
+    "schemaVersion": {"const": 1},
+    "executionId": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,127}$"},
+    "phase": {
+      "enum": [
+        "selected",
+        "trusted",
+        "expanded",
+        "inventoried",
+        "rolling",
+        "drained",
+        "contracted",
+        "promoted",
+        "accepted",
+        "complete"
+      ]
+    },
+    "target": {"$ref": "#/$defs/target"},
+    "repositories": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["substrateConsumerCommit", "exomemCommit"],
+      "properties": {
+        "substrateConsumerCommit": {"$ref": "#/$defs/nullableCommit"},
+        "exomemCommit": {"$ref": "#/$defs/nullableCommit"}
+      }
+    },
+    "locks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pairSha256", "expandSha256", "contractSha256"],
+      "properties": {
+        "pairSha256": {"$ref": "#/$defs/nullableSha256"},
+        "expandSha256": {"$ref": "#/$defs/nullableSha256"},
+        "contractSha256": {"$ref": "#/$defs/nullableSha256"}
+      }
+    },
+    "inventory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "sha256", "cellCount", "legacyCellCount"],
+      "properties": {
+        "status": {"enum": ["pending", "consistent", "inconsistent", "empty"]},
+        "sha256": {"$ref": "#/$defs/nullableSha256"},
+        "cellCount": {"type": ["integer", "null"], "minimum": 0},
+        "legacyCellCount": {"type": ["integer", "null"], "minimum": 0}
+      }
+    },
+    "cells": {"type": "array", "maxItems": 1024, "items": {"$ref": "#/$defs/cell"}},
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["release", "inventory", "cells", "promotion", "acceptance"],
+      "properties": {
+        "release": {"$ref": "#/$defs/digestList"},
+        "inventory": {"$ref": "#/$defs/digestList"},
+        "cells": {"$ref": "#/$defs/digestList"},
+        "promotion": {"$ref": "#/$defs/digestList"},
+        "acceptance": {"$ref": "#/$defs/digestList"}
+      }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "nextSafeAction"],
+      "properties": {
+        "code": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"},
+        "nextSafeAction": {
+          "enum": [
+            "trust_target",
+            "deploy_expand",
+            "inventory_fleet",
+            "begin_rollforward",
+            "continue_rollforward",
+            "prove_zero_legacy",
+            "deploy_contract",
+            "run_promotion",
+            "run_acceptance",
+            "finalize",
+            "discard_target_artifacts",
+            "restore_prior_platform_lock",
+            "retry_cell_atomically",
+            "hold_expand_and_recover",
+            "none"
+          ]
+        }
+      }
+    },
+    "createdAt": {"$ref": "#/$defs/timestamp"},
+    "updatedAt": {"$ref": "#/$defs/timestamp"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "nullableSha256": {"anyOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+    "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "nullableCommit": {"anyOf": [{"$ref": "#/$defs/commit"}, {"type": "null"}]},
+    "timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "releaseVersion",
+        "sourceCommit",
+        "runtimeImage",
+        "runtimeCandidateSha256",
+        "protocolVersion",
+        "agentProfile",
+        "gatewayContractDigest",
+        "commandFingerprint",
+        "schemaDigest",
+        "compatibilityDigest"
+      ],
+      "properties": {
+        "releaseVersion": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$"
+        },
+        "sourceCommit": {"$ref": "#/$defs/commit"},
+        "runtimeImage": {
+          "type": "string",
+          "pattern": "^ghcr\\.io/artexis10/exomem@sha256:[0-9a-f]{64}$"
+        },
+        "runtimeCandidateSha256": {"$ref": "#/$defs/sha256"},
+        "protocolVersion": {"type": "string", "pattern": "^[1-9][0-9]{0,7}$"},
+        "agentProfile": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$"},
+        "gatewayContractDigest": {"$ref": "#/$defs/sha256"},
+        "commandFingerprint": {"$ref": "#/$defs/sha256"},
+        "schemaDigest": {"$ref": "#/$defs/sha256"},
+        "compatibilityDigest": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "digestList": {
+      "type": "array",
+      "maxItems": 4096,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/sha256"}
+    },
+    "cell": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cellId",
+        "class",
+        "releaseVersion",
+        "assignmentId",
+        "operationId",
+        "status",
+        "beforeVaultSha256",
+        "afterVaultSha256",
+        "evidenceSha256"
+      ],
+      "properties": {
+        "cellId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"},
+        "class": {"enum": ["target", "legacy", "reviewer", "terminal", "inconsistent"]},
+        "releaseVersion": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$"
+        },
+        "assignmentId": {"type": ["string", "null"], "maxLength": 128},
+        "operationId": {"type": ["string", "null"], "maxLength": 128},
+        "status": {
+          "enum": ["pending", "rolling", "complete", "failed", "recovery_required", "no_op"]
+        },
+        "beforeVaultSha256": {"$ref": "#/$defs/nullableSha256"},
+        "afterVaultSha256": {"$ref": "#/$defs/nullableSha256"},
+        "evidenceSha256": {"$ref": "#/$defs/nullableSha256"}
+      }
+    }
+  }
+}

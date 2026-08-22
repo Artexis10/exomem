@@ -38,6 +38,7 @@ from . import (
 )
 from . import commands as commands_module
 from . import hosted_gateway as gateway
+from .governance import authorization_request, authorization_transport
 from .hosted_runtime import (
     HostedCellConfig,
     HostedCellLifecycle,
@@ -220,6 +221,8 @@ def _message_for(code: str) -> str:
         return "gateway and cell protocol versions are incompatible"
     if code == "HOSTED_SELECTOR_REJECTED":
         return "request contains forbidden routing metadata"
+    if code == "AUTHORIZATION_SESSION_UNAVAILABLE":
+        return "authorization session is unavailable"
     if code in {"HOSTED_TRANSFER_GRANT_INVALID", "HOSTED_TRANSFER_GRANT_EXPIRED"}:
         return "transfer authorization failed"
     if code.endswith("_NOT_FOUND") or code == "NOT_FOUND":
@@ -1047,11 +1050,37 @@ def register_hosted_routes(
         context: gateway.TrustedGatewayContext | None = None
         try:
             context = _trusted_context(request, config, private_authenticator)
-            body = await _json_body(request)
+            if "authorization_session_credential" in request.query_params:
+                raise authorization_request.AuthorizationContextUnavailable
+            request_carrier = (
+                authorization_transport.current_request_authorization_carrier()
+            )
+            if request_carrier is None:
+                _headers, request_carrier = (
+                    authorization_transport.strip_sensitive_authorization_header(
+                        list(request.scope.get("headers") or [])
+                    )
+                )
+            if request_carrier.is_invalid:
+                raise authorization_request.AuthorizationContextUnavailable
             command_name = str(request.path_params.get("command_name", ""))
             command = command_map.get(command_name)
             if command is None:
                 raise cli_ops.OpError("COMMAND_NOT_FOUND", "command is not exposed")
+            operation = command.name
+            from .governance import principal as principal_module
+
+            principal = principal_module.resolve_hosted_principal(
+                context.principal_scope
+            )
+            admission = await run_in_threadpool(
+                authorization_request.verify_authorization_context,
+                config.vault_root,
+                principal=principal,
+                credential=request_carrier.consume(),
+                now=int(time.time()),
+            )
+            body = await _json_body(request)
             if command.leaf is commands_module.op_transfer_artifact:
                 raise gateway.HostedGatewayError(
                     "HOSTED_TRANSFER_INTERCEPT_REQUIRED",
@@ -1062,7 +1091,22 @@ def register_hosted_routes(
                     "HOSTED_IMPORT_INTERCEPT_REQUIRED",
                     "hosted imports must use the gateway lifecycle flow",
                 )
-            operation = command.name
+            forbidden_identity_fields = {
+                "authorization_session_credential",
+                "principal",
+                "principal_scope",
+                "issuer",
+                "cell_id",
+                "logical_vault_id",
+                "authorization_session_id",
+            }
+            if forbidden_identity_fields.intersection(body):
+                raise authorization_request.AuthorizationContextUnavailable
+            rule = authorization_request.credential_rule(command.name, body)
+            bound_principal = authorization_request.enforce_credential_rule(
+                admission,
+                rule,
+            )
             if command.name == "edit_memory":
                 body = edit_operations.normalize_edit_surface_arguments(body)
             kwargs = cli_ops.coerce(
@@ -1112,7 +1156,6 @@ def register_hosted_routes(
             )
 
             def invoke_admitted() -> Any:
-                from .governance import principal as principal_module
                 from .governance.egress import SelectorCoverageError
 
                 # Canonical audience at the hosted-cell boundary (design D5).
@@ -1121,7 +1164,7 @@ def register_hosted_routes(
                 with capabilities.active_surface(
                     descriptor
                 ), principal_module.request_scope(
-                    principal_module.resolve_hosted_principal(context.principal_scope)
+                    bound_principal
                 ):
                     selector_error: SelectorCoverageError | None = None
                     try:

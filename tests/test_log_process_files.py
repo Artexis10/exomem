@@ -152,6 +152,24 @@ def test_main_dispatches_hosted_operators_without_cli_logging(
     assert received == [operator_argv]
 
 
+def test_main_dispatches_hosted_fingerprint_without_cli_logging(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import exomem.__main__ as main_module
+    from exomem import hosted_fingerprint, logging_config
+
+    received: list[list[str]] = []
+
+    def cli_logging_must_not_run(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("hosted fingerprint must not initialize CLI logging")
+
+    monkeypatch.setattr(logging_config, "configure_logging", cli_logging_must_not_run)
+    monkeypatch.setattr(hosted_fingerprint, "main", lambda argv: received.append(argv) or 19)
+
+    assert main_module.main(["hosted-fingerprint"]) == 19
+    assert received == [[]]
+
+
 def test_main_configures_cli_logging_for_doctor_but_not_for_serve(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

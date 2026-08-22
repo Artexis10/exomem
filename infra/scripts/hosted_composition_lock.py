@@ -23,10 +23,24 @@ MAX_EVIDENCE_BYTES = 1_048_576
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _RUNTIME_IMAGE = re.compile(r"^ghcr\.io/artexis10/exomem@sha256:[0-9a-f]{64}$")
-_PROVISIONER_IMAGE = re.compile(
-    r"^ghcr\.io/artexis10/exomem-provisioner@sha256:[0-9a-f]{64}$"
+_PROVISIONER_IMAGE = re.compile(r"^ghcr\.io/artexis10/exomem-provisioner@sha256:[0-9a-f]{64}$")
+_SUBSTRATE_RUNTIME_TRUST_SITES = [
+    "agent-canaries",
+    "agent-contract-store",
+    "client-artifacts",
+    "gateway-store",
+    "lifecycle-store",
+    "reviewer-operator",
+]
+_RUNTIME_CLOSURE = (
+    "Dockerfile",
+    ".dockerignore",
+    "pyproject.toml",
+    "uv.lock",
+    "README.md",
+    "LICENSE",
+    "src/**",
 )
-_RUNTIME_CLOSURE = ("Dockerfile", ".dockerignore", "pyproject.toml", "uv.lock", "README.md", "LICENSE", "src/**")
 _PROVISIONER_CLOSURE = (
     "infra/provisioner/Dockerfile",
     "infra/provisioner/pyproject.toml",
@@ -92,12 +106,14 @@ class CompositionRequest:
     output: Path
     records_compatibility: HashedInput | None = None
     rollback_runtime: CandidateInput | None = None
+    runtime_upgrade: HashedInput | None = None
+    substrate_trust: HashedInput | None = None
 
 
 def _canonical(value: object) -> bytes:
-    return (json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode(
-        "utf-8"
-    )
+    return (
+        json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n"
+    ).encode("utf-8")
 
 
 def _reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -127,9 +143,9 @@ def _read_regular(path: Path, *, label: str, maximum: int = MAX_EVIDENCE_BYTES) 
         raise CompositionError(f"cannot open {label}") from exc
     try:
         opened = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(opened.st_mode)
-            or (opened.st_dev, opened.st_ino) != (initial.st_dev, initial.st_ino)
+        if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (
+            initial.st_dev,
+            initial.st_ino,
         ):
             _error(f"{label} changed while opening")
         if not 1 <= opened.st_size <= maximum:
@@ -165,6 +181,102 @@ def _exact_object(value: object, *, label: str, fields: set[str]) -> dict[str, A
     return cast(dict[str, Any], value)
 
 
+def _object_with_optional(
+    value: object,
+    *,
+    label: str,
+    required: set[str],
+    optional: set[str],
+) -> dict[str, Any]:
+    if (
+        not isinstance(value, dict)
+        or not required.issubset(value)
+        or not set(value).issubset(required | optional)
+    ):
+        _error(f"{label} fields are incomplete or unknown")
+    return cast(dict[str, Any], value)
+
+
+def _runtime_upgrade(value: object) -> dict[str, object]:
+    upgrade = _exact_object(
+        value,
+        label="runtime upgrade",
+        fields={
+            "compatibilityDigest",
+            "migrationMode",
+            "substrateConsumerCommit",
+            "substrateTrustSha256",
+        },
+    )
+    _sha256(upgrade["compatibilityDigest"], label="runtime upgrade compatibility")
+    if upgrade["migrationMode"] not in {"none", "binding-v1-to-v2"}:
+        _error("runtime upgrade migration mode is invalid")
+    _commit(upgrade["substrateConsumerCommit"], label="runtime upgrade Substrate consumer")
+    _sha256(upgrade["substrateTrustSha256"], label="runtime upgrade Substrate trust")
+    return cast(dict[str, object], upgrade)
+
+
+def _substrate_trust(
+    value: object,
+    *,
+    upgrade: dict[str, object],
+    runtime_target: dict[str, str],
+    runtime_image: str,
+    runtime_source: str,
+    runtime_candidate_sha256: str,
+) -> None:
+    report = _exact_object(
+        value,
+        label="Substrate runtime trust",
+        fields={
+            "artifact",
+            "schemaVersion",
+            "consumerCommit",
+            "target",
+            "pinnedSites",
+            "fixtureSha256s",
+        },
+    )
+    if (
+        report["artifact"] != "exomem-hosted-substrate-runtime-trust"
+        or report["schemaVersion"] != 1
+    ):
+        _error("Substrate runtime trust identity is invalid")
+    consumer = _commit(report["consumerCommit"], label="Substrate runtime trust consumer")
+    if consumer != upgrade["substrateConsumerCommit"]:
+        _error("Substrate runtime trust consumer differs from runtime upgrade")
+    target = _exact_object(
+        report["target"],
+        label="Substrate runtime trust target",
+        fields={
+            *_target_fields(),
+            "runtimeImage",
+            "sourceCommit",
+            "runtimeCandidateSha256",
+            "compatibilityDigest",
+        },
+    )
+    expected_target: dict[str, object] = {
+        **runtime_target,
+        "runtimeImage": runtime_image,
+        "sourceCommit": runtime_source,
+        "runtimeCandidateSha256": runtime_candidate_sha256,
+        "compatibilityDigest": upgrade["compatibilityDigest"],
+    }
+    if target != expected_target:
+        _error("Substrate runtime trust target differs from verified release")
+    sites = report["pinnedSites"]
+    if sites != _SUBSTRATE_RUNTIME_TRUST_SITES:
+        _error("Substrate runtime trust pinned sites are incomplete or invalid")
+    fixtures = _exact_object(
+        report["fixtureSha256s"],
+        label="Substrate runtime trust fixture digests",
+        fields={"agent", "gateway"},
+    )
+    _sha256(fixtures["agent"], label="Substrate agent fixture")
+    _sha256(fixtures["gateway"], label="Substrate gateway fixture")
+
+
 def _commit(value: object, *, label: str) -> str:
     if not isinstance(value, str) or not _COMMIT.fullmatch(value):
         _error(f"{label} must be an exact commit")
@@ -184,7 +296,10 @@ def _image(value: object, *, label: str, pattern: re.Pattern[str]) -> str:
 
 
 def _rfc3339_utc(value: object, *, label: str) -> datetime:
-    if not isinstance(value, str) or re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", value) is None:
+    if (
+        not isinstance(value, str)
+        or re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", value) is None
+    ):
         _error(f"{label} must be canonical RFC3339 UTC")
     try:
         return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
@@ -355,7 +470,9 @@ def verify_source_closure(
         exists = _git(repository, ["cat-file", "-e", f"{commit}^{{commit}}"])
         if exists.returncode != 0:
             _error("Git source proof commit is unavailable")
-    ancestry = _git(repository, ["merge-base", "--is-ancestor", candidate_commit, composition_commit])
+    ancestry = _git(
+        repository, ["merge-base", "--is-ancestor", candidate_commit, composition_commit]
+    )
     if ancestry.returncode != 0:
         _error("candidate source is not an ancestor of composition source")
     changes = _git(
@@ -387,7 +504,7 @@ def _legacy_catalog(
     contracts: tuple[HashedInput, ...],
 ) -> tuple[list[dict[str, object]], str]:
     body = _exact_object(catalog, label="legacy catalog", fields={"schemaVersion", "units"})
-    if body["schemaVersion"] != 1 or not isinstance(body["units"], list) or not body["units"]:
+    if body["schemaVersion"] != 1 or not isinstance(body["units"], list):
         _error("legacy catalog is invalid")
     authority_body = _exact_object(
         authority,
@@ -398,7 +515,6 @@ def _legacy_catalog(
         authority_body["artifact"] != "exomem-hosted-authoritative-legacy-v1-release-set"
         or authority_body["schemaVersion"] != 1
         or not isinstance(authority_body["units"], list)
-        or not authority_body["units"]
     ):
         _error("authoritative legacy release set is invalid")
     authoritative_units: set[tuple[str, str, str, str]] = set()
@@ -410,12 +526,19 @@ def _legacy_catalog(
         )
         release = unit["releaseVersion"]
         protocol = unit["protocolVersion"]
-        if not isinstance(release, str) or not release or not isinstance(protocol, str) or not protocol:
+        if (
+            not isinstance(release, str)
+            or not release
+            or not isinstance(protocol, str)
+            or not protocol
+        ):
             _error("authoritative legacy release unit identity is invalid")
         authority_key = (
             release,
             protocol,
-            _image(unit["runtimeImage"], label="authoritative legacy image", pattern=_RUNTIME_IMAGE),
+            _image(
+                unit["runtimeImage"], label="authoritative legacy image", pattern=_RUNTIME_IMAGE
+            ),
             _commit(unit["sourceCommit"], label="authoritative legacy source"),
         )
         if authority_key in authoritative_units:
@@ -436,11 +559,22 @@ def _legacy_catalog(
         unit = _exact_object(
             raw_unit,
             label="legacy catalog unit",
-            fields={"releaseVersion", "protocolVersion", "runtimeImage", "sourceCommit", "contractSha256"},
+            fields={
+                "releaseVersion",
+                "protocolVersion",
+                "runtimeImage",
+                "sourceCommit",
+                "contractSha256",
+            },
         )
         release = unit["releaseVersion"]
         protocol = unit["protocolVersion"]
-        if not isinstance(release, str) or not release or not isinstance(protocol, str) or not protocol:
+        if (
+            not isinstance(release, str)
+            or not release
+            or not isinstance(protocol, str)
+            or not protocol
+        ):
             _error("legacy catalog unit identity is invalid")
         catalog_key = (release, protocol)
         if catalog_key in seen:
@@ -454,7 +588,8 @@ def _legacy_catalog(
         if (
             target["releaseVersion"] != release
             or target["protocolVersion"] != protocol
-            or image != _image(unit["runtimeImage"], label="legacy catalog image", pattern=_RUNTIME_IMAGE)
+            or image
+            != _image(unit["runtimeImage"], label="legacy catalog image", pattern=_RUNTIME_IMAGE)
             or source != _commit(unit["sourceCommit"], label="legacy catalog source")
         ):
             _error("legacy catalog contract does not match its authoritative unit")
@@ -472,13 +607,23 @@ def _legacy_catalog(
     if used != set(supplied):
         _error("legacy contract evidence is not authoritative")
     catalog_units = {
-        (cast(str, unit["releaseVersion"]), cast(str, unit["protocolVersion"]), cast(str, unit["runtimeImage"]), cast(str, unit["sourceCommit"]))
+        (
+            cast(str, unit["releaseVersion"]),
+            cast(str, unit["protocolVersion"]),
+            cast(str, unit["runtimeImage"]),
+            cast(str, unit["sourceCommit"]),
+        )
         for unit in units
     }
     if catalog_units != authoritative_units:
         _error("legacy catalog does not exactly match the authoritative release set")
-    units.sort(key=lambda unit: (cast(str, unit["releaseVersion"]), cast(str, unit["protocolVersion"])))
-    release_set = [{"releaseVersion": release, "protocolVersion": protocol} for release, protocol in sorted(seen)]
+    units.sort(
+        key=lambda unit: (cast(str, unit["releaseVersion"]), cast(str, unit["protocolVersion"]))
+    )
+    release_set = [
+        {"releaseVersion": release, "protocolVersion": protocol}
+        for release, protocol in sorted(seen)
+    ]
     return units, hashlib.sha256(_canonical(release_set)).hexdigest()
 
 
@@ -496,7 +641,9 @@ def _rollback(value: dict[str, Any]) -> dict[str, str]:
     )
     return {
         "provisionerImage": _image(
-            rollback["provisionerImage"], label="rollback provisioner image", pattern=_PROVISIONER_IMAGE
+            rollback["provisionerImage"],
+            label="rollback provisioner image",
+            pattern=_PROVISIONER_IMAGE,
         ),
         "provisionerSourceCommit": _commit(
             rollback["provisionerSourceCommit"], label="rollback provisioner source"
@@ -577,19 +724,34 @@ def validate_deployment_lock(value: object) -> None:
     if isinstance(value, dict) and value.get("schemaVersion") == 3:
         _validate_deployment_lock_v3(value)
         return
-    lock = _exact_object(
+    lock = _object_with_optional(
         value,
         label="deployment lock",
-        fields={"artifact", "schemaVersion", "admissionMode", "components", "runtimeTarget", "composition", "rollback"},
+        required={
+            "artifact",
+            "schemaVersion",
+            "admissionMode",
+            "components",
+            "runtimeTarget",
+            "composition",
+            "rollback",
+        },
+        optional={"runtimeUpgrade"},
     )
     if lock["artifact"] != "exomem-hosted-deployment-lock" or lock["schemaVersion"] != 2:
         _error("deployment lock identity is invalid")
     if lock["admissionMode"] not in {"expand", "contract"}:
         _error("deployment lock admission mode is invalid")
     target = _target(lock["runtimeTarget"], label="deployment lock runtime target")
-    components = _exact_object(lock["components"], label="deployment lock components", fields={"runtime", "provisioner"})
+    if "runtimeUpgrade" in lock:
+        _runtime_upgrade(lock["runtimeUpgrade"])
+    components = _exact_object(
+        lock["components"], label="deployment lock components", fields={"runtime", "provisioner"}
+    )
     runtime = _exact_object(
-        components["runtime"], label="runtime component", fields={"image", "sourceCommit", "candidateSha256"}
+        components["runtime"],
+        label="runtime component",
+        fields={"image", "sourceCommit", "candidateSha256"},
     )
     provisioner = _exact_object(
         components["provisioner"],
@@ -607,13 +769,22 @@ def validate_deployment_lock(value: object) -> None:
     composition = _exact_object(
         lock["composition"],
         label="composition evidence",
-        fields={"commit", "sourceClosure", "forwardContractSha256", "authoritativeLegacyReleaseSetSha256", "legacyCatalog", "legacyReleaseSetSha256"},
+        fields={
+            "commit",
+            "sourceClosure",
+            "forwardContractSha256",
+            "authoritativeLegacyReleaseSetSha256",
+            "legacyCatalog",
+            "legacyReleaseSetSha256",
+        },
     )
     _commit(composition["commit"], label="composition commit")
     _sha256(composition["forwardContractSha256"], label="forward contract")
-    _sha256(composition["authoritativeLegacyReleaseSetSha256"], label="authoritative legacy release set")
+    _sha256(
+        composition["authoritativeLegacyReleaseSetSha256"], label="authoritative legacy release set"
+    )
     _sha256(composition["legacyReleaseSetSha256"], label="legacy release set")
-    if not isinstance(composition["legacyCatalog"], list) or not composition["legacyCatalog"]:
+    if not isinstance(composition["legacyCatalog"], list):
         _error("deployment lock legacy catalog is invalid")
     legacy_units: set[tuple[str, str]] = set()
     for raw_unit in composition["legacyCatalog"]:
@@ -637,7 +808,9 @@ def validate_deployment_lock(value: object) -> None:
         if key in legacy_units:
             _error("deployment lock legacy catalog has duplicates")
         legacy_units.add(key)
-        unit_image = _image(unit["runtimeImage"], label="deployment lock legacy image", pattern=_RUNTIME_IMAGE)
+        unit_image = _image(
+            unit["runtimeImage"], label="deployment lock legacy image", pattern=_RUNTIME_IMAGE
+        )
         unit_source = _commit(unit["sourceCommit"], label="deployment lock legacy source")
         _sha256(unit["contractSha256"], label="deployment lock legacy contract")
         if hashlib.sha256(_canonical(unit["contract"])).hexdigest() != unit["contractSha256"]:
@@ -658,17 +831,22 @@ def validate_deployment_lock(value: object) -> None:
     ]
     if hashlib.sha256(_canonical(release_set)).hexdigest() != composition["legacyReleaseSetSha256"]:
         _error("deployment lock legacy release set digest is invalid")
-    closure = _exact_object(composition["sourceClosure"], label="source closure", fields={"runtime", "provisioner"})
+    closure = _exact_object(
+        composition["sourceClosure"], label="source closure", fields={"runtime", "provisioner"}
+    )
     for name, expected_paths, component in (
         ("runtime", _RUNTIME_CLOSURE, runtime),
         ("provisioner", _PROVISIONER_CLOSURE, provisioner),
     ):
         proof = _exact_object(
-            closure[name], label=f"{name} source closure", fields={"candidateCommit", "compositionCommit", "paths"}
+            closure[name],
+            label=f"{name} source closure",
+            fields={"candidateCommit", "compositionCommit", "paths"},
         )
         candidate_commit = _commit(proof["candidateCommit"], label=f"{name} closure candidate")
         composition_proof = _commit(proof["compositionCommit"], label=f"{name} closure composition")
-        if candidate_commit != component["sourceCommit"] or composition_proof != composition["commit"]:
+        expected_anchor = component["sourceCommit"] if name == "runtime" else composition["commit"]
+        if candidate_commit != component["sourceCommit"] or composition_proof != expected_anchor:
             _error(f"{name} source closure commits are not bound to the lock")
         if proof["paths"] != list(expected_paths):
             _error(f"{name} source closure paths are invalid")
@@ -678,13 +856,20 @@ def validate_deployment_lock(value: object) -> None:
 
 
 def _validate_deployment_lock_v3(value: dict[str, Any]) -> None:
-    lock = _exact_object(
+    lock = _object_with_optional(
         value,
         label="deployment lock",
-        fields={
-            "artifact", "schemaVersion", "admissionMode", "components", "runtimeTarget",
-            "composition", "rollback", "recordsCompatibility",
+        required={
+            "artifact",
+            "schemaVersion",
+            "admissionMode",
+            "components",
+            "runtimeTarget",
+            "composition",
+            "rollback",
+            "recordsCompatibility",
         },
+        optional={"runtimeUpgrade"},
     )
     v2 = dict(lock)
     compatibility = cast(dict[str, Any], v2.pop("recordsCompatibility"))
@@ -694,8 +879,12 @@ def _validate_deployment_lock_v3(value: dict[str, Any]) -> None:
         compatibility,
         label="Records compatibility",
         fields={
-            "minimum_records_reader_version", "activeProfile", "activeLifecycleActionsEnabled",
-            "rollbackProfile", "rollbackLifecycleActionsEnabled", "rollbackRuntime",
+            "minimum_records_reader_version",
+            "activeProfile",
+            "activeLifecycleActionsEnabled",
+            "rollbackProfile",
+            "rollbackLifecycleActionsEnabled",
+            "rollbackRuntime",
         },
     )
     if (
@@ -712,7 +901,14 @@ def _validate_deployment_lock_v3(value: dict[str, Any]) -> None:
     rollback_runtime = _exact_object(
         records["rollbackRuntime"],
         label="Records rollback runtime",
-        fields={"image", "sourceCommit", "candidateSha256", "recordsReaderVersion", "readerStatusProof", "runtimeTarget"},
+        fields={
+            "image",
+            "sourceCommit",
+            "candidateSha256",
+            "recordsReaderVersion",
+            "readerStatusProof",
+            "runtimeTarget",
+        },
     )
     _image(rollback_runtime["image"], label="Records rollback image", pattern=_RUNTIME_IMAGE)
     _commit(rollback_runtime["sourceCommit"], label="Records rollback source")
@@ -726,8 +922,13 @@ def _validate_deployment_lock_v3(value: dict[str, Any]) -> None:
         rollback_runtime["readerStatusProof"],
         label="Records rollback reader status proof",
         fields={
-            "profile", "recordsReaderVersion", "lifecycleActionsEnabled", "issuedAt", "expiresAt",
-            "signerWorkflow", "signerWorkflowDigest",
+            "profile",
+            "recordsReaderVersion",
+            "lifecycleActionsEnabled",
+            "issuedAt",
+            "expiresAt",
+            "signerWorkflow",
+            "signerWorkflowDigest",
         },
     )
     issued_at = _rfc3339_utc(proof["issuedAt"], label="Records rollback proof issuedAt")
@@ -747,8 +948,13 @@ def _validate_deployment_lock_v3(value: dict[str, Any]) -> None:
 
 
 def validate_deployment_lock_pair(value: object) -> None:
-    pair = _exact_object(value, label="deployment lock pair", fields={"artifact", "schemaVersion", "locks"})
-    if pair["artifact"] != "exomem-hosted-deployment-lock-pair" or pair["schemaVersion"] not in {2, 3}:
+    pair = _exact_object(
+        value, label="deployment lock pair", fields={"artifact", "schemaVersion", "locks"}
+    )
+    if pair["artifact"] != "exomem-hosted-deployment-lock-pair" or pair["schemaVersion"] not in {
+        2,
+        3,
+    }:
         _error("deployment lock pair identity is invalid")
     if not isinstance(pair["locks"], list) or len(pair["locks"]) != 2:
         _error("deployment lock pair must contain exactly two locks")
@@ -775,23 +981,50 @@ def compose_locks(request: CompositionRequest) -> dict[str, object]:
 
     composition_commit = _commit(request.composition_commit, label="composition commit")
     runtime_candidate, runtime_candidate_sha = _candidate(request.runtime, kind="runtime")
-    provisioner_candidate, provisioner_candidate_sha = _candidate(request.provisioner, kind="provisioner")
+    provisioner_candidate, provisioner_candidate_sha = _candidate(
+        request.provisioner, kind="provisioner"
+    )
     runtime_image, runtime_source = _candidate_identity(runtime_candidate, kind="runtime")
-    provisioner_image, provisioner_source = _candidate_identity(provisioner_candidate, kind="provisioner")
+    provisioner_image, provisioner_source = _candidate_identity(
+        provisioner_candidate, kind="provisioner"
+    )
     forward, _ = _load_hashed(request.forward_contract, label="forward runtime contract")
-    runtime_target, contract_image, contract_source = _contract(forward, label="forward runtime contract")
+    runtime_target, contract_image, contract_source = _contract(
+        forward, label="forward runtime contract"
+    )
     if contract_image != runtime_image or contract_source != runtime_source:
         _error("forward runtime contract does not match verified runtime candidate")
     release = runtime_candidate.get("release")
     if not isinstance(release, dict) or release.get("version") != runtime_target["releaseVersion"]:
         _error("runtime candidate release does not match forward contract")
-    authority, _ = _load_hashed(request.authoritative_legacy_release_set, label="authoritative legacy release set")
+    if (request.runtime_upgrade is None) != (request.substrate_trust is None):
+        _error("runtime upgrade composition requires Substrate trust evidence")
+    runtime_upgrade: dict[str, object] | None = None
+    if request.runtime_upgrade is not None and request.substrate_trust is not None:
+        upgrade_evidence, _ = _load_hashed(request.runtime_upgrade, label="runtime upgrade")
+        runtime_upgrade = _runtime_upgrade(upgrade_evidence)
+        trust_evidence, _ = _load_hashed(request.substrate_trust, label="Substrate runtime trust")
+        if request.substrate_trust.sha256 != runtime_upgrade["substrateTrustSha256"]:
+            _error("Substrate runtime trust digest differs from runtime upgrade")
+        _substrate_trust(
+            trust_evidence,
+            upgrade=runtime_upgrade,
+            runtime_target=runtime_target,
+            runtime_image=runtime_image,
+            runtime_source=runtime_source,
+            runtime_candidate_sha256=runtime_candidate_sha,
+        )
+    authority, _ = _load_hashed(
+        request.authoritative_legacy_release_set, label="authoritative legacy release set"
+    )
     catalog, _ = _load_hashed(request.legacy_catalog, label="legacy catalog")
     legacy_catalog, release_set_sha = _legacy_catalog(catalog, authority, request.legacy_contracts)
     rollback_evidence, _ = _load_hashed(request.rollback, label="rollback evidence")
     rollback = _rollback(rollback_evidence)
     if (request.records_compatibility is None) != (request.rollback_runtime is None):
-        _error("Records v3 composition requires compatibility and rollback runtime evidence together")
+        _error(
+            "Records v3 composition requires compatibility and rollback runtime evidence together"
+        )
     records_compatibility: dict[str, object] | None = None
     schema_version = 2
     if request.records_compatibility is not None and request.rollback_runtime is not None:
@@ -800,8 +1033,11 @@ def compose_locks(request: CompositionRequest) -> dict[str, object]:
             evidence,
             label="Records compatibility",
             fields={
-                "minimum_records_reader_version", "activeProfile", "activeLifecycleActionsEnabled",
-                "rollbackProfile", "rollbackLifecycleActionsEnabled",
+                "minimum_records_reader_version",
+                "activeProfile",
+                "activeLifecycleActionsEnabled",
+                "rollbackProfile",
+                "rollbackLifecycleActionsEnabled",
             },
         )
         if (
@@ -845,7 +1081,7 @@ def compose_locks(request: CompositionRequest) -> dict[str, object]:
         schema_version = 3
     closure = {
         "runtime": verify_source_closure(
-            request.repository, runtime_source, composition_commit, _RUNTIME_CLOSURE
+            request.repository, runtime_source, runtime_source, _RUNTIME_CLOSURE
         ),
         "provisioner": verify_source_closure(
             request.repository, provisioner_source, composition_commit, _PROVISIONER_CLOSURE
@@ -880,9 +1116,15 @@ def compose_locks(request: CompositionRequest) -> dict[str, object]:
     }
     if records_compatibility is not None:
         common["recordsCompatibility"] = records_compatibility
+    if runtime_upgrade is not None:
+        common["runtimeUpgrade"] = runtime_upgrade
     expand = {**copy.deepcopy(common), "admissionMode": "expand"}
     contract = {**copy.deepcopy(common), "admissionMode": "contract"}
-    pair = {"artifact": "exomem-hosted-deployment-lock-pair", "schemaVersion": schema_version, "locks": [expand, contract]}
+    pair = {
+        "artifact": "exomem-hosted-deployment-lock-pair",
+        "schemaVersion": schema_version,
+        "locks": [expand, contract],
+    }
     validate_deployment_lock_pair(pair)
     _write_pair_atomic(request.output, _canonical(pair))
     return pair
@@ -920,9 +1162,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--forward-contract", type=_hashed_argument, required=True)
     parser.add_argument("--authoritative-legacy-release-set", type=_hashed_argument, required=True)
     parser.add_argument("--legacy-catalog", type=_hashed_argument, required=True)
-    parser.add_argument("--legacy-contract", type=_hashed_argument, action="append", required=True)
+    parser.add_argument("--legacy-contract", type=_hashed_argument, action="append", default=[])
     parser.add_argument("--rollback", type=_hashed_argument, required=True)
     parser.add_argument("--records-compatibility", type=_hashed_argument)
+    parser.add_argument("--runtime-upgrade", type=_hashed_argument)
+    parser.add_argument("--substrate-trust", type=_hashed_argument)
     _optional_candidate_arguments(parser, "rollback-runtime")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
@@ -938,7 +1182,9 @@ def main(argv: list[str] | None = None) -> int:
         else None
     )
     if any(value is not None for value in rollback_runtime_values) and rollback_runtime is None:
-        parser.error("rollback runtime candidate requires candidate, digest, image bundle, and candidate bundle")
+        parser.error(
+            "rollback runtime candidate requires candidate, digest, image bundle, and candidate bundle"
+        )
     request = CompositionRequest(
         repository=args.repository,
         composition_commit=args.composition_commit,
@@ -964,6 +1210,8 @@ def main(argv: list[str] | None = None) -> int:
         output=args.output,
         records_compatibility=args.records_compatibility,
         rollback_runtime=rollback_runtime,
+        runtime_upgrade=args.runtime_upgrade,
+        substrate_trust=args.substrate_trust,
     )
     try:
         compose_locks(request)

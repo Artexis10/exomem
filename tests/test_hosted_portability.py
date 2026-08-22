@@ -569,6 +569,39 @@ def test_archive_verification_enforces_configured_resource_limits(tmp_path: Path
     assert _error_code(exc) == "RESOURCE_LIMIT_EXCEEDED"
 
 
+def test_canonical_vault_fingerprint_ignores_disposable_runtime_state(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    _seed_vault(vault, "preserved")
+
+    before = portability.canonical_vault_fingerprint(vault)
+    _write(vault / "Knowledge Base/.embeddings.sqlite", b"rebuilt-cache")
+    _write(vault / "logs/runtime.log", "content-free runtime log")
+    after_disposable_changes = portability.canonical_vault_fingerprint(vault)
+    _write(vault / "Knowledge Base/index.md", "# Changed\n")
+    after_canonical_change = portability.canonical_vault_fingerprint(vault)
+
+    assert before == after_disposable_changes
+    assert after_canonical_change != before
+    assert len(before) == 64
+
+
+def test_canonical_vault_fingerprint_is_stable_across_creation_order(
+    tmp_path: Path,
+) -> None:
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    _write(first / "Knowledge Base/z.md", "z")
+    _write(first / "Knowledge Base/a.md", "a")
+    _write(second / "Knowledge Base/a.md", "a")
+    _write(second / "Knowledge Base/z.md", "z")
+
+    assert portability.canonical_vault_fingerprint(first) == (
+        portability.canonical_vault_fingerprint(second)
+    )
+
+
 def test_restore_round_trip_publishes_before_rebuild_and_preserves_canonical_bytes(
     tmp_path: Path,
 ) -> None:

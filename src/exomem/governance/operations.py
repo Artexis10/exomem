@@ -26,6 +26,9 @@ _RECOVERY_STRATEGIES: Mapping[str, RecoveryStrategy] = MappingProxyType(
         "composite_sidecar": RecoveryStrategy(
             "composite_sidecar", frozenset({"grant", "purpose"})
         ),
+        "composite_companion": RecoveryStrategy(
+            "composite_companion", frozenset({"companion", "proposal"})
+        ),
         "compound_grant": RecoveryStrategy(
             "compound_grant", frozenset({"grant", "token"})
         ),
@@ -35,6 +38,8 @@ RECOVERY_STRATEGY_KEYS = frozenset(_RECOVERY_STRATEGIES)
 
 HANDLER_STRATEGY_KEYS = frozenset(
     {
+        "backfill_companion_commit",
+        "backfill_companion_preview",
         "commit",
         "declare",
         "grant_session",
@@ -43,6 +48,7 @@ HANDLER_STRATEGY_KEYS = frozenset(
         "proposal",
         "revoke_session",
         "revoke_standing",
+        "session",
         "toggle_rules",
         "undo",
     }
@@ -181,6 +187,29 @@ OPERATION_SPECS: Mapping[str, OperationSpec] = MappingProxyType(
             receipt_event="governance_purpose_declare",
             recovery_policy="composite_sidecar",
             handler_key="declare",
+        ),
+        "backfill_companion": OperationSpec(
+            False,
+            "owner",
+            authorization_exemption=True,
+            handler_key="backfill_companion_preview",
+            variants=(
+                OperationVariant(
+                    mode="commit",
+                    handler_key="backfill_companion_commit",
+                    authorization="owner",
+                    authorization_affecting=True,
+                    journal_operation="commit_backfill_companion",
+                    receipt_event="governance_companion_backfill",
+                    recovery_policy="composite_companion",
+                ),
+            ),
+        ),
+        "session": OperationSpec(
+            False,
+            "inspect",
+            authorization_exemption=True,
+            handler_key="session",
         ),
     }
 )

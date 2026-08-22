@@ -170,6 +170,10 @@ def _run_cli(argv: list[str] | None = None) -> int:
 
 
 def _dispatch_main(raw: list[str]) -> int:
+    if raw and raw[0] == "hosted-fingerprint":
+        from .hosted_fingerprint import main as hosted_fingerprint_main
+
+        return hosted_fingerprint_main(raw[1:])
     if raw and raw[0] == "hosted":
         from .hosted_operator import main as hosted_operator_main
 
@@ -2630,9 +2634,84 @@ def _core_op_main(argv: list[str]) -> int:
     from . import cli_ops, product_invoke
     from . import commands as commands_module
 
+    if "EXOMEM_AUTHORIZATION_SESSION_CREDENTIAL" in os.environ or any(
+        item == "--authorization-session-credential"
+        or item.startswith("--authorization-session-credential=")
+        for item in argv
+    ):
+        error = {
+            "code": "AUTHORIZATION_SESSION_UNAVAILABLE",
+            "message": "authorization session is unavailable",
+            "remediation": None,
+        }
+        if "--json" in argv:
+            print(json.dumps(cli_ops.envelope(False, error=error)))
+        else:
+            print(
+                "Error [AUTHORIZATION_SESSION_UNAVAILABLE]: "
+                "authorization session is unavailable",
+                file=sys.stderr,
+            )
+        return 1
+
+    from .governance import authorization_transport
+
+    fd_values: list[str] = []
+    for index, item in enumerate(argv):
+        if item == "--authorization-session-fd":
+            if index + 1 >= len(argv):
+                fd_values.append("")
+            else:
+                fd_values.append(argv[index + 1])
+        elif item.startswith("--authorization-session-fd="):
+            fd_values.append(item.partition("=")[2])
+    if not fd_values:
+        authorization_carrier = authorization_transport.CredentialCarrier.absent()
+    elif len(fd_values) != 1:
+        authorization_carrier = authorization_transport.CredentialCarrier.invalid()
+    else:
+        authorization_carrier = authorization_transport.read_cli_authorization_fd(
+            fd_values[0]
+        )
+    if authorization_carrier.is_invalid:
+        error = {
+            "code": "AUTHORIZATION_SESSION_UNAVAILABLE",
+            "message": "authorization session is unavailable",
+            "remediation": None,
+        }
+        if "--json" in argv:
+            print(json.dumps(cli_ops.envelope(False, error=error)))
+        else:
+            print(
+                "Error [AUTHORIZATION_SESSION_UNAVAILABLE]: "
+                "authorization session is unavailable",
+                file=sys.stderr,
+            )
+        return 1
+
     expose_tier2 = _expose_tier2()
     registered_commands = commands_module.product_commands_for("cli", expose_tier2=expose_tier2)
     cmds = {command.name: command for command in registered_commands}
+
+    preverified_root = None
+    preverified_admission = None
+    if not authorization_carrier.is_absent and argv and argv[0] in cmds:
+        try:
+            preverified_root, preverified_admission = (
+                product_invoke.verify_local_authorization_transport(
+                    cmds[argv[0]],
+                    raw_for_vault={},
+                    surface="cli",
+                    authorization_carrier=authorization_carrier,
+                )
+            )
+        except (ValueError, TypeError, RuntimeError) as error:
+            err = cli_ops.error_dict(error)
+            if "--json" in argv:
+                print(json.dumps(cli_ops.envelope(False, error=err), default=str))
+            else:
+                print(f"Error [{err['code']}]: {err['message']}", file=sys.stderr)
+            return 1
 
     parser = _CLIParser(prog="kb", description=f"Query and write the local {kb_dirname()}.")
     sub = parser.add_subparsers(dest="op", required=True, parser_class=_CLIParser)
@@ -2645,6 +2724,16 @@ def _core_op_main(argv: list[str]) -> int:
             action="store_true",
             help="emit the shared {success, data|error} JSON envelope",
         )
+        sp.add_argument(
+            "--authorization-session-fd",
+            dest="authorization_session_fd",
+            default=None,
+            metavar="FD|-",
+            help=(
+                "read one authorization-session bearer from an already-open "
+                "protected descriptor or stdin (-)"
+            ),
+        )
         _add_command_args(sp, cmd)
 
     args = parser.parse_args(argv)
@@ -2653,6 +2742,27 @@ def _core_op_main(argv: list[str]) -> int:
 
     try:
         raw = _collect_raw_args(cmd, args, parser)
+        if preverified_admission is None:
+            root, principal = product_invoke.prepare_local_authorization(
+                cmd,
+                raw,
+                surface="cli",
+                authorization_session_fd=getattr(
+                    args, "authorization_session_fd", None
+                ),
+                authorization_carrier=authorization_carrier,
+            )
+        else:
+            root = product_invoke.resolve_vault_for(
+                cmd.name,
+                raw,
+                preverified_root,
+            )
+            principal = product_invoke.enforce_local_authorization_route(
+                cmd,
+                raw,
+                preverified_admission,
+            )
         if cmd.name == "edit_memory":
             kwargs = _normalize_cli_edit(cmd, raw, cli_ops)
         else:
@@ -2664,6 +2774,8 @@ def _core_op_main(argv: list[str]) -> int:
         result = product_invoke.invoke_prepared(
             cmd,
             kwargs,
+            vault_root=root,
+            principal=principal,
             expose_tier2=expose_tier2,
             idempotency_key=os.environ.get("EXOMEM_IDEMPOTENCY_KEY") or None,
         )

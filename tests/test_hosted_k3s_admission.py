@@ -34,6 +34,7 @@ def _run(
     *,
     input_text: str | None = None,
     check: bool = True,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     result = subprocess.run(
         command,
@@ -42,6 +43,7 @@ def _run(
         text=True,
         capture_output=True,
         check=False,
+        env=env,
     )
     if check and result.returncode != 0:
         raise AssertionError(result.stdout + result.stderr)
@@ -104,6 +106,8 @@ def k3s(request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactory
             "--detach",
             "--name",
             name,
+            "--publish",
+            "127.0.0.1::6443",
             "--volume",
             f"{ADMISSION_CONFIG}:/etc/rancher/k3s/admission-config.yaml:ro",
             K3S_IMAGE,
@@ -291,6 +295,8 @@ def test_exact_k3s_accepts_only_the_rendered_service_account_token_audience(
     rejected_status = json.loads(rejected.stdout)["status"]
     assert rejected_status.get("authenticated") is not True
     assert "audience" in rejected_status.get("error", "").lower()
+
+
 def _build_reviewed_runtime_image(gate: dict[str, Any], source_checkout: Path) -> str:
     commit = gate["sourceCommit"]
     source = source_checkout / "source"
@@ -311,13 +317,16 @@ def _build_reviewed_runtime_image(gate: dict[str, Any], source_checkout: Path) -
 
     project = tomllib.loads((source / "pyproject.toml").read_text(encoding="utf-8"))
     assert project["project"]["version"] == gate["release"]
-    operator_contract = (
-        source
-        / "openspec/changes/complete-hosted-runtime-deployment-contract/contracts/hosted-operator-v1.json"
+    operator_contracts = list(
+        source.glob(
+            "openspec/changes/**/*complete-hosted-runtime-deployment-contract/"
+            "contracts/hosted-operator-v1.json"
+        )
     )
-    assert (
-        hashlib.sha256(operator_contract.read_bytes()).hexdigest() == gate["operatorContractSha256"]
-    )
+    assert operator_contracts
+    assert {
+        hashlib.sha256(contract.read_bytes()).hexdigest() for contract in operator_contracts
+    } == {gate["operatorContractSha256"]}
 
     image = f"exomem-hosted-k3s-gate:{commit[:12]}-{uuid.uuid4().hex[:8]}"
     _run(
@@ -350,7 +359,35 @@ def _build_reviewed_runtime_image(gate: dict[str, Any], source_checkout: Path) -
     return image
 
 
-def _import_runtime_image(k3s: str, image: str) -> str:
+def _build_provisioner_fingerprint_image() -> str:
+    image = f"exomem-provisioner-fingerprint-gate:{uuid.uuid4().hex[:12]}"
+    _run(
+        [
+            "docker",
+            "build",
+            "--file",
+            str(ROOT / "infra/provisioner/Dockerfile"),
+            "--tag",
+            image,
+            str(ROOT),
+        ]
+    )
+    command = _run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            image,
+            "sh",
+            "-c",
+            "command -v exomem-provisioner-vault-fingerprint",
+        ]
+    )
+    assert command.stdout.strip() == "/usr/local/bin/exomem-provisioner-vault-fingerprint"
+    return image
+
+
+def _import_image(k3s: str, image: str, *, repository: str) -> str:
     save = subprocess.Popen(
         ["docker", "save", image],
         cwd=ROOT,
@@ -384,7 +421,7 @@ def _import_runtime_image(k3s: str, image: str) -> str:
             break
     assert imported_reference is not None, images
     assert manifest_digest is not None and re.fullmatch(r"sha256:[0-9a-f]{64}", manifest_digest)
-    digest_reference = f"ghcr.io/artexis10/exomem@{manifest_digest}"
+    digest_reference = f"{repository}@{manifest_digest}"
     _run(
         [
             "docker",
@@ -398,6 +435,26 @@ def _import_runtime_image(k3s: str, image: str) -> str:
         ]
     )
     return digest_reference
+
+
+def _import_runtime_image(k3s: str, image: str) -> str:
+    return _import_image(k3s, image, repository="ghcr.io/artexis10/exomem")
+
+
+def _import_provisioner_image(k3s: str, image: str) -> str:
+    return _import_image(k3s, image, repository="ghcr.io/artexis10/exomem-provisioner")
+
+
+def _host_kubeconfig(k3s: str, output: Path) -> Path:
+    published = _run(["docker", "port", k3s, "6443/tcp"]).stdout.strip()
+    match = re.fullmatch(r"127\.0\.0\.1:([1-9][0-9]{0,4})", published)
+    assert match is not None
+    configuration = _run(
+        ["docker", "exec", k3s, "cat", "/etc/rancher/k3s/k3s.yaml"]
+    ).stdout.replace("https://127.0.0.1:6443", f"https://127.0.0.1:{match.group(1)}")
+    output.write_text(configuration, encoding="utf-8")
+    output.chmod(0o600)
+    return output
 
 
 def _wait_for_admission_policy(k3s: str, policy_name: str) -> None:
@@ -422,6 +479,26 @@ def _pod_logs(k3s: str, namespace: str, selector: str) -> str:
         check=False,
     )
     return result.stdout + result.stderr
+
+
+def _successful_job_logs(k3s: str, namespace: str, job_name: str) -> str:
+    pods = json.loads(
+        _kubectl(
+            k3s,
+            [
+                "get",
+                "pods",
+                "--namespace",
+                namespace,
+                f"--selector=job-name={job_name}",
+                "--output=json",
+            ],
+        ).stdout
+    )["items"]
+    succeeded = [pod for pod in pods if pod.get("status", {}).get("phase") == "Succeeded"]
+    assert succeeded, _pod_logs(k3s, namespace, f"job/{job_name}")
+    pod = max(succeeded, key=lambda item: item["metadata"]["creationTimestamp"])
+    return _pod_logs(k3s, namespace, f"pod/{pod['metadata']['name']}")
 
 
 def _wait_for_pod_ready(k3s: str, namespace: str, pod: str) -> None:
@@ -732,9 +809,13 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
         pvc_namespace,
         extra_args=("--set", f"resourceName={pvc_namespace}"),
     )
-    pvc_namespace_document = next(item for item in pvc_initialize if item.get("kind") == "Namespace")
+    pvc_namespace_document = next(
+        item for item in pvc_initialize if item.get("kind") == "Namespace"
+    )
     _kubectl(k3s, ["apply", "--filename=-"], documents=[pvc_namespace_document])
-    rendered_pvc = next(item for item in pvc_initialize if item.get("kind") == "PersistentVolumeClaim")
+    rendered_pvc = next(
+        item for item in pvc_initialize if item.get("kind") == "PersistentVolumeClaim"
+    )
     admitted_pvc = _kubectl(
         k3s,
         [
@@ -848,7 +929,11 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
 
     init_env_variants = (
         ("missing-env", [], "exact approved operator command"),
-        ("alternate-env", [{"name": "EXOMEM_LOG_DIR", "value": "/tmp"}], "exact approved operator command"),
+        (
+            "alternate-env",
+            [{"name": "EXOMEM_LOG_DIR", "value": "/tmp"}],
+            "exact approved operator command",
+        ),
         (
             "value-from-env",
             [
@@ -966,37 +1051,49 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
             "policyTypes": ["Ingress"],
             "ingress": [
                 {
-                    "from": [{
-                        "namespaceSelector": {"matchLabels": {
-                            "kubernetes.io/metadata.name": "exomem-platform"
-                        }},
-                        "podSelector": {"matchLabels": {
-                            "app.kubernetes.io/name": "traefik",
-                            "exomem.io/ingress": "traefik",
-                        }},
-                    }],
+                    "from": [
+                        {
+                            "namespaceSelector": {
+                                "matchLabels": {"kubernetes.io/metadata.name": "exomem-platform"}
+                            },
+                            "podSelector": {
+                                "matchLabels": {
+                                    "app.kubernetes.io/name": "traefik",
+                                    "exomem.io/ingress": "traefik",
+                                }
+                            },
+                        }
+                    ],
                     "ports": [{"protocol": "TCP", "port": 8765}],
                 },
                 {
-                    "from": [{
-                        "namespaceSelector": {"matchLabels": {
-                            "kubernetes.io/metadata.name": "exomem-platform"
-                        }},
-                        "podSelector": {"matchLabels": {
-                            "app.kubernetes.io/name": "exomem-durability-actions"
-                        }},
-                    }],
+                    "from": [
+                        {
+                            "namespaceSelector": {
+                                "matchLabels": {"kubernetes.io/metadata.name": "exomem-platform"}
+                            },
+                            "podSelector": {
+                                "matchLabels": {
+                                    "app.kubernetes.io/name": "exomem-durability-actions"
+                                }
+                            },
+                        }
+                    ],
                     "ports": [{"protocol": "TCP", "port": 8765}],
                 },
                 {
-                    "from": [{
-                        "namespaceSelector": {"matchLabels": {
-                            "kubernetes.io/metadata.name": "exomem-platform"
-                        }},
-                        "podSelector": {"matchLabels": {
-                            "app.kubernetes.io/name": "exomem-provisioner-worker"
-                        }},
-                    }],
+                    "from": [
+                        {
+                            "namespaceSelector": {
+                                "matchLabels": {"kubernetes.io/metadata.name": "exomem-platform"}
+                            },
+                            "podSelector": {
+                                "matchLabels": {
+                                    "app.kubernetes.io/name": "exomem-provisioner-worker"
+                                }
+                            },
+                        }
+                    ],
                     "ports": [{"protocol": "TCP", "port": 8765}],
                 },
             ],
@@ -1232,9 +1329,7 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
 
     serving_command_escape = copy.deepcopy(serving_pod)
     serving_command_escape["metadata"]["name"] = "cell-alpha-serve-command-escape"
-    serving_command_escape["spec"]["containers"][0]["command"] = [
-        "/app/.venv/bin/python"
-    ]
+    serving_command_escape["spec"]["containers"][0]["command"] = ["/app/.venv/bin/python"]
     serving_command_escape["spec"]["containers"][0]["args"] = [
         "-c",
         "from pathlib import Path; print(Path('/run/exomem/credentials/credentials.json').read_text())",
@@ -1249,8 +1344,7 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
         ),
         (
             "env",
-            serving_pod["spec"]["containers"][0]["env"]
-            + [{"name": "UNTRUSTED", "value": "1"}],
+            serving_pod["spec"]["containers"][0]["env"] + [{"name": "UNTRUSTED", "value": "1"}],
             "exact approved serving command and environment",
         ),
         (
@@ -1402,8 +1496,7 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
             "cell-alpha-serve-scheduled",
             "--type=json",
             "--patch",
-            '[{"op":"add","path":"/metadata/finalizers",'
-            '"value":["attacker.example/finalizer"]}]',
+            '[{"op":"add","path":"/metadata/finalizers","value":["attacker.example/finalizer"]}]',
             "--dry-run=server",
             f"--as={routine_username}",
         ],
@@ -1437,8 +1530,7 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
                 item
                 for item in scheduled_init_items
                 if item["spec"].get("nodeName")
-                and item["metadata"].get("finalizers")
-                == ["batch.kubernetes.io/job-tracking"]
+                and item["metadata"].get("finalizers") == ["batch.kubernetes.io/job-tracking"]
             ),
             None,
         )
@@ -1462,9 +1554,7 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
         )
         document = json.loads(result.stdout)
         assert document["spec"].get("nodeName")
-        assert document["metadata"].get("finalizers") == [
-            "batch.kubernetes.io/job-tracking"
-        ]
+        assert document["metadata"].get("finalizers") == ["batch.kubernetes.io/job-tracking"]
         return document
 
     exact_controller_source = fresh_scheduled_init()
@@ -1817,7 +1907,10 @@ def test_exact_k3s_scopes_privileged_volume_and_deletion_mutations(k3s: str) -> 
         check=False,
     )
     assert full_identity_without_label_patch.returncode != 0
-    assert "exact encrypted 10 GiB Retain HCloud PV specification" in full_identity_without_label_patch.stderr
+    assert (
+        "exact encrypted 10 GiB Retain HCloud PV specification"
+        in full_identity_without_label_patch.stderr
+    )
 
     full_identity_patch = _kubectl(
         k3s,
@@ -2054,8 +2147,7 @@ def test_exact_k3s_deletion_dispatcher_accepts_defaulted_lock_job_and_rejects_ot
         item
         for item in platform
         if item.get("metadata", {}).get("name") == "exomem-deletion-dispatcher-job-scope"
-        and item.get("kind")
-        in {"ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding"}
+        and item.get("kind") in {"ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding"}
     ]
     assert len(dispatcher_policy) == 2
     _kubectl(k3s, ["apply", "--filename=-"], documents=dispatcher_policy)
@@ -2131,14 +2223,15 @@ def test_exact_k3s_deletion_dispatcher_accepts_defaulted_lock_job_and_rejects_ot
         check=False,
     )
     assert accepted.returncode == 0, accepted.stdout + accepted.stderr
-    assert json.loads(accepted.stdout)["spec"]["template"]["spec"]["volumes"][1][
-        "configMap"
-    ]["defaultMode"] == 0o444
+    assert (
+        json.loads(accepted.stdout)["spec"]["template"]["spec"]["volumes"][1]["configMap"][
+            "defaultMode"
+        ]
+        == 0o444
+    )
 
     omitted_mode = job("exomem-deletion-2222222222222222")
-    omitted_mode["spec"]["template"]["spec"]["volumes"][1]["configMap"].pop(
-        "defaultMode"
-    )
+    omitted_mode["spec"]["template"]["spec"]["volumes"][1]["configMap"].pop("defaultMode")
     server_defaulted = _kubectl(
         k3s,
         [
@@ -2153,9 +2246,12 @@ def test_exact_k3s_deletion_dispatcher_accepts_defaulted_lock_job_and_rejects_ot
         check=False,
     )
     assert server_defaulted.returncode == 0, server_defaulted.stdout + server_defaulted.stderr
-    assert json.loads(server_defaulted.stdout)["spec"]["template"]["spec"]["volumes"][1][
-        "configMap"
-    ]["defaultMode"] == 0o644
+    assert (
+        json.loads(server_defaulted.stdout)["spec"]["template"]["spec"]["volumes"][1]["configMap"][
+            "defaultMode"
+        ]
+        == 0o644
+    )
 
     defaulted_denied = _kubectl(
         k3s,
@@ -2191,9 +2287,7 @@ def test_exact_k3s_deletion_dispatcher_accepts_defaulted_lock_job_and_rejects_ot
     assert "resources must match the reviewed bounded shape" in denied.stderr
 
     item_mode = job("exomem-deletion-5555555555555555")
-    item_mode["spec"]["template"]["spec"]["volumes"][1]["configMap"]["items"][0][
-        "mode"
-    ] = 0o600
+    item_mode["spec"]["template"]["spec"]["volumes"][1]["configMap"]["items"][0]["mode"] = 0o600
     denied = _kubectl(
         k3s,
         ["create", "--dry-run=server", "--filename=-", f"--as={dispatcher}"],
@@ -2425,7 +2519,7 @@ def test_exact_k3s_runs_the_reviewed_hosted_runtime_release(k3s: str, tmp_path: 
                 + describe.stderr
                 + _pod_logs(k3s, namespace, "job/cell-alpha-init")
             )
-        init_envelope = json.loads(_pod_logs(k3s, namespace, "job/cell-alpha-init"))
+        init_envelope = json.loads(_successful_job_logs(k3s, namespace, "cell-alpha-init"))
         assert init_envelope["ok"] is True
         assert init_envelope["code"] == "HOSTED_CELL_INITIALIZED"
         assert init_envelope["data"]["status"] == "provisioned"
@@ -2670,3 +2764,448 @@ print(json.dumps({
         )
     finally:
         _run(["docker", "image", "rm", "--force", image], check=False)
+
+
+@pytest.mark.skipif(
+    not RUN_RUNTIME,
+    reason="set RUN_K3S_RUNTIME_TEST=1 to run the same-cell runtime rollforward gate",
+)
+@pytest.mark.timeout(1200)
+def test_exact_k3s_runs_the_provisioner_owned_vault_fingerprint_job(
+    k3s: str, tmp_path: Path
+) -> None:
+    tenant_id = "tenant-fingerprint-gate"
+    subject_id = "cell-fingerprint-gate"
+    provider_operation_id = "provider-fingerprint-gate"
+    namespace = "exo-" + hashlib.sha256(subject_id.encode()).hexdigest()[:20]
+    pvc_name = namespace + "-data"
+    host_path = "/var/lib/exomem-fingerprint-gate"
+    local_image = _build_provisioner_fingerprint_image()
+    try:
+        provisioner_image = _import_provisioner_image(k3s, local_image)
+        values = yaml.safe_load((PLATFORM / "values.validation.yaml").read_text(encoding="utf-8"))
+        lock = json.loads(values["provisioner"]["deploymentLockJson"])
+        lock["components"]["provisioner"]["image"] = provisioner_image
+        lock_raw = json.dumps(lock, separators=(",", ":")) + "\n"
+        override = tmp_path / "fingerprint-lock.yaml"
+        override.write_text(
+            yaml.safe_dump(
+                {
+                    "provisioner": {
+                        "deploymentLockJson": lock_raw,
+                        "deploymentLockSha256": hashlib.sha256(lock_raw.encode()).hexdigest(),
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        platform = _render(
+            PLATFORM,
+            PLATFORM / "values.validation.yaml",
+            "exomem-platform",
+            extra_args=("--values", str(override)),
+        )
+        platform_access = [
+            item
+            for item in platform
+            if (
+                item.get("kind") in {"ServiceAccount", "ClusterRole", "ClusterRoleBinding"}
+                and item.get("metadata", {}).get("name") == "exomem-cell-provisioner"
+            )
+        ]
+        platform_admission = [
+            item
+            for item in platform
+            if item.get("kind") in {"ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding"}
+            and item.get("metadata", {}).get("name")
+            in {"exomem-tenant-boundary", "exomem-provisioner-scope"}
+        ]
+        assert len(platform_access) == 3
+        assert len(platform_admission) == 4
+
+        _run(["docker", "exec", k3s, "mkdir", "-p", host_path + "/vault"])
+        _run(
+            ["docker", "exec", "--interactive", k3s, "tee", host_path + "/vault/preserved.md"],
+            input_text="# preserved tenant bytes\n",
+        )
+        identity_annotations = {
+            "exomem.io/tenant-id": tenant_id,
+            "exomem.io/cell-id": subject_id,
+            "exomem.io/operation-id": provider_operation_id,
+            "exomem.io/tenant-digest": hashlib.sha256(tenant_id.encode()).hexdigest(),
+            "exomem.io/subject-digest": hashlib.sha256(subject_id.encode()).hexdigest(),
+            "exomem.io/operation-digest": hashlib.sha256(
+                provider_operation_id.encode()
+            ).hexdigest(),
+            "exomem.io/fence": "7",
+        }
+        namespace_document = {
+            "apiVersion": "v1",
+            "kind": "Namespace",
+            "metadata": {
+                "name": namespace,
+                "labels": {
+                    "exomem.io/tenant-cell": "true",
+                    "exomem.io/cell-resource": namespace,
+                    "pod-security.kubernetes.io/enforce": "restricted",
+                    "pod-security.kubernetes.io/enforce-version": "v1.35",
+                    "pod-security.kubernetes.io/audit": "restricted",
+                    "pod-security.kubernetes.io/audit-version": "v1.35",
+                    "pod-security.kubernetes.io/warn": "restricted",
+                    "pod-security.kubernetes.io/warn-version": "v1.35",
+                },
+                "annotations": {
+                    "helm.sh/resource-policy": "keep",
+                    "exomem.io/resource-name": namespace,
+                    "exomem.io/pvc-name": pvc_name,
+                    "exomem.io/credentials-secret-name": "exomem-cell-credentials",
+                    "exomem.io/init-request-configmap-name": namespace + "-init-request",
+                    "exomem.io/records-reader-version": "2",
+                    "exomem.io/lifecycle-actions-enabled": "false",
+                    **identity_annotations,
+                },
+            },
+        }
+        persistent_volume = {
+            "apiVersion": "v1",
+            "kind": "PersistentVolume",
+            "metadata": {"name": "exomem-fingerprint-gate-pv"},
+            "spec": {
+                "capacity": {"storage": "10Gi"},
+                "accessModes": ["ReadWriteOnce"],
+                "volumeMode": "Filesystem",
+                "persistentVolumeReclaimPolicy": "Retain",
+                "storageClassName": "",
+                "claimRef": {"namespace": namespace, "name": pvc_name},
+                "hostPath": {"path": host_path, "type": "Directory"},
+            },
+        }
+        persistent_volume_claim = {
+            "apiVersion": "v1",
+            "kind": "PersistentVolumeClaim",
+            "metadata": {"name": pvc_name, "namespace": namespace},
+            "spec": {
+                "accessModes": ["ReadWriteOnce"],
+                "volumeMode": "Filesystem",
+                "storageClassName": "",
+                "volumeName": persistent_volume["metadata"]["name"],
+                "resources": {"requests": {"storage": "10Gi"}},
+            },
+        }
+        tenant_service_account = {
+            "apiVersion": "v1",
+            "kind": "ServiceAccount",
+            "metadata": {"name": namespace, "namespace": namespace},
+            "automountServiceAccountToken": False,
+        }
+        _kubectl(
+            k3s,
+            ["apply", "--filename=-"],
+            documents=[
+                {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "exomem-platform"}},
+                namespace_document,
+                persistent_volume,
+                persistent_volume_claim,
+                tenant_service_account,
+            ],
+        )
+        _kubectl(k3s, ["apply", "--filename=-"], documents=platform_access)
+        _kubectl(k3s, ["apply", "--filename=-"], documents=platform_admission)
+        for policy_name in ("exomem-tenant-boundary", "exomem-provisioner-scope"):
+            _wait_for_policy_typecheck(k3s, policy_name)
+
+        kubeconfig = _host_kubeconfig(k3s, tmp_path / "fingerprint-kubeconfig")
+        script = """
+import asyncio
+import sys
+from kubernetes import client, config
+from exomem_provisioner.adapters import KubernetesVaultFingerprintAdapter
+from exomem_provisioner.lifecycle import OpaqueProviderMetadata
+
+config.load_kube_config(config_file=sys.argv[1])
+api_client = client.ApiClient()
+api_client.set_default_header(
+    'Impersonate-User',
+    'system:serviceaccount:exomem-platform:exomem-cell-provisioner',
+)
+adapter = KubernetesVaultFingerprintAdapter(
+    core_v1=client.CoreV1Api(api_client),
+    batch_v1=client.BatchV1Api(api_client),
+    image=sys.argv[2],
+)
+metadata = OpaqueProviderMetadata(
+    tenant_id='tenant-fingerprint-gate',
+    subject_id='cell-fingerprint-gate',
+    operation_id='provider-fingerprint-gate',
+    fence_generation=7,
+)
+print(asyncio.run(adapter.fingerprint(
+    metadata,
+    operation_id='runtime-upgrade-fingerprint-gate',
+    phase=sys.argv[3],
+    recovery_envelope='signed-fingerprint-recovery-envelope',
+)))
+"""
+
+        def fingerprint(phase: str) -> str:
+            result = _run(
+                [
+                    str(ROOT / "infra/provisioner/.venv/bin/python"),
+                    "-c",
+                    script,
+                    str(kubeconfig),
+                    provisioner_image,
+                    phase,
+                ]
+            )
+            return result.stdout.strip()
+
+        before = fingerprint("before")
+        after = fingerprint("after")
+
+        assert re.fullmatch(r"[0-9a-f]{64}", before)
+        assert after == before
+        assert (
+            _kubectl(
+                k3s,
+                [
+                    "auth",
+                    "can-i",
+                    "list",
+                    "pods",
+                    "--namespace",
+                    namespace,
+                    "--as",
+                    "system:serviceaccount:exomem-platform:exomem-cell-provisioner",
+                ],
+            ).stdout.strip()
+            == "yes"
+        )
+        assert (
+            _kubectl(
+                k3s,
+                [
+                    "auth",
+                    "can-i",
+                    "get",
+                    "pods",
+                    "--subresource=log",
+                    "--namespace",
+                    namespace,
+                    "--as",
+                    "system:serviceaccount:exomem-platform:exomem-cell-provisioner",
+                ],
+                check=False,
+            ).stdout.strip()
+            == "no"
+        )
+    finally:
+        _run(["docker", "image", "rm", "--force", local_image], check=False)
+
+
+@pytest.mark.skipif(
+    not RUN_RUNTIME,
+    reason="set RUN_K3S_RUNTIME_TEST=1 to run the same-cell runtime rollforward gate",
+)
+@pytest.mark.timeout(1200)
+def test_exact_k3s_rolls_one_cell_forward_without_replacing_its_volume(
+    k3s: str, tmp_path: Path
+) -> None:
+    base_gate = json.loads(RUNTIME_GATE.read_text(encoding="utf-8"))
+    old_gate = base_gate | {
+        "sourceCommit": "b41906384ac187cc4877abfc204639fb3b6f8d48",
+        "release": "0.54.1",
+        "releaseBuildTime": "2026-08-21T00:00:00Z",
+    }
+    target_gate = base_gate | {
+        "sourceCommit": "d4bbef7725d55f3bb6e8c288deadddb15ef7855f",
+        "release": "0.57.2",
+        "releaseBuildTime": "2026-08-21T00:01:00Z",
+    }
+    old_source = tmp_path / "old"
+    target_source = tmp_path / "target"
+    old_source.mkdir()
+    target_source.mkdir()
+    old_image = _build_reviewed_runtime_image(old_gate, old_source)
+    target_image = _build_reviewed_runtime_image(target_gate, target_source)
+    namespace = "cell-runtime-rollforward"
+    pod_name = "cell-alpha-0"
+    kubeconfig = _host_kubeconfig(k3s, tmp_path / "kubeconfig")
+    helm_environment = os.environ | {"HELM_DRIVER": "configmap"}
+
+    def host_kubectl(
+        arguments: list[str], *, documents: list[dict[str, Any]] | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        return _run(
+            ["kubectl", "--kubeconfig", str(kubeconfig), *arguments],
+            input_text=None if documents is None else _yaml(documents),
+        )
+
+    def helm_upgrade(values: Path, image: str, release: str) -> None:
+        assert HELM is not None
+        _run(
+            [
+                str(HELM),
+                "--kubeconfig",
+                str(kubeconfig),
+                "upgrade",
+                "--install",
+                "cell-alpha",
+                str(CELL),
+                "--namespace",
+                namespace,
+                "--values",
+                str(values),
+                "--set-string",
+                f"image={image}",
+                "--set-string",
+                f"expectedRelease={release}",
+                "--atomic",
+                "--wait",
+                "--wait-for-jobs",
+                "--timeout",
+                "180s",
+            ],
+            env=helm_environment,
+        )
+
+    credential = base64.urlsafe_b64encode(hashlib.sha256(b"k3s-rollforward").digest())
+    credential = credential.rstrip(b"=").decode("ascii")
+    runtime_class = {
+        "apiVersion": "node.k8s.io/v1",
+        "kind": "RuntimeClass",
+        "metadata": {"name": "exomem-storage-init"},
+        "handler": "runc",
+    }
+    namespace_resource = {
+        "apiVersion": "v1",
+        "kind": "Namespace",
+        "metadata": {
+            "name": namespace,
+            "labels": {"app.kubernetes.io/managed-by": "Helm"},
+            "annotations": {
+                "meta.helm.sh/release-name": "cell-alpha",
+                "meta.helm.sh/release-namespace": namespace,
+            },
+        },
+    }
+    persistent_volume = {
+        "apiVersion": "v1",
+        "kind": "PersistentVolume",
+        "metadata": {"name": "exomem-rollforward-pv"},
+        "spec": {
+            "capacity": {"storage": "10Gi"},
+            "accessModes": ["ReadWriteOnce"],
+            "volumeMode": "Filesystem",
+            "persistentVolumeReclaimPolicy": "Retain",
+            "storageClassName": "exomem-hcloud-encrypted-retain",
+            "claimRef": {"namespace": namespace, "name": "cell-alpha-data"},
+            "hostPath": {
+                "path": "/var/lib/exomem-rollforward-pv",
+                "type": "DirectoryOrCreate",
+            },
+        },
+    }
+    secret = {
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {"name": "exomem-cell-credentials", "namespace": namespace},
+        "type": "Opaque",
+        "stringData": {
+            "credentials.json": json.dumps(
+                {"schema_version": 1, "credentials": {"active-v1": credential}},
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        },
+    }
+    try:
+        old_runtime = _import_runtime_image(k3s, old_image)
+        target_runtime = _import_runtime_image(k3s, target_image)
+        host_kubectl(
+            ["apply", "--filename=-"],
+            documents=[namespace_resource, runtime_class, persistent_volume, secret],
+        )
+
+        helm_upgrade(CELL / "values.initialize.yaml", old_runtime, old_gate["release"])
+        init_envelope = json.loads(_successful_job_logs(k3s, namespace, "cell-alpha-init"))
+        assert init_envelope["ok"] is True
+        assert init_envelope["data"]["exomem_release"] == old_gate["release"]
+        credential_revision = init_envelope["data"]["credential_revision"]
+
+        helm_upgrade(CELL / "values.validation.yaml", old_runtime, old_gate["release"])
+        _wait_for_pod_ready(k3s, namespace, pod_name)
+        pvc_before = json.loads(
+            host_kubectl(
+                ["get", "persistentvolumeclaim", "cell-alpha-data", "-n", namespace, "-o", "json"]
+            ).stdout
+        )
+        statefulset_before = json.loads(
+            host_kubectl(["get", "statefulset", "cell-alpha", "-n", namespace, "-o", "json"]).stdout
+        )
+        sentinel = _exec_python_json(
+            k3s,
+            namespace,
+            pod_name,
+            """
+import hashlib, json, pathlib
+path = pathlib.Path('/var/lib/exomem/vault/runtime-upgrade-sentinel.json')
+path.write_text(json.dumps({'identity': 'same-cell-preservation'}, sort_keys=True))
+print(json.dumps({'sha256': hashlib.sha256(path.read_bytes()).hexdigest()}))
+""",
+        )
+
+        started = time.monotonic()
+        helm_upgrade(CELL / "values.validation.yaml", target_runtime, target_gate["release"])
+        _wait_for_pod_ready(k3s, namespace, pod_name)
+        assert time.monotonic() - started < 180
+        pvc_after = json.loads(
+            host_kubectl(
+                ["get", "persistentvolumeclaim", "cell-alpha-data", "-n", namespace, "-o", "json"]
+            ).stdout
+        )
+        statefulset_after = json.loads(
+            host_kubectl(["get", "statefulset", "cell-alpha", "-n", namespace, "-o", "json"]).stdout
+        )
+        assert pvc_after["metadata"]["uid"] == pvc_before["metadata"]["uid"]
+        assert statefulset_after["metadata"]["uid"] == statefulset_before["metadata"]["uid"]
+        preserved = _exec_python_json(
+            k3s,
+            namespace,
+            pod_name,
+            """
+import hashlib, json, pathlib
+path = pathlib.Path('/var/lib/exomem/vault/runtime-upgrade-sentinel.json')
+print(json.dumps({'sha256': hashlib.sha256(path.read_bytes()).hexdigest()}))
+""",
+        )
+        assert preserved == sentinel
+        probe = _run_authenticated_probe(
+            k3s,
+            namespace=namespace,
+            pod=pod_name,
+            gate=target_gate,
+            credential_revision=credential_revision,
+            worker_policy_digest="b" * 64,
+        )
+        assert probe["data"]["exomem_release"] == "0.57.2"
+
+        helm_upgrade(CELL / "values.validation.yaml", target_runtime, target_gate["release"])
+        _wait_for_pod_ready(k3s, namespace, pod_name)
+        assert (
+            _exec_python_json(
+                k3s,
+                namespace,
+                pod_name,
+                """
+import hashlib, json, pathlib
+path = pathlib.Path('/var/lib/exomem/vault/runtime-upgrade-sentinel.json')
+print(json.dumps({'sha256': hashlib.sha256(path.read_bytes()).hexdigest()}))
+""",
+            )
+            == sentinel
+        )
+    finally:
+        for image in (old_image, target_image):
+            _run(["docker", "image", "rm", "--force", image], check=False)

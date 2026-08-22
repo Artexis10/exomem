@@ -16,6 +16,13 @@ spec:
     - name: storageInit
       expression: >-
         has(object.spec.runtimeClassName) && object.spec.runtimeClassName == 'exomem-storage-init'
+    - name: vaultFingerprint
+      expression: >-
+        has(object.metadata.labels) &&
+        'exomem.io/vault-fingerprint' in object.metadata.labels &&
+        object.metadata.labels['exomem.io/vault-fingerprint'] == 'true'
+    - name: lifecycleJob
+      expression: variables.storageInit || variables.vaultFingerprint
     - name: tenantNamespace
       expression: >-
         has(namespaceObject.metadata.labels) &&
@@ -33,7 +40,7 @@ spec:
       expression: >-
         request.operation == 'UPDATE' &&
         request.userInfo.username == 'system:serviceaccount:kube-system:job-controller' &&
-        variables.storageInit &&
+        variables.lifecycleJob &&
         has(oldObject.spec.nodeName) &&
         has(object.spec.nodeName) &&
         object.spec.nodeName == oldObject.spec.nodeName &&
@@ -91,9 +98,9 @@ spec:
       message: Tenant pod security context must be the exact runtime-default profile.
     - expression: >-
         !variables.inScope ||
-        ((has(object.spec.runtimeClassName) && object.spec.runtimeClassName == 'exomem-storage-init' &&
+        ((variables.lifecycleJob &&
           object.spec.restartPolicy == 'Never') ||
-          ((!has(object.spec.runtimeClassName) || object.spec.runtimeClassName != 'exomem-storage-init') &&
+          (!variables.lifecycleJob &&
             object.spec.restartPolicy == 'Always'))
       message: Tenant pod restart policy must match its lifecycle mode.
     - expression: >-
@@ -106,7 +113,9 @@ spec:
         !variables.inScope ||
         (
         object.spec.containers[0].name == 'exomem' &&
-        object.spec.containers[0].image in {{ $runtimeImages | toJson }} &&
+        (variables.vaultFingerprint
+          ? object.spec.containers[0].image == '{{ $provisionerImage }}'
+          : object.spec.containers[0].image in {{ $runtimeImages | toJson }}) &&
         object.spec.containers[0].imagePullPolicy == 'IfNotPresent' &&
         object.spec.containers[0].securityContext.allowPrivilegeEscalation == false &&
         object.spec.containers[0].securityContext.readOnlyRootFilesystem == true &&
@@ -202,8 +211,58 @@ spec:
           mount.readOnly == true && mount.subPath == 'init.json'))
       message: Storage initialization mounts must match the exact tenant paths.
     - expression: >-
+        !variables.inScope || !variables.vaultFingerprint ||
+        (
+        !has(object.spec.runtimeClassName) &&
+        has(object.metadata.labels) &&
+        object.metadata.labels['job-name'] == namespaceObject.metadata.annotations['exomem.io/resource-name'] + '-init' &&
+        object.metadata.name.startsWith(object.metadata.labels['job-name'] + '-') &&
+        size(object.metadata.ownerReferences) == 1 &&
+        object.metadata.ownerReferences[0].apiVersion == 'batch/v1' &&
+        object.metadata.ownerReferences[0].kind == 'Job' &&
+        object.metadata.ownerReferences[0].name == object.metadata.labels['job-name'] &&
+        object.metadata.ownerReferences[0].controller == true &&
+        !has(object.spec.containers[0].command) &&
+        object.spec.containers[0].args == ['exomem-provisioner-vault-fingerprint'] &&
+        (!has(object.spec.containers[0].env) || size(object.spec.containers[0].env) == 0) &&
+        (!has(object.spec.containers[0].envFrom) || size(object.spec.containers[0].envFrom) == 0) &&
+        (!has(object.spec.containers[0].ports) || size(object.spec.containers[0].ports) == 0) &&
+        !has(object.spec.containers[0].lifecycle) &&
+        !has(object.spec.containers[0].livenessProbe) &&
+        !has(object.spec.containers[0].readinessProbe) &&
+        !has(object.spec.containers[0].startupProbe))
+      message: Vault fingerprinting must use the exact offline content-free provisioner command.
+    - expression: >-
+        !variables.inScope || !variables.vaultFingerprint ||
+        (
+        object.spec.containers[0].securityContext.runAsNonRoot == true &&
+        object.spec.containers[0].securityContext.runAsUser == 10001 &&
+        object.spec.containers[0].securityContext.runAsGroup == 10001 &&
+        (!has(object.spec.containers[0].securityContext.capabilities.add) ||
+          size(object.spec.containers[0].securityContext.capabilities.add) == 0) &&
+        string(dyn(object.spec.containers[0].resources).requests['cpu']) == '100m' &&
+        string(dyn(object.spec.containers[0].resources).requests['memory']) == '128Mi' &&
+        string(dyn(object.spec.containers[0].resources).limits['cpu']) == '1' &&
+        string(dyn(object.spec.containers[0].resources).limits['memory']) == '1Gi' &&
+        size(dyn(object.spec.containers[0].resources).requests) == 2 &&
+        size(dyn(object.spec.containers[0].resources).limits) == 2)
+      message: Vault fingerprinting must use the exact restricted identity and compute bounds.
+    - expression: >-
+        !variables.inScope || !variables.vaultFingerprint ||
+        (
+        size(object.spec.volumes) == 1 &&
+        object.spec.volumes[0].name == 'data' &&
+        object.spec.volumes[0].persistentVolumeClaim.claimName ==
+          namespaceObject.metadata.annotations['exomem.io/pvc-name'] &&
+        size(object.spec.containers[0].volumeMounts) == 1 &&
+        object.spec.containers[0].volumeMounts[0].name == 'data' &&
+        object.spec.containers[0].volumeMounts[0].mountPath == '/var/lib/exomem/vault' &&
+        object.spec.containers[0].volumeMounts[0].subPath == 'vault' &&
+        object.spec.containers[0].volumeMounts[0].readOnly == true)
+      message: Vault fingerprinting may mount only the canonical vault read-only.
+    - expression: >-
         !variables.inScope ||
-        (has(object.spec.runtimeClassName) && object.spec.runtimeClassName == 'exomem-storage-init') ||
+        variables.lifecycleJob ||
         (
         !has(object.spec.containers[0].command) &&
         object.spec.containers[0].args == ['--transport', 'http', '--port', '8765'] &&
@@ -269,7 +328,7 @@ spec:
       message: Serving pods must use the exact approved serving command and environment.
     - expression: >-
         !variables.inScope ||
-        (has(object.spec.runtimeClassName) && object.spec.runtimeClassName == 'exomem-storage-init') ||
+        variables.lifecycleJob ||
         (
         !has(object.spec.containers[0].lifecycle) &&
         size(object.spec.containers[0].ports) == 1 &&
@@ -328,7 +387,7 @@ spec:
       message: Serving pods must use the exact approved serving ports, probes, and interactive surface.
     - expression: >-
         !variables.inScope ||
-        (has(object.spec.runtimeClassName) && object.spec.runtimeClassName == 'exomem-storage-init') ||
+        variables.lifecycleJob ||
         (
         object.spec.containers[0].securityContext.runAsNonRoot == true &&
         object.spec.containers[0].securityContext.runAsUser == 10001 &&
@@ -338,7 +397,7 @@ spec:
       message: Serving pods must use the exact restricted identity and capabilities.
     - expression: >-
         !variables.inScope ||
-        (has(object.spec.runtimeClassName) && object.spec.runtimeClassName == 'exomem-storage-init') ||
+        variables.lifecycleJob ||
         (
         string(dyn(object.spec.containers[0].resources).requests['cpu']) == '250m' &&
         string(dyn(object.spec.containers[0].resources).requests['memory']) == '1Gi' &&
@@ -351,7 +410,7 @@ spec:
       message: Serving pods must use the exact approved compute resources.
     - expression: >-
         !variables.inScope ||
-        (has(object.spec.runtimeClassName) && object.spec.runtimeClassName == 'exomem-storage-init') ||
+        variables.lifecycleJob ||
         (size(object.spec.volumes) == 2 && object.spec.volumes.all(volume,
           (volume.name == 'data' && has(volume.persistentVolumeClaim) &&
             volume.persistentVolumeClaim.claimName == namespaceObject.metadata.annotations['exomem.io/pvc-name']) ||
@@ -361,7 +420,7 @@ spec:
       message: Serving pods may mount only their own PVC and credential Secret.
     - expression: >-
         !variables.inScope ||
-        (has(object.spec.runtimeClassName) && object.spec.runtimeClassName == 'exomem-storage-init') ||
+        variables.lifecycleJob ||
         (size(object.spec.containers[0].volumeMounts) == 4 &&
         object.spec.containers[0].volumeMounts.exists(mount,
           mount.name == 'data' && mount.mountPath == '/var/lib/exomem/vault' && mount.subPath == 'vault') &&

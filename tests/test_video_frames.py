@@ -18,6 +18,7 @@ import pytest
 from exomem import commands as commands_module
 from exomem import embeddings, video_frames
 from exomem import server as server_module
+from exomem.governance.principal import RequestPrincipal, request_scope
 
 VIDEO = "Knowledge Base/Sources/clip.mp4"
 
@@ -305,7 +306,7 @@ def test_mcp_tool_returns_metadata_then_images(video_vault, monkeypatch) -> None
     )
     mcp = _build_server(monkeypatch)
     result = asyncio.run(
-        mcp.call_tool("read_media", {"path": VIDEO}, run_middleware=False)
+        mcp.call_tool("read_media", {"path": VIDEO}, run_middleware=True)
     )
     meta = result.structured_content
     assert meta["path"] == VIDEO
@@ -323,12 +324,41 @@ def test_mcp_tool_returns_metadata_then_images(video_vault, monkeypatch) -> None
     assert base64.b64decode(images[1].data) == b"\xff\xd8BB"
 
 
+def test_unresolved_video_is_missing_before_decoder_loads(video_vault, monkeypatch) -> None:
+    governance = video_vault / "Knowledge Base" / "_Governance"
+    (governance / "scopes").mkdir(parents=True, exist_ok=True)
+    (governance / "rules").mkdir(parents=True, exist_ok=True)
+    (governance / "scopes" / "semantic-source.yaml").write_text(
+        "governance_version: 1\n"
+        "id: 01ARZ3NDEKTSV4RRFFQ69G5FAV\n"
+        "name: Semantic sources\n"
+        'types: ["source"]\n',
+        encoding="utf-8",
+    )
+    (governance / "rules" / "external.yaml").write_text(
+        "governance_version: 1\n"
+        "id: 01ARZ3NDEKTSV4RRFFQ69G5FB0\n"
+        'scope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FAV"]\n'
+        "audience: external\n"
+        "ceiling: 6\n",
+        encoding="utf-8",
+    )
+
+    def forbidden_module():
+        raise AssertionError("unresolved video reached the decoder module")
+
+    monkeypatch.setattr(commands_module, "_video_frames_module", forbidden_module)
+    with request_scope(RequestPrincipal(audience_id="external", surface="mcp")):
+        with pytest.raises(ValueError, match="NOT_FOUND"):
+            commands_module.op_get_video_frames(video_vault, VIDEO)
+
+
 def test_mcp_tool_error_carries_code(video_vault, monkeypatch) -> None:
     mcp = _build_server(monkeypatch)
     with pytest.raises(Exception) as exc:
         asyncio.run(
             mcp.call_tool(
-                "read_media", {"path": "../escape.mp4"}, run_middleware=False
+                "read_media", {"path": "../escape.mp4"}, run_middleware=True
             )
         )
     assert "INVALID_PATH" in str(exc.value)

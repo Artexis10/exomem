@@ -35,7 +35,10 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .authorization_session_lifecycle import AuthorizationSessionContext
 
 # The vault's own operator: stdio MCP, the CLI, the shared REST key, and any
 # in-process/library call with no surface bound.
@@ -61,6 +64,14 @@ UNNAMED_AUDIENCE_PROBE = "\x00unnamed"
 # `server_rest._rest_principal`; `principal:` in `command_surface`.
 _OAUTH_EQUIVALENT_PREFIXES = ("principal:", "cf-access:")
 
+_LOCAL_OWNER_ISSUER_FAMILIES = {
+    "cli": "cli-local-owner",
+    "library": "library-local-owner",
+    "mcp": "mcp-local-stdio",
+    "rest": "rest-api-key",
+    "transfer": "transfer-local-owner",
+}
+
 _REQUEST_PRINCIPAL: ContextVar[RequestPrincipal | None] = ContextVar(
     "exomem_request_principal", default=None
 )
@@ -76,6 +87,8 @@ class RequestPrincipal:
     authorization_session_id: str | None = None
     purpose: str | None = None
     resolved: bool = True
+    issuer_family: str | None = None
+    verified_authorization_session: AuthorizationSessionContext | None = None
 
     def with_purpose(self, purpose: str | None) -> RequestPrincipal:
         """Layer a per-call declared purpose on without mutating the binding."""
@@ -86,6 +99,20 @@ class RequestPrincipal:
     def with_authorization_session(self, handle: str | None) -> RequestPrincipal:
         """Bind the explicit client-conversation authorization identity."""
         return replace(self, authorization_session_id=handle)
+
+    def with_verified_authorization_session(
+        self,
+        context: AuthorizationSessionContext | None,
+        *,
+        issuer_family: str,
+    ) -> RequestPrincipal:
+        """Bind dispatcher-verified capability context without retaining its bearer."""
+        return replace(
+            self,
+            authorization_session_id=context.session_id if context is not None else None,
+            issuer_family=issuer_family,
+            verified_authorization_session=context,
+        )
 
 
 def normalize_audience(*, subject: Any, issuer: Any = None) -> str:
@@ -119,7 +146,11 @@ def _canonical_scope(scope: str) -> str:
 def owner_principal(*, surface: str = "cli", purpose: str | None = None) -> RequestPrincipal:
     """The local operator: stdio MCP, the CLI, the vault's own REST key."""
     return RequestPrincipal(
-        audience_id=OWNER_AUDIENCE, surface=surface, purpose=purpose, resolved=True
+        audience_id=OWNER_AUDIENCE,
+        surface=surface,
+        purpose=purpose,
+        resolved=True,
+        issuer_family=_LOCAL_OWNER_ISSUER_FAMILIES.get(surface),
     )
 
 
@@ -175,7 +206,14 @@ def resolve_mcp_principal() -> RequestPrincipal:
     if claims is not None:
         audience = normalize_audience(subject=claims.get("sub"), issuer=claims.get("iss"))
         if audience != MOST_RESTRICTIVE_AUDIENCE:
-            return RequestPrincipal(audience_id=audience, surface="mcp", resolved=True)
+            issuer = str(claims.get("iss") or "verified-principal").strip()
+            issuer_digest = hashlib.sha256(issuer.encode()).hexdigest()
+            return RequestPrincipal(
+                audience_id=audience,
+                surface="mcp",
+                resolved=True,
+                issuer_family=f"mcp-oauth:{issuer_digest}",
+            )
         return most_restrictive_principal(surface="mcp")
     if expectation is not None:
         return most_restrictive_principal(surface="mcp")
@@ -195,7 +233,12 @@ def resolve_rest_principal(principal_scope: str | None) -> RequestPrincipal:
     audience = _canonical_scope(principal_scope)
     if audience == MOST_RESTRICTIVE_AUDIENCE:
         return most_restrictive_principal(surface="rest")
-    return RequestPrincipal(audience_id=audience, surface="rest", resolved=True)
+    return RequestPrincipal(
+        audience_id=audience,
+        surface="rest",
+        resolved=True,
+        issuer_family="rest-cf-access",
+    )
 
 
 def resolve_hosted_principal(principal_scope: str | None) -> RequestPrincipal:
@@ -210,7 +253,12 @@ def resolve_hosted_principal(principal_scope: str | None) -> RequestPrincipal:
     audience = _canonical_scope(str(principal_scope))
     if audience == MOST_RESTRICTIVE_AUDIENCE:
         return most_restrictive_principal(surface="hosted")
-    return RequestPrincipal(audience_id=audience, surface="hosted", resolved=True)
+    return RequestPrincipal(
+        audience_id=audience,
+        surface="hosted",
+        resolved=True,
+        issuer_family="hosted-gateway",
+    )
 
 
 def current_principal() -> RequestPrincipal | None:

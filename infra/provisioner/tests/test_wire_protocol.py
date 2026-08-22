@@ -38,10 +38,11 @@ def _runtime_target() -> dict[str, str]:
         "gatewayContractDigest": "a" * 64,
         "commandFingerprint": "b" * 64,
         "schemaDigest": "c" * 64,
+        "compatibilityDigest": "d" * 64,
     }
 
 
-def test_v2_cell_requests_require_only_a_strict_six_field_runtime_target() -> None:
+def test_v2_cell_requests_require_only_a_strict_seven_field_runtime_target() -> None:
     body = {
         "operationId": "operation-v2-alpha",
         "checkpoint": "requested",
@@ -80,8 +81,42 @@ def test_v2_cell_requests_require_only_a_strict_six_field_runtime_target() -> No
 def test_v2_has_one_closed_model_per_action_and_explicit_target_free_actions() -> None:
     request_models = REQUEST_MODELS_BY_PROTOCOL[WIRE_PROTOCOL_V2]
 
-    assert len(request_models) == 14
-    assert len(set(request_models.values())) == 14
+    assert len(request_models) == 16
+    assert len(set(request_models.values())) == 16
+    assert set(request_models["rollforward"].model_fields) == {
+        "operationId",
+        "checkpoint",
+        "fenceGeneration",
+        "tenantId",
+        "cellId",
+        "serviceCredential",
+        "workerPolicy",
+        "runtimeTarget",
+        "providerRef",
+        "compatibilityDigest",
+    }
+    rollforward = request_models["rollforward"].model_validate(
+        {
+            "operationId": "operation-v2-alpha",
+            "checkpoint": "requested",
+            "fenceGeneration": 1,
+            "tenantId": "tenant-v2-alpha",
+            "cellId": "cell-v2-alpha",
+            "serviceCredential": _ACTIVE_CREDENTIAL,
+            "workerPolicy": {"workerCount": 2, "semantic": True, "media": False},
+            "runtimeTarget": _runtime_target(),
+            "providerRef": "provider-cell-v2-alpha",
+            "compatibilityDigest": "d" * 64,
+        }
+    )
+    assert rollforward.compatibilityDigest == "d" * 64
+    assert set(request_models["rollback-rollforward"].model_fields) == set(
+        request_models["rollforward"].model_fields
+    )
+    with pytest.raises(ValidationError):
+        request_models["rollforward"].model_validate(
+            {**rollforward.model_dump(mode="python"), "compatibilityDigest": "D" * 64}
+        )
     assert set(request_models["export-delete"].model_fields) == {
         "operationId",
         "checkpoint",
@@ -229,7 +264,10 @@ def test_frozen_wire_corpora_validate_all_request_response_and_failure_shapes(
             (500, "PROVISIONER_RESPONSE_INVALID", False),
             (503, "PROVISIONER_UNAVAILABLE", True),
         }
-        assert FailureResponse.model_validate(payload["mismatch"]["body"]).code == "PROVISIONER_REJECTED"
+        assert (
+            FailureResponse.model_validate(payload["mismatch"]["body"]).code
+            == "PROVISIONER_REJECTED"
+        )
         assert FailureResponse.model_validate(payload["replayFailure"]["body"]).code == (
             "CONTROL_PLANE_STATE_CONFLICT"
         )

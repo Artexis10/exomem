@@ -6,6 +6,7 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import inspect
 import json
 import os
 import re
@@ -15,7 +16,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from .credentials import validate_machine_credential
 from .lifecycle import (
@@ -228,7 +229,9 @@ class KubernetesVolumeAdapter:
                     fence_generation=metadata.fence_generation,
                 )
             except ProviderIdentityConflict as error:
-                raise MetadataConflict("PV provider recovery identity did not authenticate") from error
+                raise MetadataConflict(
+                    "PV provider recovery identity did not authenticate"
+                ) from error
         return BoundVolumeRecoveryObservation(
             recorded=recorded,
             stability_digest=hashlib.sha256(
@@ -597,6 +600,274 @@ class KubernetesCellAdapter:
         )
 
 
+class KubernetesVaultFingerprintAdapter:
+    """Run one fixed, read-only provisioner fingerprint Job per phase."""
+
+    _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+
+    def __init__(
+        self,
+        *,
+        core_v1: Any,
+        batch_v1: Any,
+        image: str,
+        sleep: Callable[[float], Any] = asyncio.sleep,
+        poll_attempts: int = 150,
+    ) -> None:
+        self._core = core_v1
+        self._batch = batch_v1
+        self._image = image
+        self._sleep = sleep
+        self._poll_attempts = poll_attempts
+
+    @staticmethod
+    def _name(metadata: OpaqueProviderMetadata) -> str:
+        # Reuse the already signed fixed init-Job provider reference. The
+        # initial install Job is terminal and TTL-cleaned before upgrades.
+        return metadata.resource_name + "-init"
+
+    async def _pause(self) -> None:
+        result = self._sleep(1.0)
+        if inspect.isawaitable(result):
+            await result
+
+    def _body(
+        self,
+        metadata: OpaqueProviderMetadata,
+        *,
+        operation_id: str,
+        phase: Literal["before", "after"],
+        recovery_envelope: str,
+    ) -> dict[str, Any]:
+        annotations = {
+            **metadata.kubernetes_annotations,
+            "exomem.io/recovery-envelope": recovery_envelope,
+            "exomem.io/vault-fingerprint-phase": phase,
+            "exomem.io/vault-fingerprint-operation": hashlib.sha256(
+                operation_id.encode("utf-8")
+            ).hexdigest(),
+        }
+        labels = {
+            "app.kubernetes.io/name": "exomem-cell",
+            "exomem.io/cell": metadata.resource_name,
+            "exomem.io/vault-fingerprint": "true",
+        }
+        return {
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {
+                "name": self._name(metadata),
+                "namespace": metadata.resource_name,
+                "labels": labels,
+                "annotations": annotations,
+            },
+            "spec": {
+                "backoffLimit": 0,
+                "activeDeadlineSeconds": 600,
+                "ttlSecondsAfterFinished": 300,
+                "template": {
+                    "metadata": {"labels": labels, "annotations": annotations},
+                    "spec": {
+                        "serviceAccountName": metadata.resource_name,
+                        "automountServiceAccountToken": False,
+                        "restartPolicy": "Never",
+                        "securityContext": {"seccompProfile": {"type": "RuntimeDefault"}},
+                        "containers": [
+                            {
+                                "name": "exomem",
+                                "image": self._image,
+                                "imagePullPolicy": "IfNotPresent",
+                                "terminationMessagePath": "/dev/termination-log",
+                                "terminationMessagePolicy": "File",
+                                "args": ["exomem-provisioner-vault-fingerprint"],
+                                "resources": {
+                                    "requests": {"cpu": "100m", "memory": "128Mi"},
+                                    "limits": {"cpu": "1", "memory": "1Gi"},
+                                },
+                                "securityContext": {
+                                    "allowPrivilegeEscalation": False,
+                                    "readOnlyRootFilesystem": True,
+                                    "runAsNonRoot": True,
+                                    "runAsUser": 10001,
+                                    "runAsGroup": 10001,
+                                    "capabilities": {"drop": ["ALL"]},
+                                },
+                                "volumeMounts": [
+                                    {
+                                        "name": "data",
+                                        "mountPath": "/var/lib/exomem/vault",
+                                        "subPath": "vault",
+                                        "readOnly": True,
+                                    }
+                                ],
+                            }
+                        ],
+                        "volumes": [
+                            {
+                                "name": "data",
+                                "persistentVolumeClaim": {
+                                    "claimName": metadata.resource_name + "-data"
+                                },
+                            }
+                        ],
+                    },
+                },
+            },
+        }
+
+    @staticmethod
+    def _duplicates_rejected(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        value: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError("duplicate JSON member")
+            value[key] = item
+        return value
+
+    def _require_job(
+        self,
+        job: Any,
+        metadata: OpaqueProviderMetadata,
+        *,
+        operation_id: str,
+        phase: Literal["before", "after"],
+        recovery_envelope: str,
+    ) -> None:
+        annotations = dict(getattr(job.metadata, "annotations", None) or {})
+        _require_annotations(annotations, metadata)
+        if (
+            annotations.get("exomem.io/recovery-envelope") != recovery_envelope
+            or annotations.get("exomem.io/vault-fingerprint-phase") != phase
+            or annotations.get("exomem.io/vault-fingerprint-operation")
+            != hashlib.sha256(operation_id.encode("utf-8")).hexdigest()
+        ):
+            raise MetadataConflict("vault fingerprint Job identity differs")
+        containers: list[Any] = list(getattr(job.spec.template.spec, "containers", None) or ())
+        if (
+            len(containers) != 1
+            or getattr(containers[0], "image", None) != self._image
+            or list(getattr(containers[0], "args", None) or ())
+            != ["exomem-provisioner-vault-fingerprint"]
+        ):
+            raise MetadataConflict("vault fingerprint Job runtime differs")
+
+    async def _read(self, metadata: OpaqueProviderMetadata) -> Any | None:
+        try:
+            return await asyncio.to_thread(
+                self._batch.read_namespaced_job,
+                self._name(metadata),
+                metadata.resource_name,
+            )
+        except Exception as error:
+            if _api_status(error) == 404:
+                return None
+            raise
+
+    async def _delete(self, metadata: OpaqueProviderMetadata) -> None:
+        try:
+            await asyncio.to_thread(
+                self._batch.delete_namespaced_job,
+                self._name(metadata),
+                metadata.resource_name,
+                body={"propagationPolicy": "Foreground"},
+            )
+        except Exception as error:
+            if _api_status(error) != 404:
+                raise
+
+    async def _result(self, metadata: OpaqueProviderMetadata, job: Any) -> str | None:
+        status = getattr(job, "status", None)
+        if int(getattr(status, "failed", 0) or 0) > 0:
+            raise MetadataConflict("vault fingerprint Job failed")
+        if int(getattr(status, "succeeded", 0) or 0) != 1:
+            return None
+        pods = await asyncio.to_thread(
+            self._core.list_namespaced_pod,
+            metadata.resource_name,
+            label_selector=f"job-name={self._name(metadata)}",
+        )
+        items = list(getattr(pods, "items", None) or ())
+        if len(items) != 1:
+            raise MetadataConflict("vault fingerprint result is unavailable")
+        statuses = list(getattr(items[0].status, "container_statuses", None) or ())
+        terminated = (
+            getattr(getattr(statuses[0], "state", None), "terminated", None)
+            if len(statuses) == 1
+            else None
+        )
+        message = getattr(terminated, "message", None)
+        if getattr(terminated, "exit_code", None) != 0 or not isinstance(message, str):
+            raise MetadataConflict("vault fingerprint result is invalid")
+        try:
+            value = json.loads(message, object_pairs_hook=self._duplicates_rejected)
+        except (TypeError, ValueError, json.JSONDecodeError) as error:
+            raise MetadataConflict("vault fingerprint result is invalid") from error
+        if (
+            not isinstance(value, dict)
+            or set(value) != {"artifact", "schemaVersion", "sha256"}
+            or value.get("artifact") != "exomem-hosted-vault-fingerprint"
+            or value.get("schemaVersion") != 1
+            or not isinstance(value.get("sha256"), str)
+            or self._SHA256.fullmatch(value["sha256"]) is None
+        ):
+            raise MetadataConflict("vault fingerprint result is invalid")
+        return value["sha256"]
+
+    async def fingerprint(
+        self,
+        metadata: OpaqueProviderMetadata,
+        *,
+        operation_id: str,
+        phase: Literal["before", "after"],
+        recovery_envelope: str,
+    ) -> str:
+        expected_annotations = self._body(
+            metadata,
+            operation_id=operation_id,
+            phase=phase,
+            recovery_envelope=recovery_envelope,
+        )["metadata"]["annotations"]
+        for _ in range(self._poll_attempts):
+            job = await self._read(metadata)
+            if job is None:
+                try:
+                    await asyncio.to_thread(
+                        self._batch.create_namespaced_job,
+                        metadata.resource_name,
+                        self._body(
+                            metadata,
+                            operation_id=operation_id,
+                            phase=phase,
+                            recovery_envelope=recovery_envelope,
+                        ),
+                    )
+                except Exception as error:
+                    if _api_status(error) != 409:
+                        raise
+                await self._pause()
+                continue
+            annotations = dict(getattr(job.metadata, "annotations", None) or {})
+            if any(annotations.get(key) != value for key, value in expected_annotations.items()):
+                if int(getattr(getattr(job, "status", None), "succeeded", 0) or 0) == 1:
+                    await self._delete(metadata)
+                    await self._pause()
+                    continue
+                raise MetadataConflict("another cell lifecycle Job owns the fixed slot")
+            self._require_job(
+                job,
+                metadata,
+                operation_id=operation_id,
+                phase=phase,
+                recovery_envelope=recovery_envelope,
+            )
+            digest = await self._result(metadata, job)
+            if digest is not None:
+                await self._delete(metadata)
+                return digest
+            await self._pause()
+        raise MetadataConflict("vault fingerprint Job did not complete within its bound")
+
+
 class KubernetesMaintenanceLeaseAdapter:
     """Per-cell durable maintenance serialization using coordination.k8s.io Lease."""
 
@@ -863,8 +1134,12 @@ class PrivateCellApiAdapter:
             if agent_response.status_code != 200:
                 raise MetadataConflict("private cell agent contract request failed")
             agent_contract = agent_response.json()
-            agent_metadata = agent_contract.get("agent_profile") if isinstance(agent_contract, dict) else None
-            agent_digest = agent_contract.get("digest") if isinstance(agent_contract, dict) else None
+            agent_metadata = (
+                agent_contract.get("agent_profile") if isinstance(agent_contract, dict) else None
+            )
+            agent_digest = (
+                agent_contract.get("digest") if isinstance(agent_contract, dict) else None
+            )
             if (
                 not isinstance(agent_metadata, dict)
                 or not isinstance(agent_digest, dict)
@@ -925,9 +1200,12 @@ class PrivateCellApiAdapter:
                 if reader_response.status_code != 200:
                     raise MetadataConflict("private cell reader status request failed")
                 reader_envelope = reader_response.json()
-                reader_status = reader_envelope.get("data") if isinstance(reader_envelope, dict) else None
+                reader_status = (
+                    reader_envelope.get("data") if isinstance(reader_envelope, dict) else None
+                )
                 if not isinstance(reader_status, dict) or set(reader_status) != {
-                    "records_reader_version", "lifecycle_actions_enabled"
+                    "records_reader_version",
+                    "lifecycle_actions_enabled",
                 }:
                     raise MetadataConflict("private cell reader status is incomplete")
                 version = reader_status["records_reader_version"]
@@ -988,6 +1266,13 @@ class PrivateCellApiAdapter:
                 agent_profile=agent_profile,
                 command_fingerprint=command_fingerprint,
                 schema_digest=schema_digest,
+                compatibility_digest=(
+                    config.runtime_target_for(
+                        {"runtimeTarget": config.runtime_target}, v2=True
+                    ).get("compatibilityDigest")
+                    if require_runtime_identity
+                    else None
+                ),
                 records_reader_version=records_reader_version,
                 lifecycle_actions_enabled=lifecycle_actions_enabled,
             )
@@ -1252,7 +1537,9 @@ class HCloudVolumeAdapter:
                     fence_generation=metadata.fence_generation,
                 )
             except ProviderIdentityConflict as error:
-                raise MetadataConflict("HCloud provider recovery identity did not authenticate") from error
+                raise MetadataConflict(
+                    "HCloud provider recovery identity did not authenticate"
+                ) from error
         return await self.verify_volume(handle, metadata, location)
 
     async def delete_volume(self, handle: str) -> None:
@@ -1382,12 +1669,7 @@ class HelmCliAdapter:
         if self._has_secret_key(values):
             raise MetadataConflict("Helm values must not carry plaintext credentials")
         environment = {"HELM_DRIVER": "configmap"}
-        version = await self._runner(
-            (self._binary, "version", "--template", "{{.Version}}"),
-            environment,
-        )
-        if version.returncode != 0 or version.stdout.strip() != f"v{self._expected_version}":
-            raise MetadataConflict("installed Helm CLI does not match the pinned version")
+        await self._require_version(environment)
         temporary: Path | None = None
         try:
             with tempfile.NamedTemporaryFile(
@@ -1434,6 +1716,259 @@ class HelmCliAdapter:
         finally:
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
+
+    async def _require_version(self, environment: dict[str, str]) -> None:
+        version = await self._runner(
+            (self._binary, "version", "--template", "{{.Version}}"),
+            environment,
+        )
+        if version.returncode != 0 or version.stdout.strip() != f"v{self._expected_version}":
+            raise MetadataConflict("installed Helm CLI does not match the pinned version")
+
+    async def _current_values(
+        self,
+        metadata: OpaqueProviderMetadata,
+        environment: dict[str, str],
+    ) -> dict[str, Any]:
+        result = await self._runner(
+            (
+                self._binary,
+                "get",
+                "values",
+                metadata.resource_name,
+                "--namespace",
+                metadata.resource_name,
+                "--output",
+                "json",
+            ),
+            environment,
+        )
+        if result.returncode != 0 or len(result.stdout.encode("utf-8")) > 262_144:
+            raise MetadataConflict("current Helm values are unavailable")
+        try:
+            value = json.loads(result.stdout)
+        except (TypeError, json.JSONDecodeError) as error:
+            raise MetadataConflict("current Helm values are invalid") from error
+        if not isinstance(value, dict) or self._has_secret_key(value):
+            raise MetadataConflict("current Helm values are invalid")
+        return value
+
+    async def _revision_values(
+        self,
+        metadata: OpaqueProviderMetadata,
+        environment: dict[str, str],
+        revision: int,
+    ) -> dict[str, Any]:
+        result = await self._runner(
+            (
+                self._binary,
+                "get",
+                "values",
+                metadata.resource_name,
+                "--namespace",
+                metadata.resource_name,
+                "--output",
+                "json",
+                "--revision",
+                str(revision),
+            ),
+            environment,
+        )
+        if result.returncode != 0 or len(result.stdout.encode("utf-8")) > 262_144:
+            raise MetadataConflict("historical Helm values are unavailable")
+        try:
+            value = json.loads(result.stdout)
+        except (TypeError, json.JSONDecodeError) as error:
+            raise MetadataConflict("historical Helm values are invalid") from error
+        if not isinstance(value, dict) or self._has_secret_key(value):
+            raise MetadataConflict("historical Helm values are invalid")
+        return value
+
+    async def _release_history(
+        self,
+        metadata: OpaqueProviderMetadata,
+        environment: dict[str, str],
+    ) -> tuple[dict[str, Any], ...]:
+        result = await self._runner(
+            (
+                self._binary,
+                "history",
+                metadata.resource_name,
+                "--namespace",
+                metadata.resource_name,
+                "--output",
+                "json",
+                "--max",
+                "20",
+            ),
+            environment,
+        )
+        if result.returncode != 0 or len(result.stdout.encode("utf-8")) > 262_144:
+            raise MetadataConflict("Helm release history is unavailable")
+        try:
+            history = json.loads(result.stdout)
+        except (TypeError, json.JSONDecodeError) as error:
+            raise MetadataConflict("Helm release history is invalid") from error
+        if not isinstance(history, list) or not 1 <= len(history) <= 20:
+            raise MetadataConflict("Helm release history is invalid")
+        revisions: list[int] = []
+        for item in history:
+            if not isinstance(item, dict):
+                raise MetadataConflict("Helm release history is invalid")
+            revision = item.get("revision")
+            if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
+                raise MetadataConflict("Helm release history is invalid")
+            revisions.append(revision)
+        if len(revisions) != len(set(revisions)):
+            raise MetadataConflict("Helm release history is invalid")
+        return tuple(history)
+
+    async def _deployed_revision(
+        self,
+        metadata: OpaqueProviderMetadata,
+        environment: dict[str, str],
+    ) -> int:
+        history = await self._release_history(metadata, environment)
+        revisions = (
+            [
+                item.get("revision")
+                for item in history
+                if isinstance(item, dict) and item.get("status") == "deployed"
+            ]
+            if isinstance(history, tuple)
+            else []
+        )
+        if (
+            len(revisions) != 1
+            or isinstance(revisions[0], bool)
+            or not isinstance(revisions[0], int)
+            or revisions[0] < 1
+        ):
+            raise MetadataConflict("Helm deployed revision is ambiguous")
+        return revisions[0]
+
+    @staticmethod
+    def _operation_digest(operation_id: str) -> str:
+        return hashlib.sha256(operation_id.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _runtime_upgrade_prior(marker: Any, operation_digest: str) -> int | None:
+        if not isinstance(marker, dict) or marker.get("operationDigest") != operation_digest:
+            return None
+        prior = marker.get("priorRevision")
+        if (
+            set(marker) != {"schemaVersion", "operationDigest", "priorRevision"}
+            or marker.get("schemaVersion") != 1
+            or isinstance(prior, bool)
+            or not isinstance(prior, int)
+            or prior < 1
+        ):
+            raise MetadataConflict("Helm runtime upgrade marker is invalid")
+        return prior
+
+    async def _rollback_already_committed(
+        self,
+        metadata: OpaqueProviderMetadata,
+        environment: dict[str, str],
+        *,
+        current: dict[str, Any],
+        operation_digest: str,
+    ) -> bool:
+        prior_revisions: set[int] = set()
+        for item in await self._release_history(metadata, environment):
+            revision = item["revision"]
+            historical = await self._revision_values(metadata, environment, revision)
+            prior = self._runtime_upgrade_prior(historical.get("runtimeUpgrade"), operation_digest)
+            if prior is not None:
+                prior_revisions.add(prior)
+        if not prior_revisions:
+            return False
+        if len(prior_revisions) != 1:
+            raise MetadataConflict("Helm runtime rollback authority is ambiguous")
+        prior_values = await self._revision_values(
+            metadata, environment, next(iter(prior_revisions))
+        )
+        return current == prior_values
+
+    async def _transition_context(
+        self,
+        metadata: OpaqueProviderMetadata,
+        *,
+        operation_id: str,
+    ) -> tuple[dict[str, Any], int]:
+        environment = {"HELM_DRIVER": "configmap"}
+        await self._require_version(environment)
+        current = await self._current_values(metadata, environment)
+        marker = current.get("runtimeUpgrade")
+        digest = self._operation_digest(operation_id)
+        prior = self._runtime_upgrade_prior(marker, digest)
+        if prior is not None:
+            return current, prior
+        return current, await self._deployed_revision(metadata, environment)
+
+    async def transition_release(
+        self,
+        metadata: OpaqueProviderMetadata,
+        values: dict[str, Any],
+        *,
+        operation_id: str,
+    ) -> None:
+        if "runtimeUpgrade" in values:
+            raise MetadataConflict("runtime upgrade marker is provisioner-owned")
+        current, prior_revision = await self._transition_context(
+            metadata, operation_id=operation_id
+        )
+        desired = json.loads(json.dumps(values))
+        desired["runtimeUpgrade"] = {
+            "schemaVersion": 1,
+            "operationDigest": self._operation_digest(operation_id),
+            "priorRevision": prior_revision,
+        }
+        if current == desired:
+            return
+        await self.ensure_release(metadata, desired)
+
+    async def rollback_release(
+        self,
+        metadata: OpaqueProviderMetadata,
+        *,
+        operation_id: str,
+        require_marker: bool = False,
+    ) -> None:
+        environment = {"HELM_DRIVER": "configmap"}
+        await self._require_version(environment)
+        current = await self._current_values(metadata, environment)
+        marker = current.get("runtimeUpgrade")
+        digest = self._operation_digest(operation_id)
+        prior = self._runtime_upgrade_prior(marker, digest)
+        if prior is None:
+            if require_marker and await self._rollback_already_committed(
+                metadata,
+                environment,
+                current=current,
+                operation_digest=digest,
+            ):
+                return
+            if require_marker:
+                raise MetadataConflict("Helm runtime rollback authority is absent")
+            return
+        result = await self._runner(
+            (
+                self._binary,
+                "rollback",
+                metadata.resource_name,
+                str(prior),
+                "--namespace",
+                metadata.resource_name,
+                "--wait",
+                "--cleanup-on-fail",
+                "--timeout",
+                "5m",
+            ),
+            environment,
+        )
+        if result.returncode != 0:
+            raise MetadataConflict("Helm runtime rollback failed")
 
 
 Probe = Callable[[str, str, dict[str, str]], Awaitable[int]]

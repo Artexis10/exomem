@@ -57,7 +57,41 @@ class ExomemFastMCP(FastMCP):
     so expose the method on the same OAuth-protected route.
     """
 
+    def __init__(
+        self,
+        *args,
+        parse_mcp_authorization: bool = True,
+        **kwargs,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self._parse_mcp_authorization = parse_mcp_authorization
+
     def http_app(self, *args, stateless_http=None, **kwargs):
+        import fastmcp
+
+        from .governance.authorization_transport import AuthorizationCarrierMiddleware
+
+        middleware = list(kwargs.pop("middleware", None) or [])
+        transport = kwargs.get("transport", "http")
+        configured_path = kwargs.get("path")
+        if configured_path is None and args:
+            configured_path = args[0]
+        if transport == "sse":
+            carrier_path = fastmcp.settings.message_path
+        else:
+            carrier_path = configured_path or fastmcp.settings.streamable_http_path
+        middleware.insert(
+            0,
+            ASGIMiddleware(
+                AuthorizationCarrierMiddleware,
+                mcp_path=(
+                    str(carrier_path).rstrip("/") or "/"
+                    if self._parse_mcp_authorization
+                    else None
+                ),
+            )
+        )
+        kwargs["middleware"] = middleware
         app = super().http_app(*args, stateless_http=stateless_http, **kwargs)
         if stateless_http:
             endpoint_found = False
@@ -74,6 +108,50 @@ class ExomemFastMCP(FastMCP):
             if not endpoint_found:
                 raise RuntimeError("FastMCP stateless endpoint route was not found")
         return app
+
+    async def run_stdio_async(
+        self,
+        show_banner: bool = True,
+        log_level: str | None = None,
+        stateless: bool = False,
+    ) -> None:
+        """Run stdio with bearer removal before the MCP SDK logs requests."""
+
+        from fastmcp.server.context import reset_transport, set_transport
+        from fastmcp.utilities.cli import log_server_banner
+        from fastmcp.utilities.logging import temporary_log_level
+        from mcp.server.lowlevel.server import NotificationOptions
+
+        from .governance.authorization_transport import sanitized_stdio_server
+
+        if show_banner:
+            log_server_banner(server=self)
+        token = set_transport("stdio")
+        try:
+            with temporary_log_level(log_level):
+                async with self._lifespan_manager():
+                    async with sanitized_stdio_server() as (
+                        read_stream,
+                        write_stream,
+                    ):
+                        mode = " (stateless)" if stateless else ""
+                        log.info(
+                            "Starting MCP server %r with transport 'stdio'%s",
+                            self.name,
+                            mode,
+                        )
+                        await self._mcp_server.run(
+                            read_stream,
+                            write_stream,
+                            self._mcp_server.create_initialization_options(
+                                notification_options=NotificationOptions(
+                                    tools_changed=True
+                                ),
+                            ),
+                            stateless=stateless,
+                        )
+        finally:
+            reset_transport(token)
 
 
 class CallTraceMiddleware(Middleware):
@@ -381,8 +459,11 @@ def _find_call_summary(message) -> str:
 def build_server(*, require_auth: bool) -> FastMCP:
     """Construct and return the FastMCP app, ready to run."""
     runtime = initialize_runtime(load_dotenv_func=load_dotenv)
+    from .governance.authorization_request import validate_credential_registry
+    from .governance.authorization_transport import AuthorizationSessionMiddleware
     from .writer_lease import start_server_lifecycle
 
+    validate_credential_registry()
     start_server_lifecycle()
     hosted = runtime.hosted_config is not None
     if hosted:
@@ -395,7 +476,12 @@ def build_server(*, require_auth: bool) -> FastMCP:
             runtime.hosted_config,
             authenticator=security_authority,
         )
-        mcp = ExomemFastMCP("exomem", auth=auth)
+        mcp = ExomemFastMCP(
+            "exomem",
+            auth=auth,
+            parse_mcp_authorization=False,
+        )
+        mcp.add_middleware(AuthorizationSessionMiddleware(runtime.vault_root))
         mcp.add_middleware(CallTraceMiddleware(hosted=True))
         expose_tier2 = not os.environ.get("EXOMEM_DISABLE_TIER2")
         register_hosted_routes(
@@ -410,6 +496,7 @@ def build_server(*, require_auth: bool) -> FastMCP:
     else:
         auth = build_oauth(require_auth=require_auth, base_url=runtime.base_url)
         mcp = ExomemFastMCP("exomem", auth=auth, icons=server_icons())
+        mcp.add_middleware(AuthorizationSessionMiddleware(runtime.vault_root))
         mcp.add_middleware(CallTraceMiddleware())
 
         register_asset_routes(mcp)

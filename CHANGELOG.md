@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.58.0](https://github.com/Artexis10/exomem/compare/v0.57.2...v0.58.0) (2026-08-22)
+
+
+### Features
+
+* **governance:** add schema v4 session authority ([#734](https://github.com/Artexis10/exomem/issues/734)) ([b9eaefe](https://github.com/Artexis10/exomem/commit/b9eaefe61caa74312994bdc28b008dee7eb985f3))
+* **governance:** backfill legacy companions ([#724](https://github.com/Artexis10/exomem/issues/724)) ([3a3aea3](https://github.com/Artexis10/exomem/commit/3a3aea3ad2c21f264dde67dd6df5cee45afe8a37))
+* **governance:** bind authorization credential verifiers ([#728](https://github.com/Artexis10/exomem/issues/728)) ([766b169](https://github.com/Artexis10/exomem/commit/766b169a14f55c350edf0bede6bfcd2ebdd8f0c6))
+* **governance:** bind session authority at transport ([#737](https://github.com/Artexis10/exomem/issues/737)) ([273dadc](https://github.com/Artexis10/exomem/commit/273dadc981229084f235382c0287fd0bca9e5414))
+* **governance:** load external authorization custody ([#732](https://github.com/Artexis10/exomem/issues/732)) ([628a30f](https://github.com/Artexis10/exomem/commit/628a30f437b6b06b6e2242cd8a9076e5535bf399))
+* **governance:** publish active policy and catalog tuples ([#740](https://github.com/Artexis10/exomem/issues/740)) ([e61c2fe](https://github.com/Artexis10/exomem/commit/e61c2fef0a74dd2273f5c60b4e31efd642b0346f))
+* **memory:** surface due-state counts on writes, recall and bootstrap ([#725](https://github.com/Artexis10/exomem/issues/725)) ([427253b](https://github.com/Artexis10/exomem/commit/427253b6b30406c3f663f8640bf176e27358c083))
+
+
+### Bug Fixes
+
+* **governance:** bind non-markdown companions ([#723](https://github.com/Artexis10/exomem/issues/723)) ([31b1b6e](https://github.com/Artexis10/exomem/commit/31b1b6e34f92f0ccafe32bfcb476f44144f163ae))
+* **governance:** bind prospective policy compilation ([#729](https://github.com/Artexis10/exomem/issues/729)) ([8ecdf88](https://github.com/Artexis10/exomem/commit/8ecdf88c0175d48c2e2c64b071661be69abb2ded))
+* **governance:** enforce reserved state paths atomically ([#739](https://github.com/Artexis10/exomem/issues/739)) ([0af030e](https://github.com/Artexis10/exomem/commit/0af030e0b43dac1c2f231ef50ae72d220ed7fc7a))
+* **governance:** gate structured direct reads ([#731](https://github.com/Artexis10/exomem/issues/731)) ([074160a](https://github.com/Artexis10/exomem/commit/074160a9ec88f986d12cb22b2a3a2f097fc46240))
+* **governance:** preflight structured reads ([#727](https://github.com/Artexis10/exomem/issues/727)) ([4161628](https://github.com/Artexis10/exomem/commit/4161628e0edf24a1e85ac4d13e3436156983d976))
+* **governance:** project direct reads at release level ([#730](https://github.com/Artexis10/exomem/issues/730)) ([9e546df](https://github.com/Artexis10/exomem/commit/9e546df4fe3092d95ef1d7e2a6a8c6eae726bf44))
+* **governance:** reserve internal state paths ([6587ad8](https://github.com/Artexis10/exomem/commit/6587ad8c7b9f5282d196d0273f393ed5dc7c7161))
+* **hosted:** harden runtime upgrade safety ([f7170ff](https://github.com/Artexis10/exomem/commit/f7170ff6fe7e8f6aca62e604eac221f4e5a648eb))
+* **hosted:** reconcile terminal runtime history ([#736](https://github.com/Artexis10/exomem/issues/736)) ([c4cfd28](https://github.com/Artexis10/exomem/commit/c4cfd284c7f326d4b3153e26879cbe46a1e08cc5))
+* **hosted:** release runtime 0.57.2 safely ([3195758](https://github.com/Artexis10/exomem/commit/3195758897c000101ca29ef4c0beb1891994e0b4))
+* **ops:** stop the deploy floating every transitive to latest ([#720](https://github.com/Artexis10/exomem/issues/720)) ([8d1457d](https://github.com/Artexis10/exomem/commit/8d1457d1d3bc5a4fe2a46f3d8d9c78bb29b779c0))
+
 ## [0.57.2](https://github.com/Artexis10/exomem/compare/v0.57.1...v0.57.2) (2026-08-21)
 
 

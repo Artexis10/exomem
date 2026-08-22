@@ -64,6 +64,14 @@ CHATGPT_PLUGIN_CONTRACT = REPO_ROOT / "deploy" / "chatgpt" / "personal-plugin-co
 V1_RELEASE_IDENTITIES = REPO_ROOT / "tests" / "fixtures" / "hosted" / "v1-release-identities.json"
 
 
+def _without_mcp_transport_credential(schema: dict[str, object]) -> dict[str, object]:
+    normalized = json.loads(json.dumps(schema))
+    properties = normalized.get("properties")
+    assert isinstance(properties, dict)
+    properties.pop("authorization_session_credential", None)
+    return normalized
+
+
 def test_epistemic_profile_is_registered_with_exact_ordered_membership() -> None:
     assert V3_PROFILE in commands.PRODUCT_SURFACE_PROFILES
     assert commands.HOSTED_ALPHA_AGENT_V3_PROFILE == V3_PROFILE
@@ -131,14 +139,16 @@ def test_epistemic_profile_yields_a_deterministic_agent_contract() -> None:
 
 
 def test_epistemic_commands_are_registry_identical_between_profiles_and_local_surface() -> None:
-    """No per-surface schema fork: the gateway forwards registry bytes."""
+    """Hosted forwards registry bytes except the MCP-only credential carrier."""
 
     fixture = json.loads(MCP_SCHEMA_FIXTURE.read_text(encoding="utf-8"))
     contract = gateway.build_agent_gateway_contract(profile=V3_PROFILE)
     entries = {entry["name"]: entry for entry in contract["commands"]}
 
     for name in EPISTEMIC_ADDITIONS:
-        assert entries[name]["mcp_tool"]["inputSchema"] == fixture[name]["inputSchema"]
+        assert entries[name]["mcp_tool"]["inputSchema"] == _without_mcp_transport_credential(
+            fixture[name]["inputSchema"]
+        )
         assert entries[name]["mcp_tool"]["description"] == fixture[name]["description"]
 
 

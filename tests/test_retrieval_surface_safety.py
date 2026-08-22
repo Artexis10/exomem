@@ -11,6 +11,7 @@ from pydantic import TypeAdapter
 from exomem import commands
 from exomem import find as find_module
 from exomem import server as server_module
+from exomem.governance import principal as principal_module
 
 
 def _build_server(monkeypatch: pytest.MonkeyPatch, vault: Path):
@@ -91,18 +92,21 @@ def test_product_mcp_retrieval_schemas_are_safe(
     read_inputs = tools["read_memory"]["inputSchema"]["properties"]
     assert {"path", "unit_ref"} <= set(read_inputs)
 
-    result = asyncio.run(
-        _build_server(monkeypatch, vault).call_tool(
-            "ask_memory",
-            {
-                "query": "metabolism",
-                "mode": "keyword",
-                "scope": "kb-only",
-                "explain": True,
-            },
-            run_middleware=False,
-        )
-    ).structured_content["result"]
+    with principal_module.request_scope(
+        principal_module.owner_principal(surface="mcp")
+    ):
+        result = asyncio.run(
+            _build_server(monkeypatch, vault).call_tool(
+                "ask_memory",
+                {
+                    "query": "metabolism",
+                    "mode": "keyword",
+                    "scope": "kb-only",
+                    "explain": True,
+                },
+                run_middleware=False,
+            )
+        ).structured_content["result"]
     assert result["retrieval_profile"]["effective_mode"] == "keyword"
     assert result["hits"][0]["ranking_explanation"]["final_rank"] == 1
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import json
 import logging
 import threading
 import time
@@ -402,10 +403,43 @@ def bind_vault(
             len(visible),
         )
         visible.insert(insert_at, response_detail)
+    if command is not None and (
+        surface_descriptor is None or surface_descriptor.surface == "mcp"
+    ):
+        authorization_credential = inspect.Parameter(
+            "authorization_session_credential",
+            kind=inspect.Parameter.KEYWORD_ONLY,
+            default=None,
+            annotation=typing.Annotated[
+                str | None,
+                Field(
+                    description=(
+                        "Optional authorization-session bearer. Consumed by the raw "
+                        "MCP boundary before tool validation."
+                    )
+                ),
+            ],
+        )
+        insert_at = next(
+            (
+                index
+                for index, parameter in enumerate(visible)
+                if parameter.kind is inspect.Parameter.VAR_KEYWORD
+            ),
+            len(visible),
+        )
+        visible.insert(insert_at, authorization_credential)
     new_sig = sig.replace(parameters=visible)
 
     def wrapper(**kwargs):
+        from .governance import authorization_request
         from .governance import principal as principal_module
+
+        if kwargs.pop("authorization_session_credential", None) is not None:
+            raise authorization_request.AuthorizationContextUnavailable
+        principal = principal_module.current_principal()
+        if principal is None:
+            raise authorization_request.AuthorizationContextUnavailable
 
         context = (
             capabilities.active_surface(surface_descriptor)
@@ -416,9 +450,7 @@ def bind_vault(
         # existing `mcp_retry_scope()` identity derivation (design D5). Bound
         # for the whole invocation so every read leaf under it decides against
         # the same principal; stdio resolves to `owner`.
-        with context, principal_module.request_scope(
-            principal_module.resolve_mcp_principal()
-        ):
+        with context, principal_module.request_scope(principal):
             if command is None:
                 return leaf(*injected, **kwargs)
             from .commands import invocation_is_read_only
@@ -462,6 +494,28 @@ def bind_vault(
 
                 if injected and is_vault_root(injected[0]):
                     result = postfilter(command.name, result, injected[0])
+                from .governance import scrubber as governance_scrubber
+
+                if governance_scrubber._issuance_projection_context(result) is not None:
+                    from fastmcp.tools import ToolResult
+                    from mcp.types import TextContent
+
+                    redacted_text, blocked = governance_scrubber.scrub_value(dict(result))
+                    if not blocked:
+                        raise authorization_request.AuthorizationContextUnavailable
+                    result = ToolResult(
+                        content=[
+                            TextContent(
+                                type="text",
+                                text=json.dumps(
+                                    redacted_text,
+                                    ensure_ascii=False,
+                                    separators=(",", ":"),
+                                ),
+                            )
+                        ],
+                        structured_content=dict(result),
+                    )
                 _log_tool_success(
                     tool=tool_name,
                     duration_ms=round((time.perf_counter() - t0) * 1000, 2),
