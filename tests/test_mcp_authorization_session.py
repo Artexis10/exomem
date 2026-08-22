@@ -85,6 +85,32 @@ def test_raw_carrier_middleware_precedes_access_logging(
     )
 
 
+def test_sanitized_http_body_replays_once_then_preserves_disconnect() -> None:
+    calls = 0
+
+    async def original_receive() -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        return {"type": "http.disconnect"}
+
+    async def exercise() -> tuple[dict[str, object], dict[str, object]]:
+        receive = authorization_transport._replay_body(
+            b'{"jsonrpc":"2.0","id":1,"method":"initialize"}',
+            original_receive,
+        )
+        return await receive(), await receive()
+
+    replayed, disconnected = asyncio.run(exercise())
+
+    assert replayed == {
+        "type": "http.request",
+        "body": b'{"jsonrpc":"2.0","id":1,"method":"initialize"}',
+        "more_body": False,
+    }
+    assert disconnected == {"type": "http.disconnect"}
+    assert calls == 1
+
+
 def test_invalid_mcp_credential_wins_before_fastmcp_argument_validation(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:

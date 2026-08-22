@@ -452,13 +452,13 @@ async def _read_asgi_body(receive: Receive) -> bytes:
     return bytes(body)
 
 
-def _replay_body(body: bytes) -> Receive:
+def _replay_body(body: bytes, original_receive: Receive) -> Receive:
     sent = False
 
     async def receive() -> ASGIMessage:
         nonlocal sent
         if sent:
-            return {"type": "http.request", "body": b"", "more_body": False}
+            return await original_receive()
         sent = True
         return {"type": "http.request", "body": body, "more_body": False}
 
@@ -529,7 +529,7 @@ class AuthorizationCarrierMiddleware:
                 )
                 return
             carrier = sanitized.carrier
-            request_receive = _replay_body(sanitized.body)
+            request_receive = _replay_body(sanitized.body, receive)
             headers = [
                 (name, value)
                 for name, value in headers
