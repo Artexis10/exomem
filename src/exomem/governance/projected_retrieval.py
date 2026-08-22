@@ -333,19 +333,52 @@ class ProjectedLexicalIndex:
     ) -> None:
         self.namespace_key = namespace_key
         self._items = _catalog_items(namespace_key, items)
+        documents: dict[str, _SelectedDocument] = {}
+        postings: dict[str, set[str]] = {}
+        for item in self._items.values():
+            for variant in item.variants:
+                text = _variant_text(variant)
+                tokens = tuple(bm25.tokenize(text))
+                document = _SelectedDocument(variant, text, tokens)
+                documents[variant.projection_variant_id] = document
+                for token in frozenset(tokens):
+                    postings.setdefault(token, set()).add(
+                        variant.projection_variant_id
+                    )
+        self._documents = MappingProxyType(documents)
+        self._postings = MappingProxyType(
+            {token: frozenset(variant_ids) for token, variant_ids in postings.items()}
+        )
 
     def _selected_documents(
         self,
         authorization: AuthorizationProjectionMap,
     ) -> tuple[_SelectedDocument, ...]:
         return tuple(
-            _SelectedDocument(variant, text, tuple(bm25.tokenize(text)))
+            self._documents[variant.projection_variant_id]
             for variant in _selected_variants(
                 self.namespace_key,
                 self._items,
                 authorization,
             )
-            if (text := _variant_text(variant))
+        )
+
+    def _candidate_documents(
+        self,
+        documents: tuple[_SelectedDocument, ...],
+        query_tokens: tuple[str, ...],
+    ) -> tuple[_SelectedDocument, ...]:
+        selected_ids = frozenset(
+            document.variant.projection_variant_id for document in documents
+        )
+        posting_sets = [self._postings.get(token, frozenset()) for token in query_tokens]
+        if not posting_sets or any(not posting for posting in posting_sets):
+            return ()
+        candidate_ids = selected_ids.intersection(*posting_sets)
+        return tuple(
+            document
+            for document in documents
+            if document.variant.projection_variant_id in candidate_ids
         )
 
     @staticmethod
@@ -367,18 +400,24 @@ class ProjectedLexicalIndex:
         if not query_tokens or not documents:
             return ()
 
-        frequencies = Counter(
-            token for document in documents for token in frozenset(document.tokens)
+        candidates = self._candidate_documents(documents, query_tokens)
+        if not candidates:
+            return ()
+
+        selected_ids = frozenset(
+            document.variant.projection_variant_id for document in documents
         )
+        frequencies = {
+            token: len(self._postings.get(token, frozenset()) & selected_ids)
+            for token in frozenset(query_tokens)
+        }
         average_length = max(
             sum(len(document.tokens) for document in documents) / len(documents),
             1.0,
         )
         scores: list[tuple[_SelectedDocument, float]] = []
-        for document in documents:
+        for document in candidates:
             term_counts = Counter(document.tokens)
-            if any(term_counts[token] == 0 for token in query_tokens):
-                continue
             score = 0.0
             for token in query_tokens:
                 frequency = term_counts[token]
@@ -419,11 +458,7 @@ class ProjectedLexicalIndex:
         documents = self._selected_documents(authorization)
         if not query_tokens:
             return ()
-        matches = [
-            document
-            for document in documents
-            if all(token in frozenset(document.tokens) for token in query_tokens)
-        ]
+        matches = list(self._candidate_documents(documents, query_tokens))
         matches.sort(
             key=lambda document: (
                 _sort_key(document.variant.item_identity),
