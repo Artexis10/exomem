@@ -63,6 +63,38 @@ def test_any_unchecked_task_keeps_an_active_change_in_progress(tmp_path: Path) -
     assert payload["unchecked_active_changes"] == ["in-progress"]
 
 
+def test_fenced_unchecked_example_does_not_hide_a_complete_task_list(tmp_path: Path) -> None:
+    _write_tasks(
+        tmp_path,
+        "shipped-with-example",
+        "- [x] implementation\n\n```markdown\n- [ ] example only\n```\n",
+    )
+
+    result = _run(tmp_path, json_output=True)
+
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    assert payload["complete_active_changes"] == ["shipped-with-example"]
+    assert payload["unchecked_active_changes"] == []
+
+
+def test_fenced_checked_example_is_not_a_task_list(tmp_path: Path) -> None:
+    _write_tasks(
+        tmp_path,
+        "example-only",
+        "# Tasks\n\n~~~markdown\n- [x] example only\n~~~\n",
+    )
+
+    result = _run(tmp_path, json_output=True)
+
+    assert result.returncode == 0
+    payload = json.loads(result.stdout)
+    assert payload["complete_active_changes"] == []
+    assert payload["unclassified_active_changes"] == [
+        {"change": "example-only", "reason": "no_task_checkboxes"}
+    ]
+
+
 def test_missing_empty_malformed_and_archived_tasks_do_not_claim_completion(
     tmp_path: Path,
 ) -> None:

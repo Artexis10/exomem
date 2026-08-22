@@ -12,6 +12,28 @@ from typing import Any
 
 _TASK = re.compile(r"^\s*-\s+\[([ xX])\]\s+\S")
 _CHECKBOX_LIKE = re.compile(r"^\s*-\s+\[[^]]*\]")
+_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+
+
+def _task_content(lines: Sequence[str]) -> list[str]:
+    """Return Markdown lines outside fenced code blocks."""
+    content: list[str] = []
+    fence: tuple[str, int] | None = None
+    for line in lines:
+        marker = _FENCE.match(line)
+        if fence is not None:
+            if marker:
+                run, suffix = marker.groups()
+                if run[0] == fence[0] and len(run) >= fence[1] and not suffix.strip():
+                    fence = None
+            continue
+        if marker:
+            run, suffix = marker.groups()
+            if run[0] == "~" or "`" not in suffix:
+                fence = (run[0], len(run))
+                continue
+        content.append(line)
+    return content
 
 
 def audit(root: Path) -> dict[str, Any]:
@@ -32,7 +54,7 @@ def audit(root: Path) -> dict[str, Any]:
             unclassified.append({"change": change.name, "reason": "missing_tasks"})
             continue
 
-        lines = tasks.read_text(encoding="utf-8").splitlines()
+        lines = _task_content(tasks.read_text(encoding="utf-8").splitlines())
         parsed = [match for line in lines if (match := _TASK.match(line))]
         malformed = any(_CHECKBOX_LIKE.match(line) and not _TASK.match(line) for line in lines)
         if malformed:
