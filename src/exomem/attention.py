@@ -1,7 +1,8 @@
 """The `attention` review surface — one ranked "what needs your review today" list.
 
-Composes the six default measurement-only queues that `audit` already produces —
-`bridge_review`, `prediction_window`, `corpus_contradictions`, `stale_review`,
+Composes the seven default measurement-only queues that `audit` already produces —
+`bridge_review`, `prediction_window`, `supersession_integrity`,
+`corpus_contradictions`, `stale_review`,
 `unprocessed_source`, and `relation_debt` — into a single ranked list while retaining
 opt-in registered semantic and epistemic-lifecycle categories. The composition is pure
 measurement: each queue already emits its findings
@@ -36,6 +37,14 @@ from .audit import AuditFinding
 # round. `bridge_review` leads because its commitment is owed to another
 # audience, where a check date is owed to yourself.
 #
+# `supersession_integrity` sits third for a reason of the same kind rather than
+# by seniority: it is the only DEFECT queue in the union. The two above it report
+# an authored obligation that has come due, which is work; a dangling supersession
+# pointer or a two-headed chain reports state that is already WRONG, and a reader
+# who fixes one is repairing the record rather than deciding something. It ranks
+# below the dated queues because a broken pointer does not expire while a check
+# date does, and above the inferential ones because nothing about it is inferred.
+#
 # Below that line the order is HISTORICAL, not principled: `unprocessed_source`
 # and `relation_debt` are deterministic scans over authored state and are in that
 # sense less inferential than `corpus_contradictions` above them. Do not read a
@@ -43,6 +52,7 @@ from .audit import AuditFinding
 DEFAULT_ATTENTION_CATEGORIES: tuple[str, ...] = (
     "bridge_review",
     "prediction_window",
+    "supersession_integrity",
     "corpus_contradictions",
     "stale_review",
     "unprocessed_source",
@@ -91,6 +101,12 @@ class AttentionItem:
     fingerprint: str | None = None
     state: str | None = None
     state_detail: dict | None = None
+    # Component fingerprints of signals that share this item's identity but are
+    # NOT folded into `categories`/`fingerprint` above, because they come from
+    # registered-but-opt-in queues the default surface does not show. Populated
+    # only by `item_by_ref`, never projected onto the wire (`as_dict`), and used
+    # solely so a triage decision quiets everything the ref actually names.
+    triage_components: list[str] | None = None
 
     def as_dict(self) -> dict:
         out = {
@@ -410,6 +426,55 @@ def activation(
     )
 
 
+#: What a ref may be resolved against when the default union does not hold it.
+#:
+#: The default union plus the registered-but-opt-in epistemic queues — exactly the
+#: categories a due-state count can hand a reference out for, and deliberately NOT
+#: `audit.ALL_CATEGORIES`, which is full of expensive structural checks that were
+#: never review items. Being opt-in is a statement about what belongs on the daily
+#: surface; it was never meant to be a statement about what a user is allowed to
+#: put down.
+_TRIAGEABLE_CATEGORIES: tuple[str, ...] = (
+    *DEFAULT_ATTENTION_CATEGORIES,
+    *audit_module.EPISTEMIC_REVIEW_CATEGORIES,
+)
+
+
+def _item_by_ref_fallback(
+    vault_root: Path, wanted: str, *, today=None
+) -> AttentionItem | None:
+    """Resolve one ref over the default union PLUS the opt-in epistemic queues.
+
+    Separate and named so it is a mechanism a test can remove.
+
+    Two distinct failures live behind one ref, and both are this queue's problem:
+
+    1. The default union holds NO item at that identity — a `question_aging` item,
+       whose partition puts it on an id nothing else occupies. `triage_memory`
+       raised `REVIEW_ITEM_NOT_FOUND`.
+    2. The default union holds a DIFFERENT item at that identity — an
+       `unfinished_experiments` page with no wikilinks also earns `relation_debt`,
+       which carries no partition, so both land on the bare `target_ref` id. Triage
+       "succeeded" and dismissed the relation-debt signal instead, leaving the
+       count exactly where it was and quietly putting down something else.
+
+    The second is why this is consulted even when the default union hits: the
+    caller keeps the default item (identity untouched, see `item_by_ref`) and only
+    borrows the component fingerprints it could not see.
+    """
+    report = attention(
+        vault_root,
+        categories=list(_TRIAGEABLE_CATEGORIES),
+        limit=0,
+        state="all",
+        today=today,
+    )
+    for item in report.items:
+        if item.item_id == wanted:
+            return item
+    return None
+
+
 def item_by_ref(
     vault_root: Path,
     reference: str,
@@ -417,14 +482,49 @@ def item_by_ref(
     expected_fingerprint: str | None = None,
     today=None,
 ) -> AttentionItem:
-    """Resolve one current review item by its stable review reference."""
+    """Resolve one current review item by its stable review reference.
+
+    The default union is searched first, then activation, and only then the opt-in
+    epistemic queues. That order is the contract, not an optimisation: a counter
+    that hands out a reference an agent is told to act on must hand out one the
+    triage surface can resolve, and a `question_aging` or `unfinished_experiments`
+    item was reachable by no path at all — read on every carrier, impossible to
+    dismiss. Widening the search only after a miss buys that without moving a
+    single existing item's identity.
+    """
     wanted = review_state_module.parse_review_ref(reference)
+    found: AttentionItem | None = None
     for resolver in (attention, activation):
         report = resolver(vault_root, limit=0, state="all", today=today)
         for item in report.items:
             if item.item_id == wanted:
-                return item
-    raise ValueError(f"REVIEW_ITEM_NOT_FOUND: no current review item for {reference}")
+                found = item
+                break
+        if found is not None:
+            break
+
+    wider = _item_by_ref_fallback(vault_root, wanted, today=today)
+    if found is None:
+        if wider is None:
+            raise ValueError(
+                f"REVIEW_ITEM_NOT_FOUND: no current review item for {reference}"
+            )
+        return wider
+
+    # The default union answered, so its item is the answer — same `item_id`,
+    # same `fingerprint`, same `categories` as before this fallback existed. The
+    # wider view only contributes the component identities the default surface
+    # cannot see, so a decision on this ref also quiets the opt-in signal that
+    # shares it. One extra pass on an explicit, infrequent triage call.
+    if wider is not None and wider is not found:
+        extra = [
+            value
+            for value in review_state_module.component_fingerprints(vault_root, wider)
+            if value != found.fingerprint
+        ]
+        if extra:
+            found.triage_components = extra
+    return found
 
 
 def _apply_review_state(

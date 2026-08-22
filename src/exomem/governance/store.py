@@ -106,6 +106,58 @@ def open_connection(
             )
 
 
+def open_authorization_session_connection(
+    vault_root: Path,
+    *,
+    check_same_thread: bool = True,
+) -> sqlite3.Connection:
+    """Open an existing exact-v4 store for session lifecycle DML only.
+
+    This opener never creates or migrates a sidecar. Ordinary v3 openers remain
+    unchanged; only the explicit offline coordinator may perform the v3-to-v4
+    transition before this boundary becomes available.
+    """
+    with reserved_paths._subsystem_authority_scope("governance.store"):
+        with reserved_paths._identity_coordination_scope(
+            vault_root,
+            descriptor_ids=("governance-store",),
+        ):
+            path = sidecar_path(vault_root)
+            with reserved_paths._sqlite_owner_target_scope(
+                vault_root,
+                path,
+                "governance-store",
+                create=False,
+            ) as retained_path:
+                connection = sqlite3.connect(
+                    f"{retained_path.as_uri()}?mode=rw",
+                    uri=True,
+                    check_same_thread=check_same_thread,
+                )
+                try:
+                    from . import schema_v4
+
+                    version = int(
+                        connection.execute("PRAGMA user_version").fetchone()[0]
+                    )
+                    if version != schema_v4.SCHEMA_USER_VERSION:
+                        raise UnsupportedGovernanceSchema(
+                            "authorization sessions require an existing exact-v4 store"
+                        )
+                    connection.execute("PRAGMA synchronous=FULL")
+                    connection.execute("PRAGMA busy_timeout=5000")
+                    reserved_paths._publish_sqlite_owner_family(
+                        vault_root,
+                        path,
+                        "governance-store",
+                        connection,
+                    )
+                    return connection
+                except BaseException:
+                    connection.close()
+                    raise
+
+
 def _open_connection_owned(
     vault_root: Path, *, check_same_thread: bool
 ) -> sqlite3.Connection:

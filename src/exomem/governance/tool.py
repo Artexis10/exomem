@@ -15,6 +15,7 @@ import sqlite3
 import time
 import uuid
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -34,7 +35,15 @@ from .. import (
     review_state,
 )
 from ..kbdir import kb_dirname
-from . import decisions, membership, receipts, store
+from . import (
+    authorization_custody,
+    authorization_session_lifecycle,
+    companion_backfill,
+    decisions,
+    membership,
+    receipts,
+    store,
+)
 from . import policy as policy_module
 from . import tokens as tokens_module
 from .operations import (
@@ -62,6 +71,10 @@ from .transaction import fsync_directory as _fsync_directory
 
 PENDING_MARKER = ".policy-mutation.pending.json"
 DEFAULT_PROPOSAL_TTL_SECONDS = 900
+_SESSION_ACTIONS = frozenset({"open", "status", "rotate", "close"})
+_SESSION_ARGUMENTS = frozenset(
+    {"authorization_session", "now", "principal", "session_action", "ttl_seconds"}
+)
 _GRAPH_REBUILD_SIDECAR_RE = re.compile(
     rf"^{re.escape(graph_sync._TEMP_PREFIX)}[0-9a-f]{{64}}-[0-9a-f]{{24}}\.sqlite"
     r"(?:-(?:wal|shm|journal))?$"
@@ -92,6 +105,18 @@ def _require_owner(value: RequestPrincipal | None) -> RequestPrincipal:
     if not who.resolved or who.audience_id != OWNER_AUDIENCE:
         raise GovernanceError("GOVERNANCE_OWNER_REQUIRED", "operation is owner-only")
     return who
+
+
+def _prospective_policy(
+    vault_root: Path, documents: Mapping[str, str | None]
+) -> policy_module.Policy:
+    prospective = policy_module.compile_prospective(vault_root, dict(documents))
+    if prospective is None:
+        raise GovernanceError(
+            "GOVERNANCE_AUTHORING_UNSTABLE",
+            "the policy workspace changed or could not be acquired safely",
+        )
+    return prospective.policy
 
 
 def _require_authorization_session(
@@ -493,7 +518,7 @@ def _proposal(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
     current_policy = policy_module.load(vault_root)
     if current_policy.blocked:
         raise GovernanceError("GOVERNANCE_BLOCKED", "current policy cannot be evaluated")
-    prospective = policy_module.compile_prospective(vault_root, documents)
+    prospective = _prospective_policy(vault_root, documents)
     if prospective.blocked:
         raise GovernanceError(
             "INVALID_GOVERNANCE_POLICY",
@@ -844,7 +869,7 @@ def _standing_grant(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
         sort_keys=False,
         allow_unicode=True,
     )
-    prospective = policy_module.compile_prospective(vault_root, {rel: document})
+    prospective = _prospective_policy(vault_root, {rel: document})
     if prospective.blocked:
         raise GovernanceError(
             "INVALID_STANDING_GRANT", _canonical_json(list(prospective.findings))
@@ -1534,8 +1559,8 @@ def _effective_transition_direction(
     if current.blocked:
         return "widening"
     try:
-        prospective = policy_module.compile_prospective(vault_root, dict(documents))
-    except (OSError, TypeError, ValueError):
+        prospective = _prospective_policy(vault_root, documents)
+    except (GovernanceError, OSError, TypeError, ValueError):
         return "widening"
     if prospective.blocked or current.release_grants != prospective.release_grants:
         return "widening"
@@ -1959,7 +1984,7 @@ def _proposal_matches_exact_prior(
         current_policy = policy_module.load(vault_root)
         if current_policy.blocked:
             return False
-        prospective = policy_module.compile_prospective(vault_root, documents)
+        prospective = _prospective_policy(vault_root, documents)
         if prospective.blocked:
             return False
         current_manifest = _membership_manifest(
@@ -1992,7 +2017,15 @@ def _validate_proposal_values(
     if current_policy.blocked:
         raise GovernanceError("GOVERNANCE_BLOCKED", "current policy cannot be evaluated")
     documents = dict(payload["documents"])
-    prospective = policy_module.compile_prospective(vault_root, documents)
+    try:
+        prospective = _prospective_policy(vault_root, documents)
+    except GovernanceError as exc:
+        if exc.code != "GOVERNANCE_AUTHORING_UNSTABLE":
+            raise
+        raise GovernanceError(
+            "INVALID_GOVERNANCE_TARGET",
+            "the policy workspace cannot be acquired through stable regular-file identities",
+        ) from exc
     if prospective.blocked:
         raise GovernanceError(
             "INVALID_GOVERNANCE_POLICY", _canonical_json(list(prospective.findings))
@@ -2106,6 +2139,342 @@ def _commit(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
         "event_id": event_id,
         "proposal_id": proposal_id,
         "direction": direction,
+    }
+
+
+def _backfill_plan(vault_root: Path, value: object) -> companion_backfill.BackfillPlan:
+    try:
+        return companion_backfill.plan(vault_root, value)
+    except companion_backfill.CompanionBackfillError as error:
+        raise GovernanceError(error.code, error.reason) from error
+
+
+def _backfill_payload(
+    plan: companion_backfill.BackfillPlan,
+) -> dict[str, Any]:
+    return {
+        "kind": "companion-backfill/v1",
+        "input": plan.normalized_input,
+        "descriptor": plan.descriptor,
+        "identities": list(plan.identities),
+        "prior": plan.prior_value,
+        "target": plan.target_value,
+    }
+
+
+def _backfill_preview(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
+    _require_owner(kwargs.get("principal"))
+    store.require_authoring_schema(vault_root)
+    plan = _backfill_plan(vault_root, kwargs.get("companion_input"))
+    payload = _backfill_payload(plan)
+    proposal_id = uuid.uuid4().hex
+    now = float(kwargs.get("now", time.time()))
+    expires_at = now + max(
+        1, int(kwargs.get("ttl_seconds", DEFAULT_PROPOSAL_TTL_SECONDS))
+    )
+    payload_json = _canonical_json(payload)
+    conn = store.open_connection(vault_root)
+    try:
+        conn.execute(
+            "INSERT INTO governance_proposals "
+            "(proposal_id, created_at, expires_at, proposal_json, fingerprint_at_propose, "
+            "membership_manifest, status) VALUES (?, ?, ?, ?, ?, '[]', 'pending')",
+            (proposal_id, now, expires_at, payload_json, _digest(payload)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return {
+        "status": "preview",
+        "proposal_id": proposal_id,
+        "expires_at": expires_at,
+        "descriptor": plan.descriptor,
+        "identities": list(plan.identities),
+    }
+
+
+def _backfill_proposal(vault_root: Path, proposal_id: str) -> tuple[Any, ...]:
+    conn = store.open_connection(vault_root)
+    try:
+        row = conn.execute(
+            "SELECT proposal_json, fingerprint_at_propose, membership_manifest, status, "
+            "expires_at, attempt_no, reserved_event_id, created_at, spent_at "
+            "FROM governance_proposals WHERE proposal_id=?",
+            (proposal_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        raise GovernanceError("PROPOSAL_UNKNOWN", "no such companion backfill proposal")
+    return tuple(row)
+
+
+def _validated_backfill_payload(
+    row: tuple[Any, ...], supplied: object
+) -> dict[str, Any]:
+    try:
+        payload = json.loads(str(row[0]))
+    except (TypeError, ValueError) as error:
+        raise GovernanceError(
+            "INVALID_COMPANION_BACKFILL", "stored backfill proposal is malformed"
+        ) from error
+    if (
+        not isinstance(payload, dict)
+        or payload.get("kind") != "companion-backfill/v1"
+        or _canonical_json(payload) != str(row[0])
+        or _digest(payload) != str(row[1])
+        or str(row[2]) != "[]"
+        or set(payload) != {
+            "kind",
+            "input",
+            "descriptor",
+            "identities",
+            "prior",
+            "target",
+        }
+    ):
+        raise GovernanceError(
+            "INVALID_COMPANION_BACKFILL", "stored backfill proposal is invalid"
+        )
+    try:
+        supplied_json = _canonical_json(supplied)
+    except (TypeError, ValueError) as error:
+        raise GovernanceError(
+            "INVALID_COMPANION_BACKFILL", "companion_input must be exact JSON"
+        ) from error
+    if supplied_json != _canonical_json(payload["input"]):
+        raise GovernanceError(
+            "STALE_COMPANION_BACKFILL", "reviewed companion input changed"
+        )
+    return payload
+
+
+def _backfill_terminal(
+    vault_root: Path, proposal_id: str, payload: Mapping[str, Any]
+) -> dict[str, Any]:
+    conn = store.open_connection(vault_root)
+    try:
+        journal = conn.execute(
+            "SELECT event_id, phase FROM governance_operation_journals "
+            "WHERE operation='commit_backfill_companion' AND proposal_id=? "
+            "ORDER BY created_at DESC LIMIT 1",
+            (proposal_id,),
+        ).fetchone()
+        if journal is None or str(journal[1]) != "closed":
+            raise GovernanceError(
+                "GOVERNANCE_BLOCKED", "committed companion backfill is incomplete"
+            )
+        current = _actual_backfill_value(
+            vault_root, str(payload["input"]["expected_companion_path"])
+        )
+        if current != payload["target"]:
+            raise GovernanceError(
+                "STALE_COMPANION_BACKFILL", "committed companion bytes changed"
+            )
+    finally:
+        conn.close()
+    return {
+        "status": "committed",
+        "event_id": str(journal[0]),
+        "proposal_id": proposal_id,
+        "direction": "widening",
+    }
+
+
+def _actual_backfill_value(vault_root: Path, companion_path: str) -> dict[str, Any]:
+    try:
+        snapshot = reserved_paths.read_generic_bytes(vault_root, companion_path)
+    except reserved_paths.ReservedPathLeafError as error:
+        raise GovernanceError(
+            "STALE_COMPANION_BACKFILL", "companion snapshot is unavailable"
+        ) from error
+    return {
+        "path_hash": hashlib.sha256(companion_path.encode("utf-8")).hexdigest(),
+        "sha256": hashlib.sha256(snapshot.data).hexdigest(),
+        "size": len(snapshot.data),
+    }
+
+
+def _backfill_commit(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
+    who = _require_owner(kwargs.get("principal"))
+    proposal_id = str(kwargs.get("proposal_id") or "")
+    if not proposal_id:
+        raise GovernanceError("PROPOSAL_UNKNOWN", "proposal_id is required")
+    reconciliation = reconcile_governance_operations(vault_root)
+    if reconciliation["blocked"]:
+        raise GovernanceError("GOVERNANCE_BLOCKED", "pending operation needs repair")
+    store.require_authoring_schema(vault_root)
+    now = float(kwargs.get("now", time.time()))
+    row = _backfill_proposal(vault_root, proposal_id)
+    payload = _validated_backfill_payload(row, kwargs.get("companion_input"))
+    status = str(row[3])
+    if status == "spent":
+        return _backfill_terminal(vault_root, proposal_id, payload)
+    if status != "pending" or float(row[4]) < now:
+        raise GovernanceError("PROPOSAL_EXPIRED", "backfill proposal is not active")
+    if row[6] is not None:
+        raise GovernanceError("PROPOSAL_RESERVED", "backfill proposal has an open attempt")
+    plan = _backfill_plan(vault_root, kwargs.get("companion_input"))
+    if _backfill_payload(plan) != payload:
+        raise GovernanceError(
+            "STALE_COMPANION_BACKFILL", "reviewed companion snapshots changed"
+        )
+
+    prior_attempt = int(row[5])
+    attempt_no = prior_attempt + 1
+    attempt_nonce = uuid.uuid4().hex
+    reserved_proposal = authorization_row(
+        proposal_json=str(row[0]),
+        fingerprint_at_propose=str(row[1]),
+        membership_manifest=str(row[2]),
+        status="pending",
+        expires_at=float(row[4]),
+        attempt_no=attempt_no,
+        attempt_nonce=attempt_nonce,
+        reserved_event_id="SELF_EVENT",
+        created_at=float(row[7]),
+        spent_at=None,
+    )
+    final_proposal = {
+        **reserved_proposal,
+        "status": "spent",
+        "reserved_event_id": None,
+        "spent_at": now,
+    }
+    phases = {
+        "prior": [
+            _component("companion", plan.companion_path, plan.prior_value, status="prior"),
+            _component("proposal", proposal_id, reserved_proposal, status="pending"),
+        ],
+        "prepared": [
+            _component(
+                "companion", plan.companion_path, plan.target_value, status="prepared"
+            ),
+            _component("proposal", proposal_id, reserved_proposal, status="pending"),
+        ],
+        "final": [
+            _component("companion", plan.companion_path, plan.target_value, status="active"),
+            _component("proposal", proposal_id, final_proposal, status="spent"),
+        ],
+    }
+    digests = {phase: _composite(phase, values) for phase, values in phases.items()}
+    event_id = receipts.critical_event_id(
+        {
+            "operation": "governance_companion_backfill",
+            "proposal_id": proposal_id,
+            "attempt": attempt_no,
+            "attempt_nonce": attempt_nonce,
+            "prepared": digests["prepared"],
+        }
+    )
+    affected = sorted(
+        {
+            hashlib.sha256(
+                f"{item['component_kind']}:{item['component_key']}".encode()
+            ).hexdigest()
+            for item in phases["prepared"]
+        }
+    )
+    conn = store.open_connection(vault_root)
+    conn.isolation_level = None
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        live = conn.execute(
+            "SELECT proposal_json, fingerprint_at_propose, membership_manifest, status, "
+            "expires_at, attempt_no, reserved_event_id FROM governance_proposals "
+            "WHERE proposal_id=?",
+            (proposal_id,),
+        ).fetchone()
+        if (
+            live is None
+            or tuple(live[:5]) != tuple(row[:5])
+            or int(live[5]) != prior_attempt
+            or live[6] is not None
+        ):
+            raise GovernanceError("PROPOSAL_RESERVED", "backfill proposal changed")
+        updated = conn.execute(
+            "UPDATE governance_proposals SET attempt_no=?, attempt_nonce=?, "
+            "reserved_event_id=? WHERE proposal_id=? AND status='pending' "
+            "AND attempt_no=? AND attempt_nonce IS NULL AND reserved_event_id IS NULL",
+            (attempt_no, attempt_nonce, event_id, proposal_id, prior_attempt),
+        )
+        if updated.rowcount != 1:
+            raise GovernanceError("PROPOSAL_RESERVED", "backfill proposal changed")
+        persisted = _create_journal(
+            conn,
+            event_id=event_id,
+            operation="commit_backfill_companion",
+            who=who,
+            authorization_session=None,
+            direction="widening",
+            phases=phases,
+            child_ids=[event_id],
+            proposal_id=proposal_id,
+            phase="allocating",
+            now=now,
+        )
+        if persisted != digests:
+            raise GovernanceError("GOVERNANCE_BLOCKED", "backfill digest changed")
+        conn.execute(
+            "UPDATE governance_operation_journals SET attempt_no=? WHERE event_id=?",
+            (attempt_no, event_id),
+        )
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.close()
+    if kwargs.get("crash_at") == "after_reservation":
+        raise GovernanceCrash("after_reservation")
+
+    receipts.begin_event(
+        vault_root,
+        operation="governance_companion_backfill",
+        prior=digests["prior"],
+        prepared=digests["prepared"],
+        target=digests["final"],
+        affected_ids=affected,
+        event_id=event_id,
+    )
+    if kwargs.get("crash_at") == "after_intent":
+        raise GovernanceCrash("after_intent")
+    try:
+        confirmed = _backfill_plan(vault_root, kwargs.get("companion_input"))
+        if _backfill_payload(confirmed) != payload:
+            raise GovernanceError(
+                "STALE_COMPANION_BACKFILL", "companion changed after receipt intent"
+            )
+    except GovernanceError:
+        reconcile_governance_operations(vault_root)
+        raise
+    _arm_journal(vault_root, event_id, now=now)
+    if kwargs.get("crash_at") == "after_arming":
+        raise GovernanceCrash("after_arming")
+    try:
+        reserved_paths.publish_generic_bytes(
+            vault_root,
+            plan.companion_path,
+            plan.target_bytes,
+            expected_identity=plan.companion_identity,
+            expected_sha256=hashlib.sha256(plan.prior_bytes).hexdigest(),
+        )
+    except reserved_paths.ReservedPathLeafError as error:
+        reconcile_governance_operations(vault_root)
+        raise GovernanceError(
+            "STALE_COMPANION_BACKFILL", "companion changed during publication"
+        ) from error
+    if kwargs.get("crash_at") == "after_publish":
+        raise GovernanceCrash("after_publish")
+    receipts.commit_event(vault_root, event_id, outcome="prepared")
+    if kwargs.get("crash_at") == "after_terminal":
+        raise GovernanceCrash("after_terminal")
+    _activate_event(vault_root, event_id, remove_marker=False, now=now)
+    return {
+        "status": "committed",
+        "event_id": event_id,
+        "proposal_id": proposal_id,
+        "direction": "widening",
     }
 
 
@@ -2436,7 +2805,7 @@ def _undo(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
         str(path): (None if prior_bytes is None else bytes(prior_bytes).decode("utf-8"))
         for path, prior_bytes in archive_rows
     }
-    restored_policy = policy_module.compile_prospective(vault_root, documents)
+    restored_policy = _prospective_policy(vault_root, documents)
     if restored_policy.blocked:
         raise GovernanceError("ARCHIVE_INVALID", "the restored policy does not compile")
     dependent_targets: dict[str, str] = {}
@@ -2477,12 +2846,222 @@ from .recovery import (  # noqa: E402 - imported after circular protocol helpers
 def _selected_variant(
     operation: str, _spec: OperationSpec, kwargs: Mapping[str, Any]
 ) -> OperationVariant:
+    if operation == "session":
+        action = kwargs.get("session_action")
+        if action not in _SESSION_ACTIONS:
+            raise GovernanceError(
+                "INVALID_AUTHORIZATION_SESSION_ACTION",
+                "session_action must be open, status, rotate, or close",
+            )
+        return select_operation(operation)
+    if kwargs.get("session_action") is not None:
+        raise GovernanceError(
+            "INVALID_AUTHORIZATION_SESSION_ARGUMENTS",
+            "session_action is valid only when operation is session",
+        )
+    if operation == "backfill_companion":
+        action = kwargs.get("backfill_action")
+        if action not in {"preview", "commit"}:
+            raise GovernanceError(
+                "INVALID_COMPANION_BACKFILL",
+                "backfill_action must be preview or commit",
+            )
+        return select_operation(operation, "commit" if action == "commit" else None)
     scope = kwargs.get("scope")
     if operation == "grant" and scope not in (None, "session", "standing"):
         raise GovernanceError(
             "INVALID_GRANT_SCOPE", "scope must be omitted, session, or standing"
         )
     return select_operation(operation, scope)
+
+
+def _validate_session_arguments(kwargs: Mapping[str, Any]) -> None:
+    action = kwargs.get("session_action")
+    if action not in _SESSION_ACTIONS:
+        raise GovernanceError(
+            "INVALID_AUTHORIZATION_SESSION_ACTION",
+            "session_action must be open, status, rotate, or close",
+        )
+    if set(kwargs) - _SESSION_ARGUMENTS:
+        raise GovernanceError(
+            "INVALID_AUTHORIZATION_SESSION_ARGUMENTS",
+            "session action received unsupported arguments",
+        )
+    ttl = kwargs.get("ttl_seconds")
+    if action in {"open", "rotate"}:
+        if (
+            isinstance(ttl, bool)
+            or not isinstance(ttl, int)
+            or not 1 <= ttl <= authorization_session_lifecycle.MAX_SESSION_TTL_SECONDS
+        ):
+            raise GovernanceError(
+                "INVALID_AUTHORIZATION_SESSION_ARGUMENTS",
+                "open and rotate require a bounded ttl_seconds",
+            )
+    elif ttl is not None:
+        raise GovernanceError(
+            "INVALID_AUTHORIZATION_SESSION_ARGUMENTS",
+            "status and close forbid ttl_seconds",
+        )
+    if action == "open" and kwargs.get("authorization_session") is not None:
+        raise GovernanceError(
+            "INVALID_AUTHORIZATION_SESSION_ARGUMENTS",
+            "session open forbids an existing authorization-session echo",
+        )
+    supplied_now = kwargs.get("now")
+    if supplied_now is not None and (
+        isinstance(supplied_now, bool)
+        or not isinstance(supplied_now, int)
+        or supplied_now <= 0
+    ):
+        raise GovernanceError(
+            "INVALID_AUTHORIZATION_SESSION_ARGUMENTS",
+            "session time must be a positive integer",
+        )
+
+
+def _trusted_session_principal(value: RequestPrincipal | None) -> RequestPrincipal:
+    who = _principal(value)
+    if (
+        not who.resolved
+        or _bounded_session_identity(who.audience_id) is None
+        or _bounded_session_identity(who.issuer_family) is None
+    ):
+        raise GovernanceError(
+            "AUTHORIZATION_SESSION_REQUIRED",
+            "trusted principal and issuer context are required",
+        )
+    return who
+
+
+def _bounded_session_identity(value: object) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError:
+        return None
+    return value if len(encoded) <= 512 else None
+
+
+def _verified_session_context(
+    who: RequestPrincipal,
+    supplied_echo: object,
+) -> authorization_session_lifecycle.AuthorizationSessionContext:
+    context = who.verified_authorization_session
+    if (
+        not isinstance(
+            context,
+            authorization_session_lifecycle.AuthorizationSessionContext,
+        )
+        or context.principal_id != who.audience_id
+        or context.issuer_family != who.issuer_family
+    ):
+        raise GovernanceError(
+            "AUTHORIZATION_SESSION_REQUIRED",
+            "a verified authorization session is required",
+        )
+    for echo in (who.authorization_session_id, supplied_echo):
+        if echo is None:
+            continue
+        if (
+            _bounded_session_identity(echo) is None
+            or not __import__("hmac").compare_digest(echo, context.session_id)
+        ):
+            raise GovernanceError(
+                "AUTHORIZATION_SESSION_REQUIRED",
+                "legacy authorization-session echo does not match verified context",
+            )
+    return context
+
+
+def _session_status_response(
+    context: authorization_session_lifecycle.AuthorizationSessionContext,
+) -> dict[str, Any]:
+    return {
+        "status": "active",
+        "credential_generation": context.credential_generation,
+        "expires_at": datetime.fromtimestamp(context.expires_at, tz=UTC)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z"),
+    }
+
+
+def _session(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
+    action = str(kwargs["session_action"])
+    who = _trusted_session_principal(kwargs.get("principal"))
+    now = int(kwargs.get("now", int(time.time())))
+    context: authorization_session_lifecycle.AuthorizationSessionContext | None = None
+    if action == "open":
+        if (
+            who.verified_authorization_session is not None
+            or who.authorization_session_id is not None
+        ):
+            raise GovernanceError(
+                "AUTHORIZATION_SESSION_CREDENTIAL_FORBIDDEN",
+                "session open forbids existing authorization-session authority",
+            )
+    else:
+        context = _verified_session_context(
+            who,
+            kwargs.get("authorization_session"),
+        )
+
+    connection: sqlite3.Connection | None = None
+    try:
+        custody = authorization_custody.load_authorization_custody(vault_root, now=now)
+        connection = store.open_authorization_session_connection(vault_root)
+        if action == "open":
+            issuance = authorization_session_lifecycle.open_session(
+                connection,
+                custody=custody,
+                principal_id=who.audience_id,
+                issuer_family=who.issuer_family,
+                now=now,
+                ttl_seconds=int(kwargs["ttl_seconds"]),
+            )
+            return issuance.response()
+        if context is None:  # pragma: no cover - guarded above
+            raise authorization_session_lifecycle.AuthorizationSessionUnavailable
+        if action == "status":
+            current = authorization_session_lifecycle.status_verified_session(
+                connection,
+                custody=custody,
+                context=context,
+                now=now,
+            )
+            return _session_status_response(current)
+        if action == "rotate":
+            issuance = authorization_session_lifecycle.rotate_verified_session(
+                connection,
+                custody=custody,
+                context=context,
+                now=now,
+                ttl_seconds=int(kwargs["ttl_seconds"]),
+            )
+            return issuance.response()
+        authorization_session_lifecycle.close_verified_session(
+            connection,
+            custody=custody,
+            context=context,
+            now=now,
+        )
+        return {"status": "closed"}
+    except (
+        authorization_custody.AuthorizationCustodyUnavailable,
+        authorization_session_lifecycle.AuthorizationSessionUnavailable,
+        FileNotFoundError,
+        OSError,
+        sqlite3.Error,
+        store.UnsupportedGovernanceSchema,
+    ):
+        raise GovernanceError(
+            "AUTHORIZATION_SESSION_UNAVAILABLE",
+            "authorization session is unavailable",
+        ) from None
+    finally:
+        if connection is not None:
+            connection.close()
 
 
 def _inspect(vault_root: Path, operation: str, **kwargs: Any) -> dict[str, Any]:
@@ -2500,6 +3079,8 @@ def _not_implemented(_vault_root: Path, operation: str, **_kwargs: Any) -> dict[
 
 _HANDLER_STRATEGIES: Mapping[str, Any] = MappingProxyType(
     {
+        "backfill_companion_commit": _backfill_commit,
+        "backfill_companion_preview": _backfill_preview,
         "inspect": _inspect,
         "proposal": _proposal,
         "commit": _commit,
@@ -2507,6 +3088,7 @@ _HANDLER_STRATEGIES: Mapping[str, Any] = MappingProxyType(
         "grant_standing": _standing_grant,
         "revoke_session": _revoke,
         "revoke_standing": _standing_revoke,
+        "session": _session,
         "toggle_rules": _toggle_rules,
         "undo": _undo,
         "declare": _declare,
@@ -2532,14 +3114,15 @@ def op_govern_memory(vault_root: Path, operation: str, **kwargs: Any) -> dict[st
         )
     root = Path(vault_root)
     selection = _selected_variant(operation, spec, kwargs)
+    if operation == "session":
+        _validate_session_arguments(kwargs)
     if not spec.read_only:
         _authorize_operation(selection, kwargs)
         # One registry-driven gate for every authoring operation, rather than
-        # thirteen `.blocked` sites. `compile_prospective` filters conflict
-        # copies out of the temp tree it compiles, so without this a mutation
-        # under a sync conflict is accepted, receipted, and silently overridden
-        # by whichever document the next real compile picks.
-        if policy_module.has_conflict_copy(root):
+        # thirteen `.blocked` sites. Prospective policy paths independently
+        # re-probe the conflict set around their held-handle byte acquisition;
+        # this fast gate also covers authoring variants that do not compile.
+        if operation != "session" and policy_module.has_conflict_copy(root):
             raise GovernanceError(
                 "GOVERNANCE_CONFLICTED",
                 "a synchronisation conflict copy is present under _Governance/; "

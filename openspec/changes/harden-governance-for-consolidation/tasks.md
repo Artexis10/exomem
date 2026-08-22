@@ -13,48 +13,48 @@
 
 ## 1. Per-Scope Disclosure Lattice
 
-- [ ] 1.1 Add red tests in `tests/test_governance_decisions.py` proving a standing grant
+- [x] 1.1 Add red tests in `tests/test_governance_decisions.py` proving a standing grant
   for scope A cannot lift overlapping default-deny scope B, in both scope/document
   orders; record the expected current item-wide-grant failure before implementation.
-- [ ] 1.2 Add red tests proving session grants carry exact reviewed scope IDs, a grant
+- [x] 1.2 Add red tests proving session grants carry exact reviewed scope IDs, a grant
   covering every matched scope raises each independently, and a legacy unscoped session
   grant contributes no ceiling.
-- [ ] 1.3 Add red tests for per-scope standing minima, default values, organisation caps,
+- [x] 1.3 Add red tests for per-scope standing minima, default values, organisation caps,
   owner default-deny exemption, complete-decision purpose monotonicity, and final item
   minimum. Include equal-level declared/undeclared branches where only one contributes
   notice/constraint/abstract/bridge/release identity and assert no
   field can be added by declaring purpose.
-- [ ] 1.4 Add red overlap tests where equal ceilings have conflicting constraints,
+- [x] 1.4 Add red overlap tests where equal ceilings have conflicting constraints,
   notices, abstracts, bridges, release identities, and strip sets; prove ambiguity/
   absence narrows or fails closed and rule-id order never
   selects a winner. Add property tests for associative, commutative, idempotent folding
   across every rule/scope/purpose permutation and parenthesization.
-- [ ] 1.5 Add red compiler tests replacing the current arbitrary-options fixtures: the
+- [x] 1.5 Add red compiler tests replacing the current arbitrary-options fixtures: the
   closed registry accepts only bounded provenance-free string
   `notice`/`constraint`/`abstract`/`bridge`, boolean control `suspended`, and release
   `strip_provenance`; every `credential_scrubber` spelling/value (including legacy
   on/off and booleans), unknown keys,
   compiler-owned fields, custom YAML tags/containers, unsafe/oversized values, wrong
   types, and non-finite numbers are compile ERRORs.
-- [ ] 1.6 Add red mixed-scope, mixed-item, error, and governance/control-envelope tests
+- [x] 1.6 Add red mixed-scope, mixed-item, error, and governance/control-envelope tests
   proving the shared terminal secret/bearer scrubber is non-disableable under active
   governance. Assert legacy scrubber-off policy blocks compilation and the exact typed
   open/rotate issuance occurrence remains the only terminal exception.
 - [ ] 1.7 Extend `tests/test_govern_memory_tool.py` and `tests/test_governance_store.py`
   with red persistence/drift tests for exact session-grant scope bindings and a
   monotonic migration that expires legacy rows unable to prove them.
-- [ ] 1.8 Implement the pure per-scope lattice and closed conservative option meet in
+- [x] 1.8 Implement the pure per-scope lattice and closed conservative option meet in
   `governance/decisions.py`, retaining deterministic explanations of each scope's
   standing, grant, cap, option, ambiguity, and final contribution; remove sorted-rule-id
   overwrite and equal-level declared-branch selection.
-- [ ] 1.9 Remove `credential_scrubber` from accepted policy options, add the owner
+- [x] 1.9 Remove `credential_scrubber` from accepted policy options, add the owner
   migration finding for every legacy occurrence, and make terminal scrubber invocation
   unconditional across content/error/control dispatch; retain only the exact validated
   issuance exception.
 - [ ] 1.10 Persist the reviewed scope set with session grants, return it from active-grant
   lookup, include it in composite digests/recovery, and make membership or policy drift
   invalidate rather than broaden it.
-- [ ] 1.11 Run the focused compiler/lattice/scrubber/store/tool tests and preserve the red-before-green
+- [x] 1.11 Run the focused compiler/lattice/scrubber/store/tool tests and preserve the red-before-green
   output in the implementation evidence.
 
 ## 2. Fail-Closed Non-Markdown Membership
@@ -62,44 +62,44 @@
 - [x] 2.1 Add red tests in `tests/test_governance_membership.py` for a missing companion
   under semantic-only project/tag/type/class scopes, proving the outcome is unresolved
   rather than the classified empty set.
-- [ ] 2.2 Add red tests for malformed, unreadable, stale, symlink-escaping, and
+- [x] 2.2 Add red tests for malformed, unreadable, stale, symlink-escaping, and
   artifact-mismatched companions; cover duplicate/relocated dataset cards and scene-frame
   parent/path/hash/timestamp mismatches, assert the same fail-closed outcome, and prove no
   cached open answer.
-- [ ] 2.3 Add red/passing distinction tests for path/ref-only policy, a path/ref exclusion
+- [x] 2.3 Add red/passing distinction tests for path/ref-only policy, a path/ref exclusion
   that proves a semantic scope excluded, a positive path match plus an unresolved
   semantic sibling, and a valid explicitly empty companion. The empty fixture must carry
   `state: classified`, all four explicit empty semantic lists, and the complete class-
   specific immutable binding tuple; missing semantic keys/descriptor must stay unresolved.
-- [ ] 2.4 Add exact red legacy/backfill fixtures for `preserve.py` minimal media stubs,
+- [x] 2.4 Add exact red legacy/backfill fixtures for `preserve.py` minimal media stubs,
   pending and completed media sidecars, ordinary binaries, dataset cards, and persisted
   scene frames. Require owner-authenticated receipt-first version-1 input with exact
   artifact/companion identities, complete explicit semantics, and class binding fields.
   Assert page tags/projects/type/classes are never inferred, pre-descriptor semantic-only
   classification is unresolved, exact retries are idempotent, and drift/crash/ambiguity
   leaves no partial descriptor or rewritten body/page metadata.
-- [ ] 2.5 Add red legacy scene-frame fixtures for finite, negative, non-finite, half-way,
+- [x] 2.5 Add red legacy scene-frame fixtures for finite, negative, non-finite, half-way,
   and out-of-range `frame_ts`; filename/index/parent agreement and disagreement; and
   canonical `int(round(binary64(frame_ts) * 1000))` ties-to-even conversion. Require
   exact bounded `frame_timestamp_ms` in `0..4_294_967_295` or atomic refusal.
 - [ ] 2.6 Add red integration coverage in `tests/test_governance_egress.py`,
   `tests/test_record_governance.py`, and media/dataset tests proving unresolved artifacts
   are L0/missing before counts, frames, rows, proposals, or grant-drift checks.
-- [ ] 2.7 Implement the closed companion locator/descriptor registry: sibling binary/media
+- [x] 2.7 Implement the closed companion locator/descriptor registry: sibling binary/media
   path/hash/size/class (+ media type/original name), unique dataset-card
   data-path/hash/size/format, and scene-frame frame/parent path+hash+size and canonical
   bounded `frame_timestamp_ms`, plus exact artifact
   `projects`/`tags`/`types`/`classes` string lists
   distinct from companion-page metadata. Make all reads immutable, canonical, regular,
   no-follow snapshots.
-- [ ] 2.8 Implement `backfill_companion` preview/commit through trusted local-owner
+- [x] 2.8 Implement `backfill_companion` preview/commit through trusted local-owner
   context and receipt-first no-follow held-parent/descriptor-bound transaction. Validate
   the exact version-1 input, preserve all non-descriptor bytes, persist prior/target
   identities and owner/event evidence, and prohibit every metadata-inference path.
-- [ ] 2.9 Introduce the typed classified/unresolved membership result and update memo keys
+- [x] 2.9 Introduce the typed classified/unresolved membership result and update memo keys
   so companion and artifact immutable identities participate without adding index-time
   materialization.
-- [ ] 2.10 Wire direct media/frame/dataset reads, corpus walks, proposal membership, and
+- [x] 2.10 Wire direct media/frame/dataset reads, corpus walks, proposal membership, and
   active-session-grant revalidation to propagate unresolved membership; remove every
   fallback that converts it to `frozenset()`.
 - [ ] 2.11 Run the membership, preserve/media-processing, scene-frame, query-dataset,
@@ -108,10 +108,10 @@
 
 ## 3. Conflict- And Fingerprint-Bound Prospective Compile
 
-- [ ] 3.1 Add red tests in `tests/test_governance_policy.py` for every supported conflict
+- [x] 3.1 Add red tests in `tests/test_governance_policy.py` for every supported conflict
   marker present before prospective compile and appearing/disappearing between its two
   probes; assert no reviewable target and no state creation.
-- [ ] 3.2 Add red tests for timestamp-preserving byte replacement, added/deleted policy
+- [x] 3.2 Add red tests for timestamp-preserving byte replacement, added/deleted policy
   files, pending-guard generation changes, symlink/non-regular policy paths, and mixed
   before/after document sets during prospective acquisition.
 - [ ] 3.3 Add red `tests/test_govern_memory_tool.py` coverage proving proposals persist
@@ -144,10 +144,10 @@
   preparation, receipt intent, narrowing overlay, tuple publication, external digest
   acknowledgement, response, and mirror. Assert predecessor-or-complete-target only,
   one tuple winner, no stale grant/catalog hybrid, and no semantic replay.
-- [ ] 3.8 Split the pure pinned-byte compiler from guarded live prospective acquisition;
+- [x] 3.8 Split the pure pinned-byte compiler from guarded live prospective acquisition;
   implement a before/read/after `AuthoringSnapshot` and return a bound
   `ProspectiveCompile` only for a stable conflict-free regular-file tree.
-- [ ] 3.9 Add append-only `compiled_policy_generations`, immutable catalog descriptors,
+- [x] 3.9 Add append-only `compiled_policy_generations`, immutable catalog descriptors,
   and singleton `active_governance_tuple` to exact schema v4. Store ordered source and
   compiled bytes/fingerprints, compiler/projector versions, predecessor/event/receipt,
   projection namespace, immutable store id, epoch, and activation digest; enforce
@@ -263,7 +263,7 @@ made before both PRs and their combined verification are complete.
   `_Consolidation` for the future owning command with no public bypass flag and no
   fallback owner until it exists; give each registered database/index only its named
   subsystem token; owning commands still use safe handle traversal and no generic bypass.
-- [ ] 4.11 Run the reserved-path and active race matrices on Linux and the Windows-specific
+- [x] 4.11 Run the reserved-path and active race matrices on Linux and the Windows-specific
   windows-latest NTFS junction/reparse/hard-link/8.3/rename-disposition/fallback-disable
   CI job; wire it into the required combined release gate. Prove enumeration/download/
   export/dataset/transfer never disclose internal state through Exomem, same-device
@@ -275,7 +275,7 @@ made before both PRs and their combined verification are complete.
 
 ## 5. Durable Authorization-Session Capability Core
 
-- [ ] 5.1 Add red pure tests in `tests/test_authorization_session_binding.py` for exact
+- [x] 5.1 Add red pure tests in `tests/test_authorization_session_binding.py` for exact
   70-byte `as1.<22-char canonical b64url 16-byte locator>.<43-char canonical b64url
   32-byte secret>` issuance, bounded decode/re-encode parser, parser-derived scrubber
   matcher, constant-time verifier success/
@@ -284,7 +284,7 @@ made before both PRs and their combined verification are complete.
   Cover padding/whitespace/alternate alphabet/wrong length/noncanonical bits/duplicates,
   malformed/expired/closed, cross-principal/cross-issuer/cross-cell/cross-vault,
   unregistered copy, unknown-key equivalence, and accepted-parser⊆scrubber property.
-- [ ] 5.2 Add red custody tests for `EXOMEM_AUTH_SESSION_KEYRING_FILE` and
+- [x] 5.2 Add red custody tests for `EXOMEM_AUTH_SESSION_KEYRING_FILE` and
   `EXOMEM_AUTH_SESSION_CONTROL_FILE`: absent, symlink/non-regular, oversized, bad
   version/id/key length/time/signature, identity mismatch, permissive POSIX mode or
   Windows ACL, policy/request/CLI/vault-provided values, and first-use generation all
@@ -298,7 +298,7 @@ made before both PRs and their combined verification are complete.
   vault+sidecar+keyring/control copies, copied external files without registry ownership,
   exact offline restore, clone with new ids, and detach-ack/attachment-epoch move; no
   colliding pair may serve simultaneously or synthesize identity.
-- [ ] 5.4 Add red lifecycle tests for exact typed `issued_credential` open/rotate,
+- [x] 5.4 Add red lifecycle tests for exact typed `issued_credential` open/rotate,
   status, close, replay of the old bearer, restart/resume, and two v4 processes/replicas.
   Add malformed/extra-copy/raised issuance tests proving the terminal scrubber exception
   activates only after exact response validation and otherwise scrubs/refuses.
@@ -323,7 +323,7 @@ made before both PRs and their combined verification are complete.
   member blocking, old/new key overlap, issuance switch, max-TTL+skew/live-row drain,
   explicit `SERVING -> DRAINING`, no-in-flight acknowledgement, epoch advance/removal,
   and current-epoch rejoin. Silence/gossip MUST NOT remove a replica from the intersection.
-- [ ] 5.9 Add red same-principal cross-session tests: tokens, grants, purpose, revoke, and
+- [x] 5.9 Add red same-principal cross-session tests: tokens, grants, purpose, revoke, and
   close from session A are rejected or isolated in session B; missing/unresolved session
   refuses without consuming or writing anything.
 - [ ] 5.10 Implement transactional schema v4
@@ -343,16 +343,16 @@ made before both PRs and their combined verification are complete.
   the standalone host registry uses the same schema. Implement authenticated per-replica
   attestation, admitted intersection, explicit drain/ack/epoch advance and current-epoch
   rejoin; gate issuance/resumption on cell identity and epoch, never observed liveness.
-- [ ] 5.13 Implement domain-separated verifier construction, bounded lookup, constant-time
+- [x] 5.13 Implement domain-separated verifier construction, bounded lookup, constant-time
   comparison, active/accepted key rotation, and row/presented-credential equality to the
   external cell/logical-vault/keyring identity.
-- [ ] 5.14 Implement server-issued open/status/rotate/close with cryptographic randomness,
+- [x] 5.14 Implement server-issued open/status/rotate/close with cryptographic randomness,
   typed issuance, keyed at-rest verifier, bounded TTL, atomic rotation, and close-time
   revocation of purpose, grants, and unconsumed tokens.
 - [ ] 5.15 Change escalation tokens, session grants, declarations, and revoke to bind the
   stable internal session ID plus principal/issuer/audience/purpose/expiry and exact
   path/fingerprint/scope bounds, never the raw bearer or a caller-selected handle.
-- [ ] 5.16 Add the generated `govern_memory(operation="session")` selector and explicit
+- [x] 5.16 Add the generated `govern_memory(operation="session")` selector and explicit
   open/status/rotate/close argument validation; treat legacy handles only as bounded
   echoes after capability verification and never as first-use authority.
 - [ ] 5.17 Run session, keyring/control/registry, membership epoch, migration/downmigration,
@@ -429,15 +429,15 @@ made before both PRs and their combined verification are complete.
   governed and registry-proven never-enrolled modes: exact raw only when scrub-safe;
   otherwise deterministic content-free `SECRET_BLOCKED`, never redacted-as-raw, while
   full-raw hash and stale-edit semantics remain unchanged.
-- [ ] 7.2 Add red provenance fixtures covering forward/reverse citations, sources,
+- [x] 7.2 Add red provenance fixtures covering forward/reverse citations, sources,
   history, links, relation/supersession, and parent-media fields; prove no raw option or
   direct-read variant restores them below L6.
-- [ ] 7.3 Add red Tier-2 direct-content coverage for dataset rows, media bytes,
+- [x] 7.3 Add red Tier-2 direct-content coverage for dataset rows, media bytes,
   video frames, Records values/reductions, and companion metadata below L6, including
   unresolved non-Markdown membership and every registered internal-state path. Assert each
   structured direct route is byte-identical to missing at L0-L5—no partial row,
   aggregate/profile, record, byte, or pixel projection exists in this change.
-- [ ] 7.4 Add red paired tests proving a valid bound companion may be discovered/read at its
+- [x] 7.4 Add red paired tests proving a valid bound companion may be discovered/read at its
   lower Markdown projection through recall/get while direct dataset/Records/media/frame
   routes stay missing and never silently substitute the companion.
 - [ ] 7.5 Refactor direct get to decide and project one immutable file snapshot before

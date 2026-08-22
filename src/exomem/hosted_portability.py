@@ -689,6 +689,49 @@ def _enumerate_source(vault_root: Path, limits: PortabilityLimits) -> list[_Sour
     return snapshots
 
 
+def canonical_vault_fingerprint(
+    vault_root: Path,
+    *,
+    limits: PortabilityLimits | None = None,
+) -> str:
+    """Return a deterministic digest of canonical and portable vault bytes.
+
+    Disposable runtime state is classified and excluded by the same registry
+    used for portable exports.  The second enumeration makes a fingerprint
+    fail closed if the quiesced source changes while it is being inspected.
+    Only the final digest needs to cross the cell boundary.
+    """
+
+    effective_limits = limits or PortabilityLimits()
+    _validate_limits(effective_limits)
+
+    def records(snapshots: Iterable[_SourceSnapshot]) -> list[dict[str, Any]]:
+        return [
+            {
+                "path": snapshot.path,
+                "size": snapshot.size,
+                "sha256": snapshot.sha256,
+                "classification": snapshot.classification,
+            }
+            for snapshot in snapshots
+        ]
+
+    first = records(_enumerate_source(vault_root, effective_limits))
+    repeated = records(_enumerate_source(vault_root, effective_limits))
+    if repeated != first:
+        _fail("SOURCE_CHANGED_DURING_EXPORT", "the vault changed during fingerprinting")
+    return _sha256_bytes(
+        _canonical_json(
+            {
+                "artifact": "exomem-hosted-canonical-vault",
+                "schema_version": 1,
+                "classification_version": CLASSIFICATION_VERSION,
+                "files": first,
+            }
+        )
+    )
+
+
 def _zip_info(path: str) -> zipfile.ZipInfo:
     info = zipfile.ZipInfo(path, date_time=_ZIP_TIMESTAMP)
     info.create_system = 3
@@ -1691,6 +1734,7 @@ __all__ = [
     "VerifiedArchive",
     "classification_registry",
     "classify_artifact",
+    "canonical_vault_fingerprint",
     "export_quiesced_vault",
     "prepare_restore",
     "publish_prepared_restore",

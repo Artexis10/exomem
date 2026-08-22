@@ -406,7 +406,7 @@ LEVEL_NONE = 0  # L0 nothing — the item is omitted, silently
 LEVEL_NOTICE = 1  # L1 rule id + scope label
 LEVEL_CONSTRAINT = 2  # L2 + the constraint string
 LEVEL_ABSTRACT = 3  # L3 + an approved abstraction
-LEVEL_EXCERPT_REDACTED = 4  # L4 — renders as L3 until `add-redaction-levels`
+LEVEL_EXCERPT_REDACTED = 4  # L4 — exact approved bridge abstraction only
 LEVEL_EXCERPT = 5  # L5 bounded excerpt + ranking signals
 LEVEL_FULL = 6  # L6 full disclosure
 
@@ -766,14 +766,21 @@ def _notice(
     rule_ids: Sequence[str] = (),
     scope_label: str | None = None,
     options: Mapping[str, Any] | None = None,
+    bridge_abstraction: str | None = None,
 ) -> dict[str, Any]:
-    """L1–L4 rendering: rule id + scope label, then constraint, then abstract.
+    """L1–L4 rendering: low-level notices or one approved L4 abstraction.
 
     Deliberately carries no path, title, excerpt, score, or provenance at any
     of these levels — see the `release-gate` spec's "Low levels strip metadata
     oracles" scenario.
     """
     options = options or {}
+    if level == LEVEL_EXCERPT_REDACTED and bridge_abstraction:
+        return {
+            "withheld": True,
+            "level": LEVEL_EXCERPT_REDACTED,
+            "bridge": bridge_abstraction,
+        }
     out: dict[str, Any] = {"withheld": True, "level": level}
     if level == LEVEL_CONSTRAINT and options.get("constraint_source") == "scope":
         constraint = options.get("constraint")
@@ -819,16 +826,22 @@ def project(
     if decision is not None:
         rule_ids = rule_ids or decision.rule_ids
         options = options if options is not None else decision.options
+    bridge_abstraction = decision.bridge_abstraction if decision is not None else None
 
     if level <= LEVEL_NONE:
         return None
-    if level == LEVEL_EXCERPT_REDACTED:
-        # L4 needs redaction span maps, which `add-redaction-levels` ships.
-        # Until then it renders exactly as L3 — an approved abstraction —
-        # rather than releasing an unredacted excerpt.
+    if level == LEVEL_EXCERPT_REDACTED and not bridge_abstraction:
+        # L4 without exact approved bridge content lowers to L3 rather than
+        # borrowing any source text or reviving the retired redaction lane.
         level = LEVEL_ABSTRACT
     if level < RELEASE_FLOOR:
-        return _notice(level, rule_ids=rule_ids, scope_label=scope_label, options=options)
+        return _notice(
+            level,
+            rule_ids=rule_ids,
+            scope_label=scope_label,
+            options=options,
+            bridge_abstraction=bridge_abstraction,
+        )
 
     resolved_kind = kind or _kind_for(payload)
     if resolved_kind in _FULL_ONLY_PROJECTORS and level < LEVEL_FULL:
@@ -1011,6 +1024,61 @@ def _declared_purpose(
     )
 
 
+def _resolve_l4_bridge(
+    vault_root: Path,
+    decision: Decision,
+    *,
+    policy: Policy,
+    audience: str,
+) -> Decision:
+    """Bind an L4 decision to live approved content, never to its opaque id.
+
+    The pure policy meet deliberately carries only a release-grant id.  Bridge
+    bytes and dependency state are mutable inputs, so this resolution happens
+    after (and outside) the decision memo on every request.  A missing or stale
+    approval lowers to the already-authorized L3 abstract without borrowing
+    source text.
+    """
+    if decision.level != LEVEL_EXCERPT_REDACTED:
+        return decision
+    bridge_id = decision.bridge
+    projection = (
+        bridges.resolve_approved_abstraction(
+            vault_root,
+            bridge_id,
+            policy=policy,
+            audience=audience,
+        )
+        if bridge_id
+        else None
+    )
+    if projection is None or not projection.allowed:
+        return replace(
+            decision,
+            level=LEVEL_ABSTRACT,
+            options={
+                key: value
+                for key, value in decision.options.items()
+                if key != "bridge"
+            },
+            bridge=None,
+            bridge_abstraction=None,
+            release_reason=(
+                projection.reason if projection is not None else bridges.RELEASE_UNAPPROVED
+            ),
+            release_grant_id=None,
+            release_strip=(),
+            release_dependency_digest=None,
+        )
+    return replace(
+        decision,
+        bridge_abstraction=projection.abstraction,
+        release_grant_id=projection.grant.id if projection.grant else None,
+        release_strip=projection.strip_identities,
+        release_dependency_digest=projection.dependency_digest,
+    )
+
+
 def _applicable_org_ceiling(policy: Policy, decision: Decision) -> int:
     participating = set(decision.rule_ids)
     return min(
@@ -1091,7 +1159,12 @@ def _decide_path(
     cached = _DECISION_MEMO.get(key)
     if cached is not None and (raw is None or not bridges.maybe_bridge(raw)):
         _DECISION_MEMO.move_to_end(key)
-        return cached
+        return _resolve_l4_bridge(
+            vault_root,
+            cached,
+            policy=policy,
+            audience=audience,
+        )
 
     mtime = st.st_mtime
     if not rel_path.lower().endswith(".md"):
@@ -1163,7 +1236,12 @@ def _decide_path(
     _DECISION_MEMO.move_to_end(key)
     while len(_DECISION_MEMO) > _DECISION_MEMO_MAX:
         _DECISION_MEMO.popitem(last=False)
-    return decision
+    return _resolve_l4_bridge(
+        vault_root,
+        decision,
+        policy=policy,
+        audience=audience,
+    )
 
 
 def _scope_label(policy: Policy, decision: Decision) -> str | None:
@@ -1588,6 +1666,29 @@ def _excerpt_of(body: str, limit: int = 600) -> str:
     return text[:limit].rsplit(" ", 1)[0] + " …"
 
 
+def _attach_raw_content(
+    page: Mapping[str, Any], snapshot_content: str | bytes | None
+) -> dict[str, Any]:
+    """Attach exact raw text only when the terminal parser finds no secret."""
+    if snapshot_content is None:
+        raise ValueError("SECRET_BLOCKED: raw content is unavailable")
+    try:
+        raw_text = (
+            snapshot_content
+            if isinstance(snapshot_content, str)
+            else bytes(snapshot_content).decode("utf-8")
+        )
+    except UnicodeDecodeError as error:
+        raise ValueError("SECRET_BLOCKED: raw content is unavailable") from error
+    _cleaned, blocked = scrubber.scrub_text(raw_text)
+    if blocked:
+        _record_credential_block()
+        raise ValueError("SECRET_BLOCKED: raw content contains protected material")
+    out = dict(page)
+    out["content"] = raw_text
+    return out
+
+
 def annotate_page(
     vault_root: Path,
     page: dict[str, Any],
@@ -1596,12 +1697,14 @@ def annotate_page(
     purpose: str | None = None,
     snapshot_content: str | bytes | None = None,
     stable_ref: str | None = None,
+    include_raw: bool = False,
 ) -> dict[str, Any] | None:
     """Render one page at its release decision's level, or `None` below notice.
 
     `None` is the caller's signal to answer byte-identically to a missing
     path — an item released below notice must be indistinguishable from one
-    that never existed.
+    that never existed. Raw text is assembled only after an L6 decision and
+    only when the terminal secret parser accepts the exact snapshot.
     """
     vault_root = Path(vault_root)
     rel_path = str(page.get("path") or stable_ref or "")
@@ -1611,7 +1714,7 @@ def annotate_page(
     who = principal if principal is not None else effective_principal()
 
     if policy.empty:
-        return page
+        return _attach_raw_content(page, snapshot_content) if include_raw else page
     if policy.blocked or not who.resolved:
         _record_blocked_outcome(who.audience_id)
         return None
@@ -1702,6 +1805,12 @@ def annotate_page(
                     release_strip=admission.strip_identities,
                     release_dependency_digest=admission.dependency_digest,
                 )
+        decision = _resolve_l4_bridge(
+            vault_root,
+            decision,
+            policy=policy,
+            audience=who.audience_id,
+        )
     else:
         # Compatibility for internal/synthetic callers. Production direct-read
         # leaves always supply ``snapshot_content``.
@@ -1732,7 +1841,9 @@ def annotate_page(
         ref=stable_ref,
     )
 
-    level = LEVEL_ABSTRACT if decision.level == LEVEL_EXCERPT_REDACTED else decision.level
+    level = decision.level
+    if level == LEVEL_EXCERPT_REDACTED and not decision.bridge_abstraction:
+        level = LEVEL_ABSTRACT
     if level < RELEASE_FLOOR:
         # No path on a sub-floor notice. `op_get`/`op_read_memory` accept a
         # fuzzy identifier and `_resolve_memory_identifier` canonicalizes it
@@ -1744,6 +1855,7 @@ def annotate_page(
             rule_ids=decision.rule_ids,
             scope_label=_scope_label(policy, decision),
             options=decision.options,
+            bridge_abstraction=decision.bridge_abstraction,
         )
 
     # L5/L6: the page is released. Its own provenance must still not name a
@@ -1795,6 +1907,28 @@ def annotate_page(
             or ref_decision.level < RELEASE_FLOOR
         )
     )
+    if level == LEVEL_EXCERPT:
+        body = parsed.body if snapshot_content is not None else str(page.get("body") or "")
+        body = redact_withheld_references(
+            vault_root,
+            body,
+            principal=who,
+            purpose=declared_purpose,
+        )
+        excerpt = {
+            "path": rel_path,
+            "body": _excerpt_of(body),
+            "body_truncated": True,
+            "release_level": level,
+        }
+        if decision.release_strip:
+            excerpt = bridges.strip_provenance(
+                excerpt,
+                decision.release_strip,
+                direct_page=True,
+            )
+        return excerpt
+
     out = _strip_page_provenance(dict(page), withheld)
     if decision.release_strip:
         out = bridges.strip_provenance(
@@ -1802,14 +1936,7 @@ def annotate_page(
             decision.release_strip,
             direct_page=True,
         )
-    if level == LEVEL_EXCERPT and isinstance(out.get("body"), str):
-        out["body"] = _excerpt_of(out["body"])
-        out["body_truncated"] = True
-        # Marked only BELOW full disclosure. A page released at L6 must be
-        # byte-identical to its ungoverned response — a `release_level: 6`
-        # marker would itself tell an audience that governance is in effect.
-        out["release_level"] = level
-    return out
+    return _attach_raw_content(out, snapshot_content) if include_raw else out
 
 
 
@@ -2841,6 +2968,16 @@ def release_level_for_path_only(
             vault_root, rel_path, policy
         ).require_classified()
     except membership_module.MembershipUnresolved:
+        if receipt_decision is not None:
+            _outcome_for_decision(
+                vault_root,
+                rel_path,
+                decision=None,
+                policy=policy,
+                audience=who.audience_id,
+                outcome="withheld",
+                purpose=purpose,
+            )
         return DISCLOSURE_MIN
     decision = decide(
         scope_ids,
@@ -3260,15 +3397,15 @@ def release_allows_frames(
     principal: RequestPrincipal | None = None,
     purpose: str | None = None,
 ) -> bool:
-    """True at the release floor and above.
+    """True only at full disclosure.
 
-    Sampled keyframes are a bounded excerpt of a video — the image-shaped
-    equivalent of the excerpt a hit already carries at L5 — so they ride the
-    same floor rather than requiring full disclosure. Below it there is no
-    'abstracted frame', so the answer is a refusal, not a degraded render.
+    Frames are a structured direct representation of the source video, not the
+    registered bounded Markdown excerpt projector. Until a typed image
+    projector exists, every level below L6 must refuse rather than decode or
+    return partial pixels.
     """
     return _binary_boundary(
-        vault_root, rel_path, boundary_name="video_frame", minimum_level=RELEASE_FLOOR,
+        vault_root, rel_path, boundary_name="video_frame", minimum_level=LEVEL_FULL,
         principal=principal, purpose=purpose,
     )
 

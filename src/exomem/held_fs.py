@@ -6,6 +6,7 @@ first acquires a root anchor, then works through retained parent handles.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import secrets
 import threading
@@ -282,6 +283,7 @@ def publish_bytes(
     data: bytes,
     *,
     expected_identity: StableIdentity | None = None,
+    expected_sha256: str | None = None,
     prepare: Callable[[HeldFile], None] | None = None,
 ) -> HeldResult[StableIdentity]:
     """Atomically publish bytes under one held parent.
@@ -322,6 +324,18 @@ def publish_bytes(
                 return HeldResult(
                     error=HeldFsError("IDENTITY_CHANGED", "held filesystem identity changed")
                 )
+            if expected_sha256 is not None:
+                observed = filesystem.read(existing)
+                if (
+                    not observed.ok
+                    or hashlib.sha256(observed.require()).hexdigest()
+                    != expected_sha256
+                ):
+                    return HeldResult(
+                        error=HeldFsError(
+                            "IDENTITY_CHANGED", "held filesystem content changed"
+                        )
+                    )
 
         created = filesystem.file(
             parent,
@@ -387,6 +401,19 @@ def publish_bytes(
                         )
                 return publication_error(removed.error)
         else:
+            if expected_sha256 is not None:
+                assert existing is not None
+                observed = filesystem.read(existing)
+                if (
+                    not observed.ok
+                    or hashlib.sha256(observed.require()).hexdigest()
+                    != expected_sha256
+                ):
+                    return HeldResult(
+                        error=HeldFsError(
+                            "IDENTITY_CHANGED", "held filesystem content changed"
+                        )
+                    )
             replaced = filesystem.rename(staged, parent, leaf, replace=True)
             if not replaced.ok:
                 return publication_error(replaced.error)

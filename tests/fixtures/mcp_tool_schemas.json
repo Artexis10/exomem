@@ -2041,7 +2041,7 @@
       "additionalProperties": false,
       "properties": {
         "operation": {
-          "description": "Governance lifecycle operation: list, explain, simulate, propose, commit, grant, revoke, suspend, resume, undo, or declare.",
+          "description": "Governance lifecycle operation: list, explain, simulate, propose, commit, grant, revoke, suspend, resume, undo, declare, or backfill_companion. Use session with session_action for the authorization-session lifecycle.",
           "enum": [
             "list",
             "explain",
@@ -2053,9 +2053,29 @@
             "suspend",
             "resume",
             "undo",
-            "declare"
+            "declare",
+            "backfill_companion",
+            "session"
           ],
           "type": "string"
+        },
+        "session_action": {
+          "anyOf": [
+            {
+              "enum": [
+                "open",
+                "status",
+                "rotate",
+                "close"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Authorization-session lifecycle action: open, status, rotate, or close. Required only when operation is session."
         },
         "documents": {
           "anyOf": [
@@ -2299,6 +2319,35 @@
           ],
           "default": null,
           "description": "Item paths for simulate."
+        },
+        "backfill_action": {
+          "anyOf": [
+            {
+              "enum": [
+                "preview",
+                "commit"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Preview or commit an owner-reviewed companion backfill."
+        },
+        "companion_input": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Exact version-1 artifact, companion, semantics, and binding input."
         },
         "response_detail": {
           "default": "full",

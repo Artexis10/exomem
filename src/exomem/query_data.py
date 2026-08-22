@@ -31,6 +31,7 @@ import itertools
 import json
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -630,6 +631,7 @@ def query_data(
     date_from: str | None = None,
     date_to: str | None = None,
     date_column: str | None = None,
+    authorize_path: Callable[[str], bool] | None = None,
 ) -> QueryDataResult:
     """Query a CSV/JSON data file under the vault. See module docstring."""
     try:
@@ -643,6 +645,8 @@ def query_data(
         raise QueryDataError("NOT_FOUND", f"path does not exist: {rel}")
     if abs_path.suffix.lower() not in ALLOWED_SUFFIXES:
         raise QueryDataError("UNSUPPORTED_FORMAT", f"only {list(ALLOWED_SUFFIXES)} supported")
+    if authorize_path is not None and not authorize_path(rel):
+        raise QueryDataError("NOT_FOUND", f"path does not exist: {rel}")
 
     fmt, rows, cols, warnings = load_generic_rows(
         vault_root, rel, abs_path.suffix, record_path

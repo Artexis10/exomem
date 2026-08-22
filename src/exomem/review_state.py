@@ -124,6 +124,125 @@ def fingerprint(
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:24]
 
 
+
+def component_fingerprint(
+    *,
+    target_ref: str,
+    reason: dict,
+    related_refs: list[str],
+) -> str:
+    """Compose the single-signal identity of ONE contributing finding.
+
+    An attention item is a FUSED thing: `_rank` folds every queue that flagged a
+    page into one item, so its `fingerprint` is composed over all of those
+    categories at once. A counter that walks one category alone -- `due_state` --
+    can only see its own finding, and composing that finding's identity by hand
+    produced a DIFFERENT fingerprint for the same `item_id`, which
+    `effective_state` then read as "the signal materially changed" and re-raised
+    forever. A dismissal through the review surface never reached the counter.
+
+    This is the one composer for that per-finding identity. Both sides call it:
+    `due_state` to ask "has this been triaged?", and `apply_for_item` to record
+    a decision against every component of the fused item the user actually
+    triaged. If they ever compose it differently again, dismissal silently stops
+    working -- so nothing else may build it privately.
+    """
+    return fingerprint(
+        target_ref=target_ref,
+        categories=[str(reason.get("category") or "")],
+        reasons=[reason],
+        related_refs=sorted(related_refs),
+    )
+
+
+def component_fingerprints(
+    vault_root: Path,
+    item: Any,
+) -> list[str]:
+    """Every per-finding fingerprint folded into one fused attention item.
+
+    Deduplicated and returned in a stable order. The item's own fused
+    fingerprint is NOT included -- the caller records that one separately,
+    because it is the identity attention itself reports and round-trips.
+    """
+    reasons = list(getattr(item, "reasons", None) or [])
+    if not reasons:
+        return []
+    anchor = str(getattr(item, "path", "") or "")
+    paths = [anchor]
+    for reason in reasons:
+        paths.extend(reason.get("related_paths") or [])
+    refs = refs_for_paths(vault_root, paths)
+    target_ref = getattr(item, "target_ref", None) or refs.get(anchor)
+    if not target_ref:
+        return []
+    out: list[str] = []
+    for reason in reasons:
+        related = sorted(
+            {
+                path
+                for path in (reason.get("related_paths") or [])
+                if path != anchor and path in refs
+            }
+        )
+        value = component_fingerprint(
+            target_ref=str(target_ref),
+            reason=reason,
+            related_refs=[refs[path] for path in related],
+        )
+        if value not in out:
+            out.append(value)
+    return out
+
+
+def apply_for_item(
+    vault_root: Path,
+    item: Any,
+    *,
+    action: str,
+    review_id: str | None = None,
+    until: str | None = None,
+    why: str | None = None,
+    now: dt.datetime | None = None,
+) -> dict[str, Any]:
+    """Record one triage decision for a fused item AND each of its components.
+
+    The fused fingerprint is what attention reports and what a client round-trips
+    into `expected_fingerprint`, so it stays the identity in the RESULT and is
+    recorded first, unchanged -- attention's own semantics do not move.
+
+    The fan-out exists because single-category consumers (`due_state`) key on a
+    component fingerprint that the fused one never equals. Recording the same
+    decision, with the same `until` and `why`, against every component is what
+    makes "dismiss it in the review surface and the counter goes quiet" true.
+    Doing it at DECISION time rather than at read time is deliberate: a reader
+    cannot know which fused item a user was looking at, and guessing would let a
+    dismissal leak across signals the user never saw.
+
+    `reopen` needs no fan-out -- `apply` clears every record under the item id,
+    component records included -- but it still routes through here so there is
+    exactly one place that knows this.
+    """
+    store = ReviewStateStore(vault_root)
+    review_id = str(review_id or getattr(item, "item_id", None) or "")
+    fused = str(getattr(item, "fingerprint", None) or "")
+    result = store.apply(review_id, fused, action=action, until=until, why=why, now=now)
+    if str(action or "").strip().lower() == "reopen":
+        return result
+    components = list(component_fingerprints(vault_root, item))
+    # Signals that share this identity but are not folded into the fused item,
+    # because they come from registered-but-opt-in queues the default surface
+    # does not show. `attention.item_by_ref` attaches them; without this, a ref
+    # published by a due-state count could be "dismissed" while the count that
+    # published it carried on, or while a different signal was put down instead.
+    components.extend(getattr(item, "triage_components", None) or [])
+    for component in dict.fromkeys(components):
+        if component == fused:
+            continue
+        store.apply(review_id, component, action=action, until=until, why=why, now=now)
+    return result
+
+
 class ReviewStateStore:
     def __init__(self, vault_root: Path):
         self.vault_root = Path(vault_root)

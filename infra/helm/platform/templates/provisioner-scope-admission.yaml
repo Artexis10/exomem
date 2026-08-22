@@ -30,6 +30,10 @@ spec:
     - name: annotations
       expression: >-
         has(variables.target.metadata.annotations) ? variables.target.metadata.annotations : {}
+    - name: vaultFingerprint
+      expression: >-
+        'exomem.io/vault-fingerprint' in variables.labels &&
+        variables.labels['exomem.io/vault-fingerprint'] == 'true'
     - name: helmRelease
       expression: >-
         request.resource.resource == 'configmaps' &&
@@ -178,6 +182,71 @@ spec:
           size(variables.target.spec.template.spec.containers) == 1 &&
           variables.target.spec.template.spec.containers[0].image in {{ $runtimeImages | toJson }})
       message: The hosted provisioner may manage only the exact pinned single-cell StatefulSet.
+    - expression: >-
+        request.resource.resource != 'jobs' || request.operation == 'DELETE' ||
+        !variables.vaultFingerprint ||
+        (
+          variables.labels['app.kubernetes.io/name'] == 'exomem-cell' &&
+          variables.labels['exomem.io/cell'] == request.namespace &&
+          variables.annotations['exomem.io/vault-fingerprint-phase'] in ['before', 'after'] &&
+          variables.annotations['exomem.io/vault-fingerprint-operation'].matches('^[a-f0-9]{64}$') &&
+          variables.target.spec.backoffLimit == 0 &&
+          variables.target.spec.activeDeadlineSeconds == 600 &&
+          variables.target.spec.ttlSecondsAfterFinished == 300 &&
+          variables.target.spec.template.metadata.labels['app.kubernetes.io/name'] == 'exomem-cell' &&
+          variables.target.spec.template.metadata.labels['exomem.io/cell'] == request.namespace &&
+          variables.target.spec.template.metadata.labels['exomem.io/vault-fingerprint'] == 'true' &&
+          variables.target.spec.template.metadata.annotations['exomem.io/vault-fingerprint-phase'] ==
+            variables.annotations['exomem.io/vault-fingerprint-phase'] &&
+          variables.target.spec.template.metadata.annotations['exomem.io/vault-fingerprint-operation'] ==
+            variables.annotations['exomem.io/vault-fingerprint-operation'] &&
+          variables.target.spec.template.metadata.annotations['exomem.io/recovery-envelope'] ==
+            variables.annotations['exomem.io/recovery-envelope'] &&
+          variables.target.spec.template.spec.serviceAccountName == request.namespace &&
+          variables.target.spec.template.spec.automountServiceAccountToken == false &&
+          variables.target.spec.template.spec.restartPolicy == 'Never' &&
+          variables.target.spec.template.spec.securityContext.seccompProfile.type == 'RuntimeDefault' &&
+          (!has(variables.target.spec.template.spec.initContainers) ||
+            size(variables.target.spec.template.spec.initContainers) == 0) &&
+          size(variables.target.spec.template.spec.containers) == 1 &&
+          variables.target.spec.template.spec.containers[0].name == 'exomem' &&
+          variables.target.spec.template.spec.containers[0].image == '{{ $provisionerImage }}' &&
+          variables.target.spec.template.spec.containers[0].imagePullPolicy == 'IfNotPresent' &&
+          !has(variables.target.spec.template.spec.containers[0].command) &&
+          variables.target.spec.template.spec.containers[0].args ==
+            ['exomem-provisioner-vault-fingerprint'] &&
+          (!has(variables.target.spec.template.spec.containers[0].env) ||
+            size(variables.target.spec.template.spec.containers[0].env) == 0) &&
+          (!has(variables.target.spec.template.spec.containers[0].envFrom) ||
+            size(variables.target.spec.template.spec.containers[0].envFrom) == 0) &&
+          variables.target.spec.template.spec.containers[0].terminationMessagePath ==
+            '/dev/termination-log' &&
+          variables.target.spec.template.spec.containers[0].terminationMessagePolicy == 'File' &&
+          variables.target.spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation == false &&
+          variables.target.spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem == true &&
+          variables.target.spec.template.spec.containers[0].securityContext.runAsNonRoot == true &&
+          variables.target.spec.template.spec.containers[0].securityContext.runAsUser == 10001 &&
+          variables.target.spec.template.spec.containers[0].securityContext.runAsGroup == 10001 &&
+          size(variables.target.spec.template.spec.containers[0].securityContext.capabilities.drop) == 1 &&
+          variables.target.spec.template.spec.containers[0].securityContext.capabilities.drop[0] == 'ALL' &&
+          string(dyn(variables.target.spec.template.spec.containers[0].resources).requests['cpu']) == '100m' &&
+          string(dyn(variables.target.spec.template.spec.containers[0].resources).requests['memory']) == '128Mi' &&
+          string(dyn(variables.target.spec.template.spec.containers[0].resources).limits['cpu']) == '1' &&
+          string(dyn(variables.target.spec.template.spec.containers[0].resources).limits['memory']) == '1Gi' &&
+          size(dyn(variables.target.spec.template.spec.containers[0].resources).requests) == 2 &&
+          size(dyn(variables.target.spec.template.spec.containers[0].resources).limits) == 2 &&
+          size(variables.target.spec.template.spec.volumes) == 1 &&
+          variables.target.spec.template.spec.volumes[0].name == 'data' &&
+          variables.target.spec.template.spec.volumes[0].persistentVolumeClaim.claimName ==
+            request.namespace + '-data' &&
+          size(variables.target.spec.template.spec.containers[0].volumeMounts) == 1 &&
+          variables.target.spec.template.spec.containers[0].volumeMounts[0].name == 'data' &&
+          variables.target.spec.template.spec.containers[0].volumeMounts[0].mountPath ==
+            '/var/lib/exomem/vault' &&
+          variables.target.spec.template.spec.containers[0].volumeMounts[0].subPath == 'vault' &&
+          variables.target.spec.template.spec.containers[0].volumeMounts[0].readOnly == true
+        )
+      message: Vault fingerprint Jobs must use the exact provisioner-owned read-only evidence contract.
     - expression: >-
         request.resource.resource != 'networkpolicies' || request.operation != 'DELETE'
       message: NetworkPolicy deletion is reserved for namespace destruction.

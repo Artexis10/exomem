@@ -22,6 +22,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import logging
 import os
 import re
 from collections.abc import Mapping
@@ -128,6 +129,8 @@ from .vault import (
     VaultPathError,
     resolve_under_vault,
 )
+
+log = logging.getLogger(__name__)
 
 _link_summary = link_summary_module.link_summary
 _CONNECT_MEMORY_DEFAULT_OPERATION = "suggest-links"
@@ -528,12 +531,15 @@ def op_bootstrap(
     # The vocabulary is read from the modules that own it instead of retyped, so a
     # new outcome or governed metadata key is taught the day it ships.
     #
-    # Deferred extension point: per-vault due state ("N predictions past their check
-    # date", "N unfinished experiments") belongs here as one further, vault-derived
-    # key. It is blocked on the epistemic review and audit-category work defining
-    # "due" and "unfinished" exactly once. A predicate invented here would be the one
-    # users see, and would turn that work into a breaking change to a public contract
-    # rather than an addition to it. Nothing in this section has to move to make room.
+    # The deferred extension point recorded here is no longer deferred. Per-vault due
+    # state ships as the payload's own `due_state` key (attached below), computed by
+    # `due_state.served()` over the four audit categories that now define "due" and
+    # "unfinished" exactly once — so the predicate users see is the one the review
+    # surface uses, which is precisely what the deferral was protecting. Nothing in
+    # this section moved to make room, as predicted: the counts are vault-derived and
+    # sit beside the payload's other vault-derived keys, while the doctrine here stays
+    # vault-independent. How to READ those counts is taught in
+    # `authoring_contract.post_write`, beside the other post-write advisories.
     epistemic_contract = {
         "commitments": {
             "preserve_the_record": (
@@ -782,6 +788,14 @@ def op_bootstrap(
                 "structure_suggestion_handling": "normally surface a strong one in the user's domain language, never in Exomem terms; prefer routing into an existing suitable destination, so search first; ask before restructuring unless curation was delegated; do not repeat it in one interaction; use judgement on a moderate one and prefer silence over bureaucracy. For source_classification_debt, agree a real kind with the user, then manage_memory_file(operation='reclassify', reason=...).",
                 "structure_suggestion_authority": "advisory only; the runtime detects and never creates, moves, renames, or deletes anything",
                 "accepted_links": "persist only through edit_memory/remember/replace_memory; never auto-write suggestions",
+                # Deliberately command-free, exactly like the epistemic
+                # commitments: `_filter_bootstrap_payload` deletes any string
+                # naming a command the active surface cannot call, and these lines
+                # matter MOST on the reduced, hookless surfaces where such a string
+                # would silently vanish.
+                "due_state": "bounded advisory counts of what this vault currently owes, arriving unasked on the ordinary results you already receive — the default committed write response, recall, and this payload — as a total, per-category counts, and up to five item references with the date each came due. Categories: predictions past an authored check date, experiments past their declared window with no result, long-unanswered questions, and broken supersession chains. Absent when nothing is due",
+                "due_state_handling": "read the counts as they arrive rather than going looking; a nonzero count is an invitation to consult the review surface when it suits the user, never an instruction to interrupt. Consult a surfaced item's fingerprint state before raising it again, so something already dismissed or snoozed stays quiet until its authored content changes. Use the user's own language, not this system's; do not repeat one inside a single interaction; a moderate signal is your judgement, and silence beats bureaucracy",
+                "due_state_authority": "advisory only; the counts measure authored state, and the runtime never judges, resolves, closes, archives, or writes on their behalf, and never changes retrieval ordering",
             },
             "note_type_recipes": {
                 "research-note": "Project-scoped finding with Question, Findings, and typed Relations.",
@@ -1073,6 +1087,31 @@ def op_bootstrap(
                 "so the agent can report stored artifacts exactly."
             ),
         }
+    # Vault-derived, audience-filtered, and absent when there is nothing to say.
+    # Attached AFTER the profile branches because it is the same block on every
+    # profile: a compact payload is a smaller contract, not a less honest one, and
+    # a session that starts on a reduced surface is exactly the session with no
+    # hooks to tell it anything else. It is bounded by construction
+    # (`due_state.TOP_LIMIT`), so it cannot grow the payload without bound.
+    #
+    # Inside the command's own disclosure boundary: this aggregates across pages,
+    # so the release plane has to decide every path before anything is counted.
+    try:
+        from . import due_state as due_state_module
+
+        with egress_module.disclosure_boundary(vault_root, "bootstrap"):
+            due_block = due_state_module.served(vault_root)
+        if due_block is not None:
+            # Attached unconditionally, then RECORDED. The attachment stays
+            # unconditional because a session opening on a reduced surface has no
+            # other way to hear about this at all, so bootstrap is not governed by
+            # emission. But it is still a delivery: without marking it, the first
+            # recall of the session repeats the identical block, which is the exact
+            # nagging the governor exists to prevent.
+            payload["due_state"] = due_block
+            due_state_module.mark_emitted(due_block, vault_root=vault_root)
+    except Exception:  # noqa: BLE001 — a due-state count never breaks a bootstrap
+        log.debug("due-state projection unavailable for bootstrap", exc_info=True)
     return _filter_bootstrap_payload(payload, active_descriptor)
 
 
@@ -2360,6 +2399,20 @@ def op_reconcile(
         vault_root, dry_run=dry_run, rebuild_graph=rebuild_graph
     )
     result = report.as_dict()
+    # The due-state projection is drift-prone in exactly the way this command
+    # exists to heal: a page edited in Obsidian or on the filesystem never fires
+    # the per-write delta, so a resolved prediction can sit "open" in the
+    # projection indefinitely. Reconcile is its full-recompute healer, and it
+    # runs here rather than on the write path because a full recompute costs
+    # roughly thirty times a delta and scales with the corpus, which would make
+    # write latency a function of vault size.
+    if not dry_run:
+        try:
+            from . import due_state as due_state_module
+
+            due_state_module.reconcile(vault_root)
+        except Exception:  # noqa: BLE001 — healing a projection never fails reconcile
+            log.debug("could not heal the due-state projection", exc_info=True)
     if active_mutation_request_id() is None:
         return reconcile_module.finalize_graph_rebuild_handoff(vault_root, result)
     return result
@@ -2492,6 +2545,9 @@ def op_get(
             read) and nothing in the normal workflow needs it: edits
             round-trip `body`, and the drift guard uses `content_hash`,
             which the server always computes over the raw bytes for you.
+            Raw text is returned only at governance release level L6 and only
+            when the mandatory secret parser accepts the exact snapshot. At
+            L1-L5 this flag is identical to false; at L0 the read is missing.
         max_body_chars: Optional cap for the returned `body`. Use this when a
             client wants bounded content instead of an arbitrary full-page read.
             Values above 12000 are capped server-side; negative values are rejected.
@@ -2503,13 +2559,16 @@ def op_get(
         file text; echo it to `edit`/`multi_edit` via `expected_hash` to
         refuse a write if the file changed on disk since this read
         (two-writer drift guard); `mtime` is advisory.
-        Adds `content` (raw file text) when `include_raw=true`.
+        Adds `content` (raw file text) when `include_raw=true` at scrub-safe
+        L6. Lower levels retain their registered Markdown projection and never
+        expose exact hashes, frontmatter, history, links, or raw content.
         Adds `body_truncated` and `body_chars` when `max_body_chars` is supplied.
         Adds `history` when `include_history=true`.
 
     Errors:
         INVALID_PATH (path escapes vault root or empty);
-        NOT_FOUND (no such file); UNREADABLE (parse failure).
+        NOT_FOUND (no such file); UNREADABLE (parse failure);
+        SECRET_BLOCKED (opt-in raw content contains protected material).
     """
     path = _resolve_memory_identifier(vault_root, path)
     try:
@@ -2533,7 +2592,7 @@ def op_get(
             "has_frontmatter": vault.parse_frontmatter(result.content)[2] is not None,
         }
     else:
-        out = result.as_dict(include_raw=include_raw)
+        out = result.as_dict(include_raw=False)
     if max_body_chars is not None and max_body_chars < 0:
         raise ValueError("get: max_body_chars must be non-negative")
     query_log.log_get_call(
@@ -2556,6 +2615,7 @@ def op_get(
         out,
         snapshot_content=result.content,
         stable_ref=snapshot_ref,
+        include_raw=include_raw,
     )
     if released is None:
         # `result.missing_path` — the EXACT value the genuinely-absent branch
@@ -3440,6 +3500,14 @@ def op_query_data(
             date_from=date_from,
             date_to=date_to,
             date_column=date_column,
+            authorize_path=lambda rel_path: (
+                egress_module.release_level_for_path_only(
+                    vault_root,
+                    rel_path,
+                    receipt_decision="released",
+                )
+                >= egress_module.LEVEL_FULL
+            ),
         )
     except query_data_module.QueryDataError as e:
         raise ValueError(f"{e.code}: {e.reason}") from e
@@ -4284,7 +4352,56 @@ def op_ask_memory(
         explain=explain,
         purpose=purpose,
     )
-    return result
+    return _with_due_state(vault_root, result, purpose=purpose)
+
+
+def _with_due_state(
+    vault_root: Path,
+    result: list | dict,
+    *,
+    purpose: str | None = None,
+) -> list | dict:
+    """Attach the advisory due-state block to a recall response, delta-only.
+
+    Reading turns are where "this prediction is due" naturally belongs, and without
+    them the channel is blind in a read-only conversation — which is most of them.
+    Emission governance keeps it a delta rather than a second nagging surface: the
+    first qualifying response of a session carries it, and after that only a change
+    in the totals does.
+
+    Attached on the PRODUCT command rather than in `op_find`, so the retrieval
+    primitive keeps exactly the response it has always returned and only the
+    product surface grows a carrier.
+
+    The block is deliberately NOT declared in `retrieval_models.FindEnvelope`.
+    Declaring it would move `ask_memory`'s published `outputSchema`, and therefore
+    the packaged tool-surface fingerprint and the connector attestations bound to
+    it — the one thing this change promises not to touch. The envelope's schema
+    does not forbid additional properties, and the block is advisory by
+    construction: nothing branches on it, so nothing can break for want of a
+    declaration. Revisit this the next time the fingerprint moves for its own
+    reasons.
+
+    The list-to-envelope flip this can cause is the shape `find` already produces
+    for `warming`, `degraded`, `timings` and `explain`, and both shapes are already
+    in the declared return union.
+    """
+    try:
+        from . import due_state as due_state_module
+
+        # Inside the command's own disclosure boundary: the block aggregates
+        # across pages, so every path is decided by the release plane before
+        # anything is counted.
+        with egress_module.disclosure_boundary(vault_root, "ask_memory"):
+            block = due_state_module.served(vault_root, purpose=purpose)
+        if not due_state_module.should_emit(block, vault_root=vault_root):
+            return result
+    except Exception:  # noqa: BLE001 — a due-state count never breaks a recall
+        log.debug("due-state projection unavailable for recall", exc_info=True)
+        return result
+    if isinstance(result, dict):
+        return {**result, "due_state": block}
+    return {"hits": result, "due_state": block}
 
 
 def op_read_memory(
@@ -5506,10 +5623,15 @@ def op_triage_memory(
             "target_ref": item.target_ref,
             "categories": item.categories,
         }
-    result = review_state_module.ReviewStateStore(vault_root).apply(
-        item.item_id or review_state_module.parse_review_ref(ref),
-        item.fingerprint or "",
+    # Records the decision for the FUSED fingerprint (attention's own identity,
+    # unchanged) AND for each component fingerprint of the findings folded into
+    # it, so single-category consumers like `due_state` see the same dismissal.
+    # The fan-out lives in review_state so there is one composer, not two.
+    result = review_state_module.apply_for_item(
+        vault_root,
+        item,
         action=action,
+        review_id=item.item_id or review_state_module.parse_review_ref(ref),
         until=until,
         why=why,
     )
@@ -6763,14 +6885,20 @@ _GovernanceOperation = Literal[
     "resume",
     "undo",
     "declare",
+    "backfill_companion",
+    "session",
 ]
 if frozenset(_GovernanceOperation.__args__) != frozenset(governance_operations.OPERATION_SPECS):
     raise RuntimeError("govern_memory surface operation choices drifted from governance registry")
 
 
+_GovernanceSessionAction = Literal["open", "status", "rotate", "close"]
+
+
 def op_govern_memory(
     vault_root: Path,
     operation: _GovernanceOperation,
+    session_action: _GovernanceSessionAction | None = None,
     documents: dict[str, str] | None = None,
     selector_paths: list[str] | None = None,
     intent: str | None = None,
@@ -6790,6 +6918,8 @@ def op_govern_memory(
     rule_ids: list[str] | None = None,
     path: str | None = None,
     paths: list[str] | None = None,
+    backfill_action: Literal["preview", "commit"] | None = None,
+    companion_input: dict[str, object] | None = None,
 ) -> dict:
     """Inspect or author opt-in confidential governance policy.
 
@@ -6799,7 +6929,11 @@ def op_govern_memory(
 
     Args:
         operation: Governance lifecycle operation: list, explain, simulate, propose,
-            commit, grant, revoke, suspend, resume, undo, or declare.
+            commit, grant, revoke, suspend, resume, undo, declare, or
+            backfill_companion. Use session with session_action for the
+            authorization-session lifecycle.
+        session_action: Authorization-session lifecycle action: open, status,
+            rotate, or close. Required only when operation is session.
         documents: Canonical policy documents proposed for a new policy version.
         selector_paths: Paths or glob selectors whose membership a proposal resolves.
         intent: Plain-language policy intent for a proposal.
@@ -6821,8 +6955,11 @@ def op_govern_memory(
         rule_ids: Rule identifiers to suspend or resume.
         path: Item path for explain.
         paths: Item paths for simulate.
+        backfill_action: Preview or commit an owner-reviewed companion backfill.
+        companion_input: Exact version-1 artifact, companion, semantics, and binding input.
     """
     values = {
+        "session_action": session_action,
         "documents": documents,
         "selector_paths": selector_paths,
         "intent": intent,
@@ -6842,6 +6979,8 @@ def op_govern_memory(
         "rule_ids": rule_ids,
         "path": path,
         "paths": paths,
+        "backfill_action": backfill_action,
+        "companion_input": companion_input,
     }
     return governance_tool_module.op_govern_memory(
         vault_root,

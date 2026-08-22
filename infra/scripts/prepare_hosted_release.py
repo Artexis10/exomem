@@ -56,6 +56,8 @@ _LOCK_FIELDS = {
 
 def _lock_fields(member: dict[str, Any]) -> set[str]:
     fields = set(_LOCK_FIELDS)
+    if "runtimeUpgrade" in member:
+        fields.add("runtimeUpgrade")
     if member.get("schemaVersion") == 3:
         fields.add("recordsCompatibility")
     return fields
