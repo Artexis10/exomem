@@ -30,7 +30,10 @@ _ROW_DOMAIN = b"exomem.authorization-projection-row.v1"
 _ITEM_DOMAIN = b"exomem.authorization-projection-item.v1"
 _STORE_DOMAIN = b"exomem.authorization-projection-rows.v1"
 _CATALOG_SCHEMA = "exomem.authorization-projection-catalog/v1"
-_EVIDENCE_SCHEMA = "exomem.authorization-projection-namespace-evidence/v1"
+_EVIDENCE_SCHEMA_V1 = "exomem.authorization-projection-namespace-evidence/v1"
+_EVIDENCE_SCHEMA_V2 = "exomem.authorization-projection-namespace-evidence/v2"
+_MEASUREMENT_FAMILY_DOMAIN = b"exomem.authorization-projection-measurement-family.v1"
+_MEASUREMENT_LANES = frozenset({"vector", "clip", "graph"})
 _HEX = frozenset("0123456789abcdef")
 _TABLES = frozenset({"namespace_meta", "projection_items", "projection_variants"})
 _TRIGGERS = frozenset(
@@ -211,6 +214,111 @@ def _framed_digest(domain: bytes, fields: Sequence[bytes]) -> str:
     return hashlib.sha256(_framed(domain, fields)).hexdigest()
 
 
+def projection_measurement_family_id(
+    key: projections.ProjectionNamespaceKey,
+    *,
+    lane: str,
+    extractor_version: str,
+    model_version: str,
+) -> str:
+    """Return one canonical measurement-family identity beneath a namespace."""
+
+    if not isinstance(key, projections.ProjectionNamespaceKey):
+        raise projections.ProjectionCanonicalizationError(
+            "projection measurement namespace key is invalid"
+        )
+    if lane not in _MEASUREMENT_LANES:
+        raise projections.ProjectionCanonicalizationError(
+            "projection measurement lane is not registered"
+        )
+    extractor = _bounded_text(
+        extractor_version,
+        "projection measurement extractor version",
+        maximum=256,
+    )
+    model = _bounded_text(
+        model_version,
+        "projection measurement model version",
+        maximum=256,
+    )
+    return _framed_digest(
+        _MEASUREMENT_FAMILY_DOMAIN,
+        (
+            key.policy_fingerprint.encode("ascii"),
+            str(key.projector_schema_version).encode("ascii"),
+            str(key.catalog_generation).encode("ascii"),
+            lane.encode("ascii"),
+            extractor.encode("utf-8"),
+            model.encode("utf-8"),
+        ),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectionMeasurementRoot:
+    """Active-tuple commitment to one complete immutable measurement family."""
+
+    namespace_key: projections.ProjectionNamespaceKey
+    family_id: str
+    lane: str
+    extractor_version: str
+    model_version: str
+    measurement_count: int
+    vector_dimension: int | None
+    graph_edge_count: int
+    rows_digest: str
+
+    def __post_init__(self) -> None:
+        expected_family_id = projection_measurement_family_id(
+            self.namespace_key,
+            lane=self.lane,
+            extractor_version=self.extractor_version,
+            model_version=self.model_version,
+        )
+        if _digest(self.family_id, "measurement family id") != expected_family_id:
+            raise projections.ProjectionCanonicalizationError(
+                "projection measurement family identity does not verify"
+            )
+        if type(self.measurement_count) is not int or self.measurement_count < 0:
+            raise projections.ProjectionCanonicalizationError(
+                "projection measurement count does not verify"
+            )
+        if type(self.graph_edge_count) is not int or self.graph_edge_count < 0:
+            raise projections.ProjectionCanonicalizationError(
+                "projection graph edge count does not verify"
+            )
+        if self.lane == "graph":
+            if self.vector_dimension is not None or (
+                self.measurement_count == 0 and self.graph_edge_count != 0
+            ):
+                raise projections.ProjectionCanonicalizationError(
+                    "projection graph measurement dimension does not verify"
+                )
+            projections.require_supported_capacity(graph_edges=self.graph_edge_count)
+        else:
+            if self.graph_edge_count != 0 or (
+                self.measurement_count == 0 and self.vector_dimension is not None
+            ) or (
+                self.measurement_count > 0
+                and (
+                    type(self.vector_dimension) is not int
+                    or not 1 <= self.vector_dimension <= 4096
+                )
+            ):
+                raise projections.ProjectionCanonicalizationError(
+                    "projection vector measurement shape does not verify"
+                )
+        _digest(self.rows_digest, "projection measurement rows digest")
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectionNamespaceEvidence:
+    """Verified lexical manifest plus exact active measurement roots."""
+
+    manifest: VariantStoreManifest
+    required_measurement_roots: tuple[ProjectionMeasurementRoot, ...]
+
+
 def variant_store_path(
     vault_root: Path,
     key: projections.ProjectionNamespaceKey,
@@ -331,17 +439,54 @@ def catalog_descriptor_bytes(
     )
 
 
-def projection_namespace_evidence_bytes(manifest: VariantStoreManifest) -> bytes:
-    """Bind the ready lexical row root to one exact namespace tuple."""
-
+def _canonical_measurement_roots(
+    manifest: VariantStoreManifest,
+    roots: Iterable[ProjectionMeasurementRoot],
+) -> tuple[ProjectionMeasurementRoot, ...]:
     if not isinstance(manifest, VariantStoreManifest):
-        raise projections.ProjectionCanonicalizationError(
-            "projection namespace manifest is invalid"
-        )
+        raise ProjectionStoreMismatch("projection namespace manifest is invalid")
+    by_lane: dict[str, ProjectionMeasurementRoot] = {}
+    for root in roots:
+        if not isinstance(root, ProjectionMeasurementRoot):
+            raise ProjectionStoreMismatch(
+                "projection measurement root does not verify"
+            )
+        if root.namespace_key != manifest.namespace_key or root.lane in by_lane:
+            raise ProjectionStoreMismatch(
+                "projection measurement roots do not match the namespace"
+            )
+        by_lane[root.lane] = root
+    return tuple(by_lane[lane] for lane in ("vector", "clip", "graph") if lane in by_lane)
+
+
+def _measurement_root_value(root: ProjectionMeasurementRoot) -> dict[str, object]:
+    return {
+        "family_id": root.family_id,
+        "extractor_version": root.extractor_version,
+        "model_version": root.model_version,
+        "measurement_count": root.measurement_count,
+        "vector_dimension": root.vector_dimension,
+        "graph_edge_count": root.graph_edge_count,
+        "rows_digest": root.rows_digest,
+    }
+
+
+def projection_namespace_evidence_bytes(
+    manifest: VariantStoreManifest,
+    *,
+    required_measurement_roots: Iterable[ProjectionMeasurementRoot] = (),
+) -> bytes:
+    """Bind ready lexical and selected measurement roots to one namespace tuple."""
+
+    roots = _canonical_measurement_roots(manifest, required_measurement_roots)
     key = manifest.namespace_key
+    required_lane_roots: dict[str, object] = {"lexical": manifest.rows_digest}
+    required_lane_roots.update(
+        {root.lane: _measurement_root_value(root) for root in roots}
+    )
     return projections.canonical_jcs(
         {
-            "schema": _EVIDENCE_SCHEMA,
+            "schema": _EVIDENCE_SCHEMA_V2 if roots else _EVIDENCE_SCHEMA_V1,
             "policy_fingerprint": key.policy_fingerprint,
             "projector_schema_version": key.projector_schema_version,
             "catalog_generation": key.catalog_generation,
@@ -349,15 +494,15 @@ def projection_namespace_evidence_bytes(manifest: VariantStoreManifest) -> bytes
             "item_count": manifest.item_count,
             "variant_count": manifest.variant_count,
             "rows_digest": manifest.rows_digest,
-            "required_lane_roots": {"lexical": manifest.rows_digest},
+            "required_lane_roots": required_lane_roots,
         }
     )
 
 
-def manifest_from_namespace_evidence(
+def namespace_evidence_from_snapshot(
     snapshot: schema_v4.ActivePolicySnapshot,
-) -> VariantStoreManifest:
-    """Decode the exact active row-root commitment without sampling a store."""
+) -> ProjectionNamespaceEvidence:
+    """Decode the exact active lexical and measurement root commitments."""
 
     if not isinstance(snapshot, schema_v4.ActivePolicySnapshot):
         raise ProjectionStoreMismatch("active governance snapshot is unavailable")
@@ -409,6 +554,64 @@ def manifest_from_namespace_evidence(
         raise ProjectionStoreMismatch(
             "projection namespace evidence does not verify"
         ) from error
+    roots_value = value["required_lane_roots"]
+    if not isinstance(roots_value, dict) or "lexical" not in roots_value:
+        raise ProjectionStoreMismatch("projection namespace evidence does not verify")
+    measurement_roots: list[ProjectionMeasurementRoot] = []
+    if value["schema"] == _EVIDENCE_SCHEMA_V1:
+        if roots_value != {"lexical": manifest.rows_digest}:
+            raise ProjectionStoreMismatch(
+                "projection namespace evidence does not verify"
+            )
+    elif value["schema"] == _EVIDENCE_SCHEMA_V2:
+        if roots_value.get("lexical") != manifest.rows_digest or not set(
+            roots_value
+        ).issubset({"lexical", *_MEASUREMENT_LANES}):
+            raise ProjectionStoreMismatch(
+                "projection namespace evidence does not verify"
+            )
+        root_fields = {
+            "family_id",
+            "extractor_version",
+            "model_version",
+            "measurement_count",
+            "vector_dimension",
+            "graph_edge_count",
+            "rows_digest",
+        }
+        try:
+            for lane in ("vector", "clip", "graph"):
+                if lane not in roots_value:
+                    continue
+                root_value = roots_value[lane]
+                if not isinstance(root_value, dict) or set(root_value) != root_fields:
+                    raise ProjectionStoreMismatch(
+                        "projection measurement root does not verify"
+                    )
+                measurement_roots.append(
+                    ProjectionMeasurementRoot(
+                        namespace_key=key,
+                        family_id=root_value["family_id"],
+                        lane=lane,
+                        extractor_version=root_value["extractor_version"],
+                        model_version=root_value["model_version"],
+                        measurement_count=root_value["measurement_count"],
+                        vector_dimension=root_value["vector_dimension"],
+                        graph_edge_count=root_value["graph_edge_count"],
+                        rows_digest=root_value["rows_digest"],
+                    )
+                )
+        except (projections.ProjectionError, ProjectionStoreMismatch) as error:
+            raise ProjectionStoreMismatch(
+                "projection namespace evidence does not verify"
+            ) from error
+        if not measurement_roots:
+            raise ProjectionStoreMismatch(
+                "projection namespace evidence does not verify"
+            )
+    else:
+        raise ProjectionStoreMismatch("projection namespace evidence does not verify")
+    roots = tuple(measurement_roots)
     active = snapshot.active
     if (
         key.policy_fingerprint != active.policy_fingerprint
@@ -416,13 +619,26 @@ def manifest_from_namespace_evidence(
         or key.catalog_generation != active.catalog_generation
         or manifest.namespace_id != key.namespace_id
         or active.projection_namespace_id != key.namespace_id
-        or value["schema"] != _EVIDENCE_SCHEMA
-        or value["required_lane_roots"] != {"lexical": manifest.rows_digest}
         or projections.canonical_jcs(value) != raw
-        or projection_namespace_evidence_bytes(manifest) != raw
+        or projection_namespace_evidence_bytes(
+            manifest,
+            required_measurement_roots=roots,
+        )
+        != raw
     ):
         raise ProjectionStoreMismatch("projection namespace evidence does not verify")
-    return manifest
+    return ProjectionNamespaceEvidence(
+        manifest=manifest,
+        required_measurement_roots=roots,
+    )
+
+
+def manifest_from_namespace_evidence(
+    snapshot: schema_v4.ActivePolicySnapshot,
+) -> VariantStoreManifest:
+    """Decode the exact active lexical row-root commitment."""
+
+    return namespace_evidence_from_snapshot(snapshot).manifest
 
 
 def bind_active_projection_namespace(
@@ -456,15 +672,12 @@ def bind_active_projection_namespace(
             "projection namespace does not match the verified active tuple"
         )
     expected_catalog = catalog_descriptor_bytes(key, canonical_items)
-    expected_evidence = projection_namespace_evidence_bytes(manifest)
+    evidence = namespace_evidence_from_snapshot(snapshot)
     if not hmac.compare_digest(snapshot.catalog_descriptor, expected_catalog):
         raise ProjectionStoreMismatch(
             "projection catalog does not match the verified active tuple"
         )
-    if not hmac.compare_digest(
-        snapshot.projection_namespace_evidence,
-        expected_evidence,
-    ):
+    if evidence.manifest != manifest:
         raise ProjectionStoreMismatch(
             "projection evidence does not match the verified active tuple"
         )
@@ -1016,6 +1229,8 @@ def load_projection_variant(
 
 __all__ = [
     "ProjectionItemVariants",
+    "ProjectionMeasurementRoot",
+    "ProjectionNamespaceEvidence",
     "ProjectionStoreError",
     "ProjectionStoreMismatch",
     "VariantStoreManifest",
@@ -1024,6 +1239,8 @@ __all__ = [
     "catalog_descriptor_bytes",
     "load_projection_catalog",
     "load_projection_variant",
+    "namespace_evidence_from_snapshot",
+    "projection_measurement_family_id",
     "projection_namespace_evidence_bytes",
     "manifest_from_namespace_evidence",
     "stage_variant_store",

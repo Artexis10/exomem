@@ -15,8 +15,10 @@ from . import (
     authorization_custody,
     authorization_session_authority,
     authorization_session_lifecycle,
+    projected_graph,
     projected_retrieval,
     projection_authorization,
+    projection_measurement_store,
     projection_store,
     schema_v4,
     store,
@@ -52,6 +54,19 @@ _PROJECTED_SERVING_RELEASE_ACCEPTED = False
 class ActiveProjectionRuntime:
     snapshot: schema_v4.ActivePolicySnapshot
     namespace: projection_store.VerifiedProjectionNamespace
+    measurement_roots: tuple[projection_store.ProjectionMeasurementRoot, ...] = ()
+    vector_index: projected_retrieval.ProjectedVectorIndex | None = field(
+        default=None,
+        repr=False,
+    )
+    clip_index: projected_retrieval.ProjectedClipIndex | None = field(
+        default=None,
+        repr=False,
+    )
+    graph_index: projected_graph.ProjectedGraphIndex | None = field(
+        default=None,
+        repr=False,
+    )
     catalog: projected_retrieval.ProjectionCatalog = field(
         init=False,
         repr=False,
@@ -80,6 +95,72 @@ class ActiveProjectionRuntime:
             raise ProjectionRuntimeUnavailable(
                 "governed projected retrieval is unavailable"
             )
+        if not isinstance(self.measurement_roots, tuple):
+            raise ProjectionRuntimeUnavailable(
+                "governed projected retrieval is unavailable"
+            )
+        by_lane: dict[str, projection_store.ProjectionMeasurementRoot] = {}
+        for root_commitment in self.measurement_roots:
+            if (
+                not isinstance(
+                    root_commitment,
+                    projection_store.ProjectionMeasurementRoot,
+                )
+                or root_commitment.namespace_key != self.namespace.namespace_key
+                or root_commitment.lane in by_lane
+            ):
+                raise ProjectionRuntimeUnavailable(
+                    "governed projected retrieval is unavailable"
+                )
+            by_lane[root_commitment.lane] = root_commitment
+        ordered_roots = tuple(
+            by_lane[lane]
+            for lane in ("vector", "clip", "graph")
+            if lane in by_lane
+        )
+        if ordered_roots != self.measurement_roots:
+            raise ProjectionRuntimeUnavailable(
+                "governed projected retrieval is unavailable"
+            )
+        indexes = {
+            "vector": self.vector_index,
+            "clip": self.clip_index,
+            "graph": self.graph_index,
+        }
+        for lane, index in indexes.items():
+            root = by_lane.get(lane)
+            if (root is None) != (index is None):
+                raise ProjectionRuntimeUnavailable(
+                    "governed projected retrieval is unavailable"
+                )
+            if root is None or index is None:
+                continue
+            if lane == "vector":
+                if not isinstance(index, projected_retrieval.ProjectedVectorIndex):
+                    raise ProjectionRuntimeUnavailable(
+                        "governed projected retrieval is unavailable"
+                    )
+                index_key = index.namespace_key
+            elif lane == "clip":
+                if not isinstance(index, projected_retrieval.ProjectedClipIndex):
+                    raise ProjectionRuntimeUnavailable(
+                        "governed projected retrieval is unavailable"
+                    )
+                index_key = index.namespace_key
+            else:
+                if not isinstance(index, projected_graph.ProjectedGraphIndex):
+                    raise ProjectionRuntimeUnavailable(
+                        "governed projected retrieval is unavailable"
+                    )
+                index_key = index.catalog.namespace_key
+            if (
+                index_key != self.namespace.namespace_key
+                or index.extractor_version != root.extractor_version
+                or index.model_version != root.model_version
+            ):
+                raise ProjectionRuntimeUnavailable(
+                    "governed projected retrieval is unavailable"
+                )
         catalog = projected_retrieval.ProjectionCatalog(self.namespace)
         object.__setattr__(self, "catalog", catalog)
         object.__setattr__(
@@ -87,6 +168,13 @@ class ActiveProjectionRuntime:
             "lexical_index",
             projected_retrieval.ProjectedLexicalIndex(catalog),
         )
+
+    @property
+    def warming_components(self) -> tuple[str, ...]:
+        """Return model lanes absent from this immutable active tuple."""
+
+        ready = frozenset(root.lane for root in self.measurement_roots)
+        return tuple(lane for lane in ("vector", "clip", "graph") if lane not in ready)
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,9 +270,8 @@ def preactivate_projection_runtime(
             expected_activation_epoch=epoch,
             expected_activation_state_digest=digest,
         )
-        expected_manifest = projection_store.manifest_from_namespace_evidence(
-            snapshot
-        )
+        evidence = projection_store.namespace_evidence_from_snapshot(snapshot)
+        expected_manifest = evidence.manifest
         manifest, items = projection_store.load_projection_catalog(
             root,
             key=expected_manifest.namespace_key,
@@ -199,7 +286,62 @@ def preactivate_projection_runtime(
             manifest=manifest,
             items=items,
         )
-        runtime = ActiveProjectionRuntime(snapshot, namespace)
+        vector_index: projected_retrieval.ProjectedVectorIndex | None = None
+        clip_index: projected_retrieval.ProjectedClipIndex | None = None
+        graph_index: projected_graph.ProjectedGraphIndex | None = None
+        for root_commitment in evidence.required_measurement_roots:
+            family = projection_measurement_store.MeasurementFamilyKey(
+                namespace_key=namespace.namespace_key,
+                lane=root_commitment.lane,
+                extractor_version=root_commitment.extractor_version,
+                model_version=root_commitment.model_version,
+            )
+            if family.family_id != root_commitment.family_id:
+                raise ProjectionRuntimeUnavailable(
+                    "governed projected retrieval is unavailable"
+                )
+            if root_commitment.lane == "vector":
+                loaded_manifest, vector_index = (
+                    projection_measurement_store.load_vector_index(
+                        root,
+                        namespace=namespace,
+                        family=family,
+                        expected_rows_digest=root_commitment.rows_digest,
+                    )
+                )
+            elif root_commitment.lane == "clip":
+                loaded_manifest, clip_index = (
+                    projection_measurement_store.load_clip_index(
+                        root,
+                        namespace=namespace,
+                        family=family,
+                        expected_rows_digest=root_commitment.rows_digest,
+                    )
+                )
+            else:
+                loaded_manifest, graph_index = (
+                    projection_measurement_store.load_graph_index(
+                        root,
+                        namespace=namespace,
+                        family=family,
+                        expected_rows_digest=root_commitment.rows_digest,
+                    )
+                )
+            if (
+                projection_measurement_store.measurement_root(loaded_manifest)
+                != root_commitment
+            ):
+                raise ProjectionRuntimeUnavailable(
+                    "governed projected retrieval is unavailable"
+                )
+        runtime = ActiveProjectionRuntime(
+            snapshot,
+            namespace,
+            evidence.required_measurement_roots,
+            vector_index=vector_index,
+            clip_index=clip_index,
+            graph_index=graph_index,
+        )
         record = _PreactivatedProjectionRuntime(
             root_key=_root_key(root),
             cell_id=cell_id,
