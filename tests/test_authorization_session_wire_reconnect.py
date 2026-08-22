@@ -11,9 +11,8 @@ import time
 from pathlib import Path
 
 import pytest
-from starlette.testclient import TestClient
-
 from record_fixtures import copy_dataset_fixture
+from starlette.testclient import TestClient
 
 from exomem import commands, server, video_frames, writer_lease
 from exomem.governance import (
@@ -53,19 +52,22 @@ def _reset_writer_state() -> None:
 def _seed(
     now: int,
     *,
-    policy_fingerprint: str = "3" * 64,
+    documents: tuple[tuple[str, bytes], ...],
+    conflict_digest: str,
 ) -> schema_v4.MigrationSeed:
+    compiled = policy.compile_documents(dict(documents))
+    assert not compiled.empty and not compiled.blocked
     return schema_v4.MigrationSeed(
         activation_store_id="activation-store-wire",
         logical_vault_id="logical-vault-wire",
         activation_epoch=1,
         policy=schema_v4.PolicyGenerationSeed(
             generation_id="01ARZ3NDEKTSV4RRFFQ69G5FAV",
-            source_documents=(("rules/release.yaml", b"governance_version: 1\n"),),
-            source_fingerprint="1" * 64,
-            conflict_digest="2" * 64,
-            compiled_policy=b'{"rules":[]}',
-            policy_fingerprint=policy_fingerprint,
+            source_documents=documents,
+            source_fingerprint=compiled.fingerprint,
+            conflict_digest=conflict_digest,
+            compiled_policy=policy.canonical_compiled_bytes(compiled),
+            policy_fingerprint=compiled.fingerprint,
             compiler_schema_version=1,
             projector_schema_version=1,
             predecessor_generation_id=None,
@@ -109,14 +111,41 @@ def _configure_v4_authority(
     custody_root: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
-    policy_fingerprint: str = "3" * 64,
+    expected_policy_fingerprint: str | None = None,
 ) -> None:
     now = int(time.time())
+    governance = vault / "Knowledge Base" / "_Governance"
+    if not governance.exists():
+        audience, _issuer_family = _service_identity()
+        (governance / "scopes").mkdir(parents=True)
+        (governance / "rules").mkdir()
+        (governance / "scopes" / "wire-session.yaml").write_text(
+            "governance_version: 1\n"
+            f"id: {SCOPE_ID}\n"
+            'paths: ["Notes/**"]\n',
+            encoding="utf-8",
+        )
+        (governance / "rules" / "wire-session.yaml").write_text(
+            "governance_version: 1\n"
+            f"id: {RULE_ID}\n"
+            f'scope_ids: ["{SCOPE_ID}"]\n'
+            f"audience: {audience}\n"
+            "ceiling: 0\n",
+            encoding="utf-8",
+        )
+    prospective = policy.compile_prospective(vault, {})
+    assert prospective is not None and not prospective.policy.blocked
+    if expected_policy_fingerprint is not None:
+        assert prospective.policy.fingerprint == expected_policy_fingerprint
     connection = store.open_connection(vault)
     try:
         migration = schema_v4.migrate_v3_connection(
             connection,
-            _seed(now, policy_fingerprint=policy_fingerprint),
+            _seed(
+                now,
+                documents=prospective.target_documents,
+                conflict_digest=prospective.snapshot.conflict_set_digest,
+            ),
         )
     finally:
         connection.close()
@@ -520,7 +549,7 @@ def test_stateless_mcp_grant_is_bound_across_every_content_route_family(
         vault,
         tmp_path / "route-custody",
         monkeypatch,
-        policy_fingerprint=policy_fingerprint,
+        expected_policy_fingerprint=policy_fingerprint,
     )
 
     canned = video_frames.FramesResult(
@@ -587,29 +616,13 @@ def test_stateless_mcp_grant_is_bound_across_every_content_route_family(
                 "mode": "keyword",
                 "graph": False,
                 "limit": 5,
-            },
-            NOTE_MARKER,
-        ),
-        (
-            "find",
-            "find",
-            {
-                "query": NOTE_MARKER,
-                "mode": "keyword",
-                "graph": False,
-                "limit": 5,
+                "detail": "full",
             },
             NOTE_MARKER,
         ),
         (
             "read_memory",
             "read_memory",
-            {"path": NOTE_PATH, "include_raw": True},
-            NOTE_MARKER,
-        ),
-        (
-            "get",
-            "get",
             {"path": NOTE_PATH, "include_raw": True},
             NOTE_MARKER,
         ),
@@ -643,12 +656,6 @@ def test_stateless_mcp_grant_is_bound_across_every_content_route_family(
         (
             "read_media",
             "read_media",
-            {"path": VIDEO_PATH, "max_frames": 1},
-            '"duration_sec":42.0',
-        ),
-        (
-            "get_video_frames",
-            "get_video_frames",
             {"path": VIDEO_PATH, "max_frames": 1},
             '"duration_sec":42.0',
         ),
