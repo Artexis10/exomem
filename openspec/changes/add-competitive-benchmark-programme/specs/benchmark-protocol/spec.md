@@ -478,7 +478,7 @@ Each referenced private-gold member SHALL reject unknown fields and contain
 exactly literals `protocol_version: "1.0.0"`, `schema_version: 1`, and
 `artifact_type: "memorybench-private-gold.v1"`; `case_id_hmac_sha256`; raw upstream
 `question_id` and `container_tag`; `question`, `question_type`, and
-`ground_truth`; original-order unique `answer_session_ids` as
+canonical source `ground_truth` as `string|integer`; original-order unique `answer_session_ids` as
 `string[]|null`; the checkpoint and
 canonical-result source pairs as `checkpoint_path`/`checkpoint_sha256` and
 `canonical_result_path`/`canonical_result_sha256`; and sorted-unique private `missing_fields`

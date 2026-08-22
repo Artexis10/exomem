@@ -1142,6 +1142,44 @@ def test_public_projection_keeps_original_hit_order_and_private_gold_is_exactly_
     assert case["canonical_result"]["sha256"] == _sha(tmp_path / "memorybench/data/runs/run-01/results/q-01.json")
 
 
+def test_private_gold_preserves_numeric_ground_truth_from_the_canonical_dataset(
+    tmp_path: Path,
+) -> None:
+    plan = _plan(tmp_path)
+    payload = json.loads(plan.read_text(encoding="utf-8"))
+    dataset_path = Path(payload["dataset_path"])
+    dataset = json.loads(dataset_path.read_text(encoding="utf-8"))
+    dataset[0]["answer"] = 2026
+    dataset_path.write_text(json.dumps(dataset) + "\n", encoding="utf-8")
+    payload["dataset"]["sha256"] = _sha(dataset_path)
+    plan.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+    plan.chmod(0o600)
+
+    def stage(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        home = Path(kwargs["cwd"])
+        _materialize_native_runtime(home)
+        checkpoint_path = home / "data/runs/run-01/checkpoint.json"
+        checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        checkpoint["questions"][RAW_QID]["groundTruth"] = 2026
+        checkpoint_path.write_text(json.dumps(checkpoint) + "\n", encoding="utf-8")
+        result_path = home / "data/runs/run-01/results/q-01.json"
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+        result["groundTruth"] = 2026
+        result_path.write_text(json.dumps(result) + "\n", encoding="utf-8")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    result = _run(
+        plan,
+        **{**_valid_dependencies(tmp_path), "stage_runner": stage},
+    )
+
+    assert result.status == "VALID"
+    public = json.loads((tmp_path / "output/memorybench-export.v1.json").read_text())
+    private_path = tmp_path / "output" / public["cases"][0]["private_gold"]["path"]
+    private = json.loads(private_path.read_text())
+    assert private["ground_truth"] == 2026
+
+
 @pytest.mark.parametrize(
     "forgery",
     [

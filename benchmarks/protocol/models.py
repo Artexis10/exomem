@@ -935,7 +935,7 @@ class MemoryBenchPrivateGold(StrictModel):
     container_tag: str
     question: str
     question_type: str
-    ground_truth: str
+    ground_truth: str | int
     answer_session_ids: list[str] | None
     checkpoint_path: str = Field(min_length=1, json_schema_extra={"pattern": _ARTIFACT_PATH_PATTERN})
     checkpoint_sha256: str = Field(pattern=_SHA256_PATTERN)
