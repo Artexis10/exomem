@@ -6879,14 +6879,19 @@ _GovernanceOperation = Literal[
     "undo",
     "declare",
     "backfill_companion",
+    "session",
 ]
 if frozenset(_GovernanceOperation.__args__) != frozenset(governance_operations.OPERATION_SPECS):
     raise RuntimeError("govern_memory surface operation choices drifted from governance registry")
 
 
+_GovernanceSessionAction = Literal["open", "status", "rotate", "close"]
+
+
 def op_govern_memory(
     vault_root: Path,
     operation: _GovernanceOperation,
+    session_action: _GovernanceSessionAction | None = None,
     documents: dict[str, str] | None = None,
     selector_paths: list[str] | None = None,
     intent: str | None = None,
@@ -6918,7 +6923,10 @@ def op_govern_memory(
     Args:
         operation: Governance lifecycle operation: list, explain, simulate, propose,
             commit, grant, revoke, suspend, resume, undo, declare, or
-            backfill_companion.
+            backfill_companion. Use session with session_action for the
+            authorization-session lifecycle.
+        session_action: Authorization-session lifecycle action: open, status,
+            rotate, or close. Required only when operation is session.
         documents: Canonical policy documents proposed for a new policy version.
         selector_paths: Paths or glob selectors whose membership a proposal resolves.
         intent: Plain-language policy intent for a proposal.
@@ -6944,6 +6952,7 @@ def op_govern_memory(
         companion_input: Exact version-1 artifact, companion, semantics, and binding input.
     """
     values = {
+        "session_action": session_action,
         "documents": documents,
         "selector_paths": selector_paths,
         "intent": intent,

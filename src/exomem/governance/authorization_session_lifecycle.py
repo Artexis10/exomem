@@ -395,6 +395,83 @@ def _resolve_session(
         raise AuthorizationSessionUnavailable from None
 
 
+def _resolve_verified_context(
+    connection: sqlite3.Connection,
+    *,
+    custody: authorization_custody.AuthorizationCustody,
+    context: object,
+    now: int,
+) -> _ResolvedSession:
+    """Recheck dispatcher-verified context without receiving the raw bearer."""
+    try:
+        _ready_custody(connection, custody, now=now)
+        if not isinstance(context, AuthorizationSessionContext):
+            raise AuthorizationSessionUnavailable
+        rows = connection.execute(
+            "SELECT session_id, locator_digest, verifier, verifier_key_id, "
+            "credential_generation, principal_id, issuer_family, cell_id, "
+            "logical_vault_id, keyring_id, status, created_at, rotated_at, "
+            "expires_at, closed_at FROM governance_authorization_sessions "
+            "WHERE session_id=?",
+            (context.session_id,),
+        ).fetchall()
+        if len(rows) != 1:
+            raise AuthorizationSessionUnavailable
+        row = tuple(rows[0])
+        binding = authorization_sessions.AuthorizationSessionBinding(
+            session_id=str(row[0]),
+            principal_id=str(row[5]),
+            issuer_family=str(row[6]),
+            cell_id=str(row[7]),
+            logical_vault_id=str(row[8]),
+            keyring_id=str(row[9]),
+            credential_generation=int(row[4]),
+            expires_at=int(row[13]),
+        )
+        record = authorization_sessions.AuthorizationSessionVerifierRecord(
+            binding=binding,
+            verifier_key_id=str(row[3]),
+            locator_digest=bytes(row[1]),
+            verifier=bytes(row[2]),
+            status=str(row[10]),  # type: ignore[arg-type]
+        )
+        expected = _new_binding(
+            custody,
+            session_id=context.session_id,
+            principal_id=context.principal_id,
+            issuer_family=context.issuer_family,
+            credential_generation=context.credential_generation,
+            expires_at=context.expires_at,
+        )
+        key = next(
+            (
+                candidate
+                for candidate in custody.keyring.accepted_keys
+                if candidate.key_id == record.verifier_key_id
+            ),
+            None,
+        )
+        if (
+            key is None
+            or not key.not_before <= now < key.not_after
+            or binding.expires_at > key.not_after
+            or record.status != "active"
+            or binding != expected
+            or _context(binding) != context
+            or now >= context.expires_at
+        ):
+            raise AuthorizationSessionUnavailable
+        return _ResolvedSession(context, record)
+    except (
+        IndexError,
+        TypeError,
+        ValueError,
+        sqlite3.Error,
+        AuthorizationSessionUnavailable,
+    ):
+        raise AuthorizationSessionUnavailable from None
+
+
 def resume_session(
     connection: sqlite3.Connection,
     *,
@@ -437,6 +514,22 @@ def status_session(
     )
 
 
+def status_verified_session(
+    connection: sqlite3.Connection,
+    *,
+    custody: authorization_custody.AuthorizationCustody,
+    context: AuthorizationSessionContext,
+    now: int,
+) -> AuthorizationSessionContext:
+    """Recheck already-verified request context without forwarding its bearer."""
+    return _resolve_verified_context(
+        connection,
+        custody=custody,
+        context=context,
+        now=now,
+    ).context
+
+
 def rotate_session(
     connection: sqlite3.Connection,
     *,
@@ -457,6 +550,47 @@ def rotate_session(
         issuer_family=issuer_family,
         now=now,
     )
+    return _rotate_resolved_session(
+        connection,
+        custody=custody,
+        resolved=resolved,
+        now=now,
+        ttl_seconds=ttl_seconds,
+    )
+
+
+def rotate_verified_session(
+    connection: sqlite3.Connection,
+    *,
+    custody: authorization_custody.AuthorizationCustody,
+    context: AuthorizationSessionContext,
+    now: int,
+    ttl_seconds: int,
+) -> AuthorizationSessionIssuance:
+    """Rotate from immutable dispatcher context, never from a leaf bearer."""
+    resolved = _resolve_verified_context(
+        connection,
+        custody=custody,
+        context=context,
+        now=now,
+    )
+    return _rotate_resolved_session(
+        connection,
+        custody=custody,
+        resolved=resolved,
+        now=now,
+        ttl_seconds=ttl_seconds,
+    )
+
+
+def _rotate_resolved_session(
+    connection: sqlite3.Connection,
+    *,
+    custody: authorization_custody.AuthorizationCustody,
+    resolved: _ResolvedSession,
+    now: int,
+    ttl_seconds: int,
+) -> AuthorizationSessionIssuance:
     issuance_key = _ready_custody(connection, custody, now=now)
     expires_at = _expiry(
         now=now,
@@ -468,8 +602,8 @@ def rotate_session(
     binding = _new_binding(
         custody,
         session_id=resolved.context.session_id,
-        principal_id=principal_id,
-        issuer_family=issuer_family,
+        principal_id=resolved.context.principal_id,
+        issuer_family=resolved.context.issuer_family,
         credential_generation=resolved.context.credential_generation + 1,
         expires_at=expires_at,
     )
@@ -540,6 +674,32 @@ def close_session(
         issuer_family=issuer_family,
         now=now,
     )
+    return _close_resolved_session(connection, resolved=resolved, now=now)
+
+
+def close_verified_session(
+    connection: sqlite3.Connection,
+    *,
+    custody: authorization_custody.AuthorizationCustody,
+    context: AuthorizationSessionContext,
+    now: int,
+) -> AuthorizationSessionContext:
+    """Close from immutable dispatcher context, never from a leaf bearer."""
+    resolved = _resolve_verified_context(
+        connection,
+        custody=custody,
+        context=context,
+        now=now,
+    )
+    return _close_resolved_session(connection, resolved=resolved, now=now)
+
+
+def _close_resolved_session(
+    connection: sqlite3.Connection,
+    *,
+    resolved: _ResolvedSession,
+    now: int,
+) -> AuthorizationSessionContext:
     _begin_immediate(connection)
     try:
         closed = connection.execute(

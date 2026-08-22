@@ -352,7 +352,7 @@ made before both PRs and their combined verification are complete.
 - [ ] 5.15 Change escalation tokens, session grants, declarations, and revoke to bind the
   stable internal session ID plus principal/issuer/audience/purpose/expiry and exact
   path/fingerprint/scope bounds, never the raw bearer or a caller-selected handle.
-- [ ] 5.16 Add the generated `govern_memory(operation="session")` selector and explicit
+- [x] 5.16 Add the generated `govern_memory(operation="session")` selector and explicit
   open/status/rotate/close argument validation; treat legacy handles only as bounded
   echoes after capability verification and never as first-use authority.
 - [ ] 5.17 Run session, keyring/control/registry, membership epoch, migration/downmigration,

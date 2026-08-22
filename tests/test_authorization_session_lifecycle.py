@@ -386,6 +386,75 @@ def test_status_requires_a_live_credential_and_expiry_uses_the_common_shape() ->
     ).fetchone() == ("active", NOW + 60)
 
 
+def test_verified_request_context_can_status_rotate_and_close_without_bearer_forwarding() -> None:
+    connection, migration = _connection()
+    custody = _custody(migration.activation_state_digest)
+    opened = authorization_session_lifecycle.open_session(
+        connection,
+        custody=custody,
+        principal_id="principal:owner:1000",
+        issuer_family="cli-local-owner",
+        now=NOW,
+        ttl_seconds=600,
+    )
+
+    assert (
+        authorization_session_lifecycle.status_verified_session(
+            connection,
+            custody=custody,
+            context=opened.context,
+            now=NOW + 1,
+        )
+        == opened.context
+    )
+    rotated = authorization_session_lifecycle.rotate_verified_session(
+        connection,
+        custody=custody,
+        context=opened.context,
+        now=NOW + 2,
+        ttl_seconds=500,
+    )
+    assert rotated.context.session_id == opened.context.session_id
+    assert rotated.context.credential_generation == 2
+    with pytest.raises(authorization_session_lifecycle.AuthorizationSessionUnavailable):
+        authorization_session_lifecycle.resume_session(
+            connection,
+            custody=custody,
+            bearer=opened.bearer,
+            principal_id=opened.context.principal_id,
+            issuer_family=opened.context.issuer_family,
+            now=NOW + 3,
+        )
+    assert (
+        authorization_session_lifecycle.resume_session(
+            connection,
+            custody=custody,
+            bearer=rotated.bearer,
+            principal_id=rotated.context.principal_id,
+            issuer_family=rotated.context.issuer_family,
+            now=NOW + 3,
+        )
+        == rotated.context
+    )
+
+    closed = authorization_session_lifecycle.close_verified_session(
+        connection,
+        custody=custody,
+        context=rotated.context,
+        now=NOW + 4,
+    )
+    assert closed == rotated.context
+    with pytest.raises(authorization_session_lifecycle.AuthorizationSessionUnavailable):
+        authorization_session_lifecycle.resume_session(
+            connection,
+            custody=custody,
+            bearer=rotated.bearer,
+            principal_id=rotated.context.principal_id,
+            issuer_family=rotated.context.issuer_family,
+            now=NOW + 5,
+        )
+
+
 def test_open_refuses_stale_activation_or_excessive_ttl_without_writing() -> None:
     connection, migration = _connection()
 

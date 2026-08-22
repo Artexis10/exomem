@@ -48,6 +48,7 @@ HANDLER_STRATEGY_KEYS = frozenset(
         "proposal",
         "revoke_session",
         "revoke_standing",
+        "session",
         "toggle_rules",
         "undo",
     }
@@ -203,6 +204,12 @@ OPERATION_SPECS: Mapping[str, OperationSpec] = MappingProxyType(
                     recovery_policy="composite_companion",
                 ),
             ),
+        ),
+        "session": OperationSpec(
+            False,
+            "inspect",
+            authorization_exemption=True,
+            handler_key="session",
         ),
     }
 )
