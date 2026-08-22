@@ -429,7 +429,7 @@ made before both PRs and their combined verification are complete.
   governed and registry-proven never-enrolled modes: exact raw only when scrub-safe;
   otherwise deterministic content-free `SECRET_BLOCKED`, never redacted-as-raw, while
   full-raw hash and stale-edit semantics remain unchanged.
-- [ ] 7.2 Add red provenance fixtures covering forward/reverse citations, sources,
+- [x] 7.2 Add red provenance fixtures covering forward/reverse citations, sources,
   history, links, relation/supersession, and parent-media fields; prove no raw option or
   direct-read variant restores them below L6.
 - [ ] 7.3 Add red Tier-2 direct-content coverage for dataset rows, media bytes,
