@@ -21,6 +21,7 @@ from starlette.responses import JSONResponse
 from . import capabilities, cf_access, cli_ops, edit_operations, upload_tokens
 from . import commands as commands_module
 from .command_surface import canonical_request_id
+from .governance import authorization_request, authorization_transport
 from .server_transfer import TransferConfig
 
 _log = logging.getLogger(__name__)
@@ -308,14 +309,64 @@ def register_rest_facade(
             gate, principal_scope = _rest_gate(request)
             if gate is not None:
                 return gate
-            body = await _rest_body(request)
-            if body is None:
-                return _rest_err("INVALID_BODY", "request body must be a JSON object", 400)
+            if (
+                "authorization_session_credential" in request.query_params
+                or "principal" in request.query_params
+                or "principal_scope" in request.query_params
+                or "issuer" in request.query_params
+                or "cell_id" in request.query_params
+                or "authorization_session_id" in request.query_params
+            ):
+                return _rest_err(
+                    "AUTHORIZATION_SESSION_UNAVAILABLE",
+                    "authorization session is unavailable",
+                    400,
+                )
+            request_carrier = (
+                authorization_transport.current_request_authorization_carrier()
+            )
+            if request_carrier is None or request_carrier.is_invalid:
+                return _rest_err(
+                    "AUTHORIZATION_SESSION_UNAVAILABLE",
+                    "authorization session is unavailable",
+                    400,
+                )
             request_id = (
                 canonical_request_id(request.headers.get("x-exomem-request-id")) or "unknown"
             )
             t0 = time.perf_counter()
             try:
+                from .governance import principal as principal_module
+
+                principal = principal_module.resolve_rest_principal(principal_scope)
+                admission = await run_in_threadpool(
+                    authorization_request.verify_authorization_context,
+                    vault_root,
+                    principal=principal,
+                    credential=request_carrier.consume(),
+                    now=int(time.time()),
+                )
+                body = await _rest_body(request)
+                if body is None:
+                    raise cli_ops.OpError(
+                        "INVALID_BODY", "request body must be a JSON object"
+                    )
+                forbidden_identity_fields = {
+                    "authorization_session_credential",
+                    "principal",
+                    "principal_scope",
+                    "issuer",
+                    "cell_id",
+                    "logical_vault_id",
+                    "authorization_session_id",
+                }
+                if forbidden_identity_fields.intersection(body):
+                    raise authorization_request.AuthorizationContextUnavailable
+                rule = authorization_request.credential_rule(_cmd.name, body)
+                bound_principal = authorization_request.enforce_credential_rule(
+                    admission,
+                    rule,
+                )
                 if _cmd.name == "edit_memory":
                     body = edit_operations.normalize_edit_surface_arguments(body)
                 kwargs = cli_ops.coerce(
@@ -325,15 +376,13 @@ def register_rest_facade(
                 from .writer_lease import invoke_command
 
                 def invoke_bound() -> Any:
-                    from .governance import principal as principal_module
-
                     # Canonical audience at the REST boundary (design D5): a
                     # `None` scope is the vault's own shared key (owner); a
                     # CF-Access scope folds into the shared OAuth id space.
                     with capabilities.active_surface(
                         surface_descriptor
                     ), principal_module.request_scope(
-                        principal_module.resolve_rest_principal(principal_scope)
+                        bound_principal
                     ):
                         return invoke_command(
                             _cmd,
@@ -347,7 +396,13 @@ def register_rest_facade(
                         )
 
                 result = await run_in_threadpool(invoke_bound)
-            except (cli_ops.OpError, ValueError, TypeError) as exc:
+            except (
+                authorization_request.AuthorizationContextUnavailable,
+                authorization_request.AuthorizationRouteUnclassified,
+                cli_ops.OpError,
+                ValueError,
+                TypeError,
+            ) as exc:
                 err = cli_ops.error_dict(exc)
                 _log_rest_failure(
                     tool=_cmd.name,
@@ -418,6 +473,24 @@ def register_rest_facade(
                     "operationId": cmd.name,
                     "summary": summary,
                     "security": [{"bearerAuth": []}],
+                    "parameters": [
+                        {
+                            "name": (
+                                authorization_transport.AUTHORIZATION_SESSION_HEADER_NAME
+                            ),
+                            "in": "header",
+                            "required": False,
+                            "description": (
+                                "Optional opaque authorization-session capability; "
+                                "distinct from service Authorization."
+                            ),
+                            "schema": {
+                                "type": "string",
+                                "minLength": 70,
+                                "maxLength": 70,
+                            },
+                        }
+                    ],
                     "requestBody": {
                         "content": {"application/json": {"schema": request_schema}}
                     },

@@ -349,7 +349,7 @@ made before both PRs and their combined verification are complete.
 - [x] 5.14 Implement server-issued open/status/rotate/close with cryptographic randomness,
   typed issuance, keyed at-rest verifier, bounded TTL, atomic rotation, and close-time
   revocation of purpose, grants, and unconsumed tokens.
-- [ ] 5.15 Change escalation tokens, session grants, declarations, and revoke to bind the
+- [x] 5.15 Change escalation tokens, session grants, declarations, and revoke to bind the
   stable internal session ID plus principal/issuer/audience/purpose/expiry and exact
   path/fingerprint/scope bounds, never the raw bearer or a caller-selected handle.
 - [x] 5.16 Add the generated `govern_memory(operation="session")` selector and explicit

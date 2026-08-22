@@ -48,7 +48,7 @@ _ACTION_VOCABULARY_MAPS = {"front_door_actions", "simple_actions", "contract"}
 
 def _call_mcp(mcp, profile: str) -> dict:
     result = asyncio.run(
-        mcp.call_tool("bootstrap", {"profile": profile}, run_middleware=False)
+        mcp.call_tool("bootstrap", {"profile": profile}, run_middleware=True)
     )
     structured = getattr(result, "structured_content", None)
     if isinstance(structured, dict):

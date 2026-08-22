@@ -18,6 +18,7 @@ from fastmcp.tools import FunctionTool
 
 from . import __version__, capabilities
 from . import commands as commands_module
+from .governance import authorization_sessions, authorization_transport
 from .hosted_runtime import (
     HOSTED_PROTOCOL_VERSION,
     SUPPORTED_HOSTED_PROTOCOL_VERSIONS,
@@ -624,6 +625,15 @@ def build_gateway_contract(
             "request": REQUEST_HEADER,
             "principal": PRINCIPAL_HEADER,
             "idempotency": "Idempotency-Key",
+        },
+        "authorization_session": {
+            "carrier": "header",
+            "name": authorization_transport.AUTHORIZATION_SESSION_HEADER_NAME,
+            "service_authorization_header": "Authorization",
+            "body_allowed": False,
+            "query_allowed": False,
+            "min_length": authorization_sessions.AUTHORIZATION_SESSION_CREDENTIAL_BYTES,
+            "max_length": authorization_sessions.AUTHORIZATION_SESSION_CREDENTIAL_BYTES,
         },
         "envelopes": {
             "success": {

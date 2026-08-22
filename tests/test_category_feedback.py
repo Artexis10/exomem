@@ -28,6 +28,7 @@ from exomem import (
     server,
 )
 from exomem.__main__ import main
+from exomem.governance import principal as principal_module
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -434,7 +435,10 @@ def _cross_surface_server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 def _mcp_call(mcp, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-    result = asyncio.run(mcp.call_tool(name, arguments, run_middleware=False))
+    with principal_module.request_scope(
+        principal_module.owner_principal(surface="mcp")
+    ):
+        result = asyncio.run(mcp.call_tool(name, arguments, run_middleware=False))
     if isinstance(result.structured_content, dict):
         return result.structured_content
     return json.loads(result.content[0].text)

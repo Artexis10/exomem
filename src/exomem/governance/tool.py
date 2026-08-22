@@ -37,6 +37,7 @@ from .. import (
 from ..kbdir import kb_dirname
 from . import (
     authorization_custody,
+    authorization_session_authority,
     authorization_session_lifecycle,
     companion_backfill,
     decisions,
@@ -123,6 +124,9 @@ def _require_authorization_session(
     value: RequestPrincipal | None, supplied: Any
 ) -> tuple[RequestPrincipal, str]:
     who = _principal(value)
+    if who.verified_authorization_session is not None:
+        context = _verified_session_context(who, supplied)
+        return who, context.session_id
     handle = str(supplied or "").strip()
     if (
         not who.resolved
@@ -137,11 +141,25 @@ def _require_authorization_session(
     return who, handle
 
 
-def _authorize_operation(selection: OperationVariant, kwargs: Mapping[str, Any]) -> None:
+def _authorize_operation(
+    vault_root: Path,
+    selection: OperationVariant,
+    kwargs: Mapping[str, Any],
+) -> None:
     """Apply the registry's coarse authorization before handler-specific bounds."""
     if selection.authorization == "owner":
         _require_owner(kwargs.get("principal"))
     elif selection.authorization in {"self_session", "token_session"}:
+        who = _principal(kwargs.get("principal"))
+        if who.verified_authorization_session is None:
+            if (
+                store.authorization_session_schema_version(vault_root)
+                != store.SCHEMA_USER_VERSION
+            ):
+                raise GovernanceError(
+                    "AUTHORIZATION_SESSION_REQUIRED",
+                    "a verified authorization session is required",
+                )
         _require_authorization_session(
             kwargs.get("principal"), kwargs.get("authorization_session")
         )
@@ -960,6 +978,8 @@ def _grant_projection(
 
 
 def _grant(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
+    if _principal(kwargs.get("principal")).verified_authorization_session is not None:
+        return _grant_v4(vault_root, **kwargs)
     selection = kwargs["_selection"]
     who, authorization_session = _require_authorization_session(
         kwargs.get("principal"), kwargs.get("authorization_session")
@@ -1192,6 +1212,143 @@ def _grant(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
     }
 
 
+def _v4_authority_inputs(
+    vault_root: Path,
+    kwargs: Mapping[str, Any],
+) -> tuple[
+    RequestPrincipal,
+    authorization_session_lifecycle.AuthorizationSessionContext,
+    authorization_custody.AuthorizationCustody,
+    sqlite3.Connection,
+    int,
+]:
+    who = _principal(kwargs.get("principal"))
+    context = _verified_session_context(who, kwargs.get("authorization_session"))
+    raw_now = kwargs.get("now", int(time.time()))
+    if isinstance(raw_now, bool) or not isinstance(raw_now, (int, float)) or raw_now <= 0:
+        raise GovernanceError("AUTHORIZATION_SESSION_UNAVAILABLE", "authorization session is unavailable")
+    now = int(raw_now)
+    connection: sqlite3.Connection | None = None
+    try:
+        custody = authorization_custody.load_authorization_custody(vault_root, now=now)
+        if (
+            custody.keyring.cell_id != context.cell_id
+            or custody.keyring.logical_vault_id != context.logical_vault_id
+            or custody.keyring.keyring_id != context.keyring_id
+        ):
+            raise authorization_session_lifecycle.AuthorizationSessionUnavailable
+        connection = store.open_authorization_session_connection(vault_root)
+        return who, context, custody, connection, now
+    except (
+        authorization_custody.AuthorizationCustodyUnavailable,
+        authorization_session_lifecycle.AuthorizationSessionUnavailable,
+        FileNotFoundError,
+        OSError,
+        sqlite3.Error,
+        store.UnsupportedGovernanceSchema,
+    ):
+        if connection is not None:
+            connection.close()
+        raise GovernanceError(
+            "AUTHORIZATION_SESSION_UNAVAILABLE",
+            "authorization session is unavailable",
+        ) from None
+
+
+def _inspect_v4_token(
+    connection: sqlite3.Connection,
+    *,
+    custody: authorization_custody.AuthorizationCustody,
+    context: authorization_session_lifecycle.AuthorizationSessionContext,
+    token: object,
+    audience: str,
+    purpose: str | None,
+    now: int,
+) -> tuple[authorization_session_authority.EscalationReview, bytes]:
+    for verifier in custody.keyring.accepted_keys:
+        try:
+            review = authorization_session_authority.inspect_escalation_token(
+                connection,
+                token=token,
+                context=context,
+                signing_key=verifier.key,
+                audience=audience,
+                purpose=purpose,
+                now=now,
+            )
+        except authorization_session_lifecycle.AuthorizationSessionUnavailable:
+            continue
+        return review, verifier.key
+    raise GovernanceError("AUTHORIZATION_SESSION_UNAVAILABLE", "authorization session is unavailable")
+
+
+def _grant_v4(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
+    who, context, custody, connection, now = _v4_authority_inputs(vault_root, kwargs)
+    try:
+        purpose = kwargs.get("purpose")
+        if purpose is None:
+            purpose = who.purpose
+        if purpose is None:
+            purpose = authorization_session_authority.active_session_purpose(
+                connection,
+                context=context,
+                audience=who.audience_id,
+                now=now,
+            )
+        review, signing_key = _inspect_v4_token(
+            connection,
+            custody=custody,
+            context=context,
+            token=kwargs.get("token"),
+            audience=who.audience_id,
+            purpose=purpose,
+            now=now,
+        )
+        bound_policy = policy_module.load(vault_root)
+        if bound_policy.empty or bound_policy.blocked:
+            raise GovernanceError("GOVERNANCE_BLOCKED", "current policy cannot be evaluated")
+        membership_rows = _resolved_membership_manifest(
+            vault_root,
+            bound_policy,
+            review.paths,
+        )
+        fingerprints = dict(zip(review.paths, review.fingerprints, strict=True))
+        current_membership = tuple(
+            authorization_session_authority.SessionMembership(
+                path=str(row["path"]),
+                fingerprint=_content_hash(vault_root / str(row["path"])),
+                scope_ids=tuple(str(scope) for scope in row["scope_ids"]),
+            )
+            for row in membership_rows
+        )
+        if any(
+            row.fingerprint != fingerprints.get(row.path)
+            for row in current_membership
+        ):
+            raise GovernanceError("AUTHORIZATION_SESSION_UNAVAILABLE", "authorization session is unavailable")
+        duration = max(1, int(kwargs.get("duration_seconds", 3600)))
+        grant = authorization_session_authority.redeem_escalation_token(
+            connection=connection,
+            token=kwargs.get("token"),
+            context=context,
+            signing_key=signing_key,
+            audience=who.audience_id,
+            purpose=purpose,
+            membership=current_membership,
+            policy_fingerprint=bound_policy.fingerprint,
+            now=now,
+            grant_expires_at=min(review.expires_at, now + duration),
+        )
+        return {"status": "committed", "grant_id": grant.grant_id}
+    except authorization_session_lifecycle.AuthorizationSessionUnavailable:
+        raise GovernanceError(
+            "AUTHORIZATION_SESSION_UNAVAILABLE",
+            "authorization session is unavailable",
+        ) from None
+    finally:
+        connection.close()
+
+
 def _single_sidecar_transition(
     vault_root: Path,
     *,
@@ -1262,6 +1419,8 @@ def _single_sidecar_transition(
 
 
 def _declare(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
+    if _principal(kwargs.get("principal")).verified_authorization_session is not None:
+        return _declare_v4(vault_root, **kwargs)
     who, authorization_session = _require_authorization_session(
         kwargs.get("principal"), kwargs.get("authorization_session")
     )
@@ -1431,10 +1590,57 @@ def _declare(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
     }
 
 
+def _declare_v4(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
+    who, context, _custody, connection, now = _v4_authority_inputs(vault_root, kwargs)
+    purpose = str(kwargs.get("purpose") or "").strip()
+    if not purpose or len(purpose) > 256:
+        connection.close()
+        raise GovernanceError("INVALID_PURPOSE", "purpose is required")
+    expires_at = min(
+        context.expires_at,
+        now + max(1, int(kwargs.get("duration_seconds", 3600))),
+    )
+    try:
+        prior = authorization_session_authority.active_session_purpose(
+            connection,
+            context=context,
+            audience=who.audience_id,
+            now=now,
+        )
+        direction = _purpose_direction(
+            vault_root,
+            audience=who.audience_id,
+            before_purpose=prior,
+            after_purpose=purpose,
+        )
+        authorization_session_authority.declare_purpose(
+            connection,
+            context=context,
+            audience=who.audience_id,
+            purpose=purpose,
+            now=now,
+            expires_at=expires_at,
+        )
+        return {
+            "status": "committed",
+            "purpose": purpose,
+            "direction": direction,
+        }
+    except authorization_session_lifecycle.AuthorizationSessionUnavailable:
+        raise GovernanceError(
+            "AUTHORIZATION_SESSION_UNAVAILABLE",
+            "authorization session is unavailable",
+        ) from None
+    finally:
+        connection.close()
+
+
 def _revoke(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
     selection = kwargs["_selection"]
     if kwargs.get("scope") != "session":
         raise GovernanceError("INVALID_REVOKE_SCOPE", "scope must be session or standing")
+    if _principal(kwargs.get("principal")).verified_authorization_session is not None:
+        return _revoke_v4(vault_root, **kwargs)
     who, authorization_session = _require_authorization_session(
         kwargs.get("principal"), kwargs.get("authorization_session")
     )
@@ -1549,6 +1755,25 @@ def _revoke(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
     receipts.commit_event(vault_root, event_id, outcome="prepared")
     _activate_event(vault_root, event_id, remove_marker=False, now=now)
     return {"status": "committed", "event_id": event_id, "revoked": len(grant_ids)}
+
+
+def _revoke_v4(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
+    who, context, _custody, connection, now = _v4_authority_inputs(vault_root, kwargs)
+    try:
+        revoked = authorization_session_authority.revoke_session_grants(
+            connection,
+            context=context,
+            audience=who.audience_id,
+            now=now,
+        )
+        return {"status": "committed", "revoked": revoked}
+    except authorization_session_lifecycle.AuthorizationSessionUnavailable:
+        raise GovernanceError(
+            "AUTHORIZATION_SESSION_UNAVAILABLE",
+            "authorization session is unavailable",
+        ) from None
+    finally:
+        connection.close()
 
 
 def _effective_transition_direction(
@@ -3117,7 +3342,7 @@ def op_govern_memory(vault_root: Path, operation: str, **kwargs: Any) -> dict[st
     if operation == "session":
         _validate_session_arguments(kwargs)
     if not spec.read_only:
-        _authorize_operation(selection, kwargs)
+        _authorize_operation(root, selection, kwargs)
         # One registry-driven gate for every authoring operation, rather than
         # thirteen `.blocked` sites. Prospective policy paths independently
         # re-probe the conflict set around their held-handle byte acquisition;
