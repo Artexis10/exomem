@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 from dataclasses import replace
 
 import pytest
 
 from exomem.governance import bridges, projections
-from exomem.governance.decisions import Decision
-from exomem.governance.policy import Policy, Rule, Scope
+from exomem.governance.decisions import Decision, decide
+from exomem.governance.policy import Policy, Rule, Scope, StandingGrant
+from exomem.governance.principal import OWNER_AUDIENCE
 
 
 def test_namespace_key_excludes_content_and_measurement_versions() -> None:
@@ -367,6 +369,106 @@ def test_enumerator_covers_finite_audience_purpose_and_session_grant_domain() ->
     assert b"projection-unlisted" not in serialized
     assert b"review" not in serialized
     assert b"session" not in serialized
+
+
+def test_finite_enumerator_matches_exhaustive_two_scope_grant_domain() -> None:
+    first = Scope(
+        id="scope-first",
+        source="scopes/first.yaml",
+        default_deny=True,
+        constraint="First constraint",
+    )
+    second = Scope(
+        id="scope-second",
+        source="scopes/second.yaml",
+        default_deny=True,
+        constraint="Second constraint",
+    )
+    policy = Policy(
+        fingerprint="a" * 64,
+        scopes={first.id: first, second.id: second},
+        rules=(
+            Rule(
+                id="rule-first",
+                source="rules/first.yaml",
+                scope_ids=(first.id,),
+                audience="audience-a",
+                ceiling=5,
+                options={
+                    "notice": "Restricted",
+                    "constraint": "First constraint",
+                    "abstract": "Shared abstract",
+                },
+            ),
+            Rule(
+                id="rule-second",
+                source="rules/second.yaml",
+                scope_ids=(second.id,),
+                audience="audience-a",
+                ceiling=4,
+                purpose="review",
+                purpose_condition="outside",
+                options={
+                    "notice": "Restricted",
+                    "constraint": "Second constraint",
+                    "abstract": "Shared abstract",
+                },
+            ),
+        ),
+    )
+    kwargs = {
+        "item_identity": "item-exhaustive",
+        "content_hash": "b" * 64,
+        "projector_schema_version": 1,
+        "full_search_fields": {"title": "Full title", "body": "Full body"},
+    }
+
+    actual = projections.enumerate_projection_variants(
+        scope_ids=(first.id, second.id),
+        policy=policy,
+        **kwargs,
+    )
+
+    expected_ids: set[str] = set()
+    audiences = (
+        OWNER_AUDIENCE,
+        "audience-a",
+        "projection-unlisted-audience-0",
+    )
+    purposes = (None, "review", "projection-unlisted-purpose-0")
+    for audience, purpose, ceilings in itertools.product(
+        audiences,
+        purposes,
+        itertools.product((None, *range(7)), repeat=2),
+    ):
+        grants = tuple(
+            StandingGrant(
+                id=f"grant-{index}-{ceiling}",
+                source="exhaustive-test",
+                scope_ids=(scope_id,),
+                audience=audience,
+                ceiling=ceiling,
+            )
+            for index, (scope_id, ceiling) in enumerate(
+                zip((first.id, second.id), ceilings, strict=True)
+            )
+            if ceiling is not None
+        )
+        decision = decide(
+            (first.id, second.id),
+            audience=audience,
+            purpose=purpose,
+            policy=policy,
+            active_grants=grants,
+        )
+        variant = projections.build_projection_variant(
+            decision=decision,
+            **kwargs,
+        )
+        if variant is not None:
+            expected_ids.add(variant.projection_variant_id)
+
+    assert {variant.projection_variant_id for variant in actual} == expected_ids
 
 
 def test_enumerator_refuses_257_unique_reachable_outputs() -> None:
