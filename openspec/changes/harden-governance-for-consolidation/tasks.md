@@ -323,7 +323,7 @@ made before both PRs and their combined verification are complete.
   member blocking, old/new key overlap, issuance switch, max-TTL+skew/live-row drain,
   explicit `SERVING -> DRAINING`, no-in-flight acknowledgement, epoch advance/removal,
   and current-epoch rejoin. Silence/gossip MUST NOT remove a replica from the intersection.
-- [ ] 5.9 Add red same-principal cross-session tests: tokens, grants, purpose, revoke, and
+- [x] 5.9 Add red same-principal cross-session tests: tokens, grants, purpose, revoke, and
   close from session A are rejected or isolated in session B; missing/unresolved session
   refuses without consuming or writing anything.
 - [ ] 5.10 Implement transactional schema v4
