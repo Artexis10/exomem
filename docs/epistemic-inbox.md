@@ -144,7 +144,17 @@ makes the review surfaces refuse with `REVIEW_STATE_INVALID` rather than answer
 as though nothing had ever been decided, because the second one silently
 resurrects every dismissal in the vault. `maintain_memory(mode="reconcile")` is
 the way back — it reads at a raised limit precisely so a store that outgrew the
-ordinary one can still be compacted.
+ordinary one can still be compacted, and it reports `review_state_compaction:
+{"error": ...}` when it cannot, because a healer that fails silently is
+indistinguishable from one that found nothing to do.
+
+The due-state carriers fail closed too, in the direction that suits a carrier:
+they serve **no block** rather than refusing. Every count they report is
+filtered by a triage decision and a family disposition read out of the same
+store, so an unreadable one would otherwise put every dismissed item back in
+front of you. Silence costs an advisory you can still ask for by name; the
+alternative costs the trust that dismissing works. The write itself is
+unaffected — this is the advisory attached to the response, not the mutation.
 
 The store compacts itself, within limits worth stating plainly. Expired snoozes
 older than 90 days and ledger entries older than 400 days are dropped once the
@@ -166,12 +176,17 @@ checkable rather than merely claimed, and checking it is the point of writing
 them down.
 
 The section also carries `due_total`: how many items were in the last block a
-caller was actually handed. Without a denominator "no blocks for twelve writes"
-is unreadable, because it is equally the shape of governance working and the
-shape of a batch that delivered nothing, and a metric that cannot tell those
-apart cannot be used to claim either. It has exactly one writer — the delivery
-path — so a vault that has delivered nothing reports `0`, which is the honest
-answer rather than a flattering one.
+caller was actually handed. It has exactly one writer — the delivery path — so a
+vault that has delivered nothing reports `0`. It is informational, and
+deliberately not a measure of any particular batch: it describes the last
+delivery whenever that happened, and survives every batch after it.
+
+Telling "governance suppressed eleven repeats" from "this batch delivered
+nothing" therefore needs the DELTA, not the totals. `writes` and `emissions` are
+cumulative over the vault's whole life, so the batch under test is the
+difference between two readings — which is what the bench's counter assertion
+compares, and why a batch that delivered nothing reports `unsupported` instead
+of inheriting a `pass` from a block emitted before it started.
 
 Which is what it reports today. No product command commits more than one
 governed write through the write carrier: measured on `adoption_studio` apply,

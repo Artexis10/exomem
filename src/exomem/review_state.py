@@ -259,6 +259,41 @@ def parse_reason(why: str | None) -> tuple[str, str | None]:
     return DEFAULT_REASON, text
 
 
+#: Every error code this module raises, as a closed vocabulary. Callers that
+#: surface a failure to a client report the CODE and never the message: the
+#: messages carry the store's absolute path, and a tool result is not the place
+#: for one. `tests/test_review_state.py` checks this set against the module's
+#: own `raise` sites, so adding a code without adding it here fails.
+STORE_ERROR_CODES: frozenset[str] = frozenset(
+    {
+        "INVALID_REVIEW_ACTION",
+        "INVALID_REVIEW_FAMILY",
+        "INVALID_REVIEW_REASON",
+        "INVALID_REVIEW_REFERENCE",
+        "INVALID_SNOOZE_DATE",
+        "INVALID_SURFACE",
+        "REVIEW_STATE_INVALID",
+    }
+)
+
+
+def error_code(error: BaseException) -> str:
+    """A safe, path-free code for one store failure.
+
+    Matched against the closed vocabulary above rather than parsed out of the
+    message. Splitting on the first colon looked equivalent and is not: an
+    `OSError` reads `cannot read <the store's absolute path>: <reason>`, which
+    has a colon too, so that spelling put the operator's home directory into a
+    tool result. Anything unrecognised falls back to the exception class name,
+    which carries no content of its own.
+    """
+    text = str(error)
+    for code in STORE_ERROR_CODES:
+        if text.startswith(code):
+            return code
+    return type(error).__name__
+
+
 def refs_for_paths(vault_root: Path, paths: list[str]) -> dict[str, str]:
     """Canonical memory refs where available, portable path refs otherwise."""
     clean = list(dict.fromkeys(str(path).replace("\\", "/").lstrip("/") for path in paths))

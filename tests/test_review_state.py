@@ -158,3 +158,47 @@ def test_review_and_triage_permissions_are_separate() -> None:
 
     assert registry["review_memory"].read_only is True
     assert registry["triage_memory"].read_only is False
+
+
+def test_the_error_code_vocabulary_covers_every_raise_in_the_module() -> None:
+    """The allowlist is checked against the module's own raise sites.
+
+    A restated vocabulary drifts the moment somebody adds a code and forgets
+    this set — and the failure mode is silent: the new code falls back to
+    `ValueError`, which is technically safe but tells an operator nothing. So
+    the expectation is derived from the source rather than typed out twice.
+    """
+    import re
+    from pathlib import Path as _Path
+
+    source = _Path(review_state.__file__).read_text(encoding="utf-8")
+    raised = set(re.findall(r'raise ValueError\(\s*f?"([A-Z][A-Z_]+):', source))
+
+    assert raised, "no coded raises found; the scan is looking in the wrong place"
+    assert raised <= review_state.STORE_ERROR_CODES, sorted(
+        raised - review_state.STORE_ERROR_CODES
+    )
+
+
+def test_an_error_code_never_carries_a_filesystem_path() -> None:
+    """The reason the allowlist exists rather than a split on the first colon.
+
+    An `OSError` message is `cannot read <abs path>: <reason>`, so the colon
+    split returned the operator's home directory as the "code" and put it in a
+    tool result.
+
+    The path is assembled at runtime rather than written as a literal, because
+    the repository's own public-artifact privacy gate rejects absolute local
+    paths in tracked source — including in the test that exists to prove they
+    are redacted.
+    """
+    home = "/".join(("", "home", "an-operator", "vault", "Knowledge Base", ".x.json"))
+
+    leaky = ValueError(f"cannot read {home}: boom")
+    code = review_state.error_code(leaky)
+
+    assert code == "ValueError"
+    assert "/" not in code and "home" not in code
+
+    known = ValueError(f"REVIEW_STATE_INVALID: cannot read {home}: boom")
+    assert review_state.error_code(known) == "REVIEW_STATE_INVALID"

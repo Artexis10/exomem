@@ -250,9 +250,8 @@ def test_an_unreadable_store_makes_the_carrier_serve_nothing(vault: Path) -> Non
     get it from `review_memory`, and a write must not fail because its optional
     advisory could not be computed. So: no block, and the write is untouched.
     """
-    from exomem import commands
+    from exomem import commands, writer_lease
     from exomem import due_state as due_state_module
-    from exomem import writer_lease
 
     _dismiss_one(vault)
     overdue_prediction(vault, "nag-open")

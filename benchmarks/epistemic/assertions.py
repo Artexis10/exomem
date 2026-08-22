@@ -35,7 +35,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
 from types import MappingProxyType
-from typing import Literal, TypeVar
+from typing import Any, Literal, TypeVar
 
 from membench.scoring.gates import states_value
 from pydantic import Field
@@ -263,8 +263,10 @@ FINGERPRINT_RAW_KEYS: frozenset[str] = frozenset(
 PASS_COUNT_RAW_KEYS: frozenset[str] = frozenset({"passes", "pass_count", "maintenance_passes"})
 EMISSION_COUNT_RAW_KEYS: frozenset[str] = frozenset({"emissions", "emission_count"})
 WRITE_COUNT_RAW_KEYS: frozenset[str] = frozenset({"writes", "write_count", "batch_size"})
-#: How many items the carrier had to report. A zero here means the batch had
-#: nothing to emit, which makes "no repetition" true for the wrong reason.
+#: How big the LAST DELIVERED block was. Informational only: it persists across
+#: batches, so it cannot say whether the batch under test delivered anything —
+#: that is the emission delta's job (see
+#: `counter_emission_not_repeated_per_write`).
 DUE_TOTAL_RAW_KEYS: frozenset[str] = frozenset({"due_total", "outstanding_total"})
 #: Attribute keys marking an item as the continuation packet, and the response
 #: detail level a carrier journey ran at.
@@ -2750,12 +2752,40 @@ def dismissal_respected_across_passes(ctx: AssertionContext) -> AssertionResult:
     )
 
 
+def _counters_block(snapshot: Any) -> Any:
+    """The due-state counters item on one snapshot, or ``None``."""
+    if snapshot is None:
+        return None
+    for item in snapshot.items:
+        if (
+            _signal_surface(item) == "due_state_counters"
+            and _raw_value(item, EMISSION_COUNT_RAW_KEYS) is not None
+        ):
+            return item
+    return None
+
+
 def counter_emission_not_repeated_per_write(ctx: AssertionContext) -> AssertionResult:
     """f23: a bulk batch does not emit one identical counters block per write.
 
     Counter-repetition is nagging under another name — the user asked for one
     batch and received N notifications — so the governance is asserted here
     rather than left to product taste.
+
+    **Scored on the DELTA between the two snapshots, not on the totals.**
+    `writes` and `emissions` are cumulative counters over the vault's whole
+    life, so a ratio taken from the later snapshot alone answers a question
+    about every batch that vault ever ran, not about the one under test. The
+    denominator that makes the verdict about THIS batch is
+    `later - prior`, and the assertion already receives both snapshots.
+
+    An earlier version used the projection's `due_total` as the anti-vacuity
+    guard. That field is the size of the LAST DELIVERED block and it persists,
+    so once any earlier delivery had happened it stayed positive forever — and
+    a later batch that delivered nothing scored `pass` on the strength of one
+    block emitted before it started. `due_total` stays in the projection as
+    what it is (informational: how big the last delivered block was) and no
+    longer gates anything.
     """
 
     name = "counter_emission_not_repeated_per_write"
@@ -2763,20 +2793,14 @@ def counter_emission_not_repeated_per_write(ctx: AssertionContext) -> AssertionR
     if gated is not None:
         return gated
 
-    blocks = [
-        item
-        for item in ctx.snapshot.items
-        if _signal_surface(item) == "due_state_counters"
-        and _raw_value(item, EMISSION_COUNT_RAW_KEYS) is not None
-    ]
-    if not blocks:
+    block = _counters_block(ctx.snapshot)
+    if block is None:
         return _result(
             name,
             "unsupported",
             "no due-state counters block records an emission count",
             ctx.subject,
         )
-    block = blocks[0]
     emissions = _raw_int(block, EMISSION_COUNT_RAW_KEYS)
     writes = _raw_int(block, WRITE_COUNT_RAW_KEYS)
     if emissions is None or writes is None:
@@ -2786,39 +2810,59 @@ def counter_emission_not_repeated_per_write(ctx: AssertionContext) -> AssertionR
             f"{block.id} does not record both an emission count and a write count",
             ctx.subject,
         )
-    if writes < 2:
+
+    # The baseline. A run with no prior snapshot is measured from zero, which is
+    # correct for a vault that starts empty and is the only honest reading when
+    # there is nothing earlier to subtract.
+    before = _counters_block(ctx.prior)
+    prior_writes = _raw_int(before, WRITE_COUNT_RAW_KEYS) if before is not None else None
+    prior_emissions = (
+        _raw_int(before, EMISSION_COUNT_RAW_KEYS) if before is not None else None
+    )
+    writes_delta = writes - (prior_writes or 0)
+    emissions_delta = emissions - (prior_emissions or 0)
+
+    if writes_delta < 0 or emissions_delta < 0:
         return _result(
             name,
             "unsupported",
-            f"{block.id} records {writes} write(s); counter repetition needs a bulk batch",
+            f"{block.id} counters went backwards between the snapshots "
+            f"(writes {prior_writes}->{writes}, emissions {prior_emissions}->{emissions}); "
+            "the pair does not describe one batch",
             ctx.subject,
         )
-    due_total = _raw_int(block, DUE_TOTAL_RAW_KEYS)
-    if due_total is not None and due_total < 1:
-        # Anti-vacuity. Zero emissions for a batch that owed nothing is not
-        # governance working; it is a batch with nothing to say. A projector
-        # that reports the denominator gets held to it.
+    if writes_delta < 2:
         return _result(
             name,
             "unsupported",
-            f"{block.id} reports a served due_total of {due_total} across {writes} "
-            f"write(s) and {emissions} emission(s): nothing was delivered, so there was "
-            "nothing that could have repeated and the absence of repetition decides "
-            "nothing",
+            f"{block.id} records {writes_delta} governed write(s) between the snapshots; "
+            "counter repetition needs a bulk batch",
             ctx.subject,
         )
-    if emissions >= writes:
+    if emissions_delta == 0:
+        # Anti-vacuity. A batch that delivered NOTHING had nothing that could
+        # have repeated, so its lack of repetition is not evidence of anything.
+        return _result(
+            name,
+            "unsupported",
+            f"{block.id} delivered 0 block(s) across {writes_delta} governed write(s): "
+            "nothing was delivered, so nothing could have repeated and the absence of "
+            "repetition decides nothing",
+            ctx.subject,
+        )
+    if emissions_delta >= writes_delta:
         return _result(
             name,
             "fail",
-            f"{block.id} emitted {emissions} counters block(s) for {writes} write(s): one "
-            "identical block per write is counter-repetition",
+            f"{block.id} emitted {emissions_delta} counters block(s) for {writes_delta} "
+            "write(s): one identical block per write is counter-repetition",
             ctx.subject,
         )
     return _result(
         name,
         "pass",
-        f"{block.id} emitted {emissions} counters block(s) for a batch of {writes} write(s)",
+        f"{block.id} emitted {emissions_delta} counters block(s) for a batch of "
+        f"{writes_delta} write(s)",
         ctx.subject,
     )
 

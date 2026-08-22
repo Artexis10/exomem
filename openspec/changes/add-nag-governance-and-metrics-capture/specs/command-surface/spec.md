@@ -44,8 +44,8 @@ A journey driver SHALL execute the f23 scenario's operations against an installe
 
 - **WHEN** the f23 journey runs against the current runtime
 - **THEN** `dismissal_respected_across_passes` passes for the dismissed subject
-- **AND** `counter_emission_not_repeated_per_write` is evaluated only on a batch that owed something, and otherwise reports `unsupported` rather than passing vacuously
-- **AND** on this runtime it reports `unsupported`, because no product leaf reaches the write carrier, so the bulk batch delivers no block and the served denominator is zero
+- **AND** `counter_emission_not_repeated_per_write` is evaluated on the emission delta between the two snapshots, so it is decided only for a batch that delivered at least one block, and otherwise reports `unsupported` rather than passing vacuously or inheriting an earlier batch's delivery
+- **AND** on this runtime it reports `unsupported`, because no product leaf reaches the write carrier, so the bulk batch delivers no block and its emission delta is zero
 - **AND** the batch-once requirement is proven where it is decidable: twelve write carriers inside one batch scope emit at most one block, plus the measured zero carrier trips at every product leaf
 
 #### Scenario: Removing the batch scope turns the counter assertion red

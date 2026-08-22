@@ -372,15 +372,6 @@ def run_journey(
         name="dismissal",
     )
     subject = f"dismissal-{dismissed_key}"
-    prior = project_run(
-        vault,
-        captured={},
-        subject=subject,
-        dismissed_key=dismissed_key,
-        passes=0,
-        phase="f23-p1",
-        taken_at=taken_at,
-    )
 
     for index in range(1, passes + 1):
         name = f"{REVIEW_CAPTURE_PREFIX}{index}"
@@ -405,6 +396,25 @@ def run_journey(
             name=name,
             extra_env={"EXOMEM_PROMINENCE": level},
         )
+
+    # The baseline, taken IMMEDIATELY before the bulk batch. Its position is
+    # load-bearing for both assertions and for different reasons. The dismissal
+    # assertion needs a snapshot in which the subject is already dismissed —
+    # true anywhere after the dismissal step. The counter assertion subtracts
+    # this snapshot's cumulative `writes`/`emissions` from the later one to get
+    # the batch's own numbers, and every read between here and the batch would
+    # otherwise be inside the window it measures. Everything above is a read, so
+    # the deltas would be the same today; taking it here is what keeps that true
+    # when a step above starts writing.
+    prior = project_run(
+        vault,
+        captured={},
+        subject=subject,
+        dismissed_key=dismissed_key,
+        passes=0,
+        phase="f23-p1",
+        taken_at=taken_at,
+    )
 
     selected = seed_bulk_documents(vault, count=bulk_documents)
     bulk_name, bulk_argv = bulk_step(selected)

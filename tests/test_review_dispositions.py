@@ -848,9 +848,18 @@ def test_the_counts_ref_lookups_do_not_scale_with_the_vault(
     because the attention scan underneath does its own single resolution and
     this test is not about that one. A per-item lookup shows up here as a count
     that tracks the item count; a hoisted one does not move at all.
-    """
 
-    def lookups(count: int) -> tuple[int, int]:
+    The second half bounds the SQL underneath, which the invariance above cannot
+    see. `refs_for_paths` is now chunked, so the honest expectation is
+    `ceil(paths / REFS_QUERY_CHUNK)` batches — a function of the chunk, never of
+    the item count. Pinned with a deliberately tiny chunk so the ceiling
+    arithmetic is exercised rather than trivially satisfied by one batch.
+    """
+    import math
+
+    from exomem import memory_refs
+
+    def lookups(count: int) -> tuple[int, int, list[int]]:
         for index in range(count):
             overdue_prediction(vault, f"nag-many-{index}")
         find_module.clear_cache()
@@ -864,14 +873,47 @@ def test_the_counts_ref_lookups_do_not_scale_with_the_vault(
         monkeypatch.setattr(review_state, "refs_for_paths", counting)
         keys = commands._review_keys_by_family(vault)
         monkeypatch.setattr(review_state, "refs_for_paths", real)
-        return len(calls), len(keys.get(FAMILY, []))
+        return len(calls), len(keys.get(FAMILY, [])), calls
 
     scratch_page(vault)
-    few_calls, few_items = lookups(2)
-    many_calls, many_items = lookups(12)
+    few_calls, few_items, _ = lookups(2)
+    many_calls, many_items, many_lengths = lookups(12)
 
     assert (few_items, many_items) == (2, 12), (few_items, many_items)
     assert few_calls == many_calls, (
         f"{few_calls} ref lookups for {few_items} items but {many_calls} for "
         f"{many_items}: the view is resolving refs per item"
     )
+
+    # The chunk bound, measured on the view's own (largest) resolution.
+    resolved = max(many_lengths)
+    assert resolved >= many_items, many_lengths
+    chunk = 4
+    batches: list[int] = []
+    real_batch = memory_refs.ReferenceIndex._refs_for_paths_batch
+
+    def counting_batch(self, wanted):
+        batches.append(len(wanted))
+        return real_batch(self, wanted)
+
+    monkeypatch.setattr(memory_refs, "REFS_QUERY_CHUNK", chunk)
+    monkeypatch.setattr(
+        memory_refs.ReferenceIndex, "_refs_for_paths_batch", counting_batch
+    )
+    view_paths: list[str] = []
+    report = attention_module.attention(
+        vault,
+        categories=list(attention_module._TRIAGEABLE_CATEGORIES),
+        limit=0,
+        state="all",
+        record_surfacing=False,
+    )
+    for item in report.items:
+        view_paths.extend(review_state.component_paths(item))
+    batches.clear()
+    review_state.refs_for_paths(vault, view_paths)
+
+    unique = len(dict.fromkeys(p.replace("\\", "/").lstrip("/") for p in view_paths if p))
+    assert unique > chunk, unique
+    assert len(batches) == math.ceil(unique / chunk), (unique, chunk, batches)
+    assert max(batches) <= chunk, batches

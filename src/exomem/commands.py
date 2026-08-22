@@ -2436,9 +2436,11 @@ def op_reconcile(
             ).compact(read_limit=review_state_module.recovery_read_limit())
         except Exception as error:  # noqa: BLE001 — compaction never fails reconcile
             # The code, not the message: the message carries the store's
-            # absolute path, and this value lands in a tool result.
-            text = str(error)
-            code = text.split(":", 1)[0].strip() if ":" in text else type(error).__name__
+            # absolute path, and this value lands in a tool result. Matched
+            # against the store's own closed vocabulary rather than split on a
+            # colon, because an `OSError("cannot read /abs/path: boom")` has one
+            # too and that spelling leaked the path.
+            code = review_state_module.error_code(error)
             result["review_state_compaction"] = {"error": code}
             log.warning("review-state compaction failed during reconcile: %s", code)
             log.debug("could not compact the review state", exc_info=True)

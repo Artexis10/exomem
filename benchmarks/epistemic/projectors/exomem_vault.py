@@ -653,20 +653,20 @@ class VaultProjector(Projector):
     def _project_due_state_counters(self) -> StateItem:
         """The persisted emission ledger, or an honest absence.
 
-        `writes` is how many governed writes the projection absorbed,
-        `emissions` how many due-state blocks were actually delivered, and
-        `due_total` how many items were in the last block a caller was HANDED.
-        The counter-repetition assertion is exactly the comparison of the first
-        two, so a projector that guessed either would decide the family's
-        verdict — and `due_total` is what stops the pass being vacuous, because
-        "0 emissions for 12 writes" is equally the shape of working governance
-        and the shape of a batch that delivered nothing at all.
+        All three are read, never guessed. `writes` is how many governed writes
+        the projection absorbed and `emissions` how many due-state blocks were
+        actually delivered; both are CUMULATIVE over the vault's life, so the
+        counter-repetition assertion compares them across a snapshot pair rather
+        than as a ratio on this one. A projector that guessed either would
+        decide the family's verdict.
 
-        One definition, one writer: the runtime records it where a block is
-        marked emitted and nowhere else. An earlier version also recorded a
-        full-recompute count under the same name, which let this field report a
-        pre-dismissal denominator for a batch that owed nothing — the projector
-        cannot detect that, so the fix belongs upstream and is pinned there.
+        `due_total` is the size of the last block a caller was HANDED — one
+        definition, one writer, recorded where a block is marked emitted and
+        nowhere else. It is informational and gates nothing: it persists past
+        the delivery it describes, so it cannot say whether any particular batch
+        delivered anything. It is projected because it is real and cheap, not
+        because an assertion depends on it — one did, and that is exactly how a
+        batch that delivered nothing came to inherit an earlier batch's `pass`.
         """
         path = self._state_file(DUE_STATE_FILE)
         payload = _read_json(path) if path is not None else None

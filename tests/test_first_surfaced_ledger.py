@@ -650,8 +650,20 @@ def test_a_ref_carrying_two_fingerprints_stamps_neither(vault: Path) -> None:
     assert ref not in due_state_module._fingerprints_by_ref(collided)
 
 
-def test_a_delivered_block_whose_ref_is_ambiguous_stamps_nothing(vault: Path) -> None:
-    """And the guard reaches the ledger, not just the helper."""
+def test_a_delivered_block_whose_refs_resolve_to_nothing_stamps_nothing(
+    vault: Path,
+) -> None:
+    """A ref the map cannot resolve is a measurement gap, never a wrong stamp.
+
+    This is the CONSEQUENCE of the guard above, not the guard itself: it empties
+    the map rather than colliding anything, so what it pins is that the carrier
+    treats an unresolvable ref as "do not stamp" instead of falling back to some
+    other identity. The collision itself is
+    `test_a_ref_carrying_two_fingerprints_stamps_neither`, which is where the
+    dropping happens; between them they cover both halves — the map drops a
+    conflicted ref, and the carrier does nothing with a ref the map has no
+    answer for.
+    """
     from exomem import due_state as due_state_module
 
     overdue_prediction(vault)

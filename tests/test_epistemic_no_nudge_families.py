@@ -1143,11 +1143,11 @@ def test_the_f23_journey_runs_against_the_installed_envelope(
     dismissal half must pass. The counter half must report `unsupported`: no
     product leaf reaches `due_state.block_for_write` (measured — see
     `.task/measurements/leaf_carrier_counts.py`), so the bulk batch delivers no
-    block, the served denominator is 0, and a `pass` here would be the
-    assertion agreeing that twelve writes produced no repeat when nothing was
-    ever produced to repeat. Asserting `unsupported` pins the honest verdict AND
-    fails the day a leaf starts carrying, which is when the family becomes
-    decidable and someone must revisit this.
+    block, its emission delta across the snapshot pair is 0, and a `pass` here
+    would be the assertion agreeing that twelve writes produced no repeat when
+    nothing was ever produced to repeat. Asserting `unsupported` pins the honest
+    verdict AND fails the day a leaf starts carrying, which is when the family
+    becomes decidable and someone must revisit this.
     """
 
     from epistemic.journeys import f23_dismissal
@@ -1170,6 +1170,7 @@ def test_the_f23_journey_runs_against_the_installed_envelope(
     # The measured zero, recorded rather than smoothed: nothing was delivered,
     # so the served denominator is 0 and no emission happened.
     assert int(ledger.raw["emissions"]) == 0
+    # Informational, and 0 here only because this vault never delivered at all.
     assert int(ledger.raw["due_total"]) == 0
 
     context = AssertionContext(
@@ -1181,8 +1182,11 @@ def test_the_f23_journey_runs_against_the_installed_envelope(
     counters = resolve("counter_emission_not_repeated_per_write")(context)
     assert counters.outcome == "unsupported", counters.evidence
     # The evidence must name WHY it could not decide, or an `unsupported` is
-    # indistinguishable from a projector that simply did not look.
-    assert "due" in counters.evidence and "0" in counters.evidence, counters.evidence
+    # indistinguishable from a projector that simply did not look. The reason
+    # is the zero emission DELTA across the batch, not the persisted
+    # `due_total`, which says nothing about this batch either way.
+    assert "delivered 0 block(s)" in counters.evidence, counters.evidence
+    assert str(f23_dismissal.BULK_DOCUMENTS) in counters.evidence, counters.evidence
 
 
 def _f23_carrier_pages(vault: Path, count: int) -> list[str]:
@@ -1296,3 +1300,75 @@ def test_the_batch_scope_is_what_keeps_the_counter_assertion_green(
     assert int(ledger.raw["emissions"]) >= len(pages)
     assert result.outcome == "fail", result.evidence
     assert "one identical block per write" in result.evidence
+
+
+def test_an_earlier_delivery_cannot_carry_a_later_batch_that_delivered_nothing(
+    tmp_path: Path,
+) -> None:
+    """The probe that used to score `pass` on somebody else's block.
+
+    A real vault, in order: one delivery (so the ledger holds `emissions=1` and
+    a positive `due_total`), a snapshot, then a twelve-write batch that delivers
+    nothing, then a second snapshot. Scored on the totals in the later snapshot
+    alone this reads "1 block for 13 writes" and passes cleanly — a verdict
+    about the batch, awarded for a block emitted before the batch began, with
+    the `due_total` gate satisfied by the same stale block.
+
+    Scored on the delta it is `unsupported`: twelve writes, zero deliveries,
+    nothing that could have repeated.
+    """
+
+    from epistemic.journeys import f23_dismissal
+
+    from exomem import commands, due_state
+
+    vault = f23_dismissal.seed_journey_vault(tmp_path / "vault", repo_root=ROOT)
+    commands.op_remember(
+        vault,
+        title=f23_dismissal.OPEN_TITLE,
+        content=f23_dismissal.seed_content(
+            marker="A signal nobody has decided about",
+            check_by=_f23_check_by(),
+            anchor="f23-open",
+        ),
+    )
+    due_state.reconcile(vault)
+    due_state.reset_emission_state()
+
+    # One genuine delivery, before the batch under test.
+    assert due_state.should_emit(due_state.served(vault), vault_root=vault)
+
+    def project(phase: str):
+        return f23_dismissal.project_run(
+            vault,
+            captured={},
+            subject="dismissal-none",
+            dismissed_key="none:none",
+            passes=0,
+            phase=phase,
+            taken_at="2026-08-16T00:00:00Z",
+        )
+
+    prior = project("f23-p1")
+    seeded = prior.item("surface-due_state_counters")
+    assert int(seeded.raw["emissions"]) == 1
+    assert int(seeded.raw["due_total"]) >= 1
+
+    # Twelve governed writes inside a batch scope, delivering nothing.
+    pages = _f23_carrier_pages(vault, 12)
+    with due_state.batch_scope(vault):
+        for page in pages:
+            due_state.should_emit(due_state.block_for_write(vault, page), vault_root=vault)
+
+    later = project("f23-p2")
+    ledger = later.item("surface-due_state_counters")
+    assert int(ledger.raw["writes"]) - int(seeded.raw["writes"]) == 12
+    assert int(ledger.raw["emissions"]) == 1
+    # The stale denominator is still positive, which is exactly the trap.
+    assert int(ledger.raw["due_total"]) >= 1
+
+    result = resolve("counter_emission_not_repeated_per_write")(
+        AssertionContext(snapshot=later, prior=prior, family="f23")
+    )
+    assert result.outcome == "unsupported", result.evidence
+    assert "delivered 0 block(s)" in result.evidence, result.evidence
