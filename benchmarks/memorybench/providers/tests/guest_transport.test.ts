@@ -448,6 +448,7 @@ describe("guest transport", () => {
       EXOMEM_DISABLE_CORPUS_CACHE: "1",
       EXOMEM_VEC_BACKEND: "numpy",
       EXOMEM_LEXICAL_BACKEND: "python",
+      EXOMEM_ALLOW_CPU_TORCH: "1",
       HF_HUB_OFFLINE: "1",
       TRANSFORMERS_OFFLINE: "1",
     })
