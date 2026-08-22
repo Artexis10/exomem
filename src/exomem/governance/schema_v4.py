@@ -339,6 +339,29 @@ def _validate_policy(seed: PolicyGenerationSeed) -> tuple[bytes, str]:
     return source_documents, row_digest
 
 
+def _verify_policy_source_parity(
+    seed: PolicyGenerationSeed,
+    source_documents: bytes,
+) -> None:
+    """Require stored source bytes to reproduce the claimed compiled authority."""
+
+    from . import policy as policy_module
+
+    documents = _decode_source_document_bytes(source_documents)
+    compiled = policy_module.compile_documents(dict(documents))
+    if (
+        compiled.empty
+        or compiled.blocked
+        or compiled.fingerprint != seed.source_fingerprint
+        or compiled.fingerprint != seed.policy_fingerprint
+        or not hmac.compare_digest(
+            policy_module.canonical_compiled_bytes(compiled),
+            seed.compiled_policy,
+        )
+    ):
+        raise SchemaV4Error("policy source parity does not verify")
+
+
 def _stored_policy_row_digest(row: tuple[object, ...]) -> str:
     (
         generation_id,
@@ -422,6 +445,7 @@ def _seed_material(seed: MigrationSeed) -> _SeedMaterial:
     activation_epoch = _integer(seed.activation_epoch, "activation_epoch")
     _integer(seed.migrated_at, "migrated_at")
     source_documents, policy_row_digest = _validate_policy(seed.policy)
+    _verify_policy_source_parity(seed.policy, source_documents)
     if not isinstance(seed.catalog, CatalogGenerationSeed):
         raise SchemaV4Error("catalog migration seed is invalid")
     catalog_generation = _integer(
@@ -1403,23 +1427,7 @@ def publish_policy_generation(
     if namespace_ready_at > activated:
         raise SchemaV4Error("projection namespace is not ready at activation")
 
-    # A generation is acceptable only when its immutable source byte map
-    # recompiles to the exact canonical policy bytes being published.
-    from . import policy as policy_module
-
-    documents = _decode_source_document_bytes(source_documents)
-    compiled = policy_module.compile_documents(dict(documents))
-    if (
-        compiled.empty
-        or compiled.blocked
-        or compiled.fingerprint != policy.source_fingerprint
-        or compiled.fingerprint != policy.policy_fingerprint
-        or not hmac.compare_digest(
-            policy_module.canonical_compiled_bytes(compiled),
-            policy.compiled_policy,
-        )
-    ):
-        raise SchemaV4Error("target policy source parity does not verify")
+    _verify_policy_source_parity(policy, source_documents)
 
     connection.execute("BEGIN IMMEDIATE")
     try:
