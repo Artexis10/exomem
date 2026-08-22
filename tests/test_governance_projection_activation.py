@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
 from governance_projection_support import verified_namespace
 
 from exomem.governance import (
@@ -61,7 +62,7 @@ def _active_runtime():
     return runtime, items
 
 
-def test_startup_preactivates_one_digest_without_request_catalog_io(
+def test_startup_preactivates_one_digest_but_release_fence_stays_closed(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -138,4 +139,8 @@ def test_startup_preactivates_one_digest_without_request_catalog_io(
             AssertionError("request reloaded projection catalog")
         ),
     )
-    assert projection_runtime.load_active_projection_runtime(tmp_path) is activated
+    with pytest.raises(
+        projection_runtime.ProjectionRuntimeUnavailable,
+        match="governed projected retrieval is unavailable",
+    ):
+        projection_runtime.load_active_projection_runtime(tmp_path)

@@ -160,7 +160,6 @@ class FindEnvelope(TypedDict):
     hits: list[RetrievalHit]
     pack: NotRequired[dict[str, Any]]
     timings: NotRequired[dict[str, Any]]
-    timings_suppressed: NotRequired[dict[str, str]]
     warming: NotRequired[dict[str, Any]]
     degraded: NotRequired[list[str]]
     retrieval_profile: NotRequired[RetrievalProfile]

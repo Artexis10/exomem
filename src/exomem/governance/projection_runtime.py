@@ -41,6 +41,11 @@ class _PreactivatedProjectionRuntime:
 
 _PREACTIVATED_RUNTIMES: dict[str, _PreactivatedProjectionRuntime] = {}
 _PREACTIVATED_RUNTIME_LOCK = threading.RLock()
+# Repository-owned release fence.  Preactivation proves startup readiness, but
+# public v4 serving stays closed until every required projected lane and the
+# exact-capacity actual-wire gate land together.  This is deliberately not an
+# environment or operator switch.
+_PROJECTED_SERVING_RELEASE_ACCEPTED = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -339,6 +344,10 @@ def load_active_projection_runtime(
     root = Path(vault_root)
     preactivated = _preactivated_runtime(root)
     if preactivated is not None:
+        if not _PROJECTED_SERVING_RELEASE_ACCEPTED:
+            raise ProjectionRuntimeUnavailable(
+                "governed projected retrieval is unavailable"
+            )
         return preactivated
     try:
         connection = store.open_active_governance_read_connection(root)
