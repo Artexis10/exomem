@@ -262,15 +262,14 @@ def attach_openai_locks(cp: ControlPlane, candidate_id: str, locks: dict) -> Non
     if attached.get("attached") is True:
         print("  openai locks attached")
         return
-    # The guard also requires `openai_package_lock IS NULL`, so a false here means
-    # the candidate already carries locks. Preflight has just proved its state and
-    # all three digests, which leaves nothing else the predicate could have
-    # rejected -- but locks attached from a different repo checkout would still
-    # break the sibling stage, and that cannot be read back through any endpoint.
-    print(
-        "  openai locks were already attached by an earlier prepare.\n"
-        "        If that run used a different checkout, `run` will fail at the\n"
-        "        OpenAI sibling stage and the candidate must be replaced."
+    # `attached: false` is deliberately not treated as idempotent success. The
+    # endpoint does not expose the stored lock bytes, so this process cannot prove
+    # that an earlier attachment used this exact release checkout. Continuing
+    # would defer the mismatch until after reviewer authority is spent.
+    raise SystemExit(
+        "attach-openai-locks returned attached=false; the harness could not prove "
+        "that the candidate carries these exact OpenAI locks. Refusing before "
+        "reviewer authority is created; verify or replace the pending candidate."
     )
 
 
@@ -901,6 +900,18 @@ def load_locks(repo: Path) -> dict:
     fixture = json.loads(
         (repo / "plugins" / "hosted" / "marketplace-review-fixture-v1.json").read_text()
     )
+    contract_fields = (
+        "command_surface_sha256",
+        "schema_contract_sha256",
+        "compatibility_sha256",
+    )
+    drift = [field for field in contract_fields if claude.get(field) != openai.get(field)]
+    if drift:
+        raise SystemExit(
+            "Claude and OpenAI release locks disagree on "
+            f"{', '.join(drift)}; regenerate the OpenAI bundle from this exact "
+            "release before promotion."
+        )
     return {
         "claude_package": claude["artifact_sha256"],
         "claude_archive": claude_zip["archive_sha256"],

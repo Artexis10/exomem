@@ -26,6 +26,7 @@ from . import (
     project_keys,
     schema,
 )
+from .governance import projection_runtime
 from .hosted_runtime import (
     HostedBindingV2,
     HostedCellConfig,
@@ -72,6 +73,7 @@ def initialize_runtime(*, load_dotenv_func: Callable[..., object]) -> ServerRunt
     log.info("vault=%s source_types=%s", vault_root, source_schema.source_types)
 
     project_keys_hint = project_keys.keys_hint(vault_root)
+    projection_runtime.preactivate_projection_runtime(vault_root)
     _start_metrics_persistence()
     _start_compute_runtime(vault_root)
     media_worker = _start_media_worker(vault_root)
@@ -131,6 +133,7 @@ def _initialize_locked_hosted_runtime(
 
     source_schema = schema.load_source_schema(vault_root)
     project_keys_hint = project_keys.keys_hint(vault_root)
+    projection_runtime.preactivate_projection_runtime(vault_root)
     log.info(
         "hosted_cell=%s source_types=%s",
         config.cell_id,

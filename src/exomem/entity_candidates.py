@@ -11,9 +11,12 @@ from .kbdir import kb_prefix
 from .vault import kb_root, parse_frontmatter, read_guarded_text
 
 
-def _identity_key(value: object) -> str:
+def identity_key(value: object) -> str:
     normalized = unicodedata.normalize("NFKC", str(value or ""))
     return " ".join(normalized.casefold().split())
+
+
+_identity_key = identity_key
 
 
 def _aliases(value: object) -> tuple[str, ...]:
@@ -32,7 +35,7 @@ def resolve_entity_candidate(
     limit: int = 8,
 ) -> dict[str, object]:
     """Return an exact active title/alias match, no match, or bounded ambiguity."""
-    needle = _identity_key(name)
+    needle = identity_key(name)
     if not needle:
         return {"status": "no_match", "candidates": [], "omitted_candidate_count": 0}
     kind_filter = None
@@ -68,8 +71,8 @@ def resolve_entity_candidate(
             ):
                 continue
             title = str(frontmatter.get("title") or path.stem).strip()
-            title_matches = needle == _identity_key(title)
-            alias_matches = any(needle == _identity_key(alias) for alias in _aliases(frontmatter.get("aliases")))
+            title_matches = needle == identity_key(title)
+            alias_matches = any(needle == identity_key(alias) for alias in _aliases(frontmatter.get("aliases")))
             if not title_matches and not alias_matches:
                 continue
             candidate = {

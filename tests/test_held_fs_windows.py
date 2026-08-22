@@ -124,6 +124,42 @@ def test_windows_native_open_uses_a_root_handle_one_component_and_reparse_flag(
     assert all(options & backend.FILE_OPEN_REPARSE_POINT for _, _, options in leaf_calls)
 
 
+def test_windows_write_handle_can_verify_a_tightened_private_dacl(
+    tmp_path: Path,
+) -> None:
+    import msvcrt
+
+    from exomem import mutation_lock
+
+    held_fs = _held_fs()
+    directory = tmp_path / "private-stage"
+    with held_fs.acquire(tmp_path).require() as filesystem:
+        with filesystem.parent(directory.name, create=True).require() as parent:
+            with filesystem.file(
+                parent,
+                "control.json",
+                access="write",
+                create=True,
+                exclusive=True,
+            ).require() as staged:
+                assert filesystem.write(staged, b"{}\n").ok
+                sid = mutation_lock._windows_current_user_sid()
+                mutation_lock._windows_apply_private_dacl(
+                    directory / "control.json",
+                    sid,
+                )
+
+                sddl = mutation_lock._windows_dacl_sddl_for_handle(
+                    msvcrt.get_osfhandle(staged.descriptor)
+                )
+
+    assert mutation_lock._windows_private_dacl_is_valid(
+        sddl,
+        sid,
+        directory=False,
+    )
+
+
 def test_windows_rename_uses_native_relative_information_class(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -430,6 +430,33 @@ def test_hosted_initialize_probes_the_late_bound_shared_mutation_guard(
     assert runtime.hosted_lifecycle.readiness().write_admitted is True
 
 
+def test_hosted_initialize_preactivates_projection_before_readiness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    values, config = _provisioned(tmp_path)
+    for key, value in values.items():
+        monkeypatch.setenv(key, value)
+    events: list[str] = []
+
+    monkeypatch.setattr(
+        server_runtime.projection_runtime,
+        "preactivate_projection_runtime",
+        lambda root: events.append(f"projection:{root}"),
+    )
+    monkeypatch.setattr(
+        server_runtime,
+        "probe_hosted_mutation_authority",
+        lambda _root: (events.append("mutation-probe") or (True, "HOSTED_READY")),
+    )
+
+    runtime = server_runtime.initialize_runtime(
+        load_dotenv_func=lambda **_kwargs: pytest.fail("hosted startup loaded dotenv")
+    )
+
+    assert events[:2] == [f"projection:{config.vault_root}", "mutation-probe"]
+    assert runtime.hosted_lifecycle is not None
+
+
 def test_hosted_plaintext_roots_reject_all_group_or_world_permission_bits(
     tmp_path: Path,
 ) -> None:

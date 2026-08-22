@@ -414,7 +414,8 @@ def test_execution_file_round_trip_is_canonical_private_and_fenced(
 
     assert module.load_execution(path) == record
     assert digest == module.canonical_sha256(record)
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    if os.name != "nt":
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert (
         path.read_bytes()
         == (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode()

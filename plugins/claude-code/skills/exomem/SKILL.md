@@ -641,6 +641,14 @@ Empty queries degrade to filtered-most-recent regardless of mode.
   what I searched,"* not *"it doesn't exist."* If you're sure something exists,
   try `scope="vault"`, vary the query terms, or `read_memory` a path you suspect.
 
+### Referents
+
+When recall returns a `referents` block, name only its `resolved` entities.
+For `partial`, say how many people remain unresolved; for `ambiguous`, ask the
+user to disambiguate; for `unresolved`, never guess. When the user supplies a
+missing identity, run `connect_memory(operation="resolve-entity")` first, then
+create the durable entity or use `edit_memory` to add a reviewed alias.
+
 Additional knobs exposed through `ask_memory`/`find`: `graph=true` (default; expands
 1-hop neighbours of strong matches through the typed graph sidecar when it is
 available — typed and provenance relations rank ahead of plain wikilinks, and a

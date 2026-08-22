@@ -72,6 +72,17 @@ to an allowlist.
 `scripts/rebuild-schema-zip.py` **from this same scaffold**, overlaying only your real
 `project-keys.yaml` — no private canonical, no markers. Needs no version bump here.)
 
+## OpenSpec closure is part of delivery
+
+Treat checked task boxes as a claim that requires code, test, and merge evidence,
+not as proof by themselves. When an active change is demonstrably shipped and
+its non-optional tasks are complete, synchronize its delta into the current
+canonical specs and archive it with `openspec archive` in the same delivery.
+Never archive by moving the directory. Preserve requirements and scenarios added
+by later work when refreshing a stale `MODIFIED` block, and run
+`openspec validate --all --strict` before and after the archive. A task-complete
+active change is archive debt and CI rejects it.
+
 ## Memory boundary
 
 Treat Claude, ChatGPT, Codex, and other assistants' native memory as short-term

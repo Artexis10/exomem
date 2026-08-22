@@ -18,3 +18,7 @@ A collection MAY recommend ordinary Markdown templates, default properties, vali
 #### Scenario: Metadata edit still requires frontmatter
 - **WHEN** a caller requests tag or frontmatter mutation on a frontmatter-less template
 - **THEN** the operation fails with a stable frontmatter-required error and does not report the resolved `path` argument as missing
+
+#### Scenario: Obsidian insertion stays ordinary
+- **WHEN** a vault is configured to use `Knowledge Base/Templates/` and a user invokes `Templates → Insert template`
+- **THEN** an X3 Push or Pull template can be inserted and manually completed without Exomem runtime involvement

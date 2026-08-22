@@ -86,6 +86,7 @@ from . import readiness as readiness_module
 from . import reconcile as reconcile_module
 from . import record_memory as record_memory_module
 from . import recover_from_trash as recover_from_trash_module
+from . import referent_runtime as referent_runtime_module
 from . import relation_queue as relation_queue_module
 from . import relation_registry as relation_registry_module
 from . import replace as replace_module
@@ -123,6 +124,7 @@ from .governance import egress as egress_module
 from .governance import operations as governance_operations
 from .governance import policy as governance_policy_module
 from .governance import principal as principal_module
+from .governance import projection_runtime as projection_runtime_module
 from .governance import tool as governance_tool_module
 from .kbdir import kb_dirname
 from .vault import (
@@ -1000,6 +1002,11 @@ def op_bootstrap(
                     "set explain=true only when ranking interpretation is useful; it adds "
                     "a bounded retrieval profile and per-hit evidence without changing recall"
                 ),
+                "referents": (
+                    "partial ambiguous unresolved; never guess"
+                    if profile == "compact"
+                    else "resolved names; partial N unresolved; ambiguous ask; unresolved never guess"
+                ),
                 "score_interpretation": {
                     "bm25": "backend relevance value; interpret using the returned direction and range",
                     "cosine": "vector similarity measurement, not probability",
@@ -1118,6 +1125,76 @@ def op_bootstrap(
     return _filter_bootstrap_payload(payload, active_descriptor)
 
 
+def _require_supported_projected_find_request(
+    *,
+    query: str,
+    mode: str,
+    graph: bool,
+    rerank: bool | None,
+    types: list[str] | None,
+    projects: list[str] | None,
+    tags: list[str] | None,
+    speakers: list[str] | None,
+    file_types: list[str] | None,
+    exclude_file_types: list[str] | None,
+    categories: list[str] | None,
+    kinds: list[str] | None,
+    source_kinds: list[str] | None,
+    domains: list[str] | None,
+    relations: list[str] | None,
+    relation_of: str | None,
+    relation_direction: str,
+    filters: dict[str, Any] | None,
+    result_level: str,
+    scope: str,
+    rerank_max_candidates: _RerankCandidateLimit | None,
+    prefer_compiled: bool,
+    prefer_active: bool,
+    prefer_used: bool,
+    pack: bool,
+    graph_enrich: bool,
+    include_timings: bool,
+    explain: bool,
+) -> None:
+    """Refuse v4 features that do not yet have a projected implementation."""
+
+    collections = (
+        types,
+        projects,
+        tags,
+        speakers,
+        file_types,
+        exclude_file_types,
+        categories,
+        kinds,
+        source_kinds,
+        domains,
+        relations,
+    )
+    if (
+        any(value for value in collections)
+        or relation_of is not None
+        or relation_direction != "any"
+        or filters
+        or result_level != "auto"
+        or not query
+        or mode not in {"keyword", "hybrid", "vector"}
+        or (graph and mode == "keyword")
+        or scope != "vault"
+        or rerank_max_candidates is not None
+        or not prefer_compiled
+        or not prefer_active
+        or prefer_used
+        or pack
+        or graph_enrich
+        or include_timings
+        or explain
+    ):
+        raise projection_runtime_module.ProjectionRuntimeUnavailable(
+            "governed projected retrieval is unavailable"
+        )
+
+
 def op_find(
     vault_root: Path,
     query: str = "",
@@ -1152,7 +1229,7 @@ def op_find(
     explain: bool = False,
     purpose: str | None = None,
 ) -> list[RetrievalHit] | FindEnvelope:
-    """Search / find / look up / query / retrieve / recall pages in the Knowledge Base (KB vault): notes, sources, insights, failures, patterns, experiments, entities. Hybrid semantic + keyword search, read-only. Filters are AND'd; tag/project lists are OR'd within.
+    """Search / find / look up / query / retrieve / recall pages in the Knowledge Base (KB vault): notes, sources, insights, failures, patterns, experiments, entities. Hybrid semantic + keyword search, read-only. Deterministic entity cues may add an abstention-aware `referents` envelope block without changing hits. Filters are AND'd; tag/project lists are OR'd within.
 
     Args:
         query: Free-text search string. In "hybrid"/"vector" mode it's
@@ -1343,6 +1420,40 @@ def op_find(
         raise ValueError(
             f"find: detail must be 'full' or 'compact', got {detail!r}"
         )
+    projection_runtime = projection_runtime_module.load_active_projection_runtime(
+        vault_root
+    )
+    if projection_runtime is not None:
+        _require_supported_projected_find_request(
+            query=query,
+            mode=mode,
+            graph=graph,
+            rerank=rerank,
+            types=types,
+            projects=projects,
+            tags=tags,
+            speakers=speakers,
+            file_types=file_types,
+            exclude_file_types=exclude_file_types,
+            categories=categories,
+            kinds=kinds,
+            source_kinds=source_kinds,
+            domains=domains,
+            relations=relations,
+            relation_of=relation_of,
+            relation_direction=relation_direction,
+            filters=filters,
+            result_level=result_level,
+            scope=scope,
+            rerank_max_candidates=rerank_max_candidates,
+            prefer_compiled=prefer_compiled,
+            prefer_active=prefer_active,
+            prefer_used=prefer_used,
+            pack=pack,
+            graph_enrich=graph_enrich,
+            include_timings=include_timings,
+            explain=explain,
+        )
     auto_rerank = rerank is None and find_module.auto_rerank_allowed_by_policy()
     compute_profile: dict[str, str | bool] = {}
     if explain:
@@ -1395,57 +1506,108 @@ def op_find(
         )
     degraded: list[str] = []
     failed: list[str] = []
-    # Release gate, part 1 of 2 (design D4): decide the over-fetch pool BEFORE
-    # retrieval, from the request alone. `gate_state` costs one `is_dir()` on
-    # an ungoverned vault, so the empty-policy fast path keeps `limit` exactly
-    # as the caller asked and the latency profile is unchanged.
-    _release_policy, _release_active = egress_module.gate_state(vault_root)
-    retrieval_limit = egress_module.pool_limit(limit) if _release_active else limit
-    hits = find_module.find(
-        vault_root,
-        query=query,
-        types=types,
-        projects=projects,
-        tags=tags,
-        speakers=speakers,
-        file_types=file_types,
-        exclude_file_types=exclude_file_types,
-        categories=categories,
-        kinds=kinds,
-        source_kinds=source_kinds,
-        domains=domains,
-        relations=relations,
-        relation_of=relation_of,
-        relation_direction=relation_direction,
-        filters=filters,
-        result_level=result_level,
-        limit=retrieval_limit,
-        scope=scope,
-        mode=mode,
-        graph=graph,
-        rerank=rerank,
-        rerank_max_candidates=rerank_max_candidates,
-        # rerank=None uses the mode/device-gated auto policy. Explicit
-        # true/false from the caller always wins over auto.
-        auto_rerank=auto_rerank,
-        prefer_compiled=prefer_compiled,
-        prefer_active=prefer_active,
-        prefer_used=prefer_used,
-        timings=timings,
-        degraded_out=degraded,
-        failed_out=failed,
-        retrieval_trace=retrieval_trace,
-    )
-    # Release gate, part 2 of 2 (design D2): decisions are computed HERE —
-    # strictly after `find()` has returned and deep-copied its candidates into
-    # the shared `_FIND_CACHE`, and before `assemble_pack` and serialization.
-    # Nothing principal-dependent may run any earlier than this line, or one
-    # principal's decisions would be cached for the next.
-    with find_module._span(timings, "release_gate"):
-        release = egress_module.annotate_hits(
-            vault_root, hits, limit=limit, purpose=purpose
+    if projection_runtime is not None:
+        who = principal_module.effective_principal()
+        projected = projection_runtime_module.find_projected_hits(
+            Path(vault_root),
+            projection_runtime,
+            query=query,
+            limit=limit,
+            mode=mode,
+            graph=graph,
+            rerank=rerank,
+            auto_rerank=auto_rerank,
+            prefer_compiled=prefer_compiled,
+            prefer_active=prefer_active,
+            rank_config=find_module._active_ranking(),
+            principal=who,
+            purpose=purpose,
+        )
+        projected_hits = list(projected.hits)
+        degraded.extend(projected.warming_components)
+        release = egress_module.annotate_projected_hits(
+            Path(vault_root),
+            projected_hits,
+            policy=projection_runtime.snapshot.policy,
+            principal=who,
+            purpose=projected.declared_purpose,
+            withheld_paths=projected.withheld_paths,
         )
         hits = release.hits
+    else:
+        # Release gate, part 1 of 2 (design D4): decide the over-fetch pool BEFORE
+        # retrieval, from the request alone. `gate_state` costs one `is_dir()` on
+        # an ungoverned vault, so the empty-policy fast path keeps `limit` exactly
+        # as the caller asked and the latency profile is unchanged.
+        _release_policy, _release_active = egress_module.gate_state(vault_root)
+        retrieval_limit = (
+            egress_module.pool_limit(limit) if _release_active else limit
+        )
+        hits = find_module.find(
+            vault_root,
+            query=query,
+            types=types,
+            projects=projects,
+            tags=tags,
+            speakers=speakers,
+            file_types=file_types,
+            exclude_file_types=exclude_file_types,
+            categories=categories,
+            kinds=kinds,
+            source_kinds=source_kinds,
+            domains=domains,
+            relations=relations,
+            relation_of=relation_of,
+            relation_direction=relation_direction,
+            filters=filters,
+            result_level=result_level,
+            limit=retrieval_limit,
+            scope=scope,
+            mode=mode,
+            graph=graph,
+            rerank=rerank,
+            rerank_max_candidates=rerank_max_candidates,
+            # rerank=None uses the mode/device-gated auto policy. Explicit
+            # true/false from the caller always wins over auto.
+            auto_rerank=auto_rerank,
+            prefer_compiled=prefer_compiled,
+            prefer_active=prefer_active,
+            prefer_used=prefer_used,
+            timings=timings,
+            degraded_out=degraded,
+            failed_out=failed,
+            retrieval_trace=retrieval_trace,
+        )
+        # Release gate, part 2 of 2 (design D2): decisions are computed HERE —
+        # strictly after `find()` has returned and deep-copied its candidates into
+        # the shared `_FIND_CACHE`, and before `assemble_pack` and serialization.
+        # Nothing principal-dependent may run any earlier than this line, or one
+        # principal's decisions would be cached for the next.
+        with find_module._span(timings, "release_gate"):
+            release = egress_module.annotate_hits(
+                vault_root, hits, limit=limit, purpose=purpose
+            )
+            hits = release.hits
+    referents: dict[str, Any] | None = None
+    if projection_runtime is None:
+        # Referents compose over the released vault hits; the projected (hosted
+        # runtime) path has no vault registry or graph sidecar to resolve against.
+        referent_cue = referent_runtime_module.cue_for_find(query=query, mode=mode)
+        if referent_cue is not None:
+            with find_module._span(timings, "referents"):
+                try:
+                    referents = referent_runtime_module.resolve_for_find(
+                        vault_root,
+                        query=query,
+                        hits=hits,
+                        mode=mode,
+                        graph=graph,
+                        release=release,
+                        purpose=purpose,
+                        cue=referent_cue,
+                    )
+                except Exception:
+                    referents = None
     pack_obj: dict | None = None
     if pack:
         with find_module._span(timings, "pack"):
@@ -1464,14 +1626,15 @@ def op_find(
             compact=(detail == "compact"),
             withheld_paths=release.withheld_paths,
         )
-        ref_index = memory_refs_module.ReferenceIndex(vault_root)
-        refs = ref_index.refs_for_paths(
-            [str(hit.get("path") or "") for hit in hit_dicts]
-        )
-        for hit in hit_dicts:
-            ref = refs.get(str(hit.get("path") or ""))
-            if ref:
-                hit["ref"] = ref
+        if projection_runtime is None:
+            ref_index = memory_refs_module.ReferenceIndex(vault_root)
+            refs = ref_index.refs_for_paths(
+                [str(hit.get("path") or "") for hit in hit_dicts]
+            )
+            for hit in hit_dicts:
+                ref = refs.get(str(hit.get("path") or ""))
+                if ref:
+                    hit["ref"] = ref
         if retrieval_trace is not None:
             retrieval_explain_module.attach_hit_explanations(retrieval_trace, hit_dicts)
         # Notices occupy only the slots the over-fetch pool could not backfill.
@@ -1479,14 +1642,15 @@ def op_find(
     timings_dict = timings.as_dict() if timings is not None else None
     # Durable structured log → feeds the offline retrieval feedback loop.
     # Best-effort; never affects the returned result.
-    query_log.log_find_call(
-        query=query, mode=mode, scope=scope,
-        types=types, projects=projects, tags=tags,
-        limit=limit, rerank=rerank, prefer_compiled=prefer_compiled,
-        prefer_used=prefer_used,
-        graph=graph, hits=hits,
-        timing_summary=_timing_log_summary(timings_dict),
-    )
+    if projection_runtime is None:
+        query_log.log_find_call(
+            query=query, mode=mode, scope=scope,
+            types=types, projects=projects, tags=tags,
+            limit=limit, rerank=rerank, prefer_compiled=prefer_compiled,
+            prefer_used=prefer_used,
+            graph=graph, hits=hits,
+            timing_summary=_timing_log_summary(timings_dict),
+        )
     # Warming marker: the server just started and the background warm-up is
     # still loading models, so one or more semantic lanes were skipped —
     # these hits are lexical-only ranking. Present only during that window
@@ -1510,9 +1674,14 @@ def op_find(
         and degraded_marker is None
         and retrieval_trace is None
     ):
-        if not pack:
+        if not pack and referents is None:
             return hit_dicts
-        return {"hits": hit_dicts, "pack": pack_obj}
+        out = {"hits": hit_dicts}
+        if pack:
+            out["pack"] = pack_obj
+        if referents is not None:
+            out["referents"] = referents
+        return out
     out: dict = {"hits": hit_dicts}
     if pack:
         out["pack"] = pack_obj
@@ -1524,6 +1693,8 @@ def op_find(
         out["degraded"] = degraded_marker
     if retrieval_trace is not None:
         out["retrieval_profile"] = retrieval_trace.profile()
+    if referents is not None:
+        out["referents"] = referents
     return out
 
 
@@ -4417,6 +4588,8 @@ def _with_due_state(
     for `warming`, `degraded`, `timings` and `explain`, and both shapes are already
     in the declared return union.
     """
+    if projection_runtime_module.requires_projected_read_boundary(vault_root):
+        return result
     try:
         from . import due_state as due_state_module
 

@@ -101,4 +101,3 @@ to producing no tags. Image extraction MUST still complete successfully; the pat
 
 - **WHEN** tagging runs but no vocabulary term's score clears the threshold
 - **THEN** no `Tags:` line is appended and the extraction output is the unchanged OCR/caption text
-

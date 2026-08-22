@@ -80,3 +80,30 @@ def gen_dense_vault(
             encoding="utf-8",
         )
     return rels
+
+
+def gen_entity_overlay(root: Path, n_entities: int, seed: int = 17) -> list[str]:
+    """Add deterministic synthetic person entities without changing dense fixtures."""
+    rng = random.Random(seed)
+    folder = root / "Knowledge Base" / "Entities" / "People"
+    folder.mkdir(parents=True, exist_ok=True)
+    rels: list[str] = []
+    for index in range(n_entities):
+        token = rng.randint(0, 999999)
+        rel = f"Knowledge Base/Entities/People/synthetic-person-{index:05d}-{token:06d}.md"
+        (root / rel).write_text(
+            "---\n"
+            "type: entity\n"
+            f"title: Synthetic Person {index:05d}\n"
+            "entity_type: person\n"
+            "status: active\n"
+            "relationship: friend\n"
+            "tags: [synthetic, scale]\n"
+            "updated: 2026-02-01\n"
+            "---\n\n"
+            f"# Synthetic Person {index:05d}\n\n"
+            "A deterministic synthetic identity used only for scale measurement.\n",
+            encoding="utf-8",
+        )
+        rels.append(rel)
+    return rels

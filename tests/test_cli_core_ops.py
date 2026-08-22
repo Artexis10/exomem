@@ -17,6 +17,8 @@ import yaml
 
 from exomem import (
     commands,
+    entity_registry,
+    find,
     freshness,
     lexstore,
     media_jobs,
@@ -61,6 +63,51 @@ def test_ask_memory_human_output(vault: Path, capsys) -> None:
     assert '"success"' not in out
 
 
+def test_ask_cli_lists_hits_and_summarises_referents_for_cue_queries(
+    vault: Path,
+    capsys,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rel = "Knowledge Base/Entities/People/aster-vale.md"
+    target = vault / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        "---\n"
+        "type: entity\n"
+        "title: Aster Vale\n"
+        "entity_type: person\n"
+        "status: active\n"
+        "updated: 2026-08-01\n"
+        "---\n\n"
+        "# Aster Vale\n\nA synthetic person used for CLI recall.\n",
+        encoding="utf-8",
+    )
+    entries = [(str(path), freshness.stat_signature(path)) for path in vault.rglob("*.md")]
+    freshness.seed(vault, "kb", entries)
+    freshness.seed(vault, "vault", entries)
+    lexstore.ensure_fresh(vault)
+    find.clear_cache()
+    entity_registry.clear_entity_registry_cache()
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
+
+    code, out, err = _run(
+        [
+            "ask_memory",
+            "which person was Aster Vale",
+            "--mode",
+            "hybrid",
+            "--no-rerank",
+        ],
+        capsys,
+    )
+
+    assert code == 0, err
+    assert rel in out
+    assert "referents: resolved; resolved: Aster Vale; unresolved: 0" in out
+    assert not out.lstrip().startswith("{")
+
+
 def test_ask_memory_cli_preserves_explanation_envelope(vault: Path, capsys) -> None:
     code, out, err = _run(
         [
@@ -76,6 +123,53 @@ def test_ask_memory_cli_preserves_explanation_envelope(vault: Path, capsys) -> N
     assert code == 0, err
     data = json.loads(out.strip().splitlines()[-1])["data"]
     assert data["retrieval_profile"]["effective_mode"] == "keyword"
+    assert data["hits"][0]["ranking_explanation"]["final_rank"] == 1
+
+
+def test_ask_cli_explain_without_json_keeps_explanation_envelope_on_cue_queries(
+    vault: Path,
+    capsys,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rel = "Knowledge Base/Entities/People/aster-vale.md"
+    target = vault / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        "---\n"
+        "type: entity\n"
+        "title: Aster Vale\n"
+        "entity_type: person\n"
+        "status: active\n"
+        "updated: 2026-08-01\n"
+        "---\n\n"
+        "# Aster Vale\n\nA synthetic person used for explained CLI recall.\n",
+        encoding="utf-8",
+    )
+    entries = [(str(path), freshness.stat_signature(path)) for path in vault.rglob("*.md")]
+    freshness.seed(vault, "kb", entries)
+    freshness.seed(vault, "vault", entries)
+    lexstore.ensure_fresh(vault)
+    find.clear_cache()
+    entity_registry.clear_entity_registry_cache()
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
+
+    code, out, err = _run(
+        [
+            "ask_memory",
+            "which person was Aster Vale",
+            "--mode",
+            "hybrid",
+            "--no-rerank",
+            "--explain",
+        ],
+        capsys,
+    )
+
+    assert code == 0, err
+    data = json.loads(out)
+    assert data["referents"]["resolved"][0]["path"] == rel
+    assert data["retrieval_profile"]["effective_mode"] == "hybrid_lexical"
     assert data["hits"][0]["ranking_explanation"]["final_rank"] == 1
 
 
