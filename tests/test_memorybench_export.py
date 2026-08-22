@@ -1807,6 +1807,17 @@ def test_public_privacy_keeps_the_shared_scan_gate(tmp_path: Path) -> None:
         )
 
 
+def test_public_privacy_does_not_misclassify_json_escaped_relative_backslashes(
+    tmp_path: Path,
+) -> None:
+    from memorybench.export import _validate_public_privacy
+
+    _validate_public_privacy(
+        json.dumps({"trace": r"notation\folder\note\more"}).encode(),
+        _privacy_plan(tmp_path),
+    )
+
+
 def test_cleanup_retains_checkpoint_target_after_late_private_projection_write_failure(
     tmp_path: Path,
 ) -> None:

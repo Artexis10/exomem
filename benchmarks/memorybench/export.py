@@ -1459,14 +1459,22 @@ def _validate_public_privacy(payload: bytes, plan: MemoryBenchRunPlan) -> None:
     text = payload.decode("utf-8")
     from exomem.public_artifact_privacy import _scan_text
 
-    if _scan_text(text, "memorybench-export.v1.json"):
+    decoded = _load_json_bytes(payload, "public export")
+    serialized_findings = _scan_text(text, "memorybench-export.v1.json")
+    if serialized_findings and any(
+        _scan_text(value, "memorybench-export.v1.json")
+        for value in _json_string_leaves(decoded)
+    ):
+        # Scan the serialized bytes first, then confirm against decoded JSON
+        # strings so one literal relative backslash cannot become a fabricated
+        # UNC path merely because JSON escapes it with a second backslash.
         raise ValueError("public export failed shared privacy validation")
     opaque, content = _privacy_forbidden_values(plan)
     if any(value and value in text for value in opaque):
         raise ValueError("public export contains private runtime material")
     # Answers can be quoted by required public question text and retrieved hit
     # content. Equality still rejects carrying a gold value as a public field.
-    if any(value in content for value in _json_string_leaves(_load_json_bytes(payload, "public export"))):
+    if any(value in content for value in _json_string_leaves(decoded)):
         raise ValueError("public export contains private runtime material")
 
 
