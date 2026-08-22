@@ -290,6 +290,53 @@ def test_attach_surfaces_a_rejected_attachment(monkeypatch) -> None:
         module.attach_openai_locks(cp, "cand-1", _locks())
 
 
+def test_attach_refuses_an_unproven_already_attached_response(monkeypatch) -> None:
+    module = _load_module()
+    monkeypatch.setenv("EXOMEM_HOSTED_CONTRACT_IMPORT_KEY_ID", "key-1")
+    monkeypatch.setenv("EXOMEM_HOSTED_CONTRACT_IMPORT_SECRET", "s3cret")
+    cp = _RecordingControlPlane({"prepare-attach-openai-locks": (200, {"attached": False})})
+
+    with pytest.raises(SystemExit) as raised:
+        module.attach_openai_locks(cp, "cand-1", _locks())
+
+    assert "could not prove" in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    "field",
+    ("command_surface_sha256", "schema_contract_sha256", "compatibility_sha256"),
+)
+def test_load_locks_rejects_cross_platform_contract_drift(
+    tmp_path: pathlib.Path, field: str
+) -> None:
+    module = _load_module()
+    generated = tmp_path / "plugins" / "hosted" / "generated"
+    generated.mkdir(parents=True)
+    fixture = tmp_path / "plugins" / "hosted" / "marketplace-review-fixture-v1.json"
+
+    claude_lock = {
+        **OPENAI_PACKAGE_LOCK,
+        "platform": "claude",
+        "artifact_sha256": "9d" * 32,
+    }
+    openai_lock = {
+        **OPENAI_PACKAGE_LOCK,
+        field: "aa" * 32,
+    }
+    (generated / "claude.lock.json").write_text(json.dumps(claude_lock))
+    (generated / "claude.zip.lock.json").write_text(
+        json.dumps({"platform": "claude", "archive_sha256": "0d" * 32})
+    )
+    (generated / "openai.lock.json").write_text(json.dumps(openai_lock))
+    (generated / "openai.zip.lock.json").write_text(json.dumps(OPENAI_ARCHIVE_LOCK))
+    fixture.write_text(json.dumps({"fixture_version": "v1", "payload_sha256": "ff" * 32}))
+
+    with pytest.raises(SystemExit) as raised:
+        module.load_locks(tmp_path)
+
+    assert field in str(raised.value)
+
+
 def test_prepare_attaches_the_openai_locks_before_anything_else(monkeypatch) -> None:
     """Ordering is the whole point: after `run` starts, this is unrecoverable."""
     module = _load_module()
