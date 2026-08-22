@@ -197,6 +197,7 @@ def _outcome_for_decision(
     content_hash: str | None = None,
     size: int | None = None,
     ref: str | None = None,
+    purpose_is_bound: bool = False,
 ) -> None:
     """Project a decision into the receipt union without carrying a path/title."""
     value: dict[str, Any] = {"decision": outcome}
@@ -207,7 +208,11 @@ def _outcome_for_decision(
     if collector is not None:
         value["command"] = collector.command_name
     who = effective_principal()
-    declared_purpose = _declared_purpose(vault_root, who, purpose)
+    declared_purpose = (
+        purpose
+        if purpose_is_bound
+        else _declared_purpose(vault_root, who, purpose)
+    )
     if declared_purpose and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}", declared_purpose):
         value["purpose"] = declared_purpose
     if decision is not None:
@@ -1140,6 +1145,7 @@ def _mint_escalation_quietly(
     decision: Decision,
     requested_level: int,
     org_ceiling: int,
+    expected_content_hash: str | None = None,
 ) -> str | None:
     context = who.verified_authorization_session
     if not isinstance(
@@ -1166,7 +1172,14 @@ def _mint_escalation_quietly(
         ):
             return None
         connection = store.open_authorization_session_connection(vault_root)
-        fingerprint = hashlib.sha256((vault_root / rel_path).read_bytes()).hexdigest()
+        if expected_content_hash is None:
+            fingerprint = hashlib.sha256(
+                (vault_root / rel_path).read_bytes()
+            ).hexdigest()
+        elif re.fullmatch(r"[0-9a-f]{64}", expected_content_hash):
+            fingerprint = expected_content_hash
+        else:
+            return None
         expires_at = min(
             context.expires_at,
             now + tokens.DEFAULT_TTL_SECONDS,
@@ -1461,6 +1474,104 @@ class AnnotatedHits:
     #: Whether the deciding audience is the vault owner. Gates owner-facing
     #: diagnostics (the policy fingerprint) out of third-party responses.
     audience_is_owner: bool = False
+
+
+def annotate_projected_hits(
+    vault_root: Path,
+    hits: list[Any],
+    *,
+    policy: Policy,
+    principal: RequestPrincipal,
+    purpose: str | None,
+    withheld_paths: frozenset[str],
+) -> AnnotatedHits:
+    """Finalize already-selected projection hits without reopening source bytes."""
+
+    released: list[Any] = []
+    notices: list[dict[str, Any]] = []
+    for hit in hits:
+        decision = getattr(hit, "decision", None)
+        content_hash = getattr(hit, "snapshot_hash", None)
+        if not isinstance(decision, Decision) or not (
+            isinstance(content_hash, str)
+            and re.fullmatch(r"[0-9a-f]{64}", content_hash)
+        ):
+            raise ValueError("projected release snapshot is invalid")
+        rel_path = _hit_path(hit)
+        if not rel_path:
+            raise ValueError("projected release snapshot is invalid")
+        if decision.level >= RELEASE_FLOOR:
+            released.append(hit)
+            _outcome_for_decision(
+                vault_root,
+                rel_path,
+                decision=decision,
+                policy=policy,
+                audience=principal.audience_id,
+                outcome="released",
+                purpose=purpose,
+                content_hash=content_hash,
+                purpose_is_bound=True,
+            )
+            continue
+        notice = _notice(
+            decision.level,
+            rule_ids=decision.rule_ids,
+            scope_label=_scope_label(policy, decision),
+            options=decision.options,
+            bridge_abstraction=decision.bridge_abstraction,
+        )
+        requested_level = (
+            RELEASE_FLOOR
+            if (
+                principal.verified_authorization_session is not None
+                or principal.authorization_session_id is not None
+            )
+            else decision.level
+        )
+        token = (
+            _mint_escalation_quietly(
+                Path(vault_root),
+                rel_path=rel_path,
+                who=principal,
+                purpose=purpose,
+                decision=decision,
+                requested_level=requested_level,
+                org_ceiling=_applicable_org_ceiling(policy, decision),
+                expected_content_hash=content_hash,
+            )
+            if isinstance(
+                principal.verified_authorization_session,
+                authorization_session_lifecycle.AuthorizationSessionContext,
+            )
+            else None
+        )
+        if isinstance(token, str):
+            notice["escalation_token"] = token
+        notices.append(notice)
+        _outcome_for_decision(
+            vault_root,
+            rel_path,
+            decision=decision,
+            policy=policy,
+            audience=principal.audience_id,
+            outcome="withheld",
+            purpose=purpose,
+            content_hash=content_hash,
+            purpose_is_bound=True,
+        )
+    if withheld_paths:
+        _record_outcome({"decision": "withheld", "count": len(withheld_paths)})
+    return AnnotatedHits(
+        hits=released,
+        notices=notices,
+        withheld_paths=withheld_paths,
+        active=True,
+        fingerprint=policy.fingerprint,
+        audience_is_owner=(
+            principal.resolved and principal.audience_id == OWNER_AUDIENCE
+        ),
+    )
 
 
 #: Pre-committed over-fetch: the pool size is a function of the REQUEST alone

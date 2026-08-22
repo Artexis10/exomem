@@ -21,6 +21,8 @@ from exomem.governance import (
     authorization_session_lifecycle,
     membership,
     policy,
+    projection_store,
+    projections,
     schema_v4,
     store,
 )
@@ -54,6 +56,8 @@ def _seed(
     *,
     documents: tuple[tuple[str, bytes], ...],
     conflict_digest: str,
+    projection_key: projections.ProjectionNamespaceKey,
+    projection_manifest: projection_store.VariantStoreManifest,
 ) -> schema_v4.MigrationSeed:
     compiled = policy.compile_documents(dict(documents))
     assert not compiled.empty and not compiled.blocked
@@ -77,13 +81,18 @@ def _seed(
         ),
         catalog=schema_v4.CatalogGenerationSeed(
             catalog_generation=1,
-            descriptor=b'{"artifacts":[]}',
+            descriptor=projection_store.catalog_descriptor_bytes(
+                projection_key,
+                (),
+            ),
             artifact_count=0,
             created_at=now,
         ),
         namespace=schema_v4.ProjectionNamespaceSeed(
-            namespace_id="projection-namespace-wire",
-            evidence=b'{"ready":true}',
+            namespace_id=projection_key.namespace_id,
+            evidence=projection_store.projection_namespace_evidence_bytes(
+                projection_manifest
+            ),
             ready_at=now,
         ),
         migrated_at=now,
@@ -93,7 +102,14 @@ def _seed(
 def _private_file(path: Path, payload: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(payload)
-    if os.name != "nt":
+    if os.name == "nt":
+        from exomem import mutation_lock
+
+        mutation_lock._windows_apply_private_dacl(
+            path,
+            mutation_lock._windows_current_user_sid(),
+        )
+    else:
         path.chmod(0o600)
 
 
@@ -137,6 +153,16 @@ def _configure_v4_authority(
     assert prospective is not None and not prospective.policy.blocked
     if expected_policy_fingerprint is not None:
         assert prospective.policy.fingerprint == expected_policy_fingerprint
+    projection_key = projections.ProjectionNamespaceKey(
+        policy_fingerprint=prospective.policy.fingerprint,
+        projector_schema_version=1,
+        catalog_generation=1,
+    )
+    projection_manifest = projection_store.stage_variant_store(
+        vault,
+        key=projection_key,
+        items=(),
+    )
     connection = store.open_connection(vault)
     try:
         migration = schema_v4.migrate_v3_connection(
@@ -145,6 +171,8 @@ def _configure_v4_authority(
                 now,
                 documents=prospective.target_documents,
                 conflict_digest=prospective.snapshot.conflict_set_digest,
+                projection_key=projection_key,
+                projection_manifest=projection_manifest,
             ),
         )
     finally:
@@ -535,13 +563,13 @@ def test_stateless_mcp_session_resumes_on_another_replica(
     assert bearer not in caplog.text
 
 
-def test_stateless_mcp_grant_is_bound_across_every_content_route_family(
+def test_stateless_mcp_grant_is_bound_across_serving_content_route_families(
     vault: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Only the granted capability survives reconnect across content families."""
+    """Only the granted capability survives reconnect on activated routes."""
 
     audience, _issuer_family = _service_identity()
     policy_fingerprint, grant_paths = _write_route_fixture(vault, audience)
@@ -609,18 +637,6 @@ def test_stateless_mcp_grant_is_bound_across_every_content_route_family(
     collection = COLLECTION_PATH
     routes = (
         (
-            "ask_memory",
-            "ask_memory",
-            {
-                "query": NOTE_MARKER,
-                "mode": "keyword",
-                "graph": False,
-                "limit": 5,
-                "detail": "full",
-            },
-            NOTE_MARKER,
-        ),
-        (
             "read_memory",
             "read_memory",
             {"path": NOTE_PATH, "include_raw": True},
@@ -679,6 +695,27 @@ def test_stateless_mcp_grant_is_bound_across_every_content_route_family(
         sibling_bearer = sibling_issued["bearer"]
         assert isinstance(sibling_bearer, str)
         assert sibling_bearer != granted_bearer
+
+        projected_refusal = _tool_response(
+            client,
+            request_id,
+            "ask_memory",
+            {
+                "query": NOTE_MARKER,
+                "mode": "keyword",
+                "scope": "vault",
+                "graph": False,
+                "rerank": False,
+                "limit": 5,
+                "detail": "full",
+                "authorization_session_credential": granted_bearer,
+            },
+        )
+        request_id += 1
+        observed_wire.append(projected_refusal.text)
+        assert projected_refusal.json()["result"].get("isError") is True
+        assert "governed projected retrieval is unavailable" in projected_refusal.text
+        assert NOTE_MARKER not in projected_refusal.text
 
         for label, tool_name, arguments, marker in routes:
             valid = _tool_response(

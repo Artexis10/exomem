@@ -80,6 +80,13 @@ needlessly contended ordinary reads against long-running writes.
 - **AND** it observes a consistent whole-file pre- or post-commit state, not
   a `MUTATION_BUSY` refusal
 
+#### Scenario: Validation preview overlaps a multi-file write
+
+- **WHEN** a validation-only authoring preview runs while another process holds the mutation boundary
+- **THEN** it may return an advisory weak-snapshot draft without waiting for mutation authority
+- **AND** the response is non-committed and binds the draft and relevant predecessor inputs
+- **AND** a later commit freshly revalidates all mutation and corpus-dependent preconditions under the boundary
+
 ### Requirement: Tenant-Scoped Retry And Idempotency Semantics
 
 Hosted mutations SHALL preserve caller-supplied idempotency keys and bounded

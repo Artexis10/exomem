@@ -276,6 +276,76 @@ def test_activation_state_digest_has_a_cross_runtime_fixed_vector() -> None:
     ) == "07a35c70829d9486f876aed26c650e3aeb3eaf064a676ba842e7dbc97ebb878b"
 
 
+def test_bounded_pointer_exposes_sqlite_cas_before_registry_ack(
+    tmp_path: Path,
+) -> None:
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate(vault, now=now)
+    connection = store.open_authorization_session_connection(vault)
+    try:
+        predecessor = schema_v4.load_active_state(
+            connection,
+            expected_logical_vault_id=LOGICAL_VAULT_ID,
+            expected_activation_store_id=ACTIVATION_STORE_ID,
+            expected_activation_epoch=1,
+            expected_activation_state_digest=migration.activation_state_digest,
+        )
+        forbidden_columns = {
+            "source_documents",
+            "compiled_policy",
+            "descriptor",
+            "evidence",
+        }
+
+        def bounded_authorizer(
+            action: int,
+            _table: str | None,
+            column: str | None,
+            _database: str | None,
+            _trigger: str | None,
+        ) -> int:
+            if action == sqlite3.SQLITE_READ and column in forbidden_columns:
+                return sqlite3.SQLITE_DENY
+            return sqlite3.SQLITE_OK
+
+        connection.set_authorizer(bounded_authorizer)
+        assert schema_v4.load_active_tuple_pointer(connection) == predecessor
+        connection.set_authorizer(None)
+
+        def unavailable_registry(
+            _active: schema_v4.VerifiedActiveGovernanceState,
+        ) -> schema_v4.ActivationRegistryAcknowledgement:
+            raise RuntimeError("registry acknowledgement unavailable")
+
+        with pytest.raises(RuntimeError, match="registry acknowledgement unavailable"):
+            schema_v4.publish_policy_generation(
+                connection,
+                expected=predecessor,
+                policy=_policy_seed(
+                    generation_id=SECOND_GENERATION_ID,
+                    documents=_documents(ceiling=1),
+                    predecessor_generation_id=FIRST_GENERATION_ID,
+                    event_suffix="bounded-pointer",
+                    now=now + 1,
+                ),
+                namespace=schema_v4.ProjectionNamespaceSeed(
+                    namespace_id="namespace-bounded-pointer",
+                    evidence=b'{"ready":true}',
+                    ready_at=now + 1,
+                ),
+                activated_at=now + 1,
+                acknowledge_registry=unavailable_registry,
+            )
+
+        successor = schema_v4.load_active_tuple_pointer(connection)
+        assert successor.activation_epoch == predecessor.activation_epoch + 1
+        assert successor != predecessor
+    finally:
+        connection.close()
+
+
 def test_tuple_publication_schema_is_closed_and_append_only(tmp_path: Path) -> None:
     now = int(time.time())
     vault = tmp_path / "vault"

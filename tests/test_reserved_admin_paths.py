@@ -2233,10 +2233,13 @@ def test_named_subsystem_authority_is_exact_and_nonserializable() -> None:
         "consolidation.future",
         "references.legacy",
         "freshness.legacy",
-        "governance.projections",
     ):
         with reserved_paths._subsystem_authority_scope(inactive_owner):
             assert reserved_paths._active_owner_authority() is None
+
+    with reserved_paths._subsystem_authority_scope("governance.projections"):
+        assert reserved_paths.owner_authorized("authorization-projections")
+        assert not reserved_paths.owner_authorized("governance-store")
 
 
 def test_owner_byte_publication_requires_exact_named_authority(

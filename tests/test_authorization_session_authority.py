@@ -263,6 +263,47 @@ def test_token_redemption_and_grant_are_bound_to_one_internal_session_and_review
     assert session_b.bearer not in database_text
 
 
+def test_projection_catalog_grants_are_loaded_once_and_stay_item_exact() -> None:
+    authority = _authority_module()
+    connection, activation_digest = _connection()
+    session = _open(connection, _custody(activation_digest))
+    _mint_and_redeem(
+        authority,
+        connection,
+        session,
+        purpose="support",
+        path="Notes/reviewed.md",
+        fingerprint="4" * 64,
+        reviewed_scope_ids=("scope-a",),
+        current_scope_ids=("scope-a",),
+    )
+
+    pairs = authority.active_session_grants_for_projection_catalog(
+        connection,
+        context=session.context,
+        audience="principal:person-1",
+        purpose="support",
+        catalog=(
+            authority.SessionMembership(
+                path="Notes/reviewed.md",
+                fingerprint="4" * 64,
+                scope_ids=("scope-a",),
+            ),
+            authority.SessionMembership(
+                path="Notes/sibling.md",
+                fingerprint="5" * 64,
+                scope_ids=("scope-a",),
+            ),
+        ),
+        policy_fingerprint=POLICY_FINGERPRINT,
+        now=NOW + 3,
+    )
+
+    assert [(path, grant.grant_id) for path, grant in pairs] == [
+        ("Notes/reviewed.md", pairs[0][1].grant_id)
+    ]
+
+
 def test_purpose_lookup_and_revoke_are_exact_for_same_principal_sessions() -> None:
     authority = _authority_module()
     connection, activation_digest = _connection()

@@ -126,4 +126,3 @@ history, relation edges, supersession pointers) that name a sub-notice item.
 
 - **WHEN** a page with no matching governance rule is read
 - **THEN** the response is identical to current behavior
-

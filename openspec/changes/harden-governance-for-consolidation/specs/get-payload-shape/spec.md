@@ -28,6 +28,18 @@ release-level projection, and an L0 response SHALL be byte-identical to missing.
 - **THEN** the complete response is byte-identical to the same request for a nonexistent
   path
 
+#### Scenario: Default get response has no content key
+
+- **WHEN** `get` is called with a valid path and no `include_raw` argument
+- **THEN** the response does not include a `content` key
+- **AND** the response includes `body`, `content_hash`, and `mtime`
+
+#### Scenario: frontmatter_only is unaffected
+
+- **WHEN** `get` is called with `frontmatter_only=true`
+- **THEN** the response is `{path, frontmatter, has_frontmatter}` as before
+- **AND** this requirement does not change that shape
+
 ### Requirement: Raw Content Is Available Opt-In Via include_raw
 
 The system SHALL support an `include_raw: bool = false` parameter on `get`. When
@@ -87,6 +99,17 @@ reserved administration-tree exclusion.
   internal database/index/journal family, or any physical alias with `include_raw=true`
 - **THEN** no content or existence signal crosses the boundary, including for the owner
 
+#### Scenario: include_raw=true returns byte-identical content
+
+- **WHEN** `get` is called with `include_raw=true` for an existing page
+- **THEN** the response includes a `content` field
+- **AND** that field's value is byte-identical to the file's contents on disk
+
+#### Scenario: include_raw=false matches the default shape
+
+- **WHEN** `get` is called with `include_raw=false`
+- **THEN** the response has no `content` key, identical to omitting the parameter
+
 ### Requirement: Content Hash Remains Computed Over Raw File Text
 
 The system SHALL continue to compute the internal `content_hash` as a sha256 digest of
@@ -123,6 +146,12 @@ authorization checks MAY use the digest without exposing it.
   subsequent `edit` call using that read's `content_hash` as `expected_hash`
 - **THEN** the edit is refused with `STALE_EDIT`, because `content_hash` covers the full
   raw file text including frontmatter
+
+#### Scenario: content_hash is present regardless of include_raw
+
+- **WHEN** `get` is called for the same page once with `include_raw=false` and once
+  with `include_raw=true`
+- **THEN** both responses include the same `content_hash` value
 
 ### Requirement: Direct reads render at the release decision level
 
@@ -181,3 +210,8 @@ routes MUST NOT silently substitute the companion or emit partial raw structure.
 - **WHEN** the external registry proves the page's vault was never governance-enrolled
 - **THEN** it resolves to L6 and the response is identical to current behavior apart from
   the always-on terminal secret scrubber and structural internal-state exclusion
+
+#### Scenario: Ungoverned page is unchanged
+
+- **WHEN** a page with no matching governance rule is read
+- **THEN** the response is identical to current behavior

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from exomem import media_processing, server_runtime
+from exomem.governance import projection_runtime
 
 
 def test_initialize_runtime_loads_dotenv_from_service_working_directory(
@@ -34,6 +35,53 @@ def test_initialize_runtime_loads_dotenv_from_service_working_directory(
 
     assert calls == [(tmp_path / ".env", True)]
     assert runtime.vault_root == vault
+
+
+def test_initialize_runtime_preactivates_governed_projection_before_workers(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    events: list[str] = []
+
+    monkeypatch.setattr(server_runtime, "resolve_vault", lambda: vault)
+    monkeypatch.setattr(
+        server_runtime.schema,
+        "load_source_schema",
+        lambda _vault: SimpleNamespace(source_types=("session",)),
+    )
+    monkeypatch.setattr(server_runtime.project_keys, "keys_hint", lambda _vault: "")
+    monkeypatch.setattr(server_runtime, "_start_metrics_persistence", lambda: None)
+    monkeypatch.setattr(
+        projection_runtime,
+        "preactivate_projection_runtime",
+        lambda root: events.append(f"projection:{root}"),
+    )
+    monkeypatch.setattr(
+        server_runtime,
+        "_start_compute_runtime",
+        lambda root: events.append(f"compute:{root}"),
+    )
+    monkeypatch.setattr(
+        server_runtime,
+        "_start_media_worker",
+        lambda root: events.append(f"media:{root}"),
+    )
+    monkeypatch.setattr(
+        server_runtime,
+        "_start_file_watcher",
+        lambda root: events.append(f"watcher:{root}"),
+    )
+    monkeypatch.setattr(server_runtime, "_start_graph_drain", lambda _root: None)
+
+    server_runtime.initialize_runtime(load_dotenv_func=lambda **_kwargs: None)
+
+    assert events == [
+        f"projection:{vault}",
+        f"compute:{vault}",
+        f"media:{vault}",
+        f"watcher:{vault}",
+    ]
 
 
 def test_media_worker_startup_reconciles_media_missed_while_service_was_stopped(
