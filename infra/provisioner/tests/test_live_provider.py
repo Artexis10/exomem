@@ -510,6 +510,7 @@ async def test_live_rollforward_uses_target_fingerprint_and_original_helm_author
         "gatewayContractDigest": "a" * 64,
         "commandFingerprint": "b" * 64,
         "schemaDigest": "c" * 64,
+        "compatibilityDigest": "e" * 64,
     }
     config = LifecycleConfig(
         image="ghcr.io/artexis10/exomem@sha256:" + "d" * 64,

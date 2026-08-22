@@ -25,14 +25,11 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _RUNTIME_IMAGE = re.compile(r"^ghcr\.io/artexis10/exomem@sha256:[0-9a-f]{64}$")
 _PROVISIONER_IMAGE = re.compile(r"^ghcr\.io/artexis10/exomem-provisioner@sha256:[0-9a-f]{64}$")
 _SUBSTRATE_RUNTIME_TRUST_SITES = [
-    "admin-catalog",
     "agent-canaries",
     "agent-contract-store",
     "client-artifacts",
     "gateway-store",
     "lifecycle-store",
-    "oauth-bootstrap",
-    "platform-cohort",
     "reviewer-operator",
 ]
 _RUNTIME_CLOSURE = (

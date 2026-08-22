@@ -7,7 +7,7 @@ import re
 import secrets
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -132,15 +132,17 @@ def create_app(
     advertised_wire_protocol = (
         lock.components.provisioner.wireProtocol if lock is not None else settings.protocol
     )
-    admission = (
-        AdmissionPolicy(
+    admission = None
+    if lock is not None:
+        selected_runtime = lock.selected_runtime(settings.runtime_selection)
+        forward_target = selected_runtime.runtimeTarget.model_dump(mode="json")
+        if selected_runtime.compatibilityDigest is not None:
+            forward_target["compatibilityDigest"] = selected_runtime.compatibilityDigest
+        admission = AdmissionPolicy(
             mode=lock.admission_mode,
             legacy_catalog=lock.legacy_catalog,
-            forward_target=lock.selected_runtime(settings.runtime_selection).runtimeTarget.model_dump(mode="json"),
+            forward_target=forward_target,
         )
-        if lock is not None
-        else None
-    )
 
     @app.exception_handler(RequestValidationError)
     async def validation_failure(_request: Request, _error: RequestValidationError) -> JSONResponse:
@@ -234,7 +236,7 @@ def create_app(
                         tenant_id=str(request_data["tenantId"]),
                         cell_id=cell_id,
                         operation_id=operation_id,
-                        fence_generation=int(request_data["fenceGeneration"]),
+                        fence_generation=cast(int, request_data["fenceGeneration"]),
                         resource_name=cell_resource_name(cell_id),
                         operation_resource_name=provider_operation_resource_name(operation_id),
                     )

@@ -1266,6 +1266,13 @@ class PrivateCellApiAdapter:
                 agent_profile=agent_profile,
                 command_fingerprint=command_fingerprint,
                 schema_digest=schema_digest,
+                compatibility_digest=(
+                    config.runtime_target_for(
+                        {"runtimeTarget": config.runtime_target}, v2=True
+                    ).get("compatibilityDigest")
+                    if require_runtime_identity
+                    else None
+                ),
                 records_reader_version=records_reader_version,
                 lifecycle_actions_enabled=lifecycle_actions_enabled,
             )
@@ -1746,11 +1753,42 @@ class HelmCliAdapter:
             raise MetadataConflict("current Helm values are invalid")
         return value
 
-    async def _deployed_revision(
+    async def _revision_values(
         self,
         metadata: OpaqueProviderMetadata,
         environment: dict[str, str],
-    ) -> int:
+        revision: int,
+    ) -> dict[str, Any]:
+        result = await self._runner(
+            (
+                self._binary,
+                "get",
+                "values",
+                metadata.resource_name,
+                "--namespace",
+                metadata.resource_name,
+                "--output",
+                "json",
+                "--revision",
+                str(revision),
+            ),
+            environment,
+        )
+        if result.returncode != 0 or len(result.stdout.encode("utf-8")) > 262_144:
+            raise MetadataConflict("historical Helm values are unavailable")
+        try:
+            value = json.loads(result.stdout)
+        except (TypeError, json.JSONDecodeError) as error:
+            raise MetadataConflict("historical Helm values are invalid") from error
+        if not isinstance(value, dict) or self._has_secret_key(value):
+            raise MetadataConflict("historical Helm values are invalid")
+        return value
+
+    async def _release_history(
+        self,
+        metadata: OpaqueProviderMetadata,
+        environment: dict[str, str],
+    ) -> tuple[dict[str, Any], ...]:
         result = await self._runner(
             (
                 self._binary,
@@ -1771,13 +1809,33 @@ class HelmCliAdapter:
             history = json.loads(result.stdout)
         except (TypeError, json.JSONDecodeError) as error:
             raise MetadataConflict("Helm release history is invalid") from error
+        if not isinstance(history, list) or not 1 <= len(history) <= 20:
+            raise MetadataConflict("Helm release history is invalid")
+        revisions: list[int] = []
+        for item in history:
+            if not isinstance(item, dict):
+                raise MetadataConflict("Helm release history is invalid")
+            revision = item.get("revision")
+            if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
+                raise MetadataConflict("Helm release history is invalid")
+            revisions.append(revision)
+        if len(revisions) != len(set(revisions)):
+            raise MetadataConflict("Helm release history is invalid")
+        return tuple(history)
+
+    async def _deployed_revision(
+        self,
+        metadata: OpaqueProviderMetadata,
+        environment: dict[str, str],
+    ) -> int:
+        history = await self._release_history(metadata, environment)
         revisions = (
             [
                 item.get("revision")
                 for item in history
                 if isinstance(item, dict) and item.get("status") == "deployed"
             ]
-            if isinstance(history, list)
+            if isinstance(history, tuple)
             else []
         )
         if (
@@ -1793,6 +1851,45 @@ class HelmCliAdapter:
     def _operation_digest(operation_id: str) -> str:
         return hashlib.sha256(operation_id.encode("utf-8")).hexdigest()
 
+    @staticmethod
+    def _runtime_upgrade_prior(marker: Any, operation_digest: str) -> int | None:
+        if not isinstance(marker, dict) or marker.get("operationDigest") != operation_digest:
+            return None
+        prior = marker.get("priorRevision")
+        if (
+            set(marker) != {"schemaVersion", "operationDigest", "priorRevision"}
+            or marker.get("schemaVersion") != 1
+            or isinstance(prior, bool)
+            or not isinstance(prior, int)
+            or prior < 1
+        ):
+            raise MetadataConflict("Helm runtime upgrade marker is invalid")
+        return prior
+
+    async def _rollback_already_committed(
+        self,
+        metadata: OpaqueProviderMetadata,
+        environment: dict[str, str],
+        *,
+        current: dict[str, Any],
+        operation_digest: str,
+    ) -> bool:
+        prior_revisions: set[int] = set()
+        for item in await self._release_history(metadata, environment):
+            revision = item["revision"]
+            historical = await self._revision_values(metadata, environment, revision)
+            prior = self._runtime_upgrade_prior(historical.get("runtimeUpgrade"), operation_digest)
+            if prior is not None:
+                prior_revisions.add(prior)
+        if not prior_revisions:
+            return False
+        if len(prior_revisions) != 1:
+            raise MetadataConflict("Helm runtime rollback authority is ambiguous")
+        prior_values = await self._revision_values(
+            metadata, environment, next(iter(prior_revisions))
+        )
+        return current == prior_values
+
     async def _transition_context(
         self,
         metadata: OpaqueProviderMetadata,
@@ -1804,16 +1901,9 @@ class HelmCliAdapter:
         current = await self._current_values(metadata, environment)
         marker = current.get("runtimeUpgrade")
         digest = self._operation_digest(operation_id)
-        if isinstance(marker, dict) and marker.get("operationDigest") == digest:
-            if (
-                set(marker) != {"schemaVersion", "operationDigest", "priorRevision"}
-                or marker.get("schemaVersion") != 1
-                or isinstance(marker.get("priorRevision"), bool)
-                or not isinstance(marker.get("priorRevision"), int)
-                or marker["priorRevision"] < 1
-            ):
-                raise MetadataConflict("Helm runtime upgrade marker is invalid")
-            return current, marker["priorRevision"]
+        prior = self._runtime_upgrade_prior(marker, digest)
+        if prior is not None:
+            return current, prior
         return current, await self._deployed_revision(metadata, environment)
 
     async def transition_release(
@@ -1843,24 +1933,25 @@ class HelmCliAdapter:
         metadata: OpaqueProviderMetadata,
         *,
         operation_id: str,
+        require_marker: bool = False,
     ) -> None:
         environment = {"HELM_DRIVER": "configmap"}
         await self._require_version(environment)
         current = await self._current_values(metadata, environment)
         marker = current.get("runtimeUpgrade")
-        if not isinstance(marker, dict) or marker.get("operationDigest") != self._operation_digest(
-            operation_id
-        ):
+        digest = self._operation_digest(operation_id)
+        prior = self._runtime_upgrade_prior(marker, digest)
+        if prior is None:
+            if require_marker and await self._rollback_already_committed(
+                metadata,
+                environment,
+                current=current,
+                operation_digest=digest,
+            ):
+                return
+            if require_marker:
+                raise MetadataConflict("Helm runtime rollback authority is absent")
             return
-        prior = marker.get("priorRevision")
-        if (
-            set(marker) != {"schemaVersion", "operationDigest", "priorRevision"}
-            or marker.get("schemaVersion") != 1
-            or isinstance(prior, bool)
-            or not isinstance(prior, int)
-            or prior < 1
-        ):
-            raise MetadataConflict("Helm runtime upgrade marker is invalid")
         result = await self._runner(
             (
                 self._binary,

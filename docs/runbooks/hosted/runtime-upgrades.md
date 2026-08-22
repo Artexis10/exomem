@@ -141,7 +141,7 @@ cell ID:
 
 ```bash
 infra/scripts/hosted_runtime_upgrade_orchestrator.py next-cell \
-  --execution "$execution" --canary-cell "$EXOMEM_RUNTIME_CANARY_CELL_ID"
+  --execution "$execution" --rollout-plan "$operation_dir/rollout-plan.json"
 ```
 
 Create the Substrate assignment and fenced rollforward operation for that one cell,

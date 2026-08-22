@@ -79,6 +79,7 @@ def _runtime_target(**overrides: object) -> dict[str, object]:
         "gatewayContractDigest": "b" * 64,
         "commandFingerprint": "c" * 64,
         "schemaDigest": "d" * 64,
+        "compatibilityDigest": "9" * 64,
     }
     value.update(overrides)
     return value
@@ -460,6 +461,59 @@ async def test_rollforward_does_not_downgrade_after_target_confirmation_failure(
     assert plane.rollback_calls == 0
     assert plane.helm_values(_metadata())["image"] == config.image
     assert plane.routes_enabled(_metadata()) == (False, False)
+
+
+@pytest.mark.asyncio
+async def test_readiness_mismatch_recovery_rolls_the_committed_runtime_back() -> None:
+    plane = HighFidelityProviderPlane(location="fsn1")
+    await plane.seed_ready_cell(_metadata(), _request(), _config())
+    prior_values = plane.helm_values(_metadata())
+    target = _runtime_target(releaseVersion="0.57.2", gatewayContractDigest="e" * 64)
+    config = replace(
+        _config(),
+        image="registry.invalid/exomem@sha256:" + "f" * 64,
+        release_version="0.57.2",
+        contract_digest="e" * 64,
+        runtime_target=target,
+        compatibility_digest="9" * 64,
+        migration_mode="none",
+    )
+    request = _v2_request(
+        operationId="rollforward-readiness-mismatch",
+        fenceGeneration=8,
+        runtimeTarget=target,
+        compatibilityDigest="9" * 64,
+    )
+    driver = CellLifecycleDriver(plane=plane, volume_worker=None, config=config)
+    context = _context(
+        operation_id="database-rollforward-readiness-mismatch",
+        provider_operation_id="rollforward-readiness-mismatch",
+        fence_generation=8,
+        wire_protocol=WIRE_PROTOCOL_V2,
+    )
+    for _ in range(12):
+        outcome = await driver.execute("rollforward", request, context)
+        if isinstance(outcome, DriverFinal):
+            break
+        context = replace(context, checkpoint=outcome.checkpoint)
+    else:
+        raise AssertionError("rollforward did not complete")
+
+    rollback = await driver.execute(
+        "rollback-rollforward",
+        request,
+        _context(
+            operation_id="database-rollback-readiness-mismatch",
+            provider_operation_id="rollforward-readiness-mismatch",
+            fence_generation=8,
+            wire_protocol=WIRE_PROTOCOL_V2,
+        ),
+    )
+
+    assert isinstance(rollback, DriverFinal)
+    assert rollback.result == {}
+    assert plane.helm_values(_metadata()) == prior_values
+    assert plane.routes_enabled(_metadata()) == (True, True)
 
 
 def _metadata(**overrides: object) -> OpaqueProviderMetadata:
@@ -1171,6 +1225,7 @@ async def test_health_flattens_exact_runtime_contract_and_fails_closed_on_drift(
         ("contract_digest", "e" * 64),
         ("command_fingerprint", "e" * 64),
         ("schema_digest", "e" * 64),
+        ("compatibility_digest", "e" * 64),
     ),
 )
 async def test_v2_health_reports_only_the_exact_observed_runtime_identity(
@@ -1195,6 +1250,22 @@ async def test_v2_health_reports_only_the_exact_observed_runtime_identity(
     )
     with pytest.raises(DriverTerminal, match="PROVISIONER_RUNTIME_CONTRACT_MISMATCH"):
         await driver.execute("health", request, _context(wire_protocol=WIRE_PROTOCOL_V2))
+
+
+@pytest.mark.asyncio
+async def test_v2_health_preserves_pre_upgrade_runtime_identity_without_compatibility() -> None:
+    plane = HighFidelityProviderPlane(location="fsn1")
+    target = _runtime_target()
+    target.pop("compatibilityDigest")
+    request = _v2_request(runtimeTarget=target)
+    config = replace(_config(), runtime_target=target, compatibility_digest=None)
+    driver = CellLifecycleDriver(plane=plane, volume_worker=None, config=config)
+    await plane.seed_ready_cell(_metadata(), request, config)
+
+    healthy = await driver.execute("health", request, _context(wire_protocol=WIRE_PROTOCOL_V2))
+
+    assert isinstance(healthy, DriverFinal)
+    assert healthy.result["runtimeIdentity"] == target
 
 
 @pytest.mark.asyncio

@@ -365,25 +365,67 @@ def begin_rollout(
     return proof, {"rolloutEvidenceSha256": hashlib.sha256(canonical(proof)).hexdigest()}
 
 
-def next_rollforward_cell(execution: dict[str, Any], *, canary_cell_id: str) -> dict[str, object]:
-    """Select at most one cell: explicit canary first, then stable sequential order."""
+def next_rollforward_cell(
+    execution: dict[str, Any], rollout_plan: dict[str, Any]
+) -> dict[str, object]:
+    """Select at most one cell from the exact rollout plan bound to execution."""
 
     record = upgrade.validate_execution(execution)
     if record["phase"] != "rolling":
         _error("cell selection requires the rolling phase")
     if record["result"]["code"] != "in_progress":
         _error("cell rollout has failed and cannot select another cell")
-    if not _OPAQUE_ID.fullmatch(canary_cell_id):
-        _error("canary cell ID is invalid")
+    plan = _closed(
+        rollout_plan,
+        {
+            "artifact",
+            "schemaVersion",
+            "executionSha256",
+            "inventorySha256",
+            "mode",
+            "canaryCellId",
+            "orderedCellIds",
+        },
+        label="rollout plan",
+    )
+    plan_sha = hashlib.sha256(canonical(plan)).hexdigest()
+    if (
+        plan["artifact"] != "exomem-hosted-runtime-rollout-plan"
+        or plan["schemaVersion"] != 1
+        or plan["inventorySha256"] != record["inventory"]["sha256"]
+        or not record["evidence"]["cells"]
+        or plan_sha != record["evidence"]["cells"][0]
+    ):
+        _error("rollout plan differs from the execution authority")
+    ordered = plan["orderedCellIds"]
+    if (
+        not isinstance(ordered, list)
+        or len(set(ordered)) != len(ordered)
+        or any(
+            not isinstance(cell_id, str) or not _OPAQUE_ID.fullmatch(cell_id) for cell_id in ordered
+        )
+    ):
+        _error("rollout plan cell order is invalid")
+    planned_cells = {cell["cellId"] for cell in record["cells"] if cell["status"] != "no_op"}
+    if set(ordered) != planned_cells:
+        _error("rollout plan cells differ from the inventoried execution")
+    if ordered:
+        if plan["mode"] != "sequential" or plan["canaryCellId"] != ordered[0]:
+            _error("rollout plan canary is invalid")
+        canary_cell_id = cast(str, ordered[0])
+    else:
+        if plan["mode"] != "no_op" or plan["canaryCellId"] is not None:
+            _error("dependency-free rollout plan is invalid")
+        canary_cell_id = None
     active = [cell for cell in record["cells"] if cell["status"] == "rolling"]
     if len(active) > 1:
         _error("more than one cell is rolling")
     if active:
         return {"action": "resume", "cellId": active[0]["cellId"]}
-    pending = sorted(
-        (cell for cell in record["cells"] if cell["status"] == "pending"),
-        key=lambda cell: cell["cellId"],
-    )
+    cells_by_id = {cell["cellId"]: cell for cell in record["cells"]}
+    pending = [
+        cells_by_id[cell_id] for cell_id in ordered if cells_by_id[cell_id]["status"] == "pending"
+    ]
     completed = [cell for cell in record["cells"] if cell["status"] == "complete"]
     if not pending:
         return {"action": "prove_zero_legacy", "cellId": None}
@@ -657,7 +699,7 @@ def _parser() -> argparse.ArgumentParser:
     adoption.add_argument("--facts-output", type=Path, required=True)
     select = commands.add_parser("next-cell", help="select the canary or next sequential cell")
     select.add_argument("--execution", type=Path, required=True)
-    select.add_argument("--canary-cell", required=True)
+    select.add_argument("--rollout-plan", type=Path, required=True)
     begin = commands.add_parser("begin-rollout", help="bind an explicit canary and rollout order")
     begin.add_argument("--execution", type=Path, required=True)
     begin.add_argument("--inventory", type=Path, required=True)
@@ -746,7 +788,7 @@ def main(argv: list[str] | None = None) -> int:
                 json.dumps(
                     next_rollforward_cell(
                         upgrade.load_execution(args.execution),
-                        canary_cell_id=args.canary_cell,
+                        _load_json(args.rollout_plan, label="rollout plan"),
                     ),
                     sort_keys=True,
                     separators=(",", ":"),

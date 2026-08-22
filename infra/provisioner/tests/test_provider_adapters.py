@@ -552,28 +552,47 @@ async def test_helm_runtime_transition_replays_and_rolls_back_the_original_revis
 ) -> None:
     calls: list[tuple[str, ...]] = []
     current_values: dict[str, object] = {"workloadMode": "serve", "image": "old"}
+    revision_values: dict[int, dict[str, object]] = {1: dict(current_values)}
+    current_revision = 1
 
     async def runner(argv: tuple[str, ...], environment: dict[str, str]) -> SimpleNamespace:
-        nonlocal current_values
+        nonlocal current_revision, current_values
         calls.append(argv)
         assert environment == {"HELM_DRIVER": "configmap"}
         if argv[1] == "version":
             return SimpleNamespace(returncode=0, stdout="v3.19.4\n", stderr="")
         if argv[1:3] == ("get", "values"):
-            return SimpleNamespace(returncode=0, stdout=json.dumps(current_values), stderr="")
+            selected = (
+                revision_values[int(argv[argv.index("--revision") + 1])]
+                if "--revision" in argv
+                else current_values
+            )
+            return SimpleNamespace(returncode=0, stdout=json.dumps(selected), stderr="")
         if argv[1] == "history":
             return SimpleNamespace(
                 returncode=0,
-                stdout=json.dumps([{"revision": 1, "status": "deployed"}]),
+                stdout=json.dumps(
+                    [
+                        {
+                            "revision": revision,
+                            "status": "deployed" if revision == current_revision else "superseded",
+                        }
+                        for revision in sorted(revision_values)
+                    ]
+                ),
                 stderr="",
             )
         if argv[1] == "upgrade":
             values_path = Path(argv[argv.index("--values") + 1])
             current_values = json.loads(values_path.read_text(encoding="utf-8"))
+            current_revision += 1
+            revision_values[current_revision] = dict(current_values)
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         if argv[1] == "rollback":
             assert argv[3] == "1"
-            current_values = {"workloadMode": "serve", "image": "old"}
+            current_values = dict(revision_values[1])
+            current_revision += 1
+            revision_values[current_revision] = dict(current_values)
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         raise AssertionError(argv)
 
@@ -595,7 +614,10 @@ async def test_helm_runtime_transition_replays_and_rolls_back_the_original_revis
         "operationDigest": hashlib.sha256(b"rollforward-alpha").hexdigest(),
         "priorRevision": 1,
     }
-    assert sum(call[1] == "upgrade" for call in calls) == 1
+    route_reopened = dict(current_values)
+    route_reopened["routeReopened"] = True
+    await adapter.ensure_release(_metadata(), route_reopened)
+    assert sum(call[1] == "upgrade" for call in calls) == 2
 
     await adapter.rollback_release(_metadata(), operation_id="rollforward-alpha")
 
@@ -603,6 +625,16 @@ async def test_helm_runtime_transition_replays_and_rolls_back_the_original_revis
     rollback = next(call for call in calls if call[1] == "rollback")
     assert rollback[2:4] == (_metadata().resource_name, "1")
     assert "--wait" in rollback and "--cleanup-on-fail" in rollback
+
+    await adapter.rollback_release(
+        _metadata(), operation_id="rollforward-alpha", require_marker=True
+    )
+    assert sum(call[1] == "rollback" for call in calls) == 1
+
+    with pytest.raises(MetadataConflict, match="rollback authority is absent"):
+        await adapter.rollback_release(
+            _metadata(), operation_id="different-operation", require_marker=True
+        )
 
 
 class _CustomObjects:

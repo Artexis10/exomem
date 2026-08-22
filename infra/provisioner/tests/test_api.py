@@ -90,6 +90,7 @@ def _settings(path: Path) -> ProvisionerSettings:
         "artifact": "exomem-hosted-deployment-lock", "schemaVersion": 2, "admissionMode": "expand",
         "components": {"runtime": {"image": f"ghcr.io/artexis10/exomem@sha256:{digest}", "sourceCommit": commit, "candidateSha256": digest}, "provisioner": {"image": f"ghcr.io/artexis10/exomem-provisioner@sha256:{'e' * 64}", "sourceCommit": commit, "candidateSha256": "e" * 64, "wireProtocol": "exomem-cell-provisioner.v2"}},
         "runtimeTarget": target,
+        "runtimeUpgrade": {"compatibilityDigest": "e" * 64, "migrationMode": "none", "substrateConsumerCommit": commit, "substrateTrustSha256": "e" * 64},
         "composition": {"commit": commit, "sourceClosure": {name: {"candidateCommit": commit, "compositionCommit": commit, "paths": ["src/**"]} for name in ("runtime", "provisioner")}, "forwardContractSha256": digest, "authoritativeLegacyReleaseSetSha256": "f" * 64, "legacyCatalog": [{"releaseVersion": "0.22.0", "protocolVersion": "exomem-hosted.v1", "runtimeImage": f"ghcr.io/artexis10/exomem@sha256:{digest}", "sourceCommit": commit, "contractSha256": _canonical_sha256(legacy_contract), "contract": legacy_contract}], "legacyReleaseSetSha256": _canonical_sha256([{"releaseVersion": "0.22.0", "protocolVersion": "exomem-hosted.v1"}])},
         "rollback": {"provisionerImage": f"ghcr.io/artexis10/exomem-provisioner@sha256:{'e' * 64}", "provisionerSourceCommit": commit, "v1CorpusSha256": digest, "legacyManifestSha256": digest, "substrateV1ConsumerCommit": commit},
     }), encoding="utf-8")
@@ -152,7 +153,7 @@ def test_target_request_excludes_provision_only_mode() -> None:
 def _body_for(action: str) -> dict[str, Any]:
     if action == "provision":
         return _base_body()
-    if action == "rollforward":
+    if action in {"rollforward", "rollback-rollforward"}:
         body = _target_body(compatibilityDigest="e" * 64)
         body.pop("releaseVersion")
         body.pop("protocolVersion")
@@ -163,6 +164,7 @@ def _body_for(action: str) -> dict[str, Any]:
             "gatewayContractDigest": "a" * 64,
             "commandFingerprint": "c" * 64,
             "schemaDigest": "d" * 64,
+            "compatibilityDigest": "e" * 64,
         }
         return body
     if action == "rotate-credential":
@@ -384,6 +386,7 @@ async def test_exact_header_selects_v2_models_before_operation_creation(
         "gatewayContractDigest": "a" * 64,
         "commandFingerprint": "c" * 64,
         "schemaDigest": "d" * 64,
+        "compatibilityDigest": "e" * 64,
     }
     body = _base_body(operationId="v2-api")
     body.pop("releaseVersion")
@@ -418,6 +421,7 @@ async def test_rollforward_is_v2_only_strict_and_idempotently_persisted(
         "gatewayContractDigest": "a" * 64,
         "commandFingerprint": "c" * 64,
         "schemaDigest": "d" * 64,
+        "compatibilityDigest": "e" * 64,
     }
     body = {
         "operationId": "rollforward-api",
@@ -547,7 +551,7 @@ async def _complete_as_worker(
 
 
 @pytest.mark.asyncio
-async def test_api_exposes_exact_fifteen_post_paths_and_strict_pending_union(
+async def test_api_exposes_exact_sixteen_post_paths_and_strict_pending_union(
     api: tuple[httpx.AsyncClient, OperationRepository, Path],
 ) -> None:
     client, _, _ = api
@@ -555,6 +559,7 @@ async def test_api_exposes_exact_fifteen_post_paths_and_strict_pending_union(
         "provision",
         "health",
         "rollforward",
+        "rollback-rollforward",
         "rotate-credential",
         "quiesce",
         "resume",
@@ -581,7 +586,7 @@ async def test_api_exposes_exact_fifteen_post_paths_and_strict_pending_union(
         body["operationId"] = f"operation-{index}"
         body["fenceGeneration"] = index
         headers = _headers(f"idempotency-{index}")
-        if action == "rollforward":
+        if action in {"rollforward", "rollback-rollforward"}:
             headers["X-Exomem-Provisioner-Protocol"] = WIRE_PROTOCOL_V2
         response = await client.post(
             f"/cells/{action}",

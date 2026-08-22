@@ -18,7 +18,7 @@ from .models import OperationAction, OperationState
 from .repository import FleetOperationSnapshot, OperationRepository
 
 _OPAQUE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
-_RUNTIME_FIELDS = {
+_BASE_RUNTIME_FIELDS = {
     "releaseVersion",
     "protocolVersion",
     "agentProfile",
@@ -26,7 +26,8 @@ _RUNTIME_FIELDS = {
     "commandFingerprint",
     "schemaDigest",
 }
-_DEPLOYMENT_FIELDS = _RUNTIME_FIELDS | {"runtimeImage"}
+_COMPATIBILITY_FIELD = "compatibilityDigest"
+_DEPLOYMENT_FIELDS = _BASE_RUNTIME_FIELDS | {"runtimeImage"}
 
 
 class FleetObservationError(ValueError):
@@ -38,16 +39,29 @@ def _error(message: str) -> NoReturn:
 
 
 def _runtime(target: dict[str, Any], image: str) -> dict[str, str]:
-    if set(target) != _RUNTIME_FIELDS or any(
-        not isinstance(target[field], str) for field in _RUNTIME_FIELDS
-    ):
+    fields = frozenset(target)
+    if fields not in {
+        frozenset(_BASE_RUNTIME_FIELDS),
+        frozenset(_BASE_RUNTIME_FIELDS | {_COMPATIBILITY_FIELD}),
+    } or any(not isinstance(value, str) for value in target.values()):
         _error("deployment runtime identity is invalid")
-    return {**{field: target[field] for field in _RUNTIME_FIELDS}, "runtimeImage": image}
+    return {**target, "runtimeImage": image}
 
 
-def _catalog(lock: DeploymentLock) -> tuple[dict[tuple[tuple[str, str], ...], dict[str, str]], dict[tuple[str, str], dict[str, str]]]:
+def _catalog(
+    lock: DeploymentLock,
+) -> tuple[
+    dict[tuple[tuple[str, str], ...], dict[str, str]], dict[tuple[str, str], dict[str, str]]
+]:
     exact: dict[tuple[tuple[str, str], ...], dict[str, str]] = {}
     legacy: dict[tuple[str, str], dict[str, str]] = {}
+
+    def register_exact(identity: dict[str, str], deployment: dict[str, str]) -> None:
+        key = tuple(sorted(identity.items()))
+        existing = exact.get(key)
+        if existing is not None and existing != deployment:
+            _error("deployment runtime catalog is ambiguous")
+        exact[key] = deployment
 
     selections = ["active"]
     if lock.schemaVersion == 3:
@@ -55,19 +69,22 @@ def _catalog(lock: DeploymentLock) -> tuple[dict[tuple[tuple[str, str], ...], di
     for name in selections:
         selected = lock.selected_runtime(name)  # type: ignore[arg-type]
         identity = selected.runtimeTarget.model_dump(mode="json")
+        if selected.compatibilityDigest is not None:
+            identity[_COMPATIBILITY_FIELD] = selected.compatibilityDigest
         deployment = _runtime(identity, selected.image)
-        exact[tuple(sorted(identity.items()))] = deployment
+        register_exact(identity, deployment)
 
     for unit in lock.composition.legacyCatalog:
         contract = unit.contract.model_dump(mode="json")
-        deployment = {
-            field: contract[field]
-            for field in _DEPLOYMENT_FIELDS
-        }
+        deployment = {field: contract[field] for field in _DEPLOYMENT_FIELDS}
         key = (deployment["releaseVersion"], deployment["protocolVersion"])
         if key in legacy:
             _error("deployment legacy runtime catalog is ambiguous")
         legacy[key] = deployment
+        register_exact(
+            {field: deployment[field] for field in _BASE_RUNTIME_FIELDS},
+            deployment,
+        )
     return exact, legacy
 
 
@@ -79,7 +96,10 @@ def _resolve_runtime(
 ) -> dict[str, str] | None:
     if identity is None:
         return None
-    if set(identity) == _RUNTIME_FIELDS:
+    if frozenset(identity) in {
+        frozenset(_BASE_RUNTIME_FIELDS),
+        frozenset(_BASE_RUNTIME_FIELDS | {_COMPATIBILITY_FIELD}),
+    }:
         return exact.get(tuple(sorted(identity.items())))
     if set(identity) == {"releaseVersion", "protocolVersion"}:
         return legacy.get((identity["releaseVersion"], identity["protocolVersion"]))
@@ -105,6 +125,7 @@ def build_fleet_observation(
 
     exact, legacy = _catalog(lock)
     desired: dict[str, dict[str, Any]] = {}
+    rollforward_priors: dict[tuple[str, str], dict[str, Any]] = {}
     resolved: dict[int, dict[str, str] | None] = {}
     ordered = sorted(operations, key=lambda item: (item.created_at, item.external_operation_id))
     for index, operation in enumerate(ordered):
@@ -115,16 +136,25 @@ def build_fleet_observation(
         if operation.action in {OperationAction.PROVISION, OperationAction.ROLLFORWARD}:
             if runtime is None:
                 _error("runtime-setting operation has no reviewed deployment identity")
-            state = (
-                "ready"
-                if operation.state is OperationState.FINAL
-                else operation.state.value
-            )
+            if operation.action is OperationAction.ROLLFORWARD:
+                prior = desired.get(operation.cell_id)
+                if prior is None:
+                    _error("rollforward operation has no prior reviewed deployment identity")
+                rollforward_priors[(operation.external_operation_id, operation.cell_id)] = prior
+            state = "ready" if operation.state is OperationState.FINAL else operation.state.value
             desired[operation.cell_id] = {
                 "cellId": operation.cell_id,
                 "runtime": runtime,
                 "state": state,
             }
+        elif (
+            operation.action is OperationAction.ROLLBACK_ROLLFORWARD
+            and operation.state is OperationState.FINAL
+        ):
+            prior = rollforward_priors.get((operation.external_operation_id, operation.cell_id))
+            if prior is None:
+                _error("rollforward rollback has no prior reviewed deployment identity")
+            desired[operation.cell_id] = {**prior, "state": "ready"}
         elif (
             operation.action in {OperationAction.DESTROY, OperationAction.DISCARD}
             and operation.state is OperationState.FINAL

@@ -8,8 +8,8 @@ from exomem_provisioner.models import OperationAction, OperationState
 from exomem_provisioner.repository import FleetOperationSnapshot
 
 
-def _target(release: str) -> dict[str, str]:
-    return {
+def _target(release: str, *, compatibility: bool = True) -> dict[str, str]:
+    target = {
         "releaseVersion": release,
         "protocolVersion": "1",
         "agentProfile": "hosted-alpha-agent-v2",
@@ -17,16 +17,28 @@ def _target(release: str) -> dict[str, str]:
         "commandFingerprint": "b" * 64,
         "schemaDigest": "c" * 64,
     }
+    if compatibility:
+        target["compatibilityDigest"] = "9" * 64
+    return target
 
 
 def _lock():
     active = _target("0.57.2")
-    legacy = {**_target("0.54.1"), "runtimeImage": "ghcr.io/artexis10/exomem@sha256:" + "d" * 64, "sourceCommit": "e" * 40}
+    legacy = {
+        **_target("0.54.1", compatibility=False),
+        "runtimeImage": "ghcr.io/artexis10/exomem@sha256:" + "d" * 64,
+        "sourceCommit": "e" * 40,
+    }
     return SimpleNamespace(
         schemaVersion=2,
         selected_runtime=lambda _selection: SimpleNamespace(
-            runtimeTarget=SimpleNamespace(model_dump=lambda **_kwargs: active),
+            runtimeTarget=SimpleNamespace(
+                model_dump=lambda **_kwargs: {
+                    key: value for key, value in active.items() if key != "compatibilityDigest"
+                }
+            ),
             image="ghcr.io/artexis10/exomem@sha256:" + "f" * 64,
+            compatibilityDigest=active["compatibilityDigest"],
         ),
         composition=SimpleNamespace(
             legacyCatalog=(
@@ -54,13 +66,13 @@ def _operation(
     )
 
 
-def test_fleet_observation_projects_target_intent_without_compatibility_self_assertion() -> None:
+def test_fleet_observation_projects_the_complete_reviewed_target_identity() -> None:
     operations = (
         _operation(
             operation_id="provision-alpha",
             action=OperationAction.PROVISION,
             state=OperationState.FINAL,
-            runtime={"releaseVersion": "0.54.1", "protocolVersion": "1"},
+            runtime=_target("0.54.1", compatibility=False),
             offset=0,
         ),
         _operation(
@@ -82,7 +94,7 @@ def test_fleet_observation_projects_target_intent_without_compatibility_self_ass
     assert desired["state"] == "pending"
     assert desired["runtime"]["releaseVersion"] == "0.57.2"
     assert desired["runtime"]["runtimeImage"].endswith("f" * 64)
-    assert "compatibilityDigest" not in desired["runtime"]
+    assert desired["runtime"]["compatibilityDigest"] == "9" * 64
     assert observation["unfinishedOperations"] == [
         {
             "operationId": "rollforward-alpha",
@@ -92,6 +104,42 @@ def test_fleet_observation_projects_target_intent_without_compatibility_self_ass
             "targetRuntime": desired["runtime"],
         }
     ]
+
+
+def test_terminal_rollforward_rollback_restores_the_prior_desired_runtime() -> None:
+    operations = (
+        _operation(
+            operation_id="provision-alpha",
+            action=OperationAction.PROVISION,
+            state=OperationState.FINAL,
+            runtime=_target("0.54.1", compatibility=False),
+            offset=0,
+        ),
+        _operation(
+            operation_id="rollforward-alpha",
+            action=OperationAction.ROLLFORWARD,
+            state=OperationState.FINAL,
+            runtime=_target("0.57.2"),
+            offset=1,
+        ),
+        _operation(
+            operation_id="rollforward-alpha",
+            action=OperationAction.ROLLBACK_ROLLFORWARD,
+            state=OperationState.FINAL,
+            runtime=_target("0.57.2"),
+            offset=2,
+        ),
+    )
+
+    observation = build_fleet_observation(
+        operations,
+        lock=_lock(),
+        observed_at="2026-08-21T11:00:00Z",
+    )
+
+    assert observation["desiredCells"][0]["runtime"]["releaseVersion"] == "0.54.1"
+    assert observation["desiredCells"][0]["state"] == "ready"
+    assert observation["unfinishedOperations"] == []
 
 
 def test_terminal_destroy_removes_provisioner_desired_state() -> None:

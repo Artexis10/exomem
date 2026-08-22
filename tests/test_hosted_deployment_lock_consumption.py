@@ -339,6 +339,31 @@ def _write_evidence(lock: dict[str, object], directory: Path) -> None:
         legacy_manifest,
         *(unit["contract"] for unit in composition["legacyCatalog"]),
     ]
+    runtime_upgrade = lock.get("runtimeUpgrade")
+    if isinstance(runtime_upgrade, dict):
+        trust = {
+            "artifact": "exomem-hosted-substrate-runtime-trust",
+            "schemaVersion": 1,
+            "consumerCommit": runtime_upgrade["substrateConsumerCommit"],
+            "target": {
+                **lock["runtimeTarget"],
+                "runtimeImage": runtime["image"],
+                "sourceCommit": runtime["sourceCommit"],
+                "runtimeCandidateSha256": runtime["candidateSha256"],
+                "compatibilityDigest": runtime_upgrade["compatibilityDigest"],
+            },
+            "pinnedSites": [
+                "agent-canaries",
+                "agent-contract-store",
+                "client-artifacts",
+                "gateway-store",
+                "lifecycle-store",
+                "reviewer-operator",
+            ],
+            "fixtureSha256s": {"agent": "a" * 64, "gateway": "b" * 64},
+        }
+        runtime_upgrade["substrateTrustSha256"] = hashlib.sha256(_canonical(trust)).hexdigest()
+        evidence.append(trust)
     digests = [hashlib.sha256(_canonical(item)).hexdigest() for item in evidence]
     composition["forwardContractSha256"] = digests[0]
     composition["authoritativeLegacyReleaseSetSha256"] = digests[1]
@@ -360,6 +385,36 @@ def test_fixed_lock_evidence_revalidates_all_reviewed_inputs(tmp_path: Path) -> 
     verifier._verify_lock_evidence(
         lock, evidence, verifier._load_script("hosted_composition_lock.py")
     )
+
+
+def test_fixed_lock_evidence_rejects_substituted_runtime_trust(tmp_path: Path) -> None:
+    verifier = _module(VERIFIER)
+    lock = _member("expand")
+    lock["runtimeUpgrade"] = {
+        "compatibilityDigest": "5" * 64,
+        "migrationMode": "none",
+        "substrateConsumerCommit": "6" * 40,
+        "substrateTrustSha256": "7" * 64,
+    }
+    evidence = tmp_path / "evidence"
+    _write_evidence(lock, evidence)
+    trust_digest = lock["runtimeUpgrade"]["substrateTrustSha256"]  # type: ignore[index]
+    trust_path = next(
+        path
+        for path in evidence.iterdir()
+        if hashlib.sha256(path.read_bytes()).hexdigest() == trust_digest
+    )
+    trust = json.loads(trust_path.read_text(encoding="utf-8"))
+    trust["pinnedSites"] = ["agent-canaries"]
+    trust_path.write_bytes(_canonical(trust))
+    lock["runtimeUpgrade"]["substrateTrustSha256"] = hashlib.sha256(  # type: ignore[index]
+        trust_path.read_bytes()
+    ).hexdigest()
+
+    with pytest.raises(ValueError, match="pinned sites"):
+        verifier._verify_lock_evidence(
+            lock, evidence, verifier._load_script("hosted_composition_lock.py")
+        )
 
 
 def test_fixed_lock_evidence_rejects_a_noncanonical_v1_corpus(tmp_path: Path) -> None:

@@ -938,7 +938,25 @@ def _verify_lock_evidence(lock: dict[str, Any], directory: Path, composer: Any) 
         require_canonical_json=False,
     )
     _validate_frozen_v1_corpus(corpus_raw)
-    _ = forward_path, authority_path, legacy_manifest_path
+    runtime_upgrade = lock.get("runtimeUpgrade")
+    if runtime_upgrade is not None:
+        trust_path, trust = _evidence_file(
+            directory,
+            runtime_upgrade["substrateTrustSha256"],
+            label="Substrate runtime trust",
+            composer=composer,
+        )
+        composer._substrate_trust(
+            trust,
+            upgrade=runtime_upgrade,
+            runtime_target=lock["runtimeTarget"],
+            runtime_image=components["runtime"]["image"],
+            runtime_source=components["runtime"]["sourceCommit"],
+            runtime_candidate_sha256=components["runtime"]["candidateSha256"],
+        )
+    else:
+        trust_path = None
+    _ = forward_path, authority_path, legacy_manifest_path, trust_path
 
 
 def _candidate_matches_lock(

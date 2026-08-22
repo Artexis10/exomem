@@ -28,8 +28,8 @@
 
 ## 4. Exomem provisioner and cell rollforward
 
-- [x] 4.1 Extend the strict provisioner wire models with the authorized `rollforward` action and exact target/compatibility identity; persist checkpoints and prior Helm revision as provisioner-owned evidence; return only a bounded content-free completion
-- [x] 4.2 Add red-first provisioner tests for quiesce/drain, idempotent checkpoints, target fencing, unauthorized drift, exact confirmation, preservation failure, Helm atomic recovery, and post-record stop behavior
+- [x] 4.1 Extend the strict provisioner wire models with authorized `rollforward` and operation-scoped pre-record `rollback-rollforward` actions plus exact target/compatibility identity; persist checkpoints and prior Helm revision as provisioner-owned evidence; return only bounded content-free completion
+- [x] 4.2 Add red-first provisioner tests for quiesce/drain, idempotent checkpoints, target fencing, unauthorized drift, exact confirmation, preservation failure, strict operation-scoped Helm recovery, and post-record stop behavior
 - [x] 4.3 Implement the live and in-memory provider rollforward action against the deployment lock's target while retaining unauthorized fixed-value drift protection
 - [x] 4.4 Add a `migrate` workload mode to the cell chart using a bounded TTL job with the existing minimal root filesystem capabilities and no serving-container privilege change
 - [x] 4.5 Bind privileged migration necessity to signed target metadata and prove no migration job renders for a plain image transition
@@ -38,6 +38,7 @@
 - [x] 4.8 Recompute the canonical vault fingerprint, exclude only the declared rebuildable derived indexes, and refuse completion on any other byte loss or change
 - [x] 4.9 Return a pre-record failure to the prior Helm revision and identity; after target observation, stop and require explicit recovery rather than downgrading or relabelling
 - [x] 4.10 Add cross-language contract fixtures and K3s acceptance proving same-cell/same-volume operation, bounded unavailability, vault preservation, runtime confirmation, and replay safety
+- [x] 4.11 Make committed Helm rollback replay-safe across multiple same-operation revisions with one unique prior revision, restore prior fleet intent after finalized rollback, accept compatibility-bearing inventory, and preserve historical full v2 identities plus optional compatibility for pre-upgrade health
 
 ## 5. Generic expand, drain, and contract orchestration
 

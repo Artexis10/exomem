@@ -34,6 +34,52 @@ _REBUILDABLE_SQLITE_NAMES = {
     ".media_jobs.sqlite",
     ".idempotency.sqlite",
 }
+_RESERVED_EXACT = {
+    *(
+        f"{name}{suffix}"
+        for name in (
+            ".governance.sqlite",
+            ".embeddings.sqlite",
+            ".clip.sqlite",
+            ".lexical.sqlite",
+            ".graph.sqlite",
+            ".claims.sqlite",
+            ".references.sqlite",
+            ".refs.sqlite",
+            ".freshness.sqlite",
+            ".deferred-index.sqlite",
+            ".deferred_index.sqlite",
+            ".media-jobs.sqlite",
+            ".media_jobs.sqlite",
+            ".idempotency.sqlite",
+        )
+        for suffix in ("", "-wal", "-shm", "-journal")
+    ),
+    ".deferred-index.json",
+    ".media-jobs.json",
+    ".media-worker.lock",
+    ".idempotency.json",
+    ".idempotency.jsonl",
+    ".voice_profiles.json",
+    ".graph-sync.json",
+    ".graph-sync-floor.json",
+    ".review-state.json",
+}
+_RESERVED_TREES = {
+    "_governance",
+    "_consolidation",
+    ".graph-commit-receipts",
+    ".authorization-projections",
+}
+_RESERVED_ROOT_PATTERNS = (
+    re.compile(r"^\.\.review-state\.json\.[a-z0-9_]{8}\.tmp$"),
+    re.compile(r"^\.lexical\.sqlite\.rebuild-[0-9a-f]{32}\.tmp(?:-(?:wal|shm|journal))?$"),
+    re.compile(r"^\.lexical\.sqlite(?:-(?:wal|shm))?\.quarantine-[0-9a-f]{32}$"),
+    re.compile(r"^\.graph-rebuild-[0-9a-f]{64}-[0-9a-f]{24}\.sqlite(?:-(?:wal|shm|journal))?$"),
+)
+_RESERVED_TREE_ROOT_PATTERNS = (re.compile(r"^\.graph-reset-[0-9a-f]{24}$"),)
+_RESERVED_COMPONENT_TREE_PATTERNS = (re.compile(r"^\.exomem-batch-[0-9a-f]{32}$"),)
+_RESERVED_LEAF_PATTERNS = (re.compile(r"^\.exomem-held-publish-[0-9a-f]{32}$"),)
 
 
 class FingerprintError(ValueError):
@@ -67,6 +113,28 @@ def _normalized(path: str) -> str:
     return candidate.as_posix()
 
 
+def _is_registered_internal_state(lowered: tuple[str, ...], kb_dir: str) -> bool:
+    if not lowered or lowered[0] != kb_dir.casefold():
+        return False
+    parts = lowered[1:]
+    if not parts:
+        return False
+    leaf_path = "/".join(parts)
+    if leaf_path in _RESERVED_EXACT:
+        return True
+    if any(leaf_path == tree or leaf_path.startswith(f"{tree}/") for tree in _RESERVED_TREES):
+        return True
+    if len(parts) == 1 and any(pattern.fullmatch(parts[0]) for pattern in _RESERVED_ROOT_PATTERNS):
+        return True
+    if any(pattern.fullmatch(parts[0]) for pattern in _RESERVED_TREE_ROOT_PATTERNS):
+        return True
+    if any(pattern.fullmatch(parts[-1]) for pattern in _RESERVED_LEAF_PATTERNS):
+        return True
+    return any(
+        pattern.fullmatch(part) for part in parts for pattern in _RESERVED_COMPONENT_TREE_PATTERNS
+    )
+
+
 def _classification(path: str) -> str | None:
     parts = PurePosixPath(path).parts
     lowered = tuple(part.casefold() for part in parts)
@@ -76,6 +144,8 @@ def _classification(path: str) -> str | None:
         return "portable-derived"
     if re.fullmatch(rf"{re.escape(kb_dir)}/\.graph-commit-receipts/[0-9a-f]{{24}}\.json", path):
         return "portable-derived"
+    if _is_registered_internal_state(lowered, kb_dir):
+        return None
     if lowered and lowered[0] in {"logs", ".logs", "runtime-logs"}:
         return None
     names = set(lowered)

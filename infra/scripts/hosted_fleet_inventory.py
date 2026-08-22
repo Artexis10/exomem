@@ -180,9 +180,7 @@ def runtime_from_upgrade_target(value: object) -> dict[str, str]:
     """Project the verifier's exact ten-field target into fleet runtime identity."""
 
     target = _closed(value, _UPGRADE_TARGET_FIELDS, label="upgrade target")
-    if not isinstance(target["sourceCommit"], str) or not _COMMIT.fullmatch(
-        target["sourceCommit"]
-    ):
+    if not isinstance(target["sourceCommit"], str) or not _COMMIT.fullmatch(target["sourceCommit"]):
         _error("upgrade target sourceCommit is invalid")
     if not isinstance(target["runtimeCandidateSha256"], str) or not _SHA256.fullmatch(
         target["runtimeCandidateSha256"]
@@ -208,12 +206,20 @@ def _control_runtime(value: object, *, label: str) -> dict[str, str]:
 def _deployment_runtime(value: object, *, label: str) -> dict[str, str]:
     """Validate image-bearing desired/observed runtime state outside Substrate."""
 
-    runtime = _closed(value, _DEPLOYMENT_RUNTIME_FIELDS, label=label)
+    if not isinstance(value, dict):
+        _error(f"{label} fields are incomplete or unknown")
+    fields = set(value)
+    if fields not in (_DEPLOYMENT_RUNTIME_FIELDS, _RUNTIME_FIELDS):
+        _error(f"{label} fields are incomplete or unknown")
+    runtime = _closed(value, fields, label=label)
     validated = _runtime(
-        {**runtime, "compatibilityDigest": "0" * 64},
+        {
+            **runtime,
+            "compatibilityDigest": runtime.get("compatibilityDigest", "0" * 64),
+        },
         label=label,
     )
-    return {field: validated[field] for field in _DEPLOYMENT_RUNTIME_FIELDS}
+    return {field: validated[field] for field in fields}
 
 
 def _runtime_contract(runtime: dict[str, str]) -> dict[str, str]:
@@ -224,10 +230,8 @@ def _runtime_deployment(runtime: dict[str, str]) -> dict[str, str]:
     return {field: runtime[field] for field in _DEPLOYMENT_RUNTIME_FIELDS}
 
 
-def _join_runtime(
-    control: dict[str, str], deployment: dict[str, str]
-) -> dict[str, str] | None:
-    shared = _CONTROL_RUNTIME_FIELDS & _DEPLOYMENT_RUNTIME_FIELDS
+def _join_runtime(control: dict[str, str], deployment: dict[str, str]) -> dict[str, str] | None:
+    shared = set(control) & set(deployment)
     if any(control[field] != deployment[field] for field in shared):
         return None
     return {**control, **deployment}
@@ -819,9 +823,7 @@ def reconcile_inventory(
             issues=issues,
         )
         status = _code(item["status"], label="assignment status")
-        assignment_runtime = _control_runtime(
-            item["targetRuntime"], label="assignment target"
-        )
+        assignment_runtime = _control_runtime(item["targetRuntime"], label="assignment target")
         referenced_claims.append((current, assignment_runtime))
         if status == "active":
             current["assignmentIds"].add(assignment_id)
@@ -1025,8 +1027,7 @@ def reconcile_inventory(
         by_contract.setdefault(_canonical(_runtime_contract(runtime)), []).append(runtime)
     for current, claim in referenced_claims:
         matches = {
-            _canonical(runtime): runtime
-            for runtime in by_contract.get(_canonical(claim), [])
+            _canonical(runtime): runtime for runtime in by_contract.get(_canonical(claim), [])
         }
         if len(matches) != 1:
             current["issues"].add("runtime_identity_unresolved")
@@ -1090,7 +1091,7 @@ def reconcile_inventory(
         if cell_runtime is not None and (
             any(claim != _runtime_contract(cell_runtime) for claim in current["runtimeClaims"])
             or any(
-                deployment != _runtime_deployment(cell_runtime)
+                any(cell_runtime[field] != value for field, value in deployment.items())
                 for deployment in current["runtimeDeployments"]
             )
         ):
@@ -1246,8 +1247,8 @@ def execution_inventory_facts(inventory: dict[str, Any]) -> dict[str, object]:
     counts = cast(dict[str, int], inventory["counts"])
     target = _runtime(inventory.get("target"), label="inventory target")
     raw_cells = inventory.get("cells")
-    if not isinstance(raw_cells, list) or len(raw_cells) != counts["cells"]:
-        _error("inventory cells do not match counts")
+    if not isinstance(raw_cells, list):
+        _error("inventory cells are invalid")
     cells: list[dict[str, object]] = []
     for index, raw in enumerate(raw_cells):
         item = _closed(
@@ -1257,6 +1258,8 @@ def execution_inventory_facts(inventory: dict[str, Any]) -> dict[str, object]:
         )
         if item["issues"] != [] or item["classification"] == "inconsistent":
             _error("inventory contains an inconsistent cell")
+        if item["classification"] == "terminal":
+            continue
         runtime = _runtime(item["runtime"], label=f"inventory cell {index} runtime")
         surfaces = _closed(
             item["surfaces"],
@@ -1286,7 +1289,7 @@ def execution_inventory_facts(inventory: dict[str, Any]) -> dict[str, object]:
         ):
             _error("inventory cell authority is ambiguous")
         classification = item["classification"]
-        if classification not in {"target", "legacy", "reviewer", "terminal"}:
+        if classification not in {"target", "legacy", "reviewer"}:
             _error("inventory cell classification is invalid")
         target_cell = runtime == target
         cells.append(
@@ -1296,12 +1299,14 @@ def execution_inventory_facts(inventory: dict[str, Any]) -> dict[str, object]:
                 "releaseVersion": runtime["releaseVersion"],
                 "assignmentId": assignment_ids[0] if assignment_ids else None,
                 "operationId": operation_ids[0] if operation_ids else None,
-                "status": "no_op" if target_cell or classification == "terminal" else "pending",
+                "status": "no_op" if target_cell else "pending",
                 "beforeVaultSha256": None,
                 "afterVaultSha256": None,
                 "evidenceSha256": None,
             }
         )
+    if len(cells) != counts["cells"]:
+        _error("live inventory cells do not match counts")
     digest = inventory_sha256(inventory)
     return {
         "inventoryStatus": inventory["status"],

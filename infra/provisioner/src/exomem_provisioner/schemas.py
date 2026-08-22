@@ -95,6 +95,7 @@ class RuntimeTarget(StrictSchema):
     gatewayContractDigest: Sha256
     commandFingerprint: Sha256
     schemaDigest: Sha256
+    compatibilityDigest: Sha256 | None = None
 
 
 class ContextRequest(StrictSchema):
@@ -203,6 +204,10 @@ class V2HealthRequest(V2TargetRequest):
 
 class V2RollforwardRequest(V2TargetRequest):
     compatibilityDigest: Sha256
+
+
+class V2RollbackRollforwardRequest(V2RollforwardRequest):
+    pass
 
 
 class V2QuiesceRequest(V2TargetRequest):
@@ -403,6 +408,7 @@ V2_REQUEST_MODELS: dict[str, type[StrictSchema]] = {
     "provision": V2ProvisionRequest,
     "health": V2HealthRequest,
     "rollforward": V2RollforwardRequest,
+    "rollback-rollforward": V2RollbackRollforwardRequest,
     "rotate-credential": V2RotateCredentialRequest,
     "quiesce": V2QuiesceRequest,
     "resume": V2ResumeRequest,
@@ -444,6 +450,7 @@ V2_FINAL_MODELS: dict[str, type[StrictSchema] | None] = {
     **FINAL_MODELS,
     "health": V2HealthResponse,
     "rollforward": None,
+    "rollback-rollforward": None,
 }
 
 

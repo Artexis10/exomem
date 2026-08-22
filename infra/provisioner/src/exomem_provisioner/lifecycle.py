@@ -200,7 +200,12 @@ class LifecycleConfig:
         if v2:
             if self.runtime_target is None:
                 raise MetadataConflict("selected runtime target is unavailable")
-            return self.runtime_target
+            compatibility_digest = self.compatibility_digest or self.runtime_target.get(
+                "compatibilityDigest"
+            )
+            if compatibility_digest is None:
+                return dict(self.runtime_target)
+            return {**self.runtime_target, "compatibilityDigest": compatibility_digest}
         target = runtime_identity(request)
         try:
             return (self.legacy_runtime_units or {})[
@@ -239,6 +244,7 @@ class HealthObservation:
     agent_profile: str | None = None
     command_fingerprint: str | None = None
     schema_digest: str | None = None
+    compatibility_digest: str | None = None
     records_reader_version: int | None = None
     lifecycle_actions_enabled: bool | None = None
 
@@ -269,6 +275,7 @@ class HealthObservation:
             agent_profile=target.get("agentProfile") if v2 else None,
             command_fingerprint=target.get("commandFingerprint") if v2 else None,
             schema_digest=target.get("schemaDigest") if v2 else None,
+            compatibility_digest=target.get("compatibilityDigest") if v2 else None,
             records_reader_version=(
                 config.records_reader_version if config.records_reader_version is not None else None
             ),
@@ -306,18 +313,21 @@ class HealthObservation:
             or self.schema_digest is None
         ):
             raise MetadataConflict("runtime identity is incomplete")
+        runtime_identity = {
+            "releaseVersion": self.release_version,
+            "protocolVersion": self.protocol_version,
+            "agentProfile": self.agent_profile,
+            "gatewayContractDigest": self.contract_digest,
+            "commandFingerprint": self.command_fingerprint,
+            "schemaDigest": self.schema_digest,
+        }
+        if self.compatibility_digest is not None:
+            runtime_identity["compatibilityDigest"] = self.compatibility_digest
         return {
             "live": self.live,
             "ready": self.ready,
             "cellId": self.cell_id,
-            "runtimeIdentity": {
-                "releaseVersion": self.release_version,
-                "protocolVersion": self.protocol_version,
-                "agentProfile": self.agent_profile,
-                "gatewayContractDigest": self.contract_digest,
-                "commandFingerprint": self.command_fingerprint,
-                "schemaDigest": self.schema_digest,
-            },
+            "runtimeIdentity": runtime_identity,
             "serviceAuthenticated": self.service_authenticated,
             "mutationAuthority": self.mutation_authority,
             "readAdmission": self.read_admission,
@@ -666,7 +676,9 @@ class LifecyclePlane(Protocol):
     ) -> HealthObservation: ...
     async def admit_runtime(self, metadata: OpaqueProviderMetadata) -> None: ...
     def runtime_admitted(self, metadata: OpaqueProviderMetadata) -> bool: ...
-    async def enable_routes(self, metadata: OpaqueProviderMetadata, request: dict[str, Any]) -> None: ...
+    async def enable_routes(
+        self, metadata: OpaqueProviderMetadata, request: dict[str, Any]
+    ) -> None: ...
     async def disable_routes(self, metadata: OpaqueProviderMetadata) -> None: ...
     def routes_enabled(self, metadata: OpaqueProviderMetadata) -> tuple[bool, bool]: ...
     async def prove_external_rejection(
@@ -719,6 +731,11 @@ class LifecyclePlane(Protocol):
         operation_id: str,
     ) -> None: ...
     async def commit_runtime_upgrade(
+        self,
+        metadata: OpaqueProviderMetadata,
+        operation_id: str,
+    ) -> None: ...
+    async def rollback_committed_runtime(
         self,
         metadata: OpaqueProviderMetadata,
         operation_id: str,
@@ -787,7 +804,9 @@ class _Cell:
     candidate: bool = False
     failed: bool = False
     vault_fingerprint: str = ""
-    prior_rollforward: tuple[dict[str, Any], dict[str, Any], HealthObservation | None] | None = None
+    prior_rollforward: (
+        tuple[str, dict[str, Any], dict[str, Any], HealthObservation | None] | None
+    ) = None
 
 
 @dataclass(slots=True)
@@ -981,7 +1000,9 @@ class HighFidelityProviderPlane:
         cell = self._cell(metadata)
         return bool(cell and cell.runtime_admitted)
 
-    async def enable_routes(self, metadata: OpaqueProviderMetadata, request: dict[str, Any]) -> None:
+    async def enable_routes(
+        self, metadata: OpaqueProviderMetadata, request: dict[str, Any]
+    ) -> None:
         del request
         cell = self._require_cell(metadata)
         cell.control_route = True
@@ -1096,15 +1117,15 @@ class HighFidelityProviderPlane:
         config: LifecycleConfig,
         operation_id: str,
     ) -> None:
-        del operation_id
         cell = self._require_cell(metadata)
         if not cell.quiesced or cell.control_route or cell.transfer_route:
             raise MetadataConflict("runtime upgrade requires closed routes and a quiesced cell")
         target = runtime_identity(request)
         if cell.request_shape.get("runtimeTarget") == target:
             return
-        if cell.prior_rollforward is None:
+        if cell.prior_rollforward is None or cell.prior_rollforward[0] != operation_id:
             cell.prior_rollforward = (
+                operation_id,
                 json.loads(json.dumps(cell.request_shape)),
                 json.loads(json.dumps(cell.helm_values)),
                 cell.health,
@@ -1129,11 +1150,10 @@ class HighFidelityProviderPlane:
         metadata: OpaqueProviderMetadata,
         operation_id: str,
     ) -> None:
-        del operation_id
         cell = self._require_cell(metadata)
-        if cell.prior_rollforward is None:
+        if cell.prior_rollforward is None or cell.prior_rollforward[0] != operation_id:
             return
-        request_shape, helm_values, health = cell.prior_rollforward
+        _, request_shape, helm_values, health = cell.prior_rollforward
         cell.request_shape = request_shape
         cell.helm_values = helm_values
         cell.health = health
@@ -1144,8 +1164,19 @@ class HighFidelityProviderPlane:
         metadata: OpaqueProviderMetadata,
         operation_id: str,
     ) -> None:
-        del operation_id
-        self._require_cell(metadata).prior_rollforward = None
+        # Keep the same-operation rollback preimage until a later rollforward
+        # replaces it with its then-current predecessor.
+        del metadata, operation_id
+
+    async def rollback_committed_runtime(
+        self,
+        metadata: OpaqueProviderMetadata,
+        operation_id: str,
+    ) -> None:
+        cell = self._require_cell(metadata)
+        if cell.prior_rollforward is None or cell.prior_rollforward[0] != operation_id:
+            raise MetadataConflict("runtime rollback authority is absent")
+        await self.rollback_runtime(metadata, operation_id)
 
     async def stage_credential(
         self,
@@ -1747,9 +1778,7 @@ class CellLifecycleDriver:
             request, v2=context.wire_protocol == WIRE_PROTOCOL_V2
         )
 
-    def rollforward_target_matches(
-        self, request: dict[str, Any], context: EffectContext
-    ) -> bool:
+    def rollforward_target_matches(self, request: dict[str, Any], context: EffectContext) -> bool:
         return bool(
             context.wire_protocol == WIRE_PROTOCOL_V2
             and self._config.compatibility_digest is not None
@@ -1764,9 +1793,15 @@ class CellLifecycleDriver:
         context: EffectContext,
     ) -> DriverPending | DriverFinal:
         try:
-            if action == "rollforward" and not self.rollforward_target_matches(request, context):
+            if action in {
+                "rollforward",
+                "rollback-rollforward",
+            } and not self.rollforward_target_matches(request, context):
                 raise DriverTerminal("PROVISIONER_RELEASE_UNIT_MISMATCH")
-            if action != "rollforward" and not self.runtime_target_matches(request, context):
+            if action not in {
+                "rollforward",
+                "rollback-rollforward",
+            } and not self.runtime_target_matches(request, context):
                 raise DriverTerminal("PROVISIONER_RELEASE_UNIT_MISMATCH")
             if await self.observed_fence(context.tenant_id) > context.fence_generation:
                 raise DriverTerminal("PROVISIONER_STALE_FENCE")
@@ -1779,6 +1814,11 @@ class CellLifecycleDriver:
                 )
             if action == "rollforward":
                 return await self._rollforward(request, context)
+            if action == "rollback-rollforward":
+                await self._plane.rollback_committed_runtime(
+                    _metadata_from_context(context), context.provider_operation_id
+                )
+                return DriverFinal({})
             if action in {"quiesce", "stop", "resume", "seal"}:
                 return await self._lifecycle(action, request, context)
             if action == "rotate-credential":
@@ -1838,15 +1878,11 @@ class CellLifecycleDriver:
         if context.checkpoint.startswith("vault-fingerprinted-") and fingerprint is not None:
             if self._config.migration_mode == "none":
                 return DriverPending(f"migration-skipped-{fingerprint}", 1)
-            await self._plane.run_runtime_migration(
-                metadata, request, self._config, operation_id
-            )
+            await self._plane.run_runtime_migration(metadata, request, self._config, operation_id)
             return DriverPending(f"migration-complete-{fingerprint}", 1)
         if context.checkpoint.startswith("migration-") and fingerprint is not None:
             try:
-                await self._plane.upgrade_runtime(
-                    metadata, request, self._config, operation_id
-                )
+                await self._plane.upgrade_runtime(metadata, request, self._config, operation_id)
                 after = await self._plane.canonical_vault_fingerprint(
                     metadata, request, operation_id, phase="after"
                 )

@@ -84,12 +84,20 @@ After the runtime transition, the operation SHALL read private authenticated rea
 
 ### Requirement: Cell rollforward failure has bounded recovery semantics
 
-A migration or runtime failure before target observation SHALL preserve the prior control-plane identity and return the Helm release to its recorded prior revision when a transition occurred. A failure after target observation SHALL stop automatic progression and require a separately authorized recovery or restore; it MUST NOT use reverse rollforward, silent relabelling, tenant deletion, or unobserved Helm mutation.
+A migration or runtime failure before target observation SHALL preserve the prior control-plane identity and return the Helm release to its recorded prior revision when a transition occurred. If that failure is detected after the provisioner transition committed, recovery SHALL use one operation-scoped action that accepts only the same operation's retained Helm marker and prior revision; a missing, stale, or different-operation marker MUST fail closed. A failure after target observation SHALL stop automatic progression and require a separately authorized recovery or restore; it MUST NOT use reverse rollforward, silent relabelling, tenant deletion, or unobserved Helm mutation.
 
 #### Scenario: Runtime transition never becomes ready
 
 - **WHEN** the target pod fails the bounded atomic wait before target observation is written
 - **THEN** Helm returns the cell to its prior revision and the prior routable identity remains authoritative
+
+#### Scenario: Independent readiness vetoes a committed transition
+
+- **WHEN** the provisioner completed the runtime transition but the control plane's exact target check fails before target observation
+- **THEN** the same lifecycle operation invokes the bounded rollback action against its retained Helm marker and prior revision
+- **AND** no other operation, absent marker, or reconstructed target can authorize that rollback
+- **AND** replay after Helm already committed the rollback proves completion from the same operation's bounded release history instead of requiring the removed current marker
+- **AND** multiple same-operation revisions are accepted only when every retained marker names the same unique prior revision
 
 #### Scenario: Failure occurs after target observation
 

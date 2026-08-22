@@ -971,6 +971,18 @@ class LiveLifecyclePlane:
         # then-current deployed revision as its own rollback point.
         del metadata, operation_id
 
+    async def rollback_committed_runtime(
+        self,
+        metadata: OpaqueProviderMetadata,
+        operation_id: str,
+    ) -> None:
+        await self._helm.rollback_release(
+            self._owner(metadata),
+            operation_id=operation_id,
+            require_marker=True,
+        )
+        await self._refresh(metadata)
+
     async def _active_version(self, metadata: OpaqueProviderMetadata) -> str:
         _, annotations = await self._cell.read_credential_bundle(self._owner(metadata))
         version = annotations.get("exomem.io/active-credential-version")

@@ -321,7 +321,7 @@ def test_production_worker_action_sets_have_one_owner_for_every_action() -> None
         for action in OperationAction
     }
 
-    assert len(ownership) == 15
+    assert len(ownership) == 16
     assert set(ownership.values()) == {1}
     assert DELETION_OPERATION_ACTIONS == frozenset(
         {OperationAction.DISCARD, OperationAction.DESTROY}

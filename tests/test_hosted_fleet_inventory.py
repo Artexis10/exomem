@@ -46,8 +46,8 @@ def _control_runtime(runtime: dict[str, str]) -> dict[str, str]:
     return {key: value for key, value in runtime.items() if key != "runtimeImage"}
 
 
-def _deployment_runtime(runtime: dict[str, str]) -> dict[str, str]:
-    """Provisioner/Kubernetes own deployed bytes, not promotion compatibility."""
+def _kubernetes_runtime(runtime: dict[str, str]) -> dict[str, str]:
+    """Kubernetes owns deployed bytes, not promotion compatibility."""
 
     return {key: value for key, value in runtime.items() if key != "compatibilityDigest"}
 
@@ -94,9 +94,7 @@ def _add_live_cell(
     reviewer: bool = False,
 ) -> None:
     substrate = sources["substrate"]
-    substrate["routableCells"].append(
-        {"cellId": cell_id, "runtime": _control_runtime(runtime)}
-    )
+    substrate["routableCells"].append({"cellId": cell_id, "runtime": _control_runtime(runtime)})
     substrate["tenantBindings"].append({"cellId": cell_id, "status": "active"})
     substrate["capacityClaims"].append({"cellId": cell_id})
     substrate["capacityActiveCellCount"] += 1
@@ -105,13 +103,13 @@ def _add_live_cell(
         substrate["reviewerTenants"].append({"cellId": cell_id})
 
     sources["provisioner"]["desiredCells"].append(
-        {"cellId": cell_id, "runtime": _deployment_runtime(runtime), "state": "ready"}
+        {"cellId": cell_id, "runtime": dict(runtime), "state": "ready"}
     )
     sources["kubernetes"]["namespaces"].append({"cellId": cell_id})
     sources["kubernetes"]["helmReleases"].append(
         {
             "cellId": cell_id,
-            "runtime": _deployment_runtime(runtime),
+            "runtime": _kubernetes_runtime(runtime),
             "driver": "configmap",
             "status": "deployed",
         }
@@ -247,8 +245,8 @@ def test_mixed_and_multiple_legacy_releases_are_retained_deterministically() -> 
     ("mutation", "issue"),
     [
         (
-                lambda sources, target: sources["provisioner"]["desiredCells"][0].update(
-                {"runtime": _deployment_runtime(target)}
+            lambda sources, target: sources["provisioner"]["desiredCells"][0].update(
+                {"runtime": _kubernetes_runtime(target)}
             ),
             "runtime_identity_divergence",
         ),
@@ -598,6 +596,25 @@ def test_execution_facts_are_derived_from_the_exact_gated_inventory() -> None:
             },
         ],
     }
+
+
+def test_execution_facts_retain_terminal_evidence_but_exclude_destroyed_cells() -> None:
+    module = _module()
+    target = _runtime("0.57.2", "a")
+    sources = _empty_sources()
+    sources["substrate"]["tenantBindings"].append(
+        {"cellId": "cell_destroyed", "status": "destroyed"}
+    )
+
+    inventory = module.reconcile_inventory(sources, target=target)
+    facts = module.execution_inventory_facts(inventory)
+
+    assert inventory["counts"]["terminalCells"] == 1
+    assert inventory["counts"]["cells"] == 0
+    assert inventory["cells"][0]["classification"] == "terminal"
+    assert inventory["cells"][0]["runtime"] is None
+    assert facts["cellCount"] == 0
+    assert facts["cells"] == []
 
 
 def test_operator_cli_collects_three_authorities_and_writes_private_phase_facts(

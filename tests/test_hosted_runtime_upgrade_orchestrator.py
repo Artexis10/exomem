@@ -312,7 +312,12 @@ def test_canary_then_sequential_rollforward_stops_on_first_failure(monkeypatch) 
         facts=rollout_facts,
     )
 
-    assert module.next_rollforward_cell(execution, canary_cell_id="cell_b")["cellId"] == "cell_b"
+    assert module.next_rollforward_cell(execution, proof)["cellId"] == "cell_b"
+    substituted_plan = copy.deepcopy(proof)
+    substituted_plan["orderedCellIds"] = ["cell_a", "cell_b"]
+    substituted_plan["canaryCellId"] = "cell_a"
+    with pytest.raises(module.OrchestrationError, match="execution authority"):
+        module.next_rollforward_cell(execution, substituted_plan)
     inventoried_authority = copy.deepcopy(execution)
     inventoried_authority["cells"][1]["assignmentId"] = "assignment_existing"
     inventoried_authority["cells"][1]["operationId"] = "operation_existing"
@@ -376,7 +381,7 @@ def test_canary_then_sequential_rollforward_stops_on_first_failure(monkeypatch) 
         )
         == completed
     )
-    assert module.next_rollforward_cell(completed, canary_cell_id="cell_b")["cellId"] == "cell_a"
+    assert module.next_rollforward_cell(completed, proof)["cellId"] == "cell_a"
     failed = module.record_cell_outcome(
         completed,
         expected_sha256=module.upgrade.canonical_sha256(completed),
@@ -397,7 +402,7 @@ def test_canary_then_sequential_rollforward_stops_on_first_failure(monkeypatch) 
     }
     assert module.upgrade.recovery_decision(failed) == "hold_expand_and_recover"
     with pytest.raises(module.OrchestrationError, match="failed"):
-        module.next_rollforward_cell(failed, canary_cell_id="cell_b")
+        module.next_rollforward_cell(failed, proof)
 
     post_record_failure = module.record_cell_outcome(
         completed,

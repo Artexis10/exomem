@@ -87,7 +87,17 @@ The operator creates a target rollout assignment for one cell, then creates the 
 8. upsert the routable observation for the same cell identity and complete the assignment;
 9. restore routing only after desired state and readiness are green.
 
-Failure before the observation moves returns the Helm release to its prior revision and leaves the prior control-plane identity. Failure after the observation moves stops the fleet, keeps expand mode active, and requires explicit recovery; the workflow never disguises a downgrade as rollforward.
+Failure before the observation moves returns the Helm release to its prior revision and leaves the prior control-plane identity. If the provisioner transition has already committed when the control plane's independent readiness check vetoes the target, the control plane invokes one operation-scoped `rollback-rollforward` action; the provisioner accepts it only while the same operation's Helm marker and prior revision remain authoritative. Failure after the observation moves stops the fleet, keeps expand mode active, and requires explicit recovery; the workflow never disguises a downgrade as rollforward.
+
+Helm rollback removes the marker from current values, so replay also accepts a bounded
+historical proof: one or more retained revisions may carry the same operation digest, but
+all of them must name one unique prior revision and that revision's values must equal the
+current deployed values. This permits the runtime transition and route-reopen revisions
+created by one operation while rejecting conflicting predecessor authority. Provisioner
+fleet projection applies a finalized rollback to the saved prior reviewed runtime, carries
+compatibility whenever the selected runtime declares it, and resolves historical full v2
+identities against the retained legacy catalog. Older reviewed runtime identities without
+compatibility remain observable for backward-compatible health and inventory.
 
 Sequential execution was chosen over parallel batches because the alpha fleet is small, per-cell downtime is already bounded, and one-at-a-time rollout gives a clean canary and limits data risk. A future capability may add bounded batching without changing the per-cell contract.
 
