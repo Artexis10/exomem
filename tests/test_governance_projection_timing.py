@@ -122,6 +122,20 @@ def test_completion_refuses_padding_sleep_that_misses_deadline() -> None:
         )
 
 
+@pytest.mark.parametrize("reading", [float("nan"), float("inf"), float("-inf")])
+def test_completion_refuses_nonfinite_clock(reading: float) -> None:
+    timing = _timing_module()
+    request_class = timing.PUBLIC_REQUEST_CLASSES["projected-find-keyword-v1"]
+
+    with pytest.raises(timing.ProjectedRequestTimingUnavailable):
+        timing.complete_public_request(
+            request_class,
+            started_at=10.0,
+            clock=lambda: reading,
+            sleeper=lambda _seconds: pytest.fail("invalid clock slept"),
+        )
+
+
 def test_shared_command_dispatch_owns_projected_completion_boundary(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,

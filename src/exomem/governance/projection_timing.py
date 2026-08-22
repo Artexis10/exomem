@@ -454,6 +454,8 @@ def complete_public_request(
     if (
         isinstance(started_at, bool)
         or not isinstance(started_at, (int, float))
+        or not math.isfinite(float(started_at))
+        or not math.isfinite(float(finished_at))
         or finished_at < started_at
     ):
         raise ProjectedRequestTimingUnavailable(
@@ -468,9 +470,17 @@ def complete_public_request(
     if remaining:
         sleeper(remaining)
     completed_at = clock()
-    if completed_at < finished_at or (
+    if (
+        isinstance(completed_at, bool)
+        or not isinstance(completed_at, (int, float))
+        or not math.isfinite(float(completed_at))
+        or completed_at < finished_at
+        or (
         completed_at - float(started_at)
-    ) * 1000.0 > request_class.deadline_ms:
+        )
+        * 1000.0
+        > request_class.deadline_ms
+    ):
         raise ProjectedRequestDeadlineExceeded(
             "governed projected request deadline was exceeded"
         )
