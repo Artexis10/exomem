@@ -496,6 +496,7 @@ def _connect(
             database,
             _DESCRIPTOR_ID,
             connection,
+            preserve_existing=True,
         )
         if readonly:
             connection.execute("PRAGMA query_only=ON")
@@ -579,6 +580,7 @@ def stage_variant_store(
                         database,
                         _DESCRIPTOR_ID,
                         connection,
+                        preserve_existing=True,
                     )
                     connection.close()
 
@@ -626,6 +628,7 @@ def verify_variant_store(
                         database,
                         _DESCRIPTOR_ID,
                         connection,
+                        preserve_existing=True,
                     )
                     connection.close()
 
@@ -699,6 +702,7 @@ def load_projection_variant(
                         database,
                         _DESCRIPTOR_ID,
                         connection,
+                        preserve_existing=True,
                     )
                     connection.close()
 

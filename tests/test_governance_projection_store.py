@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from exomem import reserved_paths
 from exomem.governance import projection_store, projections
 from exomem.governance.decisions import Decision
 
@@ -239,3 +240,33 @@ def test_loader_refuses_stale_tuple_or_catalog_identity(tmp_path: Path) -> None:
             expected_content_hash="e" * 64,
             projection_variant_id=items[0].variants[0].projection_variant_id,
         )
+
+
+def test_publishing_a_next_namespace_keeps_prior_namespace_identities(tmp_path: Path) -> None:
+    first_key = _key()
+    second_key = projections.ProjectionNamespaceKey(
+        policy_fingerprint=first_key.policy_fingerprint,
+        projector_schema_version=first_key.projector_schema_version,
+        catalog_generation=first_key.catalog_generation + 1,
+    )
+    projection_store.stage_variant_store(tmp_path, key=first_key, items=_items())
+    projection_store.stage_variant_store(tmp_path, key=second_key, items=_items())
+
+    with reserved_paths._subsystem_authority_scope("governance.projections"):
+        with reserved_paths._identity_coordination_scope(
+            tmp_path,
+            descriptor_ids=("authorization-projections",),
+        ):
+            published = reserved_paths._reachable_owner_publications(
+                tmp_path,
+                "authorization-projections",
+            )
+
+    assert {
+        projection_store.variant_store_path(tmp_path, first_key)
+        .relative_to(tmp_path)
+        .as_posix(),
+        projection_store.variant_store_path(tmp_path, second_key)
+        .relative_to(tmp_path)
+        .as_posix(),
+    } <= set(published)

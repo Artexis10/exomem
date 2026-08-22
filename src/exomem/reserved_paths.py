@@ -1940,6 +1940,8 @@ def _publish_sqlite_owner_family(
     database: Path,
     descriptor_id: str,
     connection: object,
+    *,
+    preserve_existing: bool = False,
 ) -> None:
     """Publish a canonical owner's reachable SQLite family before unlock."""
 
@@ -1978,10 +1980,15 @@ def _publish_sqlite_owner_family(
             prefix = "" if relative.parent == Path(".") else f"{relative.parent.as_posix()}/"
 
             def publish(family: dict[str, held_fs.StableIdentity]) -> None:
+                installed = {f"{prefix}{name}": identity for name, identity in family.items()}
+                if preserve_existing:
+                    current = _reachable_owner_publications(root, descriptor_id)
+                    current.update(installed)
+                    installed = current
                 _publish_owner_identities(
                     root,
                     descriptor_id,
-                    {f"{prefix}{name}": identity for name, identity in family.items()},
+                    installed,
                 )
 
             for attempt in range(3):
