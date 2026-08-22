@@ -346,7 +346,17 @@ class ExomemLocalAdapter:
     def _call_tool(self, tool: str, args: dict) -> dict:
         import asyncio
 
-        result = asyncio.run(self._mcp.call_tool(tool, args, run_middleware=False))  # type: ignore[union-attr]
+        from exomem.governance import principal as principal_module
+
+        # This benchmark intentionally invokes FastMCP in-process with its
+        # middleware disabled. Model the trusted principal that the real MCP
+        # middleware installs; the absent optional bearer remains standing-only.
+        with principal_module.request_scope(
+            principal_module.owner_principal(surface="mcp")
+        ):
+            result = asyncio.run(
+                self._mcp.call_tool(tool, args, run_middleware=False)  # type: ignore[union-attr]
+            )
         structured = getattr(result, "structured_content", None)
         if isinstance(structured, dict):
             return structured
