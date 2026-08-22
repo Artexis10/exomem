@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import get_args
 
 import pytest
@@ -252,4 +253,187 @@ def test_verified_context_routes_status_without_forwarding_raw_bearer(
         "expires_at": datetime.fromtimestamp(NOW + 600, tz=UTC).isoformat().replace("+00:00", "Z"),
     }
     assert calls == [(connection, context, NOW)]
+    assert connection.closed
+
+
+@pytest.mark.parametrize(
+    ("operation", "handler_name", "arguments"),
+    [
+        ("grant", "_grant_v4", {"token": "wh1.token"}),
+        ("declare", "_declare_v4", {"purpose": "support"}),
+        ("revoke", "_revoke_v4", {"scope": "session"}),
+    ],
+)
+def test_verified_session_authoring_routes_by_internal_context_without_public_handle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    handler_name: str,
+    arguments: dict[str, object],
+) -> None:
+    from exomem.governance import tool as governance_tool
+
+    context = _context()
+    principal = _principal(context)
+    observed: list[tuple[object, object]] = []
+
+    def bound_handler(vault_root: Path, **kwargs: object) -> dict[str, object]:
+        observed.append((vault_root, kwargs["principal"]))
+        assert kwargs.get("authorization_session") is None
+        return {"status": "committed", "session_id": context.session_id}
+
+    monkeypatch.setattr(governance_tool, handler_name, bound_handler, raising=False)
+
+    result = governance_tool.op_govern_memory(
+        tmp_path / "vault",
+        operation=operation,
+        principal=principal,
+        now=NOW,
+        **arguments,
+    )
+
+    assert result == {"status": "committed", "session_id": context.session_id}
+    assert observed == [(tmp_path / "vault", principal)]
+
+
+def test_v4_authoring_rejects_a_caller_selected_legacy_handle_before_leaf(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance import tool as governance_tool
+    from exomem.governance.tool import GovernanceError
+
+    monkeypatch.setattr(
+        governance_tool.store,
+        "authorization_session_schema_version",
+        lambda _vault: 4,
+    )
+    principal = _principal(legacy_echo="caller-selected")
+
+    with pytest.raises(GovernanceError) as error:
+        governance_tool.op_govern_memory(
+            tmp_path / "vault",
+            operation="declare",
+            principal=principal,
+            authorization_session="caller-selected",
+            purpose="support",
+            now=NOW,
+        )
+
+    assert error.value.code == "AUTHORIZATION_SESSION_REQUIRED"
+
+
+def test_missing_store_cannot_reopen_legacy_caller_handle_authority(
+    tmp_path: Path,
+) -> None:
+    from exomem.governance import tool as governance_tool
+    from exomem.governance.tool import GovernanceError
+
+    vault = tmp_path / "vault"
+    principal = _principal(legacy_echo="caller-selected")
+    with pytest.raises(GovernanceError) as error:
+        governance_tool.op_govern_memory(
+            vault,
+            operation="declare",
+            principal=principal,
+            authorization_session="caller-selected",
+            purpose="support",
+            now=NOW,
+        )
+
+    assert error.value.code == "AUTHORIZATION_SESSION_REQUIRED"
+    assert not store.sidecar_path(vault).exists()
+
+
+def test_verified_grant_binds_product_redemption_to_context_policy_and_membership(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance import authorization_session_authority
+    from exomem.governance import tool as governance_tool
+
+    context = _context()
+    principal = _principal(context)
+
+    class Connection:
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    connection = Connection()
+    key = b"k" * 32
+    custody = SimpleNamespace(keyring=SimpleNamespace(accepted_keys=()))
+    review = authorization_session_authority.EscalationReview(
+        authorization_session_id=context.session_id,
+        principal_id=context.principal_id,
+        issuer_family=context.issuer_family,
+        audience=context.principal_id,
+        purpose="support",
+        max_level=5,
+        org_ceiling=6,
+        paths=("Notes/shared.md",),
+        fingerprints=("4" * 64,),
+        scope_ids=("scope-a",),
+        expires_at=NOW + 300,
+    )
+    policy = SimpleNamespace(empty=False, blocked=False, fingerprint="3" * 64)
+    calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        governance_tool,
+        "_v4_authority_inputs",
+        lambda _vault, _kwargs: (principal, context, custody, connection, NOW),
+    )
+    monkeypatch.setattr(
+        governance_tool,
+        "_inspect_v4_token",
+        lambda *_args, **_kwargs: (review, key),
+    )
+    monkeypatch.setattr(governance_tool.policy_module, "load", lambda _vault: policy)
+    monkeypatch.setattr(
+        governance_tool,
+        "_resolved_membership_manifest",
+        lambda _vault, _policy, _paths: [
+            {"path": "Notes/shared.md", "scope_ids": ["scope-a", "scope-b"]}
+        ],
+    )
+    monkeypatch.setattr(
+        governance_tool,
+        "_content_hash",
+        lambda _path: "4" * 64,
+    )
+
+    def redeem_escalation_token(**kwargs: object):
+        calls.append(kwargs)
+        assert kwargs["connection"] is connection
+        assert kwargs["context"] is context
+        assert kwargs["signing_key"] == key
+        assert kwargs["policy_fingerprint"] == "3" * 64
+        assert kwargs["membership"] == (
+            authorization_session_authority.SessionMembership(
+                path="Notes/shared.md",
+                fingerprint="4" * 64,
+                scope_ids=("scope-a", "scope-b"),
+            ),
+        )
+        return SimpleNamespace(grant_id="8" * 64)
+
+    monkeypatch.setattr(
+        authorization_session_authority,
+        "redeem_escalation_token",
+        redeem_escalation_token,
+    )
+
+    result = governance_tool.op_govern_memory(
+        tmp_path / "vault",
+        operation="grant",
+        principal=principal,
+        token="wh1.bound-token",
+        purpose="support",
+        now=NOW,
+    )
+
+    assert result == {"status": "committed", "grant_id": "8" * 64}
+    assert len(calls) == 1
     assert connection.closed

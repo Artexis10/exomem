@@ -49,7 +49,17 @@ from urllib.parse import unquote
 from .. import find_corpus, memory_refs
 from ..find_types import Hit, SemanticUnitHit
 from ..kbdir import kb_dirname
-from . import bridges, lifecycle, receipts, scrubber, store, tokens
+from . import (
+    authorization_custody,
+    authorization_session_authority,
+    authorization_session_lifecycle,
+    bridges,
+    lifecycle,
+    receipts,
+    scrubber,
+    store,
+    tokens,
+)
 from . import membership as membership_module
 from . import policy as policy_module
 from .decisions import Decision, decide
@@ -76,6 +86,13 @@ class ReceiptUnavailableError(RuntimeError):
 
     def __init__(self) -> None:
         super().__init__("GOVERNANCE_RECEIPT_UNAVAILABLE: retry the request")
+
+
+class AuthorizationSessionDecisionUnavailable(RuntimeError):
+    """Content-free refusal when verified session state cannot be rechecked."""
+
+    def __init__(self) -> None:
+        super().__init__("AUTHORIZATION_SESSION_UNAVAILABLE")
 
 
 @dataclass
@@ -1017,6 +1034,28 @@ def _declared_purpose(
         return explicit
     if who.purpose is not None:
         return who.purpose
+    context = who.verified_authorization_session
+    if isinstance(context, authorization_session_lifecycle.AuthorizationSessionContext):
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = store.open_authorization_session_connection(vault_root)
+            return authorization_session_authority.active_session_purpose(
+                connection,
+                context=context,
+                audience=who.audience_id,
+                now=int(__import__("time").time()),
+            )
+        except (
+            authorization_session_lifecycle.AuthorizationSessionUnavailable,
+            FileNotFoundError,
+            OSError,
+            sqlite3.Error,
+            store.UnsupportedGovernanceSchema,
+        ):
+            raise AuthorizationSessionDecisionUnavailable from None
+        finally:
+            if connection is not None:
+                connection.close()
     return store.active_session_purpose(
         vault_root,
         audience=who.audience_id,
@@ -1091,6 +1130,76 @@ def _applicable_org_ceiling(policy: Policy, decision: Decision) -> int:
     )
 
 
+def _mint_escalation_quietly(
+    vault_root: Path,
+    *,
+    rel_path: str,
+    who: RequestPrincipal,
+    purpose: str | None,
+    decision: Decision,
+    requested_level: int,
+    org_ceiling: int,
+) -> str | None:
+    context = who.verified_authorization_session
+    if not isinstance(
+        context,
+        authorization_session_lifecycle.AuthorizationSessionContext,
+    ):
+        return tokens.mint_quietly(
+            vault_root,
+            paths=[rel_path],
+            audience=who.audience_id,
+            max_level=requested_level,
+            authorization_session=who.authorization_session_id,
+            purpose=purpose,
+            org_ceiling=org_ceiling,
+        )
+    connection: sqlite3.Connection | None = None
+    try:
+        now = int(__import__("time").time())
+        custody = authorization_custody.load_authorization_custody(vault_root, now=now)
+        if (
+            custody.keyring.cell_id != context.cell_id
+            or custody.keyring.logical_vault_id != context.logical_vault_id
+            or custody.keyring.keyring_id != context.keyring_id
+        ):
+            return None
+        connection = store.open_authorization_session_connection(vault_root)
+        fingerprint = hashlib.sha256((vault_root / rel_path).read_bytes()).hexdigest()
+        expires_at = min(
+            context.expires_at,
+            now + tokens.DEFAULT_TTL_SECONDS,
+        )
+        if expires_at <= now:
+            return None
+        return authorization_session_authority.mint_escalation_token(
+            connection=connection,
+            context=context,
+            signing_key=custody.keyring.active_key.key,
+            audience=who.audience_id,
+            purpose=purpose,
+            max_level=requested_level,
+            org_ceiling=org_ceiling,
+            paths=(rel_path,),
+            fingerprints=(fingerprint,),
+            scope_ids=tuple(sorted(decision.scope_ids)),
+            now=now,
+            expires_at=expires_at,
+        )
+    except (
+        authorization_custody.AuthorizationCustodyUnavailable,
+        authorization_session_lifecycle.AuthorizationSessionUnavailable,
+        FileNotFoundError,
+        OSError,
+        sqlite3.Error,
+        store.UnsupportedGovernanceSchema,
+    ):
+        return None
+    finally:
+        if connection is not None:
+            connection.close()
+
+
 def _decide_path(
     vault_root: Path,
     rel_path: str,
@@ -1100,6 +1209,8 @@ def _decide_path(
     purpose: str | None,
     grants_hash: str,
     authorization_session: str | None = None,
+    authorization_context: authorization_session_lifecycle.AuthorizationSessionContext
+    | None = None,
     expected_content_hash: str | None = None,
 ) -> Decision | None:
     """Decide one path, memoized per request identity AND page identity.
@@ -1142,30 +1253,6 @@ def _decide_path(
         live_content_hash = hashlib.sha256(raw).hexdigest()
         if expected_content_hash is not None and expected_content_hash != live_content_hash:
             return None
-
-    session_identity = "v3-session-grants-unscoped"
-    key = (
-        str(vault_root),
-        policy.fingerprint,
-        rel_path,
-        audience,
-        purpose,
-        grants_hash,
-        session_identity,
-        st.st_mtime_ns,
-        st.st_size,
-        live_content_hash,
-    )
-    cached = _DECISION_MEMO.get(key)
-    if cached is not None and (raw is None or not bridges.maybe_bridge(raw)):
-        _DECISION_MEMO.move_to_end(key)
-        return _resolve_l4_bridge(
-            vault_root,
-            cached,
-            policy=policy,
-            audience=audience,
-        )
-
     mtime = st.st_mtime
     if not rel_path.lower().endswith(".md"):
         # NON-MARKDOWN. Never hand a binary to the markdown parser: it cannot
@@ -1199,12 +1286,85 @@ def _decide_path(
             # was stattable one line ago and is not now — which is exactly
             # when guessing is least defensible.
             return None
+    if live_content_hash is None and authorization_context is not None:
+        try:
+            live_content_hash = hashlib.sha256(full_path.read_bytes()).hexdigest()
+        except OSError:
+            return None
+
+    active_grants = list(policy.grants)
+    session_identity = (
+        "v3-session-grants-unscoped"
+        if authorization_context is None
+        else "no-session-grants"
+    )
+    if authorization_context is not None and live_content_hash is not None:
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = store.open_authorization_session_connection(vault_root)
+            session_grants, session_identity = (
+                authorization_session_authority.active_session_grants(
+                    connection=connection,
+                    context=authorization_context,
+                    audience=audience,
+                    purpose=purpose,
+                    path=rel_path,
+                    fingerprint=live_content_hash,
+                    scope_ids=tuple(sorted(scope_ids)),
+                    policy_fingerprint=policy.fingerprint,
+                    now=int(__import__("time").time()),
+                )
+            )
+        except (
+            authorization_session_lifecycle.AuthorizationSessionUnavailable,
+            FileNotFoundError,
+            OSError,
+            sqlite3.Error,
+            store.UnsupportedGovernanceSchema,
+        ):
+            session_grants = ()
+            session_identity = "session-authority-unavailable"
+        finally:
+            if connection is not None:
+                connection.close()
+        active_grants.extend(
+            policy_module.StandingGrant(
+                id=grant.grant_id,
+                source="authorization-session",
+                scope_ids=grant.scope_ids,
+                audience=grant.audience,
+                ceiling=grant.ceiling,
+            )
+            for grant in session_grants
+        )
+
+    key = (
+        str(vault_root),
+        policy.fingerprint,
+        rel_path,
+        audience,
+        purpose,
+        grants_hash,
+        session_identity,
+        st.st_mtime_ns,
+        st.st_size,
+        live_content_hash,
+    )
+    cached = _DECISION_MEMO.get(key)
+    if cached is not None and (raw is None or not bridges.maybe_bridge(raw)):
+        _DECISION_MEMO.move_to_end(key)
+        return _resolve_l4_bridge(
+            vault_root,
+            cached,
+            policy=policy,
+            audience=audience,
+        )
     decision = decide(
         scope_ids,
         audience=audience,
         purpose=purpose,
         policy=policy,
-        active_grants=policy.grants,
+        active_grants=active_grants,
     )
     if raw is not None:
         admission = bridges.admit(
@@ -1372,6 +1532,7 @@ def annotate_hits(
             purpose=declared_purpose,
             grants_hash=grants_hash,
             authorization_session=who.authorization_session_id,
+            authorization_context=who.verified_authorization_session,
             expected_content_hash=getattr(hit, "snapshot_hash", None),
         )
         if decision is None:
@@ -1413,16 +1574,21 @@ def annotate_hits(
         # representation, capped by the applicable organization ceiling;
         # legacy clients retain their historical non-escalating notice token.
         requested_level = (
-            RELEASE_FLOOR if who.authorization_session_id else decision.level
+            RELEASE_FLOOR
+            if (
+                who.verified_authorization_session is not None
+                or who.authorization_session_id is not None
+            )
+            else decision.level
         )
         org_ceiling = _applicable_org_ceiling(policy, decision)
-        token = tokens.mint_quietly(
+        token = _mint_escalation_quietly(
             vault_root,
-            paths=[rel_path],
-            audience=who.audience_id,
-            max_level=requested_level,
-            authorization_session=who.authorization_session_id,
+            rel_path=rel_path,
+            who=who,
             purpose=declared_purpose,
+            decision=decision,
+            requested_level=requested_level,
             org_ceiling=org_ceiling,
         )
         if token is not None:
@@ -1588,6 +1754,7 @@ def guard_graph_context(
                 purpose=declared_purpose,
                 grants_hash=grants_hash,
                 authorization_session=who.authorization_session_id,
+                authorization_context=who.verified_authorization_session,
             )
         )
         is None
@@ -1601,6 +1768,7 @@ def guard_graph_context(
                 vault_root, rel_path, policy=policy, audience=who.audience_id,
                 purpose=declared_purpose, grants_hash=grants_hash,
                 authorization_session=who.authorization_session_id,
+                authorization_context=who.verified_authorization_session,
             ),
             policy=policy,
             audience=who.audience_id,
@@ -1617,6 +1785,7 @@ def guard_graph_context(
             purpose=declared_purpose,
             grants_hash=grants_hash,
             authorization_session=who.authorization_session_id,
+            authorization_context=who.verified_authorization_session,
         )
         if decision is not None and decision.release_strip:
             payload = bridges.strip_provenance(payload, decision.release_strip)
@@ -1822,6 +1991,7 @@ def annotate_page(
             purpose=declared_purpose,
             grants_hash=grants_hash,
             authorization_session=who.authorization_session_id,
+            authorization_context=who.verified_authorization_session,
         )
     if decision is None or decision.level <= LEVEL_NONE:
         _outcome_for_decision(
@@ -1901,6 +2071,7 @@ def annotate_page(
                     purpose=declared_purpose,
                     grants_hash=grants_hash,
                     authorization_session=who.authorization_session_id,
+                    authorization_context=who.verified_authorization_session,
                 )
             )
             is None
@@ -2869,6 +3040,7 @@ def annotate_dataset(
         purpose=declared_purpose,
         grants_hash=_grants_hash(policy),
         authorization_session=who.authorization_session_id,
+        authorization_context=who.verified_authorization_session,
     )
     if decision is None or decision.level < RELEASE_FLOOR:
         _outcome_for_decision(
@@ -2923,6 +3095,7 @@ def release_level_for(
         purpose=declared_purpose,
         grants_hash=_grants_hash(policy),
         authorization_session=who.authorization_session_id,
+        authorization_context=who.verified_authorization_session,
     )
     level = None if decision is None else decision.level
     _outcome_for_decision(
@@ -3357,6 +3530,7 @@ def release_walk_filter(
             purpose=declared_purpose,
             grants_hash=grants_hash,
             authorization_session=who.authorization_session_id,
+            authorization_context=who.verified_authorization_session,
         )
         allowed = decision is not None and decision.level >= RELEASE_FLOOR
         _outcome_for_decision(
@@ -3707,6 +3881,7 @@ def filter_withheld_entries(
             purpose=declared_purpose,
             grants_hash=grants_hash,
             authorization_session=who.authorization_session_id,
+            authorization_context=who.verified_authorization_session,
         )
         allowed = decision is not None and decision.level >= RELEASE_FLOOR
         decisions_by_path[rel_path] = decision

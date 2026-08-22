@@ -56,6 +56,21 @@ class SessionGrant:
 
 
 @dataclass(frozen=True, slots=True)
+class EscalationReview:
+    authorization_session_id: str
+    principal_id: str
+    issuer_family: str
+    audience: str
+    purpose: str | None
+    max_level: int
+    org_ceiling: int
+    paths: tuple[str, ...]
+    fingerprints: tuple[str, ...]
+    scope_ids: tuple[str, ...]
+    expires_at: int
+
+
+@dataclass(frozen=True, slots=True)
 class _TokenClaim:
     jti: str
     authorization_session_id: str
@@ -399,7 +414,7 @@ def _load_claim(
         raise _unavailable() from None
 
 
-def redeem_escalation_token(
+def inspect_escalation_token(
     connection: sqlite3.Connection,
     *,
     token: object,
@@ -407,29 +422,18 @@ def redeem_escalation_token(
     signing_key: bytes,
     audience: str,
     purpose: str | None,
-    membership: tuple[SessionMembership, ...],
-    policy_fingerprint: str,
     now: int,
-) -> SessionGrant:
-    """Consume a token once and atomically create its exact session grant."""
+) -> EscalationReview:
+    """Verify a live token and return only its reviewed authorization bounds."""
 
     current = _active_context(connection, context, now=now)
     key = _signing_key(signing_key)
     jti, wire_expiry, supplied_signature = _parse_token(token)
     claim, status, prepared_event_id, consumed_at = _load_claim(connection, jti)
-    canonical_membership = _membership(membership)
-    canonical_policy = _digest(policy_fingerprint)
     canonical_audience = _text(audience)
     canonical_purpose = _purpose(purpose)
-    try:
-        active_policy = connection.execute(
-            "SELECT policy_fingerprint FROM active_governance_tuple WHERE singleton=1"
-        ).fetchone()
-    except sqlite3.Error:
-        raise _unavailable() from None
     if (
-        active_policy != (canonical_policy,)
-        or claim.authorization_session_id != current.session_id
+        claim.authorization_session_id != current.session_id
         or claim.principal_id != current.principal_id
         or claim.issuer_family != current.issuer_family
         or claim.audience != canonical_audience
@@ -441,9 +445,64 @@ def redeem_escalation_token(
         or prepared_event_id is not None
         or consumed_at is not None
         or not hmac.compare_digest(_signature(key, claim), supplied_signature)
-        or tuple(row.path for row in canonical_membership) != claim.paths
-        or tuple(row.fingerprint for row in canonical_membership) != claim.fingerprints
-        or not set(claim.scope_ids).issubset(
+    ):
+        raise _unavailable()
+    return EscalationReview(
+        authorization_session_id=claim.authorization_session_id,
+        principal_id=claim.principal_id,
+        issuer_family=claim.issuer_family,
+        audience=claim.audience,
+        purpose=claim.purpose,
+        max_level=claim.max_level,
+        org_ceiling=claim.org_ceiling,
+        paths=claim.paths,
+        fingerprints=claim.fingerprints,
+        scope_ids=claim.scope_ids,
+        expires_at=claim.expires_at,
+    )
+
+
+def redeem_escalation_token(
+    connection: sqlite3.Connection,
+    *,
+    token: object,
+    context: AuthorizationSessionContext,
+    signing_key: bytes,
+    audience: str,
+    purpose: str | None,
+    membership: tuple[SessionMembership, ...],
+    policy_fingerprint: str,
+    now: int,
+    grant_expires_at: int | None = None,
+) -> SessionGrant:
+    """Consume a token once and atomically create its exact session grant."""
+
+    current = _active_context(connection, context, now=now)
+    review = inspect_escalation_token(
+        connection,
+        token=token,
+        context=current,
+        signing_key=signing_key,
+        audience=audience,
+        purpose=purpose,
+        now=now,
+    )
+    jti, _wire_expiry, _supplied_signature = _parse_token(token)
+    canonical_membership = _membership(membership)
+    canonical_policy = _digest(policy_fingerprint)
+    canonical_audience = review.audience
+    canonical_purpose = review.purpose
+    try:
+        active_policy = connection.execute(
+            "SELECT policy_fingerprint FROM active_governance_tuple WHERE singleton=1"
+        ).fetchone()
+    except sqlite3.Error:
+        raise _unavailable() from None
+    if (
+        active_policy != (canonical_policy,)
+        or tuple(row.path for row in canonical_membership) != review.paths
+        or tuple(row.fingerprint for row in canonical_membership) != review.fingerprints
+        or not set(review.scope_ids).issubset(
             {scope for row in canonical_membership for scope in row.scope_ids}
         )
     ):
@@ -459,21 +518,42 @@ def redeem_escalation_token(
         issuer_family=current.issuer_family,
         audience=canonical_audience,
         purpose=canonical_purpose,
-        ceiling=claim.max_level,
-        paths=claim.paths,
-        fingerprints=claim.fingerprints,
-        scope_ids=claim.scope_ids,
+        ceiling=review.max_level,
+        paths=review.paths,
+        fingerprints=review.fingerprints,
+        scope_ids=review.scope_ids,
         membership=canonical_membership,
         policy_fingerprint=canonical_policy,
         token_jti=jti,
         created_at=now,
-        expires_at=min(claim.expires_at, current.expires_at),
+        expires_at=min(
+            review.expires_at,
+            current.expires_at,
+            review.expires_at
+            if grant_expires_at is None
+            else _integer(grant_expires_at, minimum=_integer(now, minimum=1) + 1),
+        ),
     )
     if connection.in_transaction:
         raise _unavailable()
     try:
         connection.execute("BEGIN IMMEDIATE")
         _active_context(connection, current, now=now)
+        if inspect_escalation_token(
+            connection,
+            token=token,
+            context=current,
+            signing_key=signing_key,
+            audience=canonical_audience,
+            purpose=canonical_purpose,
+            now=now,
+        ) != review:
+            raise _unavailable()
+        active_policy = connection.execute(
+            "SELECT policy_fingerprint FROM active_governance_tuple WHERE singleton=1"
+        ).fetchone()
+        if active_policy != (canonical_policy,):
+            raise _unavailable()
         consumed = connection.execute(
             "UPDATE withhold_tokens SET consumed_at=?, status='consumed' "
             "WHERE jti=? AND authorization_session_id=? AND status='active' "
