@@ -2545,6 +2545,9 @@ def op_get(
             read) and nothing in the normal workflow needs it: edits
             round-trip `body`, and the drift guard uses `content_hash`,
             which the server always computes over the raw bytes for you.
+            Raw text is returned only at governance release level L6 and only
+            when the mandatory secret parser accepts the exact snapshot. At
+            L1-L5 this flag is identical to false; at L0 the read is missing.
         max_body_chars: Optional cap for the returned `body`. Use this when a
             client wants bounded content instead of an arbitrary full-page read.
             Values above 12000 are capped server-side; negative values are rejected.
@@ -2556,13 +2559,16 @@ def op_get(
         file text; echo it to `edit`/`multi_edit` via `expected_hash` to
         refuse a write if the file changed on disk since this read
         (two-writer drift guard); `mtime` is advisory.
-        Adds `content` (raw file text) when `include_raw=true`.
+        Adds `content` (raw file text) when `include_raw=true` at scrub-safe
+        L6. Lower levels retain their registered Markdown projection and never
+        expose exact hashes, frontmatter, history, links, or raw content.
         Adds `body_truncated` and `body_chars` when `max_body_chars` is supplied.
         Adds `history` when `include_history=true`.
 
     Errors:
         INVALID_PATH (path escapes vault root or empty);
-        NOT_FOUND (no such file); UNREADABLE (parse failure).
+        NOT_FOUND (no such file); UNREADABLE (parse failure);
+        SECRET_BLOCKED (opt-in raw content contains protected material).
     """
     path = _resolve_memory_identifier(vault_root, path)
     try:
@@ -2586,7 +2592,7 @@ def op_get(
             "has_frontmatter": vault.parse_frontmatter(result.content)[2] is not None,
         }
     else:
-        out = result.as_dict(include_raw=include_raw)
+        out = result.as_dict(include_raw=False)
     if max_body_chars is not None and max_body_chars < 0:
         raise ValueError("get: max_body_chars must be non-negative")
     query_log.log_get_call(
@@ -2609,6 +2615,7 @@ def op_get(
         out,
         snapshot_content=result.content,
         stable_ref=snapshot_ref,
+        include_raw=include_raw,
     )
     if released is None:
         # `result.missing_path` — the EXACT value the genuinely-absent branch
