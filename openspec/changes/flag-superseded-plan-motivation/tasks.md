@@ -12,7 +12,7 @@
 - [x] 2.1 Test that an active committed item carrying only `motivation` is selected, and that widening relaxes none of lifecycle, status, or commitment.
 - [x] 2.2 Test that `motivation_refs` keeps authored order, is bounded at 16, drops non-string and unbounded values, and keeps a malformed-but-bounded string so an invalid reference stays collapsible.
 - [x] 2.3 Widen `selects_item` to evidence bindings **or** motivation references, and add `motivation_refs`.
-- [x] 2.4 Test that the `motivation` column is projected only where `motivation_is_governed` holds, that a legacy free-text field is neither read nor refused, and that an undeclared field refuses nothing.
+- [x] 2.4 Test that a legacy free-text `motivation` is neither read as references nor refuses the collection, that an undeclared field refuses nothing, and — since no reviewed output distinguishes the two candidate gates — pin `motivation_is_governed` directly on the array, string, and absent forms.
 - [x] 2.5 Gate the projection in `_planning_page` on `planning.motivation_is_governed(manifest)`, not on field declaration.
 
 ## 3. Counts (red first)

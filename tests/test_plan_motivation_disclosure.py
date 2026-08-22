@@ -357,40 +357,65 @@ def test_a_released_target_is_the_only_thing_that_resolves(tmp_path: Path) -> No
     assert _by_title(result, "Released")["divergence"]["motivation_superseded"] == 1
 
 
-def test_a_withheld_twin_never_promotes_a_duplicate_into_a_unique_hit(
+def _twin_vault(root: Path, *, twin: bool) -> None:
+    """A released page carrying an identity, optionally shared by a hidden one."""
+    _seed_planning(root)
+    _write_page(
+        root,
+        "Knowledge Base/Notes/Open/Public Twin.md",
+        _page(PUBLIC_TWIN_ID, "Public Twin"),
+    )
+    if twin:
+        _write_page(
+            root,
+            "Knowledge Base/Notes/Blocked/Hidden Twin.md",
+            _page(PUBLIC_TWIN_ID, "Hidden Twin"),
+        )
+    _add_plan(root, "Twinned", [PUBLIC_TWIN_REF], PLAN_IDS["twinned"])
+    _write_governance(root)
+
+
+def test_an_unreleased_twin_is_invisible_rather_than_ambiguous(
     tmp_path: Path,
 ) -> None:
-    """Uniqueness is decided before release filtering, deliberately.
+    """Authorization precedes uniqueness, and that ordering is a disclosure decision.
 
-    Filtering first would drop the unreleased twin, leave one path standing,
-    and present a duplicated identity as a confident unique resolution — a
-    wrong answer that is also an inference about the page it filtered out.
+    An earlier draft of this change decided uniqueness over the *unfiltered*
+    resolution, reasoning that filtering first would present a duplicated
+    identity as a confident unique hit. Measurement showed the reasoning
+    backwards: under that ordering the identical reference resolved when no
+    hidden page shared the identity and refused when one did, so an unreleased
+    page was directly observable to anyone who could cite its id — needing only
+    one released page of their own to cite it from.
+
+    Filtering first makes the two vaults indistinguishable. A duplicated
+    identity remains an owner-visible repair item through `backfill_ids` and
+    `issues()`, which is where it belongs.
     """
     from exomem import plan_progress
     from exomem.governance.principal import request_scope
 
-    _seed_planning(tmp_path)
-    _write_page(
-        tmp_path,
-        "Knowledge Base/Notes/Open/Public Twin.md",
-        _page(PUBLIC_TWIN_ID, "Public Twin"),
-    )
-    _write_page(
-        tmp_path,
-        "Knowledge Base/Notes/Blocked/Hidden Twin.md",
-        _page(PUBLIC_TWIN_ID, "Hidden Twin"),
-    )
-    _add_plan(tmp_path, "Twinned", [PUBLIC_TWIN_REF], PLAN_IDS["twinned"])
-    _write_governance(tmp_path)
+    with_twin = tmp_path / "with_twin"
+    without_twin = tmp_path / "without_twin"
+    _twin_vault(with_twin, twin=True)
+    _twin_vault(without_twin, twin=False)
 
     with request_scope(_external()):
-        result = plan_progress.review(tmp_path)
+        present = plan_progress.review(with_twin)
+    with request_scope(_external()):
+        absent = plan_progress.review(without_twin)
 
-    entry = _motivation_entry(result["items"][0])
-    assert entry["resolved"] is False
-    assert entry["unresolved_reason"] == "motivation_unavailable"
-    assert entry["superseded"] is None
-    assert "Hidden Twin" not in str(result)
+    present.pop("generated_at")
+    absent.pop("generated_at")
+
+    assert present == absent
+
+    # Non-vacuity: the reference genuinely resolves rather than both vaults
+    # refusing it for some unrelated reason.
+    entry = _motivation_entry(present["items"][0])
+    assert entry["resolved"] is True
+    assert entry["superseded"] is True
+    assert "Hidden Twin" not in str(present)
 
 
 def test_a_malformed_stored_reference_refuses_the_collection_without_disclosure(
@@ -596,3 +621,49 @@ def test_no_motivation_key_is_named_ref_and_no_count_is_a_boolean(tmp_path: Path
     assert not [key for key, _ in _walk(result) if key in {"ref", "fingerprint"}]
     for item in result["items"]:
         assert all(type(value) is int for value in item["divergence"].values())
+
+
+def test_the_resolution_work_is_equal_whether_or_not_the_hidden_page_exists(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """The response is not the only channel; the work performed is one too.
+
+    Scanning only for the ids the sidecar could not answer made the corpus walk
+    conditional on whether *any* page — released or not — carried the cited
+    identity. Responses stayed byte-identical while a caller who could time the
+    call learned whether a hidden page held the id, with no authoring
+    prerequisite at all. Keying the scan on sidecar availability instead closed
+    that channel and opened a correctness hole — a page written outside a
+    governed write read as absent — so the resolver scans unconditionally and
+    the work is a function of the batch alone.
+
+    Asserting the call count rather than wall clock, because the leak is the
+    decision to scan, and a timing assertion would be flaky under load while
+    proving strictly less.
+    """
+    from exomem import memory_refs, plan_progress
+    from exomem.governance.principal import request_scope
+
+    with_page, without_page = _pair(tmp_path)
+
+    def _counted(root: Path) -> list[Any]:
+        scans.append(str(root))
+        return real(root)
+
+    real = memory_refs._scan_pages
+    scans: list[str] = []
+    monkeypatch.setattr(memory_refs, "_scan_pages", _counted)
+
+    with request_scope(_external()):
+        plan_progress.review(with_page)
+    present_scans = len(scans)
+
+    scans.clear()
+    with request_scope(_external()):
+        plan_progress.review(without_page)
+    absent_scans = len(scans)
+
+    assert present_scans == absent_scans
+    # Non-vacuity: equality would also hold if neither review resolved anything.
+    assert present_scans >= 1

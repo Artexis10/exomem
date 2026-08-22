@@ -35,9 +35,10 @@ to items carrying evidence **or** motivation.
   `motivation_resolved`, `motivation_unresolved`, `motivation_superseded` — on
   every reviewed item, as plain non-negative integers.
 - Add one batch primitive, `memory_refs.paths_for_ids_read_only`, resolving
-  many identities in one sidecar query or one corpus scan, returning every path
-  per identity, creating or rebuilding nothing, and never raising the
-  page-counting `AMBIGUOUS_REFERENCE` message.
+  many identities in one corpus scan, returning every path per identity,
+  creating or rebuilding nothing, and never raising the page-counting
+  `AMBIGUOUS_REFERENCE` message. The scan is unconditional so the work performed
+  cannot vary with which identities the vault holds.
 - Collapse every motivation refusal into one indistinguishable outcome. A
   reference the vault does not hold, one it holds twice, a malformed one, one
   whose page a governance ceiling blocks, and one whose page the access tier

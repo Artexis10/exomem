@@ -4,9 +4,9 @@ Planning already stores intent and may carry opaque `progress_evidence`
 descriptors naming a Records collection, a role, and a saved view. Records
 already stores observed state behind those views. Both profiles deliberately
 stop before evaluation. This module is the read-only consumer that closes the
-loop: it selects active committed Planning items that carry evidence, runs each
-bound saved view through the governed Records read path, and presents the two
-sides together.
+loop: it selects active committed Planning items that carry evidence,
+motivating knowledge, or both, runs each bound saved view through the governed
+Records read path, and presents the two sides together.
 
 A Planning item may also carry `motivation`: a bounded list of
 `exomem://memory/` references to the knowledge that motivates it. The same
@@ -98,6 +98,11 @@ _MOTIVATION_FIELD = "motivation"
 #: vault does not hold, one it holds twice, one that is malformed, one whose
 #: page is blocked, and one whose page this reader is not released are the same
 #: string, so the review cannot be used to probe for hidden knowledge.
+#: The malformed case is unreachable through a governed collection — `query`
+#: normalizes stored records and refuses the whole collection first, which the
+#: review reports through the equally bounded `collections_unavailable`. It is
+#: handled here anyway, because that is the behaviour if the validation ever
+#: loosens, and it is covered at the unit level rather than end to end.
 _MOTIVATION_UNAVAILABLE = "motivation_unavailable"
 _MOTIVATION_BUDGET_EXHAUSTED = "motivation_budget_exhausted"
 _SUPERSEDED_STATUS = "superseded"
@@ -464,14 +469,19 @@ def _supersession(root: Path, identifiers: Sequence[str]) -> dict[str, bool]:
     authorized = record_governance.full_release_filter(root)
     states: dict[str, bool] = {}
     for identifier, paths in resolved.items():
-        # Uniqueness is decided on the UNFILTERED map. Filtering first would
-        # let a withheld twin drop out and silently promote a duplicated
-        # identity into a unique hit — which is both wrong and a disclosure.
-        if len(paths) != 1:
+        # Authorization precedes uniqueness, and the order is a disclosure
+        # decision rather than a stylistic one. Deciding uniqueness on the
+        # unfiltered map makes an unreleased twin observable: the identical
+        # reference resolves when no hidden page shares the identity and
+        # refuses when one does, so a reader who can cite an id — and needs
+        # only one released page of their own to cite it from — learns whether
+        # a page they may not read also carries it. Filtering first answers
+        # about the pages this reader may actually see, which is both the
+        # honest answer and the one that discloses nothing.
+        visible = [relative for relative in paths if authorized(relative)]
+        if len(visible) != 1:
             continue
-        relative = paths[0]
-        if not authorized(relative):
-            continue
+        relative = visible[0]
         page = find_corpus.CACHE.get(root / relative, root)
         if page is None:
             continue

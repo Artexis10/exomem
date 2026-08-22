@@ -36,22 +36,44 @@ it would make invalid input the one case a caller could tell apart — by
 counting the entries that came back. Only a value that is not a bounded
 non-empty string is dropped, exactly as an unusable evidence descriptor is.
 
-**Uniqueness is decided over the unfiltered resolution.** Filtering by release
-first would drop an unreleased twin, leave one path standing, and present a
-duplicated identity as a confident unique resolution. That is both a wrong
-answer and an inference about the page it filtered out.
+**Authorization precedes uniqueness.** An earlier draft of this change decided
+uniqueness over the *unfiltered* resolution, reasoning that filtering first
+would drop an unreleased twin and present a duplicated identity as a confident
+unique resolution. That reasoning was wrong, and measurement showed it
+backwards.
+
+Under the unfiltered ordering the identical reference **resolves** when no
+hidden page shares the identity and **refuses** when one does — so the presence
+of an unreleased page is directly observable. Under filter-first the two cases
+are indistinguishable. The bound claimed for the residual was also too
+generous: it named a reader who had authored *two* pages sharing an identity,
+when only one is needed — the other is the hidden page being probed. `exomem_id`
+is ordinary frontmatter, so anyone who has ever seen an id (released once and
+later restricted, or read from an export or a receipt) can author a single
+released page carrying it and obtain a clean resolved/unresolved oracle.
+
+So the ordering bought tidier semantics and paid for it in disclosure, in the
+one module whose stated purpose is not disclosing. Filtering first answers about
+the pages this reader may actually see, which is the honest answer as well as
+the silent one. A duplicated identity remains an owner-visible repair item
+through `backfill_ids(dry_run=True)` and `issues()`, which is where it belongs.
+
+**The work performed is a function of the batch, never of what it found.**
+The batch resolver takes one whole-corpus scan, unconditionally. A sidecar fast
+path was written first and removed: consulting the sidecar and scanning only for
+the ids it could not answer makes the *work performed* a disclosure channel —
+responses stay byte-identical while a caller times the call and learns whether
+some page, released or not, carries the cited id, with no authoring prerequisite
+at all. Scanning only when no sidecar exists closes that channel but reads any
+page written outside a governed write as absent, which is most of an ordinary
+vault; measured, it left every reference in the supersession suite unresolved.
+So the resolver pays one walk per call and buys a property rather than a
+latency: how many well-formed ids were asked for is caller-visible already, and
+nothing else moves.
 
 **The budget verdict is computed before any target is consulted.** It comes
 from a counter over the retained items' distinct authored references, so
 `motivation_budget_exhausted` cannot vary with what exists.
-
-The accepted residual, stated plainly: a reader who has authored two pages
-sharing one identity, one of them released and one not, will see that reference
-report unresolved rather than resolved. Presence of the unreleased twin is
-therefore observable *to someone who already authored the duplicate*. The
-alternative — filtering first — leaks strictly more and answers wrongly, and a
-duplicated identity is already an owner-visible repair item through
-`backfill_ids(dry_run=True)` and `issues()`.
 
 ## Why a new batch primitive rather than the two that exist
 
@@ -64,10 +86,8 @@ unchanged with no existence check, so a non-reference would pass straight
 through as a path.
 
 `memory_refs.paths_for_ids_read_only(vault_root, ids)` sits beside the existing
-reverse-direction batch `refs_for_paths`: it opens the read-only sidecar
-connection, chunks the `IN` clause, falls back to **one** `_scan_pages` pass for
-the whole batch when the sidecar is absent, incompatible, or behind, returns
-every path per identity, and raises nothing. Keeping it in `memory_refs` also
+reverse-direction batch `refs_for_paths`: **one** `_scan_pages` pass for the
+whole batch, every path per identity, and nothing raised. Keeping it in `memory_refs` also
 keeps corpus-walking code out of `plan_progress.py`, whose source a shipped test
 greps for mutation calls.
 
@@ -112,6 +132,17 @@ supplies it, so every reviewed item carries all eleven.
 requires `field.type == "array"`, which is exactly the legacy free-text case it
 exists to exclude. Reading prose as references would invent counts out of a
 sentence.
+
+No reviewed output separates the two gates, and that was measured rather than
+assumed. Under a string-typed `motivation` the projected value is a string,
+which `motivation_refs` drops on shape alone; a list hand-edited under that same
+string-typed field refuses the whole collection inside `planning.query` before
+the review sees a row. Swapping the predicate for the declaration check passes
+both review tests. So the gate is defence in depth — kept because the narrower
+predicate is the correct one to write and the equivalence is a property of two
+other layers rather than of this one — and it is pinned directly at the
+predicate, where the difference exists, instead of through a review assertion
+that would pass either way.
 
 One thing follows from that gate which is worth recording, because it makes one
 of the five collapsed cases unreachable in practice: a *governed* collection

@@ -20,9 +20,6 @@ SCHEMA_VERSION = 3
 REF_PREFIX = "exomem://memory/"
 ID_FIELD = "exomem_id"
 _REFERENCE_REBUILD_LOCK = threading.Lock()
-#: SQLite's default `SQLITE_MAX_VARIABLE_NUMBER` is 999 on older builds, so a
-#: batch resolver chunks its `IN` clause rather than trusting the batch size.
-_ID_QUERY_CHUNK = 400
 
 
 def _sqlite_connect(database: Any, *args: Any, **kwargs: Any) -> sqlite3.Connection:
@@ -487,10 +484,13 @@ def paths_for_ids_read_only(
     release decision over those pages, so a caller forbidden to disclose the
     count cannot afford to catch the exception and must see the shape instead.
 
-    Cost is one sidecar query per chunk plus, at most, one whole-corpus scan
-    for the entire batch — never one scan per id. The scan is the same
-    fallback `ReferenceIndex.resolve` already takes when the sidecar is absent,
-    incompatible, or simply behind a page written outside a governed write.
+    Cost is one whole-corpus scan for the entire batch — never one per id, and
+    never a scan chosen by what any faster source already answered. That last
+    point is a disclosure property rather than an optimisation, and it is why
+    there is no sidecar fast path here: work that varies with which ids exist
+    lets a caller infer, from the work performed, that some page carries an id
+    it is not allowed to see. The scan is the same fallback
+    `ReferenceIndex.resolve` takes when the sidecar is absent or incompatible.
     """
     wanted: list[str] = []
     seen: set[str] = set()
@@ -502,36 +502,26 @@ def paths_for_ids_read_only(
     if not wanted:
         return {}
 
-    found: dict[str, set[str]] = {}
-    index = ReferenceIndex(vault_root)
-    conn = index._current_readonly_connection()
-    if conn is not None:
-        try:
-            for start in range(0, len(wanted), _ID_QUERY_CHUNK):
-                chunk = wanted[start : start + _ID_QUERY_CHUNK]
-                placeholders = ",".join("?" for _ in chunk)
-                rows = conn.execute(
-                    f"SELECT exomem_id, path FROM identities "  # noqa: S608 - placeholders only
-                    f"WHERE status = 'valid' AND exomem_id IN ({placeholders})",
-                    chunk,
-                ).fetchall()
-                for exomem_id, path in rows:
-                    found.setdefault(str(exomem_id), set()).add(str(path))
-        except (OSError, RuntimeError, sqlite3.Error):
-            found = {}
-        finally:
-            conn.close()
+    # One walk, unconditionally, for the whole batch.
+    #
+    # A sidecar fast path was tried and removed. Consulting it and scanning
+    # only for the ids it could not answer made the corpus walk conditional on
+    # whether ANY page — released or not — carried the cited identity: the
+    # response stayed byte-identical while a caller who timed the call learned
+    # whether a hidden page held the id, needing no authoring prerequisite at
+    # all. Scanning only when no sidecar exists closes that channel but reads a
+    # page written outside a governed write as absent, which is most of an
+    # ordinary vault.
+    #
+    # So the work is a function of the batch alone: how many well-formed ids
+    # were asked for, never which of them exist or who may see them. The cost
+    # is one walk per call for a deliberate, on-demand read.
+    by_id: dict[str, set[str]] = {}
+    for path, exomem_id, _raw, _hash, status in _scan_pages(vault_root):
+        if status == "valid" and exomem_id is not None:
+            by_id.setdefault(exomem_id, set()).add(path)
 
-    if any(identifier not in found for identifier in wanted):
-        by_id: dict[str, set[str]] = {}
-        for path, exomem_id, _raw, _hash, status in _scan_pages(vault_root):
-            if status == "valid" and exomem_id is not None:
-                by_id.setdefault(exomem_id, set()).add(path)
-        for identifier in wanted:
-            if identifier not in found and identifier in by_id:
-                found[identifier] = by_id[identifier]
-
-    return {identifier: tuple(sorted(found.get(identifier, ()))) for identifier in wanted}
+    return {identifier: tuple(sorted(by_id.get(identifier, ()))) for identifier in wanted}
 
 
 def resolve_identifier(vault_root: Path, value: str) -> str:

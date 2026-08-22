@@ -333,23 +333,30 @@ def test_batch_resolver_scans_the_corpus_once_for_the_whole_batch(
     assert resolved[DEAD_ID] == ("Knowledge Base/Notes/Open/Dead Belief.md",)
 
 
-def test_batch_resolver_prefers_a_current_sidecar_over_a_corpus_scan(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_batch_resolver_resolves_a_page_the_sidecar_does_not_know(tmp_path: Path) -> None:
+    """A present sidecar is not permitted to shorten the answer.
+
+    An earlier draft consulted the sidecar and skipped the scan whenever it
+    could answer at all. That closed a timing channel and opened a correctness
+    hole in the same move: a page written outside a governed write — an editor
+    save, a sync, a hand edit — is not in the sidecar, so every reference to it
+    read as absent. Here the sidecar is deliberately current *as of* the seed
+    and a later page is written straight to disk behind it.
+    """
     from exomem import memory_refs
 
     (tmp_path / "Knowledge Base").mkdir()
     _seed_beliefs(tmp_path)
     memory_refs.ReferenceIndex(tmp_path).rebuild_all()
 
-    def refuse(vault_root: Path) -> Any:
-        raise AssertionError("the sidecar was current; no scan should have run")
+    late = "Knowledge Base/Notes/Open/Late Belief.md"
+    late_id = "5e6f7081-92a3-44b5-a6c7-d8e9fa0b1c2d"
+    _write_page(tmp_path, late, _page(late_id, "Late Belief"))
 
-    monkeypatch.setattr(memory_refs, "_scan_pages", refuse)
-    resolved = memory_refs.paths_for_ids_read_only(tmp_path, [LIVE_ID, TWIN_ID])
+    resolved = memory_refs.paths_for_ids_read_only(tmp_path, [LIVE_ID, late_id])
 
     assert resolved[LIVE_ID] == ("Knowledge Base/Notes/Open/Live Belief.md",)
-    assert len(resolved[TWIN_ID]) == 2
+    assert resolved[late_id] == (late,)
 
 
 def test_batch_resolver_never_creates_or_rewrites_the_sidecar(tmp_path: Path) -> None:
@@ -711,6 +718,33 @@ def test_motivation_is_projected_only_where_the_manifest_declares_the_array_form
     assert item["motivation"] == []
     assert item["divergence"]["motivation_refs"] == 0
     assert "because we said so" not in str(result)
+
+
+def test_the_projection_predicate_requires_the_array_form_not_the_name(
+    tmp_path: Path,
+) -> None:
+    """The gate is pinned here because the review cannot observe it.
+
+    Swapping `motivation_is_governed(manifest)` for
+    `"motivation" in manifest.schema.fields` inside `_planning_page` changes no
+    reviewed output: a string-typed field holds a string, which `motivation_refs`
+    drops for its shape alone, and a hand-edited list under a string-typed field
+    refuses the whole collection inside `planning.query` before a row is seen.
+    Both were measured. So the predicate is asserted directly, where the
+    difference is real, rather than through a review assertion that would pass
+    under either gate.
+    """
+    from exomem import planning
+    from exomem import structured_collections as collections
+
+    for declared, governed in (("array", True), ("string", False), (None, False)):
+        root = tmp_path / f"vault-{declared}"
+        root.mkdir()
+        _build_vault(root, motivation=declared)
+        manifest = collections.load_manifest(root, PLANNING_COLLECTION)
+        assert planning.motivation_is_governed(manifest) is governed
+        if declared is not None:
+            assert "motivation" in manifest.schema.fields
 
 
 def test_undeclared_motivation_field_does_not_refuse_the_collection(tmp_path: Path) -> None:
