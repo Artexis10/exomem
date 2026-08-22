@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import math
 from collections import Counter
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
@@ -507,11 +507,83 @@ class ProjectedVectorIndex:
         return tuple(_projected_hit(variant, score) for variant, score in scored[:limit])
 
 
+class ProjectedReranker:
+    """Rerank complete projected-lane candidates without reopening raw content."""
+
+    def __init__(
+        self,
+        namespace_key: projections.ProjectionNamespaceKey,
+        items: Iterable[projection_store.ProjectionItemVariants],
+    ) -> None:
+        self.namespace_key = namespace_key
+        self._items = _catalog_items(namespace_key, items)
+
+    def rerank(
+        self,
+        authorization: AuthorizationProjectionMap,
+        query: str,
+        candidates: tuple[str, ...],
+        *,
+        scorer: Callable[[str, Mapping[str, str]], float],
+        k: int,
+    ) -> tuple[ProjectedLexicalHit, ...]:
+        """Score every projected candidate, then apply the final result cap."""
+
+        limit = _result_limit(k)
+        if not isinstance(query, str) or len(query) > 1_048_576:
+            raise ValueError("query must be bounded text")
+        if not isinstance(candidates, tuple) or len(candidates) > 100_000:
+            raise ProjectedRetrievalUnavailable(
+                "rerank candidates must be one bounded immutable tuple"
+            )
+        if not callable(scorer):
+            raise ProjectedLaneUnavailable("projected rerank scorer is unavailable")
+        seen: set[str] = set()
+        for identity in candidates:
+            _bounded_text(identity, "rerank candidate identity", maximum=4096)
+            if identity in seen:
+                raise ProjectedRetrievalUnavailable(
+                    "rerank candidate set contains a duplicate"
+                )
+            seen.add(identity)
+
+        selected = _selected_variants(
+            self.namespace_key,
+            self._items,
+            authorization,
+        )
+        selected_by_identity = {variant.item_identity: variant for variant in selected}
+        if any(identity not in selected_by_identity for identity in candidates):
+            raise ProjectedRetrievalUnavailable(
+                "rerank candidate is outside the selected projected corpus"
+            )
+
+        scored: list[tuple[int, projections.ProjectionVariant, float]] = []
+        for ordinal, identity in enumerate(candidates):
+            variant = selected_by_identity[identity]
+            try:
+                raw_score = scorer(query, variant.search_fields)
+            except Exception as error:
+                raise ProjectedLaneUnavailable("projected rerank scorer failed") from error
+            if isinstance(raw_score, bool) or not isinstance(raw_score, (int, float)):
+                raise ProjectedLaneUnavailable("projected rerank score must be finite")
+            score = float(raw_score)
+            if not math.isfinite(score):
+                raise ProjectedLaneUnavailable("projected rerank score must be finite")
+            scored.append((ordinal, variant, score))
+        scored.sort(key=lambda item: (-item[2], item[0]))
+        return tuple(
+            _projected_hit(variant, score)
+            for _ordinal, variant, score in scored[:limit]
+        )
+
+
 __all__ = [
     "AuthorizationProjectionMap",
     "ProjectedLaneUnavailable",
     "ProjectedLexicalHit",
     "ProjectedLexicalIndex",
+    "ProjectedReranker",
     "ProjectedRetrievalUnavailable",
     "ProjectedVectorIndex",
     "ProjectionVectorMeasurement",
