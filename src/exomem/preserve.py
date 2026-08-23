@@ -274,37 +274,49 @@ def preserve(
         extract = _extract_module()
         media_type = extract.media_type_for(filename_safe)
         want_stub = media_type is not None and artifact_text is None and not text_clean
-        if desc_clean or text_clean or want_stub:
-            if filename_safe.lower().endswith(".md"):
-                stem = filename_safe[:-3]
-                sidecar_path = folder / f"{stem}-notes.md"
+        # Unconditional, because an artifact with no page is not addressable at
+        # all: no `exomem_id`, no `ingested_into`, and no corpus presence, since
+        # only `.md` is indexed. A preserved transcript used to land exactly
+        # that way, which is why citing it reported the source as missing.
+        if filename_safe.lower().endswith(".md"):
+            stem = filename_safe[:-3]
+            sidecar_path = folder / f"{stem}-notes.md"
+        else:
+            sidecar_path = folder / f"{filename_safe}.md"
+        if sidecar_path.exists():
+            warnings.append(
+                f"sidecar {sidecar_path.name!r} already exists; skipped."
+            )
+        else:
+            if text_clean:
+                extracted_by = "upload"   # the uploader/sandbox supplied the text
+            elif want_stub:
+                extracted_by = "pending"  # the worker will fill it
             else:
-                sidecar_path = folder / f"{filename_safe}.md"
-            if sidecar_path.exists():
-                warnings.append(
-                    f"sidecar {sidecar_path.name!r} already exists; skipped."
-                )
-            else:
-                if text_clean:
-                    extracted_by = "upload"   # the uploader/sandbox supplied the text
-                elif want_stub:
-                    extracted_by = "pending"  # the worker will fill it
-                else:
-                    extracted_by = None
-                sidecar_md = _render_sidecar(
-                    artifact_name=filename_safe,
-                    scope=scope_safe,
-                    category=category_safe,
-                    date_iso=stamp_iso,
-                    description=desc_clean,
-                    text=text_clean,
-                    media_type=media_type,
-                    evidence_file=rel_artifact if media_type else None,
-                    extracted_by=extracted_by,
-                )
-                sidecar_ref = memory_refs.ref_from_markdown(sidecar_md)
-                writes.append(PlannedWrite(path=sidecar_path, content=sidecar_md))
-                sidecar_rel = sidecar_path.relative_to(vault_root).as_posix()
+                extracted_by = None
+            # Artifact provenance is carried everywhere except a pending
+            # media stub. Reconciliation owns those: it re-renders them with
+            # the same fields computed from the binary itself, and writing
+            # them here first would change when its convergence check
+            # decides a stub is already current.
+            describes_artifact = not want_stub
+            sidecar_md = _render_sidecar(
+                artifact_name=filename_safe,
+                scope=scope_safe,
+                category=category_safe,
+                date_iso=stamp_iso,
+                description=desc_clean,
+                text=text_clean,
+                media_type=media_type,
+                evidence_file=rel_artifact if media_type else None,
+                extracted_by=extracted_by,
+                binary_sha256=artifact_hash if describes_artifact else None,
+                binary_size=artifact_size if describes_artifact else None,
+                tree="Evidence",
+            )
+            sidecar_ref = memory_refs.ref_from_markdown(sidecar_md)
+            writes.append(PlannedWrite(path=sidecar_path, content=sidecar_md))
+            sidecar_rel = sidecar_path.relative_to(vault_root).as_posix()
 
         # Index + log updates.
         rel_artifact_for_summary = rel_artifact.replace(kb_prefix(), "")
@@ -519,6 +531,44 @@ def _sanitize_filename(s: str | None) -> str:
     return cleaned
 
 
+#: The append-only trees an artifact can live in, each mapped to the singular
+#: label its page uses in a title and a lead tag. A map rather than string
+#: surgery, so "Sources" -> "Source" is stated once and cannot be re-derived
+#: differently by the next caller.
+_ARTIFACT_TREE_LABELS = {"Evidence": "Evidence", "Sources": "Source"}
+_ARTIFACT_TREES = tuple(_ARTIFACT_TREE_LABELS)
+
+
+def artifact_location(relative_path: str) -> tuple[str, str, str]:
+    """Return `(tree, scope, category)` for a vault-relative artifact path.
+
+    Scope and category are simply the folders below the top-level tree, so they
+    are read positionally from wherever that tree is rather than from one
+    tree's name. Two callers used to search for a literal `evidence` segment and
+    default when there was none, which meant an artifact under `Sources/`
+    produced `evidence`/`uncategorized` — a locator line and a tag set naming a
+    folder that does not exist.
+
+    The fallback for a path in neither tree is unchanged, because there is no
+    better answer and a caller that reaches it has already lost the labels.
+    """
+    parts = Path(relative_path).parts
+    index = next(
+        (i for i, part in enumerate(parts) if part.casefold() in
+         {tree.casefold() for tree in _ARTIFACT_TREES}),
+        None,
+    )
+    if index is None:
+        return "Evidence", "evidence", "uncategorized"
+    tree = next(
+        name for name in _ARTIFACT_TREES if name.casefold() == parts[index].casefold()
+    )
+    folders = parts[index + 1 : -1]
+    scope = folders[0] if folders else tree.lower()
+    category = folders[1] if len(folders) > 1 else "uncategorized"
+    return tree, scope, category
+
+
 def _render_sidecar(
     *,
     artifact_name: str,
@@ -532,6 +582,9 @@ def _render_sidecar(
     extracted_by: str | None = None,
     parent_media: str | None = None,
     frame_ts: float | None = None,
+    binary_sha256: str | None = None,
+    binary_size: int | None = None,
+    tree: str = "Evidence",
 ) -> str:
     """Sidecar .md describing a preserved binary artifact.
 
@@ -558,7 +611,8 @@ def _render_sidecar(
     lines = ["---"]
     lines.append("type: source")
     lines.append(f"exomem_id: {memory_refs.new_id()}")
-    display_title = f"Evidence: {artifact_name}"
+    label = _ARTIFACT_TREE_LABELS.get(tree, "Evidence")
+    display_title = f"{label}: {artifact_name}"
     lines.append(f"title: {yaml_scalar(display_title)}")
     lines.append("source_type: other")
     lines.append(f"captured: {date_iso}")
@@ -568,13 +622,22 @@ def _render_sidecar(
         lines.append(f"evidence_file: {evidence_file}")
     if extracted_by:
         lines.append(f"extracted_by: {extracted_by}")
+    # Same field names the media pipeline already writes and checks, so a page
+    # written here and one re-rendered by reconciliation describe an artifact
+    # in one vocabulary rather than two.
+    if binary_sha256:
+        lines.append(f"original_filename: {yaml_scalar(artifact_name)}")
+        lines.append(f"binary_sha256: {binary_sha256}")
+        if binary_size is not None:
+            lines.append(f"binary_size: {binary_size}")
     if parent_media:
         lines.append(f"parent_media: {parent_media}")
     if frame_ts is not None:
         lines.append(f"frame_ts: {frame_ts}")
     extra_tag = ", scene-frame" if parent_media else ""
     lines.append(
-        f"tags: [evidence, {scope.lower().replace(' ', '-')}, "
+        f"tags: [{label.lower()}, "
+        f"{scope.lower().replace(' ', '-')}, "
         f"{category.lower().replace(' ', '-')}{extra_tag}]"
     )
     lines.append("ingested_into: []")
@@ -582,7 +645,7 @@ def _render_sidecar(
     lines.append("")
     lines.append(f"# {display_title}")
     lines.append("")
-    lines.append(f"Preserved under `Evidence/{scope}/{category}/`.")
+    lines.append(f"Preserved under `{tree}/{scope}/{category}/`.")
     lines.append("")
     if description:
         lines.append("## Description")
@@ -597,6 +660,18 @@ def _render_sidecar(
         if text:
             lines.append(_cap_extracted_text(text))
             lines.append("")
+    # A page with no caption, no extracted text, and no media stub would
+    # otherwise have an empty body, which `schema.validate_source` treats as an
+    # invalid source. Describing the artifact is also the only thing this page
+    # can honestly say about bytes it does not inline.
+    if not description and not text and binary_sha256:
+        lines.append("## Artifact")
+        lines.append("")
+        lines.append(f"- Original filename: `{artifact_name}`")
+        lines.append(f"- SHA-256: `{binary_sha256}`")
+        if binary_size is not None:
+            lines.append(f"- Bytes: {binary_size}")
+        lines.append("")
     return "\n".join(lines)
 
 
@@ -623,10 +698,7 @@ def ensure_media_sidecar(
     if sidecar.exists():
         return sidecar, False
     rel = binary_path.resolve().relative_to(vault_root.resolve()).as_posix()
-    # Derive scope/category from Knowledge Base/Evidence/<scope>/<category>/… for the tags.
-    parts = rel.split("/")
-    scope = parts[2] if len(parts) > 2 else "evidence"
-    category = parts[3] if len(parts) > 3 else "uncategorized"
+    tree, scope, category = artifact_location(rel)
     md = _render_sidecar(
         artifact_name=name,
         scope=scope,
@@ -635,9 +707,62 @@ def ensure_media_sidecar(
         media_type=media_type,
         evidence_file=rel,
         extracted_by="none",  # not pending → the auto OCR scan ignores it; backfill OCRs it
+        tree=tree,
     )
     batch_atomic_write([PlannedWrite(path=sidecar, content=md)], vault_root=vault_root)
     return sidecar, True
+
+
+def ensure_artifact_page(
+    vault_root: Path, binary_path: Path, *, today: dt.date | None = None
+) -> tuple[Path, bool]:
+    """Ensure any stored artifact has the page that makes it addressable.
+
+    The general form of `ensure_media_sidecar`, and the back-fill for artifacts
+    that predate the page being unconditional. Whether a page was written used
+    to depend on whether the extension was extractable, so a `.csv`, `.eml`, or
+    `.json` preserved earlier has bytes and nothing else — no `exomem_id`, no
+    `ingested_into`, and no corpus presence, because only `.md` is indexed.
+
+    Media still goes through `ensure_media_sidecar`: those pages are
+    reconciliation's to own, and describing one here would put the capture path
+    back inside a contract it does not hold. Everything else gets its identity
+    written directly, since nothing else will ever write it.
+
+    Idempotent: returns `(existing_page, False)` when one is already there.
+    """
+    extract = _extract_module()
+    if extract.media_type_for(binary_path) is not None:
+        return ensure_media_sidecar(vault_root, binary_path, today=today)
+
+    name = binary_path.name
+    if name.lower().endswith(".md"):
+        page = binary_path.with_name(f"{name[:-3]}-notes.md")
+    else:
+        page = binary_path.with_name(f"{name}.md")
+    if page.exists():
+        return page, False
+
+    rel = binary_path.resolve().relative_to(vault_root.resolve()).as_posix()
+    tree, scope, category = artifact_location(rel)
+    digest = hashlib.sha256()
+    size = 0
+    with binary_path.open("rb") as stream:
+        while chunk := stream.read(_STREAM_CHUNK):
+            digest.update(chunk)
+            size += len(chunk)
+    markdown = _render_sidecar(
+        artifact_name=name,
+        scope=scope,
+        category=category,
+        date_iso=temporal.stamp(today or temporal.now()),
+        evidence_file=rel,
+        binary_sha256=digest.hexdigest(),
+        binary_size=size,
+        tree=tree,
+    )
+    batch_atomic_write([PlannedWrite(path=page, content=markdown)], vault_root=vault_root)
+    return page, True
 
 
 _EXTRACTED_HEADING = "## Extracted text"

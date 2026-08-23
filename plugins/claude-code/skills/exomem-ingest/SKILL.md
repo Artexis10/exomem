@@ -14,7 +14,7 @@ Use when the user asks to ingest, add, import, process, or preserve an external 
 
 ## Workflow
 1. Identify the artifact type: text, article, PDF, dataset, image, audio, video, or mixed media.
-2. Preserve the raw source first with `capture_source`, `preserve_evidence`, `preserve_artifacts` for file handles, or fallback `transfer_artifact`.
+2. Preserve the raw source first with `capture_source` — `content` for text, `files` for an attached transcript, article, or screenshot. Reach for `preserve_evidence`, `preserve_artifacts`, or the `transfer_artifact` fallback only when the artifact is proof-bearing rather than raw material.
    Pass `source_kind` and `domain` on a `capture_source` call — both are open
    vocabularies, so name the label that fits even if it is unfamiliar, and keep
    `other` for material you genuinely cannot classify.

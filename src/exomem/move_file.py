@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -99,6 +100,56 @@ def _held_rename(vault_root: Path, old_rel: str, new_rel: str) -> None:
         raise MoveFileError("MOVE_FAILED", "held file move was refused") from None
 
 
+#: Frontmatter key holding a page's pointer at the bytes it describes. The
+#: name is a misnomer once a Source uses it, and is kept because roughly fifteen
+#: readers depend on it.
+_ARTIFACT_POINTER_RE = re.compile(r"(?m)^(evidence_file:[ \t]*)(.+?)[ \t]*$")
+
+
+def _compose_transforms(first, second):
+    """Run a caller's own content transform, then this module's repointing.
+
+    Order matters only in that the caller declared its change first; the
+    repointing is mechanical and must see the final text.
+    """
+    if first is None:
+        return second
+    return lambda text: second(first(text))
+
+
+def _paired_artifact(vault_root: Path, rel: str) -> tuple[str, str] | None:
+    """Return `(page_rel, binary_rel)` when `rel` is half of a stored artifact.
+
+    A captured artifact is two files — the bytes and the page that addresses
+    them, named `<filename>` and `<filename>.md`. Relocating one without the
+    other leaves the bytes with no page, which is the unaddressable state the
+    page contract exists to prevent, or a page describing an artifact that is
+    no longer there. So either half names the whole unit.
+
+    Returns None for an ordinary page, which is the common case: a source page
+    whose stem happens to have no sibling file is not a pair.
+    """
+    if rel.lower().endswith(".md"):
+        binary_rel = rel[:-3]
+        if not binary_rel or binary_rel.lower().endswith(".md"):
+            return None
+        return (rel, binary_rel) if (vault_root / binary_rel).is_file() else None
+    page_rel = f"{rel}.md"
+    return (page_rel, rel) if (vault_root / page_rel).is_file() else None
+
+
+def _repoint_artifact(old_binary: str, new_binary: str):
+    """A content transform that repoints a moved page at its moved bytes."""
+
+    def transform(text: str) -> str:
+        def replace(match: re.Match[str]) -> str:
+            return f"{match.group(1)}{new_binary}" if match.group(2) == old_binary else match.group(0)
+
+        return _ARTIFACT_POINTER_RE.sub(replace, text)
+
+    return transform
+
+
 def move_file(
     vault_root: Path,
     *,
@@ -145,6 +196,41 @@ def move_file(
         new_abs, new_rel = resolve_under_vault(vault_root, new_path)
     except VaultPathError as e:
         raise MoveFileError(code=e.code, reason=e.reason) from e
+
+    # An artifact and its page move as one unit. Whichever half the caller
+    # named, the operation is normalized onto the page — that is the `.md` path
+    # the semantic write machinery below is written for — and the bytes are
+    # renamed alongside it inside the same transaction.
+    paired_binary: tuple[str, str] | None = None
+    pair = _paired_artifact(vault_root, old_rel)
+    if pair is not None:
+        page_rel, binary_rel = pair
+        if old_rel == binary_rel:
+            if not new_rel.lower().endswith(".md"):
+                paired_binary = (binary_rel, new_rel)
+                new_rel = f"{new_rel}.md"
+                new_abs = new_abs.with_name(new_abs.name + ".md")
+            else:
+                paired_binary = (binary_rel, new_rel[:-3])
+            old_rel = page_rel
+            old_abs = old_abs.with_name(old_abs.name + ".md")
+        else:
+            new_binary = new_rel[:-3] if new_rel.lower().endswith(".md") else new_rel
+            if not new_rel.lower().endswith(".md"):
+                new_rel = f"{new_rel}.md"
+                new_abs = new_abs.with_name(new_abs.name + ".md")
+            paired_binary = (binary_rel, new_binary)
+        if (vault_root / paired_binary[1]).exists():
+            raise MoveFileError(
+                code="DEST_EXISTS",
+                reason=(
+                    f"destination already exists: {paired_binary[1]}. "
+                    f"This op refuses to overwrite — pick a different name."
+                ),
+            )
+        content_transform = _compose_transforms(
+            content_transform, _repoint_artifact(*paired_binary)
+        )
 
     try:
         reserved_paths.inspect_generic_path(vault_root, new_rel)
@@ -391,6 +477,15 @@ def move_file(
             ) -> None:
                 bound_destination.recheck(vault_root)
                 _held_rename(vault_root, old_rel, new_rel)
+                # The bytes follow the page inside the same transaction. A
+                # rollback below undoes both, so a failure can never leave an
+                # artifact split across two trees.
+                if paired_binary is not None:
+                    try:
+                        _held_rename(vault_root, *paired_binary)
+                    except MoveFileError:
+                        _held_rename(vault_root, new_rel, old_rel)
+                        raise
                 try:
                     destination_writes = (
                         [PlannedWrite(path=new_abs, content=moved_source)]
@@ -426,6 +521,8 @@ def move_file(
                         new_rel,
                     )
                     try:
+                        if paired_binary is not None:
+                            _held_rename(vault_root, paired_binary[1], paired_binary[0])
                         _held_rename(vault_root, new_rel, old_rel)
                     except MoveFileError as rollback_error:
                         raise RuntimeError(

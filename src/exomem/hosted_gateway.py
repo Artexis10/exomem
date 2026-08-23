@@ -15,6 +15,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, NamedTuple
 
 from fastmcp.tools import FunctionTool
+from fastmcp.utilities import json_schema
 
 from . import __version__, capabilities
 from . import commands as commands_module
@@ -145,11 +146,22 @@ def _mcp_tool_contract(
             idempotent=command.read_only,
         ),
     )
-    return {
+    contract = {
         key: value
         for key, value in tool.to_mcp_tool().model_dump(mode="json", by_alias=True).items()
         if value is not None
     }
+    # Inline `$defs` so this contract and the personal MCP surface describe the
+    # same command identically. The server-side registration path compresses
+    # schemas; building a `FunctionTool` directly does not, so a parameter typed
+    # with a structured model rendered as a `$ref` here and inline there. No
+    # hosted command carried one until now, which is why the two generators
+    # could disagree unnoticed — and a shipped test compares them, so the
+    # disagreement is a defect rather than a tolerated difference.
+    schema = contract.get("inputSchema")
+    if isinstance(schema, dict) and "$defs" in schema:
+        contract["inputSchema"] = json_schema.compress_schema(schema, dereference=True)
+    return contract
 
 
 #: Vault subtrees a hosted tenant's own agent may read but never rewrite.
