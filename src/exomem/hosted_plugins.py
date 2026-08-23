@@ -27,6 +27,9 @@ PLUGIN_ROOT = Path("plugins/hosted")
 DEFAULT_CANDIDATE = "hosted-alpha-agent-v1"
 LIFECYCLE_CANDIDATE = "hosted-alpha-agent-v2"
 EPISTEMIC_CANDIDATE = "hosted-alpha-agent-v3"
+#: The first candidate whose membership is derived from the product surface
+#: rather than hand-listed. See `commands.HOSTED_SURFACE_EXCLUSIONS`.
+PARITY_CANDIDATE = "hosted-alpha-agent-v4"
 #: Every distributable candidate and the surface profile it pins. A third
 #: candidate is what retired the old pairwise `== LIFECYCLE_CANDIDATE`
 #: branching: membership questions now ask the registry, not a constant.
@@ -35,12 +38,15 @@ CANDIDATE_PROFILES: Mapping[str, str] = MappingProxyType(
         DEFAULT_CANDIDATE: commands.HOSTED_ALPHA_AGENT_PROFILE,
         LIFECYCLE_CANDIDATE: commands.HOSTED_ALPHA_AGENT_V2_PROFILE,
         EPISTEMIC_CANDIDATE: commands.HOSTED_ALPHA_AGENT_V3_PROFILE,
+        PARITY_CANDIDATE: commands.HOSTED_ALPHA_AGENT_V4_PROFILE,
     }
 )
 #: Candidates whose profile exposes `record_memory`. These pin the Records
 #: reader floor, bind their own selection cases, and must clear live Records
 #: acceptance for their own profile identifier before promotion.
-RECORDS_CANDIDATES: frozenset[str] = frozenset({LIFECYCLE_CANDIDATE, EPISTEMIC_CANDIDATE})
+RECORDS_CANDIDATES: frozenset[str] = frozenset(
+    {LIFECYCLE_CANDIDATE, EPISTEMIC_CANDIDATE, PARITY_CANDIDATE}
+)
 #: Candidate-scoped skills, rendered on top of the shared `SKILL_NAMES`. Each
 #: candidate carries its own copies: a candidate package is immutable once its
 #: lock pins `skills_sha256`, so sharing a file across candidates would let one
@@ -50,6 +56,7 @@ CANDIDATE_SKILL_NAMES: Mapping[str, tuple[str, ...]] = MappingProxyType(
         DEFAULT_CANDIDATE: (),
         LIFECYCLE_CANDIDATE: ("exomem-records",),
         EPISTEMIC_CANDIDATE: ("exomem-records", "exomem-supersede"),
+        PARITY_CANDIDATE: ("exomem-records", "exomem-supersede"),
     }
 )
 PLATFORMS = ("claude", "openai")

@@ -562,6 +562,38 @@ def test_product_front_door_metadata_is_registry_derived() -> None:
         assert set(command.product_actions) <= actions
 
 
+def test_simple_action_catalog_reaches_every_product_command() -> None:
+    """Consolidation must not cost capability.
+
+    The catalog is the intended agent entry point, so a product command that no
+    action names is capability an agent cannot reach through it. `bootstrap` is
+    the one exception: it is the call that returns the catalog, so it cannot sit
+    behind it.
+
+    The companion assertion in `test_simple_action_catalog_is_registry_routed`
+    checks the other direction -- every route names a known command -- which is
+    why the gap survived: the catalog reached 18 of 29 commands, `adopt`,
+    `maintain` and `record` resolved UNAVAILABLE on the shipped hosted profile,
+    and nothing failed.
+    """
+    catalog = commands.simple_action_catalog()
+    reachable: set[str] = set()
+    for entry in catalog.values():
+        reachable.add(entry["route"]["tool"])
+        reachable.update(
+            value["tool"]
+            for key, value in entry.items()
+            if key.endswith("_route") and isinstance(value, dict)
+        )
+        reachable.update(entry["advanced"])
+
+    unreachable = {command.name for command in commands.PRODUCT_COMMANDS} - reachable
+    assert unreachable == {"bootstrap"}, (
+        "every product command must be reachable from some action; unreachable: "
+        f"{sorted(unreachable - {'bootstrap'})}"
+    )
+
+
 def test_simple_action_catalog_is_registry_routed() -> None:
     catalog = commands.simple_action_catalog()
 
