@@ -484,6 +484,12 @@ def _parse_extension_data(data: Any, digest: str, core: RelationRegistry) -> Rel
                         relation=key,
                     )
                 )
+                # Recording the finding is not the refusal. Without this the
+                # loop fell through to the collision check, whose `else` branch
+                # registered the alias anyway — so a label the grammar rejects
+                # resolved with `alias` standing, exactly as though it had
+                # passed the validation the registry claims to apply.
+                continue
             if alias in occupied or alias in aliases:
                 findings.append(
                     _finding(
