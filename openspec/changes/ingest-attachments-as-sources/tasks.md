@@ -25,11 +25,11 @@ page for an image loses its title, kind, domain, projects, and tags, and has its
 body demoted under `## Preserved notes`. This group must land before a Sources
 media capture is safe to offer.
 
-- [ ] 3.1 Test that reconciling a media page carrying a real `source_type`, `domain`, `projects`, title, and body leaves all of them intact while still filling the media fields.
-- [ ] 3.2 Test that the Evidence stub path is unchanged: a page already in the canonical pending shape converges exactly as it does today.
-- [ ] 3.3 Narrow the canonical-shape checks to the fields the pipeline owns — `media_type`, `evidence_file`, `extracted_by`, `processing_state`, and binary provenance — rather than the whole frontmatter.
-- [ ] 3.4 Re-render by editing the owned fields in place instead of rebuilding the page, so identity, classification, and body survive.
-- [ ] 3.5 Replace the positional `evidence`-segment derivation of scope and category with a lane-aware one, in both `reconcile_media` and `ensure_media_sidecar`; test the Sources case.
+- [x] 3.1 Test that reconciling a media page carrying a real `source_type`, `domain`, `projects`, title, and body leaves all of them intact while still filling the media fields.
+- [x] 3.2 Test that the Evidence stub path is unchanged: a page already in the canonical pending shape converges exactly as it does today.
+- [x] 3.3 Narrow the canonical-shape checks to the fields the pipeline owns — `media_type`, `evidence_file`, `extracted_by`, `processing_state`, and binary provenance — rather than the whole frontmatter.
+- [x] 3.4 Re-render by editing the owned fields in place instead of rebuilding the page, so identity, classification, and body survive.
+- [x] 3.5 Replace the positional `evidence`-segment derivation of scope and category with a lane-aware one, in both `reconcile_media` and `ensure_media_sidecar`; test the Sources case.
 
 ## 4. Sources lane ingestion
 

@@ -219,3 +219,148 @@ def test_a_page_never_inlines_the_artifact_bytes(vault: Path) -> None:
     page = (vault / stored.sidecar_path).read_text(encoding="utf-8")
     assert "the pier reopened in March" not in page
     assert Path(stored.path).name in page
+
+
+# --------------------------------------------------------------------------
+# 3. Page ownership is separated from the media pipeline
+# --------------------------------------------------------------------------
+
+
+_SOURCE_MEDIA_PAGE = """---
+type: source
+exomem_id: 11111111-1111-4111-8111-111111111111
+title: Riverside council walkthrough
+source_type: session
+domain: urban-planning
+projects: [riverside]
+captured: 2026-08-23
+media_type: image
+evidence_file: Knowledge Base/Sources/Sessions/2026-08-23-walkthrough.png
+extracted_by: pending
+tags: [session, riverside]
+ingested_into: []
+---
+
+# Riverside council walkthrough
+
+> Captured during the pier reopening walkthrough.
+
+## Capture
+
+- Original filename: `walkthrough.png`
+"""
+
+
+def _source_media_page(vault: Path) -> tuple[Path, Path]:
+    folder = vault / "Knowledge Base" / "Sources" / "Sessions"
+    folder.mkdir(parents=True, exist_ok=True)
+    binary = folder / "2026-08-23-walkthrough.png"
+    binary.write_bytes(_PNG)
+    page = folder / "2026-08-23-walkthrough.png.md"
+    page.write_text(_SOURCE_MEDIA_PAGE, encoding="utf-8")
+    return binary, page
+
+
+def test_reconciliation_keeps_what_the_capture_owns(vault: Path) -> None:
+    """The pipeline fills its own fields; it does not re-author the page.
+
+    `reconcile_media` re-renders any media page that is not in its canonical
+    pending shape, and that shape required `source_type: other` — which no real
+    Source has. Measured before this change, a Source page for an image lost its
+    title, kind, domain, projects and tags, and had its body demoted under
+    `## Preserved notes`, while the locator line was rewritten to
+    `Evidence/evidence/uncategorized/` — a path that does not exist.
+    """
+    from exomem import media_processing
+
+    binary, page = _source_media_page(vault)
+
+    media_processing.reconcile_media(vault, binary, explicit=True)
+
+    after = page.read_text(encoding="utf-8")
+    assert "title: Riverside council walkthrough" in after
+    assert "source_type: session" in after
+    assert "domain: urban-planning" in after
+    assert "projects: [riverside]" in after
+    assert "tags: [session, riverside]" in after
+    assert "> Captured during the pier reopening walkthrough." in after
+    assert "## Preserved notes" not in after
+    assert "Evidence: 2026-08-23-walkthrough.png" not in after
+    assert "Evidence/evidence/uncategorized" not in after
+
+
+def test_reconciliation_still_fills_the_fields_it_owns(vault: Path) -> None:
+    """Keeping the capture's fields must not cost the pipeline its own."""
+    from exomem import media_processing
+
+    binary, page = _source_media_page(vault)
+
+    media_processing.reconcile_media(vault, binary, explicit=True)
+
+    after = page.read_text(encoding="utf-8")
+    assert "processing_state: pending" in after
+    assert "original_filename: 2026-08-23-walkthrough.png" in after
+    assert "binary_sha256:" in after
+    assert "binary_size:" in after
+    assert "binary_mtime_ns:" in after
+
+
+def test_the_evidence_stub_path_is_unchanged(vault: Path) -> None:
+    """A page already in the canonical shape converges exactly as before.
+
+    The Evidence sidecar is the shape the checks were written around, so it is
+    the control: broadening them must not change what happens to it.
+    """
+    from exomem import media_processing
+
+    stored = _preserve_image(vault)
+    page = vault / stored.sidecar_path
+
+    media_processing.reconcile_media(vault, vault / stored.path, explicit=True)
+
+    after = page.read_text(encoding="utf-8")
+    assert "source_type: other" in after
+    assert 'title: "Evidence: 2026-08-23-shot.png"' in after
+    assert "tags: [evidence, riverside, screenshots]" in after
+    assert "processing_state: pending" in after
+    assert "## Preserved notes" not in after
+
+
+def test_a_backfilled_sources_binary_names_its_own_tree(vault: Path) -> None:
+    """Scope and category are folders, not a search for the word `evidence`.
+
+    Both derivations located a literal `evidence` segment and defaulted when
+    there was none, so a binary under `Sources/` was described as living in
+    `Evidence/evidence/uncategorized/` — a locator line and a tag set naming a
+    folder that does not exist.
+    """
+    from exomem import preserve as preserve_mod
+
+    folder = vault / "Knowledge Base" / "Sources" / "Sessions"
+    folder.mkdir(parents=True, exist_ok=True)
+    binary = folder / "2026-08-23-orphan.png"
+    binary.write_bytes(_PNG)
+
+    sidecar, created = preserve_mod.ensure_media_sidecar(vault, binary)
+
+    assert created is True
+    page = sidecar.read_text(encoding="utf-8")
+    assert "Preserved under `Sources/Sessions/uncategorized/`." in page
+    assert "tags: [source, sessions, uncategorized]" in page
+    assert "Evidence" not in page
+
+
+def test_an_evidence_binary_still_names_evidence(vault: Path) -> None:
+    from exomem import preserve as preserve_mod
+
+    folder = vault / "Knowledge Base" / "Evidence" / "riverside" / "screenshots"
+    folder.mkdir(parents=True, exist_ok=True)
+    binary = folder / "2026-08-23-orphan.png"
+    binary.write_bytes(_PNG)
+
+    sidecar, created = preserve_mod.ensure_media_sidecar(vault, binary)
+
+    assert created is True
+    page = sidecar.read_text(encoding="utf-8")
+    assert "Preserved under `Evidence/riverside/screenshots/`." in page
+    assert "tags: [evidence, riverside, screenshots]" in page

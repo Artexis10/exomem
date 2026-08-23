@@ -312,6 +312,7 @@ def preserve(
                 extracted_by=extracted_by,
                 binary_sha256=artifact_hash if describes_artifact else None,
                 binary_size=artifact_size if describes_artifact else None,
+                tree="Evidence",
             )
             sidecar_ref = memory_refs.ref_from_markdown(sidecar_md)
             writes.append(PlannedWrite(path=sidecar_path, content=sidecar_md))
@@ -530,6 +531,44 @@ def _sanitize_filename(s: str | None) -> str:
     return cleaned
 
 
+#: The append-only trees an artifact can live in, each mapped to the singular
+#: label its page uses in a title and a lead tag. A map rather than string
+#: surgery, so "Sources" -> "Source" is stated once and cannot be re-derived
+#: differently by the next caller.
+_ARTIFACT_TREE_LABELS = {"Evidence": "Evidence", "Sources": "Source"}
+_ARTIFACT_TREES = tuple(_ARTIFACT_TREE_LABELS)
+
+
+def artifact_location(relative_path: str) -> tuple[str, str, str]:
+    """Return `(tree, scope, category)` for a vault-relative artifact path.
+
+    Scope and category are simply the folders below the top-level tree, so they
+    are read positionally from wherever that tree is rather than from one
+    tree's name. Two callers used to search for a literal `evidence` segment and
+    default when there was none, which meant an artifact under `Sources/`
+    produced `evidence`/`uncategorized` — a locator line and a tag set naming a
+    folder that does not exist.
+
+    The fallback for a path in neither tree is unchanged, because there is no
+    better answer and a caller that reaches it has already lost the labels.
+    """
+    parts = Path(relative_path).parts
+    index = next(
+        (i for i, part in enumerate(parts) if part.casefold() in
+         {tree.casefold() for tree in _ARTIFACT_TREES}),
+        None,
+    )
+    if index is None:
+        return "Evidence", "evidence", "uncategorized"
+    tree = next(
+        name for name in _ARTIFACT_TREES if name.casefold() == parts[index].casefold()
+    )
+    folders = parts[index + 1 : -1]
+    scope = folders[0] if folders else tree.lower()
+    category = folders[1] if len(folders) > 1 else "uncategorized"
+    return tree, scope, category
+
+
 def _render_sidecar(
     *,
     artifact_name: str,
@@ -545,6 +584,7 @@ def _render_sidecar(
     frame_ts: float | None = None,
     binary_sha256: str | None = None,
     binary_size: int | None = None,
+    tree: str = "Evidence",
 ) -> str:
     """Sidecar .md describing a preserved binary artifact.
 
@@ -571,7 +611,8 @@ def _render_sidecar(
     lines = ["---"]
     lines.append("type: source")
     lines.append(f"exomem_id: {memory_refs.new_id()}")
-    display_title = f"Evidence: {artifact_name}"
+    label = _ARTIFACT_TREE_LABELS.get(tree, "Evidence")
+    display_title = f"{label}: {artifact_name}"
     lines.append(f"title: {yaml_scalar(display_title)}")
     lines.append("source_type: other")
     lines.append(f"captured: {date_iso}")
@@ -595,7 +636,8 @@ def _render_sidecar(
         lines.append(f"frame_ts: {frame_ts}")
     extra_tag = ", scene-frame" if parent_media else ""
     lines.append(
-        f"tags: [evidence, {scope.lower().replace(' ', '-')}, "
+        f"tags: [{label.lower()}, "
+        f"{scope.lower().replace(' ', '-')}, "
         f"{category.lower().replace(' ', '-')}{extra_tag}]"
     )
     lines.append("ingested_into: []")
@@ -603,7 +645,7 @@ def _render_sidecar(
     lines.append("")
     lines.append(f"# {display_title}")
     lines.append("")
-    lines.append(f"Preserved under `Evidence/{scope}/{category}/`.")
+    lines.append(f"Preserved under `{tree}/{scope}/{category}/`.")
     lines.append("")
     if description:
         lines.append("## Description")
@@ -656,10 +698,7 @@ def ensure_media_sidecar(
     if sidecar.exists():
         return sidecar, False
     rel = binary_path.resolve().relative_to(vault_root.resolve()).as_posix()
-    # Derive scope/category from Knowledge Base/Evidence/<scope>/<category>/… for the tags.
-    parts = rel.split("/")
-    scope = parts[2] if len(parts) > 2 else "evidence"
-    category = parts[3] if len(parts) > 3 else "uncategorized"
+    tree, scope, category = artifact_location(rel)
     md = _render_sidecar(
         artifact_name=name,
         scope=scope,
@@ -668,6 +707,7 @@ def ensure_media_sidecar(
         media_type=media_type,
         evidence_file=rel,
         extracted_by="none",  # not pending → the auto OCR scan ignores it; backfill OCRs it
+        tree=tree,
     )
     batch_atomic_write([PlannedWrite(path=sidecar, content=md)], vault_root=vault_root)
     return sidecar, True
