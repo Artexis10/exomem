@@ -3406,16 +3406,25 @@ def release_level_for_path_only(
     principal: RequestPrincipal | None = None,
     purpose: str | None = None,
     receipt_decision: str | None = None,
+    policy: Any | None = None,
 ) -> int:
     """Decide an opaque candidate without parsing its bytes.
 
     A structured Record must be authorized before parsing. Scopes that need
     the candidate's frontmatter therefore withhold it conservatively.
+
+    `policy` lets a caller that classifies MANY paths under one pass load the
+    policy once and hand it in, exactly as `release_walk_filter` already does
+    for a walk. The plane does not move while one pass runs, and re-probing the
+    authoring guard per path cost 8.9 s of a 33 s structured write — the guard
+    probe stats the governance root on every `policy_module.load`. Omitting it
+    keeps the original per-call load, so every existing caller is unchanged.
     """
     vault_root = Path(vault_root)
     if lifecycle.is_tombstoned(vault_root, rel_path):
         return DISCLOSURE_MIN
-    policy = policy_module.load(vault_root)
+    if policy is None:
+        policy = policy_module.load(vault_root)
     if policy.empty:
         return DISCLOSURE_MAX
     who = principal if principal is not None else effective_principal()

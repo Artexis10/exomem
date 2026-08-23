@@ -62,6 +62,11 @@ DEFAULT_ATTENTION_CATEGORIES: tuple[str, ...] = (
     "unprocessed_source",
     "relation_debt",
     "entity_type_unregistered",
+    # Last, and deliberately not mid-list: this queue fires on a binding a person
+    # authored in a manifest, which is the `prediction_window` argument for being
+    # in the default union at all, but it is the newest and the least-evidenced of
+    # them. A vault that declares no binding never sees it.
+    "unreflected_outcomes",
 )
 # Registered — selectable via `categories` — but deliberately NOT default,
 # because these read old fields that a long-lived vault can already hold a large

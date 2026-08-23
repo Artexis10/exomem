@@ -6,7 +6,8 @@ attention?" It composes deterministic measurements into one ranked list:
 - close active conclusions that may restate, refine, or contradict each other;
 - conclusions that are old, rarely surfaced, and weakly linked;
 - raw sources that have never been compiled;
-- active compiled notes with no durable outbound Markdown connections.
+- active compiled notes with no durable outbound Markdown connections;
+- open Planning items that recorded events already join to.
 
 None of these signals is a judgment. Exomem does not decide that a conclusion
 is wrong, infer a relationship as fact, decay memory, or edit a note. The agent
@@ -30,6 +31,42 @@ exomem review --category relation_debt --json
 The MCP/REST product route is `review_memory(mode="attention")`. Every item
 includes its current path, canonical target reference, reasons, stable
 `exomem://review/<id>` reference, signal fingerprint, and review state.
+
+## Unreflected outcomes
+
+`unreflected_outcomes` is the one family that reads structured collections
+rather than pages. It fires where two authored facts disagree by omission: a
+Records collection holds events that join to a Planning item, and that item is
+still open (`lifecycle: active`, status not `completed` or `cancelled`).
+
+The binding is authored, never inferred. A Records manifest declares it on its
+Planning link:
+
+```yaml
+links:
+  plans:
+    - reference: exomem://memory/<planning-collection-id>
+      query: {limit: 50}
+      join:
+        title: title
+```
+
+`join` maps one to four declared record fields to plan field names, matched
+exactly. Records itself never resolves the Planning side: the link stays opaque
+on every Records operation, and this family is its only consumer.
+
+What resolves a finding: the item leaves the open state, the binding is removed
+from the manifest, or the joined records are gone. Never time, and never the
+runtime — no command, sweep or write-path advisory edits either side. You move
+the item yourself with `plan_memory(action="triage")`.
+
+The fingerprint is the item reference plus the joined record keys, so a new
+event on a dismissed item resurfaces it under the ordinary material-change rule
+while the dismissal record stands. A record append or a plan transition applies
+its own bounded delta, so the response to the write that opens the gap is the
+response that reports it. A Planning reference that cannot be resolved produces
+no finding and is reported as unevaluated in the audit's own metadata — never
+silently skipped.
 
 ## Triage
 
@@ -174,6 +211,12 @@ command that writes many pages at once is one batch, and a batch delivers at
 most one block rather than one per write — the counters are how that is
 checkable rather than merely claimed, and checking it is the point of writing
 them down.
+
+Successive single `record_memory` or `plan_memory` calls each carry a block, and
+that is the accepted behaviour rather than a leak: the governor suppresses an
+identical total, and each of those writes genuinely changes the total. Turning
+that into one block per session would be a change to the governance rule, not to
+the carrier.
 
 The section also carries `due_total`: how many items were in the last block a
 caller was actually handed. It has exactly one writer — the delivery path — so a

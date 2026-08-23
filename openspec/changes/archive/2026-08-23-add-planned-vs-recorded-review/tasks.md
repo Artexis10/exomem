@@ -55,4 +55,4 @@
 
 ## 7. Deferred to the pinned-surface refresh (not in this change)
 
-- [ ] 7.1 Document `plan-progress` in the `review_memory` `mode` docstring, regenerate `tests/fixtures/mcp_tool_schemas.json` and `src/exomem/tool_surface_contract.json` via `scripts/dump-tool-schemas.py`, and refresh every registered external connector. This moves the pinned tool surface and belongs to that release-blocking fan-out, not here.
+- [x] 7.1 Document `plan-progress` in the `review_memory` `mode` docstring, regenerate `tests/fixtures/mcp_tool_schemas.json` and `src/exomem/tool_surface_contract.json` via `scripts/dump-tool-schemas.py`, and refresh every registered external connector. This moves the pinned tool surface and belongs to that release-blocking fan-out, not here.

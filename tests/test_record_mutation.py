@@ -627,3 +627,444 @@ def test_item_container_hash_retries_after_append_and_manifest_object_drift_refu
             expected_container_hash=result["after_container_hash"],
             why="refuse stale contract",
         )
+
+
+# --- identity from the declared natural key (design D3) -------------------------
+
+
+def _natural_key_of(manifest: collections.CollectionManifest, values: dict) -> str:
+    """The serialisation the READ path uses, spelled exactly once here too."""
+    return collections.natural_key_serialization(
+        manifest.schema.version,
+        manifest.schema.natural_key,
+        values,
+        field_types={name: spec.type for name, spec in manifest.schema.fields.items()},
+    )
+
+
+def _service(**overrides) -> dict:
+    item = {
+        "occurred_on": "2026-07-01",
+        "asset": "[[Assets/Vehicle]]",
+        "provider": "City Garage",
+        "odometer": 44_000,
+        "status": "completed",
+    }
+    item.update(overrides)
+    return item
+
+
+def test_append_without_a_key_derives_the_declared_natural_key(tmp_path: Path) -> None:
+    """`uuid4` on an omitted key made a re-stated event a duplicate, not a replay.
+
+    Every manifest already declares a natural key and the read path already knows
+    how to serialise it; the write path minted a random identity instead, so the
+    substrate could not see that the same observation had arrived twice.
+    """
+    from exomem import records
+
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest = _manifest(tmp_path, fixture)
+    parsed = record_formats.load_adapter(tmp_path, manifest).read()
+
+    result = records.append_record(
+        tmp_path,
+        manifest.path,
+        item=_service(),
+        expected_container_hash=parsed.snapshot,
+        why="log the completed service",
+    )
+
+    stored = next(
+        record
+        for record in record_formats.load_adapter(tmp_path, manifest).read().records
+        if record.identity.key == result["item_key"]
+    )
+    assert result["item_key"] == collections.inferred_item_key(
+        manifest.collection_id, _natural_key_of(manifest, stored.values)
+    )
+    assert result["outcome"] == "committed"
+
+
+def test_a_re_stated_append_replays_instead_of_duplicating(tmp_path: Path) -> None:
+    from exomem import records
+
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest = _manifest(tmp_path, fixture)
+    parsed = record_formats.load_adapter(tmp_path, manifest).read()
+    before = len(parsed.records)
+
+    first = records.append_record(
+        tmp_path, manifest.path, item=_service(),
+        expected_container_hash=parsed.snapshot, why="log the completed service",
+    )
+    replay = records.append_record(
+        tmp_path, manifest.path, item=_service(),
+        expected_container_hash=first["after_container_hash"],
+        why="log the completed service",
+    )
+
+    assert replay["outcome"] == "replayed"
+    assert replay["item_key"] == first["item_key"]
+    assert len(record_formats.load_adapter(tmp_path, manifest).read().records) == before + 1
+
+
+def test_the_same_natural_key_with_different_content_refuses(tmp_path: Path) -> None:
+    from exomem import records
+
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest = _manifest(tmp_path, fixture)
+    parsed = record_formats.load_adapter(tmp_path, manifest).read()
+    first = records.append_record(
+        tmp_path, manifest.path, item=_service(),
+        expected_container_hash=parsed.snapshot, why="log the completed service",
+    )
+
+    with pytest.raises(collections.CollectionError, match="RECORD_ID_CONFLICT"):
+        records.append_record(
+            tmp_path, manifest.path, item=_service(odometer=44_500),
+            expected_container_hash=first["after_container_hash"],
+            why="log a different odometer for the same service",
+        )
+
+
+def test_a_missing_natural_key_field_still_mints_a_random_identity(tmp_path: Path) -> None:
+    """`provider` is declared in the natural key and is NOT required.
+
+    Derivation is only sound when every declared field is present; an absent one
+    must fall back to the pre-change behaviour rather than serialise a hole.
+    """
+    from exomem import records
+
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest = _manifest(tmp_path, fixture)
+    parsed = record_formats.load_adapter(tmp_path, manifest).read()
+    partial = _service()
+    partial.pop("provider")
+
+    first = records.append_record(
+        tmp_path, manifest.path, item=partial,
+        expected_container_hash=parsed.snapshot, why="log a service with no provider",
+    )
+    second = records.append_record(
+        tmp_path, manifest.path, item={**partial, "occurred_on": "2026-07-02"},
+        expected_container_hash=first["after_container_hash"],
+        why="log another service with no provider",
+    )
+
+    assert first["item_key"] != second["item_key"]
+    stored = next(
+        record
+        for record in record_formats.load_adapter(tmp_path, manifest).read().records
+        if record.identity.key == first["item_key"]
+    )
+    assert "provider" not in stored.values
+
+
+def test_an_explicit_item_key_still_wins(tmp_path: Path) -> None:
+    from exomem import records
+
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest = _manifest(tmp_path, fixture)
+    parsed = record_formats.load_adapter(tmp_path, manifest).read()
+    explicit = "33333333-3333-4333-8333-333333333333"
+
+    result = records.append_record(
+        tmp_path, manifest.path, item=_service(),
+        item_key=explicit,
+        expected_container_hash=parsed.snapshot,
+        why="log the completed service under an explicit identity",
+    )
+
+    assert result["item_key"] == explicit
+
+
+# --- RECORD_NATURAL_KEY_CONFLICT (design D3) ------------------------------------
+
+
+def test_a_derived_twin_of_a_uuid4_keyed_item_refuses(tmp_path: Path) -> None:
+    """The hole the replay rules cannot see.
+
+    The fixture's oil-change event was keyed with a `uuid4` before derivation
+    existed. Re-stating that same observation derives a DIFFERENT key, so nothing
+    in the replay path matches and the collection would have silently held two
+    records of one event under two identities.
+    """
+    from exomem import records
+
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest = _manifest(tmp_path, fixture)
+    parsed = record_formats.load_adapter(tmp_path, manifest).read()
+    existing = next(
+        record for record in parsed.records
+        if record.identity.key == "a8d391a5-c2dc-4e79-b57b-6b2bbcaefd64"
+    )
+
+    with pytest.raises(collections.CollectionError) as caught:
+        records.append_record(
+            tmp_path,
+            manifest.path,
+            item={
+                "occurred_on": "2026-06-01",
+                "asset": "[[Assets/Vehicle]]",
+                "provider": "Northside Garage",
+                "odometer": 42_750,
+                "status": "completed",
+            },
+            expected_container_hash=parsed.snapshot,
+            why="re-state the oil change",
+        )
+
+    assert caught.value.code == "RECORD_NATURAL_KEY_CONFLICT"
+    assert existing.identity.key in str(caught.value.details)
+    after = record_formats.load_adapter(tmp_path, manifest).read()
+    assert len(after.records) == len(parsed.records), "the refusal must write nothing"
+
+
+def test_a_natural_key_conflict_names_every_existing_twin(tmp_path: Path) -> None:
+    from exomem import records
+
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest = _manifest(tmp_path, fixture)
+    twins = []
+    for index, record_id in enumerate(
+        ("11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222")
+    ):
+        (fixture / "Events" / "released" / f"twin-{index}.md").write_text(
+            "---\n"
+            "type: record\n"
+            f"collection_id: {manifest.collection_id}\n"
+            f"record_id: {record_id}\n"
+            "schema_version: 1\n"
+            "occurred_on: 2026-05-05\n"
+            'asset: "[[Assets/Vehicle]]"\n'
+            "provider: Twin Garage\n"
+            f"odometer: {40_000 + index}\n"
+            "status: completed\n"
+            "---\n\nA pre-existing duplicate.\n",
+            encoding="utf-8",
+        )
+        twins.append(record_id)
+    parsed = record_formats.load_adapter(tmp_path, manifest).read()
+
+    with pytest.raises(collections.CollectionError) as caught:
+        records.append_record(
+            tmp_path,
+            manifest.path,
+            item={
+                "occurred_on": "2026-05-05",
+                "asset": "[[Assets/Vehicle]]",
+                "provider": "Twin Garage",
+                "odometer": 41_000,
+                "status": "completed",
+            },
+            expected_container_hash=parsed.snapshot,
+            why="re-state the twinned service",
+        )
+
+    assert caught.value.code == "RECORD_NATURAL_KEY_CONFLICT"
+    named = str(caught.value.details)
+    for record_id in twins:
+        assert record_id in named
+
+
+# --- the same rule on the UPDATE path (round 1, M3) -----------------------------
+
+
+def test_an_update_onto_another_items_natural_key_refuses(tmp_path: Path) -> None:
+    """Append refuses a twin forever; update was creating them.
+
+    Nothing about the natural key is a property of how an item ARRIVED. An update
+    that moves one item's declared key onto another's produces exactly the state
+    the append check exists to prevent -- and then the collection cannot be
+    appended to for that key again, so the write that created the problem is the
+    only one that was allowed.
+    """
+    from exomem import records
+
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest = _manifest(tmp_path, fixture)
+    parsed = record_formats.load_adapter(tmp_path, manifest).read()
+    first, second = parsed.records[0], parsed.records[1]
+    assert first.identity.key != second.identity.key
+
+    with pytest.raises(collections.CollectionError) as caught:
+        records.update_record(
+            tmp_path,
+            manifest.path,
+            item_key=second.identity.key,
+            changes={
+                name: first.values[name]
+                for name in manifest.schema.natural_key
+                if name in first.values
+            },
+            expected_container_hash=parsed.snapshot,
+            expected_item_version=second.source.hash,
+            why="restate the second service as the first",
+        )
+
+    assert caught.value.code == "RECORD_NATURAL_KEY_CONFLICT"
+    assert first.identity.key in str(caught.value.details)
+    after = record_formats.load_adapter(tmp_path, manifest).read()
+    assert {record.identity.key for record in after.records} == {
+        record.identity.key for record in parsed.records
+    }
+    assert (
+        next(r for r in after.records if r.identity.key == second.identity.key).values
+        == second.values
+    ), "the refusal must write nothing"
+
+
+def test_a_planning_update_onto_another_items_natural_key_refuses(tmp_path: Path) -> None:
+    """Planning updates run through the same writer, so they inherit the rule."""
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).parent))
+    from lifecycle_fixtures import PLANNING_PATH, queue_item, seed_vault
+
+    from exomem import planning, records
+
+    seed_vault(tmp_path)
+    first = queue_item(tmp_path, "Batch 1")
+    second = queue_item(tmp_path, "Batch 2")
+    manifest = collections.load_manifest(tmp_path, tmp_path / PLANNING_PATH)
+    snapshot = record_formats.load_adapter(tmp_path, manifest).read()
+    guards = records.lifecycle_guards(manifest, snapshot)
+    item = next(r for r in snapshot.records if r.identity.key == second["plan_id"])
+
+    with pytest.raises(collections.CollectionError) as caught:
+        planning.update(
+            tmp_path,
+            PLANNING_PATH,
+            plan_id=second["plan_id"],
+            changes={"title": "Batch 1"},
+            expected_container_hash=guards["expected_container_hash"],
+            expected_item_version=item.source.hash,
+            why="rename the second deliverable onto the first",
+        )
+
+    assert caught.value.code == "RECORD_NATURAL_KEY_CONFLICT"
+    assert first["plan_id"] in str(caught.value.details)
+
+
+def test_planning_triage_cannot_reach_title_the_declared_natural_key(
+    tmp_path: Path,
+) -> None:
+    """Triage cannot reach `title` -- and `title` is what these collections key on.
+
+    Stated exactly, because the general claim is false: triage's transition
+    surface excludes `title`, so a collection keyed on `[title]` is out of
+    identity's way by construction. A collection keyed on a field triage CAN
+    reach is not, and the twin check refuses there the same way it does on
+    update. The other half of that sentence is the test below.
+    """
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).parent))
+    from lifecycle_fixtures import PLANNING_PATH, queue_item, seed_vault
+
+    from exomem import planning, records
+
+    seed_vault(tmp_path)
+    added = queue_item(tmp_path, "Batch 1")
+    manifest = collections.load_manifest(tmp_path, tmp_path / PLANNING_PATH)
+    snapshot = record_formats.load_adapter(tmp_path, manifest).read()
+    guards = records.lifecycle_guards(manifest, snapshot)
+    item = next(r for r in snapshot.records if r.identity.key == added["plan_id"])
+    assert list(manifest.schema.natural_key) == ["title"]
+
+    with pytest.raises(collections.CollectionError) as caught:
+        planning.triage(
+            tmp_path,
+            PLANNING_PATH,
+            plan_id=added["plan_id"],
+            transition={"title": "Batch 2"},
+            expected_container_hash=guards["expected_container_hash"],
+            expected_item_version=item.source.hash,
+            why="try to rename through triage",
+        )
+
+    assert caught.value.code == "INVALID_PLAN_ARGUMENTS"
+
+
+def test_a_collection_keyed_on_a_triage_field_refuses_the_same_way(
+    tmp_path: Path,
+) -> None:
+    """The other half: where triage CAN reach the key, the twin check refuses.
+
+    `status` is inside triage's transition surface, so a Planning collection
+    keyed on `[status]` is a collection where the high-traffic write really can
+    move identity -- and it is refused with the same code as an update, rather
+    than silently producing the twin state append then refuses forever.
+    """
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).parent))
+    from lifecycle_fixtures import planning_manifest, seed_vault
+
+    from exomem import planning, records
+
+    seed_vault(tmp_path)
+    keyed = "Knowledge Base/Planning/ByStatus/_collection.md"
+    planning.create_collection(
+        tmp_path,
+        keyed,
+        planning_manifest(
+            natural_key="[status]", collection_id="0b7f5c92-31ad-4e60-8f14-6c9d2a8e4b71"
+        ),
+        why="file deliverables keyed on their state",
+    )
+    shape = {"kind": "outcome", "commitment": "committed", "horizon": "quarter"}
+    first = planning.add(
+        tmp_path, keyed, item={"title": "Alpha", "status": "planned", **shape},
+        why="one planned outcome",
+    )
+    second = planning.add(
+        tmp_path, keyed, item={"title": "Beta", "status": "active", **shape},
+        why="one outcome already moving",
+    )
+    manifest = collections.load_manifest(tmp_path, tmp_path / keyed)
+    assert list(manifest.schema.natural_key) == ["status"]
+    snapshot = record_formats.load_adapter(tmp_path, manifest).read()
+    guards = records.lifecycle_guards(manifest, snapshot)
+    item = next(r for r in snapshot.records if r.identity.key == second["plan_id"])
+
+    with pytest.raises(collections.CollectionError) as caught:
+        planning.triage(
+            tmp_path,
+            keyed,
+            plan_id=second["plan_id"],
+            transition={"status": "planned"},
+            expected_container_hash=guards["expected_container_hash"],
+            expected_item_version=item.source.hash,
+            why="move it back to planned",
+        )
+
+    assert caught.value.code == "RECORD_NATURAL_KEY_CONFLICT"
+    assert first["plan_id"] in str(caught.value.details)
+
+
+def test_the_natural_key_refusal_tells_a_legacy_vault_how_to_recover(
+    tmp_path: Path,
+) -> None:
+    """A vault that already holds twins cannot append for that key at all.
+
+    "Update the named item instead" is not a route out of that state: the twins
+    predate the check, and the caller needs to be told which two writes DO end
+    it.
+    """
+    from exomem.cli_ops import _REMEDIATION
+
+    remediation = _REMEDIATION["RECORD_NATURAL_KEY_CONFLICT"]
+
+    assert "distinct natural key" in remediation
+    assert "delete" in remediation and "archive" in remediation
+    assert "retry" in remediation

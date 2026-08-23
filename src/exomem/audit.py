@@ -83,6 +83,7 @@ import re
 import stat
 import sys
 from collections import deque
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
@@ -125,6 +126,7 @@ ALL_CATEGORIES: tuple[str, ...] = (
     "duplicated_sidecar", "semantic_recall_isolation",
     "unfinished_experiments", "prediction_window",
     "question_aging", "supersession_integrity", "entity_type_unregistered",
+    "unreflected_outcomes",
 )
 OPTIONAL_CATEGORIES: tuple[str, ...] = (
     "relation_registry",
@@ -221,6 +223,13 @@ class AuditFinding:
     # `meta` carries structured extras like age_days / age_bucket.
     paths: list[str] | None = None
     meta: dict | None = None
+    #: Server-internal, never serialised (see `as_dict`, which whitelists).
+    #: A family whose finding depends on OTHER pages an audience may or may not
+    #: be allowed to see puts the primitives to re-derive it here, so a consumer
+    #: holding a narrower audience rebuilds the finding through the family's own
+    #: composer instead of forming a second opinion about what it means. Only
+    #: `unreflected_outcomes` sets it; see `unreflected_component`.
+    component: dict | None = None
 
     def as_dict(self) -> dict:
         out: dict = {
@@ -471,6 +480,11 @@ def audit(
         findings.extend(_check_prediction_window(vault_root, pages, today=today))
     if "question_aging" in selected:
         findings.extend(_check_question_aging(vault_root, pages, today=today))
+    if "unreflected_outcomes" in selected:
+        outcome_findings, outcome_metadata = _check_unreflected_outcomes(vault_root)
+        findings.extend(outcome_findings)
+        if outcome_metadata:
+            metadata["unreflected_outcomes"] = outcome_metadata
     if "supersession_integrity" in selected:
         findings.extend(_check_supersession_integrity(vault_root, pages))
     if "corpus_contradictions" in selected:
@@ -3725,6 +3739,458 @@ def _check_prediction_window(
     # urgency. Path then fingerprint keep it deterministic.
     rows.sort(key=lambda row: (-row[0], row[1], row[2]))
     return [finding for _, _, _, finding in rows]
+
+
+# ---------------- check: unreflected_outcomes ----------------
+
+#: A Planning item is OPEN while the vault still intends it: lifecycle `active`
+#: and a status that has not settled. Both are authored values, read as authored;
+#: an absent `lifecycle` reads as `active` because that is Planning's own capture
+#: default for every kind (`planning.py:77,83`), not an inference made here.
+#: Nothing reads a state out of dates, out of the events, or out of how long
+#: anything took.
+_SETTLED_PLAN_STATUSES = frozenset({"completed", "cancelled"})
+
+#: How many joined record references one finding carries. The TOTAL is always
+#: exact; the list is a sample, for the same reason the wire block caps `top`.
+_UNREFLECTED_REF_LIMIT = 8
+
+
+@dataclass(frozen=True)
+class _OutcomeBinding:
+    """One authored Records->Planning binding, both ends already resolved."""
+
+    records: Any
+    planning: Any
+    join: dict[str, str]
+
+
+def _release_filter(vault_root: Path) -> Any:
+    """The Records release gate, answered once per path per pass.
+
+    The plane does not move while one pass runs, and the same paths are asked
+    about by discovery, by each adapter read and by serving. Without the memo the
+    delta pays the full release walk three times for every file it touches.
+    """
+    from . import record_governance
+
+    allowed = record_governance.full_release_filter(vault_root)
+    cache: dict[str, bool] = {}
+
+    def memoized(relative: str) -> bool:
+        hit = cache.get(relative)
+        if hit is None:
+            hit = cache[relative] = allowed(relative)
+        return hit
+
+    return memoized
+
+
+def _outcome_bindings(
+    vault_root: Path, *, authorize: Any = None
+) -> tuple[list[_OutcomeBinding], list[dict[str, Any]]]:
+    """Every join-bearing binding, plus the ones that could not be evaluated.
+
+    An unresolvable Planning reference is NOT a quiet skip: it is a binding the
+    author declared and this pass could not check, so it comes back as its own
+    state and the caller reports it. Treating it as "no findings" would hand back
+    a clean bill for something nobody looked at.
+    """
+    from . import structured_collections as collections_module
+
+    authorize = authorize or _release_filter(vault_root)
+    try:
+        manifests = list(
+            collections_module.discover_collections(vault_root, authorize_path=authorize)
+        )
+    except collections_module.CollectionError:
+        return [], []
+    planning_by_id = {
+        manifest.collection_id: manifest
+        for manifest in manifests
+        if manifest.semantic_profile == "planning"
+    }
+    planning_by_path = {
+        manifest.path: manifest
+        for manifest in manifests
+        if manifest.semantic_profile == "planning"
+    }
+    bindings: list[_OutcomeBinding] = []
+    unevaluated: list[dict[str, Any]] = []
+    for manifest in manifests:
+        if manifest.semantic_profile != "records":
+            continue
+        for link in manifest.links.plans:
+            if not link.join:
+                continue
+            target = _resolve_planning_target(
+                vault_root, link.reference, planning_by_id, planning_by_path
+            )
+            if target is None:
+                unevaluated.append(
+                    {
+                        "collection": manifest.path,
+                        "reference": str(link.reference),
+                        "reason": "unresolved_planning_reference",
+                    }
+                )
+                continue
+            # A plan-side name the target does not declare cannot be read, so
+            # the join can never match and the family would report a clean bill
+            # for a binding nobody could evaluate. The plan side is deliberately
+            # unchecked at AUTHORING time (the target may not exist yet, and
+            # Records must not resolve Planning), which makes THIS the first
+            # place the two ends are ever held together -- so it is where the
+            # gap has to be named. Same state as an unresolvable reference: not
+            # a finding, and never silence.
+            undeclared = sorted(
+                {
+                    str(plan_field)
+                    for plan_field in link.join.values()
+                    if str(plan_field) not in target.schema.fields
+                }
+            )
+            if undeclared:
+                unevaluated.append(
+                    {
+                        "collection": manifest.path,
+                        "reference": str(link.reference),
+                        "reason": "undeclared_plan_field",
+                        "fields": undeclared,
+                    }
+                )
+                continue
+            bindings.append(_OutcomeBinding(manifest, target, dict(link.join)))
+    return bindings, unevaluated
+
+
+def outcome_binding_index(vault_root: Path) -> dict[str, list[dict[str, Any]]]:
+    """Every resolved binding, keyed BOTH ways, for the write path to consult.
+
+    A full pass already walked the tree and resolved both ends, so it publishes
+    the answer instead of making every subsequent write re-derive it. Keyed by
+    the Records manifest path and by the Planning manifest path, because the two
+    write sides ask opposite questions: "what did I just write into, and what
+    plans does it feed?" and "who feeds this plan?".
+
+    Persisted in the projection, so it is maintained exactly like the projection
+    is: rebuilt by `reconcile`, extended by a delta that resolves a binding the
+    index did not have yet, and never authoritative on its own.
+    """
+    index: dict[str, list[dict[str, Any]]] = {}
+    for binding in _outcome_bindings(vault_root)[0]:
+        row = {
+            "records": binding.records.path,
+            "planning": binding.planning.path,
+            "join": dict(binding.join),
+        }
+        for key in (binding.records.path, binding.planning.path):
+            rows = index.setdefault(key, [])
+            if row not in rows:
+                rows.append(row)
+    return index
+
+
+def declared_bindings(vault_root: Path, manifest: Any) -> list[dict[str, Any]]:
+    """The bindings THIS Records manifest declares, resolved without a vault walk.
+
+    The write path may not discover: `discover_collections` walks the governed
+    tree and re-decides the release plane for every manifest it finds, which is
+    9-21 ms an UNBOUND append was paying to learn it had nothing to do. A manifest
+    already states whether it is bound -- `links.plans[].join` is right there in
+    the bytes the writer just loaded -- so a collection nobody bound costs one
+    attribute read.
+
+    Resolution of the far end goes through the reference index, never the
+    fallback scan, for the same reason. An id the index cannot answer is skipped
+    rather than scanned for: the projection is maintained, and `reconcile` heals
+    what a delta could not resolve.
+    """
+    from . import memory_refs
+    from . import structured_collections as collections_module
+
+    rows: list[dict[str, Any]] = []
+    for link in getattr(getattr(manifest, "links", None), "plans", ()) or ():
+        if not link.join:
+            continue
+        memory_id = memory_refs.parse_memory_ref(str(link.reference))
+        target: str | None = None
+        if memory_id:
+            try:
+                paths = memory_refs.ReferenceIndex(vault_root)._paths_for_id(memory_id)
+            except Exception:  # noqa: BLE001 -- an unresolvable binding is skipped, never raised
+                paths = []
+            if len(paths) == 1:
+                target = str(paths[0])
+        elif str(link.reference).lower().startswith(("exomem://vault/", "exomem://source/")):
+            try:
+                target = str(memory_refs.resolve_identifier_read_only(
+                    vault_root, str(link.reference)
+                ))
+            except Exception:  # noqa: BLE001
+                target = None
+        if not target:
+            continue
+        normalized = target.replace("\\", "/").lstrip("/")
+        try:
+            planning = collections_module.load_manifest(vault_root, vault_root / normalized)
+        except Exception:  # noqa: BLE001
+            continue
+        if planning.semantic_profile != "planning":
+            continue
+        if any(str(name) not in planning.schema.fields for name in link.join.values()):
+            continue
+        rows.append({"planning": normalized, "join": dict(link.join)})
+    return rows
+
+
+def open_plan_item(values: Any) -> bool:
+    """Public alias: a Planning item the vault still intends (design D6)."""
+    return _open_plan_item(values)
+
+
+def join_key(names: list[str], values: Any) -> tuple[str, ...] | None:
+    """Public alias: the exact join token tuple, or None when a side is empty."""
+    return _join_key(names, values)
+
+
+def _resolve_planning_target(
+    vault_root: Path,
+    reference: str,
+    planning_by_id: dict[str, Any],
+    planning_by_path: dict[str, Any],
+) -> Any | None:
+    """Resolve one opaque reference to a Planning manifest, or None.
+
+    A collection's id IS its manifest page's `exomem_id`, so the common
+    `exomem://memory/<id>` form is answered from the manifests already in hand.
+    Anything else goes through the read-only resolver, which never creates or
+    refreshes the sidecar for an audit pass.
+    """
+    from . import memory_refs
+
+    memory_id = memory_refs.parse_memory_ref(str(reference))
+    if memory_id and memory_id in planning_by_id:
+        return planning_by_id[memory_id]
+    try:
+        resolved = memory_refs.resolve_identifier_read_only(vault_root, str(reference))
+    except Exception:  # noqa: BLE001 -- an unresolvable reference is reported, not raised
+        return None
+    return planning_by_path.get(str(resolved).replace("\\", "/").lstrip("/"))
+
+
+def _join_token(value: Any) -> str | None:
+    """One comparable token, or None when this side carries no value at all.
+
+    Exact, never fuzzy: identity is the manifest author's declaration, and a
+    near-match here would silently invent a binding nobody wrote down.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (dt.date, dt.datetime)):
+        return value.isoformat()
+    text = str(value).strip()
+    return text or None
+
+
+def _join_key(names: list[str], values: Any) -> tuple[str, ...] | None:
+    tokens: list[str] = []
+    for name in names:
+        token = _join_token(values.get(name))
+        if token is None:
+            return None
+        tokens.append(token)
+    return tuple(tokens)
+
+
+def _open_plan_item(values: Any) -> bool:
+    lifecycle = str(values.get("lifecycle") or "active").strip().lower()
+    status = str(values.get("status") or "").strip().lower()
+    return lifecycle == "active" and status not in _SETTLED_PLAN_STATUSES
+
+
+def _outcome_snapshot(vault_root: Path, manifest: Any, authorize: Any) -> Any | None:
+    """One release-filtered adapter snapshot, or None when it cannot be read.
+
+    The filter is the same one every other Planning read uses, so a withheld
+    record or item is absent here exactly as it is absent from the served view.
+    """
+    from . import record_formats
+    from . import structured_collections as collections_module
+
+    try:
+        return record_formats.load_adapter(
+            vault_root, manifest, authorize_path=authorize
+        ).read()
+    except (collections_module.CollectionError, OSError, ValueError):
+        return None
+
+
+def _unreflected_for_binding(
+    vault_root: Path, binding: _OutcomeBinding, authorize: Any
+) -> tuple[list[AuditFinding], set[str]]:
+    """Findings for one bound pair, plus every plan-item path the pair covers.
+
+    The second value is what a write-time delta must REPLACE: an item that no
+    longer has a finding has to lose its stored entry, and only a pass that knows
+    the full candidate set can tell "cleared" from "not looked at".
+    """
+    plan_snapshot = _outcome_snapshot(vault_root, binding.planning, authorize)
+    record_snapshot = _outcome_snapshot(vault_root, binding.records, authorize)
+    if plan_snapshot is None or record_snapshot is None:
+        return [], set()
+    record_fields = list(binding.join)
+    plan_fields = [binding.join[name] for name in record_fields]
+    grouped: dict[tuple[str, ...], list[Any]] = {}
+    for record in record_snapshot.records:
+        key = _join_key(record_fields, record.values)
+        if key is not None:
+            grouped.setdefault(key, []).append(record)
+    findings: list[AuditFinding] = []
+    covered: set[str] = set()
+    for item in plan_snapshot.records:
+        covered.add(item.source.path)
+        if not _open_plan_item(item.values):
+            continue
+        key = _join_key(plan_fields, item.values)
+        if key is None:
+            continue
+        matched = grouped.get(key)
+        if matched:
+            finding = _unreflected_finding(binding, item, matched)
+            if finding is not None:
+                findings.append(finding)
+    return findings, covered
+
+
+def outcome_component(
+    records: Any, planning: Any, join: Mapping[str, str], item: Any
+) -> dict[str, Any]:
+    """The primitives one finding needs, minus the joined records themselves.
+
+    Serialisable on purpose. The due-state projection stores it beside the joined
+    `(path, key)` pairs so that a SERVE under a narrower audience can rebuild the
+    finding from the records that audience may see -- through
+    `unreflected_component` below, the same composer this pass uses -- instead of
+    inventing a second opinion about what a partially-withheld finding means. The
+    write-time delta stores it for the same reason: it can then refresh a
+    renamed or re-statused item without re-reading the Records collection.
+    """
+    return {
+        "records_title": str(records.title or ""),
+        "records_collection": str(records.path),
+        "records_collection_id": str(records.collection_id),
+        "planning_collection": str(planning.path),
+        "planning_collection_id": str(planning.collection_id),
+        "join": dict(join),
+        "item_path": str(item.source.path),
+        "item_key": str(item.identity.key),
+        "item_title": str(item.values.get("title") or item.identity.key),
+        "item_status": str(item.values.get("status") or "open"),
+    }
+
+
+def unreflected_component(
+    component: Mapping[str, Any], joined: Iterable[tuple[str, str]]
+) -> AuditFinding | None:
+    """One finding, composed from a component and the joined records in scope.
+
+    THE composer for this family. `joined` is `(record_path, record_key)` pairs;
+    an empty set is not a finding, because "an item with recorded events" is the
+    whole claim. Every derived value -- the count in `detail`, the sample refs,
+    the total, and the `signal_version` the fingerprint is built from -- is
+    derived from the pairs handed in, so a caller that filtered them produces
+    exactly what a fresh pass under the same visibility would.
+    """
+    from . import structured_collections as collections_module
+
+    pairs = sorted({(str(path), str(key)) for path, key in joined})
+    if not pairs:
+        return None
+    keys = sorted(key for _path, key in pairs)
+    paths = sorted({path for path, _key in pairs})
+    join = dict(component.get("join") or {})
+    title = str(component.get("item_title") or "")
+    status = str(component.get("item_status") or "open")
+    records_title = str(component.get("records_title") or "")
+    binding_text = ", ".join(f"{name}={join[name]}" for name in sorted(join))
+    return AuditFinding(
+        category="unreflected_outcomes",
+        severity="info",
+        path=str(component.get("item_path") or ""),
+        detail=(
+            f"{len(pairs)} recorded event(s) in {records_title!r} join to "
+            f"the open item {title!r} (status {status}) on {binding_text}, and the "
+            f"item has not been moved."
+        ),
+        proposed_fix=(
+            "Surfaced for REVIEW only -- nothing is judged, written, or "
+            "transitioned. Read the joined events and, if they settle the item, "
+            "move it yourself with plan_memory(action=\"triage\"); remove the "
+            "manifest binding if these events are not about this work."
+        ),
+        paths=paths[:_UNREFLECTED_REF_LIMIT],
+        meta={
+            # The joined record identities, so a new event on the same item
+            # changes the fingerprint and a dismissal binds to what was read.
+            "signal_version": hashlib.sha256(
+                json.dumps(
+                    [str(component.get("item_key") or ""), keys], separators=(",", ":")
+                ).encode("utf-8")
+            ).hexdigest()[:16],
+            # One review item per plan item, even where a Markdown-log collection
+            # keeps every item in one file.
+            "review_partition": str(component.get("item_key") or ""),
+            # Never resolved by time: the sentinel every dateless due-state
+            # category publishes, so serving sorts it after real overdue work.
+            "due_since": dt.date.min.isoformat(),
+            "plan_item": collections_module.plan_ref(
+                str(component.get("planning_collection_id") or ""),
+                str(component.get("item_key") or ""),
+            ),
+            "plan_title": title,
+            "plan_collection": str(component.get("planning_collection") or ""),
+            "records_collection": str(component.get("records_collection") or ""),
+            "joined_records": [
+                collections_module.record_ref(
+                    str(component.get("records_collection_id") or ""), key
+                )
+                for key in keys[:_UNREFLECTED_REF_LIMIT]
+            ],
+            "joined_total": len(keys),
+            "binding": join,
+        },
+        component={**dict(component), "joined": [list(pair) for pair in pairs]},
+    )
+
+
+def _unreflected_finding(
+    binding: _OutcomeBinding, item: Any, matched: list[Any]
+) -> AuditFinding | None:
+    return unreflected_component(
+        outcome_component(binding.records, binding.planning, binding.join, item),
+        ((record.source.path, record.identity.key) for record in matched),
+    )
+
+
+def _check_unreflected_outcomes(
+    vault_root: Path,
+) -> tuple[list[AuditFinding], dict[str, Any]]:
+    """Open plan items that recorded events already joined to (design D6).
+
+    Both halves of the fact are already in the vault: an event says a thing
+    happened, an item says the vault still intends it. Nobody was comparing them,
+    so an agent had to remember to, which is exactly the class of prompt this
+    change removes. Measurement only -- the runtime never moves either side.
+    """
+    authorize = _release_filter(vault_root)
+    bindings, unevaluated = _outcome_bindings(vault_root, authorize=authorize)
+    findings: list[AuditFinding] = []
+    for binding in bindings:
+        pair_findings, _ = _unreflected_for_binding(vault_root, binding, authorize)
+        findings.extend(pair_findings)
+    findings.sort(key=lambda finding: (finding.path, str((finding.meta or {}).get("plan_item"))))
+    return findings, ({"unevaluated": unevaluated} if unevaluated else {})
 
 
 # ---------------- check: question_aging ----------------
