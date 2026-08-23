@@ -62,4 +62,4 @@
 
 ## 7. Orchestrator-owned (NOT for the implementation lane)
 
-- [ ] 7.1 After this change merges, sync both delta specs into `openspec/specs/` and archive it with `openspec archive`. It cannot be archived from the implementation lane: the change is not shipped until it is on the default branch, and a sibling lane is authoring specs concurrently, so an early sync would collide in `openspec/specs/`.
+- [x] 7.1 After this change merges, sync both delta specs into `openspec/specs/` and archive it with `openspec archive`. It cannot be archived from the implementation lane: the change is not shipped until it is on the default branch, and a sibling lane is authoring specs concurrently, so an early sync would collide in `openspec/specs/`.

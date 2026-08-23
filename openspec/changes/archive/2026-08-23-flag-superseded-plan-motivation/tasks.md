@@ -64,4 +64,4 @@
 
 ## 9. Closure
 
-- [ ] 9.1 Once this change is merged and therefore demonstrably shipped, sync its `planning` delta into `openspec/specs/` and archive it with `openspec archive` in the same delivery, re-running `openspec validate --all --strict` before and after. Left open deliberately: archiving before the merge would claim a shipped state that does not exist yet, and the archive-discipline check treats a fully-ticked active change as debt.
+- [x] 9.1 Once this change is merged and therefore demonstrably shipped, sync its `planning` delta into `openspec/specs/` and archive it with `openspec archive` in the same delivery, re-running `openspec validate --all --strict` before and after. Left open deliberately: archiving before the merge would claim a shipped state that does not exist yet, and the archive-discipline check treats a fully-ticked active change as debt.
