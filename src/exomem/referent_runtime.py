@@ -9,6 +9,7 @@ from typing import Any
 
 from . import epistemic_graph, memory_refs
 from .entity_registry import load_entity_registry
+from .entity_types import load_entity_types
 from .find import FreshnessSnapshot
 from .governance import egress
 from .referent_resolution import (
@@ -23,13 +24,13 @@ _TRUE = frozenset({"1", "true", "yes", "on"})
 log = logging.getLogger(__name__)
 
 
-def cue_for_find(*, query: str, mode: str) -> ReferentCue | None:
+def cue_for_find(*, vault_root: Path, query: str, mode: str) -> ReferentCue | None:
     """Return the eligible cue once, before opening the optional stage."""
     if mode not in {"hybrid", "vector"}:
         return None
     if os.environ.get("EXOMEM_DISABLE_REFERENTS", "").strip().casefold() in _TRUE:
         return None
-    return detect_cue(query)
+    return detect_cue(query, registry=load_entity_types(vault_root))
 
 
 def _hit_facts(hits: list[Any]) -> tuple[HitFact, ...]:
@@ -113,11 +114,16 @@ def resolve_for_find(
             return None
         if os.environ.get("EXOMEM_DISABLE_REFERENTS", "").strip().casefold() in _TRUE:
             return None
-        cue = cue or detect_cue(query)
+        type_registry = load_entity_types(vault_root)
+        cue = cue or detect_cue(query, registry=type_registry)
         if cue is None:
             return None
         freshness_key = FreshnessSnapshot(vault_root).projection_key("kb")
-        registry = load_entity_registry(vault_root, freshness_key=freshness_key)
+        registry = load_entity_registry(
+            vault_root,
+            freshness_key=freshness_key,
+            type_registry=type_registry,
+        )
         hit_facts = _hit_facts(hits)
         edges = _edge_facts(
             vault_root,

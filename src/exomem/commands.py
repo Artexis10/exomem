@@ -367,6 +367,7 @@ def op_bootstrap(
     active_product_names = frozenset(active_descriptor.product_commands)
     requested_workflow = workflow.strip() if workflow and workflow.strip() else "general"
     selected_packs = knowledge_packs_module.selected_pack_state(vault_root)
+    entity_type_registry = entity_types_module.load_entity_types(vault_root)
     source_taxonomy_projection = _source_taxonomy_projection(vault_root, profile=profile)
     simple_actions = simple_action_catalog(
         selected_packs, available_tools=active_product_names
@@ -725,12 +726,14 @@ def op_bootstrap(
                     "aliases": list(definition.aliases),
                     "capture_guidance": definition.capture_guidance,
                 }
-                for definition in entity_types_module.ENTITY_TYPE_REGISTRY
+                for definition in entity_type_registry.active_definitions
             ],
             "capture_rule": (
                 "After durable work, run one bounded exact-match-first entity pass. "
                 "Create only stable, recurring identities; update an existing entity only "
-                "with new durable facts or relations; skip incidental mentions."
+                "with new durable facts or relations; skip incidental mentions. Unknown "
+                "types are registered through schema_memory(operation='save-entity-types') "
+                "with a why, never by editing frontmatter around the registry rule."
             ),
             "candidate_route": "connect_memory(operation='resolve-entity')",
         },
@@ -1617,7 +1620,11 @@ def op_find(
     if projection_runtime is None:
         # Referents compose over the released vault hits; the projected (hosted
         # runtime) path has no vault registry or graph sidecar to resolve against.
-        referent_cue = referent_runtime_module.cue_for_find(query=query, mode=mode)
+        referent_cue = referent_runtime_module.cue_for_find(
+            vault_root=vault_root,
+            query=query,
+            mode=mode,
+        )
         if referent_cue is not None:
             with find_module._span(timings, "referents"):
                 try:
@@ -3351,7 +3358,9 @@ def op_link(
     reconcile via desk audit.
 
     Args:
-        entity_type: Stable ID returned by bootstrap.entity_registry.
+        entity_type: stable ID from the active entity registry — core: person,
+            organization, concept, library, decision — plus any vault-defined type in
+            `_Schema/entity-types.yaml`.
         name: Unicode display name stored in frontmatter and the H1.
         slug: Optional lowercase ASCII kebab-case filename component.
         summary: One-paragraph description for the `## Summary` section.
@@ -3367,7 +3376,8 @@ def op_link(
         {path, warnings}.
 
     Errors:
-        INVALID_LINK (bad entity_type, decision_status, missing required);
+        ENTITY_TYPE_UNKNOWN (entity_type not in the active registry);
+        INVALID_LINK (bad decision_status, missing required);
         ENTITY_EXISTS (update/link the returned active entity instead);
         ENTITY_AMBIGUOUS (reconcile the returned bounded candidates first).
     """
@@ -6119,6 +6129,13 @@ def op_triage_memory(
             "categories": item.categories,
         }
     )
+    state_resolved_only = [
+        category
+        for category in item.categories
+        if category == "entity_type_unregistered"
+    ]
+    if state_resolved_only:
+        result["state_resolved_only_categories"] = state_resolved_only
     return result
 
 
@@ -6193,7 +6210,9 @@ def op_connect_memory(
         max_edges: Graph edge cap.
         traversal_profile: Deterministic graph lens; omission preserves `all`.
         max_body_chars: Per-document stored-body cap for context.
-        entity_type: Entity type for create-entity.
+        entity_type: stable ID from the active entity registry — core: person,
+            organization, concept, library, decision — plus any vault-defined type in
+            `_Schema/entity-types.yaml`.
         name: Entity name for create-entity.
         slug: Optional lowercase ASCII kebab-case entity filename component.
         summary: Entity summary for create-entity.
@@ -6661,6 +6680,7 @@ def op_schema_memory(
     strict: bool = False,
     compare_to: str | None = None,
     proposal: dict | None = None,
+    why: str | None = None,
     include_model_suggestions: bool = False,
 ) -> dict:
     """Infer, validate, diff, or save governed memory schemas.
@@ -6671,7 +6691,7 @@ def op_schema_memory(
     current content hash.
 
     Args:
-        operation: infer, validate, or diff.
+        operation: infer, validate, diff, or save-entity-types.
         name: Lowercase contract slug; required only for `subject="contract"`.
         subject: `contract`, `categories`, `relations`, or `traversal-profiles`.
         project: Optional project scope for inference.
@@ -6681,6 +6701,7 @@ def op_schema_memory(
         strict: In validate mode, signal a failing CLI/CI outcome on findings.
         compare_to: In diff mode, compare to this saved contract instead of corpus reality.
         proposal: Reviewed semantic-language, relation, or traversal-profile proposal.
+        why: Required audit reason for save-entity-types.
         include_model_suggestions: Request response-only optional relation suggestions.
 
     Returns:
@@ -6688,6 +6709,34 @@ def op_schema_memory(
     """
     operation = operation.strip().lower()
     subject = subject.strip().lower()
+    if operation == "save-entity-types":
+        if proposal is None or not isinstance(proposal, dict):
+            raise ValueError(
+                "INCOMPLETE_ENTITY_TYPE_PROPOSAL: save requires a reviewed proposal"
+            )
+        if not why or not why.strip():
+            raise ValueError("WHY_REQUIRED: save-entity-types requires why")
+        findings = entity_types_module.validate_proposal(proposal)
+        if findings:
+            return {
+                "subject": "entity-types",
+                "valid": False,
+                "findings": findings,
+                "saved": None,
+            }
+        saved = entity_types_module.save_registry(
+            vault_root,
+            proposal,
+            expected_hash=expected_hash,
+            observed_ids=entity_types_module.observed_extension_ids(vault_root),
+        )
+        return {
+            "subject": "entity-types",
+            "valid": True,
+            "findings": [],
+            "why": why.strip(),
+            "saved": saved,
+        }
     if subject == "categories":
         if operation == "infer":
             result = memory_schema_module.infer_category_registry(

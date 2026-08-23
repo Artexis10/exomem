@@ -102,6 +102,7 @@ from . import (
     semantic_units,
     temporal,
 )
+from . import entity_types as entity_types_module
 from . import find as find_module
 from . import vault as vault_module
 from .kbdir import kb_dirname, kb_prefix
@@ -124,7 +125,7 @@ ALL_CATEGORIES: tuple[str, ...] = (
     "relation_debt", "governance_receipts", "bridge_review",
     "duplicated_sidecar", "semantic_recall_isolation",
     "unfinished_experiments", "prediction_window",
-    "question_aging", "supersession_integrity",
+    "question_aging", "supersession_integrity", "entity_type_unregistered",
     "unreflected_outcomes",
 )
 OPTIONAL_CATEGORIES: tuple[str, ...] = (
@@ -270,14 +271,14 @@ class AuditReport:
         validate_presentation_controls(detail, legacy_sample_limit)
         upstream = _semantic_upstream_facts(self.metadata)
         if detail == "full":
-            value = self.as_dict()
-            value["detail"] = "full"
-            value["presentation"] = {
+            full_value = self.as_dict()
+            full_value["detail"] = "full"
+            full_value["presentation"] = {
                 "grouped_legacy_backlog": False,
                 "upstream_findings_complete": upstream["findings_complete"],
                 "upstream_omitted_count": upstream["omitted_count"],
             }
-            return value
+            return full_value
 
         legacy = _unique_legacy_backlog_findings(self.findings)
         actionable = sorted(
@@ -459,6 +460,8 @@ def audit(
         findings.extend(_check_tag_inconsistency(pages))
     if "frontmatter_compliance" in selected:
         findings.extend(_check_frontmatter_compliance(pages))
+    if "entity_type_unregistered" in selected:
+        findings.extend(_check_unregistered_entity_types(vault_root, pages))
     if "unregistered_project_key" in selected:
         findings.extend(_check_unregistered_project_keys(vault_root, pages))
     if "embedding_drift" in selected:
@@ -1174,7 +1177,7 @@ def semantic_recall_isolation_census(
     vault_root: Path,
     *,
     limit: int = _SEMANTIC_ISOLATION_CENSUS_LIMIT,
-    after: dict[str, str] | None = None,
+    after: dict[str, dict[str, str]] | None = None,
 ) -> SemanticRecallIsolationCensus:
     """Inventory live suppressed Markdown that survives in semantic sidecars.
 
@@ -1622,6 +1625,288 @@ def _page_signal_version(page: find_module.ParsedPage) -> str:
     return content_hash(frontmatter + "\n" + page.body)[:16]
 
 
+def _check_unregistered_entity_types(
+    vault_root: Path,
+    pages: list[find_module.ParsedPage],
+) -> list[AuditFinding]:
+    """Surface authored entity kinds/folders absent from the active registry."""
+    registry = entity_types_module.load_entity_types(vault_root)
+    prefix = f"{kb_prefix()}Entities/"
+    entities: list[tuple[find_module.ParsedPage, str]] = []
+    for page in pages:
+        if not page.rel_path.startswith(prefix):
+            continue
+        remainder = page.rel_path[len(prefix):]
+        folder, separator, _tail = remainder.partition("/")
+        if separator and folder:
+            entities.append((page, folder))
+
+    def definition_payload(
+        definition: entity_types_module.EntityTypeDefinition,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "folder": definition.folder,
+            "label": definition.label,
+            "aliases": list(definition.aliases),
+            "cue_nouns": list(definition.cue_nouns),
+            "capture_guidance": definition.capture_guidance,
+        }
+        if definition.optional_frontmatter:
+            payload["optional_frontmatter"] = list(definition.optional_frontmatter)
+        if definition.parent is not None:
+            payload["parent"] = definition.parent
+        if definition.status != "active":
+            payload["status"] = definition.status
+        if definition.replaced_by is not None:
+            payload["replaced_by"] = definition.replaced_by
+        return payload
+
+    current_extensions = {
+        type_id: definition_payload(definition)
+        for type_id, definition in registry.extensions.items()
+    }
+    occupied_folders = {
+        definition.folder.casefold()
+        for definition in (*registry.core.values(), *registry.extensions.values())
+    }
+    proposal_cache: dict[
+        tuple[str, str],
+        tuple[dict[str, Any] | None, dict[str, Any] | None, str | None],
+    ] = {}
+
+    def proposed_entry(
+        type_id: str,
+        source_folder: str,
+        label: str,
+        page_count: int,
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, str | None]:
+        cache_key = (type_id, source_folder.casefold())
+        cached = proposal_cache.get(cache_key)
+        if cached is not None:
+            cached_entry, cached_proposal, reason = cached
+            cached_result = dict(cached_entry) if cached_entry is not None else None
+            if cached_result is not None:
+                cached_result["page_count"] = page_count
+            return cached_result, cached_proposal, reason
+
+        owner = registry.by_folder.get(source_folder.casefold())
+        parent = owner.id if owner is not None and owner.id in registry.core else None
+
+        base = derived_folder(type_id)
+        attempt = 0
+        while attempt <= 1000:
+            if attempt == 0:
+                folder = source_folder
+            elif attempt == 1:
+                folder = base
+            else:
+                folder = f"{base}{attempt}"
+            attempt += 1
+            if folder.casefold() in occupied_folders:
+                continue
+            candidate_entry: dict[str, Any] = {
+                "id": type_id,
+                "folder": folder,
+                "label": label,
+                "aliases": [],
+            }
+            if parent is not None:
+                candidate_entry["parent"] = parent
+            definition = {
+                key: value for key, value in candidate_entry.items() if key != "id"
+            }
+            definition["capture_guidance"] = (
+                f"A stable {label.lower()} identity with reusable context."
+            )
+            proposal = {
+                "schema_version": entity_types_module.EXTENSION_SCHEMA_VERSION,
+                "entity_types": {**current_extensions, type_id: definition},
+            }
+            validation = entity_types_module.validate_proposal(proposal)
+            if not validation:
+                proposal_cache[cache_key] = (candidate_entry, proposal, None)
+                result = dict(candidate_entry)
+                result["page_count"] = page_count
+                return result, proposal, None
+            if all(
+                finding["path"].endswith(f".{type_id}.folder")
+                for finding in validation
+            ):
+                continue
+            reason = "; ".join(
+                f"{finding['path']}: {finding['detail']}" for finding in validation
+            )
+            proposal_cache[cache_key] = (None, None, reason)
+            return None, None, reason
+        reason = "No collision-free entity folder could be derived."
+        proposal_cache[cache_key] = (None, None, reason)
+        return None, None, reason
+
+    def derived_folder(type_id: str) -> str:
+        label = type_id.replace("-", " ").title()
+        if label.casefold().endswith("s"):
+            return label
+        return f"{label}s"
+
+    folder_pages: dict[str, list[find_module.ParsedPage]] = {}
+    folder_spelling: dict[str, str] = {}
+    authored_type_counts: dict[str, int] = {}
+    authored_type_folder_counts: dict[str, dict[str, int]] = {}
+    authored_type_folder_spelling: dict[tuple[str, str], str] = {}
+    unknown_entities: list[tuple[find_module.ParsedPage, str, str]] = []
+    for page, folder in sorted(entities, key=lambda item: item[0].rel_path):
+        key = folder.casefold()
+        folder_pages.setdefault(key, []).append(page)
+        folder_spelling.setdefault(key, folder)
+        raw_type = page.frontmatter.get("entity_type")
+        if isinstance(raw_type, str):
+            type_id = entity_types_module.normalize_entity_token(raw_type)
+            authored_type_counts[type_id] = authored_type_counts.get(type_id, 0) + 1
+            if registry.resolve(raw_type) is None:
+                unknown_entities.append((page, folder, type_id))
+                folder_counts = authored_type_folder_counts.setdefault(type_id, {})
+                folder_counts[key] = folder_counts.get(key, 0) + 1
+                authored_type_folder_spelling.setdefault((type_id, key), folder)
+
+    preferred_folder_by_type = {
+        type_id: authored_type_folder_spelling[
+            (
+                type_id,
+                min(
+                    folder_counts,
+                    key=lambda folder_key: (
+                        -folder_counts[folder_key],
+                        authored_type_folder_spelling[(type_id, folder_key)].casefold(),
+                    ),
+                ),
+            )
+        ]
+        for type_id, folder_counts in authored_type_folder_counts.items()
+    }
+
+    carrier_path_by_type_folder: dict[tuple[str, str], str] = {}
+    for page, folder, type_id in unknown_entities:
+        carrier_path_by_type_folder.setdefault(
+            (type_id, folder.casefold()), page.rel_path
+        )
+
+    def proposal_meta(
+        *,
+        entry: dict[str, Any] | None,
+        proposal: dict[str, Any] | None,
+        reason: str | None,
+        signal_version: str,
+        carrier_path: str,
+        finding_path: str,
+    ) -> tuple[dict[str, Any], str]:
+        meta: dict[str, Any] = {
+            "proposed_entry": entry,
+            "signal_version": signal_version,
+        }
+        if reason is not None:
+            meta["reason"] = reason
+        if proposal is None:
+            return (
+                meta,
+                "Resolve the reported registry conflict or move the affected page(s).",
+            )
+        if finding_path == carrier_path:
+            meta["proposal"] = proposal
+            meta["expected_hash"] = registry.extension_hash
+            return (
+                meta,
+                "Save `meta.proposal` — the full registry with this entry merged — "
+                "via `schema_memory(operation=\"save-entity-types\", "
+                "proposal=meta.proposal, why=..., "
+                "expected_hash=meta.expected_hash)`. Do not save "
+                "`proposed_entry` on its own; it is a description, not a registry.",
+            )
+        meta["proposal_carrier"] = carrier_path
+        return (
+            meta,
+            f"Use `meta.proposal` and `meta.expected_hash` from the carrying finding "
+            f"at {carrier_path!r}. Do not save `proposed_entry` on its own; it is a "
+            "description, not a registry.",
+        )
+
+    findings: list[AuditFinding] = []
+    for page, folder, type_id in unknown_entities:
+        raw_type = str(page.frontmatter["entity_type"])
+        label = type_id.replace("-", " ").title()
+        entry, proposal, reason = proposed_entry(
+            type_id,
+            preferred_folder_by_type[type_id],
+            label,
+            authored_type_counts[type_id],
+        )
+        meta, proposed_fix = proposal_meta(
+            entry=entry,
+            proposal=proposal,
+            reason=reason,
+            signal_version=_page_signal_version(page),
+            carrier_path=carrier_path_by_type_folder[(type_id, folder.casefold())],
+            finding_path=page.rel_path,
+        )
+        findings.append(
+            AuditFinding(
+                category="entity_type_unregistered",
+                severity="warn",
+                path=page.rel_path,
+                detail=(
+                    f"Entity type {raw_type!r} is not in the active entity registry."
+                ),
+                proposed_fix=proposed_fix,
+                meta=meta,
+            )
+        )
+
+    for key in sorted(folder_pages):
+        members = sorted(folder_pages[key], key=lambda page: page.rel_path)
+        if len(members) < 3 or registry.by_folder.get(key) is not None:
+            continue
+        # Page-level unknown-type findings already expose this folder. The
+        # threshold signal is for registered-looking pages stored under a new
+        # folder, so do not duplicate the same proposal on one attention pass.
+        if any(
+            isinstance(page.frontmatter.get("entity_type"), str)
+            and registry.resolve(str(page.frontmatter["entity_type"])) is None
+            for page in members
+        ):
+            continue
+        folder = folder_spelling[key]
+        paths = [page.rel_path for page in members]
+        signal = content_hash("\n".join(paths))[:16]
+        type_id = entity_types_module.normalize_entity_token(folder)
+        entry, proposal, reason = proposed_entry(
+            type_id,
+            folder,
+            folder.title(),
+            len(paths),
+        )
+        meta, proposed_fix = proposal_meta(
+            entry=entry,
+            proposal=proposal,
+            reason=reason,
+            signal_version=signal,
+            carrier_path=paths[0],
+            finding_path=paths[0],
+        )
+        findings.append(
+            AuditFinding(
+                category="entity_type_unregistered",
+                severity="info",
+                path=paths[0],
+                paths=paths,
+                detail=(
+                    f"{len(paths)} entity pages live under unregistered folder {folder!r}."
+                ),
+                proposed_fix=proposed_fix,
+                meta=meta,
+            )
+        )
+    return sorted(findings, key=lambda finding: (finding.path, finding.detail))
+
+
 # ---------------- checks: broken_wikilink / forward_reference ----------------
 
 
@@ -1727,7 +2012,9 @@ def _check_wikilinks(
 
             immutable = in_append_only_tree(str(page.rel_path)) is not None
             if not broken:
-                meta = {"signal_version": _page_signal_version(page)}
+                meta: dict[str, Any] = {
+                    "signal_version": _page_signal_version(page)
+                }
                 if immutable:
                     meta["immutable"] = True
                 findings.append(AuditFinding(

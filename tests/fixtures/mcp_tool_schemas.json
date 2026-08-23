@@ -1175,13 +1175,6 @@
         "entity_type": {
           "anyOf": [
             {
-              "enum": [
-                "person",
-                "organization",
-                "concept",
-                "library",
-                "decision"
-              ],
               "type": "string"
             },
             {
@@ -1189,7 +1182,7 @@
             }
           ],
           "default": null,
-          "description": "Entity type for create-entity."
+          "description": "stable ID from the active entity registry — core: person, organization, concept, library, decision — plus any vault-defined type in `_Schema/entity-types.yaml`."
         },
         "name": {
           "anyOf": [
@@ -5505,7 +5498,7 @@
       "additionalProperties": false,
       "properties": {
         "operation": {
-          "description": "infer, validate, or diff.",
+          "description": "infer, validate, diff, or save-entity-types.",
           "type": "string"
         },
         "name": {
@@ -5595,6 +5588,18 @@
           ],
           "default": null,
           "description": "Reviewed semantic-language, relation, or traversal-profile proposal."
+        },
+        "why": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Required audit reason for save-entity-types."
         },
         "include_model_suggestions": {
           "default": false,

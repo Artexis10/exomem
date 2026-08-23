@@ -308,6 +308,7 @@ def test_default_attention_union_is_pinned() -> None:
         "stale_review",
         "unprocessed_source",
         "relation_debt",
+        "entity_type_unregistered",
         "unreflected_outcomes",
     )
 
