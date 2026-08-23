@@ -497,15 +497,25 @@ def capture_source_artifacts(
                     )
                 mark_active_mutation_committed()
                 payload = result.as_dict()
+                # `stored_path` and `media_id` are required by the bounded
+                # artifact-receipt projection a compact terminal applies; a row
+                # missing either is replaced wholesale with
+                # INVALID_ARTIFACT_RECEIPT. That projection also drops any key
+                # outside its allowlist, so `page` and `ref` survive only in a
+                # full terminal — which costs nothing, because citation resolves
+                # from the artifact path and the page is `<stored_path>.md`.
+                stored_path = payload.get("artifact_path")
                 outcomes[index] = {
                     "file_id": artifact.file_id,
                     "outcome": "stored",
-                    "path": payload.get("artifact_path"),
+                    "stored_path": stored_path,
+                    "path": stored_path,
                     "page": payload["path"],
                     "ref": payload["ref"],
                     "size": payload.get("size"),
                     "hash": payload.get("hash"),
                     "hash_algorithm": payload.get("hash_algorithm"),
+                    "media_id": None,
                     "content_type": artifact.content_type,
                     "warnings": list(payload.get("warnings") or []),
                 }

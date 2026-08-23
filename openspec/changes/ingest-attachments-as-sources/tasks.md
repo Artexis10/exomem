@@ -37,7 +37,7 @@ media capture is safe to offer.
 - [x] 4.2 Test that `capture_source` with an image file handle produces a media page awaiting extraction, and that the existing extraction path converges on it without destroying its classification.
 - [x] 4.3 Test that the artifact and its page share one resolved stem, that naming authority is `add`'s uniquify rather than an `ARTIFACT_EXISTS` refusal, and that the original filename is recorded in frontmatter rather than used as the path.
 - [ ] 4.4 Test that a byte-identical retry within the replay window returns the cached terminal result and does not write a second uniquified copy.
-- [ ] 4.5 Test that safe-fetch behaviour is shared, not re-implemented: a private-address URL, an oversized body, and an expired handle each fail through the Sources path with the same stable codes as the Evidence path.
+- [x] 4.5 Test that safe-fetch behaviour is shared, not re-implemented: a private-address URL, an oversized body, and an expired handle each fail through the Sources path with the same stable codes as the Evidence path.
 - [x] 4.6 Add `files` to `capture_source`, reusing the existing staging function and the existing file-handle type; persist through a Sources destination that reuses `add`'s taxonomy, indexes, and log writes.
 - [x] 4.7 Test that `preserve_artifacts` and `preserve_evidence` are unchanged: same destination, same per-file outcomes, same failure codes.
 
@@ -68,11 +68,11 @@ media capture is safe to offer.
 
 ## 9. Verification
 
-- [ ] 9.1 Test the ingestion matrix end to end across text, image, PDF, audio, and video, in both lanes.
-- [ ] 9.2 Test through a generic MCP client, not only the in-process path, so the file-handle parameter is exercised as clients actually send it.
-- [ ] 9.3 Assert no byte duplication: one stored copy per captured artifact, and no artifact written to both trees.
-- [ ] 9.4 Run `openspec validate ingest-attachments-as-sources --strict` and `openspec validate --specs --strict`.
-- [ ] 9.5 Run the affected suites, plus lint, plus the tool-surface fidelity test.
+- [x] 9.1 Test the ingestion matrix end to end across text, image, PDF, audio, and video, in both lanes.
+- [x] 9.2 Test through a generic MCP client, not only the in-process path, so the file-handle parameter is exercised as clients actually send it. This found a real defect the leaf-level tests could not: the compact mutation terminal projects artifact receipts through a bounded allowlist and replaces any row missing `stored_path` or `media_id` with `INVALID_ARTIFACT_RECEIPT`. The Sources outcome emitted neither.
+- [x] 9.3 Assert no byte duplication: one stored copy per captured artifact, and no artifact written to both trees.
+- [x] 9.4 Run `openspec validate ingest-attachments-as-sources --strict` and `openspec validate --specs --strict`.
+- [x] 9.5 Run the affected suites, plus lint, plus the tool-surface fidelity test.
 
 ## 10. Closure
 

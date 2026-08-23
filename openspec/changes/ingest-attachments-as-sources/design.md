@@ -280,6 +280,25 @@ operations reference, and the workflow skills — where an agent reads it at the
 moment it is choosing. That is also the more honest placement: this is a fact
 about the surface, not a claim about knowledge.
 
+## The receipt shape is the surface's, not the leaf's
+
+Every leaf-level test passed while the command was broken over the wire. The
+compact mutation terminal projects a client-artifact receipt through a bounded
+allowlist and replaces any row missing `stored_path`, `size`, a 64-hex `hash`,
+`hash_algorithm`, `media_id`, `content_type`, or a bounded `warnings` list with a
+single `INVALID_ARTIFACT_RECEIPT` row. The Sources outcome named its path `path`
+and omitted `media_id`, so a real client got a failure for a capture that had in
+fact stored the bytes.
+
+The fix conforms rather than widening: that allowlist is a safety boundary on
+what a mutation may report, and extending it to carry the page path would buy
+nothing. The projection drops `page` and `ref`, but the page is `<stored_path>.md`
+by the convention above, and citation resolves from the artifact path anyway — so
+the compact receipt is complete for every use a client has.
+
+This is the argument for testing through the surface rather than the leaf, and
+it is why task 9.2 exists as its own item.
+
 ## Fix forward, and what that leaves
 
 Artifacts already in Evidence stay there. `move_file` refuses to move anything

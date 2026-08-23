@@ -902,3 +902,168 @@ def test_the_walk_reaches_unpaged_artifacts_in_both_trees(vault: Path) -> None:
     assert not (vault / "Knowledge Base/Notes/Open/loose.csv.md").exists()
 
     assert backfill.backfill_artifact_pages(vault) == 0
+
+
+# --------------------------------------------------------------------------
+# 9. Verification
+# --------------------------------------------------------------------------
+
+# A minimal real file per extraction kind. Small enough to inline, real enough
+# that `media_type_for` classifies them the way a genuine upload would.
+_PDF = (
+    b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"
+    b"2 0 obj<</Type/Pages/Kids[]/Count 0>>endobj\n"
+    b"trailer<</Root 1 0 R>>\n%%EOF\n"
+)
+_WAV = (
+    b"RIFF$\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00"
+    b"\x44\xac\x00\x00\x88X\x01\x00\x02\x00\x10\x00data\x00\x00\x00\x00"
+)
+_MP4 = b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom\x00\x00\x00\x08free"
+
+_MATRIX = (
+    ("text", "notes.txt", b"Speaker A: the pier reopened."),
+    ("image", "shot.png", _PNG),
+    ("pdf", "report.pdf", _PDF),
+    ("audio", "call.wav", _WAV),
+    ("video", "clip.mp4", _MP4),
+)
+
+
+@pytest.mark.parametrize(("kind", "filename", "payload"), _MATRIX)
+def test_every_media_kind_captures_as_a_source(
+    vault: Path, source_schema, tmp_path: Path, kind: str, filename: str, payload: bytes
+) -> None:
+    """One stored copy, one page, citable — for each extraction kind."""
+    from exomem import add as add_module
+
+    added = add_module.add(
+        vault, source_schema, content="", title=f"Matrix {kind}",
+        source_type="other",
+        artifact=_staged(tmp_path / kind, filename, payload), today=TODAY,
+    )
+
+    assert (vault / added.artifact_path).read_bytes() == payload
+    assert added.path == f"{added.artifact_path}.md"
+    page = (vault / added.path).read_text(encoding="utf-8")
+    assert "type: source" in page
+    assert "ingested_into: []" in page
+    assert f"evidence_file: {added.artifact_path}" in page
+
+    result = _cite(vault, added.artifact_path, f"Compiled from {kind}")
+    assert _backref_skipped(result.warnings) is None, result.warnings
+
+
+@pytest.mark.parametrize(("kind", "filename", "payload"), _MATRIX)
+def test_every_media_kind_preserves_as_evidence(
+    vault: Path, kind: str, filename: str, payload: bytes
+) -> None:
+    from exomem import preserve as preserve_mod
+
+    stored = preserve_mod.preserve(
+        vault, scope="matrix", category=kind, filename=filename,
+        content_base64=base64.b64encode(payload).decode(), today=TODAY,
+    )
+
+    assert stored.sidecar_path is not None
+    assert (vault / stored.path).read_bytes() == payload
+    result = _cite(vault, stored.path, f"Evidence compiled from {kind}")
+    assert _backref_skipped(result.warnings) is None, result.warnings
+
+
+@pytest.mark.parametrize(("kind", "filename", "payload"), _MATRIX)
+def test_no_artifact_is_written_to_both_trees(
+    vault: Path, source_schema, tmp_path: Path, kind: str, filename: str, payload: bytes
+) -> None:
+    """No byte duplication: one stored copy per captured artifact."""
+    from exomem import add as add_module
+
+    add_module.add(
+        vault, source_schema, content="", title=f"Single copy {kind}",
+        source_type="other",
+        artifact=_staged(tmp_path / f"dup-{kind}", filename, payload), today=TODAY,
+    )
+
+    copies = [
+        path
+        for path in (vault / "Knowledge Base").rglob("*")
+        if path.is_file() and path.read_bytes() == payload
+    ]
+    assert len(copies) == 1, [str(p) for p in copies]
+    assert "Sources" in copies[0].parts
+
+
+def test_capture_source_accepts_files_through_the_mcp_surface(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Through the tool surface, as a generic client actually sends it.
+
+    Every other test here calls the leaf directly. This one goes through
+    `call_tool`, so the `files` parameter is exercised as it arrives over the
+    wire — coerced from JSON against the published schema rather than handed in
+    as Python objects.
+    """
+    import asyncio
+    import json
+
+    from exomem import client_artifacts, server
+    from exomem.governance import principal as principal_module
+
+    monkeypatch.setattr(server, "load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "leases"))
+    monkeypatch.setenv("EXOMEM_DISABLE_RELEVANCE_CHECK", "1")
+    monkeypatch.setenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", "1")
+    monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
+
+    blob = tmp_path / "transcript.txt"
+    blob.write_bytes(b"Speaker A: the pier reopened.")
+
+    def _fake_stage(file, budget, *, batch_deadline=None):
+        return client_artifacts.StagedArtifact(
+            file_id=str(file["file_id"]),
+            path=blob,
+            size=blob.stat().st_size,
+            sha256="0" * 64,
+            content_type="text/plain",
+            filename="transcript.txt",
+        )
+
+    monkeypatch.setattr(client_artifacts, "stage_artifact", _fake_stage)
+    mcp = server.build_server(require_auth=False)
+
+    arguments = json.loads(
+        json.dumps(
+            {
+                "title": "Riverside transcript over the wire",
+                "source_kind": "session",
+                "files": [
+                    {"download_url": "https://example.invalid/a", "file_id": "f1"}
+                ],
+            }
+        )
+    )
+    with principal_module.request_scope(
+        principal_module.owner_principal(surface="mcp")
+    ):
+        result = asyncio.run(
+            mcp.call_tool("capture_source", arguments, run_middleware=False)
+        )
+    payload = (
+        result.structured_content
+        if isinstance(result.structured_content, dict)
+        else json.loads(result.content[0].text)
+    )
+
+    files = payload.get("files") or payload.get("result", {}).get("files")
+    assert files, payload
+    [outcome] = files
+    assert outcome["outcome"] == "stored", outcome
+    # `stored_path`, not `path`: the compact terminal projects artifact receipts
+    # through a bounded allowlist, so this is what a client actually receives.
+    stored_path = outcome["stored_path"]
+    assert stored_path.startswith("Knowledge Base/Sources/")
+    assert (vault / stored_path).read_bytes() == b"Speaker A: the pier reopened."
+    # The page is derivable from it, which is why dropping `page` costs nothing.
+    assert (vault / f"{stored_path}.md").exists()
+    assert outcome["hash_algorithm"] == "sha256"
