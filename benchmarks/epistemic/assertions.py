@@ -46,7 +46,7 @@ from .budgets import (
     RESTRUCTURE_QUIET_WINDOW_PASSES,
     STRUCTURAL_EMERGENCE_CLUSTER_BUDGET,
 )
-from .snapshot import EpistemicStateSnapshot, StateItem, StrictModel
+from .snapshot import CollectionProjection, EpistemicStateSnapshot, StateItem, StrictModel
 
 #: The five-valued outcome vocabulary from the spec.
 Outcome = Literal["pass", "fail", "not_applicable", "unsupported", "blocked"]
@@ -3073,5 +3073,357 @@ def due_state_block_present_in_carrier(ctx: AssertionContext) -> AssertionResult
         "pass",
         f"{len(carried)} of {len(responses)} compact response(s) carry the due-state block: "
         f"{_listed(carried)}",
+        ctx.subject,
+    )
+
+
+# --------------------------------------------------------------------------
+# f27 lifecycle_routing_replay (2026-08 amendment, sequence 3)
+# --------------------------------------------------------------------------
+
+#: The two collection profiles the replay is measured over. Both must project,
+#: because "the vault holds no plan items" and "we never observed Planning" are
+#: different findings and only one of them is about the product.
+REPLAY_PROFILES: tuple[str, ...] = ("planning", "records")
+
+#: The three tiers, in reporting order. Counted separately and never summed: a
+#: single number would let a product that files no intent look two-thirds right.
+REPLAY_TIERS: tuple[str, ...] = ("intent", "outcome", "transition")
+
+
+def _replay_collections(
+    snapshot: EpistemicStateSnapshot,
+) -> dict[str, "CollectionProjection"] | str:
+    """``profile -> collection``, or the sentence saying why nothing can be read."""
+
+    if not snapshot.collections:
+        # The projector's own note travels with the refusal. A driver that
+        # blocked an arm records why in the notes, and "nothing could be read"
+        # is a far weaker finding than "nothing could be read because the agent
+        # exited 1 before turn two".
+        return (
+            "the snapshot's collections section is empty; an unprojected section is "
+            "an observation error, never a pass"
+            + (f" ({snapshot.completeness_notes})" if snapshot.completeness_notes else "")
+        )
+    by_profile: dict[str, CollectionProjection] = {}
+    for collection in snapshot.collections:
+        by_profile.setdefault(_normalized(collection.profile), collection)
+    missing = [profile for profile in REPLAY_PROFILES if profile not in by_profile]
+    if missing:
+        return (
+            f"the snapshot's collections section carries no {_listed(missing)} profile "
+            f"(saw {_listed({_normalized(c.profile) for c in snapshot.collections})}); "
+            "an unprojected collection is an observation error, never a pass"
+        )
+    return by_profile
+
+
+def _replay_expectation(subject: str | None):
+    """The authored fold a scenario names, or the sentence saying why not."""
+
+    from .corpora.lifecycle_replay import CorpusLookupError, expected_end_state
+
+    try:
+        return expected_end_state(subject or None)
+    except CorpusLookupError as error:
+        return str(error)
+
+
+def _replay_normalized(value: str) -> str:
+    from .corpora.lifecycle_replay import normalize
+
+    return normalize(value)
+
+
+def _valid_date(value: str) -> bool:
+    try:
+        datetime.strptime(value.strip(), "%Y-%m-%d")  # noqa: DTZ007 - a date, not a clock
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _plan_rows(collection: "CollectionProjection") -> tuple[tuple[str, str | None], ...]:
+    """``(normalised title, status)`` for every item of the planning collection."""
+
+    return tuple(
+        (_replay_normalized(item.natural_key.get("title", "")), item.status)
+        for item in collection.items
+    )
+
+
+def _record_rows(
+    collection: "CollectionProjection",
+) -> tuple[tuple[tuple[str, str], str], ...]:
+    """``((normalised title, normalised event type), occurred_on)`` per record."""
+
+    return tuple(
+        (
+            (
+                _replay_normalized(item.natural_key.get("title", "")),
+                _replay_normalized(item.natural_key.get("event_type", "")),
+            ),
+            item.natural_key.get("occurred_on", ""),
+        )
+        for item in collection.items
+    )
+
+
+def replay_coverage(
+    snapshot: EpistemicStateSnapshot, corpus_id: str | None
+) -> dict[str, dict[str, object]] | str:
+    """Per-tier landed/expected counts, or the sentence saying why nothing can be read.
+
+    The single mechanism behind both the coverage assertion and the run report:
+    a report that recomputed the fractions its own way could disagree with the
+    assertion it is printed beside, and the pair would stop being one reading of
+    one run.
+    """
+
+    collections = _replay_collections(snapshot)
+    if isinstance(collections, str):
+        return collections
+    expected = _replay_expectation(corpus_id)
+    if isinstance(expected, str):
+        return expected
+
+    plan_status = dict(_plan_rows(collections["planning"]))
+    record_rows = dict(_record_rows(collections["records"]))
+    missing: dict[str, list[str]] = {tier: [] for tier in REPLAY_TIERS}
+
+    for key in expected.plan_items:
+        if key not in plan_status:
+            missing["intent"].append(key)
+
+    for key, record in expected.records.items():
+        occurred_on = record_rows.get(key)
+        if occurred_on is None:
+            missing["outcome"].append(f"{key[0]}/{key[1]}")
+        elif not _valid_date(occurred_on):
+            missing["outcome"].append(f"{key[0]}/{key[1]} (occurred_on {occurred_on!r})")
+        elif record.occurred_on and occurred_on.strip() != record.occurred_on:
+            missing["outcome"].append(
+                f"{key[0]}/{key[1]} (occurred_on {occurred_on!r}, corpus states "
+                f"{record.occurred_on!r})"
+            )
+
+    for key, status in expected.transitions.items():
+        observed = plan_status.get(key)
+        if observed is None or _replay_normalized(observed) != _replay_normalized(status):
+            missing["transition"].append(f"{key} -> {status} (observed {observed!r})")
+
+    return {
+        tier: {
+            "expected": expected.tier_size(tier),
+            "landed": expected.tier_size(tier) - len(missing[tier]),
+            "missing": tuple(missing[tier]),
+        }
+        for tier in REPLAY_TIERS
+    }
+
+
+def _page_locators(snapshot: EpistemicStateSnapshot | None) -> frozenset[str]:
+    """Every file page a snapshot projects.
+
+    ``#`` locators are the open-thread pseudo-items the projector derives from a
+    page's own headings, not files; surface markers carry no locator at all.
+    """
+
+    if snapshot is None:
+        return frozenset()
+    return frozenset(
+        item.locator
+        for item in snapshot.items
+        if item.locator_kind == "file" and item.locator and "#" not in item.locator
+    )
+
+
+def replay_extras(
+    snapshot: EpistemicStateSnapshot,
+    corpus_id: str | None,
+    seeded: EpistemicStateSnapshot | None,
+) -> tuple[str, ...] | str:
+    """Everything projected that the corpus fold does not account for.
+
+    The page baseline is the **seeded snapshot** — what the vault held before
+    turn 1, in this phase — and never a literal list. ``init_vault`` lays a
+    scaffold whose contents are the product's to choose; a restated allowlist
+    would either go stale against it or, worse, keep passing while the scaffold
+    changed underneath. A page in the seed is a page the harness laid.
+
+    ``seeded`` is checked, not trusted: same phase as the scored snapshot, and
+    pre-turn in content. See the comment at the guard for why the runner cannot
+    be the one to enforce that.
+    """
+
+    collections = _replay_collections(snapshot)
+    if isinstance(collections, str):
+        return collections
+    expected = _replay_expectation(corpus_id)
+    if isinstance(expected, str):
+        return expected
+    if seeded is None:
+        return (
+            "no seeded snapshot was observed before the replay, so a page cannot be "
+            "told from one the harness itself laid; a missing baseline is an "
+            "observation error, never a pass"
+        )
+
+    from .corpora.lifecycle_replay import (
+        FILED_STATUS,
+        SEEDED_COLLECTION_IDS,
+        SEEDED_PLAN_TITLES,
+    )
+
+    seeded_titles = {_replay_normalized(title) for title in SEEDED_PLAN_TITLES}
+
+    # The baseline has to be THIS phase's seed. `runner.evaluate_scenario`
+    # reaches snapshots cumulatively across the whole scenario — deliberately,
+    # other families take their pair across phases — so `ctx.prior` for the
+    # second arm is the first arm's POST-RUN projection unless the second arm
+    # took its own seed snapshot. Scored that way, a page both arms wrote is
+    # already in the "baseline" and the dual passes on the exact write it exists
+    # to catch. f27 refuses here rather than changing the runner.
+    if seeded.phase != snapshot.phase:
+        return (
+            f"the snapshot offered as the baseline was taken in phase "
+            f"{seeded.phase!r}, not {snapshot.phase!r}: phase {snapshot.phase!r} "
+            "reached no seeded snapshot of its own, and another phase's vault is "
+            "not a baseline for this one"
+        )
+    seeded_view = _replay_collections(seeded)
+    if isinstance(seeded_view, str):
+        return f"the snapshot offered as the baseline could not be read: {seeded_view}"
+    baseline_records = [key for key, _occurred_on in _record_rows(seeded_view["records"])]
+    baseline_extra_titles = sorted(
+        title for title, _status in _plan_rows(seeded_view["planning"])
+        if title not in seeded_titles
+    )
+    if baseline_records or baseline_extra_titles:
+        return (
+            "the snapshot offered as the baseline was not taken before turn 1: the "
+            f"seeded vault holds no record and no plan item outside {sorted(seeded_titles)}, "
+            f"and this one holds {len(baseline_records)} record(s) and "
+            f"{len(baseline_extra_titles)} further plan item(s)"
+        )
+
+    extras: list[str] = []
+
+    for title, status in _plan_rows(collections["planning"]):
+        if title in seeded_titles:
+            allowed = frozenset({FILED_STATUS})
+        else:
+            item = expected.plan_items.get(title)
+            if item is None:
+                extras.append(f"plan item {title!r}")
+                continue
+            allowed = item.assigned_statuses
+        if status is not None and _replay_normalized(status) not in {
+            _replay_normalized(candidate) for candidate in allowed
+        }:
+            extras.append(f"plan item {title!r} status {status!r}")
+
+    for key, _occurred_on in _record_rows(collections["records"]):
+        if key not in expected.records:
+            extras.append(f"record {key[0]!r} ({key[1]})")
+
+    for collection in snapshot.collections:
+        if collection.id not in SEEDED_COLLECTION_IDS:
+            extras.append(f"collection {collection.id!r} ({collection.manifest})")
+
+    # Exactly the manifest file and the storage subdirectory that manifest
+    # declares. The round-0 rule exempted a collection's whole parent directory,
+    # which let a prose page written *instead of* a record — the corpus's own
+    # stated failure case — sit inside `Planning/Delivery/` and pass.
+    owned: set[str] = set()
+    storage_prefixes: list[str] = []
+    for collection in snapshot.collections:
+        owned.add(collection.manifest)
+        if "/" in collection.manifest and collection.storage_source:
+            directory = collection.manifest.rsplit("/", 1)[0]
+            storage_prefixes.append(f"{directory}/{collection.storage_source.strip('/')}/")
+
+    baseline = _page_locators(seeded)
+    for locator in sorted(_page_locators(snapshot)):
+        if locator in baseline or locator in owned:
+            continue
+        if any(locator.startswith(prefix) for prefix in storage_prefixes):
+            continue
+        extras.append(f"page {locator!r}")
+
+    return tuple(extras)
+
+
+def lifecycle_consequence_landed_unprompted(ctx: AssertionContext) -> AssertionResult:
+    """f27: every consequence an expert lands is in the replay's projected state.
+
+    Three tiers, counted separately and never summed: a plan item filed from
+    stated intent, a record appended from an observed outcome, and an open item
+    whose status an outcome moved. It passes only when *every* tier is complete,
+    because a family that averaged them would let a product that never files an
+    intent look two-thirds right.
+
+    The expectation comes from the corpus fold the scenario names in ``subject``.
+    The transcript is never read: what an agent said it did is not what it did.
+    """
+
+    name = "lifecycle_consequence_landed_unprompted"
+    coverage = replay_coverage(ctx.snapshot, ctx.subject)
+    if isinstance(coverage, str):
+        return _result(name, "blocked", coverage, ctx.subject)
+
+    fractions = " · ".join(
+        f"{tier} {coverage[tier]['landed']}/{coverage[tier]['expected']}"
+        for tier in REPLAY_TIERS
+    )
+    incomplete = [tier for tier in REPLAY_TIERS if coverage[tier]["missing"]]
+    if incomplete:
+        detail = "; ".join(
+            f"{tier} missing {_listed(coverage[tier]['missing'])}" for tier in incomplete
+        )
+        return _result(name, "fail", f"coverage {fractions}: {detail}", ctx.subject)
+    return _result(
+        name,
+        "pass",
+        f"coverage {fractions}: every consequence the corpus declares is present",
+        ctx.subject,
+    )
+
+
+def no_structured_write_beyond_expectation(ctx: AssertionContext) -> AssertionResult:
+    """f27: the false-write dual. Nothing was written that the fold did not expect.
+
+    Coverage alone would reward a product that wrote a record for every sentence,
+    so this is reported beside it from the same run and never on its own. Four
+    kinds of extra: a plan item or a record outside the expected set, a plan item
+    holding a status the fold never assigned, a collection beyond the seeded two,
+    and a page that was neither in the seeded vault nor a file the collection's
+    own manifest declares it stores.
+
+    ``ctx.prior`` is the seeded vault's projection, taken before turn 1, in this
+    phase. Without it the assertion blocks rather than guessing a baseline,
+    because "the agent wrote this page" and "the scaffold shipped it" are
+    different findings — and so are "this arm wrote it" and "the previous arm
+    did", which is what a baseline reached from another phase would conflate.
+    """
+
+    name = "no_structured_write_beyond_expectation"
+    extras = replay_extras(ctx.snapshot, ctx.subject, ctx.prior)
+    if isinstance(extras, str):
+        return _result(name, "blocked", extras, ctx.subject)
+    if extras:
+        return _result(
+            name,
+            "fail",
+            f"{len(extras)} extra structured write(s) beyond the corpus fold: "
+            f"{_listed(extras)}",
+            ctx.subject,
+        )
+    return _result(
+        name,
+        "pass",
+        "0 extra structured writes: every projected plan item, record, collection "
+        "and page is one the corpus fold accounts for",
         ctx.subject,
     )

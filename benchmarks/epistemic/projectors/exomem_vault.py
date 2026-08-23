@@ -403,8 +403,11 @@ class VaultProjector(Projector):
     name = "exomem-vault-file-projector"
     #: 0.2.0 adds the `collections` section. Additive: every field a 0.1.0
     #: snapshot carried is unchanged, and a vault with no collection serialises
-    #: byte-for-byte as it did.
-    version = "0.2.0"
+    #: byte-for-byte as it did. 0.3.0 adds `CollectionProjection.storage_source`,
+    #: read from the manifest's own `storage.source`. Also additive and
+    #: default-empty, but the output schema moved, and a snapshot's provenance is
+    #: only worth anything if the version tracks what the projector can emit.
+    version = "0.3.0"
     author = "benchmark-harness"
     endpoints_used = ("filesystem:walk(vault)", "filesystem:read_text(*.md)")
 
@@ -697,9 +700,15 @@ class VaultProjector(Projector):
         projected: list[CollectionProjection] = []
         for collection_id, (relative, frontmatter) in sorted(manifests.items()):
             schema_version = frontmatter.get("schema_version")
+            storage = frontmatter.get("storage")
             projected.append(
                 CollectionProjection(
                     id=collection_id,
+                    storage_source=(
+                        str(storage.get("source") or "").strip()
+                        if isinstance(storage, Mapping)
+                        else ""
+                    ),
                     profile=str(frontmatter.get("semantic_profile") or "").strip()
                     or "unknown",
                     manifest=relative,
