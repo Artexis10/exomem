@@ -24,10 +24,19 @@ forms, and TUI workflows are intentionally deferred.
 
 `review_memory(mode="plan-progress")` is the read-only review that resolves
 those evidence descriptors. It selects active, committed items that carry
-`progress_evidence`, runs each bound Records saved view through the ordinary
-governed read path, and presents authored intent next to the exact number of
-records each view matched. Pass a Planning collection selector as `path` to
-scope it, and `limit` to cap reviewed items.
+`progress_evidence`, `motivation`, or both, runs each bound Records saved view
+through the ordinary governed read path, and presents authored intent next to
+the exact number of records each view matched. Pass a Planning collection
+selector as `path` to scope it, and `limit` to cap reviewed items.
+
+Where an item carries `motivation` — a bounded list of `exomem://memory/`
+references to the knowledge it rests on — the review also reports, per
+reference, whether the vault still holds it and whether that page has since
+been superseded. It names nothing it cannot show you: a reference the vault
+does not hold, one it holds twice, a malformed one, and one whose page you may
+not read all come back as the same bounded `motivation_unavailable`, with no
+path, title, page count, or successor. A superseded citation is a prompt to
+re-read the plan, not a verdict on it.
 
 It measures and stops there. It never writes `health`, never mutates a plan or
 a record, and never computes a score, ratio, percentage, or ranking — items are
