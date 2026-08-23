@@ -713,6 +713,58 @@ def ensure_media_sidecar(
     return sidecar, True
 
 
+def ensure_artifact_page(
+    vault_root: Path, binary_path: Path, *, today: dt.date | None = None
+) -> tuple[Path, bool]:
+    """Ensure any stored artifact has the page that makes it addressable.
+
+    The general form of `ensure_media_sidecar`, and the back-fill for artifacts
+    that predate the page being unconditional. Whether a page was written used
+    to depend on whether the extension was extractable, so a `.csv`, `.eml`, or
+    `.json` preserved earlier has bytes and nothing else — no `exomem_id`, no
+    `ingested_into`, and no corpus presence, because only `.md` is indexed.
+
+    Media still goes through `ensure_media_sidecar`: those pages are
+    reconciliation's to own, and describing one here would put the capture path
+    back inside a contract it does not hold. Everything else gets its identity
+    written directly, since nothing else will ever write it.
+
+    Idempotent: returns `(existing_page, False)` when one is already there.
+    """
+    extract = _extract_module()
+    if extract.media_type_for(binary_path) is not None:
+        return ensure_media_sidecar(vault_root, binary_path, today=today)
+
+    name = binary_path.name
+    if name.lower().endswith(".md"):
+        page = binary_path.with_name(f"{name[:-3]}-notes.md")
+    else:
+        page = binary_path.with_name(f"{name}.md")
+    if page.exists():
+        return page, False
+
+    rel = binary_path.resolve().relative_to(vault_root.resolve()).as_posix()
+    tree, scope, category = artifact_location(rel)
+    digest = hashlib.sha256()
+    size = 0
+    with binary_path.open("rb") as stream:
+        while chunk := stream.read(_STREAM_CHUNK):
+            digest.update(chunk)
+            size += len(chunk)
+    markdown = _render_sidecar(
+        artifact_name=name,
+        scope=scope,
+        category=category,
+        date_iso=temporal.stamp(today or temporal.now()),
+        evidence_file=rel,
+        binary_sha256=digest.hexdigest(),
+        binary_size=size,
+        tree=tree,
+    )
+    batch_atomic_write([PlannedWrite(path=page, content=markdown)], vault_root=vault_root)
+    return page, True
+
+
 _EXTRACTED_HEADING = "## Extracted text"
 
 

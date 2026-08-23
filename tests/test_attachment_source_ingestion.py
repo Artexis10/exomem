@@ -792,3 +792,113 @@ def test_a_lone_page_still_moves_by_itself(vault: Path, source_schema) -> None:
 
     assert (vault / destination).exists()
     assert not (vault / added.path).exists()
+
+
+# --------------------------------------------------------------------------
+# 8. Back-fill
+# --------------------------------------------------------------------------
+
+
+def _orphan(vault: Path, rel: str, data: bytes) -> Path:
+    target = vault / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(data)
+    return target
+
+
+def test_an_artifact_stored_before_this_change_becomes_citable(vault: Path) -> None:
+    """Retroactive by back-fill, and in place.
+
+    Whether an artifact received a page used to depend on whether its extension
+    was extractable, so a `.csv` or `.eml` preserved earlier has bytes and
+    nothing else. The existing media back-fill cannot reach them: it walks media
+    files only.
+    """
+    from exomem import preserve as preserve_mod
+
+    binary = _orphan(
+        vault, "Knowledge Base/Evidence/riverside/exports/counts.csv", b"segment,count\npier,412\n"
+    )
+
+    page, created = preserve_mod.ensure_artifact_page(vault, binary)
+
+    assert created is True
+    assert page.name == "counts.csv.md"
+    text = page.read_text(encoding="utf-8")
+    assert "type: source" in text
+    assert "ingested_into: []" in text
+    assert "original_filename: counts.csv" in text
+    assert "binary_sha256:" in text
+    assert "Preserved under `Evidence/riverside/exports/`." in text
+
+
+def test_the_back_fill_leaves_the_lane_alone(vault: Path) -> None:
+    """A Sources artifact is described as living in Sources.
+
+    `.json` rather than `.eml` deliberately: `.eml` classifies as extractable
+    media, so it would take the media sidecar branch and prove nothing about the
+    non-media branch this test is named for.
+    """
+    from exomem import preserve as preserve_mod
+
+    binary = _orphan(vault, "Knowledge Base/Sources/Other/notes.json", b'{"a": 1}')
+
+    page, created = preserve_mod.ensure_artifact_page(vault, binary)
+
+    assert created is True
+    assert page.parent == binary.parent
+    text = page.read_text(encoding="utf-8")
+    assert "Preserved under `Sources/Other/uncategorized/`." in text
+    assert "tags: [source, other, uncategorized]" in text
+    assert "binary_sha256:" in text
+
+
+def test_the_back_fill_is_idempotent(vault: Path) -> None:
+    from exomem import preserve as preserve_mod
+
+    binary = _orphan(vault, "Knowledge Base/Evidence/r/e/counts.csv", b"a,b\n1,2\n")
+
+    first, created_first = preserve_mod.ensure_artifact_page(vault, binary)
+    before = first.read_text(encoding="utf-8")
+    second, created_second = preserve_mod.ensure_artifact_page(vault, binary)
+
+    assert created_first is True
+    assert created_second is False
+    assert first == second
+    assert second.read_text(encoding="utf-8") == before
+
+
+def test_the_back_fill_still_routes_media_to_the_media_stub(vault: Path) -> None:
+    """Media pages stay reconciliation's to own, back-fill included."""
+    from exomem import preserve as preserve_mod
+
+    binary = _orphan(vault, "Knowledge Base/Evidence/r/s/shot.png", _PNG)
+
+    page, created = preserve_mod.ensure_artifact_page(vault, binary)
+
+    assert created is True
+    text = page.read_text(encoding="utf-8")
+    assert "media_type: image" in text
+    assert "binary_sha256:" not in text
+
+
+def test_the_walk_reaches_unpaged_artifacts_in_both_trees(vault: Path) -> None:
+    from exomem import backfill
+
+    _orphan(vault, "Knowledge Base/Evidence/r/e/counts.csv", b"a,b\n1,2\n")
+    _orphan(vault, "Knowledge Base/Sources/Other/notes.json", b'{"a": 1}')
+    # Already paged, and outside an append-only tree: neither should be touched.
+    _orphan(vault, "Knowledge Base/Evidence/r/e/paged.json", b"{}")
+    (vault / "Knowledge Base/Evidence/r/e/paged.json.md").write_text(
+        "---\ntype: source\n---\n\n# paged\n", encoding="utf-8"
+    )
+    _orphan(vault, "Knowledge Base/Notes/Open/loose.csv", b"x\n")
+
+    created = backfill.backfill_artifact_pages(vault)
+
+    assert created == 2
+    assert (vault / "Knowledge Base/Evidence/r/e/counts.csv.md").exists()
+    assert (vault / "Knowledge Base/Sources/Other/notes.json.md").exists()
+    assert not (vault / "Knowledge Base/Notes/Open/loose.csv.md").exists()
+
+    assert backfill.backfill_artifact_pages(vault) == 0

@@ -63,8 +63,8 @@ media capture is safe to offer.
 
 ## 8. Back-fill
 
-- [ ] 8.1 Test that an artifact stored before this change gains a page and becomes citable without moving lane.
-- [ ] 8.2 Extend the existing media back-fill to non-media artifacts, idempotently.
+- [x] 8.1 Test that an artifact stored before this change gains a page and becomes citable without moving lane.
+- [x] 8.2 Extend the existing media back-fill to non-media artifacts, idempotently.
 
 ## 9. Verification
 
