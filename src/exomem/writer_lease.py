@@ -3128,9 +3128,25 @@ class LeaseManager:
             and kwargs.get("operation", "list") in {"create", "append"}
             and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
         )
+        # `capture_source` carries two lanes under one name. Its file lane
+        # stages client handles first -- up to eight network fetches against a
+        # batch deadline -- and its leaf takes the mutation boundary itself,
+        # once per committed artifact (`client_artifacts.capture_source_artifacts`),
+        # exactly as `preserve_artifacts` does. Its text lane routes to `add`,
+        # which guards nothing and depends on this outer boundary. So the name
+        # cannot join `_NARROW_BOUNDARY_COMMANDS`: narrowing it wholesale would
+        # leave a text capture unguarded, and leaving it out holds the vault
+        # lock across every fetch and blocks all other writers for the
+        # duration. The boundary follows the invocation, not the command.
+        narrow_source_artifact_commit = (
+            command.name == "capture_source"
+            and bool(kwargs.get("files"))
+            and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
+        )
         narrow_boundary = (
             narrow_media_commit
             or narrow_tier2_file_commit
+            or narrow_source_artifact_commit
             or (
                 command.name in _NARROW_BOUNDARY_COMMANDS
                 and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")

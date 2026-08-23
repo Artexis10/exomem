@@ -1207,3 +1207,153 @@ def test_a_byte_identical_retry_replays_instead_of_capturing_twice(
         if path.is_file() and not path.name.endswith(".md")
     ]
     assert len(stored) == 1, [str(p) for p in stored]
+
+
+# --- The boundary a file capture holds -------------------------------------
+#
+# `preserve_artifacts` narrows its outer boundary so that retrieval — up to
+# eight fetches against a batch deadline — happens before the vault mutation
+# lock is taken; its leaf re-acquires the lock per commit. `capture_source`
+# grew the same file-handle lane but not the same boundary, so a Source
+# capture held the lock across every fetch and blocked all other writers for
+# the duration. The command cannot simply join `_NARROW_BOUNDARY_COMMANDS`:
+# its text capture routes to `add`, which has no guard of its own and depends
+# on the wide boundary. The boundary has to follow the invocation.
+
+
+def _boundary_probe(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str | None]]:
+    """Record, in order, every staging fetch and every mutation-lock entry."""
+    import contextlib
+
+    from exomem import writer_lease
+
+    events: list[tuple[str, str | None]] = []
+    original = writer_lease.LeaseManager.mutation_guard
+
+    @contextlib.contextmanager
+    def _recording(self, vault_root, **kwargs):
+        events.append(("mutation-boundary", kwargs.get("operation")))
+        with original(self, vault_root, **kwargs) as coordinator:
+            yield coordinator
+
+    monkeypatch.setattr(writer_lease.LeaseManager, "mutation_guard", _recording)
+    return events
+
+
+def test_a_file_capture_fetches_before_taking_the_mutation_lock(
+    vault: Path, source_schema, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import client_artifacts, commands, writer_lease
+
+    events = _boundary_probe(monkeypatch)
+    blob = tmp_path / "transcript.txt"
+    blob.write_bytes(b"raw material")
+
+    def _stage(file, _budget, **_kwargs):
+        events.append(("fetch", str(file["file_id"])))
+        return client_artifacts.StagedArtifact(
+            file_id=str(file["file_id"]), path=blob, size=blob.stat().st_size,
+            sha256="b" * 64, content_type="text/plain", filename="transcript.txt",
+        )
+
+    monkeypatch.setattr(client_artifacts, "stage_artifact", _stage)
+    command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "capture_source")
+
+    result = writer_lease.invoke_command(
+        command, vault, source_schema=source_schema, title="Boundary capture",
+        files=[{"download_url": "https://files.example/1", "file_id": "f1"}],
+    )
+
+    assert result["summary"] == {"stored": 1, "failed": 0}
+    assert events[0] == ("fetch", "f1"), (
+        f"the mutation lock was held across retrieval: {events}"
+    )
+    assert ("mutation-boundary", "capture_source_artifacts_commit") in events, (
+        f"the commit must still take the lock: {events}"
+    )
+
+
+def test_every_staged_file_is_fetched_before_the_first_commit(
+    vault: Path, source_schema, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole batch stages first — the point of narrowing, not just file one."""
+    from exomem import client_artifacts, commands, writer_lease
+
+    events = _boundary_probe(monkeypatch)
+
+    def _stage(file, _budget, **_kwargs):
+        file_id = str(file["file_id"])
+        blob = tmp_path / f"{file_id}.txt"
+        blob.write_bytes(file_id.encode())
+        events.append(("fetch", file_id))
+        return client_artifacts.StagedArtifact(
+            file_id=file_id, path=blob, size=blob.stat().st_size,
+            sha256=file_id[-1] * 64, content_type="text/plain", filename=f"{file_id}.txt",
+        )
+
+    monkeypatch.setattr(client_artifacts, "stage_artifact", _stage)
+    command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "capture_source")
+
+    result = writer_lease.invoke_command(
+        command, vault, source_schema=source_schema, title="Batch capture",
+        files=[
+            {"download_url": f"https://files.example/{index}", "file_id": f"f{index}"}
+            for index in range(3)
+        ],
+    )
+
+    assert result["summary"] == {"stored": 3, "failed": 0}
+    first_lock = next(i for i, event in enumerate(events) if event[0] == "mutation-boundary")
+    assert [event for event in events[:first_lock] if event[0] == "fetch"] == [
+        ("fetch", "f0"), ("fetch", "f1"), ("fetch", "f2")
+    ], f"retrieval was interleaved with the mutation lock: {events}"
+
+
+def test_a_text_capture_still_runs_under_the_wide_boundary(
+    vault: Path, source_schema, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`add` self-guards nowhere, so the text lane must keep the outer lock."""
+    from exomem import commands, writer_lease
+
+    events = _boundary_probe(monkeypatch)
+    command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "capture_source")
+
+    result = writer_lease.invoke_command(
+        command, vault, source_schema=source_schema, title="Text capture",
+        content="raw material, as text",
+    )
+
+    assert result["path"].startswith("Knowledge Base/Sources/")
+    assert ("mutation-boundary", "capture_source") in events, (
+        f"the text lane lost its only mutation boundary: {events}"
+    )
+
+
+def test_the_kill_switch_restores_the_wide_boundary_for_a_file_capture(
+    vault: Path, source_schema, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The narrowing keeps the same escape hatch every other narrowed lane has."""
+    from exomem import client_artifacts, commands, writer_lease
+
+    monkeypatch.setenv("EXOMEM_WIDE_MUTATION_BOUNDARY", "1")
+    events = _boundary_probe(monkeypatch)
+    blob = tmp_path / "transcript.txt"
+    blob.write_bytes(b"raw material")
+
+    def _stage(file, _budget, **_kwargs):
+        events.append(("fetch", str(file["file_id"])))
+        return client_artifacts.StagedArtifact(
+            file_id=str(file["file_id"]), path=blob, size=blob.stat().st_size,
+            sha256="c" * 64, content_type="text/plain", filename="transcript.txt",
+        )
+
+    monkeypatch.setattr(client_artifacts, "stage_artifact", _stage)
+    command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "capture_source")
+
+    result = writer_lease.invoke_command(
+        command, vault, source_schema=source_schema, title="Kill switch capture",
+        files=[{"download_url": "https://files.example/1", "file_id": "f1"}],
+    )
+
+    assert result["summary"] == {"stored": 1, "failed": 0}
+    assert events[0] == ("mutation-boundary", "capture_source"), events
