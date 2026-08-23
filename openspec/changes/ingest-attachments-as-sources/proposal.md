@@ -19,30 +19,33 @@ convenient one.
 Two live reproductions, both measured against the current implementation.
 
 **A transcript captured as raw material for later compilation.** It belongs in
-Sources; the convenient lossless path put it in Evidence. Worse, the artifact
-received no page at all: `preserve()` writes a sidecar only when a description,
-extracted text, or a media stub applies, `preserve_artifacts` supplies none of
-them, and a `.txt` is not extractable media. The stored result is a bare file
-with no `exomem_id`, no `ingested_into`, and no markdown page — and the corpus
-indexes only `.md`, so it is invisible to find, to the graph, and to the
-unprocessed-source backlog.
+Sources; the convenient lossless path put it in Evidence.
 
-**A screenshot attached later.** Same asymmetry on the routing question. This one
-does receive a page, because an image is media and gets a stub sidecar. But
-`preserve` returns the artifact path first and only the sidecar is citable, and
-nothing in the response says so.
+**A screenshot attached later.** Same asymmetry on the routing question.
 
-Both reproductions then failed the same way at the next step. `remember`
+Alongside the routing defect, and independent of it, whether a stored artifact
+receives a page at all is decided by an extraction-capability test. `preserve()`
+writes one only when a description, extracted text, or a *media stub* applies,
+and the stub condition asks whether the extension is extractable and whether the
+bytes arrived as a stream rather than as text. Measured, that means a `.txt`
+streamed through `preserve_artifacts` receives a page, the same `.txt` supplied
+as text through `preserve_evidence` does not, and a `.csv`, `.json`, or `.eml`
+receives one on neither path. An artifact with no page has no `exomem_id`, no
+`ingested_into`, and no corpus presence, because only `.md` is indexed — so it is
+invisible to find, to the graph, and to the unprocessed-source backlog. None of
+that follows from whether the artifact's text can be extracted.
+
+Both reproductions failed the same way at the next step, and this is the part
+that produced the reported warning. `remember`
 resolves a cited source by replacing the extension with `.md`, while preserve
 writes the page as `<filename>.md` — so `session.txt` resolves to `session.md`
 and `shot.png` to `shot.md`, neither of which exists:
 
 ```
-TEXT path:    Knowledge Base/Evidence/tu-riverside/transcripts/2026-05-25-session.txt
-TEXT sidecar: None
-TEXT resolve -> …/2026-05-25-session.md          exists: False
-IMG  resolve -> …/2026-05-25-shot.md             exists: False
-IMG  sidecar resolve -> …/2026-05-25-shot.png.md exists: True
+TEXT sidecar: None                                (supplied as text, not streamed)
+TEXT resolve -> …/2026-05-25-session.md           exists: False
+IMG  resolve -> …/2026-05-25-shot.md              exists: False
+IMG  sidecar resolve -> …/2026-05-25-shot.png.md  exists: True
 ```
 
 That is the reported `source not found, ingested_into back-ref skipped`, and it
@@ -63,9 +66,10 @@ convenient one and the one-way one.
   applied. No bytes pass through model-visible arguments, and nothing is
   duplicated.
 - Give every ingested artifact exactly one addressable page, in both lanes,
-  regardless of media type and regardless of whether a description or extracted
-  text was supplied. The page carries `type: source`, a stable `exomem_id`,
-  `ingested_into`, and a pointer to the bytes.
+  regardless of whether its type is extractable, which input mode delivered the
+  bytes, or whether a description was supplied. The page carries `type: source`,
+  a stable `exomem_id`, `ingested_into`, and a pointer to the bytes. A pending
+  media stub keeps its current shape, because reconciliation owns it.
 - Resolve a cited artifact path to its page, so `sources:` accepts either the
   artifact or its page and the `ingested_into` back-reference lands.
 - Give the out-of-band transports the same lane choice, so `/upload` and

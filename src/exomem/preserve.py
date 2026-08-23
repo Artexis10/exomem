@@ -274,37 +274,48 @@ def preserve(
         extract = _extract_module()
         media_type = extract.media_type_for(filename_safe)
         want_stub = media_type is not None and artifact_text is None and not text_clean
-        if desc_clean or text_clean or want_stub:
-            if filename_safe.lower().endswith(".md"):
-                stem = filename_safe[:-3]
-                sidecar_path = folder / f"{stem}-notes.md"
+        # Unconditional, because an artifact with no page is not addressable at
+        # all: no `exomem_id`, no `ingested_into`, and no corpus presence, since
+        # only `.md` is indexed. A preserved transcript used to land exactly
+        # that way, which is why citing it reported the source as missing.
+        if filename_safe.lower().endswith(".md"):
+            stem = filename_safe[:-3]
+            sidecar_path = folder / f"{stem}-notes.md"
+        else:
+            sidecar_path = folder / f"{filename_safe}.md"
+        if sidecar_path.exists():
+            warnings.append(
+                f"sidecar {sidecar_path.name!r} already exists; skipped."
+            )
+        else:
+            if text_clean:
+                extracted_by = "upload"   # the uploader/sandbox supplied the text
+            elif want_stub:
+                extracted_by = "pending"  # the worker will fill it
             else:
-                sidecar_path = folder / f"{filename_safe}.md"
-            if sidecar_path.exists():
-                warnings.append(
-                    f"sidecar {sidecar_path.name!r} already exists; skipped."
-                )
-            else:
-                if text_clean:
-                    extracted_by = "upload"   # the uploader/sandbox supplied the text
-                elif want_stub:
-                    extracted_by = "pending"  # the worker will fill it
-                else:
-                    extracted_by = None
-                sidecar_md = _render_sidecar(
-                    artifact_name=filename_safe,
-                    scope=scope_safe,
-                    category=category_safe,
-                    date_iso=stamp_iso,
-                    description=desc_clean,
-                    text=text_clean,
-                    media_type=media_type,
-                    evidence_file=rel_artifact if media_type else None,
-                    extracted_by=extracted_by,
-                )
-                sidecar_ref = memory_refs.ref_from_markdown(sidecar_md)
-                writes.append(PlannedWrite(path=sidecar_path, content=sidecar_md))
-                sidecar_rel = sidecar_path.relative_to(vault_root).as_posix()
+                extracted_by = None
+            # Artifact provenance is carried everywhere except a pending
+            # media stub. Reconciliation owns those: it re-renders them with
+            # the same fields computed from the binary itself, and writing
+            # them here first would change when its convergence check
+            # decides a stub is already current.
+            describes_artifact = not want_stub
+            sidecar_md = _render_sidecar(
+                artifact_name=filename_safe,
+                scope=scope_safe,
+                category=category_safe,
+                date_iso=stamp_iso,
+                description=desc_clean,
+                text=text_clean,
+                media_type=media_type,
+                evidence_file=rel_artifact if media_type else None,
+                extracted_by=extracted_by,
+                binary_sha256=artifact_hash if describes_artifact else None,
+                binary_size=artifact_size if describes_artifact else None,
+            )
+            sidecar_ref = memory_refs.ref_from_markdown(sidecar_md)
+            writes.append(PlannedWrite(path=sidecar_path, content=sidecar_md))
+            sidecar_rel = sidecar_path.relative_to(vault_root).as_posix()
 
         # Index + log updates.
         rel_artifact_for_summary = rel_artifact.replace(kb_prefix(), "")
@@ -532,6 +543,8 @@ def _render_sidecar(
     extracted_by: str | None = None,
     parent_media: str | None = None,
     frame_ts: float | None = None,
+    binary_sha256: str | None = None,
+    binary_size: int | None = None,
 ) -> str:
     """Sidecar .md describing a preserved binary artifact.
 
@@ -568,6 +581,14 @@ def _render_sidecar(
         lines.append(f"evidence_file: {evidence_file}")
     if extracted_by:
         lines.append(f"extracted_by: {extracted_by}")
+    # Same field names the media pipeline already writes and checks, so a page
+    # written here and one re-rendered by reconciliation describe an artifact
+    # in one vocabulary rather than two.
+    if binary_sha256:
+        lines.append(f"original_filename: {yaml_scalar(artifact_name)}")
+        lines.append(f"binary_sha256: {binary_sha256}")
+        if binary_size is not None:
+            lines.append(f"binary_size: {binary_size}")
     if parent_media:
         lines.append(f"parent_media: {parent_media}")
     if frame_ts is not None:
@@ -597,6 +618,18 @@ def _render_sidecar(
         if text:
             lines.append(_cap_extracted_text(text))
             lines.append("")
+    # A page with no caption, no extracted text, and no media stub would
+    # otherwise have an empty body, which `schema.validate_source` treats as an
+    # invalid source. Describing the artifact is also the only thing this page
+    # can honestly say about bytes it does not inline.
+    if not description and not text and binary_sha256:
+        lines.append("## Artifact")
+        lines.append("")
+        lines.append(f"- Original filename: `{artifact_name}`")
+        lines.append(f"- SHA-256: `{binary_sha256}`")
+        if binary_size is not None:
+            lines.append(f"- Bytes: {binary_size}")
+        lines.append("")
     return "\n".join(lines)
 
 

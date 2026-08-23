@@ -79,30 +79,49 @@ presentation there needs nothing.
 
 ## Every ingested artifact gets exactly one page
 
-Today the page is conditional: `preserve()` writes a sidecar only when a
-description, extracted text, or a media stub applies, and `preserve_artifacts`
-supplies none of the three. A text attachment therefore lands as bytes with no
-`exomem_id`, no `ingested_into`, and no corpus presence at all — the corpus
-indexes only `.md`. That is what broke the provenance loop, and it is independent
-of which lane the artifact went to.
+Today the page is conditional, and the condition is an extraction-capability
+test wearing the wrong hat. `preserve()` writes one when a description, extracted
+text, or a media *stub* applies, and the stub condition asks two questions that
+have nothing to do with addressability: is this extension extractable, and did
+the bytes arrive as a stream rather than as text. Measured, the fallout is:
 
-The page becomes unconditional in both lanes. When there is no description, no
-extracted text, and no media type, the page still carries `type: source`, a
-stable `exomem_id`, `ingested_into: []`, the pointer, the original filename, the
-SHA-256, and the byte count — enough to cite it, find it by title, and see what
-it is. `schema.validate_source` requires non-empty `content`, so the body is
-synthesized from that metadata rather than left empty; a source page whose body
-describes bytes it does not inline is the shape `adopt` already ships.
+| Artifact | Delivered as | Page today |
+|---|---|---|
+| `.txt` | stream (`preserve_artifacts`) | yes — text is extractable |
+| `.txt` | text (`preserve_evidence`) | no — the stub wants absent bytes |
+| `.png` | either | yes — image is extractable |
+| `.csv`, `.json`, `.eml` | either | no |
 
-For media the page keeps its current stub form — `media_type`, `extracted_by:
-pending`, and the `## Extracted text` anchor the worker fills — so the existing
-extraction path converges on it unchanged.
+An artifact with no page has no `exomem_id`, no `ingested_into`, and no corpus
+presence at all, because only `.md` is indexed. That is independent of which lane
+the artifact went to, and it is why an initial reading of the reproduction
+blamed the lane for a failure the extension had already caused.
+
+The page becomes unconditional in both lanes. Where no description and no
+extracted text were supplied, it carries the artifact's identity — the original
+filename, the SHA-256, and the byte count — alongside `type: source`, a stable
+`exomem_id`, `ingested_into: []`, and the pointer. `schema.validate_source`
+requires non-empty `content`, so the body is synthesized from that metadata
+rather than left empty; a source page whose body describes bytes it does not
+inline is the shape `adopt` already ships.
+
+Those three fields are named `original_filename`, `binary_sha256`, and
+`binary_size` because the media pipeline already writes and checks them under
+exactly those names. One vocabulary for describing an artifact, whether the page
+was written at capture or re-rendered by reconciliation.
+
+The one page this path does not describe is a *pending media stub*.
+Reconciliation owns those: it re-renders them with the same provenance computed
+from the binary itself, and decides by comparing those fields whether a stub is
+already current. Writing them at capture would move that decision, so the gate is
+`not want_stub` rather than "not media" — a `.txt` supplied as text is media by
+type but is not a pending stub, and it does get its identity fields.
 
 A shipped test pins the current absence (`tests/test_preserve.py` asserts
 `sidecar_path is None` for a text artifact with no description). It is a
-deliberate re-aim, not a deletion: the property worth pinning is that no
-*empty* sidecar is written, and the replacement asserts the page exists and
-carries the addressing contract.
+deliberate re-aim, not a deletion: the property worth pinning is that no *empty*
+page is written and that the page never inlines the artifact's bytes, so the
+replacement asserts the addressing contract and the absence of the content.
 
 ## Citation resolves from the artifact, not only from the page
 
@@ -111,10 +130,17 @@ find a page named `<stem>.md`. Under the convention above the page is
 `<filename>.md`, which is why both reproductions failed even though one of them
 had a perfectly good page.
 
-Resolution becomes ordered and additive: a path already ending `.md` is used as
-given; otherwise `<path>.md` is tried, then `<stem>-notes.md` for the `.md`
-artifact case `preserve` handles, and finally today's `.with_suffix(".md")` so
-every citation that resolves now keeps resolving. The order matters — `<path>.md`
+Resolution becomes ordered and additive, with the candidate list chosen by
+whether the citation already ends `.md`. If it does not, the candidates are
+`<path>.md` — the artifact's own page — then today's `.with_suffix(".md")`, so
+every citation that resolves now keeps resolving. If it does, the ambiguity runs
+the other way: the citation is either a full page path or an `.md` artifact whose
+page `preserve` names `<stem>-notes.md` to avoid a doubled extension, so that
+form is tried first and the path itself second. The first candidate that exists
+wins; when none does, the historical candidate is returned so a genuinely missing
+source still reports the path a caller would expect.
+
+The order matters — `<path>.md`
 must precede the suffix replacement, or `shot.png` keeps resolving to a
 non-existent `shot.md` while `shot.png.md` sits beside it.
 

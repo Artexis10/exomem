@@ -2,19 +2,19 @@
 
 ## 1. Citation resolution
 
-- [ ] 1.1 Test that a note citing a stored artifact path receives the back-reference on that artifact's page, for a media artifact and for a text artifact, with no source-not-found warning.
-- [ ] 1.2 Test that a note citing the page path directly resolves to the same page, and that an ordinary `.md` source page citation resolves exactly as before.
-- [ ] 1.3 Test the ordering explicitly: assert that a path whose extension-replaced twin does not exist resolves through the `<path>.md` form, so a future reordering that puts extension replacement first fails.
-- [ ] 1.4 Extend `note._resolve_source_path` to try, in order, an already-`.md` path as given, `<path>.md`, `<stem>-notes.md`, then extension replacement. Apply it to both back-reference sites in `note.py`.
-- [ ] 1.5 Verify the same resolution is used by the compile-proposal source lookup, or record why that surface differs.
+- [x] 1.1 Test that a note citing a stored artifact path receives the back-reference on that artifact's page, for a media artifact and for a text artifact, with no source-not-found warning.
+- [x] 1.2 Test that a note citing the page path directly resolves to the same page, and that an ordinary `.md` source page citation resolves exactly as before.
+- [x] 1.3 Test the ordering explicitly: assert that a path whose extension-replaced twin does not exist resolves through the `<path>.md` form, so a future reordering that puts extension replacement first fails.
+- [x] 1.4 Extend `note._resolve_source_path` to try, in order, an already-`.md` path as given, `<path>.md`, `<stem>-notes.md`, then extension replacement. Apply it to both back-reference sites in `note.py`.
+- [x] 1.5 Verify the same resolution is used by the compile-proposal source lookup, or record why that surface differs. Measured: it differs and is already correct — `compile_proposal` appends `.md` to the normalized wikilink instead of replacing the extension, so it resolves both an artifact path and its page today. No change needed; the divergence is worth leaving because `note.py` must also handle the `<stem>-notes.md` form, which that surface never sees.
 
 ## 2. Every ingested artifact is addressable
 
-- [ ] 2.1 Test that a text artifact stored with no description and no extracted text still receives a page carrying `type: source`, a stable `exomem_id`, empty `ingested_into`, the artifact pointer, original filename, SHA-256, and byte count.
-- [ ] 2.2 Test that the media stub is unchanged: media type declared, extraction pending, and the extraction anchor present, with the worker still converging on that page.
-- [ ] 2.3 Test that the page body is non-empty and describes the artifact, so `schema.validate_source`'s content requirement is satisfied without inlining bytes.
-- [ ] 2.4 Make the page unconditional in `preserve()`; synthesize the body from artifact metadata when there is no description, no text, and no media type.
-- [ ] 2.5 Re-aim `tests/test_preserve.py`'s `sidecar_path is None` assertion onto the property that survives: no *empty* page is written, and the page carries the addressing contract. Do not delete it.
+- [x] 2.1 Test that a text artifact stored with no description and no extracted text still receives a page carrying `type: source`, a stable `exomem_id`, empty `ingested_into`, the artifact pointer, original filename, SHA-256, and byte count.
+- [x] 2.2 Test that the media stub is unchanged: media type declared, extraction pending, and the extraction anchor present, with the worker still converging on that page.
+- [x] 2.3 Test that the page body is non-empty and describes the artifact, so `schema.validate_source`'s content requirement is satisfied without inlining bytes.
+- [x] 2.4 Make the page unconditional in `preserve()`; synthesize the body from artifact metadata when there is no description, no text, and no media type.
+- [x] 2.5 Re-aim `tests/test_preserve.py`'s `sidecar_path is None` assertion onto the property that survives: no *empty* page is written, and the page carries the addressing contract. Do not delete it.
 - [ ] 2.6 Make `ensure_media_sidecar` lane-aware rather than deriving scope and category positionally from the Evidence layout, and test the Sources case.
 
 ## 3. Sources lane ingestion
