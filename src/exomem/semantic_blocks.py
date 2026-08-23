@@ -47,6 +47,12 @@ BLOCK_TYPES: frozenset[str] = frozenset(
     }
 )
 
+#: Headings at this level or shallower are page titles rather than blocks. Every
+#: page-type template in `references/page-types.md` opens `# <Title>`, and every
+#: writer here emits `# {title}` followed by `##` sections, so the parser was the
+#: only component reading a level-1 heading as content.
+_TITLE_HEADING_LEVEL = 1
+
 _BLOCK_TYPE_ALIASES: dict[str, str] = {
     "claims": "claim",
     "findings": "finding",
@@ -339,6 +345,14 @@ def parse_semantic_blocks(
                 continue
             flush(line_number - 1)
             title = heading.group(2).strip()
+            if level <= _TITLE_HEADING_LEVEL:
+                # A level-1 heading is the page title, never a block. It still
+                # closes an open block above — that is the `flush` already done
+                # — but typing it would open a block with no closing heading,
+                # which then absorbs every `##` block in the file. A page titled
+                # `Source`, `Decision` or `Open Question` lost all of its real
+                # blocks that way, silently and with no finding.
+                continue
             block_type, kind_findings = _resolve_block_type(
                 title, resolver=kind_resolver
             )
