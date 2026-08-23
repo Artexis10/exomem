@@ -1171,7 +1171,7 @@ def test_build_turn_argv_opens_a_session_and_then_resumes_it() -> None:
     first = journey.build_turn_argv(prompt="hello", first=True, **common)
     later = journey.build_turn_argv(prompt="hello again", first=False, **common)
 
-    assert first[:3] == ["/usr/bin/claude", "-p", "hello"]
+    assert first[:3] == [str(Path("/usr/bin/claude")), "-p", "hello"]
     assert "--session-id" in first and "--resume" not in first
     assert "--resume" in later and "--session-id" not in later
     assert later[later.index("--resume") + 1] == common["session_id"]
@@ -1222,12 +1222,12 @@ def test_build_turn_argv_gives_each_arm_the_surface_its_users_get() -> None:
     assert "--plugin-dir" not in hookless
     assert (
         hookless[hookless.index("--append-system-prompt-file") + 1]
-        == "/w/custom-instructions.txt"
+        == str(Path("/w/custom-instructions.txt"))
     )
     assert hookless[hookless.index("--allowedTools") + 1] == "mcp__exomem"
 
     assert hooked[hooked.index("--tools") + 1] == "Skill"
-    assert hooked[hooked.index("--plugin-dir") + 1] == "/repo/plugins/claude-code"
+    assert hooked[hooked.index("--plugin-dir") + 1] == str(Path("/repo/plugins/claude-code"))
     assert "--append-system-prompt-file" not in hooked
     assert hooked[hooked.index("--allowedTools") + 1] == "mcp__exomem Skill"
 
@@ -1555,7 +1555,7 @@ def test_the_arm_environment_keeps_the_parent_home_and_adds_no_config_dir() -> N
     assert env["HOME"] == floor["HOME"]
     assert "CLAUDE_CONFIG_DIR" not in env
     # The EXOMEM pins still take over from anything inherited.
-    assert env["EXOMEM_VAULT_PATH"] == "/w/vault"
+    assert env["EXOMEM_VAULT_PATH"] == str(Path("/w/vault"))
     assert env["EXOMEM_HOOK_HOME"] == str(Path("/w/hook-home"))
 
 
