@@ -383,6 +383,8 @@ def test_a_seeded_planning_and_records_pair_appears_in_the_snapshot(tmp_path: Pa
 
 
 def test_the_collections_section_is_versioned(tmp_path: Path) -> None:
+    """0.3.0 adds `CollectionProjection.storage_source`; the output schema moved."""
+
     projected = VaultProjector(tmp_path).project(phase="p1", taken_at="2026-01-01T00:00:00Z")
 
-    assert projected.projector.version == "0.2.0"
+    assert projected.projector.version == "0.3.0"

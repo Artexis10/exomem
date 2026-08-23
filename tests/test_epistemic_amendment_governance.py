@@ -25,6 +25,9 @@ AMENDED_FAMILIES = ("f15", "f16", "f17", "f18", "f19")
 #: Sequence 2 (no-nudge). Registered by the same §7 path and withheld by the
 #: same receipt gate, because its acknowledgment has not landed.
 SEQUENCE_TWO_FAMILIES = ("f20", "f21", "f22", "f23", "f24", "f25", "f26")
+#: Sequence 3 (lifecycle replay). Registered by the same §7 path and withheld by
+#: the same receipt gate, for the same reason: no acknowledgment has landed.
+SEQUENCE_THREE_FAMILIES = ("f27",)
 DATASET = {
     "id": "fixture",
     "variant": "mini",
@@ -620,9 +623,9 @@ def test_acknowledged_amendment_derives_a_complete_typed_identity() -> None:
     identity = derive_preregistration_identity(ROOT)
 
     # Pinned exactly, not loosened to an inequality: a chain that silently grew
-    # a third link would otherwise satisfy every assertion below while nobody
+    # a fourth link would otherwise satisfy every assertion below while nobody
     # had adjudicated the new one.
-    assert len(identity.amendments) == 2
+    assert len(identity.amendments) == 3
     amendment = identity.amendments[0]
     assert amendment.acknowledgment_status == "acknowledged"
     assert amendment.introduced_family_ids == ("f15", "f16", "f17", "f18", "f19")
@@ -630,18 +633,23 @@ def test_acknowledged_amendment_derives_a_complete_typed_identity() -> None:
     assert amendment.contract.repository_revision != amendment.receipt.introduction_revision
     assert amendment.sequence not in {a.sequence for a in identity.pending_amendments}
 
-    # Sequence 2 is the *pending* half of the same chain, and its presence is
-    # what proves the two shapes derive side by side: an acknowledged amendment
-    # pins its amended revision from the founder, while a pending one has that
-    # revision reconstructed from its unique introduction commit.
-    pending = identity.amendments[-1]
-    assert pending.sequence == 2
-    assert pending.acknowledgment_status == "pending"
-    assert pending.introduced_family_ids == SEQUENCE_TWO_FAMILIES
-    assert pending.contract.repository_revision == pending.receipt.introduction_revision
-    assert identity.effective.sha256 == pending.contract.sha256
-    assert identity.pending_amendments == (pending,)
-    assert identity.withheld_family_ids == frozenset(SEQUENCE_TWO_FAMILIES)
+    # Sequences 2 and 3 are the *pending* half of the same chain, and their
+    # presence is what proves the two shapes derive side by side: an
+    # acknowledged amendment pins its amended revision from the founder, while a
+    # pending one has that revision reconstructed from its unique introduction
+    # commit.
+    pending_two, pending_three = identity.amendments[1], identity.amendments[2]
+    assert (pending_two.sequence, pending_three.sequence) == (2, 3)
+    for pending in (pending_two, pending_three):
+        assert pending.acknowledgment_status == "pending"
+        assert pending.contract.repository_revision == pending.receipt.introduction_revision
+    assert pending_two.introduced_family_ids == SEQUENCE_TWO_FAMILIES
+    assert pending_three.introduced_family_ids == SEQUENCE_THREE_FAMILIES
+    assert identity.effective.sha256 == pending_three.contract.sha256
+    assert identity.pending_amendments == (pending_two, pending_three)
+    assert identity.withheld_family_ids == frozenset(
+        SEQUENCE_TWO_FAMILIES + SEQUENCE_THREE_FAMILIES
+    )
 
 
 def test_the_acknowledged_amendment_releases_its_own_families() -> None:
@@ -742,7 +750,7 @@ def test_acknowledged_amendment_is_recorded_on_every_run_manifest(
     # which families backed this run and which were withheld from it without
     # reading any other artifact, which is the whole reason the field exists.
     assert manifest.preregistration_identity.withheld_family_ids == frozenset(
-        SEQUENCE_TWO_FAMILIES
+        SEQUENCE_TWO_FAMILIES + SEQUENCE_THREE_FAMILIES
     )
     assert manifest.preregistration_lineage is not None
 
@@ -888,10 +896,11 @@ def test_the_loader_gate_releases_sequence_one_and_withholds_sequence_two() -> N
 
     ``epistemic.amendments`` answers "is amendment N acknowledged?" from the
     working receipt bytes without Git, which is the cheap path the loader takes
-    per scenario.  Sequence 1 is acknowledged, so f15-f19 pass the gate; sequence
-    2 is pending, so f20-f26 are refused by the very same call.  Holding both
-    facts in one test is the point: release is a property of each receipt, not a
-    switch that was flipped once and left on.
+    per scenario.  Sequence 1 is acknowledged, so f15-f19 pass the gate;
+    sequences 2 and 3 are unacknowledged, so f20-f26 and f27 are refused by the
+    very same call, each naming its own sequence.  Holding all of it in one test
+    is the point: release is a property of each receipt, not a switch that was
+    flipped once and left on.
     """
 
     from epistemic.amendments import (
@@ -902,15 +911,21 @@ def test_the_loader_gate_releases_sequence_one_and_withholds_sequence_two() -> N
     from protocol.contracts import AmendmentAcknowledgmentPendingError
 
     reset_cache()
-    assert withheld_family_ids(ROOT) == frozenset(SEQUENCE_TWO_FAMILIES)
+    assert withheld_family_ids(ROOT) == frozenset(
+        SEQUENCE_TWO_FAMILIES + SEQUENCE_THREE_FAMILIES
+    )
     for family_id in AMENDED_FAMILIES:
         require_family_released(family_id, repo_root=ROOT)
-    for family_id in SEQUENCE_TWO_FAMILIES:
-        with pytest.raises(
-            AmendmentAcknowledgmentPendingError,
-            match=rf"amendment sequence 2 .*pending.*{family_id}",
-        ):
-            require_family_released(family_id, repo_root=ROOT)
+    for sequence, families in (
+        (2, SEQUENCE_TWO_FAMILIES),
+        (3, SEQUENCE_THREE_FAMILIES),
+    ):
+        for family_id in families:
+            with pytest.raises(
+                AmendmentAcknowledgmentPendingError,
+                match=rf"amendment sequence {sequence} .*pending.*{family_id}",
+            ):
+                require_family_released(family_id, repo_root=ROOT)
 
 
 def test_ratified_base_families_still_load() -> None:

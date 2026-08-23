@@ -1,0 +1,53 @@
+# RED fixture: a user turn that names the act of storing.
+#
+# f27 measures whether ordinary working language routes a lifecycle consequence
+# on its own. A turn that says "save this one" teaches the answer, so the corpus
+# module's pinned vocabulary refuses it — at corpus construction, and again here
+# at scenario load, which is the only gate a hand-authored fixture reaches.
+#
+# The refusal names the turn and the matched token. The family gate refuses this
+# fixture first while sequence 3 is unacknowledged, which is why the test that
+# exercises the store-bearing refusal releases the family the way the sequence-2
+# execution tests do.
+scenario_id: red-sequence3-store-bearing-utterance
+family_id: f27
+kind: operational
+public_coverage: none
+phases:
+  - phase_id: hookless
+    ops:
+      - op: configure
+        ref: hookless-maximal
+        detail: "no plugin; prominence maximal"
+      - op: agent_turn
+        ref: t01-ordinary
+        detail: "The Batch layout draft came off the press this morning."
+      - op: agent_turn
+        ref: t02-store-bearing
+        detail: "save this one"
+      - op: snapshot
+        ref: s-hookless
+    expect:
+      - assert: lifecycle_consequence_landed_unprompted
+        subject: f27-lifecycle-replay-v1
+fairness:
+  why_neutral: >-
+    The refusal under test is a loader rule, and a scenario without a complete
+    fairness packet refuses for a different reason — which would mask it.
+  public_coverage_subtraction: none
+  mechanisms:
+    - provider_role: subject
+      mechanism: projected structured collections
+      verdict: unknown
+      evidence: benchmarks/epistemic/PREREGISTRATION.md:52
+  privileged_endpoint_matrix:
+    - driver_surface_id: state.read
+      provider: fixture
+      variant: native
+      disposition: equivalent
+      audit_scope: read-only projected state
+      evidence: benchmarks/epistemic/PREREGISTRATION.md:32
+      reason: The fixture projects only documented neutral state.
+      competitor_surface: documented list/read endpoint
+  acceptance_predicate: >-
+    PREREGISTRATION.md section 4, lifecycle_consequence_landed_unprompted.

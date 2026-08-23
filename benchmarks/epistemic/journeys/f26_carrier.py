@@ -14,6 +14,12 @@ no envelope is installed, the journey refuses with
 a fallback would quietly turn a carrier test into a library test, which is the
 one substitution this family cannot survive.
 
+f27's :mod:`~epistemic.journeys.f27_replay` is the agent-driven sibling. Both
+insist on a discovered client surface; they differ in what they read back. f26
+reads only the responses, because a claim about delivery cannot be settled from
+stored state. f27 reads only the vault, because a claim about what a session
+left cannot be settled from what the agent said it did.
+
 Nothing here reads a clock. ``captured_at`` is supplied by the caller so a
 journey artifact is reproducible from its inputs.
 """

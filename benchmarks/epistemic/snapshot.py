@@ -267,6 +267,12 @@ class CollectionProjection(StrictModel):
     manifest: str = Field(min_length=1)
     title: str = ""
     schema_version: int = Field(ge=1)
+    #: The subdirectory the manifest declares its items live in (`storage.source`).
+    #: Additive and default-empty. Recorded because "is this page an item file or
+    #: a prose page someone wrote in the collection's folder?" is a question the
+    #: false-write dual has to answer, and guessing `Items/` would be the
+    #: harness inventing a contract the manifest is the authority on.
+    storage_source: str = ""
     natural_key: tuple[str, ...] = ()
     items: tuple[CollectionItem, ...] = ()
 
