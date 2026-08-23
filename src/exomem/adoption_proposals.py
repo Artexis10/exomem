@@ -28,13 +28,12 @@ from typing import Any
 
 from . import context_refs, guards
 from . import get_page as get_page_module
-from . import link as link_module
 from . import note as note_module
 from . import relation_registry as relation_registry_module
 from . import review_state as review_state_module
 from . import vault as vault_module
 from .adoption_run import AdoptionRunStore
-from .entity_types import ENTITY_TYPE_IDS
+from .entity_types import load_entity_types
 from .kbdir import kb_dirname
 
 ADOPTION_REVIEW_PREFIX = "exomem://review/adoption/"
@@ -52,18 +51,21 @@ _WORK_ITEM_CONSTRAINTS = (
     "deleted."
 )
 
-_PROPOSAL_KIND_SUMMARY = {
-    "compilation": "sources (governed Sources paths) + title + note_type + content "
-    "markdown; applied via remember",
-    "entity": f"entity_type ({'|'.join(ENTITY_TYPE_IDS)}) + name + summary "
-    "[+ slug, why_in_kb, tags, connections]; applied via create-entity",
-    "relation": "from + to + relation_type (must exist in the relation registry); "
-    "applied as a reviewed Relations bullet",
-    "reconciliation": "subject_path + duplicate_of + resolution (relate|supersede) "
-    "+ sub-kind fields",
-    "supersession": "old_path + title + note_type + content; applied via replace "
-    "(supersession chain)",
-}
+
+def _proposal_kind_summary(root: Path) -> dict[str, str]:
+    active_ids = "|".join(load_entity_types(root).active_ids)
+    return {
+        "compilation": "sources (governed Sources paths) + title + note_type + content "
+        "markdown; applied via remember",
+        "entity": f"entity_type ({active_ids}) + name + summary "
+        "[+ slug, why_in_kb, tags, connections]; applied via create-entity",
+        "relation": "from + to + relation_type (must exist in the relation registry); "
+        "applied as a reviewed Relations bullet",
+        "reconciliation": "subject_path + duplicate_of + resolution (relate|supersede) "
+        "+ sub-kind fields",
+        "supersession": "old_path + title + note_type + content; applied via replace "
+        "(supersession chain)",
+    }
 
 
 class AdoptionProposalError(Exception):
@@ -387,13 +389,14 @@ def _validate(root: Path, kind: str, payload: dict, run: dict) -> list[dict]:
         _validate_content(payload.get("content"), findings)
 
     elif kind == "entity":
-        if payload.get("entity_type") not in link_module.ENTITY_TYPES:
+        active_ids = load_entity_types(root).active_ids
+        if payload.get("entity_type") not in active_ids:
             findings.append(
                 _finding(
                     "INVALID_ENTITY_TYPE",
                     "entity_type",
                     f"entity_type {payload.get('entity_type')!r} is not one of "
-                    f"{list(link_module.ENTITY_TYPES)}",
+                    f"{list(active_ids)}",
                 )
             )
         if not str(payload.get("name") or "").strip():
@@ -592,7 +595,7 @@ def work_item(
             "junk_counts": scan_summary.get("junk_counts") or {},
         },
         "existing_context": existing_context,
-        "proposal_kinds": dict(_PROPOSAL_KIND_SUMMARY),
+        "proposal_kinds": _proposal_kind_summary(root),
         "limits": {
             "max_sources": max_sources,
             "max_chars_per_source": max_chars_per_source,

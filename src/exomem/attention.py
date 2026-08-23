@@ -1,9 +1,10 @@
 """The `attention` review surface — one ranked "what needs your review today" list.
 
-Composes the seven default measurement-only queues that `audit` already produces —
+Composes the eight default measurement-only queues that `audit` already produces —
 `bridge_review`, `prediction_window`, `supersession_integrity`,
 `corpus_contradictions`, `stale_review`,
-`unprocessed_source`, and `relation_debt` — into a single ranked list while retaining
+`unprocessed_source`, `relation_debt`, and `entity_type_unregistered` — into a
+single ranked list while retaining
 opt-in registered semantic and epistemic-lifecycle categories. The composition is pure
 measurement: each queue already emits its findings
 in intra-queue rank order, and this module fuses those ranks with Reciprocal Rank Fusion
@@ -60,6 +61,7 @@ DEFAULT_ATTENTION_CATEGORIES: tuple[str, ...] = (
     "stale_review",
     "unprocessed_source",
     "relation_debt",
+    "entity_type_unregistered",
 )
 # Registered — selectable via `categories` — but deliberately NOT default,
 # because these read old fields that a long-lived vault can already hold a large
@@ -765,6 +767,7 @@ def _apply_review_state(
             today=today,
             payload=state_payload,
         )
+        state_resolved_only = "entity_type_unregistered" in item.categories
         if effective == "open":
             # No item-level decision APPLIES (none recorded, or a snooze that has
             # since lapsed), so a competing-alternatives stance recorded on the
@@ -787,6 +790,14 @@ def _apply_review_state(
             if stances and all(stance is not None for stance in stances.values()):
                 effective = "competing"
                 decision = stances[min(stances)]
+        if state_resolved_only:
+            effective = "open"
+        for reason in item.reasons:
+            if reason.get("category") == "entity_type_unregistered":
+                reason["state_resolved_only"] = True
+                reason["decision"] = None
+            else:
+                reason["decision"] = decision.action if decision is not None else None
         item.item_id = review_id
         item.ref = review_state_module.review_ref(review_id)
         item.target_ref = target_ref

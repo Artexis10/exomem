@@ -23,6 +23,30 @@ def _fm(p: Path) -> dict:
     return yaml.safe_load(fm)
 
 
+def _write_extension_registry(vault: Path) -> None:
+    path = vault / "Knowledge Base" / "_Schema" / "entity-types.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "entity_types": {
+                    "place": {
+                        "folder": "Places",
+                        "label": "Place",
+                        "aliases": ["location"],
+                        "cue_nouns": ["venue"],
+                        "capture_guidance": "A stable place identity.",
+                        "parent": "concept",
+                    }
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+
 def test_link_creates_person_entity(vault: Path) -> None:
     result = link_module.link(
         vault,
@@ -124,8 +148,71 @@ def test_link_rejects_invalid_entity_type(vault: Path) -> None:
             summary="y",
             today=TODAY,
         )
-    assert exc.value.code == "INVALID_LINK"
+    assert exc.value.code == "ENTITY_TYPE_UNKNOWN"
     assert "entity_type" in exc.value.missing
+
+
+def test_create_entity_accepts_vault_defined_type_and_creates_its_folder_lazily(
+    vault: Path,
+) -> None:
+    _write_extension_registry(vault)
+    folder = vault / "Knowledge Base" / "Entities" / "Places"
+    assert not folder.exists()
+
+    result = link_module.link(
+        vault,
+        entity_type="place",
+        name="Aster Hall",
+        summary="A stable synthetic venue used across notes.",
+        today=TODAY,
+    )
+
+    assert result.path == "Knowledge Base/Entities/Places/Aster Hall.md"
+    assert folder.is_dir()
+    assert _fm(vault / result.path)["entity_type"] == "place"
+
+
+def test_create_entity_rejects_unknown_type_naming_active_ids(vault: Path) -> None:
+    _write_extension_registry(vault)
+
+    with pytest.raises(link_module.LinkError) as exc:
+        link_module.link(
+            vault,
+            entity_type="venue",
+            name="Unknown Hall",
+            summary="This type is not registered.",
+            today=TODAY,
+        )
+
+    assert exc.value.code == "ENTITY_TYPE_UNKNOWN"
+    assert "person" in exc.value.reason
+    assert "place" in exc.value.reason
+
+
+def test_resolve_entity_scopes_to_vault_defined_type(vault: Path) -> None:
+    _write_extension_registry(vault)
+    place = vault / "Knowledge Base" / "Entities" / "Places" / "aster-hall.md"
+    place.parent.mkdir(parents=True)
+    place.write_text(
+        "---\ntype: entity\ntitle: Aster Hall\naliases: [Aster]\n"
+        "entity_type: place\nstatus: active\n---\n# Aster Hall\n",
+        encoding="utf-8",
+    )
+    person = vault / "Knowledge Base" / "Entities" / "People" / "aster-person.md"
+    person.write_text(
+        "---\ntype: entity\ntitle: Aster Person\naliases: [Aster]\n"
+        "entity_type: person\nstatus: active\n---\n# Aster Person\n",
+        encoding="utf-8",
+    )
+
+    result = entity_candidates.resolve_entity_candidate(
+        vault,
+        name="Aster",
+        entity_type="place",
+    )
+
+    assert result["status"] == "match"
+    assert [item["entity_type"] for item in result["candidates"]] == ["place"]
 
 
 def test_link_rejects_missing_name(vault: Path) -> None:

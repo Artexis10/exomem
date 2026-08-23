@@ -10,6 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import yaml
 
 from exomem import activation_manifest
 from exomem import init as init_module
@@ -104,6 +105,35 @@ def test_force_init_reconciles_organizations_without_overwriting_entity_index(
     assert "People]] (0) — curated" in text
     assert "## Recent\n\nKeep this section." in text
     assert "Entities/Organizations/|Organizations]] (0)" in text
+
+
+def test_force_init_creates_folders_from_an_existing_entity_type_registry(
+    tmp_path: Path,
+) -> None:
+    registry = tmp_path / "Knowledge Base" / "_Schema" / "entity-types.yaml"
+    registry.parent.mkdir(parents=True)
+    registry.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "entity_types": {
+                    "place": {
+                        "folder": "Places",
+                        "label": "Place",
+                        "aliases": ["location"],
+                        "capture_guidance": "A stable synthetic place identity.",
+                        "parent": "concept",
+                    }
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    init_module.init_vault(tmp_path, force=True)
+
+    assert (tmp_path / "Knowledge Base" / "Entities" / "Places").is_dir()
 
 
 def test_init_refuses_existing_kb_without_force(tmp_path: Path) -> None:

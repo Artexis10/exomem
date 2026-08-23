@@ -8,33 +8,40 @@ to registered typed semantic categories. The operation deterministically ranks
 and deduplicates existing audit findings via Reciprocal Rank Fusion, never mutates
 the vault or changes `find` ranking, reports explicit truncation, and keeps
 bridge-review causes private and read-only.
+
 ## Requirements
+
 ### Requirement: Unified Review Surface Composed From The Epistemic Queues
 
-The default `attention` category union SHALL preserve the existing review queues
-and the already-shipped `relation_debt` queue while adding `bridge_review` and
-`prediction_window`. Its default category and tiebreak-preference order SHALL be
-`bridge_review`, `prediction_window`, `corpus_contradictions`, `stale_review`,
-`unprocessed_source`, and `relation_debt`. A queue that fires on a date the
-author wrote down SHALL outrank every queue that infers its own candidates, so
-`bridge_review` and `prediction_window` SHALL precede the remaining four; the
-relative order of those four is historical and carries no normative claim. The
-broader registered attention category set SHALL continue to admit its existing
-typed semantic categories and its opt-in epistemic-lifecycle categories.
-`attention` SHALL consume one audit pass over its selected categories and SHALL
-remain read-only. It MUST NOT re-implement the queues — it consumes the findings
-the existing checks already produce.
+The default `attention` category union SHALL preserve the existing review queues and the already-shipped `relation_debt` queue while adding `bridge_review` and deterministic `entity_type_unregistered` audit findings. Its default category and tiebreak-preference order SHALL retain the existing ordering and SHALL compose unregistered entity types without giving them a dismiss-to-silence path. The broader registered attention category set SHALL continue to admit its existing typed semantic categories. `attention` SHALL consume one audit pass over its selected categories and SHALL remain read-only.
 
-`bridge_review` SHALL use read-only reference resolution; it SHALL not write
-canonical governance facts or review state during scanning. A release grant's
-bridge SHALL surface per approved audience for only these generic,
-bridge-path-anchored causes: due review date, bridge edited/stale approval,
-source or relevant restriction changed, and source unavailable/ambiguous. Detail,
-metadata, related paths, review context, and public responses SHALL not disclose
-restricted source title, path, ref, or other provenance.
+`bridge_review` SHALL use read-only reference resolution; it SHALL not write canonical governance facts or review state during scanning. A release grant's bridge SHALL surface per approved audience for only these generic, bridge-path-anchored causes: due review date, bridge edited/stale approval, source or relevant restriction changed, and source unavailable/ambiguous. Detail, metadata, related paths, review context, and public responses SHALL not disclose restricted source title, path, ref, or other provenance.
+
+#### Scenario: Default attention composes the effective queue union
+
+- **WHEN** `attention` is called without a category filter
+- **THEN** it composes bridge review, contradiction, stale-review, unprocessed source, relation-debt, and unregistered-entity-type findings without removing any existing queue
+- **AND** no file under the vault is created, modified, moved, or deleted
+
+#### Scenario: Category subset and registered-category validation
+
+- **WHEN** `attention` is called with `categories=["entity_type_unregistered"]`
+- **THEN** only unregistered-entity-type items are surfaced
+- **AND** the registered existing categories remain accepted while an unregistered category raises a `ValueError` naming the valid set
+
+#### Scenario: Unregistered type resolves only from state
+
+- **WHEN** an unregistered-type attention item is dismissed or snoozed without changing the registry or pages
+- **THEN** unchanged audit state remains eligible to surface
+- **AND** every reason reports a `decision` key, with the recorded action on ordinary reasons and `null` on state-resolved-only reasons
+- **AND** registering the type or moving the pages clears the item on the next pass
+
+#### Scenario: Source drift produces a private bridge finding
+
+- **WHEN** an approved dependency changes, is deleted, or resolves ambiguously
+- **THEN** the bridge surfaces with a generic `bridge_review` cause and no source provenance
 
 #### Scenario: All four queues compose into one list
-
 - **WHEN** `attention` is called with the historical four-queue category subset over a vault that has
   stale, contradiction, unprocessed-source, and relation-debt findings
 - **THEN** it returns a single `items` list drawn from all four queues, plus a
@@ -42,40 +49,16 @@ restricted source title, path, ref, or other provenance.
 - **AND** no governed note under the vault is created, modified, moved, or deleted
 
 #### Scenario: Category subset and invalid category
-
 - **WHEN** `attention` is called with `categories=["relation_debt"]`
 - **THEN** only relation-debt items are surfaced
 - **AND** calling it with an unregistered category raises a `ValueError` naming
   the complete registered set
 
-#### Scenario: Default attention composes the effective queue union
-
-- **WHEN** `attention` is called without a category filter
-- **THEN** it composes bridge review, prediction window, contradiction,
-  stale-review, unprocessed source, and relation-debt findings in the stated
-  default order without removing any existing queue
-- **AND** no file under the vault is created, modified, moved, or deleted
-
 #### Scenario: A due prediction reaches the daily surface unasked
-
 - **WHEN** `attention` is called without a category filter over a vault holding a
   due, unresolved prediction
 - **THEN** that prediction is surfaced as a ranked review item without the caller
   naming the `prediction_window` category
-
-#### Scenario: Category subset and registered-category validation
-
-- **WHEN** `attention` is called with `categories=["bridge_review"]`
-- **THEN** only bridge-review items are surfaced
-- **AND** `bridge_review`, `prediction_window`, `relation_debt`, and registered
-  typed semantic categories are accepted, while an unregistered category raises a
-  `ValueError` naming the valid set
-
-#### Scenario: Source drift produces a private bridge finding
-
-- **WHEN** an approved dependency changes, is deleted, or resolves ambiguously
-- **THEN** the bridge surfaces with a generic `bridge_review` cause and no source
-  provenance
 
 ### Requirement: Deterministic Cross-Queue Ranking By Reciprocal Rank Fusion
 
@@ -784,4 +767,24 @@ The store SHALL use a sectioned schema holding records, dispositions, the surfac
 - **WHEN** the store is built with fifty thousand decision records and one hundred fifty thousand ledger entries
 - **THEN** load, one lookup, one apply, and one compaction each complete within their pinned budgets
 - **AND** the compacted file is under the read limit
+
+### Requirement: Plan-progress review is a standalone mode outside the Epistemic Inbox
+
+Planned-versus-recorded review SHALL be a standalone read-only `review_memory` mode and SHALL NOT be an attention category. It SHALL NOT contribute items to the default `attention` union or to any registered typed semantic category, SHALL NOT participate in Reciprocal Rank Fusion or any other cross-queue ranking, SHALL NOT mint `exomem://review/<id>` references or signal fingerprints, and SHALL NOT be reachable by `review_item_context`, `triage_memory`, snooze, dismiss, or any other disposition.
+
+The reason is the adjudication boundary the attention queue already draws. Inbox items exist so a reviewer can dispose of a proposed finding; plan-progress divergence is a measured fact about authored intent and recorded observation that the human interprets directly. Enrolling it would also require a rank, and ranking plans by divergence would be exactly the derived judgment the review refuses to make. The existing attention categories, ordering, fusion, dedup, and truncation behaviour SHALL remain unchanged by this mode.
+
+#### Scenario: Default attention union is unchanged
+- **WHEN** `review_memory(mode="attention")` runs over a vault whose Planning items diverge from their recorded evidence
+- **THEN** the composed queue union, its default category order, and its counts are exactly what they were before plan-progress review existed
+- **AND** no plan, evidence binding, or divergence count appears as an attention item
+
+#### Scenario: Plan-progress produces no triageable reference
+- **WHEN** a plan-progress review returns items with unresolved bindings and zero completion observations
+- **THEN** the response carries plan references rather than review references
+- **AND** no returned identifier can be snoozed, dismissed, or otherwise triaged
+
+#### Scenario: Review state store is untouched
+- **WHEN** a plan-progress review runs
+- **THEN** no review-state entry, fingerprint, or disposition is read for adjudication or written
 
