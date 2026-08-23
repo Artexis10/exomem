@@ -36,7 +36,7 @@ media capture is safe to offer.
 - [x] 4.1 Test that `capture_source` with a text file handle stores bytes under `Sources/`, applies the supplied kind, domain, and projects, and passes no base64 through a model-visible argument.
 - [x] 4.2 Test that `capture_source` with an image file handle produces a media page awaiting extraction, and that the existing extraction path converges on it without destroying its classification.
 - [x] 4.3 Test that the artifact and its page share one resolved stem, that naming authority is `add`'s uniquify rather than an `ARTIFACT_EXISTS` refusal, and that the original filename is recorded in frontmatter rather than used as the path.
-- [ ] 4.4 Test that a byte-identical retry within the replay window returns the cached terminal result and does not write a second uniquified copy.
+- [x] 4.4 Test that a byte-identical retry within the replay window returns the cached terminal result and does not write a second uniquified copy. Measured: the handle is staged once, the two results are identical, and one artifact is stored. Replay is keyed at the lease layer and is independent of the narrow-boundary set.
 - [x] 4.5 Test that safe-fetch behaviour is shared, not re-implemented: a private-address URL, an oversized body, and an expired handle each fail through the Sources path with the same stable codes as the Evidence path.
 - [x] 4.6 Add `files` to `capture_source`, reusing the existing staging function and the existing file-handle type; persist through a Sources destination that reuses `add`'s taxonomy, indexes, and log writes.
 - [x] 4.7 Test that `preserve_artifacts` and `preserve_evidence` are unchanged: same destination, same per-file outcomes, same failure codes.
@@ -45,8 +45,8 @@ media capture is safe to offer.
 
 - [x] 5.1 Test that the same bytes reach different lanes purely by which command was called, for a text file and for an image.
 - [x] 5.2 Test that no lane decision reads MIME type, filename, or extension — assert by capturing an image through the Sources command and a `.md` file through the Evidence command.
-- [ ] 5.3 Test that a minted upload capability names its lane and that bytes posted against it land in that lane.
-- [ ] 5.4 Carry the lane on `transfer_artifact` and `/upload`, fixing the destination when the capability is minted rather than when the bytes arrive.
+- [x] 5.3 Test that a minted upload capability names its lane and that bytes posted against it land in that lane.
+- [x] 5.4 Carry the lane on `transfer_artifact` and `/upload`, fixing the destination when the capability is minted rather than when the bytes arrive. The lane is signed **into** the token's scope rather than carried beside it, so it is fixed at mint time and cannot be swapped by whoever posts the bytes; `evidence` signs the bare `upload` scope so every token issued before lanes existed keeps verifying. The hosted transfer-grant route is a separate mechanism and is not covered here.
 
 ## 6. Promotion and Evidence semantics are untouched
 
@@ -74,6 +74,10 @@ media capture is safe to offer.
 - [x] 9.4 Run `openspec validate ingest-attachments-as-sources --strict` and `openspec validate --specs --strict`.
 - [x] 9.5 Run the affected suites, plus lint, plus the tool-surface fidelity test.
 
-## 10. Closure
+## 10. Follow-up filed, not fixed here
 
-- [ ] 10.1 Once this change is merged and therefore demonstrably shipped, sync its deltas into `openspec/specs/` and archive it with `openspec archive` in the same delivery, re-running `openspec validate --all --strict` before and after. Left open deliberately: archiving before the merge would claim a shipped state that does not exist yet, and the archive-discipline check treats a fully-ticked active change as debt.
+- [ ] 10.1 `capture_source` is not in `writer_lease._NARROW_BOUNDARY_COMMANDS`, so unlike its Evidence twin `preserve_artifacts` it holds the wide mutation boundary across network retrieval — up to eight fetches against a 60-second batch deadline, blocking every other writer for the duration. Adding the name unconditionally is not the fix: it would also move the boundary for an ordinary text capture, which relies on the wide guard. The boundary needs to follow the invocation rather than the command name.
+
+## 11. Closure
+
+- [ ] 11.1 Once this change is merged and therefore demonstrably shipped, sync its deltas into `openspec/specs/` and archive it with `openspec archive` in the same delivery, re-running `openspec validate --all --strict` before and after. Left open deliberately: archiving before the merge would claim a shipped state that does not exist yet, and the archive-discipline check treats a fully-ticked active change as debt.

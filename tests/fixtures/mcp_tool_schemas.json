@@ -5667,13 +5667,18 @@
     }
   },
   "transfer_artifact": {
-    "description": "Prepare out-of-band binary artifact transfer.\n\nCompatibility transport for clients that cannot supply file handles to\n`preserve_artifacts`. Returns a short-lived token and URL for uploading\nevidence binaries or downloading a vault file into a sandbox. Minting an\nupload token does not mean bytes were stored.",
+    "description": "Prepare out-of-band binary artifact transfer.\n\nCompatibility transport for clients that cannot supply file handles to\n`capture_source` or `preserve_artifacts`. Returns a short-lived token and URL\nfor uploading a binary or downloading a vault file into a sandbox. Minting an\nupload token does not mean bytes were stored.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
         "operation": {
           "default": "upload",
           "description": "upload or download.",
+          "type": "string"
+        },
+        "lane": {
+          "default": "evidence",
+          "description": "where an upload lands — `source` for raw material, `evidence` for proof-bearing artifacts. Bound into the token when it is minted, so the destination cannot be chosen by whoever posts the bytes. Ignored for downloads.",
           "type": "string"
         },
         "response_detail": {

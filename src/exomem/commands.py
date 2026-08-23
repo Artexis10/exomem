@@ -5353,20 +5353,30 @@ def op_preserve_artifacts(
     )
 
 
-def op_transfer_artifact(vault_root: Path, operation: str = "upload") -> dict:
+def op_transfer_artifact(
+    vault_root: Path, operation: str = "upload", lane: str = "evidence"
+) -> dict:
     """Prepare out-of-band binary artifact transfer.
 
     Compatibility transport for clients that cannot supply file handles to
-    `preserve_artifacts`. Returns a short-lived token and URL for uploading
-    evidence binaries or downloading a vault file into a sandbox. Minting an
+    `capture_source` or `preserve_artifacts`. Returns a short-lived token and URL
+    for uploading a binary or downloading a vault file into a sandbox. Minting an
     upload token does not mean bytes were stored.
 
     Args:
         operation: upload or download.
+        lane: where an upload lands — `source` for raw material, `evidence` for
+            proof-bearing artifacts. Bound into the token when it is minted, so
+            the destination cannot be chosen by whoever posts the bytes. Ignored
+            for downloads.
     """
     _ = vault_root
     if operation not in ("upload", "download"):
         raise ValueError("INVALID_MODE: transfer_artifact operation must be 'upload' or 'download'")
+    if lane not in upload_tokens.UPLOAD_LANES:
+        raise ValueError(
+            f"INVALID_MODE: transfer_artifact lane must be one of {upload_tokens.UPLOAD_LANES}"
+        )
     secret = os.environ.get("EXOMEM_UPLOAD_TOKEN", "").strip() or None
     base_url = os.environ.get("EXOMEM_BASE_URL", "").strip().rstrip("/")
     large_base_url = os.environ.get("EXOMEM_LARGE_UPLOAD_BASE_URL", "").strip().rstrip("/") or None
@@ -5375,6 +5385,7 @@ def op_transfer_artifact(vault_root: Path, operation: str = "upload") -> dict:
         base_url,
         scope=operation,
         large_base_url=large_base_url if operation == "upload" else None,
+        lane=lane if operation == "upload" else None,
     )
 
 

@@ -205,11 +205,30 @@ fixed once, in the resolver, rather than by teaching each caller a naming rule.
 ## Transport does not decide the lane
 
 `transfer_artifact` mints a token and `/upload` receives the bytes, and both
-land in Evidence because that is the only destination `preserve_stream` has.
+landed in Evidence because that was the only destination `preserve_stream` has.
 Clients that cannot expose file handles would otherwise keep the original defect
-in a second place. Both take the lane as an explicit parameter, carried on the
-minted capability so the destination is fixed when the token is issued rather
-than chosen by whoever posts the bytes.
+in a second place.
+
+The lane is signed **into** the token's scope — `upload` for evidence,
+`upload:source` for sources — rather than carried beside it as a header or a
+form field. That is what makes the destination a property of the capability: it
+is fixed when the token is minted and cannot be swapped in transit or chosen by
+whoever posts the bytes. Evidence keeps the bare `upload` scope, so every token
+minted before lanes existed still verifies and still lands where it used to. A
+shared static secret or a Cloudflare Access identity carries no lane and falls
+back to evidence for the same reason.
+
+The title for a Sources upload does come off the form, and that is not an
+inconsistency: a title is ordinary data, not an authorization claim, and it
+falls back to the filename so a capture is never refused for want of a label.
+
+The bytes are spooled to a private temporary file before `add` runs, because
+`add` copies from a path and writes the artifact and its page in one operation —
+a half-consumed request stream could not be replayed if that operation refused.
+
+Out of scope, and named rather than assumed: the hosted transfer-grant route is
+a different mechanism from these tokens, so carrying a lane there is its own
+change.
 
 ## Promotion has to move a pair, and does not yet
 

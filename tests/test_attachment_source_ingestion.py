@@ -1067,3 +1067,143 @@ def test_capture_source_accepts_files_through_the_mcp_surface(
     # The page is derivable from it, which is why dropping `page` costs nothing.
     assert (vault / f"{stored_path}.md").exists()
     assert outcome["hash_algorithm"] == "sha256"
+
+
+# --------------------------------------------------------------------------
+# 5.3 / 5.4 The out-of-band transport carries the lane
+# --------------------------------------------------------------------------
+
+
+def test_a_minted_upload_capability_names_its_lane() -> None:
+    """The destination is fixed when the token is issued, not when bytes arrive.
+
+    Otherwise the fallback transport reintroduces the original defect for every
+    client that cannot expose file handles: whoever posts the bytes would pick
+    the lane, and the convenient choice would be whatever the form defaulted to.
+    """
+    from exomem import upload_tokens
+
+    secret = "test-secret"
+    evidence = upload_tokens.mint_for_endpoint(secret, "https://example.invalid")
+    source = upload_tokens.mint_for_endpoint(
+        secret, "https://example.invalid", lane="source"
+    )
+
+    assert evidence["lane"] == "evidence"
+    assert source["lane"] == "source"
+    assert evidence["upload_url"] == source["upload_url"] == "https://example.invalid/upload"
+    assert evidence["token"] != source["token"]
+
+
+def test_a_lane_bound_token_does_not_verify_for_the_other_lane() -> None:
+    """The lane rides inside the signature, so it cannot be swapped in transit."""
+    from exomem import upload_tokens
+
+    secret = "test-secret"
+    source_token = upload_tokens.mint(secret, scope=upload_tokens.upload_scope("source"))
+
+    assert upload_tokens.verify(
+        source_token, secret, scope=upload_tokens.upload_scope("source")
+    )
+    assert not upload_tokens.verify(
+        source_token, secret, scope=upload_tokens.upload_scope("evidence")
+    )
+
+
+def test_transfer_artifact_refuses_an_unknown_lane(vault: Path) -> None:
+    from exomem import commands
+
+    with pytest.raises(ValueError, match="INVALID_MODE"):
+        commands.op_transfer_artifact(vault, operation="upload", lane="wherever")
+
+
+def test_an_upload_lands_in_the_lane_its_token_was_minted_for(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The out-of-band fallback must not decide epistemics either.
+
+    Posting the same bytes with a source-bound capability and an evidence-bound
+    one must reach different trees, with the form identical in both cases.
+    """
+    from starlette.testclient import TestClient
+
+    from exomem import server, upload_tokens
+
+    secret = "upload-secret"
+    monkeypatch.setattr(server, "load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "leases"))
+    monkeypatch.setenv("EXOMEM_UPLOAD_TOKEN", secret)
+    monkeypatch.setenv("EXOMEM_DISABLE_RELEVANCE_CHECK", "1")
+    monkeypatch.setenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", "1")
+    monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
+
+    client = TestClient(server.build_server(require_auth=False).http_app())
+    payload = b"Speaker A: the pier reopened."
+
+    def _post(lane: str, filename: str) -> dict:
+        token = upload_tokens.mint(secret, scope=upload_tokens.upload_scope(lane))
+        response = client.post(
+            "/upload",
+            headers={"Authorization": f"Bearer {token}"},
+            files={"file": (filename, payload, "text/plain")},
+            data={"scope": "riverside", "category": "transcripts", "title": f"Wire {lane}"},
+        )
+        assert response.status_code in (200, 201), response.text
+        return response.json()
+
+    as_source = _post("source", "source-copy.txt")
+    as_evidence = _post("evidence", "evidence-copy.txt")
+
+    source_path = as_source.get("artifact_path") or as_source.get("path")
+    assert source_path.startswith("Knowledge Base/Sources/"), as_source
+    assert as_evidence["path"].startswith("Knowledge Base/Evidence/"), as_evidence
+    assert (vault / source_path).read_bytes() == payload
+    assert (vault / as_evidence["path"]).read_bytes() == payload
+
+
+def test_a_byte_identical_retry_replays_instead_of_capturing_twice(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A lost acknowledgement must not cost a duplicate capture.
+
+    Naming is uniquify-on-collision, so a retry that re-ran would store a second
+    copy under `-2` rather than refusing — silent duplication, which is worse
+    than an error. Replay is keyed on the idempotency key at the lease layer and
+    is independent of the narrow-boundary set `preserve_artifacts` belongs to.
+    """
+    from exomem import client_artifacts, commands, schema, writer_lease
+
+    blob = tmp_path / "transcript.txt"
+    blob.write_bytes(b"raw material")
+    staged: list[str] = []
+
+    def _stage(file, _budget, **_kwargs):
+        staged.append(str(file["file_id"]))
+        return client_artifacts.StagedArtifact(
+            file_id=str(file["file_id"]), path=blob, size=blob.stat().st_size,
+            sha256="a" * 64, content_type="text/plain", filename="transcript.txt",
+        )
+
+    monkeypatch.setattr(client_artifacts, "stage_artifact", _stage)
+    command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "capture_source")
+    source_schema_obj = schema.load_source_schema(vault)
+    files = [{"download_url": "https://files.example/1", "file_id": "f1"}]
+
+    first = writer_lease.invoke_command(
+        command, vault, source_schema=source_schema_obj, title="Retried capture",
+        files=files, idempotency_key="retry-key",
+    )
+    replay = writer_lease.invoke_command(
+        command, vault, source_schema=source_schema_obj, title="Retried capture",
+        files=files, idempotency_key="retry-key",
+    )
+
+    assert first == replay
+    assert staged == ["f1"], "the retry re-fetched the handle"
+    stored = [
+        path
+        for path in (vault / "Knowledge Base" / "Sources").rglob("*")
+        if path.is_file() and not path.name.endswith(".md")
+    ]
+    assert len(stored) == 1, [str(p) for p in stored]
