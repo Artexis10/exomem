@@ -3,11 +3,18 @@ parent-vault wikilinks must resolve (SKILL.md rule 1 allows them)."""
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
+from exomem import attention as attention_module
 from exomem import audit as audit_module
+from exomem import commands
+from exomem import entity_types as entity_types_module
+from exomem import review_state as review_state_module
 
 
 def test_audit_and_reconcile_import_in_fresh_process() -> None:
@@ -19,6 +26,424 @@ def test_audit_and_reconcile_import_in_fresh_process() -> None:
     )
 
     assert imported.returncode == 0, imported.stderr
+
+
+def _write_entity(
+    vault: Path,
+    *,
+    folder: str,
+    name: str,
+    entity_type: str,
+) -> Path:
+    path = vault / "Knowledge Base" / "Entities" / folder / f"{name}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"---\ntype: entity\ntitle: {name}\nentity_type: {entity_type}\n"
+        "status: active\ncreated: 2026-08-22\nupdated: 2026-08-22\n---\n"
+        f"# {name}\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _save_proposal(
+    vault: Path,
+    proposal: dict,
+    *,
+    expected_hash: str | None = None,
+) -> None:
+    result = commands.op_schema_memory(
+        vault,
+        operation="save-entity-types",
+        proposal=proposal,
+        why="Register the synthetic type offered by attention.",
+        expected_hash=expected_hash,
+    )
+    assert result["valid"] is True
+
+
+def test_unregistered_entity_type_is_an_attention_finding_with_proposed_entry(
+    tmp_path: Path,
+) -> None:
+    page = _write_entity(
+        tmp_path,
+        folder="Places",
+        name="Aster Hall",
+        entity_type="place",
+    )
+
+    report = attention_module.attention(
+        tmp_path,
+        categories=["entity_type_unregistered"],
+    )
+
+    assert len(report.items) == 1
+    item = report.items[0]
+    assert item.path == page.relative_to(tmp_path).as_posix()
+    assert item.categories == ["entity_type_unregistered"]
+    assert item.reasons[0]["meta"]["proposed_entry"] == {
+        "id": "place",
+        "folder": "Places",
+        "label": "Place",
+        "aliases": [],
+        "page_count": 1,
+    }
+
+
+def test_unregistered_type_finding_guides_to_the_full_proposal(
+    tmp_path: Path,
+) -> None:
+    _save_proposal(
+        tmp_path,
+        {
+            "schema_version": 1,
+            "entity_types": {
+                "venue": {
+                    "folder": "Venues",
+                    "label": "Venue",
+                    "aliases": [],
+                    "capture_guidance": "A stable synthetic venue identity.",
+                }
+            },
+        },
+    )
+    _write_entity(
+        tmp_path,
+        folder="Places",
+        name="Aster Hall",
+        entity_type="place",
+    )
+
+    finding = audit_module.audit(
+        tmp_path, categories=["entity_type_unregistered"]
+    ).findings[0]
+    meta = finding.meta
+
+    assert "meta.proposal" in finding.proposed_fix
+    assert "expected_hash" in finding.proposed_fix
+    assert "capture_guidance" not in meta["proposed_entry"]
+    _save_proposal(
+        tmp_path,
+        meta["proposal"],
+        expected_hash=meta["expected_hash"],
+    )
+    assert set(entity_types_module.load_entity_types(tmp_path).extensions) == {
+        "place",
+        "venue",
+    }
+
+
+def test_stale_offer_is_refused_after_an_interleaving_registration(
+    tmp_path: Path,
+) -> None:
+    _write_entity(
+        tmp_path,
+        folder="Halls",
+        name="Aster Hall",
+        entity_type="hall",
+    )
+    offer = audit_module.audit(
+        tmp_path, categories=["entity_type_unregistered"]
+    ).findings[0].meta
+    _save_proposal(
+        tmp_path,
+        {
+            "schema_version": 1,
+            "entity_types": {
+                "gadget": {
+                    "folder": "Gadgets",
+                    "label": "Gadget",
+                    "aliases": [],
+                    "capture_guidance": "A stable synthetic gadget identity.",
+                }
+            },
+        },
+    )
+
+    with pytest.raises(ValueError, match="STALE_ENTITY_TYPE_REGISTRY"):
+        _save_proposal(
+            tmp_path,
+            offer["proposal"],
+            expected_hash=offer["expected_hash"],
+        )
+
+    assert set(entity_types_module.load_entity_types(tmp_path).extensions) == {
+        "gadget"
+    }
+
+
+def test_proposal_is_emitted_once_per_distinct_type_and_folder(
+    tmp_path: Path,
+) -> None:
+    _save_proposal(
+        tmp_path,
+        {
+            "schema_version": 1,
+            "entity_types": {
+                f"kind-{index:02d}": {
+                    "folder": f"Kind{index:02d}s",
+                    "label": f"Kind {index:02d}",
+                    "aliases": [],
+                    "capture_guidance": "A stable synthetic identity.",
+                }
+                for index in range(40)
+            },
+        },
+    )
+    for index in range(30):
+        _write_entity(
+            tmp_path,
+            folder="Places",
+            name=f"Aster Hall {index:02d}",
+            entity_type="place",
+        )
+
+    findings = audit_module.audit(
+        tmp_path, categories=["entity_type_unregistered"]
+    ).findings
+    carriers = [finding for finding in findings if "proposal" in finding.meta]
+    references = [
+        finding for finding in findings if "proposal_carrier" in finding.meta
+    ]
+
+    assert len(carriers) == 1
+    assert len(references) == 29
+    assert all(
+        finding.meta["proposal_carrier"] == carriers[0].path
+        for finding in references
+    )
+    carrier_bytes = len(json.dumps(carriers[0].meta, sort_keys=True))
+    total_bytes = sum(
+        len(json.dumps(finding.meta, sort_keys=True)) for finding in findings
+    )
+    assert total_bytes < 4 * carrier_bytes
+
+
+def test_one_unregistered_id_across_folders_yields_one_proposal(
+    tmp_path: Path,
+) -> None:
+    for folder, names in (
+        ("Rooms", ("Aster", "Beryl")),
+        ("Halls", ("Cedar", "Dahlia", "Elm")),
+    ):
+        for name in names:
+            _write_entity(
+                tmp_path,
+                folder=folder,
+                name=name,
+                entity_type="place",
+            )
+
+    findings = audit_module.audit(
+        tmp_path, categories=["entity_type_unregistered"]
+    ).findings
+    carriers = [finding for finding in findings if "proposal" in finding.meta]
+
+    assert len(carriers) == 2
+    assert {finding.meta["proposed_entry"]["folder"] for finding in findings} == {
+        "Halls"
+    }
+    assert len(
+        {json.dumps(finding.meta["proposal"], sort_keys=True) for finding in carriers}
+    ) == 1
+
+
+def test_unregistered_type_finding_resolves_when_the_type_is_registered(
+    tmp_path: Path,
+) -> None:
+    _write_entity(
+        tmp_path,
+        folder="Places",
+        name="Aster Hall",
+        entity_type="place",
+    )
+    before = audit_module.audit(tmp_path, categories=["entity_type_unregistered"])
+    assert len(before.findings) == 1
+
+    offer = before.findings[0].meta
+    _save_proposal(tmp_path, offer["proposal"])
+    after = audit_module.audit(tmp_path, categories=["entity_type_unregistered"])
+
+    assert after.findings == []
+
+
+def test_unregistered_type_under_a_core_folder_proposes_a_non_colliding_entry(
+    tmp_path: Path,
+) -> None:
+    _write_entity(
+        tmp_path,
+        folder="People",
+        name="Aster Mentor",
+        entity_type="mentor",
+    )
+    before = audit_module.audit(tmp_path, categories=["entity_type_unregistered"])
+
+    assert len(before.findings) == 1
+    offer = before.findings[0].meta
+    proposed_entry = offer["proposed_entry"]
+    assert proposed_entry["id"] == "mentor"
+    assert proposed_entry["folder"] != "People"
+    assert proposed_entry["parent"] == "person"
+
+    _save_proposal(tmp_path, offer["proposal"])
+    after = audit_module.audit(tmp_path, categories=["entity_type_unregistered"])
+
+    assert after.findings == []
+
+
+def test_proposed_entry_avoids_folders_owned_by_existing_extensions(
+    tmp_path: Path,
+) -> None:
+    _save_proposal(
+        tmp_path,
+        {
+            "schema_version": 1,
+            "entity_types": {
+                "venue": {
+                    "folder": "Places",
+                    "label": "Venue",
+                    "aliases": [],
+                    "capture_guidance": "A stable synthetic venue identity.",
+                }
+            },
+        },
+    )
+    _write_entity(
+        tmp_path,
+        folder="Places",
+        name="Aster Hall",
+        entity_type="place",
+    )
+    _write_entity(
+        tmp_path,
+        folder="Places",
+        name="Beryl Hall",
+        entity_type="venue",
+    )
+
+    before = audit_module.audit(tmp_path, categories=["entity_type_unregistered"])
+
+    assert len(before.findings) == 1
+    offer = before.findings[0].meta
+    assert offer["proposed_entry"]["folder"] != "Places"
+    assert offer["proposed_entry"]["page_count"] == 1
+    current_hash = entity_types_module.load_entity_types(tmp_path).extension_hash
+    _save_proposal(
+        tmp_path,
+        offer["proposal"],
+        expected_hash=current_hash,
+    )
+
+    registry = entity_types_module.load_entity_types(tmp_path)
+    assert set(registry.extensions) == {"place", "venue"}
+    after = audit_module.audit(tmp_path, categories=["entity_type_unregistered"])
+    assert after.findings == []
+
+
+def test_proposed_entry_is_null_with_reason_when_no_clean_entry_exists(
+    tmp_path: Path,
+) -> None:
+    _save_proposal(
+        tmp_path,
+        {
+            "schema_version": 1,
+            "entity_types": {
+                "venue": {
+                    "folder": "Venues",
+                    "label": "Venue",
+                    "aliases": ["places"],
+                    "capture_guidance": "A stable synthetic venue identity.",
+                }
+            },
+        },
+    )
+    for name in ("Aster", "Beryl", "Cedar"):
+        _write_entity(tmp_path, folder="Places", name=name, entity_type="concept")
+
+    report = audit_module.audit(tmp_path, categories=["entity_type_unregistered"])
+
+    assert len(report.findings) == 1
+    assert report.findings[0].meta["proposed_entry"] is None
+    assert report.findings[0].meta["reason"]
+
+
+def test_proposed_entry_validation_is_memoized_per_type_and_folder(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    for name in ("Aster Hall", "Beryl Hall"):
+        _write_entity(
+            tmp_path,
+            folder="Places",
+            name=name,
+            entity_type="place",
+        )
+    calls = 0
+    original = entity_types_module.validate_proposal
+
+    def counted_validate(proposal: dict) -> list[dict[str, str]]:
+        nonlocal calls
+        calls += 1
+        return original(proposal)
+
+    monkeypatch.setattr(entity_types_module, "validate_proposal", counted_validate)
+
+    report = audit_module.audit(tmp_path, categories=["entity_type_unregistered"])
+
+    assert len(report.findings) == 2
+    assert calls == 1
+
+
+def test_unregistered_type_finding_cannot_be_dismissed_to_silence(
+    tmp_path: Path,
+) -> None:
+    _write_entity(
+        tmp_path,
+        folder="Places",
+        name="Aster Hall",
+        entity_type="place",
+    )
+    item = attention_module.attention(
+        tmp_path,
+        categories=["entity_type_unregistered"],
+    ).items[0]
+    review_state_module.ReviewStateStore(tmp_path).apply(
+        item.item_id,
+        item.fingerprint,
+        action="dismiss",
+        why="Leave the authored state unchanged.",
+    )
+
+    refreshed = attention_module.attention(
+        tmp_path,
+        categories=["entity_type_unregistered"],
+        state="open",
+    )
+
+    assert len(refreshed.items) == 1
+    assert refreshed.items[0].state == "open"
+
+
+def test_three_pages_under_an_unregistered_folder_trigger_the_finding_two_do_not(
+    tmp_path: Path,
+) -> None:
+    for name in ("Aster", "Beryl"):
+        _write_entity(tmp_path, folder="Venues", name=name, entity_type="concept")
+
+    two = audit_module.audit(tmp_path, categories=["entity_type_unregistered"])
+    assert two.findings == []
+
+    _write_entity(tmp_path, folder="Venues", name="Cedar", entity_type="concept")
+    three = audit_module.audit(tmp_path, categories=["entity_type_unregistered"])
+
+    assert len(three.findings) == 1
+    assert three.findings[0].meta["proposed_entry"] == {
+        "id": "venues",
+        "folder": "Venues",
+        "label": "Venues",
+        "aliases": [],
+        "page_count": 3,
+    }
 
 
 def test_forward_reference_findings_have_non_empty_path(vault: Path) -> None:

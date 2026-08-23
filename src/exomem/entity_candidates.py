@@ -6,7 +6,7 @@ import unicodedata
 from pathlib import Path
 
 from . import memory_refs
-from .entity_types import ENTITY_TYPE_REGISTRY, resolve_entity_type
+from .entity_types import load_entity_types
 from .kbdir import kb_prefix
 from .vault import kb_root, parse_frontmatter, read_guarded_text
 
@@ -38,16 +38,20 @@ def resolve_entity_candidate(
     needle = identity_key(name)
     if not needle:
         return {"status": "no_match", "candidates": [], "omitted_candidate_count": 0}
+    registry = load_entity_types(vault_root)
     kind_filter = None
     if entity_type is not None:
-        kind = resolve_entity_type(entity_type)
+        kind = registry.resolve(entity_type)
         if kind is None:
-            raise ValueError(f"INVALID_LINK: unregistered entity_type {entity_type!r}")
+            raise ValueError(
+                f"ENTITY_TYPE_UNKNOWN: entity_type {entity_type!r} is not active. "
+                f"Active ids: {list(registry.active_ids)}"
+            )
         kind_filter = kind.id
 
     matches: list[dict[str, str]] = []
     entities_root = kb_root(vault_root) / "Entities"
-    for definition in ENTITY_TYPE_REGISTRY:
+    for definition in registry.active_definitions:
         folder = entities_root / definition.folder
         if not folder.is_dir():
             continue
@@ -65,7 +69,7 @@ def resolve_entity_candidate(
                 or str(frontmatter.get("status") or "").casefold() != "active"
             ):
                 continue
-            registered = resolve_entity_type(str(frontmatter.get("entity_type") or ""))
+            registered = registry.resolve(str(frontmatter.get("entity_type") or ""))
             if registered is None or (
                 kind_filter is not None and registered.id != kind_filter
             ):

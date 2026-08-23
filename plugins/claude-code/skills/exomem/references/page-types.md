@@ -460,6 +460,36 @@ active entity registry exposed by bootstrap.
 
 **Required frontmatter:** `type: entity`, `entity_type`, `status`, `created`, `updated`, `tags`. Optional fields by entity-type.
 
+Vaults extend the five core kinds through the user-owned
+`_Schema/entity-types.yaml` registry. The governed save operation validates the
+whole proposal before writing it; deprecated types stay recorded rather than
+being deleted. An unregistered-type finding supplies `proposal` and
+`expected_hash`; save those exact values with a `why` through
+`schema_memory(operation="save-entity-types")`. Its `proposed_entry` is only a
+description, not a registry payload. For example:
+
+```yaml
+schema_version: 1
+entity_types:
+  place:
+    folder: Places
+    label: Place
+    aliases: [location]
+    cue_nouns: [venue]
+    optional_frontmatter: [domain]
+    capture_guidance: A stable place identity with reusable context or relations.
+    parent: concept
+    status: active
+```
+
+The `parent` is a one-level roll-up to a core type; it does not create a deeper
+type hierarchy.
+
+Extension `optional_frontmatter` may name only fields supported by the entity
+writer: `affiliation`, `relationship`, `domain`, `language`, `repo`, `license`,
+`used_in`, `decided`, `project`, and `decision_status`. Any other field is a
+registry finding rather than silently inert metadata.
+
 ### People
 
 Optional frontmatter: `affiliation`, `relationship` (e.g., colleague, public-figure, source-author),

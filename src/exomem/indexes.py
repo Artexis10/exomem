@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
 
-from .entity_types import ENTITY_TYPE_REGISTRY, ENTITY_TYPES_BY_FOLDER
+from .entity_types import EntityTypeRegistry, core_registry, load_entity_types
 from .kbdir import kb_prefix
 from .vault import (
     PlannedWrite,
@@ -366,7 +366,11 @@ _NOTES_TOTAL_LINE = re.compile(r"^- Notes:\s*\d+\s*$", re.MULTILINE)
 _ENTITIES_TOTAL_LINE = re.compile(r"^- Entities:\s*\d+\s*$", re.MULTILINE)
 
 
-def _count_entities(entities_dir: Path) -> dict[str, int]:
+def _count_entities(
+    entities_dir: Path,
+    *,
+    registry: EntityTypeRegistry | None = None,
+) -> dict[str, int]:
     """Per-entity-type count, mirrors `_count_sources` shape.
 
     Returns a dict keyed by registered entity-type ID. Excludes index.md and
@@ -375,10 +379,11 @@ def _count_entities(entities_dir: Path) -> dict[str, int]:
     out: dict[str, int] = {}
     if not entities_dir.is_dir():
         return out
+    registry = registry or load_entity_types(entities_dir.parents[1])
     for sub in entities_dir.iterdir():
         if not sub.is_dir() or sub.name.startswith("_"):
             continue
-        definition = ENTITY_TYPES_BY_FOLDER.get(sub.name.casefold())
+        definition = registry.by_folder.get(sub.name.casefold())
         if definition is None:
             continue
         out[definition.id] = sum(
@@ -502,11 +507,17 @@ def _notes_subfolder_bullet_re(kb_prefix_str: str) -> re.Pattern[str]:
 # Entities/index.md top-level bullet:
 # `- [[<KB>/Entities/People/|People]] (12)` (optional description)
 @cache
-def _entities_bullet_re(kb_prefix_str: str) -> re.Pattern[str]:
-    folders = "|".join(re.escape(item.folder) for item in ENTITY_TYPE_REGISTRY)
+def _entities_bullet_re(
+    kb_prefix_str: str,
+    core_version: int,
+    extension_hash: str,
+    folders: tuple[str, ...],
+) -> re.Pattern[str]:
+    del core_version, extension_hash
+    folder_pattern = "|".join(re.escape(folder) for folder in folders)
     return re.compile(
         r"^(- \[\[(?:" + re.escape(kb_prefix_str) + r")?"
-        + rf"Entities/(?P<folder>{folders})/?(?:\|[^\]]+)?\]\])"
+        + rf"Entities/(?P<folder>{folder_pattern})/?(?:\|[^\]]+)?\]\])"
         r"( \((?P<count>\d+)\))?(?P<rest>(?:\s+—[^\n]*)?)\s*$",
         re.MULTILINE,
     )
@@ -603,14 +614,23 @@ def _refresh_notes_subindex_text(
 
 
 def _refresh_entities_subindex_text(
-    text: str, *, counts_by_type: dict[str, int]
+    text: str,
+    *,
+    counts_by_type: dict[str, int],
+    registry: EntityTypeRegistry | None = None,
 ) -> str:
     """Refresh registered entity rows while preserving hand-authored prose."""
-    pattern = _entities_bullet_re(kb_prefix())
+    registry = registry or core_registry()
+    pattern = _entities_bullet_re(
+        kb_prefix(),
+        registry.core_version,
+        registry.extension_hash,
+        tuple(item.folder for item in registry.active_definitions),
+    )
 
     def _bullet(m: re.Match[str]) -> str:
         folder = m.group("folder")
-        definition = ENTITY_TYPES_BY_FOLDER.get(folder.casefold())
+        definition = registry.by_folder.get(folder.casefold())
         if definition is None:
             return m.group(0)
         actual = counts_by_type.get(definition.id, 0)
@@ -621,7 +641,7 @@ def _refresh_entities_subindex_text(
     present = {match.group("folder").casefold() for match in pattern.finditer(refreshed)}
     missing = [
         definition
-        for definition in ENTITY_TYPE_REGISTRY
+        for definition in registry.active_definitions
         if definition.folder.casefold() not in present
     ]
     if not missing:
@@ -684,10 +704,11 @@ def compute_subindex_writes(
     sources_dir = kb / "Sources"
     notes_dir = kb / "Notes"
     entities_dir = kb / "Entities"
+    entity_registry = load_entity_types(vault_root)
 
     sources_counts = _count_sources(sources_dir)
     notes_counts = _count_notes(notes_dir)
-    entities_counts = _count_entities(entities_dir)
+    entities_counts = _count_entities(entities_dir, registry=entity_registry)
     notes_by_subfolder = _count_notes_by_subfolder(notes_dir)
 
     # Virtually count each pending path so the index shows post-write state.
@@ -724,7 +745,7 @@ def compute_subindex_writes(
                 inner[""] = inner.get("", 0) + 1
         elif head == "Entities" and len(parts) >= 3:
             ent_folder = parts[1]
-            definition = ENTITY_TYPES_BY_FOLDER.get(ent_folder.casefold())
+            definition = entity_registry.by_folder.get(ent_folder.casefold())
             if definition is not None:
                 entities_counts[definition.id] = entities_counts.get(definition.id, 0) + 1
 
@@ -808,7 +829,9 @@ def compute_subindex_writes(
             new = _rewritten_in_place(
                 base,
                 lambda logical: _refresh_entities_subindex_text(
-                    logical, counts_by_type=entities_counts
+                    logical,
+                    counts_by_type=entities_counts,
+                    registry=entity_registry,
                 ),
             )
             new = render_wikilinks_for_vault(new, vault_root)

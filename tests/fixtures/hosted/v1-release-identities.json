@@ -1,8 +1,8 @@
 {
   "plugins/hosted/definition.json": "96f92d72b47b2578d28e8cc60fe65a3d1dbb0f0ea11d3ee8ecc44d895e443196",
-  "plugins/hosted/generated/claude.lock.json": "b6c9ea3affb554c0b224d828b18bc92b6ec5c79eda3bd35d635478919ea8d544",
+  "plugins/hosted/generated/claude.lock.json": "890f7e3700709c9ed36167c48edb24cf95378eb9ace39fc4525a1ce7d5e34f50",
   "plugins/hosted/generated/claude.zip": "0da1055f4bb34d383101011f568b171f73ad4e033c3f3dd575136e1da54a1442",
-  "plugins/hosted/generated/compatibility.json": "1641dfbcb1a1a6549c6ee2f25dd20068b95b675e2738cc7a5e09ed3a174c5109",
+  "plugins/hosted/generated/compatibility.json": "196ab40af7a99994725c66c7160fff365a262ac8e1a93dd6b0f10e64892ebbde",
   "plugins/hosted/generated/openai.lock.json": "92ab35d7b7d7f8f4cc50cb8070f4fda478f33956479e4a021c480f52e0aea912",
   "plugins/hosted/generated/openai.zip": "d8e42e7b886ddd87ba0b84f58cc03d40296d64c7c38b419f0ee8579b9af8028f",
   "plugins/hosted/promotion/claude.json": "a489c80456db9b2f8929284b53b1dc6892f08eecfda9213bb57457480ed250a9",
