@@ -657,8 +657,12 @@ are review-only and never write to the vault.
 ### Procedure
 1. Pass a `path` for an existing page, or `draft_title` / `draft_body` for an
    unwritten draft.
-2. Review deterministic candidates from wikilinks, frontmatter sources, shared
-   sources/entities, supersession, and optional embedding proximity.
+2. Review deterministic candidates. Structural ones come first: a relation kind
+   you already typed on one of the page's own semantic units and have not yet
+   promoted to a page-level relation, pages carrying the same open question, and
+   pages whose units answer or resolve the same target. Then wikilinks,
+   frontmatter sources, shared sources/entities, supersession, and optional
+   embedding proximity.
 3. Model-backed suggestions are default-off (`include_model_suggestions=false`),
    response-only, and soft-fail with warnings when optional extras are absent.
 4. Persist accepted relations through the normal Markdown write path (`note` or
