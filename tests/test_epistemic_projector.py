@@ -309,3 +309,27 @@ def test_projector_meta_publishes_code_line_count_docstrings_included(snapshot) 
     meta = snapshot.projector
     assert meta.loc_code == module_code_line_count(VaultProjector)
     assert 0 < meta.loc_code < meta.loc
+
+
+def test_stored_triage_verbs_project_as_standing_review_states() -> None:
+    """Every verb the store can hold maps to a state the schema calls closed.
+
+    `reopen` is absent on purpose: reopening clears the records under an item
+    id, so no stored decision ever carries it. `competing` maps to a CLOSED
+    state because a competing-alternatives stance is a decision somebody made,
+    not outstanding work — the bench's `conflict` is an open state and reading
+    a recorded stance as open is what this row exists to prevent.
+    """
+
+    from epistemic.assertions import CLOSED_REVIEW_STATES
+    from epistemic.projectors.exomem_vault import (
+        ACTION_TO_REVIEW_STATE,
+        _review_state_of,
+    )
+    from exomem.review_state import _RECORDING_ACTIONS
+
+    assert set(ACTION_TO_REVIEW_STATE) == set(_RECORDING_ACTIONS)
+    assert "reopen" not in ACTION_TO_REVIEW_STATE
+    for verb, state in ACTION_TO_REVIEW_STATE.items():
+        assert state in CLOSED_REVIEW_STATES, (verb, state)
+        assert _review_state_of({"action": verb}) == state

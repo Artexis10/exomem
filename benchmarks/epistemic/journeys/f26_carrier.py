@@ -71,7 +71,14 @@ class Envelope:
     executable: Path
     version: str
 
-    def run(self, args: Sequence[str], *, cwd: Path, timeout: float = 60.0) -> str:
+    def run(
+        self,
+        args: Sequence[str],
+        *,
+        cwd: Path,
+        timeout: float = 60.0,
+        extra_env: Mapping[str, str] | None = None,
+    ) -> str:
         completed = subprocess.run(  # noqa: S603 - resolved executable, fixed argv
             [str(self.executable), *args],
             cwd=str(cwd),
@@ -80,6 +87,13 @@ class Envelope:
             timeout=timeout,
             env={
                 **os.environ,
+                # Documented configuration a journey varies deliberately, such
+                # as the prominence level f23 sweeps across its declared range.
+                # FIRST, so the pinned keys below win: a journey that could
+                # override `EXOMEM_VAULT_PATH` or re-enable embeddings would be
+                # measuring a different runtime than the harness set up, and the
+                # failure would look like a product one.
+                **dict(extra_env or {}),
                 "EXOMEM_DISABLE_EMBEDDINGS": "1",
                 # The envelope locates the vault from the environment, not from
                 # the working directory. Passing only ``cwd`` produced a

@@ -5371,7 +5371,7 @@
       "properties": {
         "mode": {
           "default": "attention",
-          "description": "attention, activation, item, audit, provenance, evolution, compilation, stale, contradiction, unprocessed-sources, relation-debt, relation-queue, or adoption. `relation-queue` returns the read-only, batched relation-acceptance queue (deterministic suggestion candidates grouped by source page, with signal fingerprints and coverage counters); accept a candidate via `connect_memory(operation=\"accept-relation\")` or reject via `triage_memory`. `adoption` returns the read-only Adoption Studio proposal queue grouped per run (structured agent proposals with signal fingerprints); approve a proposal via `adoption_studio(action=\"apply-proposal\")` or dismiss via `triage_memory`.",
+          "description": "attention, activation, item, audit, dispositions, provenance, evolution, compilation, stale, contradiction, unprocessed-sources, relation-debt, relation-queue, or adoption. `dispositions` lists every signal family a user has set to `quiet` or `off` through `triage_memory`, with its reason code, why, timestamp, origin, and per-family manual dismissal count; a quiet family is silent on the carriers, not clean. `relation-queue` returns the read-only, batched relation-acceptance queue (deterministic suggestion candidates grouped by source page, with signal fingerprints and coverage counters); accept a candidate via `connect_memory(operation=\"accept-relation\")` or reject via `triage_memory`. `adoption` returns the read-only Adoption Studio proposal queue grouped per run (structured agent proposals with signal fingerprints); approve a proposal via `adoption_studio(action=\"apply-proposal\")` or dismiss via `triage_memory`.",
           "type": "string"
         },
         "categories": {
@@ -5713,11 +5713,11 @@
       "additionalProperties": false,
       "properties": {
         "ref": {
-          "description": "Stable `exomem://review/<id>` reference from review_memory. An `exomem://review/adoption/<id>` ref triages an Adoption Studio proposal instead, keyed the same way (`review_id:fingerprint`).",
+          "description": "Stable `exomem://review/<id>` reference from review_memory. An `exomem://review/adoption/<id>` ref triages an Adoption Studio proposal instead, keyed the same way (`review_id:fingerprint`). An `exomem://review/family/<family>` ref addresses a whole signal FAMILY instead of one item.",
           "type": "string"
         },
         "action": {
-          "description": "dismiss, snooze, or reopen.",
+          "description": "dismiss, snooze, or reopen for an item; quiet, off, or normal for a family. `quiet` drops that family from the default review union, every due-state carrier and the write-path advisories while it stays reachable on explicit request; `off` additionally drops it from explicit category review; `normal` restores it. Audit measurement is never affected: a quiet family is silent, not clean.",
           "type": "string"
         },
         "until": {
@@ -5742,7 +5742,7 @@
             }
           ],
           "default": null,
-          "description": "Optional short rationale stored with the review decision."
+          "description": "Optional short rationale stored with the review decision. Lead it with a reason code and a colon — `intentional:`, `false_positive:`, `handled:`, `deferred:`, or `too_frequent:` — to record why the decision was made; `quiet` and `off` require one."
         },
         "expected_fingerprint": {
           "anyOf": [

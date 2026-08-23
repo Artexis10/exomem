@@ -869,6 +869,25 @@ def test_hosted_read_only_tools_advertise_safe_retry_semantics() -> None:
 
 
 @pytest.mark.parametrize("channel", ["claude-connector", "claude-plugin"])
+def test_the_committed_directory_packet_is_not_stale(channel: str) -> None:
+    """A generated directory channel that drifted from its inputs fails HERE.
+
+    The packets embed the tool surface, so any change to a tool description
+    moves them — and there is one generated file per channel, which is exactly
+    the shape a person regenerates one of and forgets the others. `claude-plugin`
+    was left behind by a description edit that `claude-connector` picked up, and
+    nothing in the suite noticed; `directory_check` is the product's own
+    staleness check and this is it, wired to the repository.
+
+    `openai-plugin` is deliberately not covered: its packet binds a registered
+    OpenAI app id that is a release input rather than a repository artifact, so
+    checking it from the repo alone is not possible. That channel's freshness is
+    a release-time check, and this test names the gap rather than hiding it.
+    """
+    hosted_plugins.directory_check(REPO_ROOT, channel=channel)
+
+
+@pytest.mark.parametrize("channel", ["claude-connector", "claude-plugin"])
 def test_claude_directory_packets_exclude_openai_review_only_fields(channel: str) -> None:
     packet = json.loads(hosted_plugins.directory_packets(REPO_ROOT, channel=channel)[channel])
 

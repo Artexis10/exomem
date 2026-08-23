@@ -82,6 +82,8 @@ import os
 import tempfile
 import threading
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -424,7 +426,19 @@ def recompute(vault_root: Path, *, today: dt.date | None = None) -> dict[str, An
 
 def reconcile(vault_root: Path, *, today: dt.date | None = None) -> dict[str, Any]:
     """Full recompute plus persist — the healer after out-of-band edits."""
+    existing = load(vault_root) or _UNPERSISTED.get(str(vault_root))
     payload = recompute(vault_root, today=today)
+    # The projection is derived and rebuilt from authored state; the emission
+    # ledger is a MEASUREMENT of what this vault has told its callers, and a
+    # heal is not a reason to forget it.
+    #
+    # `due_total` is deliberately NOT written here. It has exactly one
+    # definition — the size of the block a caller was actually handed — and a
+    # heal hands nobody anything. An earlier version recorded reconcile's own
+    # unfiltered count under the same name, which gave the field two meanings
+    # and let an anti-vacuity gate read a pre-dismissal number as evidence that
+    # a later batch had something to say. One writer, one meaning.
+    payload["emission"] = _emission_delta(existing)
     save(vault_root, payload)
     _remember_unpersisted(vault_root, payload)
     return payload
@@ -530,9 +544,140 @@ def apply_write_delta(
             "version": SCHEMA_VERSION,
             "computed_on": today.isoformat(),
             "categories": categories,
+            # One governed write, one projection delta, one tick. This is the
+            # denominator the "more automatic" claim is measured against, and
+            # it has to be persisted because the emission governor above it is
+            # per-process memory no projector can read.
+            "emission": _emission_delta(current, writes=1),
         }
         save(vault_root, updated)
     return updated
+
+
+# --------------------------------------------------------------------------
+# the emission ledger
+# --------------------------------------------------------------------------
+
+
+def _emission_section(payload: dict[str, Any] | None) -> dict[str, Any]:
+    section = (payload or {}).get("emission")
+    if not isinstance(section, dict):
+        return {"writes": 0, "emissions": 0, "last_digest": None, "due_total": 0}
+    return {
+        "writes": int(section.get("writes") or 0),
+        "emissions": int(section.get("emissions") or 0),
+        "last_digest": section.get("last_digest"),
+        # The size of the last block a caller was actually HANDED — written by
+        # `_record_emission` and by nothing else. Without a denominator
+        # "0 emissions for 12 writes" is unreadable: it is the behaviour the
+        # governance is supposed to produce AND the behaviour of a vault that
+        # owed nothing, and a metric that cannot tell those apart cannot be
+        # used to claim either one. A vault that delivered nothing therefore
+        # reports 0 here, which is the honest answer and the one that makes a
+        # counter assertion report `unsupported` rather than pass vacuously.
+        "due_total": int(section.get("due_total") or 0),
+    }
+
+
+def _emission_delta(
+    payload: dict[str, Any] | None,
+    *,
+    writes: int = 0,
+    emissions: int = 0,
+    last_digest: str | None = None,
+    due_total: int | None = None,
+) -> dict[str, Any]:
+    section = _emission_section(payload)
+    section["writes"] += writes
+    section["emissions"] += emissions
+    if last_digest is not None:
+        section["last_digest"] = last_digest
+    if due_total is not None:
+        section["due_total"] = int(due_total)
+    return section
+
+
+def _record_emission(
+    vault_root: Path | None, digest: str, *, due_total: int | None = None
+) -> None:
+    """Persist that a block was DELIVERED, and how big it was. Best effort.
+
+    Called from `mark_emitted`, which the terminal reaches once per response
+    that actually carried a block — so this is one small JSON replace per
+    delivered advisory, and never inside a mutation critical section.
+
+    `due_total` rides along rather than getting its own write because it is a
+    property OF the delivery: the number of items in the block that was handed
+    over. Recording it anywhere else would give the field a second definition.
+    """
+    if not vault_root:
+        return
+    try:
+        payload = load(vault_root) or _UNPERSISTED.get(str(vault_root))
+        if payload is None:
+            return
+        payload = {
+            **payload,
+            "emission": _emission_delta(
+                payload, emissions=1, last_digest=digest, due_total=due_total
+            ),
+        }
+        save(vault_root, payload)
+        _remember_unpersisted(vault_root, payload)
+    except Exception:  # noqa: BLE001 — a ledger write never breaks a response
+        log.debug("could not record the due-state emission", exc_info=True)
+
+
+def emission_ledger(vault_root: Path) -> dict[str, Any]:
+    """The persisted `{writes, emissions, last_digest, due_total}` a projector reads."""
+    return _emission_section(load(vault_root) or _UNPERSISTED.get(str(vault_root)))
+
+
+# --------------------------------------------------------------------------
+# batch scope
+# --------------------------------------------------------------------------
+
+#: Vaults currently inside a batch scope, with the nesting depth. A depth rather
+#: than a flag because a batch leaf can call another one, and the inner exit
+#: must not un-silence the outer batch. Its own lock: `_LOCK` is not reentrant
+#: and the emission governor consults this registry while holding it.
+_BATCH: dict[str, int] = {}
+_BATCH_LOCK = threading.Lock()
+
+
+@contextmanager
+def batch_scope(vault_root: Path | None) -> Iterator[None]:
+    """Suppress emission for the duration of one multi-write command.
+
+    A product command that commits twelve governed writes must not deliver
+    twelve counters blocks: the user asked for one batch and would receive
+    twelve notifications, which is nagging by another name. Inside the scope the
+    per-write projection deltas still apply — the counts stay true — and the
+    governor simply refuses to emit. The command's terminal runs after the scope
+    has exited and decides once, under the unchanged change-only rule.
+
+    Separate invocations are separate batches by definition: N calls that each
+    change the counts legitimately emit N changed lines, which is the cadence
+    the design asks for.
+    """
+    key = str(vault_root or "")
+    with _BATCH_LOCK:
+        _BATCH[key] = _BATCH.get(key, 0) + 1
+    try:
+        yield
+    finally:
+        with _BATCH_LOCK:
+            depth = _BATCH.get(key, 1) - 1
+            if depth > 0:
+                _BATCH[key] = depth
+            else:
+                _BATCH.pop(key, None)
+
+
+def batch_active(vault_root: Path | None) -> bool:
+    """Whether this vault is inside a batch scope right now."""
+    with _BATCH_LOCK:
+        return _BATCH.get(str(vault_root or ""), 0) > 0
 
 
 # --------------------------------------------------------------------------
@@ -590,12 +735,30 @@ def served_entries(
     try:
         state_payload = store.load()
     except ValueError:
-        state_payload = {"version": review_state_module.SCHEMA_VERSION, "records": {}}
+        # Fail closed, exactly as the decision read does — but the carrier's
+        # safe direction is SILENCE, not a raise. Every row below is filtered
+        # by a triage decision and a family disposition read out of this store;
+        # substituting an empty state would serve every dismissed item as due,
+        # which is the nag this slice exists to stop, arriving because a file
+        # is corrupt. Serving nothing costs the caller an advisory they can get
+        # from `review_memory`; serving everything costs them the trust that
+        # dismissing works. The write itself is untouched: this is the advisory
+        # attached to the response, not the mutation.
+        log.debug("review state unreadable; serving no due state", exc_info=True)
+        return []
+    excluded = _excluded_families(state_payload)
 
     order = {category: rank for rank, category in enumerate(PROJECTION_CATEGORIES)}
     rows: list[dict[str, Any]] = []
     categories = payload.get("categories") or {}
     for category in PROJECTION_CATEGORIES:
+        if category in excluded:
+            # A count of things the user asked not to hear about is a nag by
+            # another route, so a quiet family contributes nothing to `total`,
+            # to `categories`, or to `top` — exactly as a withheld item does.
+            # Unlike egress, the absence is explained: `review_memory(
+            # mode="dispositions")` says which families are quiet and why.
+            continue
         pages = categories.get(category) or {}
         if not isinstance(pages, dict):
             continue
@@ -647,6 +810,107 @@ def served_entries(
         )
     )
     return rows
+
+
+def _excluded_families(state_payload: dict[str, Any]) -> frozenset[str]:
+    """Projection categories a family disposition removes from every carrier.
+
+    Named and separate so it is a mechanism a test can remove. There is no
+    second filter in `block_for_write`: that path serves through `served_entries`
+    and therefore through this one, and a duplicate would be a second opinion
+    about what "quiet" means on the write carrier specifically.
+    """
+    return frozenset(review_state_module.disposition_map(state_payload))
+
+
+def _record_delivered(vault_root: Path | None, block: dict[str, Any] | None) -> None:
+    """Stamp the references a DELIVERED block actually put on the wire.
+
+    Called from `mark_emitted` and from nowhere else, because producing a block
+    is not surfacing it. Four things between production and delivery can drop
+    it — a batch scope, the change-only governor, a `legacy` detail level, and
+    terminal validation — and each of them means the caller was shown nothing.
+    Stamping at production time recorded a first surfacing for references that
+    reached no one, which is a false measurement in the one ledger whose whole
+    purpose is to say what reached a person.
+
+    The block's own `top` is the wire content, so it is exactly the right set:
+    a row that only contributed to `total` was never shown. Everything in it is
+    already past egress, the triage filter and the disposition filter, because
+    that is where `served_entries` put it.
+
+    The fingerprints come from the projection the block was built from: the wire
+    block deliberately carries refs and dates only, and widening it to carry a
+    fingerprint would put an internal identity on a public surface for the sake
+    of a ledger write.
+    """
+    if not vault_root or not block:
+        return
+    rows = [row for row in (block.get("top") or []) if isinstance(row, dict)]
+    if not rows:
+        return
+    try:
+        projection = load(vault_root) or _UNPERSISTED.get(str(vault_root))
+        if projection is None:
+            return
+        fingerprints = _fingerprints_by_ref(projection)
+        entries = []
+        for row in rows:
+            ref = str(row.get("ref") or "")
+            finger = fingerprints.get(ref)
+            if ref and finger:
+                entries.append((_ref_id(ref), finger))
+        if not entries:
+            return
+        review_state_module.record_surfaced(vault_root, entries, surface="carrier")
+    except Exception:  # noqa: BLE001 — a ledger write never breaks a carrier
+        log.debug("first-surfaced ledger not recorded for the carrier", exc_info=True)
+
+
+def _fingerprints_by_ref(payload: dict[str, Any]) -> dict[str, str]:
+    """``ref -> fingerprint`` over the whole projection. One pass, no ordering.
+
+    **The coupling this depends on.** A `ref` is a page-level identity and a
+    fingerprint is a per-finding one, so the map is only well defined while at
+    most one projection row per ref carries a fingerprint. That holds today
+    because every category except `unfinished_experiments` stamps a
+    `review_partition` into its ref, which makes the ref per-finding too. It is
+    a property of how the projection composes refs, not an invariant anything
+    else enforces — so a new category that omits the partition would silently
+    make this map ambiguous and stamp the wrong identity on the ledger.
+
+    Rather than take first-category-wins on a collision, a conflicting ref is
+    DROPPED and logged: an unstamped row is a measurement gap, a wrongly
+    stamped one is a false record of what a person was shown.
+    """
+    out: dict[str, str] = {}
+    conflicted: set[str] = set()
+    for pages in (payload.get("categories") or {}).values():
+        if not isinstance(pages, dict):
+            continue
+        for entries in pages.values():
+            for entry in _unbucket(entries):
+                ref = str(entry.get("ref") or "")
+                finger = str(entry.get("fingerprint") or "")
+                if not ref or not finger:
+                    continue
+                seen = out.get(ref)
+                if seen is None:
+                    out[ref] = finger
+                elif seen != finger:
+                    conflicted.add(ref)
+    for ref in conflicted:
+        log.debug(
+            "projection ref %s carries more than one fingerprint; "
+            "not stamping the first-surfaced ledger for it",
+            ref,
+        )
+        out.pop(ref, None)
+    return out
+
+
+def _ref_id(ref: str) -> str:
+    return str(ref or "").rsplit("/", 1)[-1]
 
 
 def block(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -770,6 +1034,10 @@ def would_emit(payload: dict[str, Any] | None, *, vault_root: Path | None = None
     """
     if not payload:
         return False
+    if batch_active(vault_root):
+        # Inside a batch the answer is always "not now": the leaf's terminal
+        # decides once, after the scope exits.
+        return False
     with _LOCK:
         return _EMISSION.get(emission_key(vault_root)) != _digest(payload)
 
@@ -786,6 +1054,8 @@ def mark_emitted(payload: dict[str, Any] | None, *, vault_root: Path | None = No
     """
     if not payload:
         return
+    if batch_active(vault_root):
+        return
     key = emission_key(vault_root)
     digest = _digest(payload)
     with _LOCK:
@@ -797,6 +1067,13 @@ def mark_emitted(payload: dict[str, Any] | None, *, vault_root: Path | None = No
             # oldest costs at worst one extra emission for a stale session.
             _EMISSION.pop(next(iter(_EMISSION)), None)
         _EMISSION[key] = digest
+    # Outside the lock: the ledger write reads and replaces the projection file,
+    # and `_remember_unpersisted` takes this same non-reentrant lock.
+    _record_emission(vault_root, digest, due_total=int(payload.get("total") or 0))
+    # This is the moment the block became something a person was shown, so it is
+    # the moment the first-surfaced ledger may record its refs. See
+    # `_record_delivered`.
+    _record_delivered(vault_root, payload)
 
 
 def should_emit(payload: dict[str, Any] | None, *, vault_root: Path | None = None) -> bool:
@@ -823,3 +1100,5 @@ def reset_emission_state() -> None:
     with _LOCK:
         _EMISSION.clear()
         _UNPERSISTED.clear()
+    with _BATCH_LOCK:
+        _BATCH.clear()
