@@ -164,6 +164,26 @@ from exomem import commands
 #: one adjective. No rule left the payload, and the pins moved WITH the text
 #: rather than being loosened around it. Merged compact is 61,297, 103 bytes
 #: under. The ceiling did not move.
+#:
+#: TRIM again, same answer. Completing the action catalog so that every product
+#: command is reachable from some action added ten names to `advanced` lists:
+#: 183 bytes, taking the merged payload to 61,480 -- 80 over. The names are not
+#: prose and there was nothing in them to shorten; a name removed is a command
+#: an agent can no longer route to, which is the defect being fixed.
+#:
+#: The bytes came back from redundancy instead. Six of the entries named a
+#: command that is already another action's primary route -- `connect_memory`
+#: and `review_memory` under `ask`, `connect_memory` and `plan_memory` under
+#: `remember`, `review_memory` under `review`, `maintain_memory` under
+#: `maintain`. The catalog already names `connect`, `review`, `plan` and
+#: `maintain` as actions, so those entries told an agent nothing the payload
+#: did not already say, and `plan` only became an action on the merge that
+#: caused the overflow. The rule is now: `advanced` carries commands no route
+#: reaches. Coverage is unchanged -- the gate counts routes and `advanced`
+#: together -- and compact is 61,376, 24 bytes under. The ceiling did not move.
+#:
+#: 24 bytes is not headroom. The next addition trims or argues, and this branch
+#: has no claim on the argument: it spent 79 of the 103 bytes main left.
 COMPACT_BYTE_CEILING = 61_400
 
 #: The defect was compact and full being near-identical. A profile that does not

@@ -7724,25 +7724,13 @@ _SIMPLE_ACTION_DEFS: dict[str, dict] = {
             "args": {"detail": "compact", "rerank": False, "deep": True},
         },
         "safety": "read-only; deep mode assembles context and graph enrichment stays explicit",
-        "advanced": [
-            "read_memory",
-            "connect_memory",
-            "review_memory",
-            "query_dataset",
-            "read_media",
-        ],
+        "advanced": ["read_memory", "query_dataset", "read_media"],
     },
     "remember": {
         "intent": "Save a durable conclusion as compiled governed knowledge.",
         "route": {"tool": "remember", "args": {"note_type": "insight"}},
         "safety": "additive write; uses note validation and does not preserve raw provenance unless sources are provided",
-        "advanced": [
-            "replace_memory",
-            "edit_memory",
-            "observe_memory",
-            "connect_memory",
-            "plan_memory",
-        ],
+        "advanced": ["replace_memory", "edit_memory", "observe_memory"],
     },
     "capture": {
         "intent": (
@@ -7768,7 +7756,6 @@ _SIMPLE_ACTION_DEFS: dict[str, dict] = {
         "audit_route": {"tool": "review_memory", "args": {"mode": "audit"}},
         "safety": "read-only by default; triage state changes are explicit through triage_memory",
         "advanced": [
-            "review_memory",
             "review_item_context",
             "triage_memory",
             "compile_source",
@@ -7795,7 +7782,6 @@ _SIMPLE_ACTION_DEFS: dict[str, dict] = {
         "reconcile_route": {"tool": "maintain_memory", "args": {"mode": "reconcile", "dry_run": False}},
         "safety": "read-only by default; write-capable fixes require explicit flags",
         "advanced": [
-            "maintain_memory",
             "doctor",
             "govern_memory",
             "schema_memory",

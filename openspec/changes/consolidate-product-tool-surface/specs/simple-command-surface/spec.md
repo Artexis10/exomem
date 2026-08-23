@@ -7,7 +7,7 @@ The system SHALL define a small set of simple product actions that route common 
 #### Scenario: Action catalog names the simple actions
 
 - **WHEN** the action catalog is requested by bootstrap, docs generation, or CLI help
-- **THEN** it lists `ask`, `remember`, `capture`, `review`, `connect`, `adopt`, `maintain`, and `record`
+- **THEN** it lists `ask`, `remember`, `capture`, `review`, `connect`, `adopt`, `maintain`, `record`, and `plan`
 - **AND** each action identifies its canonical operation route and default safety posture
 - **AND** the catalog is generated from the action registry, so an action added to the registry appears without editing a second list
 
@@ -23,11 +23,12 @@ The system SHALL define a small set of simple product actions that route common 
 - **THEN** every command in the product command registry is named by at least one action's primary route, alternate route, or `advanced` list, except commands that are themselves the catalog entry point
 - **AND** a product command that no action reaches fails the surface-contract check rather than being silently unreachable
 
-#### Scenario: Action catalog is offered to an agent surface
+#### Scenario: Action catalog is delivered to an agent surface
 
-- **WHEN** an agent surface resolves its active surface descriptor
-- **THEN** the descriptor exports the action catalog as it does for CLI-family surfaces
-- **AND** the catalog resolves against exactly the commands that surface exports, so an action with no surviving route is reported unavailable with its reason rather than omitted
+- **WHEN** an agent surface requests the action catalog through its bootstrap contract
+- **THEN** the catalog resolves against exactly the commands that surface exports
+- **AND** an action with no surviving route is reported unavailable with its reason rather than omitted
+- **AND** the action names are not themselves callable on that surface; making them callable tools is a separate change, because it alters the surface's callable command set and therefore its published identity
 
 #### Scenario: Withheld command degrades its action
 
