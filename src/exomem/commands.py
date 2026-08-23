@@ -8093,6 +8093,99 @@ HAND_REGISTERED_EXCEPTIONS: frozenset[str] = frozenset()
 HOSTED_ALPHA_AGENT_PROFILE = "hosted-alpha-agent-v1"
 HOSTED_ALPHA_AGENT_V2_PROFILE = "hosted-alpha-agent-v2"
 HOSTED_ALPHA_AGENT_V3_PROFILE = "hosted-alpha-agent-v3"
+HOSTED_ALPHA_AGENT_V4_PROFILE = "hosted-alpha-agent-v4"
+
+
+@dataclass(frozen=True, slots=True)
+class HostedSurfaceExclusion:
+    """One product command withheld from hosted, and what would lift it.
+
+    v1's membership was a hand-maintained allowlist, which drifts by default:
+    every command added since is absent from hosted until somebody remembers.
+    Inverting it -- hosted *is* the product surface, absence is the exception --
+    makes the default correct and forces each exception to say why.
+
+    `reason` states what is technically broken, not what has not been reviewed.
+    `lifted_when` names the condition that ends the exclusion, so an entry
+    cannot quietly become permanent.
+    """
+
+    command: str
+    reason: str
+    lifted_when: str
+
+
+HOSTED_SURFACE_EXCLUSIONS = MappingProxyType(
+    {
+        exclusion.command: exclusion
+        for exclusion in (
+            HostedSurfaceExclusion(
+                command="transfer_artifact",
+                reason=(
+                    "The hosted runtime intercepts this leaf with "
+                    "HOSTED_TRANSFER_INTERCEPT_REQUIRED; publishing it as a tool would "
+                    "hand an agent a call that returns an interception error instead of "
+                    "moving an artifact. The capability itself is reachable through the "
+                    "gateway transfer flow."
+                ),
+                lifted_when="the tool call is bridged to the gateway transfer flow",
+            ),
+            HostedSurfaceExclusion(
+                command="adopt_vault",
+                reason=(
+                    "The hosted runtime intercepts this leaf with "
+                    "HOSTED_IMPORT_INTERCEPT_REQUIRED. Adoption on hosted is "
+                    "upload-then-adopt: bytes are staged under _Staging/adoption/<run_id>/ "
+                    "by the verified transfer grant and never land under Knowledge Base/ "
+                    "unadopted. The capability is reachable through the gateway lifecycle "
+                    "flow."
+                ),
+                lifted_when="the tool call is bridged to the gateway lifecycle flow",
+            ),
+            HostedSurfaceExclusion(
+                command="process_media",
+                reason=(
+                    "The hosted image is built from the `hosted` Dockerfile stage, which "
+                    "installs only the `embeddings-onnx` extra and gates the build on "
+                    "torch being absent. Media extraction is additionally gated per cell "
+                    "by the `media` feature grant, which no alpha cell carries, so the "
+                    "tool would refuse on every cell it was published to."
+                ),
+                lifted_when=(
+                    "a media-capable hosted image ships and the cell carries the `media` "
+                    "feature grant"
+                ),
+            ),
+            HostedSurfaceExclusion(
+                command="read_media",
+                reason=(
+                    "Sampling video frames needs the same decoding dependencies the "
+                    "hosted image omits, under the same `media` feature grant."
+                ),
+                lifted_when=(
+                    "a media-capable hosted image ships and the cell carries the `media` "
+                    "feature grant"
+                ),
+            ),
+        )
+    }
+)
+
+
+def hosted_complete_surface_names() -> tuple[str, ...]:
+    """The product command surface minus the recorded hosted exclusions.
+
+    Derived rather than restated so that adding a product command without
+    deciding its hosted status is a test failure rather than a silent subset.
+    Published profile membership stays pinned as a literal -- a profile whose
+    membership moved with the registry would change its own
+    `command_surface_sha256` under an unchanged identifier.
+    """
+    return tuple(
+        command.name
+        for command in PRODUCT_COMMANDS
+        if command.name not in HOSTED_SURFACE_EXCLUSIONS
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -8101,6 +8194,11 @@ class ProductSurfaceProfile:
 
     name: str
     command_names: tuple[str, ...]
+    #: Whether this profile may expose tier-2 commands. Default closed: the
+    #: resolver refuses a tier-2 member unless the profile opted in, so a
+    #: command promoted to tier 2 later cannot leak onto a profile that never
+    #: decided to carry it. v1-v3 are tier-1 only and unaffected.
+    expose_tier2: bool = False
 
     def __post_init__(self) -> None:
         names = tuple(self.command_names)
@@ -8180,6 +8278,50 @@ PRODUCT_SURFACE_PROFILES = MappingProxyType(
                 "edit_memory",
             ),
         ),
+        # v4 is the first hosted profile that is not an allowlist. Its membership
+        # is the product command surface minus HOSTED_SURFACE_EXCLUSIONS, in
+        # canonical registry order, and `hosted_complete_surface_names()` returns
+        # exactly this tuple -- asserted by a gate, so a command added to the
+        # registry without a hosted decision fails the build.
+        #
+        # It does not extend v3 as a prefix, unlike v2 -> v3. Registry order is
+        # what the rule can state and keep true; a hand-ordered extension would
+        # need re-deciding on every addition, which is the property being removed.
+        #
+        # Tier 2 is included. Every tier-2 command operates inside the calling
+        # tenant's own vault -- the blast radius a local operator already has --
+        # so withholding it bought no safety, only a smaller product.
+        HOSTED_ALPHA_AGENT_V4_PROFILE: ProductSurfaceProfile(
+            name=HOSTED_ALPHA_AGENT_V4_PROFILE,
+            command_names=(
+                "coordination_status",
+                "bootstrap",
+                "ask_memory",
+                "read_memory",
+                "browse_memory",
+                "remember",
+                "edit_memory",
+                "observe_memory",
+                "replace_memory",
+                "capture_source",
+                "compile_source",
+                "preserve_evidence",
+                "preserve_artifacts",
+                "review_memory",
+                "review_item_context",
+                "triage_memory",
+                "connect_memory",
+                "adoption_studio",
+                "maintain_memory",
+                "schema_memory",
+                "govern_memory",
+                "manage_memory_file",
+                "record_memory",
+                "plan_memory",
+                "query_dataset",
+            ),
+            expose_tier2=True,
+        ),
     }
 )
 
@@ -8218,7 +8360,9 @@ def product_commands_for_profile(
             raise RuntimeError(
                 f"product surface profile {profile!r} references missing command {name!r}"
             )
-        if command.tier != 1 or surface not in command.surfaces:
+        if (command.tier != 1 and not definition.expose_tier2) or (
+            surface not in command.surfaces
+        ):
             raise RuntimeError(
                 f"product surface profile {profile!r} cannot expose {name!r} on {surface!r}"
             )
@@ -8429,6 +8573,24 @@ def _catalog_route_tools(entry: dict) -> set[str]:
     return tools
 
 
+def _unavailable_route_reason(tool: str) -> str:
+    """Say which command is missing and why, not merely that one is.
+
+    An agent told only "no route is exported" learns that the action failed,
+    not whether the capability exists by another path. Where the surface
+    withholds the command under a recorded exclusion, the recorded reason and
+    its lifting condition are the useful answer -- `adopt` on hosted is not
+    absent, it runs through the gateway lifecycle flow.
+    """
+    exclusion = HOSTED_SURFACE_EXCLUSIONS.get(tool)
+    if exclusion is None:
+        return "No route for this action is exported by the active surface."
+    return (
+        f"The active surface withholds `{tool}`. {exclusion.reason} "
+        f"Lifted when {exclusion.lifted_when}."
+    )
+
+
 def simple_action_names() -> tuple[str, ...]:
     """The stable, beginner-facing action vocabulary."""
     return _SIMPLE_ACTIONS
@@ -8463,9 +8625,10 @@ def simple_action_catalog(
             out[action]["route"] = primary_route
         else:
             out[action]["available"] = False
-            out[action]["unavailable_reason"] = (
-                "No route for this action is exported by the active surface."
+            out[action]["unavailable_reason"] = _unavailable_route_reason(
+                primary_route["tool"]
             )
+            out[action]["unavailable_command"] = primary_route["tool"]
         for key in (
             "deep_route",
             "evidence_route",

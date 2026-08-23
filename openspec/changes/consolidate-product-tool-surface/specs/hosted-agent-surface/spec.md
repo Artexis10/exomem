@@ -24,11 +24,12 @@ The alpha least-privilege posture of `hosted-alpha-agent-v1` is superseded: it w
 - **THEN** Tier-2 commands are included unless individually excluded with a recorded reason
 - **AND** each Tier-2 command remains bound by its existing guarded-field, destructive-operation, and schema-validation contracts
 
-#### Scenario: Product actions all resolve on hosted
+#### Scenario: Product action degraded by an exclusion explains itself
 
-- **WHEN** the action catalog is resolved against a hosted profile
-- **THEN** no action is reported unavailable
-- **AND** an action reported unavailable identifies the excluded command and its recorded reason
+- **WHEN** the action catalog is resolved against a hosted profile and an action's primary route names an excluded command
+- **THEN** the action is reported unavailable together with the excluded command, the recorded reason, and the condition that lifts it
+- **AND** a generic "no route is exported" message is not sufficient, because it does not tell the caller whether the capability is reachable by another path
+- **AND** an action whose primary route survives is reported available even when entries of its `advanced` list are withheld
 
 ### Requirement: Hosted Complete-Surface Profile
 
