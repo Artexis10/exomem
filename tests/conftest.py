@@ -13,10 +13,12 @@ from pathlib import Path
 import pytest
 from benchmark_capabilities import (
     declares_absent_directory_fd,
+    declares_absent_held_filesystem,
     declares_absent_sandbox,
     declares_absent_surface_timers,
     declares_absent_trusted_git,
     has_bwrap_sandbox,
+    has_held_filesystem_backend,
     has_posix_directory_fd_traversal,
     has_posix_file_modes,
     has_posix_interval_timers,
@@ -318,6 +320,8 @@ def pytest_runtest_makereport(item, call):  # noqa: ANN001, ANN201
         reason = "os.defpath names no trusted system Git on this platform"
     elif not has_posix_directory_fd_traversal() and declares_absent_directory_fd(error):
         reason = "POSIX directory descriptors (openat) do not exist on this platform"
+    elif not has_held_filesystem_backend() and declares_absent_held_filesystem(error):
+        reason = "exomem ships no held-filesystem backend for this platform"
     else:
         return
     report.outcome = "skipped"

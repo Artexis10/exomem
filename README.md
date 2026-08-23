@@ -282,7 +282,10 @@ idle; opt into GPU residency with `EXOMEM_MODE=performance` when you want it.
 The image also runs as an always-on remote server via `docker compose` with a
 tunnel sidecar — see [docs/docker.md](docs/docker.md). Windows users with a live
 vault should usually prefer the native install (WSL2 bind mounts miss live
-file-watch events); macOS Apple Silicon users need native install for MPS/MLX.
+file-watch events). macOS cannot serve a vault today: exomem's held-filesystem
+substrate, which every governed write acquires a reserved-path root through, has
+a Linux backend and a Windows backend and no darwin implementation, so `exomem`
+refuses there and `exomem doctor` says why.
 
 </details>
 
