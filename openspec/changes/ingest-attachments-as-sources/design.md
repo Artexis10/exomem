@@ -123,6 +123,61 @@ deliberate re-aim, not a deletion: the property worth pinning is that no *empty*
 page is written and that the page never inlines the artifact's bytes, so the
 replacement asserts the addressing contract and the absence of the content.
 
+## Media reconciliation owns any pending media page, and rewrites it as Evidence
+
+This is the largest thing the change has to deal with, and the first design
+pass missed it. `reconcile_media` does not merely fill a page's extracted text —
+when a media page is not already in the canonical pending shape it **re-renders
+the whole page** from `preserve._render_sidecar`, keeping only `exomem_id` and
+demoting the previous body into `## Preserved notes`. The canonical shape it
+compares against requires `source_type: other`, which no real Source has.
+
+Measured on a Source-shaped page for an image under `Sources/Sessions/`, with a
+kind, a domain, and projects on it:
+
+```
+title:       Riverside council walkthrough  ->  "Evidence: 2026-08-23-walkthrough.png"
+source_type: session                        ->  other
+domain:      urban-planning                 ->  dropped
+projects:    [riverside]                    ->  dropped
+tags:        [session, riverside]           ->  [evidence, evidence, uncategorized]
+body                                        ->  demoted under "## Preserved notes"
+```
+
+The locator line reads `Preserved under Evidence/evidence/uncategorized/`, a path
+that does not exist, because scope and category are derived by locating a literal
+`evidence` segment in the path and defaulting when there is none. That is the
+same positional assumption `ensure_media_sidecar` makes, except here it destroys
+classification rather than producing poor tags.
+
+So an image captured as a Source would lose its classification the first time
+media processing touched it, silently, and the loss would look like ordinary
+convergence. Three responses were considered:
+
+- **Leave Sources media unmarked**, so reconciliation never claims it. Rejected:
+  a captured screenshot would never be OCR'd, which removes most of the reason to
+  capture it losslessly.
+- **Two pages per artifact** — a pipeline-owned stub plus a Source page citing
+  it. Rejected: it contradicts the one-page contract this change just
+  established, and doubles the addressing problem it set out to fix.
+- **Make the pending shape and its re-render preserve what they do not own.**
+  Taken. The pipeline's business is `media_type`, `evidence_file`,
+  `extracted_by`, `processing_state`, and the binary provenance fields; a page's
+  identity, classification, and body belong to whoever captured it. The canonical
+  shape check becomes a check over the fields the pipeline owns rather than over
+  the whole frontmatter, and the re-render edits those fields in place instead of
+  rebuilding the page.
+
+That is a genuine widening of this change, and it is why the layout decision
+above — reusing the Evidence file convention so the pipeline serves both lanes
+unchanged — bought less than it appeared to. The addressing is shared; the
+*ownership* was not, and had to be separated anyway.
+
+It also explains, after the fact, why writing artifact provenance onto a pending
+stub was worth avoiding at capture: not because it would flip the convergence
+check, which it provably cannot without `processing_state` and the timestamp
+fields, but because those pages are not the capture path's to describe.
+
 ## Citation resolves from the artifact, not only from the page
 
 `note._resolve_source_path` replaces the extension with `.md`, so it can only
