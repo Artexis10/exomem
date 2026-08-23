@@ -49,6 +49,7 @@ the public-suite lanes.
 | f24 | fresh_session_reconstruction | operational | none | continuation_packet_reconstructs_session · no_retired_state_served_as_current (scope extended to the packet by amendment sequence 2) |
 | f25 | restructure_lifecycle | operational | none | restructure_signal_cleared_by_state_change · signal_absence_checked_across_all_surfaces (cleared by state change, not by dismissal; zero merge-class churn in the frozen window) |
 | f26 | hookless_episode_carrier | operational | none | due_state_block_present_in_carrier · continuation_packet_reconstructs_session (end-to-end thin-client episode; due-state block present in the actual compact responses) |
+| f27 | lifecycle_routing_replay | operational | none | lifecycle_consequence_landed_unprompted · no_structured_write_beyond_expectation (a real agent replays an authored episode of ordinary working language with every store-bearing utterance removed; the durable state it leaves is diffed against the state an expert session leaves, in three tiers — intent, outcome, transition — with the false-write dual reported from the same run) |
 
 ## 2. Assertion registry (deterministic; unknown name = fixture load error)
 
@@ -76,6 +77,8 @@ counter_emission_not_repeated_per_write
 continuation_packet_reconstructs_session
 restructure_signal_cleared_by_state_change
 due_state_block_present_in_carrier
+lifecycle_consequence_landed_unprompted
+no_structured_write_beyond_expectation
 ```
 
 All run against neutral state snapshots (never product internals or answer
@@ -181,6 +184,39 @@ Deterministic results are final; no judge may overturn one.
   compact mutation and recall responses the journey actually received; OR a
   documented compact-response schema that includes the block plus captured
   responses conforming to it. A block only reachable at verbose detail fails.
+- **lifecycle_consequence_landed_unprompted**: the projected structured
+  collections carry, for every consequence the corpus declares, an item whose
+  declared natural key matches the deliverable, an event item whose declared
+  natural key matches the observed outcome, and the status the outcome implies
+  on the open item; OR a documented collection/query surface that resolves each
+  declared consequence back to a live item carrying the same natural key and
+  state. Titles match after NFKC normalisation, case folding and whitespace
+  collapse and nothing looser; a date field must be present and valid on every
+  event item, and its value is compared only where the utterance stated one.
+  Counted per tier — intent, outcome, transition — and complete in **every** tier
+  or it fails, with the fractions and the missing keys in the evidence. An empty
+  or missing collections projection is an **error**, never a pass.
+- **no_structured_write_beyond_expectation**: the same projection carries no
+  item and no event outside the declared expectation, no item holding a status
+  the expectation never assigned, no collection beyond the seeded pair, and no
+  page the session wrote; OR a documented enumeration of everything the session
+  wrote resolves every entry back to a declared expectation. A page counts as
+  written by the session unless it is present in the projection of the seeded
+  vault taken **before the first turn** — the seeded page set, recorded by path
+  on the run manifest — or it is a collection's own manifest file or a file
+  under the storage subdirectory that manifest declares, which the item and
+  event checks already cover. Any other page under a collection's directory,
+  including prose written where an event belongs, is an extra. It passes only on
+  an empty extras set and lists the extras otherwise. Reported beside its
+  coverage dual and from the same run, never on its own; an empty or missing
+  collections projection, or a missing seeded projection, is an **error**, never
+  a pass. The seeded projection must be **this phase's own**: taken in the same
+  phase as the scored projection and before that phase's first turn. Reached
+  snapshots accumulate across a trajectory's phases, so a phase that took no seed
+  projection of its own would otherwise be scored against the previous phase's
+  post-run state — under which a page both arms wrote is already in the
+  "baseline". A projection from another phase, or one that already holds an event
+  or an item outside the seeded pair, is an **error**, never a pass.
 
 Claim-conditioned N/A: a product whose own materials claim a property scores
 **fail**, not not_applicable, when it is absent — with the claim cited.
@@ -240,3 +276,21 @@ adversarial comparison at acceptable marginal cost.
   **The judged half stays out.** Intervention usefulness and continuation sufficiency remain membench agent-track (AT-1) dimensions behind the judge-agreement gate, outside the pre-registered deterministic set. Deterministic gates are never overturnable by a judge.
 
   Until the receipt is acknowledged, f20–f26 MUST NOT support a comparative run, score, or claim.
+
+- 2026-08-23 — **Lifecycle-routing replay family amendment (sequence 3).** Reason: the lifecycle-routing contract slice shipped the runtime for routing lifecycle consequences and an acceptance journey that proves it *given the expert end-state* — the journey drives the library writes itself. Nothing in f01–f26 measures the north star that work was undertaken for: a real agent, on the shipped contract, given ordinary work language with every store-bearing utterance removed, produces the same durable state the expert session produced. f26 drives the real client envelope with no agent, track C drives single fresh sessions and measures retrieval activation, and f16 measures plan-versus-record divergence over authored state; none runs a multi-turn agent through a lifecycle episode and diffs what it wrote against what an expert would have written. Contracts-first is the house rule sequences 1 and 2 established: the measurement files before anyone tunes the contract against an improvised test.
+
+  This amendment extends §1 with f27 `lifecycle_routing_replay` (operational journey; no public coverage; an authored, ordered transcript of user turns in ordinary working language is replayed through a real agent CLI against an isolated server over a seeded vault, and the durable state it leaves is diffed against the fold of the corpus's own per-turn annotations in three tiers — `intent`, a plan item filed from stated intent; `outcome`, a record appended from an observed event; `transition`, an open item whose status an outcome moved). It appends two deterministic assertions to §2 and adds their representation-neutral predicates to §4. It adds **no** operation kind: the trajectory uses `configure` for the arm, `agent_turn` per user utterance and `snapshot` per arm, all already registered. `UNPROMPTED_FAMILIES`, the absence-meta composition set and the item-pair set are unchanged — the user turns are the stimulus, and both assertions are state assertions rather than signal-absence assertions.
+
+  **The expectation is authored, never produced by an agent.** The corpus is a pure function of its arguments — a seeded vault, the ordered transcript, and per-turn annotations — and the expected end-state is the fold of those annotations. Turns that land nothing are in the corpus on purpose: at least one tentative claim, one elapsed-time remark and one deferral each annotate `none`, because the shipped contract says a tentative claim is never an event and elapsed time is never an outcome. A family with only positive turns would score a product that wrote something for every utterance as perfect. Deliverables are referenced by their seeded titles and matched after NFKC normalisation, case folding and whitespace collapse; a miss is a miss, and loosening that is a new amendment.
+
+  **The stimulus is clean by construction.** The corpus module pins a store-bearing vocabulary — the store itself, and the act of storing — and refuses any user turn matching it, at corpus construction and again at scenario load, naming the turn and the matched token. A red fixture carrying "save this one" proves the refusal. The retrieve-nudge's own activation regex is the sibling and is deliberately **not** reused: it matches `earlier`, `previous`, `history` and `decision`, which are exactly the ordinary working language this family measures.
+
+  **A harness fault is never a product result.** A non-zero exit, an error-subtype or `is_error` result, a login failure or a malformed transcript line marks the arm a harness fault: no snapshot is produced for it, both of its assertions evaluate `blocked` with the reason, and nothing about the product is scored from it. The same rule covers an unprojected collections section — an observation error is not a finding about the runtime.
+
+  **Paired readouts, no aggregate.** Coverage is counted per tier and reported beside the extras count from the same run, together with the capture-nudge firing count and the structured-write tool-use count, under a manifest pinning the client version, the model, the product version, the prominence level per arm, and the corpus and fixture digests. No figure aggregates across tiers or across arms, and a coverage figure is never published without its false-write dual. The house rule from sequence 2 applies unchanged.
+
+  **Expected partial.** On the runtime that exists today the family is **expected partial**: the outcome and transition tiers are the ones the contract slice taught, while the intent tier depends on the agent filing a plan item from stated intent without being asked, and the hookless arm has only the tool surface and a pasted instruction block to teach it. That is the family's finding and its falsification target, not a CI failure. The next contract slice is built against this family, and "became more automatic" means its tiers flip green while the extras stay at zero.
+
+  **Catastrophic set: no additions.** A missed consequence is a trust failure, not an integrity failure; putting one in §3 would suppress every aggregate over a routing miss. This amendment adds **no** catastrophic assertions and no budget constant — the tier counts are fixed by the corpus, so there is nothing to calibrate and nothing to freeze. It changes no projector, no runtime and no tool surface, and performs no witness join against the server write log: the projected vault is the state witness, and the transcript's tool-use counts are reported beside it rather than reconciled against it.
+
+  Until the receipt is acknowledged, f27 MUST NOT support a comparative run, score, or claim.

@@ -1,17 +1,18 @@
 """The frozen assertion registry.
 
-The 33 names below are pre-registered in ``PREREGISTRATION.md`` §2 — eighteen
+The 35 names below are pre-registered in ``PREREGISTRATION.md`` §2 — eighteen
 committed before any competitor was run by this programme, six added by the
-2026-08 loop-closure amendment, and nine added by the 2026-08 no-nudge
-amendment, both through the governed §7 path. The registry is a closed set on
+2026-08 loop-closure amendment, nine added by the 2026-08 no-nudge amendment,
+and two added by the 2026-08 lifecycle-replay amendment, all through the
+governed §7 path. The registry is a closed set on
 purpose: a scenario that names anything else fails to load, which is what stops
 the suite from growing an assertion to fit a result it wanted.
 
 Registration is not release. The families each amendment introduced stay
 withheld from comparative runs until its receipt is acknowledged; that gate
 lives in :mod:`epistemic.amendments` and fires at the same load-time choke
-point this registry does. Sequence 1 is acknowledged; sequence 2 is not, so
-f20-f26 are registered and withheld at once.
+point this registry does. Sequence 1 is acknowledged; sequences 2 and 3 are
+not, so f20-f26 and f27 are registered and withheld at once.
 
 ``PREREGISTERED_ASSERTIONS`` mirrors §2 in code so the mapping can be checked
 without file I/O at import time; ``tests/test_epistemic_registry.py`` parses the
@@ -75,6 +76,12 @@ PREREGISTERED_ASSERTIONS: tuple[str, ...] = (
     "continuation_packet_reconstructs_session",
     "restructure_signal_cleared_by_state_change",
     "due_state_block_present_in_carrier",
+    # Added by the 2026-08 lifecycle-replay amendment (§7), sequence 3. The two
+    # are a *pair*: coverage without its false-write dual would reward a product
+    # that wrote something for every utterance, so they are registered together
+    # and reported together.
+    "lifecycle_consequence_landed_unprompted",
+    "no_structured_write_beyond_expectation",
 )
 
 #: Quiet assertions: every one composes
@@ -130,6 +137,8 @@ PREREGISTERED_FAMILIES: tuple[tuple[str, str], ...] = (
     ("f24", "fresh_session_reconstruction"),
     ("f25", "restructure_lifecycle"),
     ("f26", "hookless_episode_carrier"),
+    # Added by the 2026-08 lifecycle-replay amendment (§7), sequence 3.
+    ("f27", "lifecycle_routing_replay"),
 )
 
 PREREGISTERED_FAMILY_IDS: frozenset[str] = frozenset(
@@ -166,6 +175,11 @@ AMENDMENT_INTRODUCED_FAMILIES: Mapping[str, int] = MappingProxyType(
         "f24": 2,
         "f25": 2,
         "f26": 2,
+        # Sequence 3 (lifecycle replay). Pending founder acknowledgment, so f27
+        # is registered and withheld at once — the development run the change
+        # records is evidence about the harness and the current runtime, never a
+        # comparative claim.
+        "f27": 3,
     }
 )
 
@@ -191,6 +205,13 @@ REQUIRES_ITEM_PAIR: frozenset[str] = frozenset(
 #: and far weaker claim that an empty snapshot would satisfy.
 REQUIRES_SUBJECT: frozenset[str] = frozenset(
     {
+        # f27's pair reads its expectation out of the corpus the subject names.
+        # Subject-less both block with the reason, but blocking at evaluation is
+        # late: the mistake is visible at load, and a scenario that forgot the
+        # corpus id should be refused there rather than produce a run whose two
+        # assertions are both unscoreable.
+        "lifecycle_consequence_landed_unprompted",
+        "no_structured_write_beyond_expectation",
         "signal_absence_checked_across_all_surfaces",
         "structural_signal_surfaced_within_budget",
         "entity_candidate_surfaced_from_recurrence",
@@ -204,6 +225,11 @@ REQUIRES_SUBJECT: frozenset[str] = frozenset(
 #: take two snapshots at or before the phase that expects them.
 REQUIRES_SNAPSHOT_PAIR: frozenset[str] = frozenset(
     {
+        # f27's false-write dual diffs pages against the seeded vault, so the
+        # trajectory owes a snapshot taken before the first agent turn. Without
+        # it a scaffold page the harness itself laid would be scored as a page
+        # the agent wrote.
+        "no_structured_write_beyond_expectation",
         "review_state_durable",
         "review_reopens_on_material_change",
         "review_stays_closed_on_irrelevant_change",

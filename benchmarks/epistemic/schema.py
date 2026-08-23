@@ -82,6 +82,14 @@ UNPROMPTED_SAFE_OPS: frozenset[str] = frozenset({"maintenance_pass", "snapshot"}
 #: refuses such a trajectory rather than scoring it.
 UNPROMPTED_FAMILIES: frozenset[str] = frozenset({"f20", "f21", "f22"})
 
+#: Families whose *stimulus* is the measurement. f27 asks whether ordinary
+#: working language routes a lifecycle consequence on its own, so a user turn
+#: that names the store or the act of storing would be teaching the answer. The
+#: vocabulary lives in the corpus module beside the fold it protects; this is the
+#: second of its two enforcement points — corpus construction is the first, and a
+#: fixture authored by hand reaches only this one.
+STORE_BEARING_GATED_FAMILIES: frozenset[str] = frozenset({"f27"})
+
 ScenarioKind = Literal["corpus", "operational"]
 
 
@@ -314,6 +322,45 @@ def _validate_unprompted_trajectory(scenario: Scenario, source: str) -> None:
             )
 
 
+def _validate_store_bearing_turns(scenario: Scenario, source: str) -> None:
+    """A gated family's user turns may not name the store or the act of storing.
+
+    The turn text travels in the op's ``detail``, which is also why a blank one
+    refuses: a fixture whose turns carry no utterance would pass this gate
+    vacuously while asserting over a trajectory nobody can read.
+    """
+
+    if scenario.family_id not in STORE_BEARING_GATED_FAMILIES:
+        return
+
+    from .corpora.lifecycle_replay import (
+        StoreBearingUtterance,
+        assert_no_store_bearing_utterance,
+    )
+
+    turns = tuple(
+        (op.ref, op.detail)
+        for phase in scenario.phases
+        for op in phase.ops
+        if op.op == "agent_turn"
+    )
+    if not turns:
+        raise ScenarioLoadError(
+            f"{source}: family {scenario.family_id} is measured on its user turns, but "
+            "the trajectory contains no agent_turn operation"
+        )
+    blank = sorted({ref for ref, detail in turns if not detail.strip()})
+    if blank:
+        raise ScenarioLoadError(
+            f"{source}: family {scenario.family_id} turn(s) {blank} carry no utterance "
+            "text; the store-bearing gate would pass vacuously over them"
+        )
+    try:
+        assert_no_store_bearing_utterance(turns)
+    except StoreBearingUtterance as error:
+        raise ScenarioLoadError(f"{source}: {error}") from error
+
+
 def load_scenario_text(text: str, *, source: str) -> Scenario:
     """Parse and fully validate one scenario document."""
 
@@ -335,6 +382,7 @@ def load_scenario_text(text: str, *, source: str) -> Scenario:
         _validate_names(scenario, source)
         _validate_pair_requirements(scenario, source)
         _validate_unprompted_trajectory(scenario, source)
+        _validate_store_bearing_turns(scenario, source)
         scenario.bound_assertions()
     except RegistryError as error:
         raise ScenarioLoadError(f"{source}: {error}") from error

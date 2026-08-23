@@ -11,7 +11,6 @@ from __future__ import annotations
 from collections.abc import Callable
 
 import pytest
-
 from epistemic.assertions import AssertionContext, AssertionResult
 from epistemic.registry import ASSERTION_REGISTRY, PREREGISTERED_ASSERTIONS, resolve
 from epistemic.snapshot import (
@@ -21,6 +20,11 @@ from epistemic.snapshot import (
     ProjectorMeta,
     Relation,
     StateItem,
+)
+from test_epistemic_lifecycle_replay import (  # tests/ is on sys.path under pytest
+    replay_complete_context,
+    replay_incomplete_context,
+    replay_overwriting_context,
 )
 
 PROJECTOR = ProjectorMeta(
@@ -1023,6 +1027,14 @@ DISCRIMINATION: dict[str, tuple[Factory, Factory]] = {
     "due_state_block_present_in_carrier": (
         due_state_block_present_in_carrier_pass,
         due_state_block_present_in_carrier_fail,
+    ),
+    "lifecycle_consequence_landed_unprompted": (
+        replay_complete_context,
+        replay_incomplete_context,
+    ),
+    "no_structured_write_beyond_expectation": (
+        replay_complete_context,
+        replay_overwriting_context,
     ),
 }
 
