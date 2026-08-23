@@ -48,6 +48,53 @@ def _preserve_under_guard(
         return preserve_stream(vault_root, **kwargs)
 
 
+def _capture_source_under_guard(
+    manager: Any,
+    vault_root: Path,
+    source_schema: Any,
+    *,
+    title: str,
+    filename: str,
+    stream: Any,
+    content_type: str | None,
+    source_type: str | None,
+    domain: str | None,
+    add_module: Any,
+    max_bytes: int,
+) -> Any:
+    """Capture an out-of-band upload as a Source, under vault authority.
+
+    The bytes are spooled to a private temporary file first because `add` copies
+    from a path: it writes the artifact and its page in one operation, and a
+    half-consumed request stream cannot be replayed if that operation refuses.
+    """
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="exomem-upload-") as staging:
+        staged = Path(staging) / (Path(filename).name or "upload.bin")
+        written = 0
+        with staged.open("wb") as sink:
+            while chunk := stream.read(1024 * 1024):
+                written += len(chunk)
+                if written > max_bytes:
+                    raise ValueError("TOO_LARGE: upload exceeds the configured limit")
+                sink.write(chunk)
+        with manager.mutation_guard(vault_root):
+            return add_module.add(
+                vault_root,
+                source_schema,
+                content="",
+                title=title,
+                source_type=source_type,
+                domain=domain,
+                artifact=add_module.SourceArtifact(
+                    staged_path=staged,
+                    filename=filename,
+                    content_type=content_type,
+                ),
+            )
+
+
 def _reconcile_under_guard(
     manager: Any,
     vault_root: Path,
@@ -151,6 +198,24 @@ def register_transfer_routes(
     """Register /upload and /download routes and return their config."""
     config = load_transfer_config()
 
+    def _upload_lane(request: Request) -> str:
+        """The lane a request's upload capability is bound to.
+
+        Read off the token rather than the form, so the destination is whatever
+        was fixed at mint time. A shared static secret or a Cloudflare Access
+        identity carries no lane and falls back to evidence, which is where
+        every upload landed before lanes existed.
+        """
+        if config.upload_token is not None:
+            header = request.headers.get("authorization", "")
+            if header.startswith("Bearer "):
+                presented = header[len("Bearer ") :].strip()
+                if not secrets.compare_digest(presented, config.upload_token):
+                    lane = upload_tokens.lane_for_token(presented, config.upload_token)
+                    if lane is not None:
+                        return lane
+        return "evidence"
+
     def _authorized(request: Request, *, scope: str = "upload") -> bool:
         if config.upload_token is not None:
             header = request.headers.get("authorization", "")
@@ -159,6 +224,10 @@ def register_transfer_routes(
                 if secrets.compare_digest(presented, config.upload_token):
                     return True
                 if upload_tokens.verify(presented, config.upload_token, scope=scope):
+                    return True
+                if scope == "upload" and upload_tokens.lane_for_token(
+                    presented, config.upload_token
+                ):
                     return True
         if config.cf_jwks is not None:
             if cf_access.verify(
@@ -214,22 +283,46 @@ def register_transfer_routes(
             getattr(upload, "filename", "") or ""
         )
         preserve_module = _preserve_module()
+        lane = _upload_lane(request)
         try:
             manager = get_manager()
-            result = await run_in_threadpool(
-                _preserve_under_guard,
-                manager,
-                vault_root,
-                preserve_module.preserve_stream,
-                scope=scope,
-                category=category,
-                filename=filename,
-                stream=upload.file,
-                content_type=getattr(upload, "content_type", None),
-                description=description,
-                text=text,
-                max_bytes=config.upload_max_bytes,
-            )
+            if lane == "source":
+                # The lane came off the token; the title is ordinary data and may
+                # come off the form, falling back to the filename so a capture is
+                # never refused for want of a label.
+                from . import add as add_module
+                from . import schema as schema_module
+
+                title = str(form.get("title") or "").strip() or filename
+                result = await run_in_threadpool(
+                    _capture_source_under_guard,
+                    manager,
+                    vault_root,
+                    schema_module.load_source_schema(vault_root),
+                    title=title,
+                    filename=filename,
+                    stream=upload.file,
+                    content_type=getattr(upload, "content_type", None),
+                    source_type=str(form.get("source_kind") or "").strip() or None,
+                    domain=str(form.get("domain") or "").strip() or None,
+                    add_module=add_module,
+                    max_bytes=config.upload_max_bytes,
+                )
+            else:
+                result = await run_in_threadpool(
+                    _preserve_under_guard,
+                    manager,
+                    vault_root,
+                    preserve_module.preserve_stream,
+                    scope=scope,
+                    category=category,
+                    filename=filename,
+                    stream=upload.file,
+                    content_type=getattr(upload, "content_type", None),
+                    description=description,
+                    text=text,
+                    max_bytes=config.upload_max_bytes,
+                )
         except preserve_module.PreserveError as exc:
             status = {
                 "ARTIFACT_EXISTS": 409,

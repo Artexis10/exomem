@@ -18,7 +18,7 @@ Use when the user asks to save or the session lands on durable reusable knowledg
    two open axes when you can: `source_kind` (what it is) and `domain` (what it
    is about), plus `projects` for the work it serves. Use `other` only when the
    kind genuinely cannot be determined, never because no familiar label matches.
-3. Use `preserve_evidence` for factual text, `preserve_artifacts` when file handles are available, and `transfer_artifact` only as the binary-upload fallback.
+3. Pick the lane before the transport. Raw material stays with `capture_source`, which takes `files` for attachments as well as `content` for text. Proof-bearing material takes `preserve_evidence` for factual text, `preserve_artifacts` when file handles are available, and `transfer_artifact` only as the binary-upload fallback.
 4. Use `remember` for distilled conclusions: `research-note`, `insight`, `failure`, or `pattern`. Pass any path captured in steps 2-3 as `sources:` so the conclusion links to its provenance and the source leaves the unprocessed queue.
 5. Run `connect_memory(operation="suggest-links")` before writing compiled notes;
    prefer `edit_memory` or `replace_memory` for near-duplicates.

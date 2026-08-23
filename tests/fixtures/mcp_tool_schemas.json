@@ -779,16 +779,17 @@
     }
   },
   "capture_source": {
-    "description": "Capture raw source material and optionally return compile guidance.\n\nThe raw source is preserved first. If `compile_guidance=true`, Exomem then\nreturns a proposal for a future compiled note, without silently converting\nraw provenance into a conclusion.\n\nClassification is optional and never a precondition for preserving material,\nbut it is what makes a source findable and coherently filed. Two independent\naxes describe it: what the artifact IS (`source_kind`) and what it is ABOUT\n(`domain`). Both are open vocabularies.",
+    "description": "Capture raw source material and optionally return compile guidance.\n\nTakes `content` for text or `files` for attached file handles, stored\nlosslessly under `Sources/`. This command is for raw material; proof-bearing\nartifacts go to `preserve_evidence`/`preserve_artifacts`. Choose by what the\nartifact is for, not by what the client can carry.\n\nThe raw source is preserved first. If `compile_guidance=true`, Exomem then\nreturns a proposal for a future compiled note, without silently converting\nraw provenance into a conclusion.\n\nClassification is optional and never a precondition for preserving material,\nbut it is what makes a source findable and coherently filed. Two independent\naxes describe it: what the artifact IS (`source_kind`) and what it is ABOUT\n(`domain`). Both are open vocabularies.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
-        "content": {
-          "description": "Raw source text.",
-          "type": "string"
-        },
         "title": {
           "description": "Source title.",
+          "type": "string"
+        },
+        "content": {
+          "default": "",
+          "description": "Raw source text. Supply this or `files`, not both.",
           "type": "string"
         },
         "slug": {
@@ -910,6 +911,37 @@
           "default": null,
           "description": "Project keys this source serves. Never affects where it is stored; one source may serve several projects."
         },
+        "files": {
+          "default": [],
+          "description": "Up to eight temporary client file handles, captured losslessly as Sources instead of `content` — an attached transcript, article, screenshot, or recording that is raw material. Each requires `download_url` and `file_id`; `mime_type` and `file_name` are optional. Exomem retrieves each handle server-side, so no bytes pass through model-visible arguments. Proof-bearing artifacts go to `preserve_artifacts` instead — the lane is chosen by what the artifact is for, never by which transport is available.",
+          "items": {
+            "description": "Client-neutral temporary remote file handle.\n\nUsed by ``capture_source`` for raw material and ``preserve_artifacts`` for\nproof-bearing artifacts. The handle carries no destination: the lane is the\ncommand's, never the transport's.",
+            "properties": {
+              "download_url": {
+                "type": "string"
+              },
+              "file_id": {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              "mime_type": {
+                "maxLength": 255,
+                "type": "string"
+              },
+              "file_name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "download_url",
+              "file_id"
+            ],
+            "type": "object"
+          },
+          "maxItems": 8,
+          "type": "array"
+        },
         "response_detail": {
           "default": "compact",
           "description": "Successful committed mutation detail: compact (default), full diagnostics, or legacy raw leaf result.",
@@ -934,7 +966,6 @@
         }
       },
       "required": [
-        "content",
         "title"
       ],
       "type": "object"
@@ -3549,7 +3580,7 @@
         "files": {
           "description": "One to eight temporary client file handles.",
           "items": {
-            "description": "Client-neutral temporary remote file handle used by ``preserve_artifacts``.",
+            "description": "Client-neutral temporary remote file handle.\n\nUsed by ``capture_source`` for raw material and ``preserve_artifacts`` for\nproof-bearing artifacts. The handle carries no destination: the lane is the\ncommand's, never the transport's.",
             "properties": {
               "download_url": {
                 "type": "string"
@@ -4416,7 +4447,7 @@
     }
   },
   "remember": {
-    "description": "Remember a durable conclusion as compiled governed knowledge.\n\nThis is for distilled thinking, decisions, findings, failures, patterns,\nexperiments, and production logs. Raw material belongs in `capture_source`;\nproof artifacts belong in `preserve_evidence`.\n\nFor each `sources:` wikilink, this appends the new note's wikilink to that\nsource's `ingested_into:` frontmatter, maintaining the source-to-note graph\nand taking the source out of the unprocessed backlog.\n\nSemantic authoring [exomem.semantic-authoring:v4 sha256:837b03b15c3d83f6c6eeb50771f4eaa04e4beaaae0f7d54be249be40ce7685f7]: Every new, replaced, or activated active compiled note needs at least one valid, non-empty semantic unit. Either compact or rich form satisfies the minimum; compact is preferred, and a valid rich unit does not need a duplicate compact restatement. Check new active creates, replacements, and inactive-to-active transitions; inactive drafts may remain unit-free until activation. A post-activation compliant page cannot lose its final valid semantic unit. Under `## Observations`, write `- [category] content #tags (context) ^anchor` with an open-vocabulary category: the unit's one primary open-vocabulary subject or domain label. Category: One primary open-vocabulary label describes what a unit is about; rich category defaults to its governed kind unless explicitly overridden. Tag: Zero or more optional secondary retrieval labels refine lookup and never replace category or determine kind. Kind: The governed semantic form: compact units always use `observation`; rich units use their recognized heading kind. Rich form uses `## <Governed Kind>`. After optional leading metadata, add a blank line and a substantive Markdown body. A heading at level N owns content until the next non-fenced heading at level N or shallower; deeper headings remain in its body. Portable categories: Choose exactly one primary category: prefer a meaningful epistemic or operational role and put the domain in tags, but if the role would only be a generic fact, finding, or observation and the domain is the durable lens, use a domain category instead. The category vocabulary is open: these core keys are a shared starting point, not a closed list. When no core key is a good primary fit, author a new meaningful category rather than forcing an ill-fitting one. Role example: - [decision] Relocate to a coastal city next spring #life ^relocation For the complete core keys, aliases, and rich example, call bootstrap(profile=\"full\"). `missing_semantic_unit` means an applicable active compiled result has no valid non-empty unit. Compact remediation: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. Rich remediation: Alternatively add `## Decision`, a blank line, and a substantive body. `empty_rich_unit` means a recognized rich heading has no substantive body. Add substantive body content or remove the empty recognized heading.",
+    "description": "Remember a durable conclusion as compiled governed knowledge.\n\nThis is for distilled thinking, decisions, findings, failures, patterns,\nexperiments, and production logs. Raw material belongs in `capture_source`,\nwhich takes attached file handles as well as text; proof-bearing artifacts\nbelong in `preserve_evidence` or `preserve_artifacts`.\n\nFor each `sources:` wikilink, this appends the new note's wikilink to that\nsource's `ingested_into:` frontmatter, maintaining the source-to-note graph\nand taking the source out of the unprocessed backlog.\n\nSemantic authoring [exomem.semantic-authoring:v4 sha256:837b03b15c3d83f6c6eeb50771f4eaa04e4beaaae0f7d54be249be40ce7685f7]: Every new, replaced, or activated active compiled note needs at least one valid, non-empty semantic unit. Either compact or rich form satisfies the minimum; compact is preferred, and a valid rich unit does not need a duplicate compact restatement. Check new active creates, replacements, and inactive-to-active transitions; inactive drafts may remain unit-free until activation. A post-activation compliant page cannot lose its final valid semantic unit. Under `## Observations`, write `- [category] content #tags (context) ^anchor` with an open-vocabulary category: the unit's one primary open-vocabulary subject or domain label. Category: One primary open-vocabulary label describes what a unit is about; rich category defaults to its governed kind unless explicitly overridden. Tag: Zero or more optional secondary retrieval labels refine lookup and never replace category or determine kind. Kind: The governed semantic form: compact units always use `observation`; rich units use their recognized heading kind. Rich form uses `## <Governed Kind>`. After optional leading metadata, add a blank line and a substantive Markdown body. A heading at level N owns content until the next non-fenced heading at level N or shallower; deeper headings remain in its body. Portable categories: Choose exactly one primary category: prefer a meaningful epistemic or operational role and put the domain in tags, but if the role would only be a generic fact, finding, or observation and the domain is the durable lens, use a domain category instead. The category vocabulary is open: these core keys are a shared starting point, not a closed list. When no core key is a good primary fit, author a new meaningful category rather than forcing an ill-fitting one. Role example: - [decision] Relocate to a coastal city next spring #life ^relocation For the complete core keys, aliases, and rich example, call bootstrap(profile=\"full\"). `missing_semantic_unit` means an applicable active compiled result has no valid non-empty unit. Compact remediation: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. Rich remediation: Alternatively add `## Decision`, a blank line, and a substantive body. `empty_rich_unit` means a recognized rich heading has no substantive body. Add substantive body content or remove the empty recognized heading.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -5636,13 +5667,18 @@
     }
   },
   "transfer_artifact": {
-    "description": "Prepare out-of-band binary artifact transfer.\n\nCompatibility transport for clients that cannot supply file handles to\n`preserve_artifacts`. Returns a short-lived token and URL for uploading\nevidence binaries or downloading a vault file into a sandbox. Minting an\nupload token does not mean bytes were stored.",
+    "description": "Prepare out-of-band binary artifact transfer.\n\nCompatibility transport for clients that cannot supply file handles to\n`capture_source` or `preserve_artifacts`. Returns a short-lived token and URL\nfor uploading a binary or downloading a vault file into a sandbox. Minting an\nupload token does not mean bytes were stored.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
         "operation": {
           "default": "upload",
           "description": "upload or download.",
+          "type": "string"
+        },
+        "lane": {
+          "default": "evidence",
+          "description": "where an upload lands — `source` for raw material, `evidence` for proof-bearing artifacts. Bound into the token when it is minted, so the destination cannot be chosen by whoever posts the bytes. Ignored for downloads.",
           "type": "string"
         },
         "response_detail": {
