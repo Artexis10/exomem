@@ -50,6 +50,10 @@ from epistemic.schema import ScenarioLoadError, load_scenario, load_scenario_tex
 ROOT = Path(__file__).resolve().parents[1]
 SEQUENCE2 = ROOT / "benchmarks" / "epistemic" / "fixtures" / "sequence2"
 SEQUENCE_TWO_FAMILIES = ("f20", "f21", "f22", "f23", "f24", "f25", "f26")
+#: Families a *later* unacknowledged amendment introduced. The withhold gate is
+#: repo-wide, so a test that pinned its answer to sequence 2 alone would fail the
+#: day another amendment filed — which is drift in the test, not in the gate.
+LATER_WITHHELD_FAMILIES = ("f27",)
 
 
 @pytest.fixture
@@ -91,7 +95,9 @@ def test_the_withhold_gate_refuses_every_sequence_two_family() -> None:
     from protocol.contracts import AmendmentAcknowledgmentPendingError
 
     amendments.reset_cache()
-    assert amendments.withheld_family_ids(ROOT) == frozenset(SEQUENCE_TWO_FAMILIES)
+    assert amendments.withheld_family_ids(ROOT) == frozenset(
+        SEQUENCE_TWO_FAMILIES + LATER_WITHHELD_FAMILIES
+    )
     for family_id in SEQUENCE_TWO_FAMILIES:
         assert amendments.amendment_sequence_for(family_id) == 2
         with pytest.raises(AmendmentAcknowledgmentPendingError):
@@ -115,13 +121,18 @@ def test_the_amendment_receipt_is_pending_and_binds_the_working_document() -> No
     )
 
     receipts = working_amendment_receipts(ROOT)
-    assert [receipt.sequence for receipt in receipts] == [1, 2]
+    assert [receipt.sequence for receipt in receipts] == [1, 2, 3]
     sequence_two = receipts[1]
     assert sequence_two.acknowledgment_status == "pending"
     assert sequence_two.ratifier is None
     assert sequence_two.catastrophic_set_decision is None
     assert sequence_two.parent_contract_sha256 == receipts[0].contract_sha256
-    assert validate_working_preregistration(ROOT) == sequence_two.contract_sha256
+    # Sequence 2's digest binds the document *as it stood at sequence 2*, which
+    # stopped being the working bytes the moment sequence 3 amended it. What
+    # still has to hold is the chain link, and that the fold culminates in the
+    # last receipt's document rather than in this one's.
+    assert receipts[2].parent_contract_sha256 == sequence_two.contract_sha256
+    assert validate_working_preregistration(ROOT) == receipts[-1].contract_sha256
 
 
 # --------------------------------------------------------------------------
