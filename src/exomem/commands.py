@@ -224,15 +224,14 @@ _OptionalClientArtifactFiles = Annotated[
     Field(
         max_length=8,
         description=(
-            "Up to eight temporary client file handles to capture losslessly as "
-            "Sources, instead of `content`. Each object requires `download_url` "
-            "and `file_id`; `mime_type` and `file_name` are optional. Exomem "
-            "retrieves each handle server-side, so no bytes pass through "
-            "model-visible arguments. Use this for an attached transcript, "
-            "article, screenshot, or recording that is raw material. "
-            "Proof-bearing artifacts go to `preserve_artifacts` instead — the "
-            "lane is chosen by what the artifact is for, never by which "
-            "transport is available."
+            "Up to eight temporary client file handles, captured losslessly as "
+            "Sources instead of `content` — an attached transcript, article, "
+            "screenshot, or recording that is raw material. Each requires "
+            "`download_url` and `file_id`; `mime_type` and `file_name` are "
+            "optional. Exomem retrieves each handle server-side, so no bytes "
+            "pass through model-visible arguments. Proof-bearing artifacts go "
+            "to `preserve_artifacts` instead — the lane is chosen by what the "
+            "artifact is for, never by which transport is available."
         ),
     ),
 ]
@@ -4774,8 +4773,9 @@ def op_remember(
     """Remember a durable conclusion as compiled governed knowledge.
 
     This is for distilled thinking, decisions, findings, failures, patterns,
-    experiments, and production logs. Raw material belongs in `capture_source`;
-    proof artifacts belong in `preserve_evidence`.
+    experiments, and production logs. Raw material belongs in `capture_source`,
+    which takes attached file handles as well as text; proof-bearing artifacts
+    belong in `preserve_evidence` or `preserve_artifacts`.
 
     For each `sources:` wikilink, this appends the new note's wikilink to that
     source's `ingested_into:` frontmatter, maintaining the source-to-note graph
@@ -5195,11 +5195,10 @@ def op_capture_source(
 ) -> dict:
     """Capture raw source material and optionally return compile guidance.
 
-    Takes either `content` for text or `files` for attached file handles, which
-    are retrieved server-side and stored losslessly under `Sources/`. Both land
-    in the same lane: this command is for raw material, and `preserve_evidence`
-    and `preserve_artifacts` are for proof-bearing artifacts. Which one to call
-    is decided by what the artifact is for, never by what the client can carry.
+    Takes `content` for text or `files` for attached file handles, stored
+    losslessly under `Sources/`. This command is for raw material; proof-bearing
+    artifacts go to `preserve_evidence`/`preserve_artifacts`. Choose by what the
+    artifact is for, not by what the client can carry.
 
     The raw source is preserved first. If `compile_guidance=true`, Exomem then
     returns a proposal for a future compiled note, without silently converting
@@ -5231,14 +5230,8 @@ def op_capture_source(
             source_kind and equally extensible.
         projects: Project keys this source serves. Never affects where it is
             stored; one source may serve several projects.
-        files: Temporary client file handles to capture losslessly as Sources,
-            instead of `content`. Each object requires `download_url` and
-            `file_id`; `mime_type` and `file_name` are optional. Exomem
-            retrieves each handle server-side, so no bytes pass through
-            model-visible arguments. Use this for an attached transcript,
-            article, screenshot, or recording that is raw material. Proof-bearing
-            artifacts go to `preserve_artifacts` instead — the lane is chosen by
-            what the artifact is for, never by which transport is available.
+        files: Temporary client file handles, captured losslessly as Sources
+            instead of `content`. See the parameter schema for the shape.
     """
     if files:
         from . import client_artifacts

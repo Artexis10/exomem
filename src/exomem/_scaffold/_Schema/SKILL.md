@@ -317,7 +317,7 @@ experiments, proof-bearing records, review, and supersession.
 |---|---|---|
 | `ask` | "what do I know," "find what I concluded," "show the context" | `ask_memory(detail="compact", rerank=false)` first; `read_memory` or `ask_memory(deep=true)` when synthesis needs context |
 | `remember` | "remember this," "save this conclusion," "write this decision" | `remember`; use `replace_memory` when it supersedes old knowledge |
-| `capture` | "save this article/source/transcript," "keep this receipt/record/proof" | `capture_source` for Sources; `preserve_evidence` for text, `preserve_artifacts` for file handles, otherwise `transfer_artifact` for Evidence |
+| `capture` | "save this article/source/transcript," "keep this receipt/record/proof" | Pick the lane first, then the transport. Raw material -> `capture_source` (`content` for text, `files` for attachments). Proof-bearing -> `preserve_evidence` for text, `preserve_artifacts` for attachments, `transfer_artifact` when the client has no file handles |
 | `plan` | "save this feature idea," "file this bug for later," "what matters this week" | `plan_memory` for intended future state in a configured Planning collection |
 | `record` | "a dated measurement," "a completed session," "a transaction," "the current mileage" | `record_memory` for observed state in a configured Record collection |
 | `review` | "review stale knowledge," "what needs attention," "what sources are unprocessed" | `review_memory`; explicit dismiss/snooze/reopen via `triage_memory` |
@@ -353,6 +353,11 @@ Examples:
   retry with adjacent terms before treating a miss as meaningful.
 - "Save this article" -> `capture_source` with provenance; ask about compiling
   only if a conclusion is present.
+- "Here's the transcript/screenshot from that session" -> an attachment is raw
+  material, so `capture_source(files=[...])`, classified on both axes. Do not
+  reach for an Evidence command because the file handle was convenient: the
+  lane is what the artifact is *for*, and a Source can be promoted to Evidence
+  later when it turns out to be proof, while the reverse is refused.
 - "Keep this receipt for the warranty case" -> `preserve_evidence`, `preserve_artifacts`, or `transfer_artifact`, not as a
   general note.
 - "I completed a dated training session" -> resolve exactly one compatible
@@ -508,8 +513,13 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
   boundary-crossing moves are refused.
 - **Binaries go out-of-band — never inline through a tool argument.** Transcribe
   what's relevant into the note/evidence *text* (that's the queryable part), and
-  deliver the *original file* separately. On claude.ai web, call
-  **`preserve_artifacts(scope="...", category="...", files=[{"download_url": "...", "file_id": "...", "mime_type": "...", "file_name": "..."}])`** directly when the client supplies file handles. Otherwise call
+  deliver the *original file* separately. Decide the lane before the transport:
+  raw material takes
+  **`capture_source(title="...", source_kind="...", files=[{"download_url": "...", "file_id": "...", "mime_type": "...", "file_name": "..."}])`**,
+  and proof-bearing material takes
+  **`preserve_artifacts(scope="...", category="...", files=[...])`** — the same
+  handle shape either way. On claude.ai web, call whichever of those fits
+  directly when the client supplies file handles. Otherwise call
   **`transfer_artifact(operation="upload")`** for a short-lived `{token, upload_url}`. If the
   file-owning client can reach `upload_url`, multipart-`curl` the attached files there; otherwise
   open the prefilled browser upload form or give its URL to the user for a manual upload.

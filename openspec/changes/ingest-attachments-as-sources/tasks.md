@@ -56,8 +56,8 @@ media capture is safe to offer.
 
 ## 7. Guidance and surface
 
-- [ ] 7.1 Update scaffold guidance to select the lane before the transport, keeping it generic; `tests/test_scaffold_no_leak.py` must stay green.
-- [ ] 7.2 Update the bootstrap contract and tool descriptions to state the same intent-first routing.
+- [x] 7.1 Update scaffold guidance to select the lane before the transport, keeping it generic; `tests/test_scaffold_no_leak.py` must stay green.
+- [x] 7.2 Update the bootstrap contract and tool descriptions to state the same intent-first routing. Tool descriptions and the scaffold carry it. The bootstrap **commitments** deliberately do not: a shipped test requires commitments to name no tool, and the compact payload has a pinned byte ceiling with 197 bytes of headroom — so routing doctrine that must name `capture_source` versus `preserve_artifacts` belongs where an agent reads it at the moment of choosing, not in tool-independent doctrine.
 - [x] 7.3 Regenerate the tool surface with `scripts/dump-tool-schemas.py` and review the diff for exactly the intended additions.
 - [x] 7.4 Confirm the ChatGPT Personal Plugin attestation is not silently refreshed, and record the fingerprint change as release-blocking for that consumer. `dump-tool-schemas.py` states on every run that it leaves `deploy/chatgpt/personal-plugin-contract.json` alone; the MCP discovery fingerprint moved to `54d9c6e5b1c9051f449d75dcbd6528d42de7573596aad288a0ad3a34dbd0ae5e` and stays release-blocking until that connector is refreshed and verified.
 

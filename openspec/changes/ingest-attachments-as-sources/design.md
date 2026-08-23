@@ -265,6 +265,21 @@ renders as an `anyOf`, which pushed the item model into `$defs` on both
 surfaces and made the two generators disagree in a second, subtler way. An
 empty list already means "no files supplied", so the union bought nothing.
 
+## Routing guidance is not doctrine, and the bootstrap says so
+
+The obvious home for "the lane is what the artifact is for" looked like the
+bootstrap's epistemic commitments. It is the wrong one, and two shipped tests
+say why. Commitments must name no tool — they are doctrine that holds whatever
+the surface looks like — and this rule is only actionable once it names
+`capture_source` against `preserve_artifacts`. The compact bootstrap also has a
+pinned byte ceiling, currently with 197 bytes of headroom, so a commitment-sized
+addition trips it.
+
+So the guidance lives in the tool descriptions, the scaffold `SKILL.md`, the
+operations reference, and the workflow skills — where an agent reads it at the
+moment it is choosing. That is also the more honest placement: this is a fact
+about the surface, not a claim about knowledge.
+
 ## Fix forward, and what that leaves
 
 Artifacts already in Evidence stay there. `move_file` refuses to move anything
