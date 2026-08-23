@@ -779,16 +779,17 @@
     }
   },
   "capture_source": {
-    "description": "Capture raw source material and optionally return compile guidance.\n\nThe raw source is preserved first. If `compile_guidance=true`, Exomem then\nreturns a proposal for a future compiled note, without silently converting\nraw provenance into a conclusion.\n\nClassification is optional and never a precondition for preserving material,\nbut it is what makes a source findable and coherently filed. Two independent\naxes describe it: what the artifact IS (`source_kind`) and what it is ABOUT\n(`domain`). Both are open vocabularies.",
+    "description": "Capture raw source material and optionally return compile guidance.\n\nTakes either `content` for text or `files` for attached file handles, which\nare retrieved server-side and stored losslessly under `Sources/`. Both land\nin the same lane: this command is for raw material, and `preserve_evidence`\nand `preserve_artifacts` are for proof-bearing artifacts. Which one to call\nis decided by what the artifact is for, never by what the client can carry.\n\nThe raw source is preserved first. If `compile_guidance=true`, Exomem then\nreturns a proposal for a future compiled note, without silently converting\nraw provenance into a conclusion.\n\nClassification is optional and never a precondition for preserving material,\nbut it is what makes a source findable and coherently filed. Two independent\naxes describe it: what the artifact IS (`source_kind`) and what it is ABOUT\n(`domain`). Both are open vocabularies.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
-        "content": {
-          "description": "Raw source text.",
-          "type": "string"
-        },
         "title": {
           "description": "Source title.",
+          "type": "string"
+        },
+        "content": {
+          "default": "",
+          "description": "Raw source text. Supply this or `files`, not both.",
           "type": "string"
         },
         "slug": {
@@ -910,6 +911,37 @@
           "default": null,
           "description": "Project keys this source serves. Never affects where it is stored; one source may serve several projects."
         },
+        "files": {
+          "default": [],
+          "description": "Up to eight temporary client file handles to capture losslessly as Sources, instead of `content`. Each object requires `download_url` and `file_id`; `mime_type` and `file_name` are optional. Exomem retrieves each handle server-side, so no bytes pass through model-visible arguments. Use this for an attached transcript, article, screenshot, or recording that is raw material. Proof-bearing artifacts go to `preserve_artifacts` instead — the lane is chosen by what the artifact is for, never by which transport is available.",
+          "items": {
+            "description": "Client-neutral temporary remote file handle.\n\nUsed by ``capture_source`` for raw material and ``preserve_artifacts`` for\nproof-bearing artifacts. The handle carries no destination: the lane is the\ncommand's, never the transport's.",
+            "properties": {
+              "download_url": {
+                "type": "string"
+              },
+              "file_id": {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              "mime_type": {
+                "maxLength": 255,
+                "type": "string"
+              },
+              "file_name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "download_url",
+              "file_id"
+            ],
+            "type": "object"
+          },
+          "maxItems": 8,
+          "type": "array"
+        },
         "response_detail": {
           "default": "compact",
           "description": "Successful committed mutation detail: compact (default), full diagnostics, or legacy raw leaf result.",
@@ -934,7 +966,6 @@
         }
       },
       "required": [
-        "content",
         "title"
       ],
       "type": "object"
@@ -3549,7 +3580,7 @@
         "files": {
           "description": "One to eight temporary client file handles.",
           "items": {
-            "description": "Client-neutral temporary remote file handle used by ``preserve_artifacts``.",
+            "description": "Client-neutral temporary remote file handle.\n\nUsed by ``capture_source`` for raw material and ``preserve_artifacts`` for\nproof-bearing artifacts. The handle carries no destination: the lane is the\ncommand's, never the transport's.",
             "properties": {
               "download_url": {
                 "type": "string"

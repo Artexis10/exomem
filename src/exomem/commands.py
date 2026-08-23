@@ -193,7 +193,12 @@ class SearchResult(TypedDict):
 
 
 class ClientArtifactFile(TypedDict):
-    """Client-neutral temporary remote file handle used by ``preserve_artifacts``."""
+    """Client-neutral temporary remote file handle.
+
+    Used by ``capture_source`` for raw material and ``preserve_artifacts`` for
+    proof-bearing artifacts. The handle carries no destination: the lane is the
+    command's, never the transport's.
+    """
 
     download_url: str
     file_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=256)]
@@ -207,6 +212,28 @@ _ClientArtifactFiles = Annotated[
         min_length=1,
         max_length=8,
         description="One to eight temporary client file handles.",
+    ),
+]
+#: The same handles where the parameter is optional. Deliberately not
+#: `_ClientArtifactFiles | None`: a union renders as an `anyOf`, which makes the
+#: JSON-schema generator hoist `ClientArtifactFile` into `$defs` on one surface
+#: and inline it on another, so the personal and hosted tool schemas stop
+#: agreeing. An empty list already means "no files supplied".
+_OptionalClientArtifactFiles = Annotated[
+    list[ClientArtifactFile],
+    Field(
+        max_length=8,
+        description=(
+            "Up to eight temporary client file handles to capture losslessly as "
+            "Sources, instead of `content`. Each object requires `download_url` "
+            "and `file_id`; `mime_type` and `file_name` are optional. Exomem "
+            "retrieves each handle server-side, so no bytes pass through "
+            "model-visible arguments. Use this for an attached transcript, "
+            "article, screenshot, or recording that is raw material. "
+            "Proof-bearing artifacts go to `preserve_artifacts` instead — the "
+            "lane is chosen by what the artifact is for, never by which "
+            "transport is available."
+        ),
     ),
 ]
 
@@ -5152,8 +5179,8 @@ def op_replace_memory(
 def op_capture_source(
     vault_root: Path,
     source_schema: object,
-    content: str,
     title: str,
+    content: str = "",
     slug: str | None = None,
     source_type: str | None = None,
     url: str | None = None,
@@ -5164,7 +5191,7 @@ def op_capture_source(
     source_kind: str | None = None,
     domain: str | None = None,
     projects: list[str] | None = None,
-    files: _ClientArtifactFiles | None = None,
+    files: _OptionalClientArtifactFiles = (),  # noqa: B006 - read-only
 ) -> dict:
     """Capture raw source material and optionally return compile guidance.
 
@@ -5184,8 +5211,8 @@ def op_capture_source(
     (`domain`). Both are open vocabularies.
 
     Args:
-        content: Raw source text.
         title: Source title.
+        content: Raw source text. Supply this or `files`, not both.
         slug: Optional lowercase ASCII kebab-case filename component.
         source_type: What the artifact IS. Same axis as source_kind; supply
             either one. Open vocabulary, not a closed set.

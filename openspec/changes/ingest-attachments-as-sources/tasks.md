@@ -58,8 +58,8 @@ media capture is safe to offer.
 
 - [ ] 7.1 Update scaffold guidance to select the lane before the transport, keeping it generic; `tests/test_scaffold_no_leak.py` must stay green.
 - [ ] 7.2 Update the bootstrap contract and tool descriptions to state the same intent-first routing.
-- [ ] 7.3 Regenerate the tool surface with `scripts/dump-tool-schemas.py` and review the diff for exactly the intended additions.
-- [ ] 7.4 Confirm the ChatGPT Personal Plugin attestation is not silently refreshed, and record the fingerprint change as release-blocking for that consumer.
+- [x] 7.3 Regenerate the tool surface with `scripts/dump-tool-schemas.py` and review the diff for exactly the intended additions.
+- [x] 7.4 Confirm the ChatGPT Personal Plugin attestation is not silently refreshed, and record the fingerprint change as release-blocking for that consumer. `dump-tool-schemas.py` states on every run that it leaves `deploy/chatgpt/personal-plugin-contract.json` alone; the MCP discovery fingerprint moved to `54d9c6e5b1c9051f449d75dcbd6528d42de7573596aad288a0ad3a34dbd0ae5e` and stays release-blocking until that connector is refreshed and verified.
 
 ## 8. Back-fill
 

@@ -244,6 +244,27 @@ unchanged. An ordinary source page whose stem happens to have no sibling file
 is not a pair, and still moves alone; that control is asserted rather than
 assumed.
 
+## Two schema generators disagreed, and nothing had made them prove it
+
+Adding a structured parameter to `capture_source` failed a shipped test that
+compares the hosted agent contract against the personal MCP surface. Measured,
+the same command rendered `files` two ways: the hosted contract emitted
+`items: {$ref: "#/$defs/ClientArtifactFile"}`, the personal surface inlined the
+model. The server-side registration path compresses schemas; building a
+`FunctionTool` directly, which is what the hosted contract does, does not.
+
+No hosted-alpha command had ever carried a structured type, so the divergence
+had never been exercised — `preserve_artifacts` uses the same model but is not
+in the hosted alpha set. The test that catches it exists precisely because the
+two must agree, so this is a latent defect surfaced rather than a cost of this
+change, and the hosted contract now inlines to match.
+
+One shape decision follows from it. `files` on `capture_source` is
+`list[ClientArtifactFile]` defaulting to empty, not `... | None`. A union
+renders as an `anyOf`, which pushed the item model into `$defs` on both
+surfaces and made the two generators disagree in a second, subtler way. An
+empty list already means "no files supplied", so the union bought nothing.
+
 ## Fix forward, and what that leaves
 
 Artifacts already in Evidence stay there. `move_file` refuses to move anything
