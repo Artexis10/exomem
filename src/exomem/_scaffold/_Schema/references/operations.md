@@ -12,7 +12,7 @@ commands.
 |---|---|---|
 | `ask` | Ask what Exomem knows, find a prior conclusion, gather context | `ask_memory`, then `read_memory`; use `ask_memory(deep=true)` for synthesis |
 | `remember` | Remember a durable conclusion, decision, solved problem, or pattern | `remember`; use `replace_memory` if it supersedes old knowledge |
-| `capture` | Preserve raw material, a source, proof, receipt, or record | `capture_source` for Sources; `preserve_evidence` for text, `preserve_artifacts` for file handles, otherwise `transfer_artifact` for Evidence |
+| `capture` | Preserve raw material, a source, proof, receipt, or record | Lane first, transport second. Raw material -> `capture_source` (`content` for text, `files` for attachments). Proof-bearing -> `preserve_evidence` for text, `preserve_artifacts` for attachments, `transfer_artifact` when the client has no file handles |
 | `plan` | Capture, inspect, query, update, or triage intended future state | `plan_memory` for a configured Planning collection |
 | `record` | Capture, correct, inspect, or query a durable observed event or current state | `record_memory` for a configured Record collection |
 | `review` | Review stale, contradictory, or unprocessed knowledge | `review_memory` |
@@ -421,13 +421,26 @@ preservation.
 
 ### Delivering the bytes — direct handles first, never inline through the model
 
-Binaries are never inline as a tool argument (the `preserve_evidence` command
-takes text only). Pick the channel by the client capability:
+Binaries are never inline as a tool argument (`preserve_evidence` takes text
+only). Two questions, in this order.
+
+**First, which lane?** That is decided by what the artifact is *for*, never by
+what the client can carry. A transcript, article, recording, or screenshot kept
+as material to reason from is a Source. A receipt, letter, or record kept
+because it proves something is Evidence. A Source can be promoted to Evidence
+later, with a stated reason, when it turns out to be proof-bearing; the reverse
+is refused, so routing to Evidence "just in case" is the one mistake that
+cannot be undone.
+
+**Then, which channel?** Pick by client capability:
 
 - **When the client can provide file handles:** call
-  **`preserve_artifacts(scope="...", category="...", files=[{"download_url": "...", "file_id": "..."}])`**.
-  Use one call for the whole batch. A successful preservation response contains
-  `stored_path`, `size`, and `hash`; never treat an upload token as proof that bytes landed.
+  **`capture_source(title="...", source_kind="...", files=[{"download_url": "...", "file_id": "..."}])`**
+  for raw material, or
+  **`preserve_artifacts(scope="...", category="...", files=[...])`** for
+  proof-bearing artifacts. Same handle shape either way. Use one call for the
+  whole batch. A successful response contains the stored path, `size`, and
+  `hash`; never treat an upload token as proof that bytes landed.
 
 - **Without file handles (including Claude web):** (1) call **`transfer_artifact(operation="upload")`** →
   a short-lived `{token, ttl_seconds, upload_url}`; (2) only where the runtime
@@ -644,8 +657,12 @@ are review-only and never write to the vault.
 ### Procedure
 1. Pass a `path` for an existing page, or `draft_title` / `draft_body` for an
    unwritten draft.
-2. Review deterministic candidates from wikilinks, frontmatter sources, shared
-   sources/entities, supersession, and optional embedding proximity.
+2. Review deterministic candidates. Structural ones come first: a relation kind
+   you already typed on one of the page's own semantic units and have not yet
+   promoted to a page-level relation, pages carrying the same open question, and
+   pages whose units answer or resolve the same target. Then wikilinks,
+   frontmatter sources, shared sources/entities, supersession, and optional
+   embedding proximity.
 3. Model-backed suggestions are default-off (`include_model_suggestions=false`),
    response-only, and soft-fail with warnings when optional extras are absent.
 4. Persist accepted relations through the normal Markdown write path (`note` or

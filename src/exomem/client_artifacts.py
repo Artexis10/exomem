@@ -414,6 +414,132 @@ def _failed(file_id: str, error: SafeFetchError | PreserveError) -> dict[str, st
     return {"file_id": file_id, "outcome": "failed", "code": error.code, "reason": reason}
 
 
+def capture_source_artifacts(
+    vault_root: Path,
+    *,
+    source_schema: object,
+    title: str,
+    files: list[Mapping[str, object]],
+    **source_fields: object,
+) -> dict:
+    """Stage remote files first, then capture each as a Source under a guard.
+
+    The Evidence twin of this function is `preserve_artifacts`. They share
+    staging deliberately — one implementation of hostile-URL handling, redirect
+    and byte bounds, and per-file outcomes — and differ only in where the bytes
+    are committed and what describes them. The lane is the command's, never the
+    transport's: nothing here reads a MIME type or an extension to decide it.
+    """
+    from . import add as add_module
+
+    if not isinstance(files, list) or not files:
+        return {"files": [], "summary": {"stored": 0, "failed": 0}}
+    if len(files) > MAX_FILES:
+        error = SafeFetchError("TOO_MANY_FILES", "too many files in one request")
+        return {
+            "files": [
+                _failed(str(file.get("file_id") or "") if isinstance(file, Mapping) else "", error)
+                for file in files
+            ],
+            "summary": {"stored": 0, "failed": len(files)},
+        }
+
+    budget = FetchBudget()
+    batch_deadline = _monotonic() + _BATCH_DEADLINE_SECONDS
+    staged: dict[int, StagedArtifact] = {}
+    outcomes: list[dict | None] = [None] * len(files)
+    for index, file in enumerate(files):
+        if not isinstance(file, Mapping):
+            outcomes[index] = _failed("", SafeFetchError("INVALID_FILE", "file handle is invalid"))
+            continue
+        try:
+            _file_id(file)
+            if not isinstance(file.get("download_url"), str) or not file["download_url"].strip():
+                raise SafeFetchError("INVALID_FILE", "download_url is required")
+            _content_type(file.get("mime_type"))
+            staged[index] = stage_artifact(file, budget, batch_deadline=batch_deadline)
+        except SafeFetchError as error:
+            file_id = str(file.get("file_id") or "") if isinstance(file, Mapping) else ""
+            outcomes[index] = _failed(file_id, error)
+
+    manager = active_manager()
+    try:
+        for index, artifact in staged.items():
+            try:
+                if (
+                    not artifact.file_id
+                    or len(artifact.file_id) > _MAX_FILE_ID_CHARS
+                    or artifact.content_type is not None
+                    and len(artifact.content_type) > _MAX_CONTENT_TYPE_CHARS
+                ):
+                    raise SafeFetchError("INVALID_FILE", "staged file metadata is invalid")
+                # One title per artifact, because each becomes its own source
+                # page. A batch would otherwise land several pages under one
+                # name and rely on uniquify to tell them apart.
+                item_title = title if len(staged) == 1 else f"{title} — {artifact.filename}"
+                with manager.mutation_guard(
+                    vault_root,
+                    request_id=active_mutation_request_id(),
+                    operation="capture_source_artifacts_commit",
+                    holder_kind="command",
+                ):
+                    result = add_module.add(
+                        vault_root,
+                        source_schema,
+                        content="",
+                        title=item_title,
+                        artifact=add_module.SourceArtifact(
+                            staged_path=artifact.path,
+                            filename=artifact.filename,
+                            content_type=artifact.content_type,
+                        ),
+                        **source_fields,
+                    )
+                mark_active_mutation_committed()
+                payload = result.as_dict()
+                # `stored_path` and `media_id` are required by the bounded
+                # artifact-receipt projection a compact terminal applies; a row
+                # missing either is replaced wholesale with
+                # INVALID_ARTIFACT_RECEIPT. That projection also drops any key
+                # outside its allowlist, so `page` and `ref` survive only in a
+                # full terminal — which costs nothing, because citation resolves
+                # from the artifact path and the page is `<stored_path>.md`.
+                stored_path = payload.get("artifact_path")
+                outcomes[index] = {
+                    "file_id": artifact.file_id,
+                    "outcome": "stored",
+                    "stored_path": stored_path,
+                    "path": stored_path,
+                    "page": payload["path"],
+                    "ref": payload["ref"],
+                    "size": payload.get("size"),
+                    "hash": payload.get("hash"),
+                    "hash_algorithm": payload.get("hash_algorithm"),
+                    "media_id": None,
+                    "content_type": artifact.content_type,
+                    "warnings": list(payload.get("warnings") or []),
+                }
+            except (SafeFetchError, PreserveError) as error:
+                outcomes[index] = _failed(artifact.file_id, error)
+            except add_module.AddError as error:
+                outcomes[index] = _failed(
+                    artifact.file_id, SafeFetchError(error.code, error.reason)
+                )
+    finally:
+        for artifact in staged.values():
+            try:
+                artifact.path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    resolved = [outcome for outcome in outcomes if outcome is not None]
+    stored = sum(1 for outcome in resolved if outcome.get("outcome") == "stored")
+    return {
+        "files": resolved,
+        "summary": {"stored": stored, "failed": len(resolved) - stored},
+    }
+
+
 def preserve_artifacts(
     vault_root: Path,
     *,

@@ -15,8 +15,10 @@ On schema-rejection: return a structured error, do not touch disk.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import logging
 import os
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -76,6 +78,9 @@ class AddResult:
     # Optional advisory classification signal. Emitted only when a condition is
     # detected, following the compiled-write `structure_suggestion` convention.
     structure_suggestion: dict | None = None
+    artifact_path: str | None = None
+    artifact_hash: str | None = None
+    artifact_size: int | None = None
 
     def as_dict(self) -> dict:
         out = {"path": self.path, "ref": self.ref, "warnings": self.warnings}
@@ -83,6 +88,11 @@ class AddResult:
             out["slug"] = self.slug
         if self.structure_suggestion:
             out["structure_suggestion"] = self.structure_suggestion
+        if self.artifact_path:
+            out["artifact_path"] = self.artifact_path
+            out["hash"] = self.artifact_hash
+            out["hash_algorithm"] = "sha256"
+            out["size"] = self.artifact_size
         return out
 
 
@@ -94,6 +104,65 @@ class AddError(Exception):
 
     def as_dict(self) -> dict:
         return {"code": self.code, "missing": self.missing, "reason": self.reason}
+
+
+@dataclass(frozen=True)
+class SourceArtifact:
+    """Bytes being captured as a Source, already staged on readable disk.
+
+    The caller stages — `client_artifacts` for a client file handle, the upload
+    route for an out-of-band POST — and this module copies. Keeping the staging
+    out of here is what lets one safe-fetch implementation serve both lanes
+    instead of two that drift.
+    """
+
+    staged_path: Path
+    filename: str
+    content_type: str | None = None
+
+
+def _artifact_pair(folder: Path, stem: str, suffix: str) -> tuple[Path, Path]:
+    """A free `<stem><suffix>` / `<stem><suffix>.md` pair under `folder`.
+
+    `unique_path` guarantees one free name; a captured artifact needs two, and
+    an orphaned binary with no page would otherwise be silently overwritten.
+    Bumping the seed and asking again keeps one implementation of the
+    case-insensitive collision test rather than a second copy of it here, and
+    keeps `add`'s uniquify semantics rather than introducing a refusal.
+    """
+    for attempt in range(1, 51):
+        seed = stem if attempt == 1 else f"{stem}-{attempt}"
+        page = unique_path(folder, seed, suffix=f"{suffix}.md")
+        artifact = page.with_name(page.name[:-3])
+        if not artifact.exists():
+            return artifact, page
+    raise AddError(
+        code="INVALID_SOURCE",
+        missing=["slug"],
+        reason=f"could not find a free filename for {stem!r} in {folder.name!r}",
+    )
+
+
+def _describe_artifact(filename: str, digest: str, size: int) -> str:
+    """The body of a source page for bytes it deliberately does not inline."""
+    return "\n".join(
+        [
+            f"- Original filename: `{filename}`",
+            f"- SHA-256: `{digest}`",
+            f"- Bytes: {size}",
+        ]
+    )
+
+
+def _artifact_identity(path: Path) -> tuple[str, int]:
+    """SHA-256 and byte count of a staged file, read in chunks."""
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+            size += len(chunk)
+    return digest.hexdigest(), size
 
 
 def add(
@@ -110,6 +179,7 @@ def add(
     domain: str | None = None,
     projects: list[str] | None = None,
     today: dt.date | None = None,
+    artifact: SourceArtifact | None = None,
 ) -> AddResult:
     """Capture a raw source into the KB and update indexes/log atomically.
 
@@ -121,6 +191,27 @@ def add(
 
     `today` is dependency-injectable for tests; defaults to dt.date.today().
     """
+    # An artifact's identity is read before validation, because the page body
+    # is synthesized from it when the caller supplied no text — and
+    # `schema.validate_source` refuses an empty body.
+    artifact_digest: str | None = None
+    artifact_size: int | None = None
+    artifact_suffix = ""
+    if artifact is not None:
+        from .preserve import _sanitize_filename
+
+        safe_name = _sanitize_filename(artifact.filename)
+        if not safe_name:
+            raise AddError(
+                code="INVALID_SOURCE",
+                missing=["artifact"],
+                reason="artifact filename is empty or only invalid characters",
+            )
+        artifact_suffix = Path(safe_name).suffix
+        artifact_digest, artifact_size = _artifact_identity(artifact.staged_path)
+        if not content or not content.strip():
+            content = _describe_artifact(safe_name, artifact_digest, artifact_size)
+
     taxonomy = source_taxonomy.load_taxonomy(vault_root)
     try:
         # No kind supplied means unclassified, not invalid: capture is never
@@ -201,7 +292,15 @@ def add(
     project_plan = project_keys.plan_project_keys(vault_root, project_keys_clean)
 
     stem = f"{date_iso}-{filename_slug}"
-    source_path = unique_path(folder_path, stem)
+    folder_path.mkdir(parents=True, exist_ok=True)
+    if artifact is None:
+        artifact_path: Path | None = None
+        source_path = unique_path(folder_path, stem)
+    else:
+        # The page is `<stem><ext>.md` beside `<stem><ext>`, the same convention
+        # Evidence uses, so the media pipeline addresses both lanes with no
+        # change and the citation resolver is fixed once rather than per layout.
+        artifact_path, source_path = _artifact_pair(folder_path, stem, artifact_suffix)
 
     tags_clean = _clean_tags(tags)
     exomem_id = memory_refs.new_id()
@@ -217,16 +316,22 @@ def add(
         exomem_id=exomem_id,
         domain=domain_resolution.key if domain_resolution else None,
         projects=project_keys_clean,
+        artifact_name=(
+            _sanitize_filename(artifact.filename) if artifact is not None else None
+        ),
+        artifact_rel=(
+            artifact_path.relative_to(vault_root).as_posix()
+            if artifact_path is not None
+            else None
+        ),
+        artifact_digest=artifact_digest,
+        artifact_size=artifact_size,
     )
 
     # Plan the source file write so the counts in compute_updates() are
-    # *post*-creation. We do this by passing a "+1" hint via writing the file
-    # to a tmp first? Simpler: pre-create the folder and let compute_updates
-    # re-scan, then add the new file as part of the batch. We need the new
-    # count to reflect the file we're about to write, so we explicitly bump
-    # the in-memory counts.
-    folder_path.mkdir(parents=True, exist_ok=True)
-
+    # *post*-creation: the folder already exists (name resolution had to list
+    # it), compute_updates re-scans, and the new file joins the batch — so the
+    # in-memory counts are bumped explicitly to include it.
     rel_source_no_ext = (
         source_path.relative_to(vault_root).with_suffix("").as_posix()
     )
@@ -302,10 +407,19 @@ def add(
     # Cap-50 trim is recorded in log.md per SKILL.md trim discipline; no need
     # to also surface it as a per-write warning.
 
+    # The bytes land before the batch because `batch_atomic_write` is text-only,
+    # and are removed again if the batch fails — otherwise a failed capture
+    # would leave an orphaned binary with no page, which is exactly the
+    # unaddressable state this change exists to remove.
+    if artifact is not None and artifact_path is not None:
+        shutil.copyfile(artifact.staged_path, artifact_path)
+
     try:
         batch_atomic_write(writes, vault_root=vault_root)
     except Exception as e:
         log.exception("partial write during add(); some files may be updated")
+        if artifact_path is not None:
+            artifact_path.unlink(missing_ok=True)
         warnings.append(f"partial write — reconcile on desktop: {e}")
         raise
 
@@ -333,6 +447,13 @@ def add(
         path=source_path.relative_to(vault_root).as_posix(),
         ref=memory_refs.memory_ref(exomem_id),
         warnings=warnings,
+        artifact_path=(
+            artifact_path.relative_to(vault_root).as_posix()
+            if artifact_path is not None
+            else None
+        ),
+        artifact_hash=artifact_digest,
+        artifact_size=artifact_size,
         slug=filename_slug,
         structure_suggestion=_classification_suggestion(
             folder_path, kind, domain_resolution
@@ -481,6 +602,12 @@ def _clean_tags(tags: list[str] | None) -> list[str]:
     return out
 
 
+def _media_type_for(name: str) -> str | None:
+    from . import media_types
+
+    return media_types.media_type_for(name)
+
+
 def _render_source(
     *,
     title: str,
@@ -493,8 +620,22 @@ def _render_source(
     exomem_id: str,
     domain: str | None = None,
     projects: list[str] | None = None,
+    artifact_name: str | None = None,
+    artifact_rel: str | None = None,
+    artifact_digest: str | None = None,
+    artifact_size: int | None = None,
 ) -> str:
-    """Emit the source page markdown matching frontmatter.md's example shape."""
+    """Emit the source page markdown matching frontmatter.md's example shape.
+
+    When the source *is* an artifact, the page also points at the bytes and
+    records their identity. The field names are the ones the media pipeline
+    already writes and checks — `evidence_file`, `original_filename`,
+    `binary_sha256`, `binary_size` — so one vocabulary describes an artifact
+    whether its page was written at capture or refreshed by reconciliation.
+    `evidence_file` is a misnomer in this tree; it is read in roughly fifteen
+    places, and renaming it would cost the whole media pipeline for a better
+    word.
+    """
     lines = ["---"]
     lines.append("type: source")
     lines.append(f"exomem_id: {exomem_id}")
@@ -505,6 +646,22 @@ def _render_source(
     if projects:
         lines.append("projects: [" + ", ".join(projects) + "]")
     lines.append(f"captured: {date_iso}")
+    if artifact_rel:
+        media_type = _media_type_for(artifact_name or artifact_rel)
+        if media_type:
+            lines.append(f"media_type: {media_type}")
+        lines.append(f"evidence_file: {artifact_rel}")
+        if media_type:
+            # `pending` is what invites the extraction worker. It is safe to
+            # write on a classified Source now that reconciliation edits the
+            # fields it owns instead of re-authoring the page.
+            lines.append("extracted_by: pending")
+        if artifact_name:
+            lines.append(f"original_filename: {yaml_scalar(artifact_name)}")
+        if artifact_digest:
+            lines.append(f"binary_sha256: {artifact_digest}")
+        if artifact_size is not None:
+            lines.append(f"binary_size: {artifact_size}")
     if url:
         lines.append(f"url: {yaml_scalar(url)}")
     if tags:

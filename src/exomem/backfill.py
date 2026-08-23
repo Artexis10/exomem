@@ -35,7 +35,7 @@ from . import (
     semantic_segments,
 )
 from .kbdir import kb_dirname, kb_prefix
-from .vault import VAULT_SCAN_SKIP_DIRS
+from .vault import VAULT_SCAN_SKIP_DIRS, in_append_only_tree
 
 log = logging.getLogger(__name__)
 
@@ -178,6 +178,60 @@ class BackfillStats:
     clip_indexed: int = 0
     scene_frames_written: int = 0
     skipped: int = 0
+    artifact_pages_created: int = 0
+
+
+def _iter_unpaged_artifacts(vault_root: Path, root: Path):
+    """Yield stored non-media artifacts that have no page beside them.
+
+    Media is excluded because `ensure_media_sidecar` and reconciliation already
+    own those. `.md` files are excluded because a markdown file in an
+    append-only tree is either a page already or an artifact whose page is
+    `<stem>-notes.md`, and the latter is handled by the same helper.
+    """
+    for candidate in iter_kb_files(root):
+        if extract.media_type_for(candidate):
+            continue
+        rel = candidate.relative_to(vault_root).as_posix()
+        if in_append_only_tree(rel) is None:
+            continue
+        if candidate.name.lower().endswith(".md"):
+            continue
+        if _sidecar_for(candidate).exists():
+            continue
+        yield candidate
+
+
+def backfill_artifact_pages(
+    vault_root: Path, *, dry_run: bool = False, log_fn=log.info
+) -> int:
+    """Give every stored non-media artifact the page that makes it citable.
+
+    Whether an artifact received a page used to depend on whether its extension
+    was extractable, so a `.csv`, `.eml`, or `.json` preserved earlier has bytes
+    and nothing else. `backfill_media` cannot reach them — it walks media files
+    only — and without a page they are absent from find, from the graph, and
+    from every `sources:` citation. Idempotent.
+    """
+    kb = vault_root / kb_dirname()
+    if not kb.is_dir():
+        return 0
+    created = 0
+    for artifact in _iter_unpaged_artifacts(vault_root, kb):
+        rel = artifact.relative_to(vault_root).as_posix()
+        if dry_run:
+            log_fn(f"would write a page for {rel}")
+            created += 1
+            continue
+        try:
+            _, wrote = preserve.ensure_artifact_page(vault_root, artifact)
+        except (OSError, ValueError) as error:
+            log_fn(f"could not write a page for {rel}: {error}")
+            continue
+        if wrote:
+            created += 1
+            log_fn(f"wrote a page for {rel}")
+    return created
 
 
 def backfill_media(
@@ -203,6 +257,11 @@ def backfill_media(
     if not kb.is_dir():
         log_fn(f"no {kb_prefix()} directory; nothing to back-fill")
         return stats
+    # Non-media artifacts first: it is a cheap metadata pass, and it makes them
+    # citable even if the expensive extraction below is disabled or fails.
+    stats.artifact_pages_created = backfill_artifact_pages(
+        vault_root, dry_run=dry_run, log_fn=log_fn
+    )
     if rediarize and not extract._diarize_enabled():
         log_fn(
             "--rediarize requested but EXOMEM_DIARIZE is not enabled; "
