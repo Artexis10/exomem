@@ -78,7 +78,93 @@ from exomem import commands
 #: 31.46% recorded for the previous raise is stale: the payload has moved since,
 #: and the two figures here are both measured on the current tree, which is why
 #: they do not chain onto it.)
-COMPACT_BYTE_CEILING = 59_500
+#:
+#: Raised a third time, measured on the final tree with the same method. The floor
+#: at 59,500 measured 59,096 — exactly what the previous raise recorded, so nothing
+#: else moved in between. Nag governance adds three `authoring_contract.post_write`
+#: entries: `review_reason` (220 B), `family_disposition` (396 B) and
+#: `family_disposition_reading` (290 B), 912 bytes with separators, taking compact
+#: to 60,008. The dispositions and the ledger they describe cost this measurement
+#: nothing: both are vault-derived and empty on the fixture.
+#:
+#: Why these bytes earn their place. The change gives a user a way to say "stop
+#: suggesting this kind of thing" and gives the runtime a reason code to count. An
+#: agent that has not been taught either does the two things this change exists to
+#: prevent: it answers the request by lowering prominence, which silences every
+#: family including the ones the user still wants, and it writes free-text `why`
+#: strings that record `unspecified`, leaving the metrics with no denominator. A
+#: hookless client receives this payload and nothing else, so untaught here is
+#: untaught anywhere.
+#:
+#: Fitting under 59,500 was examined and rejected. It needed roughly 508 bytes,
+#: which is two of the three entries. `review_reason` (220 B) is the vocabulary
+#: itself; without it no code is ever composed. `family_disposition_reading`
+#: (290 B) is the line saying a quiet family is silent rather than clean, which is
+#: precisely the misreading a per-family silence introduces and the reason the
+#: spec requires it. Collapsing `family_disposition` to the reference form alone
+#: (~200 B) would drop "rather than lowering prominence" — the wrong answer the
+#: guidance exists to displace.
+#:
+#: The new ceiling is 60,400: 392 bytes of headroom, again deliberately less than
+#: the 404 the last raise left, and ~3.7 KB below the 64,070-byte regression point.
+#: `MINIMUM_SAVING_RATIO` is untouched; the saving moved 35.63% -> 34.63%.
+#:
+#: Raised a FOURTH time, and this raise is different from the three above it:
+#: it spends the whole budget the change that made it was allowed to spend, and
+#: leaves a margin thinner than any previous raise. Read the arithmetic before
+#: adding anything.
+#:
+#: Measured on this tree with the same method. The floor at 60,400 was 60,066 --
+#: 334 bytes of headroom, already inside the warning band. Lifecycle routing adds
+#: 1,240 bytes, taking compact to 61,306:
+#:
+#:   engagement          +258  the capture axis names the two lifecycle classes
+#:                             (stated intent -> Planning, observed outcome ->
+#:                             Records) and the pairing rule; the payload projects
+#:                             the ACTIVE level's contract, so exactly one level's
+#:                             text is ever counted here
+#:   records             +560  `intent_boundary` gains `stated_intent`,
+#:                             `observed_outcome` and `pairing_rule`;
+#:                             `capture_examples` gains one paired landing
+#:   simple_actions      +321  the `plan` front-door action, with its route
+#:   planning            +193  the inventory form of `inspect` and the bounded
+#:                             query that resolves an observation to one item
+#:   common_actions        +8  `plan` in the action vocabulary
+#:
+#: Why the bytes earn their place. The evidence for these two classes exists ONLY
+#: in the conversation, and only the CLI hooks can see a conversation -- so on a
+#: hosted, claude.ai or ChatGPT client this payload is the entire mechanism. An
+#: agent that is not taught them does exactly what the dogfood session recorded:
+#: it treats "three done" and "the rest next time" as chat, files nothing, and
+#: waits to be told to use Planning. The pairing rule is not decoration either:
+#: without it the two classes produce a record and leave the plan item open,
+#: which is the specific miss the whole change exists to close.
+#:
+#: The wording was cut twice before this number was accepted. The tentative-claim
+#: and elapsed-time clause is stated once (in `intent_boundary`) rather than in
+#: both carriers; the paired example is one clause rather than a sentence; the
+#: Planning inventory and its resolving query are one key rather than two. Those
+#: three passes removed 406 bytes. What remains is the rule and its two routes.
+#:
+#: The new ceiling is 61,400: 94 bytes of headroom, and that is a cliff, not a
+#: budget. It is the cap the change was authorised to reach and it is now spent.
+#: The next addition of any size trips this test, and the honest response is to
+#: TRIM compact -- the queued compact-bootstrap trim -- not to raise this number
+#: again. `MINIMUM_SAVING_RATIO` is untouched; compact still saves ~35% over full.
+#:
+#: That prediction came true on the next merge, and the response was the one
+#: written above: TRIM, not raise. `main`'s vault-defined entity types added ~150
+#: bytes of guidance on top of the lifecycle slice's 1,240, taking the merged
+#: payload to 61,455 -- 55 over. 158 bytes came back out of the LIFECYCLE slice's
+#: own text, because that is the text this branch is entitled to spend: the two
+#: capture classes lost their preamble but not their routes; the pairing rule
+#: lost "append the"/"the item"/"reported" but keeps one landing, two
+#: consequences, the record-before-transition order, "once", and both named
+#: non-outcomes; the paired example is a clause; the `plan` front-door row drops
+#: one adjective. No rule left the payload, and the pins moved WITH the text
+#: rather than being loosened around it. Merged compact is 61,297, 103 bytes
+#: under. The ceiling did not move.
+COMPACT_BYTE_CEILING = 61_400
 
 #: The defect was compact and full being near-identical. A profile that does not
 #: measurably differ from full is not a profile.

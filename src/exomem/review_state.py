@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import logging
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,12 +14,115 @@ from typing import Any
 from . import context_refs, memory_refs
 from .kbdir import kb_dirname
 
-SCHEMA_VERSION = 1
+log = logging.getLogger(__name__)
+
+SCHEMA_VERSION = 2
+#: Schemas this runtime can READ. A v1 file is migrated in memory on load and
+#: rewritten as v2 on the next write; anything newer is refused, which is the
+#: correct fail-closed posture for a vault-local file whose writers upgrade
+#: together (see the `add-nag-governance-and-metrics-capture` design, D7).
+_READABLE_SCHEMA_VERSIONS = frozenset({1, 2})
 STATE_FILENAME = ".review-state.json"
-_STATE_READ_LIMIT = 4 * 1024 * 1024
+#: Raised from 4 MiB with the sectioned schema, and MEASURED rather than picked.
+#:
+#: The number. At the cardinality the design's stress gate names — 50,000
+#: decision records and 150,000 ledger entries, a decade of heavy use — the
+#: store measures 41.28 MiB as written (indented) and 32.7 MiB compact. The
+#: design proposed 16 MiB; that was chosen before anything was measured and it
+#: cannot hold this store. The floor is arithmetic, not encoding style: the keys
+#: alone are `review_id:fingerprint`, 49 hex characters plus quoting, so 200,000
+#: of them cost 10.1 MiB before a single value, and the leanest plausible record
+#: and ledger values take the total to 29.0 MiB. 64 MiB is the measured worst
+#: case with roughly 1.5x margin over the written size.
+#:
+#: What this ceiling does NOT do, stated plainly because the previous wording
+#: implied otherwise. It does not bound the store, and neither does compaction.
+#: Compaction bounds the LEDGER (an entry with no standing decision behind it
+#: goes at 400 days) and lapsed snoozes (90 days). It does not bound standing
+#: decisions and it must not: a dismissal is a decision somebody made and
+#: nothing here is entitled to forget it. Because the file is a whole-file
+#: rewrite, its size grows linearly with the standing decisions a vault
+#: accumulates, and no retention rule will ever bring it back down.
+#:
+#: So the migration trigger is unbounded standing decisions, not this
+#: arithmetic. Raising the ceiling buys headroom for the ledger's transient
+#: bulk; the day the stress gate fails is the day the sectioned schema has to
+#: become append-plus-compaction or SQLite. This constant is a ceiling on a
+#: pathological store, not an expectation — a live store compacts past 1 MiB
+#: and sits orders of magnitude below it.
+_STATE_READ_LIMIT = 64 * 1024 * 1024
+#: How much further the RECOVERY path may read.
+#:
+#: Failing closed on an over-limit store is only safe if there is a way back,
+#: and there is exactly one: compaction, which has to read the file first. With
+#: a single limit a store that crossed the ceiling could never be compacted, so
+#: the refusal would be a permanent lockout rather than a refusal. The reconcile
+#: path — operator-invoked, once, whose entire job is to bring the file back
+#: under the ceiling — reads at four times the ordinary limit. Four rather than
+#: unbounded because a recovery read is still a read into memory; it is the
+#: margin that covers a store that drifted past the ceiling, not one that is
+#: pathological in a different way.
+_RECOVERY_READ_LIMIT_FACTOR = 4
+
+
+def recovery_read_limit() -> int:
+    """The elevated limit the reconcile healer reads at. Derived, never restated."""
+    return _STATE_READ_LIMIT * _RECOVERY_READ_LIMIT_FACTOR
+
+
 REVIEW_PREFIX = "exomem://review/"
+#: The family namespace, alongside `corpus_aware`'s write-advisory namespace. A
+#: family reference addresses a KIND of signal rather than one occurrence of it.
+FAMILY_PREFIX = f"{REVIEW_PREFIX}family/"
 VALID_ACTIONS = frozenset({"dismiss", "snooze", "reopen", "competing"})
 VALID_VIEWS = frozenset({"open", "all", "snoozed", "dismissed", "competing"})
+#: The three dispositions a registered signal family can be in. `normal` is the
+#: absence of a record, not a stored value, so setting it clears (mirroring
+#: `reopen`).
+DISPOSITIONS: tuple[str, ...] = ("normal", "quiet", "off")
+DISPOSITION_ACTIONS = frozenset(DISPOSITIONS)
+#: The closed triage-reason vocabulary. It rides the existing free-text `why` as
+#: a leading colon-terminated token, so no tool input parameter moves for it.
+#: `unspecified` is the fallback and is never an error for an item decision; a
+#: `quiet` or `off` disposition requires one of the others.
+REASON_CODES: tuple[str, ...] = (
+    "intentional",
+    "false_positive",
+    "handled",
+    "deferred",
+    "too_frequent",
+    "unspecified",
+)
+DEFAULT_REASON = "unspecified"
+#: Who wrote a record: a person through the explicit triage surface, or the
+#: runtime itself. The manual-maintenance metric is the count of `manual`
+#: records in a window, so this has to be on every record rather than inferred.
+ORIGINS: tuple[str, ...] = ("manual", "automatic")
+MANUAL = "manual"
+AUTOMATIC = "automatic"
+#: Where a signal was first composed onto a served surface.
+SURFACES: tuple[str, ...] = ("review", "carrier", "write")
+
+#: Retention. A snooze whose `until` lapsed this long ago is a decision nothing
+#: is waiting on; a ledger entry this old with no standing decision behind it is
+#: past every window the paired metrics look at. Both are long on purpose:
+#: compaction is the irreversible direction.
+_SNOOZE_RETENTION_DAYS = 90
+_LEDGER_RETENTION_DAYS = 400
+#: Compaction runs on write past either threshold, and on reconcile.
+_COMPACT_BYTE_THRESHOLD = 1 * 1024 * 1024
+_COMPACT_RECORD_THRESHOLD = 20_000
+#: When a scan is worth REPEATING, once a threshold is permanently tripped.
+#:
+#: Standing dismissals are unbounded by design — nothing is entitled to forget
+#: a decision somebody made — so a vault that crosses the record threshold never
+#: comes back under it, and a naive "compact on every write past the threshold"
+#: rescans 30,000 records on every single decision for the rest of the vault's
+#: life, finding nothing, forever. The threshold says the store is big; these
+#: say whether anything has changed enough for another walk to be worth it.
+#: Growth in either section, or a day elapsed, whichever comes first.
+_COMPACT_RESCAN_GROWTH = 0.10
+_COMPACT_RESCAN_AFTER = dt.timedelta(days=1)
 # Every effective state a decision can resolve to, in report order. `all` is a view
 # over these, never a state an item is in.
 VALID_STATES: tuple[str, ...] = ("open", "snoozed", "dismissed", "competing")
@@ -72,6 +176,122 @@ def parse_review_ref(value: str) -> str:
     if len(raw_id) != 24 or any(char not in "0123456789abcdef" for char in raw_id):
         raise ValueError(f"INVALID_REVIEW_REFERENCE: invalid review reference {value!r}")
     return raw_id
+
+
+# --------------------------------------------------------------------------
+# family references and the registry of valid families
+# --------------------------------------------------------------------------
+
+
+def family_ref(family: str) -> str:
+    """Render the family namespace for one registered signal family."""
+    return f"{FAMILY_PREFIX}{str(family or '').strip()}"
+
+
+def is_family_ref(value: str) -> bool:
+    return str(value or "").strip().lower().startswith(FAMILY_PREFIX)
+
+
+def parse_family_ref(value: str) -> str:
+    """The family a reference names, validated against the registry.
+
+    Validation lives here rather than at the call site because the registry is
+    assembled from three modules and a second opinion about what a family IS is
+    exactly how a disposition could be recorded that nothing ever reads.
+    """
+    raw = str(value or "").strip()
+    if not raw.lower().startswith(FAMILY_PREFIX):
+        raise ValueError(f"INVALID_REVIEW_REFERENCE: expected {FAMILY_PREFIX}<family>")
+    family = raw[len(FAMILY_PREFIX) :].strip()
+    registered = registered_families()
+    if family not in registered:
+        raise ValueError(
+            f"INVALID_REVIEW_FAMILY: {family!r} is not a registered signal family. "
+            f"Valid: {sorted(registered)}"
+        )
+    return family
+
+
+def registered_families() -> frozenset[str]:
+    """Every name a disposition may be recorded against.
+
+    The triageable attention categories — the default union plus the registered
+    opt-in epistemic queues, which is exactly what a due-state count can hand a
+    reference out for — plus the write-advisory kinds the write path emits.
+    Assembled from the owning modules rather than restated, so a queue that is
+    added or retired cannot leave a stale name here.
+    """
+    from . import attention as attention_module
+    from . import corpus_aware as corpus_aware_module
+
+    return frozenset(
+        {
+            *attention_module._TRIAGEABLE_CATEGORIES,
+            *corpus_aware_module._WRITE_ADVISORY_KINDS,
+        }
+    )
+
+
+# --------------------------------------------------------------------------
+# the closed reason vocabulary
+# --------------------------------------------------------------------------
+
+
+def parse_reason(why: str | None) -> tuple[str, str | None]:
+    """``(reason code, the why verbatim)``. The ONE place that knows the vocabulary.
+
+    The code is the leading colon-terminated token of the free text and must
+    match a vocabulary word exactly (case- and space-insensitively). Anything
+    else — no colon, an unknown word, a colon that merely punctuates a sentence
+    — records `unspecified` and is never an error for an item decision. The
+    `why` is stored verbatim regardless, because a closed code alone does not
+    say what the user actually meant.
+    """
+    text = str(why).strip() if why else None
+    if not text:
+        return DEFAULT_REASON, None
+    head, separator, _rest = text.partition(":")
+    if not separator:
+        return DEFAULT_REASON, text
+    candidate = head.strip().lower().replace("-", "_")
+    if candidate in REASON_CODES:
+        return candidate, text
+    return DEFAULT_REASON, text
+
+
+#: Every error code this module raises, as a closed vocabulary. Callers that
+#: surface a failure to a client report the CODE and never the message: the
+#: messages carry the store's absolute path, and a tool result is not the place
+#: for one. `tests/test_review_state.py` checks this set against the module's
+#: own `raise` sites, so adding a code without adding it here fails.
+STORE_ERROR_CODES: frozenset[str] = frozenset(
+    {
+        "INVALID_REVIEW_ACTION",
+        "INVALID_REVIEW_FAMILY",
+        "INVALID_REVIEW_REASON",
+        "INVALID_REVIEW_REFERENCE",
+        "INVALID_SNOOZE_DATE",
+        "INVALID_SURFACE",
+        "REVIEW_STATE_INVALID",
+    }
+)
+
+
+def error_code(error: BaseException) -> str:
+    """A safe, path-free code for one store failure.
+
+    Matched against the closed vocabulary above rather than parsed out of the
+    message. Splitting on the first colon looked equivalent and is not: an
+    `OSError` reads `cannot read <the store's absolute path>: <reason>`, which
+    has a colon too, so that spelling put the operator's home directory into a
+    tool result. Anything unrecognised falls back to the exception class name,
+    which carries no content of its own.
+    """
+    text = str(error)
+    for code in STORE_ERROR_CODES:
+        if text.startswith(code):
+            return code
+    return type(error).__name__
 
 
 def refs_for_paths(vault_root: Path, paths: list[str]) -> dict[str, str]:
@@ -155,28 +375,55 @@ def component_fingerprint(
     )
 
 
+def component_paths(item: Any) -> list[str]:
+    """Every vault path one fused item's components need resolved to a ref.
+
+    Separate and public so a caller counting over MANY items can resolve them
+    all in one `refs_for_paths` — that call opens a database connection, and
+    per-item resolution turned a 103-item view into 103 connections.
+    """
+    reasons = list(getattr(item, "reasons", None) or [])
+    if not reasons:
+        return []
+    paths = [str(getattr(item, "path", "") or "")]
+    for reason in reasons:
+        paths.extend(reason.get("related_paths") or [])
+    return paths
+
+
 def component_fingerprints(
     vault_root: Path,
     item: Any,
-) -> list[str]:
+    *,
+    with_category: bool = False,
+    refs: dict[str, str] | None = None,
+) -> list[Any]:
     """Every per-finding fingerprint folded into one fused attention item.
 
     Deduplicated and returned in a stable order. The item's own fused
     fingerprint is NOT included -- the caller records that one separately,
     because it is the identity attention itself reports and round-trips.
+
+    `with_category=True` returns `(category, fingerprint)` pairs instead of bare
+    fingerprints, in the same order and with the same dedup. It exists so a
+    caller that needs to know WHICH family a component belongs to does not
+    re-derive the composition by hand: a second derivation that drifts from this
+    one produces keys `apply_for_item` never recorded, which is silent
+    under-counting rather than a failure.
+
+    `refs` lets a caller that already resolved the paths (see `component_paths`)
+    supply the map instead of paying a lookup per item.
     """
     reasons = list(getattr(item, "reasons", None) or [])
     if not reasons:
         return []
     anchor = str(getattr(item, "path", "") or "")
-    paths = [anchor]
-    for reason in reasons:
-        paths.extend(reason.get("related_paths") or [])
-    refs = refs_for_paths(vault_root, paths)
+    if refs is None:
+        refs = refs_for_paths(vault_root, component_paths(item))
     target_ref = getattr(item, "target_ref", None) or refs.get(anchor)
     if not target_ref:
         return []
-    out: list[str] = []
+    out: list[Any] = []
     for reason in reasons:
         related = sorted(
             {
@@ -190,8 +437,9 @@ def component_fingerprints(
             reason=reason,
             related_refs=[refs[path] for path in related],
         )
-        if value not in out:
-            out.append(value)
+        entry = (str(reason.get("category") or ""), value) if with_category else value
+        if entry not in out:
+            out.append(entry)
     return out
 
 
@@ -248,7 +496,15 @@ class ReviewStateStore:
         self.vault_root = Path(vault_root)
         self.path = state_path(vault_root)
 
-    def load(self) -> dict[str, Any]:
+    def load(self, *, read_limit: int | None = None) -> dict[str, Any]:
+        """The store, or an empty one when the file is absent.
+
+        Raises `REVIEW_STATE_INVALID` on anything else. That is deliberate and
+        it is what every caller that reads DECISIONS must inherit: an unreadable
+        decision store answered as an empty one silently resurrects every
+        dismissal in the vault. `read_limit` raises the ceiling for the one
+        recovery path allowed past it (see `recovery_read_limit`).
+        """
         from . import reserved_paths
 
         try:
@@ -257,21 +513,21 @@ class ReviewStateStore:
                     self.vault_root,
                     self.path,
                     "review-state",
-                    limit=_STATE_READ_LIMIT,
+                    limit=_STATE_READ_LIMIT if read_limit is None else int(read_limit),
                 )
             payload = json.loads(raw.decode("utf-8"))
         except FileNotFoundError:
-            return {"version": SCHEMA_VERSION, "records": {}}
+            return empty_state()
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ValueError(f"REVIEW_STATE_INVALID: cannot read {self.path}: {exc}") from exc
-        if not isinstance(payload, dict) or payload.get("version") != SCHEMA_VERSION:
+        if not isinstance(payload, dict) or payload.get("version") not in _READABLE_SCHEMA_VERSIONS:
             raise ValueError(
                 f"REVIEW_STATE_INVALID: unsupported review state schema in {self.path}"
             )
         records = payload.get("records")
         if not isinstance(records, dict):
             raise ValueError(f"REVIEW_STATE_INVALID: records must be an object in {self.path}")
-        return payload
+        return _migrated(payload)
 
     def decision(
         self,
@@ -328,6 +584,7 @@ class ReviewStateStore:
         until: str | None = None,
         why: str | None = None,
         now: dt.datetime | None = None,
+        origin: str = MANUAL,
     ) -> dict[str, Any]:
         action = str(action or "").strip().lower()
         if action not in VALID_ACTIONS:
@@ -341,9 +598,9 @@ class ReviewStateStore:
             raise ValueError("INVALID_REVIEW_ACTION: `until` is valid only for snooze")
 
         key = _record_key(review_id, signal_fingerprint)
-        timestamp = (now or dt.datetime.now(dt.UTC)).astimezone(
-            dt.UTC
-        ).isoformat().replace("+00:00", "Z")
+        moment = (now or dt.datetime.now(dt.UTC)).astimezone(dt.UTC)
+        timestamp = _stamp(moment)
+        reason, verbatim = parse_reason(why)
         with _LOCK:
             payload = self.load()
             records = payload["records"]
@@ -361,11 +618,14 @@ class ReviewStateStore:
                     "fingerprint": signal_fingerprint,
                     "action": action,
                     "until": parsed_until,
-                    "why": str(why).strip() if why else None,
+                    "why": verbatim,
+                    "reason": reason,
+                    "origin": origin if origin in ORIGINS else MANUAL,
                     "updated_at": timestamp,
                 }
                 records[key] = record
                 decision = record
+            _compact_if_due(payload, now=moment, path=self.path)
             self._write(payload)
         return {
             "item_id": review_id,
@@ -374,6 +634,101 @@ class ReviewStateStore:
             "state": _ACTION_STATE[action],
             "decision": decision,
         }
+
+    # ------------------------------------------------------------------
+    # dispositions
+    # ------------------------------------------------------------------
+
+    def set_disposition(
+        self,
+        family: str,
+        disposition: str,
+        *,
+        why: str | None = None,
+        now: dt.datetime | None = None,
+        origin: str = MANUAL,
+    ) -> dict[str, Any]:
+        """Record or clear one family's disposition. `normal` clears the record.
+
+        A `quiet` or `off` decision requires a real reason code: silencing a
+        whole family with no stated ground is exactly the decision a reader six
+        months later cannot evaluate, and the dispositions view exists to be
+        read.
+        """
+        disposition = str(disposition or "").strip().lower()
+        if disposition not in DISPOSITION_ACTIONS:
+            raise ValueError(
+                f"INVALID_REVIEW_ACTION: disposition must be one of {sorted(DISPOSITION_ACTIONS)}"
+            )
+        reason, verbatim = parse_reason(why)
+        if disposition != "normal" and reason == DEFAULT_REASON:
+            raise ValueError(
+                "INVALID_REVIEW_REASON: quieting a family requires a reason code as the "
+                f"leading token of `why`, one of {sorted(set(REASON_CODES) - {DEFAULT_REASON})}"
+            )
+        moment = (now or dt.datetime.now(dt.UTC)).astimezone(dt.UTC)
+        timestamp = _stamp(moment)
+        with _LOCK:
+            payload = self.load()
+            dispositions = payload["dispositions"]
+            if disposition == "normal":
+                record = dispositions.pop(family, None)
+                stored: dict[str, Any] = {
+                    "family": family,
+                    "disposition": "normal",
+                    "reason": reason,
+                    "why": verbatim,
+                    "updated_at": timestamp,
+                    "origin": origin if origin in ORIGINS else MANUAL,
+                }
+                if record is None:
+                    # Nothing to clear: still a valid, idempotent decision, and
+                    # writing nothing keeps the store free of `normal` rows that
+                    # would then have to be filtered out of every read.
+                    stored["cleared"] = False
+                else:
+                    stored["cleared"] = True
+                    _compact_if_due(payload, now=moment, path=self.path)
+                    self._write(payload)
+                return stored
+            stored = {
+                "family": family,
+                "disposition": disposition,
+                "reason": reason,
+                "why": verbatim,
+                "updated_at": timestamp,
+                "origin": origin if origin in ORIGINS else MANUAL,
+            }
+            dispositions[family] = stored
+            _compact_if_due(payload, now=moment, path=self.path)
+            self._write(payload)
+        return dict(stored)
+
+    # ------------------------------------------------------------------
+    # retention and compaction
+    # ------------------------------------------------------------------
+
+    def compact(
+        self,
+        *,
+        force: bool = False,
+        now: dt.datetime | None = None,
+        read_limit: int | None = None,
+    ) -> dict[str, Any]:
+        """Drop what retention allows and report it. Runs under the store lock.
+
+        Never drops a standing dismissal, a competing stance, or a disposition:
+        those are decisions somebody made and nothing here is entitled to
+        forget them. What it does drop is a snooze whose clock ran out long ago
+        and a ledger entry nothing is waiting on.
+        """
+        moment = (now or dt.datetime.now(dt.UTC)).astimezone(dt.UTC)
+        with _LOCK:
+            payload = self.load(read_limit=read_limit)
+            report = _compact_payload(payload, now=moment)
+            if force or report["dropped"]["records"] or report["dropped"]["surfaced"]:
+                self._write(payload)
+        return report
 
     def _write(self, payload: dict[str, Any]) -> None:
         from . import reserved_paths
@@ -388,6 +743,375 @@ class ReviewStateStore:
                 "review-state",
                 encoded,
             )
+
+
+# --------------------------------------------------------------------------
+# schema: the sectioned store, and the forward migration into it
+# --------------------------------------------------------------------------
+
+
+def empty_state() -> dict[str, Any]:
+    """A fresh v2 payload. One definition, because five readers build this."""
+    return {
+        "version": SCHEMA_VERSION,
+        "records": {},
+        "dispositions": {},
+        "surfaced": {},
+        "stats": {},
+    }
+
+
+def _migrated(payload: dict[str, Any]) -> dict[str, Any]:
+    """Bring a loaded payload up to the current schema, in memory.
+
+    A v1 file has one flat `records` section and no reason, origin, disposition
+    or ledger. Its records carry `origin: manual` because v1 could only be
+    written by the triage surface, so calling them anything else would be a
+    lie about who decided. The reason is parsed from the `why` that was already
+    stored, so a coded dismissal made before the vocabulary existed is read the
+    same way afterwards. Nothing is written here: the rewrite happens on the
+    next write, which is the one moment the file is already being replaced.
+    """
+    for section in ("dispositions", "surfaced", "stats"):
+        if not isinstance(payload.get(section), dict):
+            payload[section] = {}
+    if payload.get("version") == SCHEMA_VERSION:
+        return payload
+    for record in payload["records"].values():
+        if not isinstance(record, dict):
+            continue
+        record.setdefault("origin", MANUAL)
+        if "reason" not in record:
+            record["reason"] = parse_reason(record.get("why"))[0]
+    payload["version"] = SCHEMA_VERSION
+    return payload
+
+
+def _stamp(moment: dt.datetime) -> str:
+    return moment.astimezone(dt.UTC).isoformat().replace("+00:00", "Z")
+
+
+def _parse_stamp(value: Any) -> dt.datetime | None:
+    try:
+        parsed = dt.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=dt.UTC)
+
+
+# --------------------------------------------------------------------------
+# dispositions: reading them
+# --------------------------------------------------------------------------
+
+
+def disposition_map(payload: dict[str, Any] | None) -> dict[str, str]:
+    """``family -> quiet|off`` for every family with a non-default disposition."""
+    stored = (payload or {}).get("dispositions") or {}
+    if not isinstance(stored, dict):
+        return {}
+    out: dict[str, str] = {}
+    for family, record in stored.items():
+        if not isinstance(record, dict):
+            continue
+        value = str(record.get("disposition") or "").strip().lower()
+        if value in {"quiet", "off"}:
+            out[str(family)] = value
+    return out
+
+
+def disposition_for(family: str, *, payload: dict[str, Any] | None) -> str:
+    return disposition_map(payload).get(str(family), "normal")
+
+
+def manual_records_since(payload: dict[str, Any] | None, *, since: dt.datetime) -> int:
+    """The manual-maintenance metric, computable from the store alone."""
+    since = since.astimezone(dt.UTC)
+    total = 0
+    for record in ((payload or {}).get("records") or {}).values():
+        if not isinstance(record, dict) or record.get("origin") != MANUAL:
+            continue
+        stamped = _parse_stamp(record.get("updated_at"))
+        if stamped is not None and stamped >= since:
+            total += 1
+    return total
+
+
+def manual_dismissals_by_family(
+    payload: dict[str, Any] | None, families: dict[str, list[str]]
+) -> dict[str, int]:
+    """Per-family manual dismissal counts, from a caller-supplied key index.
+
+    The store keys records by `review_id:fingerprint` and knows nothing about
+    which family produced a signal, so the caller that CAN answer that supplies
+    the mapping. Guessing it here would put a second, weaker opinion about
+    signal identity in the one module that must have exactly one.
+    """
+    records = (payload or {}).get("records") or {}
+    out: dict[str, int] = {}
+    for family, keys in families.items():
+        count = 0
+        for key in keys:
+            record = records.get(key)
+            if (
+                isinstance(record, dict)
+                and record.get("action") == "dismiss"
+                and record.get("origin", MANUAL) == MANUAL
+            ):
+                count += 1
+        out[family] = count
+    return out
+
+
+# --------------------------------------------------------------------------
+# the first-surfaced ledger
+# --------------------------------------------------------------------------
+
+
+def record_surfaced(
+    vault_root: Path,
+    entries: Any,
+    *,
+    surface: str,
+    now: dt.datetime | None = None,
+    known: dict[str, Any] | None = None,
+) -> dict[str, str]:
+    """Stamp the first time each signal reached a served surface. Best effort.
+
+    Returns `key -> first_surfaced_at` for every entry, whether it was already
+    on the ledger or has just been added, so the caller can annotate what it is
+    about to return without a second read.
+
+    `known` is a payload the caller has already loaded this pass. When every
+    entry is on it there is nothing to add, so the whole store access is
+    skipped — which is the steady state for a signal that keeps resurfacing,
+    and the reason a large store does not pay a second full read on every
+    write. A first surfacing still reloads under the lock, because writing the
+    caller's older snapshot back would silently drop any decision recorded in
+    between.
+
+    Failure-isolated on purpose: a read surface must not fail, slow past its
+    budget, or change its content because the ledger could not be written. An
+    unwritable store simply records the entry on a later surfacing, and the
+    caller still gets a value to annotate with — the timestamp is what this
+    pass observed, which is the honest answer when nothing can be persisted.
+
+    Concurrency, stated rather than implied. `_LOCK` is in-process; the file is
+    a whole-file rewrite, so two PROCESSES writing it in the same instant can
+    lose one of the writes. That race is the pre-existing one every decision
+    write has always had, and this function does not close it. What it does do
+    is stay out of it: `known=` makes the steady state — a signal that keeps
+    resurfacing — cost no write at all, so the window is opened only by a
+    genuine first surfacing, and what is at risk is one ledger row that the
+    next surfacing re-adds. A file lock here would put cross-process contention
+    on a read surface's latency budget to protect a best-effort measurement.
+    """
+    if surface not in SURFACES:
+        raise ValueError(f"INVALID_SURFACE: surface must be one of {list(SURFACES)}")
+    pairs = [
+        (str(review_id), str(fingerprint))
+        for review_id, fingerprint in entries
+        if review_id and fingerprint
+    ]
+    if not pairs:
+        return {}
+    timestamp = _stamp(now or dt.datetime.now(dt.UTC))
+    stamps: dict[str, str] = {}
+    if known is not None:
+        cached = _cached_stamps(pairs, known)
+        if cached is not None:
+            return cached
+    store = ReviewStateStore(vault_root)
+    try:
+        with _LOCK:
+            payload = store.load()
+            ledger = payload["surfaced"]
+            added = False
+            for review_id, fingerprint in pairs:
+                key = _record_key(review_id, fingerprint)
+                existing = ledger.get(key)
+                if isinstance(existing, dict) and existing.get("first_surfaced_at"):
+                    stamps[key] = str(existing["first_surfaced_at"])
+                    continue
+                ledger[key] = {
+                    "first_surfaced_at": timestamp,
+                    "surface": surface,
+                    # The runtime decided to show this, not a person.
+                    "origin": AUTOMATIC,
+                }
+                stamps[key] = timestamp
+                added = True
+            if added:
+                store._write(payload)
+    except (OSError, ValueError) as error:
+        log.debug("first-surfaced ledger not recorded: %s", error)
+        for review_id, fingerprint in pairs:
+            stamps.setdefault(_record_key(review_id, fingerprint), timestamp)
+    return stamps
+
+
+def _cached_stamps(
+    pairs: list[tuple[str, str]], known: dict[str, Any]
+) -> dict[str, str] | None:
+    """Every pair's existing stamp, or None if any one of them is unrecorded.
+
+    All-or-nothing on purpose: one missing entry means the store has to be
+    written anyway, and a partial answer would let a caller annotate half its
+    report from a snapshot and half from a fresh read.
+    """
+    ledger = known.get("surfaced") or {}
+    if not isinstance(ledger, dict):
+        return None
+    cached: dict[str, str] = {}
+    for review_id, fingerprint in pairs:
+        key = _record_key(review_id, fingerprint)
+        existing = ledger.get(key)
+        if not isinstance(existing, dict) or not existing.get("first_surfaced_at"):
+            return None
+        cached[key] = str(existing["first_surfaced_at"])
+    return cached
+
+
+def first_surfaced_map(payload: dict[str, Any] | None) -> dict[str, str]:
+    ledger = (payload or {}).get("surfaced") or {}
+    if not isinstance(ledger, dict):
+        return {}
+    return {
+        str(key): str(row["first_surfaced_at"])
+        for key, row in ledger.items()
+        if isinstance(row, dict) and row.get("first_surfaced_at")
+    }
+
+
+# --------------------------------------------------------------------------
+# retention and compaction
+# --------------------------------------------------------------------------
+
+
+def _is_standing(record: Any) -> bool:
+    """A decision nothing is allowed to forget."""
+    return (
+        isinstance(record, dict)
+        and str(record.get("action") or "") in {"dismiss", "competing"}
+    )
+
+
+def _compact_payload(payload: dict[str, Any], *, now: dt.datetime) -> dict[str, Any]:
+    """Apply retention in place and return the drop report. Caller holds the lock."""
+    today = now.date()
+    records = payload["records"]
+    dropped_records = [
+        key
+        for key, record in records.items()
+        if isinstance(record, dict)
+        and str(record.get("action") or "") == "snooze"
+        and (until := _safe_date(record.get("until"))) is not None
+        and until < today - dt.timedelta(days=_SNOOZE_RETENTION_DAYS)
+    ]
+    for key in dropped_records:
+        records.pop(key, None)
+
+    ledger = payload["surfaced"]
+    horizon = now - dt.timedelta(days=_LEDGER_RETENTION_DAYS)
+    dropped_ledger = [
+        key
+        for key, row in ledger.items()
+        if isinstance(row, dict)
+        and not _is_standing(records.get(key))
+        and (stamped := _parse_stamp(row.get("first_surfaced_at"))) is not None
+        and stamped < horizon
+    ]
+    for key in dropped_ledger:
+        ledger.pop(key, None)
+
+    report = {
+        "at": _stamp(now),
+        # Compaction is the runtime deciding, so what it writes says so. The
+        # standing decisions it preserves are untouched and keep `manual`.
+        "origin": AUTOMATIC,
+        "dropped": {"records": len(dropped_records), "surfaced": len(dropped_ledger)},
+        "retention_days": {
+            "lapsed_snooze": _SNOOZE_RETENTION_DAYS,
+            "surfaced": _LEDGER_RETENTION_DAYS,
+        },
+    }
+    # Only a compaction that REMOVED something records itself. A no-op that
+    # stamped `stats` would make the payload differ from the file on every
+    # scan, so a store that can never drop anything again — the ordinary end
+    # state, since standing decisions are permanent — would rewrite itself for
+    # the sake of a timestamp saying nothing happened.
+    if dropped_records or dropped_ledger:
+        payload["stats"]["compaction"] = report
+    return report
+
+
+def _compact_if_due(
+    payload: dict[str, Any], *, now: dt.datetime, path: Path | None = None
+) -> None:
+    """Compact on write past a declared threshold, but never pointlessly. Lock held.
+
+    Two gates, and both are needed.
+
+    The THRESHOLD gate says the store is large enough to be worth walking. The
+    size test reads the file already on disk rather than re-encoding the
+    payload: re-encoding to decide whether to encode costs a second full
+    serialization of a store that can be tens of megabytes, on the one path a
+    user is waiting on. The file is the previous write's bytes, which for a
+    threshold is exactly as good an answer and free.
+
+    The RESCAN gate says anything has changed since the last walk. It exists
+    because the threshold gate is permanently tripped on any vault that reaches
+    it: standing dismissals are never dropped, so a store that crossed 20,000
+    records stays across it forever, and without this every subsequent decision
+    would pay a full scan of every record and every ledger entry to discover
+    that retention still allows nothing. Ten percent growth in either section,
+    or a day since the last walk, is what makes another one worth its cost.
+    """
+    if not _past_threshold(payload, path=path):
+        return
+    if not _rescan_warranted(payload["stats"].get("compaction_scan"), payload, now=now):
+        return
+    _compact_payload(payload, now=now)
+    # The post-compaction counts, deliberately: growth is measured from what the
+    # last walk left behind, so a store that drops nothing does not re-arm
+    # itself on its own leftovers.
+    payload["stats"]["compaction_scan"] = {
+        "at": _stamp(now),
+        "records": len(payload["records"]),
+        "surfaced": len(payload["surfaced"]),
+    }
+
+
+def _past_threshold(payload: dict[str, Any], *, path: Path | None) -> bool:
+    if len(payload["records"]) >= _COMPACT_RECORD_THRESHOLD:
+        return True
+    try:
+        size = path.stat().st_size if path is not None else 0
+    except OSError:
+        size = 0
+    return size >= _COMPACT_BYTE_THRESHOLD
+
+
+def _rescan_warranted(
+    marker: Any, payload: dict[str, Any], *, now: dt.datetime
+) -> bool:
+    """Whether another retention walk can plausibly find anything new."""
+    if not isinstance(marker, dict):
+        return True
+    records = len(payload["records"])
+    surfaced = len(payload["surfaced"])
+    if records > int(marker.get("records") or 0) * (1 + _COMPACT_RESCAN_GROWTH):
+        return True
+    if surfaced > int(marker.get("surfaced") or 0) * (1 + _COMPACT_RESCAN_GROWTH):
+        return True
+    stamped = _parse_stamp(marker.get("at"))
+    return stamped is None or (now - stamped) >= _COMPACT_RESCAN_AFTER
+
+
+def _safe_date(value: Any) -> dt.date | None:
+    try:
+        return dt.date.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
 
 
 def _record_key(review_id: str, signal_fingerprint: str) -> str:

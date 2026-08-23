@@ -722,34 +722,125 @@ def dismissal_respected_across_passes_fail() -> AssertionContext:
     )
 
 
-def counter_emission_not_repeated_per_write_pass() -> AssertionContext:
+def _counters_snapshot(phase: str, **raw: str):
     block = item(
         "surface-due_state_counters",
         kind="container",
-        raw={
-            "surface": "due_state_counters",
-            "projection": "complete",
-            "emissions": "1",
-            "writes": "12",
-        },
+        raw={"surface": "due_state_counters", "projection": "complete", **raw},
     )
-    return AssertionContext(snapshot=snapshot((block,)))
+    return snapshot((block,), phase=phase)
+
+
+def _counters(*, before: dict[str, str] | None = None, **raw: str) -> AssertionContext:
+    """A counters context. `before` seeds the PRIOR snapshot's cumulative totals."""
+    return AssertionContext(
+        snapshot=_counters_snapshot("p2", **raw),
+        prior=None if before is None else _counters_snapshot("p1", **before),
+    )
+
+
+def counter_emission_not_repeated_per_write_pass() -> AssertionContext:
+    return _counters(emissions="1", writes="12", due_total="4")
 
 
 def counter_emission_not_repeated_per_write_fail() -> AssertionContext:
     """Mechanism removed: batching is gone, so one block is emitted per write."""
 
-    block = item(
-        "surface-due_state_counters",
-        kind="container",
-        raw={
-            "surface": "due_state_counters",
-            "projection": "complete",
-            "emissions": "12",
-            "writes": "12",
-        },
+    return _counters(emissions="12", writes="12", due_total="4")
+
+
+def test_the_counter_verdict_is_the_delta_between_the_snapshots() -> None:
+    """Cumulative totals answer a question about the vault, not about the batch.
+
+    `writes` and `emissions` count everything the vault ever did, so a ratio
+    read off the later snapshot alone is a verdict on its whole history. The
+    batch under test is `later - prior`, and both snapshots are already in the
+    context.
+
+    The row that matters is the third one. `due_total` — the size of the last
+    delivered block — persists, so once ANY earlier delivery had happened it
+    stayed positive forever, and a later batch that delivered nothing scored a
+    clean `pass` on the strength of a block emitted before it began.
+    """
+
+    def outcome(**kwargs) -> str:
+        return resolve("counter_emission_not_repeated_per_write")(
+            _counters(**kwargs)
+        ).outcome
+
+    # One prior delivery, then a twelve-write batch that delivers NOTHING.
+    assert (
+        outcome(
+            before={"emissions": "1", "writes": "3", "due_total": "4"},
+            emissions="1",
+            writes="15",
+            due_total="4",
+        )
+        == "unsupported"
     )
-    return AssertionContext(snapshot=snapshot((block,)))
+    # The same history, but this batch did deliver once: decidable, and clean.
+    assert (
+        outcome(
+            before={"emissions": "1", "writes": "3", "due_total": "4"},
+            emissions="2",
+            writes="15",
+            due_total="4",
+        )
+        == "pass"
+    )
+    # ...and one per write inside the window is still a failure.
+    assert (
+        outcome(
+            before={"emissions": "1", "writes": "3", "due_total": "4"},
+            emissions="13",
+            writes="15",
+            due_total="4",
+        )
+        == "fail"
+    )
+    # No batch in the window at all.
+    assert (
+        outcome(
+            before={"emissions": "1", "writes": "15", "due_total": "4"},
+            emissions="1",
+            writes="15",
+        )
+        == "unsupported"
+    )
+    # A missing prior is measured from zero, which is right for a fresh vault.
+    assert outcome(emissions="1", writes="12") == "pass"
+    assert outcome(emissions="0", writes="12") == "unsupported"
+    # Counters that went backwards do not describe one batch.
+    assert (
+        outcome(before={"emissions": "5", "writes": "20"}, emissions="1", writes="12")
+        == "unsupported"
+    )
+
+
+def test_due_total_no_longer_decides_the_counter_verdict() -> None:
+    """It stays in the projection, informational, and gates nothing.
+
+    Pinned because removing a gate quietly is how the next reviewer ends up
+    re-deriving why it left. A zero `due_total` on a batch that DID deliver is
+    no longer an `unsupported`, and a positive one on a batch that delivered
+    nothing is no longer a `pass`.
+    """
+
+    def outcome(**kwargs) -> str:
+        return resolve("counter_emission_not_repeated_per_write")(
+            _counters(**kwargs)
+        ).outcome
+
+    assert outcome(emissions="1", writes="12", due_total="0") == "pass"
+    assert (
+        outcome(
+            before={"emissions": "1", "writes": "3", "due_total": "9"},
+            emissions="1",
+            writes="15",
+            due_total="9",
+        )
+        == "unsupported"
+    )
 
 
 def _packet_units() -> tuple[StateItem, ...]:

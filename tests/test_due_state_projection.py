@@ -1011,3 +1011,56 @@ def test_removing_the_day_boundary_rebucket_fails_this_module(
     )
 
     assert due_state_module.served(vault, today=TOMORROW) is None
+
+
+# ==========================================================================
+# one definition per name (round 2, H2)
+# ==========================================================================
+
+
+def test_the_projection_module_defines_each_name_once() -> None:
+    """A second `def` of a live name is a silent rebind, not a syntax error.
+
+    `_unbucket` was defined twice: the lower one won for every caller, including
+    the page-write path the upper one was written for, and the two bodies did not
+    agree about a malformed bucket or a missing date. Ruff's F811 stayed quiet
+    because a USE sits between the two bindings. An AST check is cheap and it is
+    the only thing that catches the next one.
+    """
+    import ast
+    from collections import Counter
+
+    import exomem.due_state as module
+
+    tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
+    names = Counter(
+        node.name
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+    )
+
+    assert [name for name, count in names.items() if count > 1] == []
+
+
+def test_a_malformed_bucket_does_not_cost_a_page_write_its_delta(vault: Path) -> None:
+    """A projection is derived state; a corrupt one must degrade, never throw.
+
+    The page delta reads the stored bucket for every split category before
+    replacing the page-local half. A list-shaped bucket — the shape a truncated
+    or hand-edited projection produces — raised `AttributeError` inside the lock,
+    and the callers' blanket `except Exception` turned that into a page write
+    that silently lost all four of its category updates AND its `writes` bump.
+    """
+    rel = _prediction(vault, "silent-loss", check_by="2026-08-01")
+    due_state_module.reconcile(vault, today=TODAY)
+    payload = due_state_module.load(vault)
+    assert payload is not None
+    payload["categories"]["supersession_integrity"] = {rel: ["not", "a", "bucket"]}
+    due_state_module.save(vault, payload)
+    before = due_state_module.load(vault)["emission"]["writes"]
+
+    updated = due_state_module.apply_write_delta(vault, rel, today=TODAY)
+
+    assert updated["emission"]["writes"] == before + 1
+    assert due_state_module._unbucket(["not", "a", "bucket"]) == []
+    assert due_state_module.load(vault)["emission"]["writes"] == before + 1

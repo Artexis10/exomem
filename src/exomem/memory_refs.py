@@ -78,6 +78,15 @@ def sidecar_path(vault_root: Path) -> Path:
     return Path(vault_root) / kb_dirname() / ".refs.sqlite"
 
 
+#: How many paths one identity lookup binds at a time. SQLite's compiled-in
+#: `SQLITE_MAX_VARIABLE_NUMBER` is the hard ceiling — measured on this build at
+#: 32,766 fine and 32,767 raising `OperationalError: too many SQL variables` —
+#: and a caller that derives its path list from the vault can cross it. 500 is
+#: far below the ceiling and far above any realistic single batch, so the loop
+#: costs one extra query only on inputs that would otherwise have failed.
+REFS_QUERY_CHUNK = 500
+
+
 class ReferenceIndex:
     """Rebuildable path/identity index.
 
@@ -324,16 +333,31 @@ class ReferenceIndex:
         return self.refs_for_paths([clean]).get(clean)
 
     def refs_for_paths(self, paths: list[str]) -> dict[str, str | None]:
-        """Resolve many paths with one sidecar query or one Markdown scan.
+        """Resolve many paths with one sidecar query per chunk, or one scan.
 
         The returned dict is keyed by the caller's own cleaned spelling; callers
         index it by the string they passed in.
+
+        Chunked because the lookup below binds one SQL variable per path, and
+        SQLite refuses past `SQLITE_MAX_VARIABLE_NUMBER` — measured on this
+        build as fine at 32,766 paths and `OperationalError: too many SQL
+        variables` at 32,767. Chunking HERE rather than at a caller is the
+        point: every caller of this method inherits the bound, including the
+        ones that hand it a list whose length is a function of the vault.
         """
         clean = [str(path or "").replace("\\", "/").lstrip("/") for path in paths]
         wanted = list(dict.fromkeys(path for path in clean if path))
         if not wanted:
             return {}
+        if len(wanted) > REFS_QUERY_CHUNK:
+            out: dict[str, str | None] = {}
+            for start in range(0, len(wanted), REFS_QUERY_CHUNK):
+                out.update(self._refs_for_paths_batch(wanted[start : start + REFS_QUERY_CHUNK]))
+            return out
+        return self._refs_for_paths_batch(wanted)
 
+    def _refs_for_paths_batch(self, wanted: list[str]) -> dict[str, str | None]:
+        """One bounded batch: at most `REFS_QUERY_CHUNK` paths, already cleaned."""
         conn = self._current_readonly_connection()
         if conn is None:
             # Schema upgrades and first use rebuild once. The lock prevents a
