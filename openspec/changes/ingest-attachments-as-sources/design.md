@@ -235,9 +235,14 @@ one-way refusal unchanged. `move_file` already carries `extra_writes` and
 `content_transform` for exactly this class of caller-owned, declared change, so
 the seam exists; what does not exist is a notion of a two-file unit.
 
-This is left unimplemented and is the one thing standing between the Sources
-lane and being complete. It is recorded rather than partly done because a
-half-moved artifact is worse than a refused one.
+Implemented that way. Whichever half a caller names, the operation is
+normalized onto the page before any guard runs, and the bytes are renamed
+alongside it inside `mutate` — after the page's own rename, so a failure of
+either rolls back both. The append-only guards, the promotion-reason
+requirement, and the one-way refusal all still see the page path and are
+unchanged. An ordinary source page whose stem happens to have no sibling file
+is not a pair, and still moves alone; that control is asserted rather than
+assumed.
 
 ## Fix forward, and what that leaves
 

@@ -693,3 +693,102 @@ def test_evidence_still_cannot_be_moved_out(vault: Path) -> None:
         )
 
     assert caught.value.code == "APPEND_ONLY"
+
+
+def _promotable(vault: Path, source_schema, tmp_path: Path, name: str = "receipt.png"):
+    from exomem import add as add_module
+
+    return add_module.add(
+        vault, source_schema, content="", title="Warranty receipt",
+        source_type="other",
+        artifact=_staged(tmp_path / "promote", name, _PNG), today=TODAY,
+    )
+
+
+def test_promotion_moves_the_artifact_and_its_page_together(
+    vault: Path, source_schema, tmp_path: Path
+) -> None:
+    """An artifact and its page are one unit, so a move relocates both.
+
+    Measured before this change: promotion relocated the bytes and left the
+    page in `Sources/` with a dangling `evidence_file`, so the artifact arrived
+    in Evidence with no page at all — the unaddressable state this change
+    exists to remove — and the operation reported success.
+    """
+    from exomem import move_file as move_file_module
+
+    added = _promotable(vault, source_schema, tmp_path)
+    destination = "Knowledge Base/Evidence/warranty/receipts/receipt.png"
+
+    move_file_module.move_file(
+        vault,
+        old_path=added.artifact_path,
+        new_path=destination,
+        promotion_reason="the appliance failed; this is the proof of purchase",
+    )
+
+    assert (vault / destination).exists()
+    assert (vault / f"{destination}.md").exists()
+    assert not (vault / added.artifact_path).exists()
+    assert not (vault / added.path).exists()
+
+
+def test_the_moved_page_points_at_the_moved_bytes(
+    vault: Path, source_schema, tmp_path: Path
+) -> None:
+    from exomem import move_file as move_file_module
+
+    added = _promotable(vault, source_schema, tmp_path)
+    destination = "Knowledge Base/Evidence/warranty/receipts/receipt.png"
+
+    move_file_module.move_file(
+        vault,
+        old_path=added.artifact_path,
+        new_path=destination,
+        promotion_reason="the appliance failed; this is the proof of purchase",
+    )
+
+    page = (vault / f"{destination}.md").read_text(encoding="utf-8")
+    assert f"evidence_file: {destination}" in page
+    assert added.artifact_path not in page
+    # Identity survives the move: this is the same captured item, reclassified.
+    assert "title: Warranty receipt" in page
+    assert "original_filename: receipt.png" in page
+
+
+def test_moving_the_page_moves_the_artifact_too(
+    vault: Path, source_schema, tmp_path: Path
+) -> None:
+    """Either half addresses the unit; neither can be relocated alone."""
+    from exomem import move_file as move_file_module
+
+    added = _promotable(vault, source_schema, tmp_path, "invoice.png")
+    destination = "Knowledge Base/Evidence/warranty/receipts/invoice.png"
+
+    move_file_module.move_file(
+        vault,
+        old_path=added.path,
+        new_path=f"{destination}.md",
+        promotion_reason="the appliance failed; this is the proof of purchase",
+    )
+
+    assert (vault / destination).exists()
+    assert (vault / f"{destination}.md").exists()
+    assert not (vault / added.artifact_path).exists()
+
+
+def test_a_lone_page_still_moves_by_itself(vault: Path, source_schema) -> None:
+    """The pair rule must not capture an ordinary source page."""
+    from exomem import add as add_module
+    from exomem import move_file as move_file_module
+
+    added = add_module.add(
+        vault, source_schema, content="Ordinary captured text.",
+        title="No artifact here", source_type="other", today=TODAY,
+    )
+    destination = "Knowledge Base/Sources/Other/relocated-note.md"
+
+    move_file_module.move_file(vault, old_path=added.path, new_path=destination)
+
+    assert (vault / destination).exists()
+    assert not (vault / added.path).exists()
