@@ -20,6 +20,8 @@ import base64
 import datetime as dt
 from pathlib import Path
 
+import pytest
+
 from exomem import note as note_module
 from exomem import preserve as preserve_module
 
@@ -371,7 +373,7 @@ def test_an_evidence_binary_still_names_evidence(vault: Path) -> None:
 # --------------------------------------------------------------------------
 
 
-def _staged(tmp: Path, name: str, data: bytes) -> "object":
+def _staged(tmp: Path, name: str, data: bytes) -> object:
     from exomem.add import SourceArtifact
 
     staged = tmp / name
@@ -606,3 +608,88 @@ def test_no_lane_decision_reads_the_file_type(
     # A `.md` artifact's page avoids the doubled extension, so it is addressed
     # by the `-notes.md` form rather than `<name>.md`.
     assert markdown_evidence.sidecar_path.endswith("-notes.md")
+
+
+# --------------------------------------------------------------------------
+# 6. Promotion and Evidence semantics are untouched
+# --------------------------------------------------------------------------
+
+
+def test_the_artifact_pointer_is_grouped_by_tree_not_by_field_name(
+    vault: Path, source_schema, tmp_path: Path
+) -> None:
+    """A captured Source must not be presented as evidence.
+
+    The pointer field is `evidence_file` in both trees — a misnomer kept because
+    roughly fifteen readers depend on the name. Review context grouped it by
+    that name, which would have shown a Source under an evidence heading:
+    the exact confusion this change exists to end, reproduced in the review
+    surface.
+    """
+    from exomem import add as add_module
+    from exomem import review_context
+
+    added = add_module.add(
+        vault, source_schema, content="", title="Grouped by tree",
+        source_type="other",
+        artifact=_staged(tmp_path / "grp", "shot.png", _PNG), today=TODAY,
+    )
+    frontmatter = {"evidence_file": added.artifact_path}
+
+    section = review_context._provenance_section(
+        vault, frontmatter, ref_resolver=review_context._ReferenceResolver(vault)
+    )
+
+    assert section["evidence"] == []
+    assert [row["path"] for row in section["sources"]] == [added.artifact_path]
+
+
+def test_an_evidence_artifact_pointer_still_groups_as_evidence(vault: Path) -> None:
+    from exomem import review_context
+
+    stored = _preserve_image(vault)
+    frontmatter = {"evidence_file": stored.path}
+
+    section = review_context._provenance_section(
+        vault, frontmatter, ref_resolver=review_context._ReferenceResolver(vault)
+    )
+
+    assert section["sources"] == []
+    assert [row["path"] for row in section["evidence"]] == [stored.path]
+
+
+def test_promotion_of_a_captured_source_still_requires_a_reason(
+    vault: Path, source_schema, tmp_path: Path
+) -> None:
+    from exomem import add as add_module
+    from exomem import move_file as move_file_module
+
+    added = add_module.add(
+        vault, source_schema, content="", title="Promotable attachment",
+        source_type="other",
+        artifact=_staged(tmp_path / "p", "receipt.png", _PNG), today=TODAY,
+    )
+    destination = "Knowledge Base/Evidence/warranty/receipts/receipt.png"
+
+    with pytest.raises(move_file_module.MoveFileError) as caught:
+        move_file_module.move_file(
+            vault, old_path=added.artifact_path, new_path=destination
+        )
+
+    assert caught.value.code == "PROMOTION_REASON_REQUIRED"
+
+
+def test_evidence_still_cannot_be_moved_out(vault: Path) -> None:
+    from exomem import move_file as move_file_module
+
+    stored = _preserve_image(vault)
+
+    with pytest.raises(move_file_module.MoveFileError) as caught:
+        move_file_module.move_file(
+            vault,
+            old_path=stored.path,
+            new_path="Knowledge Base/Sources/Other/shot.png",
+            promotion_reason="reclassifying as raw material",
+        )
+
+    assert caught.value.code == "APPEND_ONLY"

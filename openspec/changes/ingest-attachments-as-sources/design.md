@@ -211,6 +211,34 @@ in a second place. Both take the lane as an explicit parameter, carried on the
 minted capability so the destination is fixed when the token is issued rather
 than chosen by whoever posts the bytes.
 
+## Promotion has to move a pair, and does not yet
+
+Making an artifact a two-file unit — bytes plus the page that addresses them —
+breaks an assumption `move_file` was entitled to make. Measured on a captured
+Source promoted into Evidence with a stated reason:
+
+```
+binary at destination:   True
+page at destination:     False
+page still in Sources:   True, with evidence_file pointing at the old path
+```
+
+So the promotion half-lands. The bytes reach Evidence with no page, which is the
+unaddressable state this change exists to remove, and the page left behind in
+Sources describes an artifact that is no longer there. Nothing refuses, and the
+result reads as success.
+
+The fix belongs in the move rather than in a caller: an artifact and its page
+are one unit, so relocating either has to relocate both and rewrite the pointer,
+in one atomic batch, with the existing promotion-reason requirement and the
+one-way refusal unchanged. `move_file` already carries `extra_writes` and
+`content_transform` for exactly this class of caller-owned, declared change, so
+the seam exists; what does not exist is a notion of a two-file unit.
+
+This is left unimplemented and is the one thing standing between the Sources
+lane and being complete. It is recorded rather than partly done because a
+half-moved artifact is worse than a refused one.
+
 ## Fix forward, and what that leaves
 
 Artifacts already in Evidence stay there. `move_file` refuses to move anything

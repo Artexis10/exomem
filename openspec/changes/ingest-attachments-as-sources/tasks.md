@@ -50,9 +50,9 @@ media capture is safe to offer.
 
 ## 6. Promotion and Evidence semantics are untouched
 
-- [ ] 6.1 Test that Sources-to-Evidence promotion still refuses without a reason and that the reverse move is still refused, including for an artifact captured through the new Sources path.
-- [ ] 6.2 Test that a Source captured as an attachment can be promoted, and that both its bytes and its page arrive in Evidence with the pointer still correct.
-- [ ] 6.3 Fix `review_context`'s evidence-field grouping so a Source page carrying the artifact pointer is not presented under an evidence heading; test both lanes.
+- [x] 6.1 Test that Sources-to-Evidence promotion still refuses without a reason and that the reverse move is still refused, including for an artifact captured through the new Sources path.
+- [ ] 6.2 Test that a Source captured as an attachment can be promoted, and that both its bytes and its page arrive in Evidence with the pointer still correct. **Measured gap:** `move_file` moves one file, so promotion currently relocates the bytes and leaves the page in `Sources/` with a dangling `evidence_file` — the bytes arrive with no page at all. An artifact and its page are one unit; the move must relocate both and rewrite the pointer in one atomic batch, keeping the promotion-reason requirement and the one-way refusal.
+- [x] 6.3 Fix `review_context`'s evidence-field grouping so a Source page carrying the artifact pointer is not presented under an evidence heading; test both lanes.
 
 ## 7. Guidance and surface
 
