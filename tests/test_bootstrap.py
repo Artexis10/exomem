@@ -246,18 +246,16 @@ def test_bootstrap_routes_observed_state_to_records_without_activating_state(
         # kind of UTTERANCE and where it goes, because the evidence for them exists
         # only in the conversation and a hookless client reads nothing else.
         "stated_intent": (
-            "work the user commits to, sequences or re-prioritises; route "
-            "to plan_memory"
+            "work the user commits to, sequences or reorders; route: plan_memory"
         ),
         "observed_outcome": (
-            "a report that something happened, was produced, delivered, "
-            "approved, published or failed; route to record_memory"
+            "reported as happened: produced, delivered, approved, published, "
+            "failed; route: record_memory"
         ),
         "pairing_rule": (
-            "an outcome on an open committed Planning item is one landing "
-            "with two consequences: append the record, then transition the "
-            "item, reported once. A tentative claim is never an event; "
-            "elapsed time is never an outcome"
+            "an outcome on an open committed Planning item is one landing, "
+            "two consequences: record then transition, once. A tentative "
+            "claim is not an event, elapsed time not an outcome"
         ),
     }
     assert "ordinary editable files" in contract["manual_first"]

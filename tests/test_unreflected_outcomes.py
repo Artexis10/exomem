@@ -806,16 +806,18 @@ def test_the_advisory_runs_outside_the_mutation_guard(
 # --- 4.7 the bounded write-time delta -------------------------------------------
 
 
-def _update_record(vault_root: Path, key: str, changes: dict) -> dict:
+def _update_record(
+    vault_root: Path, key: str, changes: dict, *, collection: str = RECORDS_PATH
+) -> dict:
     from exomem import record_formats, records
     from exomem import structured_collections as collections
 
-    manifest = collections.load_manifest(vault_root, vault_root / RECORDS_PATH)
+    manifest = collections.load_manifest(vault_root, vault_root / collection)
     snapshot = record_formats.load_adapter(vault_root, manifest).read()
     item = next(record for record in snapshot.records if record.identity.key == key)
     return records.update_record(
         vault_root,
-        RECORDS_PATH,
+        collection,
         item_key=key,
         changes=changes,
         expected_container_hash=snapshot.snapshot,
@@ -979,3 +981,135 @@ def _titles_in(projection: dict) -> set[str]:
         for row in due_state_module._unbucket(bucket):
             titles.add(str((row.get("component") or {}).get("item_title") or ""))
     return titles
+
+
+# --- round 2 -------------------------------------------------------------------
+
+SECOND_RECORDS_PATH = "Knowledge Base/Records/Late/_collection.md"
+SECOND_RECORDS_ID = "7c1d9e04-5f62-4a88-9b31-2e6a0c4d7f53"
+
+
+def _two_bindings(vault_root: Path) -> None:
+    """A second Records collection joined to the SAME Planning collection.
+
+    A perfectly ordinary shape -- deliveries logged by two sources against one
+    plan -- and the audit reports it as two findings, one per binding, because a
+    binding is what the finding is about.
+    """
+    from exomem import records as records_module
+
+    records_module.create_collection(
+        vault_root,
+        SECOND_RECORDS_PATH,
+        records_manifest(collection_id=SECOND_RECORDS_ID),
+        why="log delivery events from a second source",
+    )
+
+
+def test_two_bindings_on_one_item_are_two_entries_not_one(tmp_path: Path) -> None:
+    """H1: the projection's unit has to be the audit's unit, or nothing binds.
+
+    Keying an entry by the plan item alone made the second binding's write
+    overwrite the first's: the block reported one finding where the audit reports
+    two, and its fingerprint was composed over the union of both bindings' records
+    -- a value no audit produces, so a dismissal taken against the block bound to
+    nothing and both real findings stayed live until the next reconcile.
+    """
+    seed_vault(tmp_path)
+    _two_bindings(tmp_path)
+    queue_item(tmp_path, "Batch 1")
+    due_state_module.reconcile(tmp_path)
+
+    report_event(tmp_path, "Batch 1")
+    report_event(tmp_path, "Batch 1", collection=SECOND_RECORDS_PATH)
+
+    from_delta = _identities(due_state_module.served_entries(tmp_path))
+    assert len(from_delta) == 2
+    due_state_module.reconcile(tmp_path)
+    assert _identities(due_state_module.served_entries(tmp_path)) == from_delta
+    assert from_delta == _fresh_identities(tmp_path)
+
+
+def test_a_dismissal_binds_to_both_bindings_and_each_resurfaces_alone(
+    tmp_path: Path,
+) -> None:
+    """The consequence H1 is actually about: a dismissal has to BIND.
+
+    Two bindings on one plan item are two findings but ONE review item -- the
+    partition is the plan item (`review_partition` = `item_key`), and
+    `apply_for_item` deliberately records the decision against every component of
+    the fused item. So the reachable property is not "dismiss one of them": it is
+    that the decision reaches BOTH components and that each one resurfaces on its
+    own evidence.
+
+    Collapsing the two into one entry broke exactly that. The stored fingerprint
+    was composed over the union of both bindings' records -- a value no audit
+    produces -- so the fan-out recorded against the two real component
+    fingerprints and the projection compared against a third. The count carried
+    on as if nothing had been triaged.
+    """
+    from exomem import attention as attention_module
+    from exomem.commands import op_triage_memory
+
+    seed_vault(tmp_path)
+    _two_bindings(tmp_path)
+    queue_item(tmp_path, "Batch 1")
+    due_state_module.reconcile(tmp_path)
+    report_event(tmp_path, "Batch 1")
+    report_event(tmp_path, "Batch 1", collection=SECOND_RECORDS_PATH)
+    served = due_state_module.served_entries(tmp_path)
+    assert len(served) == 2
+    # The served row carries no `component` -- that is server-internal -- so each
+    # binding is identified through the stored entry's fingerprint.
+    stored = {
+        str((row.get("component") or {}).get("records_collection")): str(row["fingerprint"])
+        for row in due_state_module._unbucket(next(iter(_projection(tmp_path).values())))
+    }
+    assert set(stored) == {RECORDS_PATH, SECOND_RECORDS_PATH}
+    assert {row["fingerprint"] for row in served} == set(stored.values())
+    item = attention_module.item_by_ref(tmp_path, served[0]["ref"])
+    assert set(review_state_module.component_fingerprints(tmp_path, item)) == set(
+        stored.values()
+    ), "the fused item's components ARE the two stored entries, or nothing binds"
+
+    op_triage_memory(
+        tmp_path,
+        ref=served[0]["ref"],
+        action="dismiss",
+        why="handled: both sources are already reconciled elsewhere",
+        expected_fingerprint=item.fingerprint,
+    )
+
+    assert due_state_module.served_entries(tmp_path) == []
+    report_event(tmp_path, "Batch 1", collection=SECOND_RECORDS_PATH, occurred_on="2026-08-09")
+    resurfaced = due_state_module.served_entries(tmp_path)
+    assert [row["fingerprint"] for row in resurfaced] != [], (
+        "new evidence on one binding must resurface that binding"
+    )
+    assert {row["fingerprint"] for row in resurfaced} & {stored[RECORDS_PATH]} == set(), (
+        "and must not resurface the binding whose evidence did not move"
+    )
+    due_state_module.reconcile(tmp_path)
+    assert _identities(due_state_module.served_entries(tmp_path)) == _identities(resurfaced)
+
+
+def test_the_two_binding_delta_equals_a_full_recompute_through_a_join_move(
+    tmp_path: Path,
+) -> None:
+    """The delta-equals-recompute set was entirely single-binding until now."""
+    seed_vault(tmp_path)
+    _two_bindings(tmp_path)
+    queue_item(tmp_path, "Batch 1")
+    queue_item(tmp_path, "Batch 2")
+    due_state_module.reconcile(tmp_path)
+    report_event(tmp_path, "Batch 1")
+    appended = report_event(tmp_path, "Batch 1", collection=SECOND_RECORDS_PATH)
+
+    _update_record(
+        tmp_path, appended["item_key"], {"title": "Batch 2"}, collection=SECOND_RECORDS_PATH
+    )
+
+    delta = _identities(due_state_module.served_entries(tmp_path))
+    assert len(delta) == 2
+    due_state_module.reconcile(tmp_path)
+    assert _identities(due_state_module.served_entries(tmp_path)) == delta

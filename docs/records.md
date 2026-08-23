@@ -137,8 +137,10 @@ A collection that declares an `item_schema.natural_key` holds at most one item
 per key. Both writes are checked: an append whose derived key already exists
 under another identity refuses, and so does an update that would MOVE an item
 onto another item's key. Planning updates run through the same writer and
-inherit the rule; Planning triage cannot reach a natural-key field at all, so
-ordinary lifecycle work is unaffected. The refusal is
+inherit the rule; Planning triage cannot reach `title`, the natural key these
+collections declare, so ordinary lifecycle work is unaffected — a collection
+keyed on a field triage CAN reach, such as `status`, would refuse the same way.
+The refusal is
 `RECORD_NATURAL_KEY_CONFLICT` and it names every existing item holding the key.
 
 Recovery, for a collection that already holds two items under one key — a state

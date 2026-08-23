@@ -955,11 +955,16 @@ def test_a_planning_update_onto_another_items_natural_key_refuses(tmp_path: Path
     assert first["plan_id"] in str(caught.value.details)
 
 
-def test_planning_triage_cannot_reach_a_natural_key_field(tmp_path: Path) -> None:
-    """The narrow transition surface is what keeps triage out of identity.
+def test_planning_triage_cannot_reach_title_the_declared_natural_key(
+    tmp_path: Path,
+) -> None:
+    """Triage cannot reach `title` -- and `title` is what these collections key on.
 
-    Asserted rather than assumed: the twin rule on update is only sound while
-    triage -- the high-traffic write -- cannot move a natural-key field at all.
+    Stated exactly, because the general claim is false: triage's transition
+    surface excludes `title`, so a collection keyed on `[title]` is out of
+    identity's way by construction. A collection keyed on a field triage CAN
+    reach is not, and the twin check refuses there the same way it does on
+    update. The other half of that sentence is the test below.
     """
     import sys
 
@@ -988,6 +993,63 @@ def test_planning_triage_cannot_reach_a_natural_key_field(tmp_path: Path) -> Non
         )
 
     assert caught.value.code == "INVALID_PLAN_ARGUMENTS"
+
+
+def test_a_collection_keyed_on_a_triage_field_refuses_the_same_way(
+    tmp_path: Path,
+) -> None:
+    """The other half: where triage CAN reach the key, the twin check refuses.
+
+    `status` is inside triage's transition surface, so a Planning collection
+    keyed on `[status]` is a collection where the high-traffic write really can
+    move identity -- and it is refused with the same code as an update, rather
+    than silently producing the twin state append then refuses forever.
+    """
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).parent))
+    from lifecycle_fixtures import planning_manifest, seed_vault
+
+    from exomem import planning, records
+
+    seed_vault(tmp_path)
+    keyed = "Knowledge Base/Planning/ByStatus/_collection.md"
+    planning.create_collection(
+        tmp_path,
+        keyed,
+        planning_manifest(
+            natural_key="[status]", collection_id="0b7f5c92-31ad-4e60-8f14-6c9d2a8e4b71"
+        ),
+        why="file deliverables keyed on their state",
+    )
+    shape = {"kind": "outcome", "commitment": "committed", "horizon": "quarter"}
+    first = planning.add(
+        tmp_path, keyed, item={"title": "Alpha", "status": "planned", **shape},
+        why="one planned outcome",
+    )
+    second = planning.add(
+        tmp_path, keyed, item={"title": "Beta", "status": "active", **shape},
+        why="one outcome already moving",
+    )
+    manifest = collections.load_manifest(tmp_path, tmp_path / keyed)
+    assert list(manifest.schema.natural_key) == ["status"]
+    snapshot = record_formats.load_adapter(tmp_path, manifest).read()
+    guards = records.lifecycle_guards(manifest, snapshot)
+    item = next(r for r in snapshot.records if r.identity.key == second["plan_id"])
+
+    with pytest.raises(collections.CollectionError) as caught:
+        planning.triage(
+            tmp_path,
+            keyed,
+            plan_id=second["plan_id"],
+            transition={"status": "planned"},
+            expected_container_hash=guards["expected_container_hash"],
+            expected_item_version=item.source.hash,
+            why="move it back to planned",
+        )
+
+    assert caught.value.code == "RECORD_NATURAL_KEY_CONFLICT"
+    assert first["plan_id"] in str(caught.value.details)
 
 
 def test_the_natural_key_refusal_tells_a_legacy_vault_how_to_recover(

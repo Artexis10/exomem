@@ -333,9 +333,11 @@ def test_the_capture_axis_names_both_lifecycle_classes_and_the_pairing_rule(
     assert "planning" in capture
     assert "observed outcome" in capture
     assert "records" in capture
-    # The pairing rule: one landing, two consequences, reported once.
+    # The pairing rule: one landing, two consequences, reported once. Pinned on
+    # the exact tail rather than on "once" alone, which any prose could satisfy.
     assert "one landing" in capture
-    assert "reported once" in capture
+    assert "two consequences" in capture
+    assert "record then transition, once" in capture
     # Order is load-bearing: the observation is canonical, the transition follows.
     assert capture.index("record then transition") > capture.index("one landing")
     # The two named non-outcomes -- a tentative claim, and elapsed time -- are

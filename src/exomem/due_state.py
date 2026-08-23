@@ -462,7 +462,22 @@ def _page_exists(vault_root: Path, rel_path: str) -> bool:
 
 
 def _unbucket(bucket: Any) -> list[dict[str, Any]]:
-    """Turn a stored `{open, pending}` bucket back into plain dated entries."""
+    """Turn a stored `{open, pending}` bucket back into plain dated entries.
+
+    THE definition -- there was briefly a second one further down the file, and
+    because a use sits between the two bindings ruff's F811 never fired while the
+    lower one silently won for the page-write path the upper one was written for.
+    The two bodies disagreed about exactly the two things a projection must not
+    get wrong: a malformed bucket, and a missing date.
+
+    Both answers are kept, and both are deliberate. A bucket that is not a dict
+    degrades to `[]`: the projection is derived state and a corrupt one is a
+    reason to recompute, never a reason to throw inside a caller's write (the
+    blanket `except Exception` above this would have turned it into a page write
+    that silently lost all four of its category updates and its `writes` bump).
+    A row with no stored date reads as `_NO_DATE` rather than `None`, because
+    `_bucket` sorts on that value and `None` would `TypeError` on the way back in.
+    """
     out: list[dict[str, Any]] = []
     if not isinstance(bucket, dict):
         return out
@@ -471,7 +486,7 @@ def _unbucket(bucket: Any) -> list[dict[str, Any]]:
             if not isinstance(row, dict):
                 continue
             entry = dict(row)
-            entry["due"] = entry.pop(date_key, None)
+            entry["due"] = entry.pop(date_key, _NO_DATE)
             out.append(entry)
     return out
 
@@ -684,22 +699,31 @@ def _bindings_index(payload: Any) -> dict[str, list[dict[str, Any]]]:
     return rows if isinstance(rows, dict) else {}
 
 
-def _unbucket(bucket: Any) -> list[dict[str, Any]]:
-    """One page's stored buckets back to the pre-`_bucket` entry shape."""
-    out: list[dict[str, Any]] = []
-    for key, date_key in (("open", "due_since"), ("pending", "due_on")):
-        for row in (bucket or {}).get(key) or []:
-            if not isinstance(row, dict):
-                continue
-            entry = dict(row)
-            entry["due"] = entry.pop(date_key, _NO_DATE)
-            out.append(entry)
-    return out
-
-
 def _entry_item_key(entry: Any) -> str:
     component = (entry or {}).get("component")
     return str((component or {}).get("item_key") or "") if isinstance(component, dict) else ""
+
+
+def _entry_records(entry: Any) -> str:
+    """Which Records collection's binding this entry is about."""
+    component = (entry or {}).get("component")
+    if not isinstance(component, dict):
+        return ""
+    return str(component.get("records_collection") or "")
+
+
+def _entry_binding(entry: Any) -> tuple[str, str]:
+    """The stored entry's identity WITHIN a page: the item, and the binding.
+
+    Not the item alone. Two Records collections joined to one Planning collection
+    is an ordinary shape -- two sources logging deliveries against one plan -- and
+    the audit reports it as two findings, one per binding, each with its own
+    joined records and therefore its own fingerprint. A projection keyed by the
+    item collapsed them into one entry whose fingerprint was composed over the
+    union, which is a value no audit produces: the block reported one finding
+    where two were owed, and a dismissal taken against it bound to nothing.
+    """
+    return (_entry_item_key(entry), _entry_records(entry))
 
 
 def _stored_joined(entry: Any) -> list[tuple[str, str]]:
@@ -714,35 +738,65 @@ def _stored_joined(entry: Any) -> list[tuple[str, str]]:
 
 
 def _find_outcome_entry(
-    pages: dict[str, Any], item_path: str, item_key: str
+    pages: dict[str, Any], item_path: str, item_key: str, records_path: str
 ) -> dict[str, Any] | None:
     for entry in _unbucket(pages.get(item_path)):
-        if _entry_item_key(entry) == item_key:
+        if _entry_binding(entry) == (item_key, records_path):
             return entry
     return None
+
+
+def _item_entries(pages: dict[str, Any], item_path: str, item_key: str) -> list[dict[str, Any]]:
+    """Every binding's entry for ONE plan item, in stored order."""
+    return [row for row in _unbucket(pages.get(item_path)) if _entry_item_key(row) == item_key]
+
+
+def _replace_page_rows(
+    pages: dict[str, Any], item_path: str, rows: list[dict[str, Any]], today: dt.date
+) -> None:
+    if rows:
+        pages[item_path] = _bucket(rows, today)
+    else:
+        pages.pop(item_path, None)
 
 
 def _put_outcome_entry(
     pages: dict[str, Any],
     item_path: str,
     item_key: str,
+    records_path: str,
     entry: dict[str, Any] | None,
     today: dt.date,
 ) -> None:
-    """Replace (or drop) exactly one item's entry on one page. Nothing else moves.
+    """Replace (or drop) exactly ONE binding's entry for one item. Nothing else moves.
 
-    A Markdown-log Planning collection keeps every item in one file, so a page
-    can hold several entries and the unit of replacement is the ITEM, never the
-    page. Replacing the page wholesale is how one item's write deletes another
-    item's finding.
+    A Markdown-log Planning collection keeps every item in one file, so a page can
+    hold several entries; and one item can be bound to several Records
+    collections, so an item can hold several entries too. The unit of replacement
+    is therefore the `(item, binding)` pair -- the audit's own unit. Replacing the
+    page wholesale deletes other items' findings; replacing the item wholesale
+    deletes the other bindings' findings, which is what H1 was.
     """
-    rows = [row for row in _unbucket(pages.get(item_path)) if _entry_item_key(row) != item_key]
+    rows = [
+        row
+        for row in _unbucket(pages.get(item_path))
+        if _entry_binding(row) != (item_key, records_path)
+    ]
     if entry is not None:
         rows.append(entry)
-    if rows:
-        pages[item_path] = _bucket(rows, today)
-    else:
-        pages.pop(item_path, None)
+    _replace_page_rows(pages, item_path, rows, today)
+
+
+def _drop_item_entries(
+    pages: dict[str, Any], item_path: str, item_key: str, today: dt.date
+) -> None:
+    """Drop EVERY binding's entry for one item -- the item left the open state.
+
+    A closed item is not a finding whatever joins to it, so this is the one place
+    that is right to work item-wide rather than per binding.
+    """
+    rows = [row for row in _unbucket(pages.get(item_path)) if _entry_item_key(row) != item_key]
+    _replace_page_rows(pages, item_path, rows, today)
 
 
 def _compose_outcome_entry(
@@ -950,7 +1004,13 @@ def apply_record_write_delta(
                 if item_key != new_key and item_key != old_key:
                     continue
                 component = audit_module.outcome_component(manifest, planning, join, item)
-                existing = _find_outcome_entry(pages, item.source.path, item.identity.key)
+                # Keyed by the WRITTEN Records collection: this write can only
+                # speak for its own binding, and another collection bound to the
+                # same item owns an entry of its own.
+                records_path = str(manifest.path)
+                existing = _find_outcome_entry(
+                    pages, item.source.path, item.identity.key, records_path
+                )
                 joined = set(_stored_joined(existing))
                 if item_key == new_key:
                     joined.add((str(path), str(key)))
@@ -960,6 +1020,7 @@ def apply_record_write_delta(
                     pages,
                     item.source.path,
                     item.identity.key,
+                    records_path,
                     _compose_outcome_entry(Path(vault_root), component, sorted(joined)),
                     today,
                 )
@@ -1020,7 +1081,9 @@ def apply_plan_write_delta(
         if not rows:
             return _persist_delta(Path(vault_root), current, categories, today)
         if not audit_module.open_plan_item(values):
-            _put_outcome_entry(pages, str(path), str(key), None, today)
+            # Item-wide, and the only case that is: a closed item is not a
+            # finding under ANY binding.
+            _drop_item_entries(pages, str(path), str(key), today)
             _prune_missing_joined(Path(vault_root), pages, today)
             categories[_OUTCOME_FAMILY] = pages
             return _persist_delta(Path(vault_root), current, categories, today)
@@ -1030,8 +1093,10 @@ def apply_plan_write_delta(
             for name in sorted(plan_fields)
         )
         if not moved:
-            existing = _find_outcome_entry(pages, str(path), str(key))
-            if existing is not None:
+            # Each binding's stored entry keeps its OWN joined records; only the
+            # item's title and status could have moved, and they move in all of
+            # them.
+            for existing in _item_entries(pages, str(path), str(key)):
                 component = {
                     **(existing.get("component") or {}),
                     "item_path": str(path),
@@ -1043,6 +1108,7 @@ def apply_plan_write_delta(
                     pages,
                     str(path),
                     str(key),
+                    _entry_records(existing),
                     _compose_outcome_entry(
                         Path(vault_root), component, sorted(_stored_joined(existing))
                     ),
@@ -1051,40 +1117,44 @@ def apply_plan_write_delta(
             _prune_missing_joined(Path(vault_root), pages, today)
             categories[_OUTCOME_FAMILY] = pages
             return _persist_delta(Path(vault_root), current, categories, today)
-        joined: set[tuple[str, str]] = set()
-        component: dict[str, Any] | None = None
+        planning = _load_manifest(Path(vault_root), str(manifest.path)) or manifest
+        item = _SyntheticItem(str(path), str(key), dict(values))
         for row in rows:
-            records = _load_manifest(Path(vault_root), str(row.get("records") or ""))
+            # One binding at a time, and each one writes only its own entry --
+            # including writing None, which is how a join move that leaves ONE
+            # source behind retracts that source's finding without touching the
+            # other's.
+            records_path = str(row.get("records") or "")
+            records = _load_manifest(Path(vault_root), records_path)
             if records is None:
                 continue
             join = dict(row.get("join") or {})
             record_fields = list(join)
             plan_side = [join[name] for name in record_fields]
             wanted = audit_module.join_key(plan_side, values)
-            if wanted is None:
-                continue
-            snapshot = _unfiltered_snapshot(Path(vault_root), records)
-            if snapshot is None:
-                continue
-            matched = [
-                record
-                for record in snapshot.records
-                if audit_module.join_key(record_fields, record.values) == wanted
-            ]
-            if not matched:
-                continue
-            planning = _load_manifest(Path(vault_root), str(manifest.path))
-            item = _SyntheticItem(str(path), str(key), dict(values))
-            component = audit_module.outcome_component(
-                records, planning if planning is not None else manifest, join, item
+            snapshot = (
+                _unfiltered_snapshot(Path(vault_root), records) if wanted is not None else None
             )
-            joined |= {(record.source.path, record.identity.key) for record in matched}
-        entry = (
-            _compose_outcome_entry(Path(vault_root), component, sorted(joined))
-            if component is not None and joined
-            else None
-        )
-        _put_outcome_entry(pages, str(path), str(key), entry, today)
+            matched = (
+                [
+                    record
+                    for record in snapshot.records
+                    if audit_module.join_key(record_fields, record.values) == wanted
+                ]
+                if snapshot is not None
+                else []
+            )
+            joined = {(record.source.path, record.identity.key) for record in matched}
+            entry = (
+                _compose_outcome_entry(
+                    Path(vault_root),
+                    audit_module.outcome_component(records, planning, join, item),
+                    sorted(joined),
+                )
+                if joined
+                else None
+            )
+            _put_outcome_entry(pages, str(path), str(key), records_path, entry, today)
         _prune_missing_joined(Path(vault_root), pages, today)
         categories[_OUTCOME_FAMILY] = pages
         return _persist_delta(Path(vault_root), current, categories, today)

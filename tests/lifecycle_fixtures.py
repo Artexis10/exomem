@@ -20,10 +20,14 @@ RECORDS_PATH = "Knowledge Base/Records/Deliveries/_collection.md"
 UNBOUND_PATH = "Knowledge Base/Records/Unbound/_collection.md"
 
 
-def planning_manifest() -> str:
+def planning_manifest(*, natural_key: str = "[title]", collection_id: str = "") -> str:
+    """The Delivery plan manifest. `natural_key` is a parameter for exactly one
+    reason: a collection keyed on a field Planning triage CAN reach behaves
+    differently from one keyed on `title`, and the docs now say so."""
+    exomem_id = collection_id or PLANNING_ID
     return f"""---
 type: collection
-exomem_id: {PLANNING_ID}
+exomem_id: {exomem_id}
 title: Delivery plan
 semantic_profile: planning
 collection_version: 1
@@ -34,7 +38,7 @@ storage:
   source: Items
   format_version: 1
 item_schema:
-  natural_key: [title]
+  natural_key: {natural_key}
   fields:
     title:
       type: string

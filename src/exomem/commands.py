@@ -452,18 +452,17 @@ def op_bootstrap(
                 # goes, because the evidence for them exists only in the
                 # conversation and a hookless client reads nothing else.
                 "stated_intent": (
-                    "work the user commits to, sequences or re-prioritises; route "
-                    "to plan_memory"
+                    "work the user commits to, sequences or reorders; "
+                    "route: plan_memory"
                 ),
                 "observed_outcome": (
-                    "a report that something happened, was produced, delivered, "
-                    "approved, published or failed; route to record_memory"
+                    "reported as happened: produced, delivered, approved, "
+                    "published, failed; route: record_memory"
                 ),
                 "pairing_rule": (
-                    "an outcome on an open committed Planning item is one landing "
-                    "with two consequences: append the record, then transition the "
-                    "item, reported once. A tentative claim is never an event; "
-                    "elapsed time is never an outcome"
+                    "an outcome on an open committed Planning item is one landing, "
+                    "two consequences: record then transition, once. A tentative "
+                    "claim is not an event, elapsed time not an outcome"
                 ),
             },
             "capture_examples": (
@@ -471,8 +470,7 @@ def op_bootstrap(
                 "events, and current state here without waiting for a magic save or log verb. "
                 "Resolve one compatible collection before append or update; if none fits, "
                 "describe and propose a concise collection before validate and explicit create. "
-                "Paired: a produced deliverable on an open plan item is one append, "
-                "then one triage, reported once."
+                "Paired: one append then one plan triage, once."
             ),
             "review_rule": (
                 "Review may compare planned intent with recorded reality; it must not make "
@@ -7730,9 +7728,9 @@ _SIMPLE_ACTION_DEFS: dict[str, dict] = {
         "advanced": ["record_memory"],
     },
     "plan": {
-        "intent": "File or re-prioritise intended work.",
+        "intent": "File or re-prioritise work.",
         "route": {"tool": "plan_memory", "args": {"action": "inspect"}},
-        "safety": "read-only by default; mutations are explicit",
+        "safety": "read-only by default; mutations explicit",
         "advanced": ["plan_memory"],
     },
 }

@@ -151,6 +151,19 @@ from exomem import commands
 #: The next addition of any size trips this test, and the honest response is to
 #: TRIM compact -- the queued compact-bootstrap trim -- not to raise this number
 #: again. `MINIMUM_SAVING_RATIO` is untouched; compact still saves ~35% over full.
+#:
+#: That prediction came true on the next merge, and the response was the one
+#: written above: TRIM, not raise. `main`'s vault-defined entity types added ~150
+#: bytes of guidance on top of the lifecycle slice's 1,240, taking the merged
+#: payload to 61,455 -- 55 over. 158 bytes came back out of the LIFECYCLE slice's
+#: own text, because that is the text this branch is entitled to spend: the two
+#: capture classes lost their preamble but not their routes; the pairing rule
+#: lost "append the"/"the item"/"reported" but keeps one landing, two
+#: consequences, the record-before-transition order, "once", and both named
+#: non-outcomes; the paired example is a clause; the `plan` front-door row drops
+#: one adjective. No rule left the payload, and the pins moved WITH the text
+#: rather than being loosened around it. Merged compact is 61,297, 103 bytes
+#: under. The ceiling did not move.
 COMPACT_BYTE_CEILING = 61_400
 
 #: The defect was compact and full being near-identical. A profile that does not
