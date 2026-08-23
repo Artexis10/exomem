@@ -16,6 +16,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -39,21 +40,34 @@ from exomem import review_state
 #   compacted file    23.44 MiB 23.44 MiB
 #   one apply()        0.285 s   0.258 s    (load, mutate, encode, fsync, replace)
 #
-# The budgets below are those numbers with roughly 4-6x margin, which is the
-# spread this box shows between a quiesced run and one taken while the rest of
-# the suite runs. They are a CEILING on a decade of heavy use, not a performance
-# target: the point of the gate is that the whole-file rewrite is still viable
-# at that cardinality, and the day it is not, THIS FAILING is the trigger for
-# the append-plus-compaction or SQLite migration the roadmap keeps in reserve.
+# The budgets were first set at roughly 4-6x those numbers, the spread this box
+# shows between a quiesced run and one taken while the rest of the suite runs.
+# That margin was measured on one machine and it was not enough: on the hosted
+# CI runner (ubuntu, CPython 3.11, lean shard 4/4) the same apply() took 1.860 s
+# and 1.695 s on two consecutive runs against a 1.5 s budget, with load() and
+# compact() under their 2.0 s budgets but unmeasured, because the gate only
+# reported a number when it failed. apply() is the fsync-and-replace step, and a
+# hosted runner's disk is the slowest part of it. So the wall-clock budgets are
+# now 5.0 s -- about 17x the lane measurement and 2.7x the worst runner run --
+# and the gate records every measurement into the junit (`record_property`) so
+# CI shows the numbers on every run, not only on the one that fails.
+#
+# They are a CEILING on a decade of heavy use, not a performance target: the
+# point of the gate is that the whole-file rewrite is still viable at that
+# cardinality. A viable rewrite is a few seconds; the regression this gate
+# exists to catch -- the rewrite going quadratic, or the lookup going linear --
+# is minutes at 50,000 records, and 5.0 s still fails it outright. The day the
+# rewrite genuinely is not viable, THIS FAILING is the trigger for the
+# append-plus-compaction or SQLite migration the roadmap keeps in reserve.
 #
 # The lookup budget is deliberately tight rather than generous. At 2 ms it is
 # ~60x the measured dict hit and still below what a linear scan over 50,000
 # records costs, so it fails if the lookup ever stops being a hash lookup —
 # which is the only regression this particular number can catch.
-LOAD_BUDGET_SECONDS = 2.0
+LOAD_BUDGET_SECONDS = 5.0
 LOOKUP_BUDGET_SECONDS = 0.002
-APPLY_BUDGET_SECONDS = 1.5
-COMPACT_BUDGET_SECONDS = 2.0
+APPLY_BUDGET_SECONDS = 5.0
+COMPACT_BUDGET_SECONDS = 5.0
 STRESS_RECORDS = 50_000
 STRESS_LEDGER_ENTRIES = 150_000
 
@@ -609,12 +623,15 @@ def _stress_payload() -> dict:
 
 
 @pytest.mark.timeout(600)
-def test_the_stress_gate_holds_at_multi_year_cardinality(vault: Path) -> None:
+def test_the_stress_gate_holds_at_multi_year_cardinality(
+    vault: Path, record_property: Callable[[str, object], None]
+) -> None:
     """50,000 decisions and 150,000 ledger entries — a decade of heavy use.
 
     Failing this is the declared trigger for the append-plus-compaction or
     SQLite migration the roadmap keeps in reserve. See the module header for the
-    measurements the budgets are pinned from.
+    measurements the budgets are pinned from. Every timing is recorded into the
+    junit as a property, so a CI run shows the numbers whether or not it fails.
     """
     store = review_state.ReviewStateStore(vault)
     store._write(_stress_payload())
@@ -627,12 +644,14 @@ def test_the_stress_gate_holds_at_multi_year_cardinality(vault: Path) -> None:
     start = time.perf_counter()
     payload = store.load()
     load_seconds = time.perf_counter() - start
+    record_property("stress_load_seconds", round(load_seconds, 4))
     assert load_seconds < LOAD_BUDGET_SECONDS, f"load took {load_seconds:.3f}s"
 
     key = f"{7:024x}"
     start = time.perf_counter()
     assert store.decision(key, key, payload=payload) is not None
     lookup_seconds = time.perf_counter() - start
+    record_property("stress_lookup_seconds", round(lookup_seconds, 6))
     assert lookup_seconds < LOOKUP_BUDGET_SECONDS, f"lookup took {lookup_seconds:.4f}s"
 
     # Compaction BEFORE the apply, deliberately: an apply past the record
@@ -641,6 +660,7 @@ def test_the_stress_gate_holds_at_multi_year_cardinality(vault: Path) -> None:
     start = time.perf_counter()
     report = store.compact(force=True, now=_now())
     compact_seconds = time.perf_counter() - start
+    record_property("stress_compact_seconds", round(compact_seconds, 4))
     assert compact_seconds < COMPACT_BUDGET_SECONDS, f"compact took {compact_seconds:.3f}s"
     assert report["dropped"]["records"] > 0
     assert report["dropped"]["surfaced"] > 0
@@ -648,6 +668,7 @@ def test_the_stress_gate_holds_at_multi_year_cardinality(vault: Path) -> None:
     start = time.perf_counter()
     store.apply("f" * 24, "e" * 24, action="dismiss", why="handled: done")
     apply_seconds = time.perf_counter() - start
+    record_property("stress_apply_seconds", round(apply_seconds, 4))
     assert apply_seconds < APPLY_BUDGET_SECONDS, f"apply took {apply_seconds:.3f}s"
 
     compacted = review_state.state_path(vault).stat().st_size
