@@ -90,4 +90,4 @@ The `review_memory` `mode` documentation in the generated tool surface SHALL lis
 #### Scenario: One pin move
 
 - **WHEN** the tool surface is regenerated for this change
-- **THEN** exactly one digest change is recorded and every generated consumer agrees on it
+- **THEN** exactly one digest change is recorded and every generated consumer the repository gates agrees on it; the OpenAI directory packet binds a release input rather than the tool-surface pin and is regenerated at that release step

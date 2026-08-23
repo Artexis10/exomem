@@ -158,14 +158,48 @@ the two opt-in queues are held back by a grandfathered population
 this family fires only on a binding a person declared in a manifest, which is the
 `prediction_window` precedent, and a vault without bindings sees nothing.
 
-Write-time delta. A structured write can settle this category in full for what it
-touched, with a bounded counterpart read: a record append or update re-evaluates the
-open items whose join values equal the written record's (one Planning snapshot); a
-plan add / update / triage re-evaluates that one item against the Records collections
-bound to its Planning collection (their adapter snapshots). The read is bounded by
-the declared bindings and the bound collections, not by the vault — the S1 argument
-that write latency must not scale with the corpus holds, and the cost is measured
-(tasks 4.7). `reconcile` remains the healer and the only full recomputation.
+Write-time delta. A structured write settles this category for what it touched, from
+the committed write itself plus at most one counterpart snapshot.
+
+*Record side* (append / update). The written record is the caller's own committed
+write, so its join value is already in hand; the only unknown is which open plan
+items that value lands on. The delta reads exactly one thing — the bound Planning
+snapshot, UNFILTERED — and edits only the entries for the items whose join key
+equals the record's new value or, on an update, its previous one: merge the
+record's `(path, key)` into that entry's joined set, remove it from entries keyed by
+the old value, drop an entry whose set empties. It never re-reads the Records
+collection to recount, and it never asks the release plane about anything.
+
+*Plan side* (add / update / triage). Reads nothing in the common case: an item that
+left the open state has its entry popped, and an item still open whose join-side
+values did not move is recomposed in place from the pairs already stored. Only an
+`add`, or an update that moves a join-side value, reads the bound Records
+snapshot(s) — unfiltered — to rebuild that one item's entry.
+
+*Binding discovery never walks the vault.* The record side asks the manifest it was
+handed (`links.plans[].join`); the plan side consults a `bindings` index persisted in
+the projection, rebuilt by `reconcile` and extended by any record-side delta that
+resolves a binding the index did not have. An unbound write therefore pays no
+discovery at all.
+
+*Disclosure is decided once, at serve.* The projection is server-internal truth; the
+served view drops joined records the reading audience may not see and recomposes the
+fingerprint from the survivors. Filtering at write time as well cost a policy load
+per item file — 55% of a 33 s write — to reach an answer the serve boundary reaches
+anyway, and it made the stored projection depend on whoever wrote last. The audit
+pass keeps its filter, because that one IS a read surface; it now loads the release
+policy once per pass rather than once per path.
+
+*Page writes are a different shape and settle a different set.* `unreflected_outcomes`
+is a property of a bound collection PAIR, so an ordinary page write can neither
+produce it nor prove its absence: `PAGE_DELTA_CATEGORIES` excludes it and
+`STRUCTURED_DELTA_CATEGORIES` is the remainder, derived from the two rather than
+restated.
+
+The read is bounded by the declared bindings and the bound collections, not by the
+vault — the S1 argument that write latency must not scale with the corpus holds, and
+the cost is measured (tasks 4.7). `reconcile` remains the healer and the only full
+recomputation.
 
 Relation to plan-progress. `review_memory(mode="plan-progress")` evaluates bound
 views per committed item on demand and presents divergence; it stays out of the
@@ -183,10 +217,22 @@ responses carry the bounded advisory due-state block exactly as the page-write
 terminal does: `due_state.apply_write_delta` for the category the write can settle,
 then `served` → `mark_emitted` under the S6 emission governance (`batch_scope`,
 dispositions, first-surfaced ledger, fail-closed to silence on an unreadable store).
-The leaves do not pass through `project_terminal` (it projects a page); they call
-the same helpers, and a test proves one block per response and one per batch. With
-this, the response to the append that opens a gap is the response that reports it —
-inside the same turn, on every client.
+The leaves DO pass through `project_terminal`: the structured writer attaches the
+produced block to its receipt as a leaf `due_state` key, and the terminal lifts that
+key exactly as it projects a page write — one place decides emission, one place
+strips the internal routing hint, and a test proves one block per response and one
+per batch. The advisory is produced AFTER the mutation guard releases (M1): it is
+derived state that changes nothing another writer could observe, and holding the
+vault's single writer lease across an audit-shaped read made a third of the critical
+section other writers' queueing time.
+
+Successive single `record_memory` calls each carry a block, and that is the intended
+behaviour rather than a governance gap: the S6 governor suppresses an identical
+total, and each of those writes genuinely changes the total. A session-level
+debounce would be a change to the governance itself, not to this carrier.
+
+With this, the response to the append that opens a gap is the response that reports
+it — inside the same turn, on every client.
 
 ## D8 — Contract bytes
 

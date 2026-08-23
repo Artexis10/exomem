@@ -310,3 +310,47 @@ def test_the_deployed_copy_matches_the_packaged_hook() -> None:
     deployed = root / "plugins" / "claude-code" / "hooks" / "exomem_capture_nudge.py"
 
     assert deployed.read_bytes() == packaged.read_bytes()
+
+
+# --- the capture predicate has to cover lifecycle consequences ---------------
+
+
+@pytest.mark.parametrize("level", ["balanced", "maximal"])
+def test_the_capture_axis_names_both_lifecycle_classes_and_the_pairing_rule(
+    level: str,
+) -> None:
+    """Stated intent and observed outcomes are capture classes, not magic words.
+
+    The dogfood session that motivated this had the evidence in ordinary
+    language every turn -- "let's do the next one", "three done", "Kim posted
+    it" -- and the capture predicate was closed over three classes that name
+    none of them. The classes are asserted with their ROUTE, because a class
+    an agent cannot route is a label rather than an instruction.
+    """
+    capture = prominence.CONTRACTS[level].capture.lower()
+
+    assert "stated intent" in capture
+    assert "planning" in capture
+    assert "observed outcome" in capture
+    assert "records" in capture
+    # The pairing rule: one landing, two consequences, reported once.
+    assert "one landing" in capture
+    assert "reported once" in capture
+    # Order is load-bearing: the observation is canonical, the transition follows.
+    assert capture.index("record then transition") > capture.index("one landing")
+    # The two named non-outcomes -- a tentative claim, and elapsed time -- are
+    # stated ONCE, in the bootstrap `intent_boundary` that every client tier
+    # reads, rather than in every carrier: see
+    # `tests/test_epistemic_bootstrap_contract.py::
+    # test_intent_boundary_routes_the_two_lifecycle_classes`. The compact payload
+    # projects this level's contract verbatim, so a second copy here is bytes
+    # spent on a hookless client's context for a rule it already received.
+
+
+def test_light_does_not_widen_with_the_lifecycle_classes() -> None:
+    """`light` is capture-only-when-asked; naming a proactive class there is a bug."""
+    capture = prominence.CONTRACTS["light"].capture.lower()
+
+    assert "stated intent" not in capture
+    assert "observed outcome" not in capture
+    assert "only when the user asks" in capture

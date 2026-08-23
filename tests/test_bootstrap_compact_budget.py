@@ -108,7 +108,50 @@ from exomem import commands
 #: The new ceiling is 60,400: 392 bytes of headroom, again deliberately less than
 #: the 404 the last raise left, and ~3.7 KB below the 64,070-byte regression point.
 #: `MINIMUM_SAVING_RATIO` is untouched; the saving moved 35.63% -> 34.63%.
-COMPACT_BYTE_CEILING = 60_400
+#:
+#: Raised a FOURTH time, and this raise is different from the three above it:
+#: it spends the whole budget the change that made it was allowed to spend, and
+#: leaves a margin thinner than any previous raise. Read the arithmetic before
+#: adding anything.
+#:
+#: Measured on this tree with the same method. The floor at 60,400 was 60,066 --
+#: 334 bytes of headroom, already inside the warning band. Lifecycle routing adds
+#: 1,240 bytes, taking compact to 61,306:
+#:
+#:   engagement          +258  the capture axis names the two lifecycle classes
+#:                             (stated intent -> Planning, observed outcome ->
+#:                             Records) and the pairing rule; the payload projects
+#:                             the ACTIVE level's contract, so exactly one level's
+#:                             text is ever counted here
+#:   records             +560  `intent_boundary` gains `stated_intent`,
+#:                             `observed_outcome` and `pairing_rule`;
+#:                             `capture_examples` gains one paired landing
+#:   simple_actions      +321  the `plan` front-door action, with its route
+#:   planning            +193  the inventory form of `inspect` and the bounded
+#:                             query that resolves an observation to one item
+#:   common_actions        +8  `plan` in the action vocabulary
+#:
+#: Why the bytes earn their place. The evidence for these two classes exists ONLY
+#: in the conversation, and only the CLI hooks can see a conversation -- so on a
+#: hosted, claude.ai or ChatGPT client this payload is the entire mechanism. An
+#: agent that is not taught them does exactly what the dogfood session recorded:
+#: it treats "three done" and "the rest next time" as chat, files nothing, and
+#: waits to be told to use Planning. The pairing rule is not decoration either:
+#: without it the two classes produce a record and leave the plan item open,
+#: which is the specific miss the whole change exists to close.
+#:
+#: The wording was cut twice before this number was accepted. The tentative-claim
+#: and elapsed-time clause is stated once (in `intent_boundary`) rather than in
+#: both carriers; the paired example is one clause rather than a sentence; the
+#: Planning inventory and its resolving query are one key rather than two. Those
+#: three passes removed 406 bytes. What remains is the rule and its two routes.
+#:
+#: The new ceiling is 61,400: 94 bytes of headroom, and that is a cliff, not a
+#: budget. It is the cap the change was authorised to reach and it is now spent.
+#: The next addition of any size trips this test, and the honest response is to
+#: TRIM compact -- the queued compact-bootstrap trim -- not to raise this number
+#: again. `MINIMUM_SAVING_RATIO` is untouched; compact still saves ~35% over full.
+COMPACT_BYTE_CEILING = 61_400
 
 #: The defect was compact and full being near-identical. A profile that does not
 #: measurably differ from full is not a profile.

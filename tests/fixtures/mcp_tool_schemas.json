@@ -3152,7 +3152,7 @@
     }
   },
   "plan_memory": {
-    "description": "Inspect, create, query, add, update, or triage one Planning collection.",
+    "description": "Inspect, create, query, add, update, or triage one Planning collection.\n\n`inspect` with no collection lists the Planning collections instead, so a\nsession can find the one it needs before naming a selector.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -5347,7 +5347,7 @@
       "properties": {
         "mode": {
           "default": "attention",
-          "description": "attention, activation, item, audit, dispositions, provenance, evolution, compilation, stale, contradiction, unprocessed-sources, relation-debt, relation-queue, or adoption. `dispositions` lists every signal family a user has set to `quiet` or `off` through `triage_memory`, with its reason code, why, timestamp, origin, and per-family manual dismissal count; a quiet family is silent on the carriers, not clean. `relation-queue` returns the read-only, batched relation-acceptance queue (deterministic suggestion candidates grouped by source page, with signal fingerprints and coverage counters); accept a candidate via `connect_memory(operation=\"accept-relation\")` or reject via `triage_memory`. `adoption` returns the read-only Adoption Studio proposal queue grouped per run (structured agent proposals with signal fingerprints); approve a proposal via `adoption_studio(action=\"apply-proposal\")` or dismiss via `triage_memory`.",
+          "description": "attention, activation, item, audit, dispositions, provenance, evolution, compilation, stale, contradiction, unprocessed-sources, relation-debt, relation-queue, adoption, or plan-progress. `plan-progress` reports, for each committed Planning item declaring `progress_evidence`, the counts its bound Records views return; it is derived and read-only, and it scores nothing. `dispositions` lists every signal family a user has set to `quiet` or `off` through `triage_memory`, with its reason code, why, timestamp, origin, and per-family manual dismissal count; a quiet family is silent on the carriers, not clean. `relation-queue` returns the read-only, batched relation-acceptance queue (deterministic suggestion candidates grouped by source page, with signal fingerprints and coverage counters); accept a candidate via `connect_memory(operation=\"accept-relation\")` or reject via `triage_memory`. `adoption` returns the read-only Adoption Studio proposal queue grouped per run (structured agent proposals with signal fingerprints); approve a proposal via `adoption_studio(action=\"apply-proposal\")` or dismiss via `triage_memory`.",
           "type": "string"
         },
         "categories": {

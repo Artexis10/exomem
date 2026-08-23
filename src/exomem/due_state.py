@@ -82,8 +82,9 @@ import os
 import tempfile
 import threading
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -104,6 +105,9 @@ PROJECTION_CATEGORIES: tuple[str, ...] = (
     "supersession_integrity",
     "unfinished_experiments",
     "question_aging",
+    # Last for the reason it is last in the attention union: it reports an
+    # authored binding rather than an authored date, and it is the newest.
+    "unreflected_outcomes",
 )
 
 #: The categories a single write can soundly settle in full on its own.
@@ -111,6 +115,27 @@ DELTA_CATEGORIES: tuple[str, ...] = (
     "prediction_window",
     "unfinished_experiments",
     "question_aging",
+    "unreflected_outcomes",
+)
+
+#: The subset a PAGE write settles. `unreflected_outcomes` is not one of them:
+#: it is a property of a bound COLLECTION PAIR, so an ordinary page write can
+#: neither produce it nor prove its absence. Clearing it from the written path
+#: would silently drop a finding that only the structured delta below owns —
+#: the same reasoning `DELTA_DEFECTS` applies within a split category, applied
+#: across two different write shapes.
+PAGE_DELTA_CATEGORIES: tuple[str, ...] = (
+    "prediction_window",
+    "unfinished_experiments",
+    "question_aging",
+)
+
+#: The remainder: what a STRUCTURED write settles, keyed by plan-item path rather
+#: than by the path the write touched. Derived from the two above rather than
+#: restated, so `DELTA_CATEGORIES` stays the single answer to "what can one write
+#: settle" and the two shapes partition it instead of drifting apart.
+STRUCTURED_DELTA_CATEGORIES: tuple[str, ...] = tuple(
+    category for category in DELTA_CATEGORIES if category not in PAGE_DELTA_CATEGORIES
 )
 
 #: Categories a write can settle only PARTLY, listed with the defects it may touch.
@@ -309,6 +334,13 @@ def _entry(vault_root: Path, finding: Any, refs: dict[str, str]) -> dict[str, An
             if (finding.meta or {}).get("defect")
             else {}
         ),
+        # Server-internal, for a family whose finding depends on OTHER pages:
+        # the primitives plus the joined `(path, key)` pairs, so serving under a
+        # narrower audience can drop the withheld ones and rebuild the finding
+        # through the family's own composer. Without it the stored count is the
+        # WRITER's count, and an audience that may not see a joined record still
+        # reads it in the total.
+        **({"component": finding.component} if finding.component else {}),
     }
 
 
@@ -327,6 +359,62 @@ def _entries_from_findings(
             continue
         out.setdefault(finding.category, {}).setdefault(finding.path, []).append(entry)
     return out
+
+
+def _survivors_only(
+    vault_root: Path, entry: dict[str, Any], keep: Any
+) -> dict[str, Any] | None:
+    """Re-derive one entry from the joined pages THIS audience may see.
+
+    The projection is shared across audiences and is built once, by whoever
+    wrote last. Filtering only the entry's own `path` was therefore not enough
+    for a family whose finding is a statement about OTHER pages: an item whose
+    joined records are all withheld still contributed a row, a count and a
+    review reference to an audience that may not know the records exist.
+
+    So the entry carries the joined `(path, key)` pairs, and the ones this
+    audience may not see are dropped HERE, at serve. No survivor is no finding.
+    Fewer survivors is a DIFFERENT finding, and it is recomposed through
+    `audit.unreflected_component` -- the family's own composer, the same one the
+    audit pass calls -- so the fingerprint this audience is offered is the one a
+    fresh audit under that audience would produce, and a dismissal taken here
+    still matches. Composing it any other way is how dismissal silently breaks.
+
+    Entries with no component (every other category) are returned unchanged.
+    """
+    component = entry.get("component")
+    if not isinstance(component, dict):
+        return entry
+    stored = [
+        (str(pair[0]), str(pair[1]))
+        for pair in component.get("joined") or []
+        if isinstance(pair, (list, tuple)) and len(pair) == 2
+    ]
+    if not stored:
+        return entry
+    survivors = [pair for pair in stored if keep(pair[0])]
+    if len(survivors) == len(stored):
+        return entry
+    if not survivors:
+        return None
+    from . import audit as audit_module
+
+    finding = audit_module.unreflected_component(component, survivors)
+    if finding is None:
+        return None
+    paths = sorted({finding.path, *(finding.paths or [])})
+    rebuilt = _entry(
+        vault_root, finding, review_state_module.refs_for_paths(vault_root, paths)
+    )
+    if rebuilt is None:
+        return None
+    return {
+        **entry,
+        "ref": rebuilt["ref"],
+        "item_id": rebuilt["item_id"],
+        "fingerprint": rebuilt["fingerprint"],
+        "component": rebuilt.get("component"),
+    }
 
 
 def _bucket(
@@ -421,6 +509,12 @@ def recompute(vault_root: Path, *, today: dt.date | None = None) -> dict[str, An
         "version": SCHEMA_VERSION,
         "computed_on": today.isoformat(),
         "categories": categories,
+        # The write path may not walk the vault to learn what is bound to what
+        # (4.7): a full pass already resolved every binding, so it publishes the
+        # answer here for the deltas to consult. Maintained, never authoritative
+        # -- a delta that resolves a binding this index does not have yet adds
+        # it, and the next reconcile rebuilds the whole thing.
+        "bindings": audit_module.outcome_binding_index(Path(vault_root)),
     }
 
 
@@ -517,7 +611,7 @@ def apply_write_delta(
     with _LOCK:
         current = load(vault_root) or payload
         categories = dict(current.get("categories") or {})
-        for category in DELTA_CATEGORIES:
+        for category in PAGE_DELTA_CATEGORIES:
             pages_map = dict(categories.get(category) or {})
             entries = (grouped.get(category) or {}).get(rel)
             if entries:
@@ -549,9 +643,512 @@ def apply_write_delta(
             # it has to be persisted because the emission governor above it is
             # per-process memory no projector can read.
             "emission": _emission_delta(current, writes=1),
+            # Carried, not rebuilt. A page write learns nothing about bindings
+            # and must not drop the index the structured deltas depend on --
+            # losing it here would silently send every later plan write back to
+            # doing nothing at all until the next reconcile.
+            **(
+                {"bindings": current["bindings"]}
+                if isinstance(current.get("bindings"), dict)
+                else {}
+            ),
         }
         save(vault_root, updated)
     return updated
+
+
+#: The one family whose entries a STRUCTURED write maintains. Named, not derived,
+#: because the two deltas below edit entries field by field and only this
+#: family's stored `component` makes that possible; a second structured family
+#: would need its own edit rules, and silently reusing these would corrupt it.
+#: Whether it is maintained AT ALL is still `STRUCTURED_DELTA_CATEGORIES`'
+#: decision -- see `_settles_at_write_time`.
+_OUTCOME_FAMILY = "unreflected_outcomes"
+
+
+def _settles_at_write_time() -> bool:
+    """Whether one structured write may settle this family, per the declaration.
+
+    `DELTA_CATEGORIES` is the single answer to "what can one write settle", and
+    the two subsets partition it. Reading it here rather than assuming it keeps
+    the declaration load-bearing: take the family out of `DELTA_CATEGORIES` (or
+    hand it to the page loop) and the write path stops maintaining it, which is
+    exactly the mechanism-removal probe.
+    """
+    return _OUTCOME_FAMILY in STRUCTURED_DELTA_CATEGORIES
+
+
+def _bindings_index(payload: Any) -> dict[str, list[dict[str, Any]]]:
+    """The persisted binding index, or an empty one. Never authoritative."""
+    rows = (payload or {}).get("bindings")
+    return rows if isinstance(rows, dict) else {}
+
+
+def _unbucket(bucket: Any) -> list[dict[str, Any]]:
+    """One page's stored buckets back to the pre-`_bucket` entry shape."""
+    out: list[dict[str, Any]] = []
+    for key, date_key in (("open", "due_since"), ("pending", "due_on")):
+        for row in (bucket or {}).get(key) or []:
+            if not isinstance(row, dict):
+                continue
+            entry = dict(row)
+            entry["due"] = entry.pop(date_key, _NO_DATE)
+            out.append(entry)
+    return out
+
+
+def _entry_item_key(entry: Any) -> str:
+    component = (entry or {}).get("component")
+    return str((component or {}).get("item_key") or "") if isinstance(component, dict) else ""
+
+
+def _stored_joined(entry: Any) -> list[tuple[str, str]]:
+    component = (entry or {}).get("component")
+    if not isinstance(component, dict):
+        return []
+    return [
+        (str(pair[0]), str(pair[1]))
+        for pair in component.get("joined") or []
+        if isinstance(pair, (list, tuple)) and len(pair) == 2
+    ]
+
+
+def _find_outcome_entry(
+    pages: dict[str, Any], item_path: str, item_key: str
+) -> dict[str, Any] | None:
+    for entry in _unbucket(pages.get(item_path)):
+        if _entry_item_key(entry) == item_key:
+            return entry
+    return None
+
+
+def _put_outcome_entry(
+    pages: dict[str, Any],
+    item_path: str,
+    item_key: str,
+    entry: dict[str, Any] | None,
+    today: dt.date,
+) -> None:
+    """Replace (or drop) exactly one item's entry on one page. Nothing else moves.
+
+    A Markdown-log Planning collection keeps every item in one file, so a page
+    can hold several entries and the unit of replacement is the ITEM, never the
+    page. Replacing the page wholesale is how one item's write deletes another
+    item's finding.
+    """
+    rows = [row for row in _unbucket(pages.get(item_path)) if _entry_item_key(row) != item_key]
+    if entry is not None:
+        rows.append(entry)
+    if rows:
+        pages[item_path] = _bucket(rows, today)
+    else:
+        pages.pop(item_path, None)
+
+
+def _compose_outcome_entry(
+    vault_root: Path, component: Mapping[str, Any], joined: list[tuple[str, str]]
+) -> dict[str, Any] | None:
+    """One entry, through the family's own composer. No vault read beyond refs."""
+    from . import audit as audit_module
+
+    finding = audit_module.unreflected_component(component, joined)
+    if finding is None:
+        return None
+    paths = sorted({finding.path, *(finding.paths or [])})
+    return _entry(
+        vault_root, finding, review_state_module.refs_for_paths(vault_root, paths)
+    )
+
+
+def _unfiltered_snapshot(vault_root: Path, manifest: Any) -> Any | None:
+    """An adapter snapshot with NO release filter, for the write path only.
+
+    Deliberate, and the reason it is safe: the projection is server-internal
+    truth, and disclosure is decided once at serve, where `_survivors_only`
+    drops what the reading audience may not see. Filtering here as well cost a
+    policy decision per item file -- 55% of a 33 s write -- to reach an answer
+    the serve boundary reaches anyway, and it made the stored projection depend
+    on whoever happened to write last. The audit pass keeps its filter: that one
+    IS a read surface.
+    """
+    from . import record_formats
+    from . import structured_collections as collections_module
+
+    try:
+        return record_formats.load_adapter(vault_root, manifest).read()
+    except (collections_module.CollectionError, OSError, ValueError):
+        return None
+
+
+def _load_manifest(vault_root: Path, path: str) -> Any | None:
+    from . import structured_collections as collections_module
+
+    try:
+        return collections_module.load_manifest(vault_root, Path(vault_root) / path)
+    except Exception:  # noqa: BLE001 -- a binding whose end vanished heals at reconcile
+        return None
+
+
+def _persist_delta(
+    vault_root: Path,
+    current: dict[str, Any],
+    categories: dict[str, Any],
+    today: dt.date,
+    *,
+    bindings: dict[str, list[dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
+    updated = {
+        "version": SCHEMA_VERSION,
+        "computed_on": today.isoformat(),
+        "categories": categories,
+        # Bumped on EVERY governed structured write, including one into a
+        # collection nobody bound. `writes` is the denominator the "how often
+        # does the advisory actually fire?" claim divides by; counting only the
+        # writes that had something to say makes that ratio measure the wrong
+        # population and flatters the governor.
+        "emission": _emission_delta(current, writes=1),
+        **(
+            {"bindings": bindings}
+            if bindings is not None
+            else (
+                {"bindings": current["bindings"]}
+                if isinstance(current.get("bindings"), dict)
+                else {}
+            )
+        ),
+    }
+    save(vault_root, updated)
+    return updated
+
+
+def _prune_missing_joined(
+    vault_root: Path, pages: dict[str, Any], today: dt.date
+) -> None:
+    """Drop joined records whose file is gone, and any entry that empties.
+
+    The mirror of the `_page_exists` check the serve loop already runs on an
+    entry's own page, applied to the pages the finding is ABOUT. A record deleted
+    out of band leaves an entry claiming events that no longer exist, and the
+    bounded delta cannot see that deletion from the write it was handed -- but a
+    `stat` per stored pair can, and the cost is bounded by the projection, not
+    by the vault. `reconcile` still owns the general out-of-band heal; this is
+    the one case a counter must not get wrong, because it inflates a count.
+    """
+    for item_path in list(pages):
+        rows = _unbucket(pages.get(item_path))
+        rebuilt: list[dict[str, Any]] = []
+        changed = False
+        for row in rows:
+            stored = _stored_joined(row)
+            if not stored:
+                rebuilt.append(row)
+                continue
+            survivors = [pair for pair in stored if _page_exists(vault_root, pair[0])]
+            if len(survivors) == len(stored):
+                rebuilt.append(row)
+                continue
+            changed = True
+            if not survivors:
+                continue
+            replacement = _compose_outcome_entry(
+                vault_root, row.get("component") or {}, sorted(survivors)
+            )
+            if replacement is not None:
+                rebuilt.append(replacement)
+        if not changed:
+            continue
+        if rebuilt:
+            pages[item_path] = _bucket(rebuilt, today)
+        else:
+            pages.pop(item_path, None)
+
+
+def apply_record_write_delta(
+    vault_root: Path,
+    manifest: Any,
+    *,
+    path: str,
+    key: str,
+    values: Mapping[str, Any],
+    previous: Mapping[str, Any] | None = None,
+    today: dt.date | None = None,
+) -> dict[str, Any] | None:
+    """Fold ONE committed record into the projection. Never reads Records.
+
+    The written record is the caller's own committed write, so its join value is
+    already in hand; what the delta does not know is which open plan items that
+    value lands on. It therefore reads exactly one thing -- the bound Planning
+    snapshot -- and edits only the entries for the items whose join key matches
+    the record's new value, or (on an update) its previous one.
+
+    What it deliberately does NOT do: discover collections, re-read the Records
+    collection to recount, or ask the release plane about anything. Those three
+    were 33 s of a 100-item append between them, and none of them is needed to
+    know what one record just did.
+    """
+    from . import audit as audit_module
+
+    today = today or dt.date.today()
+    # A cheap existence probe, not a parse: the only question before the lock is
+    # "is there a projection at all?", and answering it by decoding a 100 KB file
+    # doubled the write's JSON cost to skip a lock nobody else is holding.
+    if not state_path(vault_root).exists():
+        return None
+    with _LOCK:
+        current = load(vault_root)
+        if current is None:
+            return None
+        if not _settles_at_write_time():
+            return _persist_delta(
+                Path(vault_root), current, dict(current.get("categories") or {}), today
+            )
+        index = _bindings_index(current)
+        rows = [
+            row
+            for row in index.get(str(manifest.path), [])
+            if isinstance(row, dict) and row.get("records") == str(manifest.path)
+        ]
+        registered = None
+        if not rows:
+            # Not in the index: either nothing is bound (the common case, and it
+            # costs one attribute read of the manifest already in hand) or this
+            # collection was bound since the last full pass. Resolving it here
+            # and registering it is what lets the PLAN side stay walk-free too.
+            declared = audit_module.declared_bindings(Path(vault_root), manifest)
+            rows = [{"records": str(manifest.path), **row} for row in declared]
+            if rows:
+                registered = {key_: list(value) for key_, value in index.items()}
+                for row in rows:
+                    for slot in (row["records"], row["planning"]):
+                        bucket = registered.setdefault(slot, [])
+                        if row not in bucket:
+                            bucket.append(row)
+        categories = dict(current.get("categories") or {})
+        pages = dict(categories.get(_OUTCOME_FAMILY) or {})
+        for row in rows:
+            planning = _load_manifest(Path(vault_root), str(row.get("planning") or ""))
+            if planning is None:
+                continue
+            join = dict(row.get("join") or {})
+            record_fields = list(join)
+            plan_fields = [join[name] for name in record_fields]
+            new_key = audit_module.join_key(record_fields, values)
+            old_key = (
+                audit_module.join_key(record_fields, previous) if previous is not None else None
+            )
+            if new_key is None and old_key is None:
+                continue
+            snapshot = _unfiltered_snapshot(Path(vault_root), planning)
+            if snapshot is None:
+                continue
+            for item in snapshot.records:
+                if not audit_module.open_plan_item(item.values):
+                    continue
+                item_key = audit_module.join_key(plan_fields, item.values)
+                if item_key is None:
+                    continue
+                if item_key != new_key and item_key != old_key:
+                    continue
+                component = audit_module.outcome_component(manifest, planning, join, item)
+                existing = _find_outcome_entry(pages, item.source.path, item.identity.key)
+                joined = set(_stored_joined(existing))
+                if item_key == new_key:
+                    joined.add((str(path), str(key)))
+                else:
+                    joined.discard((str(path), str(key)))
+                _put_outcome_entry(
+                    pages,
+                    item.source.path,
+                    item.identity.key,
+                    _compose_outcome_entry(Path(vault_root), component, sorted(joined)),
+                    today,
+                )
+        _prune_missing_joined(Path(vault_root), pages, today)
+        categories[_OUTCOME_FAMILY] = pages
+        return _persist_delta(
+            Path(vault_root), current, categories, today, bindings=registered
+        )
+
+
+def apply_plan_write_delta(
+    vault_root: Path,
+    manifest: Any,
+    *,
+    path: str,
+    key: str,
+    values: Mapping[str, Any],
+    previous: Mapping[str, Any] | None = None,
+    today: dt.date | None = None,
+) -> dict[str, Any] | None:
+    """Fold ONE committed plan write into the projection. Usually reads nothing.
+
+    Three cases, and only the third costs a read:
+
+    * the item left the open state -- its entry goes, and nothing else can have
+      changed, because a closed item is not a finding whatever joins to it;
+    * the item is still open and no join-side value moved -- the joined records
+      it already had are still the joined records it has, so the entry is
+      recomposed in place from the stored pairs with the item's current title
+      and status (a status change moves the finding's own text, and a stale one
+      would serve a fingerprint no fresh pass would produce);
+    * the item is new, or a join-side value moved -- only then is the bound
+      Records snapshot read, and only to rebuild THIS item's entry.
+    """
+    from . import audit as audit_module
+
+    today = today or dt.date.today()
+    # A cheap existence probe, not a parse: the only question before the lock is
+    # "is there a projection at all?", and answering it by decoding a 100 KB file
+    # doubled the write's JSON cost to skip a lock nobody else is holding.
+    if not state_path(vault_root).exists():
+        return None
+    with _LOCK:
+        current = load(vault_root)
+        if current is None:
+            return None
+        if not _settles_at_write_time():
+            return _persist_delta(
+                Path(vault_root), current, dict(current.get("categories") or {}), today
+            )
+        rows = [
+            row
+            for row in _bindings_index(current).get(str(manifest.path), [])
+            if isinstance(row, dict) and row.get("planning") == str(manifest.path)
+        ]
+        categories = dict(current.get("categories") or {})
+        pages = dict(categories.get(_OUTCOME_FAMILY) or {})
+        if not rows:
+            return _persist_delta(Path(vault_root), current, categories, today)
+        if not audit_module.open_plan_item(values):
+            _put_outcome_entry(pages, str(path), str(key), None, today)
+            _prune_missing_joined(Path(vault_root), pages, today)
+            categories[_OUTCOME_FAMILY] = pages
+            return _persist_delta(Path(vault_root), current, categories, today)
+        plan_fields = {str(name) for row in rows for name in dict(row.get("join") or {}).values()}
+        moved = previous is None or any(
+            audit_module.join_key([name], previous) != audit_module.join_key([name], values)
+            for name in sorted(plan_fields)
+        )
+        if not moved:
+            existing = _find_outcome_entry(pages, str(path), str(key))
+            if existing is not None:
+                component = {
+                    **(existing.get("component") or {}),
+                    "item_path": str(path),
+                    "item_key": str(key),
+                    "item_title": str(values.get("title") or key),
+                    "item_status": str(values.get("status") or "open"),
+                }
+                _put_outcome_entry(
+                    pages,
+                    str(path),
+                    str(key),
+                    _compose_outcome_entry(
+                        Path(vault_root), component, sorted(_stored_joined(existing))
+                    ),
+                    today,
+                )
+            _prune_missing_joined(Path(vault_root), pages, today)
+            categories[_OUTCOME_FAMILY] = pages
+            return _persist_delta(Path(vault_root), current, categories, today)
+        joined: set[tuple[str, str]] = set()
+        component: dict[str, Any] | None = None
+        for row in rows:
+            records = _load_manifest(Path(vault_root), str(row.get("records") or ""))
+            if records is None:
+                continue
+            join = dict(row.get("join") or {})
+            record_fields = list(join)
+            plan_side = [join[name] for name in record_fields]
+            wanted = audit_module.join_key(plan_side, values)
+            if wanted is None:
+                continue
+            snapshot = _unfiltered_snapshot(Path(vault_root), records)
+            if snapshot is None:
+                continue
+            matched = [
+                record
+                for record in snapshot.records
+                if audit_module.join_key(record_fields, record.values) == wanted
+            ]
+            if not matched:
+                continue
+            planning = _load_manifest(Path(vault_root), str(manifest.path))
+            item = _SyntheticItem(str(path), str(key), dict(values))
+            component = audit_module.outcome_component(
+                records, planning if planning is not None else manifest, join, item
+            )
+            joined |= {(record.source.path, record.identity.key) for record in matched}
+        entry = (
+            _compose_outcome_entry(Path(vault_root), component, sorted(joined))
+            if component is not None and joined
+            else None
+        )
+        _put_outcome_entry(pages, str(path), str(key), entry, today)
+        _prune_missing_joined(Path(vault_root), pages, today)
+        categories[_OUTCOME_FAMILY] = pages
+        return _persist_delta(Path(vault_root), current, categories, today)
+
+
+@dataclass(frozen=True)
+class _SyntheticIdentity:
+    key: str
+
+
+@dataclass(frozen=True)
+class _SyntheticSource:
+    path: str
+
+
+class _SyntheticItem:
+    """The written item in the shape `outcome_component` reads, without a re-read.
+
+    The caller just committed these bytes, so re-loading the collection to hand
+    the composer an adapter record would be reading back its own write.
+    """
+
+    def __init__(self, path: str, key: str, values: dict[str, Any]) -> None:
+        self.source = _SyntheticSource(path)
+        self.identity = _SyntheticIdentity(key)
+        self.values = values
+
+
+def block_for_structured_write(
+    vault_root: Path,
+    manifest: Any,
+    *,
+    path: str,
+    key: str,
+    values: Mapping[str, Any],
+    previous: Mapping[str, Any] | None = None,
+    today: dt.date | None = None,
+) -> dict[str, Any] | None:
+    """The block a structured mutation response may carry, or None.
+
+    Produces only. Emission is decided at the mutation terminal, exactly as it is
+    for a page write: the producer cannot know whether the response will actually
+    carry the block, and recording delivery here would burn the session's one
+    emission on a response that never showed it.
+    """
+    profile = str(getattr(manifest, "semantic_profile", "") or "")
+    delta = apply_plan_write_delta if profile == "planning" else apply_record_write_delta
+    if (
+        delta(
+            vault_root,
+            manifest,
+            path=path,
+            key=key,
+            values=values,
+            previous=previous,
+            today=today,
+        )
+        is None
+    ):
+        return None
+    from .governance import egress as egress_module
+
+    with egress_module.disclosure_boundary(Path(vault_root), "due_state_advisory"):
+        return served(vault_root, today=today)
 
 
 # --------------------------------------------------------------------------
@@ -775,6 +1372,13 @@ def served_entries(
                     path = str(entry.get("path") or "")
                     if keep is not None and path and not keep(path):
                         continue  # withheld: contributes to nothing, anywhere
+                    if keep is not None:
+                        entry = _survivors_only(vault_root, entry, keep)
+                        if entry is None:
+                            # Every page this finding was ABOUT is withheld from
+                            # this audience, so under that audience there is no
+                            # finding -- not a finding with a smaller count.
+                            continue
                     if path and not _page_exists(vault_root, path):
                         # Deleted out of band. The projection is maintained, not
                         # authoritative, and reconcile heals it — but until then a

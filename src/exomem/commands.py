@@ -446,12 +446,32 @@ def op_bootstrap(
                     "a checkable claim about a future observation, which is neither "
                     "observed state nor intent to act; see epistemic_contract"
                 ),
+                # The two lifecycle classes. Every other key here names a KIND of
+                # durable content; these two name a kind of UTTERANCE and where it
+                # goes, because the evidence for them exists only in the
+                # conversation and a hookless client reads nothing else.
+                "stated_intent": (
+                    "work the user commits to, sequences or re-prioritises; route "
+                    "to plan_memory"
+                ),
+                "observed_outcome": (
+                    "a report that something happened, was produced, delivered, "
+                    "approved, published or failed; route to record_memory"
+                ),
+                "pairing_rule": (
+                    "an outcome on an open committed Planning item is one landing "
+                    "with two consequences: append the record, then transition the "
+                    "item, reported once. A tentative claim is never an event; "
+                    "elapsed time is never an outcome"
+                ),
             },
             "capture_examples": (
                 "Route durable measurements, completed sessions, transactions, maintenance "
                 "events, and current state here without waiting for a magic save or log verb. "
                 "Resolve one compatible collection before append or update; if none fits, "
-                "describe and propose a concise collection before validate and explicit create."
+                "describe and propose a concise collection before validate and explicit create. "
+                "Paired: a produced deliverable on an open plan item is one append, "
+                "then one triage, reported once."
             ),
             "review_rule": (
                 "Review may compare planned intent with recorded reality; it must not make "
@@ -509,6 +529,11 @@ def op_bootstrap(
         "intent_first_routing": (
             "Route goals, priorities, commitments, candidate work, and future-state intent to "
             "plan_memory before treating them as observed Records."
+        ),
+        "inventory": (
+            "inspect without a collection lists Planning collections and creates "
+            "nothing; resolve one item with query on title or a natural-key field "
+            "plus lifecycle and status."
         ),
         "evidence_execution_boundary": (
             "Progress evidence is an opaque Records pointer and execution is a thin opaque pointer; "
@@ -5570,7 +5595,10 @@ def op_review_memory(
     Args:
         mode: attention, activation, item, audit, dispositions, provenance,
             evolution, compilation, stale, contradiction, unprocessed-sources,
-            relation-debt, relation-queue, or adoption. `dispositions` lists every
+            relation-debt, relation-queue, adoption, or plan-progress.
+            `plan-progress` reports, for each committed Planning item declaring
+            `progress_evidence`, the counts its bound Records views return; it is
+            derived and read-only, and it scores nothing. `dispositions` lists every
             signal family a user has set to `quiet` or `off` through
             `triage_memory`, with its reason code, why, timestamp, origin, and
             per-family manual dismissal count; a quiet family is silent on the
@@ -7565,6 +7593,7 @@ _SIMPLE_ACTIONS: tuple[str, ...] = (
     "adopt",
     "maintain",
     "record",
+    "plan",
 )
 _SIMPLE_ACTION_PACK_ALIASES: dict[str, tuple[str, ...]] = {
     "ask": ("ask",),
@@ -7575,6 +7604,7 @@ _SIMPLE_ACTION_PACK_ALIASES: dict[str, tuple[str, ...]] = {
     "adopt": ("adopt",),
     "maintain": ("review", "update"),
     "record": ("record",),
+    "plan": ("save", "update"),
 }
 _SIMPLE_ACTION_DEFS: dict[str, dict] = {
     "ask": {
@@ -7649,6 +7679,12 @@ _SIMPLE_ACTION_DEFS: dict[str, dict] = {
         "route": {"tool": "record_memory", "args": {"action": "inspect"}},
         "safety": "resolve one compatible collection before a mutation; propose rather than silently create a schema",
         "advanced": ["record_memory"],
+    },
+    "plan": {
+        "intent": "File or re-prioritise intended work.",
+        "route": {"tool": "plan_memory", "args": {"action": "inspect"}},
+        "safety": "read-only by default; mutations are explicit",
+        "advanced": ["plan_memory"],
     },
 }
 _PRODUCT_METADATA: dict[str, dict] = {

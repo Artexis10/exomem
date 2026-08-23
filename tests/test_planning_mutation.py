@@ -330,3 +330,60 @@ def test_planning_update_refuses_crossing_the_area_boundary(tmp_path: Path) -> N
             expected_item_version=added["after_item_hash"],
             why="attempt invalid conversion",
         )
+
+
+# --- Planning inherits the derived identity (design D3) -------------------------
+
+
+def test_planning_add_without_a_plan_id_derives_the_title_natural_key(tmp_path: Path) -> None:
+    """Planning declares `natural_key: [title]` and goes through the same writer.
+
+    Nothing here is Planning-specific: `add` forwards `plan_id` as `item_key`, so a
+    capture with no caller-chosen id must land on the derived identity rather than a
+    fresh `uuid4` that makes the same intent captureable twice.
+    """
+    from exomem import structured_collections as collections
+    from exomem.planning import add, create_collection
+
+    (tmp_path / "Knowledge Base").mkdir()
+    (tmp_path / "Knowledge Base" / "log.md").write_text("# Log\n", encoding="utf-8")
+    manifest_path = "Knowledge Base/Planning/Work/_collection.md"
+    manifest = create_collection(
+        tmp_path, manifest_path, _manifest(), why="create planning collection"
+    )
+
+    added = add(
+        tmp_path,
+        manifest_path,
+        item={"title": "Keep this for later"},
+        why="capture future work",
+    )
+
+    assert added["plan_id"] == collections.inferred_item_key(
+        manifest["collection_id"],
+        collections.natural_key_serialization(1, ["title"], {"title": "Keep this for later"}, field_types={"title": "string"}),
+    )
+
+
+def test_planning_add_of_the_same_title_with_different_fields_refuses(tmp_path: Path) -> None:
+    from exomem.planning import add, create_collection
+
+    (tmp_path / "Knowledge Base").mkdir()
+    (tmp_path / "Knowledge Base" / "log.md").write_text("# Log\n", encoding="utf-8")
+    manifest_path = "Knowledge Base/Planning/Work/_collection.md"
+    create_collection(tmp_path, manifest_path, _manifest(), why="create planning collection")
+    added = add(
+        tmp_path,
+        manifest_path,
+        item={"title": "Keep this for later"},
+        why="capture future work",
+    )
+
+    with pytest.raises(CollectionError, match="RECORD_ID_CONFLICT"):
+        add(
+            tmp_path,
+            manifest_path,
+            item={"title": "Keep this for later", "priority": "high"},
+            expected_container_hash=added["after_container_hash"],
+            why="capture the same intent differently",
+        )

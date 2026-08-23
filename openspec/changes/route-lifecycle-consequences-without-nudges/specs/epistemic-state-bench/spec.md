@@ -12,4 +12,4 @@ The neutral vault projection SHALL include a `collections` section listing every
 #### Scenario: Nothing else moves
 
 - **WHEN** the projector runs over a vault with no structured collections
-- **THEN** every pre-existing section is unchanged and the registry, receipts and drift check report no difference
+- **THEN** every pre-existing section is unchanged apart from the projector version field, and the registry, receipts and drift check report no difference

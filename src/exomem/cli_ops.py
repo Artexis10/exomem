@@ -109,6 +109,11 @@ _REMEDIATION: dict[str, str] = {
     "STALE_RECORD": "Re-read the record and retry with its current versions.",
     "STALE_RECORD_SNAPSHOT": "Re-run the query against the current collection snapshot.",
     "RECORD_ID_CONFLICT": "Use a new record ID or re-read the existing record before retrying.",
+    "RECORD_NATURAL_KEY_CONFLICT": (
+        "Update the named existing item instead of appending a second one for the same key. "
+        "If the collection already holds two items under that key, update one of the named "
+        "items to a distinct natural key, or delete/archive one, then retry."
+    ),
     "CREATE_ONLY_CONFLICT": "Choose an unused collection path or inspect the existing collection.",
     "UNSUPPORTED_MEDIA": "Use a supported audio, video, image, document, or text-media extension.",
     "MEDIA_NOT_FOUND": "Check the governed Knowledge Base path and original filename.",
@@ -168,6 +173,7 @@ _CONFLICT_CODES = frozenset(
         "STALE_RECORD",
         "STALE_RECORD_SNAPSHOT",
         "RECORD_ID_CONFLICT",
+        "RECORD_NATURAL_KEY_CONFLICT",
         "CREATE_ONLY_CONFLICT",
         "AMBIGUOUS_RECORD",
     }

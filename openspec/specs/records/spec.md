@@ -142,7 +142,7 @@ A Record collection manifest MAY store one or more opaque Planning references pa
 - **THEN** Records may preserve the observed outcome and Planning may preserve intent, while repository/OpenSpec artifacts remain execution truth
 
 ### Requirement: Neutral observed-state query views
-Records query views SHALL display bounded observed values and provenance. Domain-specific interpretation SHALL require an explicit analysis or protocol layer and SHALL NOT be embedded in generic Records machinery. Planned-versus-recorded comparison is outside this delivery.
+Records query views SHALL display bounded observed values and provenance. Domain-specific interpretation SHALL require an explicit analysis or protocol layer and SHALL NOT be embedded in generic Records machinery. Planned-versus-recorded comparison SHALL live in the read-only plan-progress review rather than in Records machinery: a Records view SHALL remain the same neutral observed-state rendering whether it is read directly or read as bound Planning evidence, and Records SHALL NOT gain a comparison, progress, completion, or success semantic of its own.
 
 #### Scenario: Three-month X3 view remains neutral
 - **WHEN** a user asks for X3 progression over three months
@@ -151,6 +151,11 @@ Records query views SHALL display bounded observed values and provenance. Domain
 #### Scenario: Vehicle latest-state view cites events
 - **WHEN** a user asks for current mileage or next due maintenance
 - **THEN** the result identifies the governing collection/query and the record item from which the latest value was derived
+
+#### Scenario: A view read as plan evidence is the same view
+- **WHEN** the same saved view is read directly through the Records command and read again as a Planning item's bound progress evidence
+- **THEN** both reads run the same declared view over the same canonical snapshot and produce the same observed numbers
+- **AND** the Records view definition, response shape, and neutrality are unchanged by having been used as evidence
 
 ### Requirement: Records authoring is self-describing and safely preflightable
 The Records product command SHALL expose content-free `describe` and `validate` actions in addition to collection inspection and mutation. `describe` SHALL return the complete supported manifest contract, all closed enum values, exact open constraints, and generic minimal and nested-measurement examples. `validate` SHALL run the binding parser, Records-profile rule, safe-path rules, create-only checks, and scaffold checks without requiring a mutation reason, acquiring writer authority, writing an audit event, or changing the vault.
@@ -273,3 +278,28 @@ When exactly one existing collection is compatible and the observation is suffic
 #### Scenario: Interpretation remains outside Records
 - **WHEN** a Records query supplies values that support a possible conclusion
 - **THEN** the Records response remains neutral observed state and any durable conclusion is compiled explicitly into a linked Note
+
+### Requirement: Records serves cross-profile review as an ordinary governed reader
+
+A planned-versus-recorded reviewer SHALL reach Records only through the existing governed read path: resolution of a fully released manifest, authorization of the named saved view, authorization of the canonical source before it is parsed, and the default-deny query envelope. Records SHALL NOT gain a review-specific query surface, filter operator, saved-view feature, bulk export, or relaxed authorization path, and SHALL NOT resolve Planning, compare intent with observation, copy plan state, or mutate either side.
+
+A reviewer SHALL take only bounded provenance and counts from the envelope — the matched count, the returned count, the truncation flag, and the collection and snapshot identifiers — and SHALL NOT receive record rows, bodies, item identities, record values, or a view's declared aggregate through the review. A withheld envelope SHALL yield no numbers at all rather than partial ones.
+
+#### Scenario: Review cannot widen Records authorization
+- **WHEN** governance withholds a Records collection, its canonical source, or the named saved view
+- **THEN** the cross-profile review receives the same refusal an ordinary Records reader receives and obtains no rows, counts, snapshot, or existence signal
+
+#### Scenario: Review reads counts, not records
+- **WHEN** a bound saved view matches many records
+- **THEN** the review reports the exact matched and returned counts, the truncation flag, and the snapshot identifier
+- **AND** no record row, body, or item identity appears in the review response
+
+#### Scenario: An aggregating view discloses no more than a plain one
+- **WHEN** a bound view declares an aggregate that would return a full record row, distinct record values, grouped values, or a mean
+- **THEN** the review discloses exactly the same fields it discloses for a view with no aggregate
+- **AND** the aggregate's row, values, and statistic are withheld entirely rather than partially projected
+
+#### Scenario: Records keeps no review state
+- **WHEN** a plan-progress review executes bound Records views repeatedly
+- **THEN** no Records manifest, canonical source, audit head, mutation receipt, or query cache is written, and the collection's next ordinary query is unaffected
+

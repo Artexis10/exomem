@@ -26,6 +26,17 @@ or decision. Those links are opaque reference/query descriptors: Records do not
 resolve Planning, duplicate a plan's history, or infer progress, completion,
 medical conclusions, or personal judgments.
 
+A Planning link may additionally carry a bounded `join`: one to four pairs
+mapping a declared record field to a plan field name, matched exactly. It is an
+authored declaration of which events are about which intended work, and Records
+still resolves nothing — validation checks the record side against this
+manifest's own schema and leaves the plan side as opaque text. Its only consumer
+is the Epistemic Inbox's `unreflected_outcomes` family, which reports an open
+Planning item that recorded events already join to. Nothing transitions the item:
+the decider moves it with `plan_memory(action="triage")`, and the finding clears
+when the item leaves the open state, the binding is removed, or the joined
+records are gone.
+
 The comparison itself lives in `review_memory(mode="plan-progress")`, which
 reaches Records only as an ordinary governed reader — released manifest,
 authorized saved view, default-deny envelope — and takes counts rather than
@@ -119,6 +130,22 @@ and templates intact. New agent-authored log items get prospective stable marker
 historical entries are not mass-rewritten. Removing the manifest returns the
 tracker to ordinary manual use. The X3 training log remains canonical and has no
 forced migration.
+
+### Natural-key identity is enforced on every write
+
+A collection that declares an `item_schema.natural_key` holds at most one item
+per key. Both writes are checked: an append whose derived key already exists
+under another identity refuses, and so does an update that would MOVE an item
+onto another item's key. Planning updates run through the same writer and
+inherit the rule; Planning triage cannot reach a natural-key field at all, so
+ordinary lifecycle work is unaffected. The refusal is
+`RECORD_NATURAL_KEY_CONFLICT` and it names every existing item holding the key.
+
+Recovery, for a collection that already holds two items under one key — a state
+older vaults could reach before the append check existed, and one in which every
+further append for that key refuses: update one of the named items to a distinct
+natural key, or delete/archive one, then retry. An update that leaves the key
+unchanged is never refused, so the corrective edit itself always goes through.
 
 Agent writes use stable item identity, stale-write guards, bounded edits, atomic
 publication, same-vault mutation serialisation, auditable reasons, and receipts.

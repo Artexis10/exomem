@@ -29,8 +29,11 @@ Use when the user asks to save or the session lands on durable reusable knowledg
 8. Only when no entity matches and the identity is stable, recurring, central,
    and useful beyond this source, use `connect_memory(operation="create-entity")`.
 
+## Lifecycle
+Two more classes land here. A **stated intent or commitment** — what the user will do, a batch or workstream they commit to, work they sequence or re-prioritise — routes to Planning with `plan_memory(action="add")`, or `triage`/`update` on an item that already exists. An **observed outcome or event** — something happened, was produced, measured, delivered, approved, published or failed — routes to Records with `record_memory(action="append")` into the one compatible collection; when collections compete ask one focused question, and when none fits propose one rather than creating it silently. An outcome that lands on an open committed Planning item is one landing with two consequences: append the record, then transition the item, together, reported once. A tentative claim is never written as an event, and elapsed time is never an outcome.
+
 ## Output contract
-After writing, report exactly `Saved -> <path>` plus one short phrase if needed. If nothing durable was saved, say why.
+After writing, report exactly `Saved -> <path>` plus one short phrase if needed. If nothing durable was saved, say why. Report a lifecycle consequence in the user's own vocabulary and cite the collection the way recall cites a page; the words Planning, Records, collection, schema and natural key never lead the report.
 
 ## Save rules
 Keep raw source verbatim when it matters. Keep compiled notes concise, attributed, linked, and written as conclusions, not transcripts.

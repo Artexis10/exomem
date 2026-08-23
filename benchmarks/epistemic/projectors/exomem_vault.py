@@ -39,6 +39,8 @@ from typing import Any
 import yaml
 
 from ..snapshot import (
+    CollectionItem,
+    CollectionProjection,
     EpistemicStateSnapshot,
     FieldDeclaration,
     ProjectorMeta,
@@ -399,7 +401,10 @@ class VaultProjector(Projector):
     """Project one exomem vault directory into a neutral state snapshot."""
 
     name = "exomem-vault-file-projector"
-    version = "0.1.0"
+    #: 0.2.0 adds the `collections` section. Additive: every field a 0.1.0
+    #: snapshot carried is unchanged, and a vault with no collection serialises
+    #: byte-for-byte as it did.
+    version = "0.2.0"
     author = "benchmark-harness"
     endpoints_used = ("filesystem:walk(vault)", "filesystem:read_text(*.md)")
 
@@ -548,6 +553,7 @@ class VaultProjector(Projector):
         for marker in self._project_surfaces():
             items[marker.id] = marker
 
+        collections = self._project_collections(pages)
         return EpistemicStateSnapshot(
             provider="exomem",
             variant="native",
@@ -556,6 +562,7 @@ class VaultProjector(Projector):
             items=tuple(items[key] for key in sorted(items)),
             relations=_dedupe(relations),
             declarations=FIELD_DECLARATIONS,
+            collections=collections,
             projector=ProjectorMeta(
                 name=self.name,
                 version=self.version,
@@ -635,6 +642,73 @@ class VaultProjector(Projector):
                         "targets": target,
                         "fingerprint": fingerprint,
                     },
+                )
+            )
+        return tuple(projected)
+
+    def _project_collections(
+        self, pages: tuple[tuple[str, dict[str, Any], str], ...]
+    ) -> tuple[CollectionProjection, ...]:
+        """Structured collections, read from the same page walk as everything else.
+
+        Deliberately file-level, like the rest of this projector: a manifest
+        declares `item_schema.natural_key`, an item file declares its own key and
+        values, and nothing here calls into the product to interpret either. The
+        natural-key VALUES are what the acceptance journey compares across
+        providers — an item is "the same deliverable" because its declared key
+        says so, not because two systems happened to spell a title alike.
+        """
+        manifests: dict[str, tuple[str, dict[str, Any]]] = {}
+        for relative, frontmatter, _ in pages:
+            if str(frontmatter.get("type") or "").strip() != "collection":
+                continue
+            collection_id = str(frontmatter.get("exomem_id") or "").strip()
+            if collection_id:
+                manifests[collection_id] = (relative, frontmatter)
+        if not manifests:
+            return ()
+        grouped: dict[str, list[CollectionItem]] = {}
+        for relative, frontmatter, _ in pages:
+            page_type = str(frontmatter.get("type") or "").strip()
+            if page_type not in {"record", "plan"}:
+                continue
+            collection_id = str(frontmatter.get("collection_id") or "").strip()
+            manifest = manifests.get(collection_id)
+            if manifest is None:
+                continue
+            key = str(
+                frontmatter.get("record_id") or frontmatter.get("plan_id") or ""
+            ).strip()
+            if not key:
+                continue
+            natural_key = _natural_key_names(manifest[1])
+            grouped.setdefault(collection_id, []).append(
+                CollectionItem(
+                    key=key,
+                    natural_key={
+                        name: _as_text(frontmatter.get(name))
+                        for name in natural_key
+                        if frontmatter.get(name) is not None
+                    },
+                    lifecycle=str(frontmatter.get("lifecycle") or "").strip() or None,
+                    status=str(frontmatter.get("status") or "").strip() or None,
+                )
+            )
+        projected: list[CollectionProjection] = []
+        for collection_id, (relative, frontmatter) in sorted(manifests.items()):
+            schema_version = frontmatter.get("schema_version")
+            projected.append(
+                CollectionProjection(
+                    id=collection_id,
+                    profile=str(frontmatter.get("semantic_profile") or "").strip()
+                    or "unknown",
+                    manifest=relative,
+                    title=str(frontmatter.get("title") or "").strip(),
+                    schema_version=(
+                        schema_version if isinstance(schema_version, int) and schema_version >= 1 else 1
+                    ),
+                    natural_key=_natural_key_names(frontmatter),
+                    items=tuple(sorted(grouped.get(collection_id, []), key=lambda item: item.key)),
                 )
             )
         return tuple(projected)
@@ -732,6 +806,14 @@ class VaultProjector(Projector):
             items[item_id] = items[item_id].model_copy(
                 update={"revision_chain_id": f"chain:{root}", "revision_index": depth}
             )
+
+
+def _natural_key_names(frontmatter: Mapping[str, Any]) -> tuple[str, ...]:
+    schema = frontmatter.get("item_schema")
+    names = schema.get("natural_key") if isinstance(schema, Mapping) else None
+    if not isinstance(names, list):
+        return ()
+    return tuple(str(name) for name in names if isinstance(name, str) and name)
 
 
 def _dedupe(relations: Iterable[Relation]) -> tuple[Relation, ...]:

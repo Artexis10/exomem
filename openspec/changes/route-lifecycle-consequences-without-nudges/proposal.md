@@ -156,6 +156,16 @@ pinned tool surface moves once for both.
   past 61,400.
 - New error code `RECORD_NATURAL_KEY_CONFLICT`; new attention category
   `unreflected_outcomes` (default union, projection, delta, disposition-registrable).
+- **Compatibility break.** Natural-key identity is enforced on every write, not
+  only on append: an update that moves an item onto another item's declared
+  natural key now refuses with `RECORD_NATURAL_KEY_CONFLICT`, and Planning
+  updates inherit it (triage cannot reach a natural-key field, so lifecycle work
+  is unaffected). Existing collections that already hold two items under the same
+  natural key -- reachable before the append check existed -- refuse every further
+  append for that key until one twin is corrected. Recovery: update one of the
+  named items to a distinct natural key, or delete/archive one, then retry; an
+  update that leaves the key unchanged is never refused, so the corrective edit
+  itself always goes through. Documented in `docs/records.md`.
 - Out of scope, deliberately: the agent-track replay harness (north-star comparator;
   own change with the §7 sequence-3 amendment); project emergence from Planning state
   (own change); any runtime-performed Planning transition (never — the runtime
