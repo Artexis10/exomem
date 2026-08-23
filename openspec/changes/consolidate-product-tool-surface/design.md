@@ -86,8 +86,20 @@ Tool names appear in skill prose validated by `validate_skill_text`, and the shi
 
 Nothing here is observable end to end until substrate PR #144 deploys: `ask_memory` and `connect_memory` publish an `x-fastmcp-wrap-result` schema the gateway never applied, so every hosted tool call has returned `CELL_RESPONSE_INVALID`. Every tool except those two is currently inferred-correct from its schema and has never been observed working through the gateway.
 
-## Open questions
+## Decisions
 
-1. Does `plan_memory` deserve a ninth action (`plan`) rather than sitting under `remember`? Stating intent before acting is arguably its own intent, and `widen-hosted-epistemic-surface` treated planning as a first-class part of the epistemic loop.
-2. Under option A, does `bootstrap` remain a separate tool or become the catalog response itself?
-3. Should `read_media` and `query_dataset` stay tier 2 once hosted exposes tier 2, or be reclassified as ordinary retrieval?
+**1. `plan_memory` sits under `remember`; there is no ninth action.** Planning is a first-class part of the epistemic loop, but that argues for reachability, not for a top-level verb. The stated goal is fewer things to choose between, and a ninth action moves against it while the action count is the number this change is trying to hold down. `plan_memory` is a durable write that states intent before acting, which is what `remember` already means; it is reachable as an `advanced` entry, and option A's route parameter gives it a first-class name inside `remember` without spending a verb on it.
+
+**2. `bootstrap` stays a separate tool under option A.** It is the call that returns the catalog, so it cannot be an operation *within* the catalog without a chicken-and-egg for any agent that has not called it yet. This is why it is the single exemption in the coverage gate rather than an oversight.
+
+**3. Tier classification is unchanged.** Tier is a statement about how advanced a command is, not about where it is hosted. Reclassifying `read_media` and `query_dataset` out of tier 2 would change CLI and REST behaviour for every existing operator to solve a hosted-only problem — and it solves nothing, because once hosted exposes tier 2 both commands are available anyway. If they are later judged to be ordinary retrieval, that is its own change with its own reason.
+
+## Budget consequence, to be settled once
+
+Completing the catalog costs compact bootstrap 183 bytes — measured, 59,303 on `origin/main` to 59,486 — against a 59,500 ceiling that `main` already sat 197 bytes under. The gate passes and warns. There is no honest trim inside this change: the ten names *are* the capability being made reachable, and dropping them restores the unreachability the change exists to fix.
+
+The ceiling is therefore raised once, at the end of this change, measured on the final tree with Phase 2's bytes included — not now and again later. `COMPACT_BYTE_CEILING`'s own docstring records that a previous raise was carried over from a draft rather than re-measured, and that is the mistake being avoided.
+
+## Status of the prerequisite
+
+The catalog is complete: routes and `advanced` entries now reach 28 of 29 product commands, `bootstrap` being the exemption above. `test_simple_action_catalog_reaches_every_product_command` asserts it and fails against the pre-change source naming all ten previously unreachable commands, so the gate discriminates rather than passing by construction.

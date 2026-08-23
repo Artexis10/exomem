@@ -7400,7 +7400,13 @@ _SIMPLE_ACTION_DEFS: dict[str, dict] = {
             "args": {"detail": "compact", "rerank": False, "deep": True},
         },
         "safety": "read-only; deep mode assembles context and graph enrichment stays explicit",
-        "advanced": ["read_memory", "connect_memory", "review_memory"],
+        "advanced": [
+            "read_memory",
+            "connect_memory",
+            "review_memory",
+            "query_dataset",
+            "read_media",
+        ],
     },
     "remember": {
         "intent": "Save a durable conclusion as compiled governed knowledge.",
@@ -7411,6 +7417,7 @@ _SIMPLE_ACTION_DEFS: dict[str, dict] = {
             "edit_memory",
             "observe_memory",
             "connect_memory",
+            "plan_memory",
         ],
     },
     "capture": {
@@ -7424,7 +7431,12 @@ _SIMPLE_ACTION_DEFS: dict[str, dict] = {
         "route": {"tool": "capture_source", "args": {}},
         "evidence_route": {"tool": "preserve_evidence", "args": {}},
         "safety": "additive write; Sources and Evidence preserve originals/provenance",
-        "advanced": ["transfer_artifact", "compile_source"],
+        "advanced": [
+            "transfer_artifact",
+            "compile_source",
+            "preserve_artifacts",
+            "process_media",
+        ],
     },
     "review": {
         "intent": "Review stale, contradictory, disconnected, or unprocessed knowledge before acting.",
@@ -7436,6 +7448,7 @@ _SIMPLE_ACTION_DEFS: dict[str, dict] = {
             "review_item_context",
             "triage_memory",
             "compile_source",
+            "coordination_status",
         ],
     },
     "connect": {
@@ -7449,7 +7462,7 @@ _SIMPLE_ACTION_DEFS: dict[str, dict] = {
         "intent": "Assess or import an existing vault safely.",
         "route": {"tool": "adopt_vault", "args": {"mode": "scan-only"}},
         "safety": "scan-only by default; copy/compile modes require explicit options and preserve originals",
-        "advanced": ["browse_memory", "compile_source"],
+        "advanced": ["browse_memory", "compile_source", "adoption_studio"],
     },
     "maintain": {
         "intent": "Check vault health and repair drift only when explicitly requested.",
@@ -7457,7 +7470,13 @@ _SIMPLE_ACTION_DEFS: dict[str, dict] = {
         "fix_route": {"tool": "maintain_memory", "args": {"mode": "fix", "dry_run": False}},
         "reconcile_route": {"tool": "maintain_memory", "args": {"mode": "reconcile", "dry_run": False}},
         "safety": "read-only by default; write-capable fixes require explicit flags",
-        "advanced": ["maintain_memory", "doctor"],
+        "advanced": [
+            "maintain_memory",
+            "doctor",
+            "govern_memory",
+            "schema_memory",
+            "manage_memory_file",
+        ],
     },
     "record": {
         "intent": "Capture, inspect, query, or correct durable observed events and current state.",

@@ -7,8 +7,9 @@ The system SHALL define a small set of simple product actions that route common 
 #### Scenario: Action catalog names the simple actions
 
 - **WHEN** the action catalog is requested by bootstrap, docs generation, or CLI help
-- **THEN** it lists `ask`, `remember`, `capture`, `review`, `connect`, `adopt`, and `maintain`
+- **THEN** it lists `ask`, `remember`, `capture`, `review`, `connect`, `adopt`, `maintain`, and `record`
 - **AND** each action identifies its canonical operation route and default safety posture
+- **AND** the catalog is generated from the action registry, so an action added to the registry appears without editing a second list
 
 #### Scenario: Canonical operations remain the source of truth
 
