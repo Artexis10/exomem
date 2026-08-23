@@ -193,7 +193,12 @@ class SearchResult(TypedDict):
 
 
 class ClientArtifactFile(TypedDict):
-    """Client-neutral temporary remote file handle used by ``preserve_artifacts``."""
+    """Client-neutral temporary remote file handle.
+
+    Used by ``capture_source`` for raw material and ``preserve_artifacts`` for
+    proof-bearing artifacts. The handle carries no destination: the lane is the
+    command's, never the transport's.
+    """
 
     download_url: str
     file_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=256)]
@@ -207,6 +212,27 @@ _ClientArtifactFiles = Annotated[
         min_length=1,
         max_length=8,
         description="One to eight temporary client file handles.",
+    ),
+]
+#: The same handles where the parameter is optional. Deliberately not
+#: `_ClientArtifactFiles | None`: a union renders as an `anyOf`, which makes the
+#: JSON-schema generator hoist `ClientArtifactFile` into `$defs` on one surface
+#: and inline it on another, so the personal and hosted tool schemas stop
+#: agreeing. An empty list already means "no files supplied".
+_OptionalClientArtifactFiles = Annotated[
+    list[ClientArtifactFile],
+    Field(
+        max_length=8,
+        description=(
+            "Up to eight temporary client file handles, captured losslessly as "
+            "Sources instead of `content` — an attached transcript, article, "
+            "screenshot, or recording that is raw material. Each requires "
+            "`download_url` and `file_id`; `mime_type` and `file_name` are "
+            "optional. Exomem retrieves each handle server-side, so no bytes "
+            "pass through model-visible arguments. Proof-bearing artifacts go "
+            "to `preserve_artifacts` instead — the lane is chosen by what the "
+            "artifact is for, never by which transport is available."
+        ),
     ),
 ]
 
@@ -4801,8 +4827,9 @@ def op_remember(
     """Remember a durable conclusion as compiled governed knowledge.
 
     This is for distilled thinking, decisions, findings, failures, patterns,
-    experiments, and production logs. Raw material belongs in `capture_source`;
-    proof artifacts belong in `preserve_evidence`.
+    experiments, and production logs. Raw material belongs in `capture_source`,
+    which takes attached file handles as well as text; proof-bearing artifacts
+    belong in `preserve_evidence` or `preserve_artifacts`.
 
     For each `sources:` wikilink, this appends the new note's wikilink to that
     source's `ingested_into:` frontmatter, maintaining the source-to-note graph
@@ -5206,8 +5233,8 @@ def op_replace_memory(
 def op_capture_source(
     vault_root: Path,
     source_schema: object,
-    content: str,
     title: str,
+    content: str = "",
     slug: str | None = None,
     source_type: str | None = None,
     url: str | None = None,
@@ -5218,8 +5245,14 @@ def op_capture_source(
     source_kind: str | None = None,
     domain: str | None = None,
     projects: list[str] | None = None,
+    files: _OptionalClientArtifactFiles = (),  # noqa: B006 - read-only
 ) -> dict:
     """Capture raw source material and optionally return compile guidance.
+
+    Takes `content` for text or `files` for attached file handles, stored
+    losslessly under `Sources/`. This command is for raw material; proof-bearing
+    artifacts go to `preserve_evidence`/`preserve_artifacts`. Choose by what the
+    artifact is for, not by what the client can carry.
 
     The raw source is preserved first. If `compile_guidance=true`, Exomem then
     returns a proposal for a future compiled note, without silently converting
@@ -5231,8 +5264,8 @@ def op_capture_source(
     (`domain`). Both are open vocabularies.
 
     Args:
-        content: Raw source text.
         title: Source title.
+        content: Raw source text. Supply this or `files`, not both.
         slug: Optional lowercase ASCII kebab-case filename component.
         source_type: What the artifact IS. Same axis as source_kind; supply
             either one. Open vocabulary, not a closed set.
@@ -5251,7 +5284,25 @@ def op_capture_source(
             source_kind and equally extensible.
         projects: Project keys this source serves. Never affects where it is
             stored; one source may serve several projects.
+        files: Temporary client file handles, captured losslessly as Sources
+            instead of `content`. See the parameter schema for the shape.
     """
+    if files:
+        from . import client_artifacts
+
+        return client_artifacts.capture_source_artifacts(
+            vault_root,
+            source_schema=source_schema,
+            title=title,
+            files=files,
+            slug=slug,
+            source_type=source_type or source_kind,
+            url=url,
+            tags=tags,
+            why_captured=why_captured,
+            domain=domain,
+            projects=projects,
+        )
     source = op_add(
         vault_root,
         source_schema,
@@ -5360,20 +5411,30 @@ def op_preserve_artifacts(
         )
 
 
-def op_transfer_artifact(vault_root: Path, operation: str = "upload") -> dict:
+def op_transfer_artifact(
+    vault_root: Path, operation: str = "upload", lane: str = "evidence"
+) -> dict:
     """Prepare out-of-band binary artifact transfer.
 
     Compatibility transport for clients that cannot supply file handles to
-    `preserve_artifacts`. Returns a short-lived token and URL for uploading
-    evidence binaries or downloading a vault file into a sandbox. Minting an
+    `capture_source` or `preserve_artifacts`. Returns a short-lived token and URL
+    for uploading a binary or downloading a vault file into a sandbox. Minting an
     upload token does not mean bytes were stored.
 
     Args:
         operation: upload or download.
+        lane: where an upload lands — `source` for raw material, `evidence` for
+            proof-bearing artifacts. Bound into the token when it is minted, so
+            the destination cannot be chosen by whoever posts the bytes. Ignored
+            for downloads.
     """
     _ = vault_root
     if operation not in ("upload", "download"):
         raise ValueError("INVALID_MODE: transfer_artifact operation must be 'upload' or 'download'")
+    if lane not in upload_tokens.UPLOAD_LANES:
+        raise ValueError(
+            f"INVALID_MODE: transfer_artifact lane must be one of {upload_tokens.UPLOAD_LANES}"
+        )
     secret = os.environ.get("EXOMEM_UPLOAD_TOKEN", "").strip() or None
     base_url = os.environ.get("EXOMEM_BASE_URL", "").strip().rstrip("/")
     large_base_url = os.environ.get("EXOMEM_LARGE_UPLOAD_BASE_URL", "").strip().rstrip("/") or None
@@ -5382,6 +5443,7 @@ def op_transfer_artifact(vault_root: Path, operation: str = "upload") -> dict:
         base_url,
         scope=operation,
         large_base_url=large_base_url if operation == "upload" else None,
+        lane=lane if operation == "upload" else None,
     )
 
 

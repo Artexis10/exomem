@@ -18,6 +18,15 @@ def _read(p: Path) -> str:
 
 
 def test_preserve_text_artifact_writes_file(vault: Path) -> None:
+    """The artifact, and the page that makes it addressable.
+
+    This used to assert `sidecar_path is None` when no description was
+    supplied. That was true and it was the defect: an artifact with no page has
+    no identifier, no `ingested_into`, and no corpus presence, because only
+    `.md` is indexed — so citing it reported the source as missing. The
+    property worth pinning is that the page describes the artifact rather than
+    being an empty stub.
+    """
     result = preserve_module.preserve(
         vault,
         scope="Yolo",
@@ -29,7 +38,22 @@ def test_preserve_text_artifact_writes_file(vault: Path) -> None:
     written = vault / result.path
     assert written.exists()
     assert "cease and desist" in _read(written)
-    assert result.sidecar_path is None  # no description supplied
+
+    assert result.sidecar_path == (
+        "Knowledge Base/Evidence/Yolo/letters/2026-05-25-warning-letter.txt.md"
+    )
+    page = _read(vault / result.sidecar_path)
+    assert "type: source" in page
+    assert "ingested_into: []" in page
+    assert "original_filename: 2026-05-25-warning-letter.txt" in page
+    assert f"binary_sha256: {result.hash}" in page
+    assert f"binary_size: {result.size}" in page
+    # Not an empty page: `schema.validate_source` treats an empty body as an
+    # invalid source, and a page that says nothing about the artifact is worse
+    # than useless next to it.
+    assert "## Artifact" in page
+    # The artifact's own bytes are pointed at, never copied into the page.
+    assert "cease and desist" not in page
 
 
 def test_cap_extracted_text_passthrough_under_limit() -> None:

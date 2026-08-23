@@ -1419,15 +1419,47 @@ def _normalize_bridge_sources(
 
 
 def _resolve_source_path(vault_root: Path, kb_relative: str) -> Path | None:
-    """Resolve a 'Knowledge Base/Sources/Articles/<slug>' wikilink to an on-disk
-    .md path, or None if the path escapes the vault."""
+    """Resolve a cited source to the page that carries its `ingested_into:`.
+
+    A citation names one of two things. An ordinary source is cited as a
+    wikilink with the extension dropped — `Sources/Articles/<slug>` — so the
+    page is found by appending `.md`. A preserved artifact is cited by the path
+    `preserve` returns, and its page sits beside it as `<filename>.md`:
+    `shot.png.md`, not `shot.md`. Replacing the extension therefore misses the
+    page of every artifact that has one, which is where
+    `source not found, ingested_into back-ref skipped` came from.
+
+    Order is load-bearing rather than incidental. `shot.png` has a plausible
+    extension-replaced twin, `shot.md`, which is a *different* page that may
+    also exist — so the artifact's own page has to be tried first or the
+    back-reference lands on a stranger. For a citation that already ends `.md`
+    the ambiguity runs the other way: it is either a full page path or an `.md`
+    artifact whose page `preserve` names `<stem>-notes.md` to avoid a doubled
+    extension, so that form is tried before the path itself.
+
+    Returns the first candidate that exists, else the historical candidate so a
+    genuinely missing source still reports the path a caller would expect.
+    """
     rel = kb_relative.removeprefix(kb_prefix())
-    candidate = (kb_root(vault_root) / rel).with_suffix(".md")
-    try:
-        candidate.resolve().relative_to(vault_root.resolve())
-    except ValueError:
+    base = kb_root(vault_root) / rel
+    if base.suffix.lower() == ".md":
+        candidates = [base.with_name(f"{base.name[:-3]}-notes.md"), base]
+    else:
+        candidates = [base.with_name(base.name + ".md"), base.with_suffix(".md")]
+    root = vault_root.resolve()
+    inside: list[Path] = []
+    for candidate in candidates:
+        try:
+            candidate.resolve().relative_to(root)
+        except ValueError:
+            continue
+        inside.append(candidate)
+    if not inside:
         return None
-    return candidate
+    for candidate in inside:
+        if candidate.exists():
+            return candidate
+    return inside[-1]
 
 
 # ---------------- log + activity helpers ----------------

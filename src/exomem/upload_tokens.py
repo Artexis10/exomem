@@ -54,12 +54,40 @@ def verify(presented: str | None, secret: str, *, scope: str = "upload", now: in
     return hmac.compare_digest(sig, _sig(secret, scope, exp))
 
 
+#: Destination lanes an upload capability may be minted for. `evidence` signs the
+#: bare `upload` scope so every token issued before lanes existed keeps verifying.
+UPLOAD_LANES = ("evidence", "source")
+
+
+def upload_scope(lane: str) -> str:
+    """The signed scope for an upload capability bound to `lane`.
+
+    The lane rides *inside* the signature rather than beside it, so the
+    destination is fixed when the capability is minted and cannot be swapped by
+    whoever posts the bytes. Without that, the out-of-band transport would
+    reintroduce the defect this change exists to close: a client that cannot
+    expose file handles would have its lane chosen by a form field.
+    """
+    if lane not in UPLOAD_LANES:
+        raise ValueError(f"INVALID_MODE: upload lane must be one of {UPLOAD_LANES}")
+    return "upload" if lane == "evidence" else f"upload:{lane}"
+
+
+def lane_for_token(presented: str | None, secret: str, *, now: int | None = None) -> str | None:
+    """The lane a presented upload token is bound to, or None if it verifies for none."""
+    for lane in UPLOAD_LANES:
+        if verify(presented, secret, scope=upload_scope(lane), now=now):
+            return lane
+    return None
+
+
 def mint_for_endpoint(
     secret: str | None,
     base_url: str,
     *,
     scope: str = "upload",
     large_base_url: str | None = None,
+    lane: str | None = None,
 ) -> dict:
     """Response payload for the `mint_<scope>_token` MCP tools (or raise if off).
 
@@ -74,11 +102,16 @@ def mint_for_endpoint(
     """
     if secret is None:
         raise ValueError(f"{scope.upper()}_DISABLED: server has no EXOMEM_UPLOAD_TOKEN configured")
+    # The lane is signed into the scope but never into the URL: both lanes post
+    # to the same endpoint, and the server reads the destination off the token.
+    signed_scope = upload_scope(lane) if lane is not None and scope == "upload" else scope
     out = {
-        "token": mint(secret, scope=scope),
+        "token": mint(secret, scope=signed_scope),
         "ttl_seconds": DEFAULT_TTL,
         f"{scope}_url": f"{base_url}/{scope}",
     }
+    if scope == "upload":
+        out["lane"] = lane or "evidence"
     if large_base_url:
         out["large_upload_url"] = f"{large_base_url}/upload"
     return out
