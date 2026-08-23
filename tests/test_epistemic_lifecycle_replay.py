@@ -1403,6 +1403,7 @@ def test_the_full_offline_path_runs_for_both_arms(tmp_path, released: None) -> N
 def test_dry_run_prints_argv_and_the_environment_delta_and_executes_nothing(
     tmp_path, capsys
 ) -> None:
+    _cli_or_skip()
     from epistemic.corpora.lifecycle_replay import replay_corpus
     from epistemic.journeys import f27_replay as journey
 
@@ -1817,6 +1818,7 @@ def test_a_dry_run_writes_nothing_and_prints_the_whole_environment_delta(
     the delta is now every key added, changed or removed.
     """
 
+    _cli_or_skip()
     from epistemic.journeys import f27_replay as journey
 
     # A parent that already pins the vault turns that key from an *addition*
