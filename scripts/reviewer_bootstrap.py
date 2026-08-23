@@ -64,9 +64,27 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 CANDIDATE_PROFILE = "hosted-alpha-agent-v1"
-#: `exomem_oauth_client_partition_available` in migration 0048. Operator clients
-#: keep the original bound; auto-registered CIMD clients get a separate 128.
-OPERATOR_CLIENT_BOUND = 32
+#: `exomem_oauth_client_partition_available`, raised from 32 to 96 by substrate
+#: migration 0051 after two weeks of promotion attempts filled the partition and
+#: blocked the first promotion outright. Auto-registered CIMD clients keep their
+#: separate 128.
+#:
+#: This duplicates a value the database owns and will go stale again the next
+#: time the bound moves -- it already did once, reporting "<=0 of 32 free" while
+#: the deployed bound was 96. The fix is for the control plane to report headroom
+#: as server state and for this to read it; tracked as task 3.2 of the substrate
+#: change `reclaim-oauth-client-slots`. Until then, keep this in step with the
+#: latest migration to touch the function.
+OPERATOR_CLIENT_BOUND = 96
+#: How long the staged client releases live, and therefore how long the whole
+#: evidence window lives. Substrate's `decouple-reviewer-assignment-expiry` made
+#: the reviewer rollout assignment take its expiry from the staged release rather
+#: than LEAST(authority, stage), so this value -- not the authority's thirty
+#: minutes -- is now the window. It was 55 minutes, chosen when it was capped at
+#: thirty anyway and could not matter. It has to cover provisioning (~10 minutes
+#: observed), a clean-client run on every platform being promoted, then observe,
+#: sign and import for each, then promote. `boundedExpiry` caps it at seven days.
+DEFAULT_WINDOW_MINUTES = 180
 LOOPBACK_REDIRECT = "http://localhost:47831/callback"
 CLAUDE_CIMD_CLIENT_ID = "https://claude.ai/oauth/mcp-oauth-client-metadata"
 CLAUDE_CIMD_REDIRECT = "https://claude.ai/api/mcp/auth_callback"
@@ -532,6 +550,7 @@ def prepare(
     email: str,
     locks: dict,
     existing_client_id: str | None = None,
+    window_minutes: int = DEFAULT_WINDOW_MINUTES,
 ) -> dict:
     """Create stage, pinned client and invite. Spends nothing irreversible."""
     # First, because `run` cannot create the OpenAI sibling stage without it and
@@ -558,7 +577,7 @@ def prepare(
             "action": "create-stage",
             "candidateId": candidate_id,
             "platform": "claude",
-            "expiresAt": stamp(timedelta(minutes=55)),
+            "expiresAt": stamp(timedelta(minutes=window_minutes)),
             "packageSha256": locks["claude_package"],
             "archiveSha256": locks["claude_archive"],
             "compatibilitySha256": locks["compatibility"],
@@ -635,6 +654,7 @@ def run(
     locks: dict,
     openai_connector: str,
     openai_redirect_override: list[str] | None = None,
+    window_minutes: int = DEFAULT_WINDOW_MINUTES,
 ) -> None:
     """Authority through both canary credentials, with no waiting in between."""
     resource = f"{cp.base_url}/api/exomem/mcp/v1"
@@ -803,7 +823,7 @@ def run(
                 "action": "create-stage",
                 "candidateId": context["candidateId"],
                 "platform": platform,
-                "expiresAt": stamp(timedelta(minutes=55)),
+                "expiresAt": stamp(timedelta(minutes=window_minutes)),
                 "packageSha256": package,
                 "archiveSha256": archive,
                 "compatibilitySha256": locks["compatibility"],
@@ -944,6 +964,16 @@ def main() -> int:
     )
     parser.add_argument("--token", help="emailed invite token, required for run")
     parser.add_argument(
+        "--window-minutes",
+        type=int,
+        default=DEFAULT_WINDOW_MINUTES,
+        help="Staged release lifetime, which is the evidence window. This bounds "
+        "the rollout assignment and therefore the canary credentials, the token "
+        "paths, import and promote. Size it for provisioning plus a clean-client "
+        "run on every platform being promoted plus observe/sign/import for each. "
+        "Pass the same value to prepare and run.",
+    )
+    parser.add_argument(
         "--openai-connector",
         help="ChatGPT connector id, or the full client.json URL, required for run. "
         "Create the connector in ChatGPT first: the OpenAI sibling stage is built "
@@ -983,7 +1013,14 @@ def main() -> int:
             print("\nrefusing to prepare while preflight is red")
             return 1
         print("\nprepare:")
-        context = prepare(cp, args.candidate_id, args.email, locks, args.existing_client_id)
+        context = prepare(
+            cp,
+            args.candidate_id,
+            args.email,
+            locks,
+            args.existing_client_id,
+            args.window_minutes,
+        )
         print(f"  stage   {context['stageId']}")
         print(f"  client  {context['oauthClientId']}")
         print(f"  invite  {context['inviteId']}")
@@ -1008,7 +1045,15 @@ def main() -> int:
         return 2
     context = json.loads((args.state_dir / "bootstrap-context.json").read_text())
     print("run:")
-    run(cp, context, args.token, locks, args.openai_connector, args.openai_redirect)
+    run(
+        cp,
+        context,
+        args.token,
+        locks,
+        args.openai_connector,
+        args.openai_redirect,
+        args.window_minutes,
+    )
     return 0
 
 
