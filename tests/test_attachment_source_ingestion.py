@@ -364,3 +364,245 @@ def test_an_evidence_binary_still_names_evidence(vault: Path) -> None:
     page = sidecar.read_text(encoding="utf-8")
     assert "Preserved under `Evidence/riverside/screenshots/`." in page
     assert "tags: [evidence, riverside, screenshots]" in page
+
+
+# --------------------------------------------------------------------------
+# 4. Sources lane ingestion
+# --------------------------------------------------------------------------
+
+
+def _staged(tmp: Path, name: str, data: bytes) -> "object":
+    from exomem.add import SourceArtifact
+
+    staged = tmp / name
+    staged.parent.mkdir(parents=True, exist_ok=True)
+    staged.write_bytes(data)
+    return SourceArtifact(staged_path=staged, filename=name)
+
+
+def test_an_attached_transcript_becomes_a_classified_source(
+    vault: Path, source_schema, tmp_path: Path
+) -> None:
+    """The defect at its root: an attachment could not be a Source at all.
+
+    `capture_source` took `content: str` and nothing else, so the only lossless
+    file-handle path led to Evidence — and Evidence is one-way, so the
+    misrouting could not be corrected afterwards.
+    """
+    from exomem import add as add_module
+
+    added = add_module.add(
+        vault,
+        source_schema,
+        content="",
+        title="Riverside council transcript",
+        source_type="session",
+        domain="urban-planning",
+        projects=["riverside"],
+        artifact=_staged(tmp_path / "stage", "session.txt", b"Speaker A: the pier reopened."),
+        today=TODAY,
+    )
+
+    assert added.artifact_path is not None
+    assert added.artifact_path.startswith("Knowledge Base/Sources/")
+    assert (vault / added.artifact_path).read_bytes() == b"Speaker A: the pier reopened."
+
+    page = (vault / added.path).read_text(encoding="utf-8")
+    assert "source_type: session" in page
+    assert "domain: urban-planning" in page
+    assert "projects: [riverside]" in page
+    assert "ingested_into: []" in page
+    assert f"evidence_file: {added.artifact_path}" in page
+    assert "original_filename: session.txt" in page
+    assert f"binary_sha256: {added.artifact_hash}" in page
+    # Bytes are pointed at, never inlined.
+    assert "Speaker A: the pier reopened." not in page
+
+
+def test_the_artifact_and_its_page_share_one_resolved_stem(
+    vault: Path, source_schema, tmp_path: Path
+) -> None:
+    from exomem import add as add_module
+
+    added = add_module.add(
+        vault, source_schema, content="", title="Shared stem",
+        source_type="other",
+        artifact=_staged(tmp_path / "s1", "shot.png", _PNG), today=TODAY,
+    )
+
+    assert added.path == f"{added.artifact_path}.md"
+
+
+def test_a_second_capture_of_the_same_title_does_not_collide(
+    vault: Path, source_schema, tmp_path: Path
+) -> None:
+    """Naming authority stays `add`'s uniquify, for the pair as well as the page."""
+    from exomem import add as add_module
+
+    first = add_module.add(
+        vault, source_schema, content="", title="Same title",
+        source_type="other",
+        artifact=_staged(tmp_path / "a", "shot.png", _PNG), today=TODAY,
+    )
+    second = add_module.add(
+        vault, source_schema, content="", title="Same title",
+        source_type="other",
+        artifact=_staged(tmp_path / "b", "shot.png", _PNG + b"\x00"), today=TODAY,
+    )
+
+    assert first.artifact_path != second.artifact_path
+    assert first.path != second.path
+    assert (vault / first.artifact_path).read_bytes() != (
+        vault / second.artifact_path
+    ).read_bytes()
+
+
+def test_an_attached_source_is_citable_immediately(
+    vault: Path, source_schema, tmp_path: Path
+) -> None:
+    from exomem import add as add_module
+
+    added = add_module.add(
+        vault, source_schema, content="", title="Citable attachment",
+        source_type="other",
+        artifact=_staged(tmp_path / "c", "notes.txt", b"raw material"), today=TODAY,
+    )
+
+    result = _cite(vault, added.artifact_path, "Compiled from an attachment")
+
+    assert _backref_skipped(result.warnings) is None, result.warnings
+    assert "compiled-from-an-attachment" in _ingested_into(vault, added.path)
+
+
+def test_an_attached_image_survives_reconciliation(
+    vault: Path, source_schema, tmp_path: Path
+) -> None:
+    """The group-3 fix, exercised through the real capture path."""
+    from exomem import add as add_module
+    from exomem import media_processing
+
+    added = add_module.add(
+        vault, source_schema, content="", title="Walkthrough photo",
+        source_type="session", domain="urban-planning", projects=["riverside"],
+        artifact=_staged(tmp_path / "d", "walkthrough.png", _PNG), today=TODAY,
+    )
+
+    media_processing.reconcile_media(vault, vault / added.artifact_path, explicit=True)
+
+    page = (vault / added.path).read_text(encoding="utf-8")
+    assert "title: Walkthrough photo" in page
+    assert "source_type: session" in page
+    assert "domain: urban-planning" in page
+    assert "projects: [riverside]" in page
+    assert "processing_state: pending" in page
+    assert "## Preserved notes" not in page
+
+
+def test_capture_source_routes_file_handles_to_sources(
+    vault: Path, monkeypatch, tmp_path: Path
+) -> None:
+    """The command surface, with staging stubbed so no network is involved.
+
+    Staging is shared with `preserve_artifacts` on purpose — one implementation
+    of hostile-URL handling, redirect and byte bounds, and per-file outcomes —
+    so what this exercises is the part that differs: where the bytes are
+    committed and what describes them.
+    """
+    from exomem import client_artifacts, commands
+
+    staged_dir = tmp_path / "staged"
+    staged_dir.mkdir()
+    blob = staged_dir / "transcript.txt"
+    blob.write_bytes(b"Speaker A: the pier reopened.")
+
+    def _fake_stage(file, budget, *, batch_deadline=None):
+        return client_artifacts.StagedArtifact(
+            file_id=str(file["file_id"]),
+            path=blob,
+            size=blob.stat().st_size,
+            sha256="0" * 64,
+            content_type="text/plain",
+            filename="transcript.txt",
+        )
+
+    monkeypatch.setattr(client_artifacts, "stage_artifact", _fake_stage)
+
+    result = commands.op_capture_source(
+        vault,
+        _schema(vault),
+        content="",
+        title="Riverside transcript",
+        source_kind="session",
+        domain="urban-planning",
+        files=[{"download_url": "https://example.invalid/a", "file_id": "f1"}],
+    )
+
+    [outcome] = result["files"]
+    assert outcome["outcome"] == "stored"
+    assert outcome["path"].startswith("Knowledge Base/Sources/")
+    assert result["summary"] == {"stored": 1, "failed": 0}
+
+    page = (vault / outcome["page"]).read_text(encoding="utf-8")
+    assert "source_type: session" in page
+    assert "domain: urban-planning" in page
+    # The staged bytes are copied, never left only in temporary storage.
+    assert (vault / outcome["path"]).read_bytes() == b"Speaker A: the pier reopened."
+
+
+def _schema(vault: Path):
+    from exomem import schema as schema_module
+
+    return schema_module.load_source_schema(vault)
+
+
+# --------------------------------------------------------------------------
+# 5. The lane is stated, never inferred
+# --------------------------------------------------------------------------
+
+
+def test_identical_bytes_reach_different_lanes_by_command(
+    vault: Path, source_schema, tmp_path: Path
+) -> None:
+    from exomem import add as add_module
+
+    captured = add_module.add(
+        vault, source_schema, content="", title="Same bytes as a source",
+        source_type="other",
+        artifact=_staged(tmp_path / "lane", "shot.png", _PNG), today=TODAY,
+    )
+    preserved = _preserve_image(vault, "shot.png")
+
+    assert captured.artifact_path.startswith("Knowledge Base/Sources/")
+    assert preserved.path.startswith("Knowledge Base/Evidence/")
+    assert (vault / captured.artifact_path).read_bytes() == (
+        vault / preserved.path
+    ).read_bytes()
+
+
+def test_no_lane_decision_reads_the_file_type(
+    vault: Path, source_schema, tmp_path: Path
+) -> None:
+    """An image as a Source and a markdown file as Evidence.
+
+    Both cut against whatever a type-based heuristic would guess, which is the
+    point: inference would put the decision back somewhere other than the
+    caller's intent, and that is where the defect came from.
+    """
+    from exomem import add as add_module
+
+    image_source = add_module.add(
+        vault, source_schema, content="", title="Screenshot kept as material",
+        source_type="other",
+        artifact=_staged(tmp_path / "img", "diagram.png", _PNG), today=TODAY,
+    )
+    markdown_evidence = preserve_module.preserve(
+        vault, scope="riverside", category="letters",
+        filename="2026-08-23-notice.md", content="# Notice\n\nServed on the 23rd.\n",
+        today=TODAY,
+    )
+
+    assert image_source.artifact_path.startswith("Knowledge Base/Sources/")
+    assert markdown_evidence.path.startswith("Knowledge Base/Evidence/")
+    # A `.md` artifact's page avoids the doubled extension, so it is addressed
+    # by the `-notes.md` form rather than `<name>.md`.
+    assert markdown_evidence.sidecar_path.endswith("-notes.md")

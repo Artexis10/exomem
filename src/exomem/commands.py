@@ -5164,8 +5164,15 @@ def op_capture_source(
     source_kind: str | None = None,
     domain: str | None = None,
     projects: list[str] | None = None,
+    files: _ClientArtifactFiles | None = None,
 ) -> dict:
     """Capture raw source material and optionally return compile guidance.
+
+    Takes either `content` for text or `files` for attached file handles, which
+    are retrieved server-side and stored losslessly under `Sources/`. Both land
+    in the same lane: this command is for raw material, and `preserve_evidence`
+    and `preserve_artifacts` are for proof-bearing artifacts. Which one to call
+    is decided by what the artifact is for, never by what the client can carry.
 
     The raw source is preserved first. If `compile_guidance=true`, Exomem then
     returns a proposal for a future compiled note, without silently converting
@@ -5197,7 +5204,31 @@ def op_capture_source(
             source_kind and equally extensible.
         projects: Project keys this source serves. Never affects where it is
             stored; one source may serve several projects.
+        files: Temporary client file handles to capture losslessly as Sources,
+            instead of `content`. Each object requires `download_url` and
+            `file_id`; `mime_type` and `file_name` are optional. Exomem
+            retrieves each handle server-side, so no bytes pass through
+            model-visible arguments. Use this for an attached transcript,
+            article, screenshot, or recording that is raw material. Proof-bearing
+            artifacts go to `preserve_artifacts` instead — the lane is chosen by
+            what the artifact is for, never by which transport is available.
     """
+    if files:
+        from . import client_artifacts
+
+        return client_artifacts.capture_source_artifacts(
+            vault_root,
+            source_schema=source_schema,
+            title=title,
+            files=files,
+            slug=slug,
+            source_type=source_type or source_kind,
+            url=url,
+            tags=tags,
+            why_captured=why_captured,
+            domain=domain,
+            projects=projects,
+        )
     source = op_add(
         vault_root,
         source_schema,

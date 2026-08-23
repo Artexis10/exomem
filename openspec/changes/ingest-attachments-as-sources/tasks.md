@@ -33,18 +33,18 @@ media capture is safe to offer.
 
 ## 4. Sources lane ingestion
 
-- [ ] 4.1 Test that `capture_source` with a text file handle stores bytes under `Sources/`, applies the supplied kind, domain, and projects, and passes no base64 through a model-visible argument.
-- [ ] 4.2 Test that `capture_source` with an image file handle produces a media page awaiting extraction, and that the existing extraction path converges on it without destroying its classification.
-- [ ] 4.3 Test that the artifact and its page share one resolved stem, that naming authority is `add`'s uniquify rather than an `ARTIFACT_EXISTS` refusal, and that the original filename is recorded in frontmatter rather than used as the path.
+- [x] 4.1 Test that `capture_source` with a text file handle stores bytes under `Sources/`, applies the supplied kind, domain, and projects, and passes no base64 through a model-visible argument.
+- [x] 4.2 Test that `capture_source` with an image file handle produces a media page awaiting extraction, and that the existing extraction path converges on it without destroying its classification.
+- [x] 4.3 Test that the artifact and its page share one resolved stem, that naming authority is `add`'s uniquify rather than an `ARTIFACT_EXISTS` refusal, and that the original filename is recorded in frontmatter rather than used as the path.
 - [ ] 4.4 Test that a byte-identical retry within the replay window returns the cached terminal result and does not write a second uniquified copy.
 - [ ] 4.5 Test that safe-fetch behaviour is shared, not re-implemented: a private-address URL, an oversized body, and an expired handle each fail through the Sources path with the same stable codes as the Evidence path.
-- [ ] 4.6 Add `files` to `capture_source`, reusing the existing staging function and the existing file-handle type; persist through a Sources destination that reuses `add`'s taxonomy, indexes, and log writes.
-- [ ] 4.7 Test that `preserve_artifacts` and `preserve_evidence` are unchanged: same destination, same per-file outcomes, same failure codes.
+- [x] 4.6 Add `files` to `capture_source`, reusing the existing staging function and the existing file-handle type; persist through a Sources destination that reuses `add`'s taxonomy, indexes, and log writes.
+- [x] 4.7 Test that `preserve_artifacts` and `preserve_evidence` are unchanged: same destination, same per-file outcomes, same failure codes.
 
 ## 5. The lane is stated, never inferred
 
-- [ ] 5.1 Test that the same bytes reach different lanes purely by which command was called, for a text file and for an image.
-- [ ] 5.2 Test that no lane decision reads MIME type, filename, or extension — assert by capturing an image through the Sources command and a `.md` file through the Evidence command.
+- [x] 5.1 Test that the same bytes reach different lanes purely by which command was called, for a text file and for an image.
+- [x] 5.2 Test that no lane decision reads MIME type, filename, or extension — assert by capturing an image through the Sources command and a `.md` file through the Evidence command.
 - [ ] 5.3 Test that a minted upload capability names its lane and that bytes posted against it land in that lane.
 - [ ] 5.4 Carry the lane on `transfer_artifact` and `/upload`, fixing the destination when the capability is minted rather than when the bytes arrive.
 
