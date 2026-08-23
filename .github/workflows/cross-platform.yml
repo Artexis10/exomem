@@ -135,6 +135,16 @@ jobs:
       # same modules again in this Windows matrix pushed a shard past its 45m
       # session cap; macOS still gets them here, and Linux keeps its ordinary
       # CI coverage.
+      # `--session-timeout` is 55 min inside a 60 min job -- the same five-minute
+      # margin ci.yml leaves (1500s session in a 30 min job). At 2700s the cap sat
+      # below normal Windows runtime rather than above it: shards on main measured
+      # 38:40, 38:57, 42:58 and 45:44 against a 45:00 cap, so whichever crossed it
+      # reported `2929 passed, 226 skipped, 0 failed in 45:02` and then exit 1.
+      # Those were a clock, not a defect, and they read as a red main for two days.
+      # The cap stays below the job budget on purpose: it still catches a genuine
+      # hang, and pytest prints a summary where a killed job prints nothing.
+      # Every flag below lives inside a folded `>-` scalar, so a `#` there is part
+      # of the command and comments out the rest of it. Explanations go here.
       - name: Run tests (lean — BM25/keyword, server media extraction off)
         env:
           KB_MCP_DISABLE_EMBEDDINGS: "1"
@@ -155,7 +165,7 @@ jobs:
           --group=${{ matrix.shard }}
           --splitting-algorithm=least_duration
           --durations-path=.test_durations.json
-          --session-timeout=2700
+          --session-timeout=3300
           --durations=50
           --durations-min=1
           --junitxml=test-results/junit-${{ matrix.os }}-shard-${{ matrix.shard }}.xml

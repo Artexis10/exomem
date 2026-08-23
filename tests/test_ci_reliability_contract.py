@@ -297,3 +297,77 @@ def test_the_capped_runner_is_paid_on_merge_not_on_every_pull_request() -> None:
     # reaches it one merge later, on a lane that is advisory by design.
     assert "macos-latest" in push_arm
     assert "windows-latest" in push_arm
+
+
+_FOLDED_RUN_RE = re.compile(
+    r"^(?P<indent>\s*)-?\s*run:\s*>[-+]?\s*$(?P<body>(?:\n(?:(?P=indent)\s+.*|\s*))*)",
+    re.MULTILINE,
+)
+
+
+def _folded_run_blocks(text: str) -> list[str]:
+    """Every `run: >` folded scalar body in *text*, verbatim.
+
+    Style is the whole point here and `yaml.safe_load` discards it, so this
+    reads the file rather than the parsed tree: a `#` is a shell comment in a
+    literal `|` block and a command-killer in a folded `>` one.
+    """
+    return [match.group("body") for match in _FOLDED_RUN_RE.finditer(text)]
+
+
+def test_the_cross_platform_session_cap_sits_above_real_runtime_with_margin() -> None:
+    """A cap below normal runtime reports a clock as a defect.
+
+    At 2700s inside a 60 minute job this cap was under what a Windows shard
+    actually takes, not over it: shards on `main` measured 38:40, 38:57, 42:58
+    and 45:44 against a 45:00 cap, so whichever one crossed reported
+    `2929 passed, 226 skipped, 0 failed in 45:02` and then exit 1. Two days of
+    red `main` were that arithmetic.
+
+    The cap still has to stay *under* the job budget, because that is what buys
+    the diagnosis: pytest prints a summary and the timing evidence, where a
+    killed job prints nothing at all.
+    """
+    workflow = _cross_platform_workflow()
+    job = workflow["jobs"]["suite"]
+    step = next(step for step in job["steps"] if step.get("name", "").startswith("Run tests"))
+
+    match = re.search(r"--session-timeout=(\d+)", step["run"])
+    assert match, "the cross-platform lane must bound its session"
+    session_seconds = int(match.group(1))
+    job_seconds = job["timeout-minutes"] * 60
+
+    assert session_seconds < job_seconds, (
+        "the session cap must stay under the job budget, so a hang is reported by "
+        "pytest rather than killed silently by the runner"
+    )
+    assert job_seconds - session_seconds <= 5 * 60, (
+        f"{job_seconds - session_seconds}s of the job budget is unused; the cap should "
+        "claim it rather than fire below real runtime"
+    )
+    assert session_seconds >= 46 * 60, (
+        f"the cap is {session_seconds}s but a healthy Windows shard has been measured "
+        "at 45:44, so a green run would be reported as a failure"
+    )
+
+
+def test_no_folded_run_script_carries_a_yaml_style_comment() -> None:
+    """A `#` inside a folded `>-` scalar is part of the command, not a comment.
+
+    Folding joins the lines with spaces, so one `#` comments out every flag
+    after it and the lane silently stops running what the file appears to say.
+    Explanations belong above the step, where YAML actually treats them as
+    comments.
+    """
+    offenders: list[str] = []
+    for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
+        text = path.read_text(encoding="utf-8")
+        for body in _folded_run_blocks(text):
+            for number, line in enumerate(body.splitlines(), start=1):
+                if "#" in line:
+                    offenders.append(f"{path.name}: folded run block, line {number}: {line.strip()}")
+
+    assert not offenders, (
+        "a `#` inside a folded `>` run scalar is part of the command and comments "
+        f"out every flag after it: {offenders}"
+    )
