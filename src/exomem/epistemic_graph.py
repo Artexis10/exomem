@@ -3188,7 +3188,25 @@ class EpistemicGraphIndex:
                 graph_checkpoint=graph_checkpoint,
             )
         if report.pop("_rebuild_after_release", False):
-            return self._rebuild_all_off_boundary(accept_stabilized_build=True)
+            queued_before_rebuild = bool(report.pop("_queued_before_rebuild", False))
+            try:
+                return self._rebuild_all_off_boundary(accept_stabilized_build=True)
+            except graph_sync.GraphRebuildInProgress:
+                # A defer-disposition fallback has already persisted these exact
+                # paths and signalled the graph drain. The active owner cannot
+                # cover a mutation that landed after its snapshot, so leave the
+                # receipt for the next drain instead of blocking this mutator or
+                # pretending an unqueued rebuild request was safely coalesced.
+                if not queued_before_rebuild:
+                    raise
+                return {
+                    "indexed_files": 0,
+                    "nodes": 0,
+                    "edges": 0,
+                    "deferred": 1,
+                    "queued": 1,
+                    "coalesced": 1,
+                }
         # Standalone callers have already left the graph mutation hold. Command
         # callers retain their exact registration for writer_lease to start and
         # join only after canonical authority releases.
@@ -3243,7 +3261,13 @@ class EpistemicGraphIndex:
                 )
                 return None
             if graph_checkpoint is None:
-                return None
+                return {
+                    "indexed_files": 0,
+                    "nodes": 0,
+                    "edges": 0,
+                    "_rebuild_after_release": 1,
+                    "_queued_before_rebuild": 1,
+                }
             self._mark_unavailable()
             # `queued` is what separates this from `fallback()`'s own deferral
             # below, which registers a whole-vault rebuild and reports

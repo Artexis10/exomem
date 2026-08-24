@@ -10,7 +10,16 @@ from pathlib import Path
 
 import pytest
 
-from exomem import audit, epistemic_graph, freshness, graph_sync, index_sync, reconcile, semantic_index
+from exomem import (
+    audit,
+    deferred_index,
+    epistemic_graph,
+    freshness,
+    graph_sync,
+    index_sync,
+    reconcile,
+    semantic_index,
+)
 from exomem import find as find_module
 from exomem import vault as vault_module
 from exomem.cli_ops import OpError
@@ -235,6 +244,8 @@ def test_spawned_mutator_commits_while_full_rebuild_is_running(
         # 8.0s at which the held rebuild gives up -- and 0.5s was measuring
         # commit latency instead, which a loaded shared runner exceeds.
         assert completed.wait(_OBSERVE_SECONDS)
+        if operation == "refresh":
+            assert A in deferred_index.list_graph_paths(vault)
     finally:
         release_rebuild.set()
         rebuild_thread.join(timeout=_HOLD_SECONDS)
