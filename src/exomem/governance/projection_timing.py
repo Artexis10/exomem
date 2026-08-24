@@ -102,8 +102,8 @@ _REQUIRED_ROUTES = frozenset(
         "max-query",
         "max-limit",
         "max-shape",
-        "invalid-limit",
-        "minimum-limit",
+        "hidden-index-missing",
+        "pagination",
     }
 )
 _HARDWARE_RUNTIME_PROFILE = "github-hosted-ubuntu-latest-x64-python3.13"

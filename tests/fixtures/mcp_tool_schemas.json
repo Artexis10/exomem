@@ -579,6 +579,18 @@
           "description": "Max hits. Default 15.",
           "type": "integer"
         },
+        "continuation": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Opaque continuation returned by a prior governed recall page."
+        },
         "scope": {
           "default": "kb",
           "description": "kb, vault, or kb-only.",

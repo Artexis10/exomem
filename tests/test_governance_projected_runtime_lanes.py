@@ -416,6 +416,70 @@ def test_graph_promotes_a_target_below_the_complete_vector_candidate_prefix(
     assert result.hits[1].graph_hop is True
 
 
+def test_continuation_keeps_the_first_page_graph_candidate_boundary(
+    monkeypatch,
+    tmp_path,
+):
+    seed = _variant("Knowledge Base/seed.md", "1" * 64, "seed")
+    filler = _variant("Knowledge Base/filler.md", "2" * 64, "filler")
+    target = _variant("Knowledge Base/target.md", "3" * 64, "target")
+    runtime = _runtime(
+        tuple(_item(variant) for variant in (seed, filler, target)),
+        vectors=(
+            _vector(seed, (1.0, 0.0)),
+            _vector(filler, (0.5, 0.5)),
+            _vector(target, (-1.0, 0.0)),
+        ),
+        graphs=(
+            _graph(seed, target.item_identity),
+            _graph(filler),
+            _graph(target),
+        ),
+    )
+    monkeypatch.setattr(
+        embeddings,
+        "embed_texts",
+        lambda texts, *, is_query: [[1.0, 0.0]],
+    )
+    rank_config = projection_runtime.ranking_config.RankingConfig(
+        candidate_multiplier=1,
+        candidate_floor=2,
+        graph_seed_cap=1,
+    )
+    call = {
+        "query": "seed",
+        "limit": 1,
+        "mode": "hybrid",
+        "graph": True,
+        "rerank": False,
+        "rank_config": rank_config,
+        "principal": principal.owner_principal(surface="library"),
+        "purpose": None,
+    }
+    projection_runtime._clear_projected_continuations_for_tests()
+
+    first = projection_runtime.find_projected_hits(tmp_path, runtime, **call)
+    assert [hit.path for hit in first.hits] == [seed.item_identity]
+    assert first.continuation is not None
+    second = projection_runtime.find_projected_hits(
+        tmp_path,
+        runtime,
+        continuation=first.continuation,
+        **call,
+    )
+    assert [hit.path for hit in second.hits] == [target.item_identity]
+    assert second.hits[0].graph_hop is True
+    assert second.continuation is not None
+    third = projection_runtime.find_projected_hits(
+        tmp_path,
+        runtime,
+        continuation=second.continuation,
+        **call,
+    )
+    assert [hit.path for hit in third.hits] == [filler.item_identity]
+    assert third.continuation is None
+
+
 def test_default_scope_retains_outside_target_beyond_the_lane_candidate_floor(
     tmp_path,
 ):

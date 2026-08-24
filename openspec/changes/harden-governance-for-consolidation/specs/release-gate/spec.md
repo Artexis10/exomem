@@ -161,6 +161,46 @@ envelope: an echoed JSON-RPC request id, HTTP `Date`/outer trace headers, TLS/ch
 compression framing, and physical network arrival time. It MUST NOT delete arbitrary
 application fields to obtain equality.
 
+Governed find SHALL expose one optional input/output `continuation` with exact grammar
+`pc1.` followed by 64 lowercase hexadecimal SHA-256 characters. The token SHALL be the
+SHA-256 digest of NUL-terminated ASCII domain
+`exomem.projected-find-continuation.v1\0` followed by RFC 8785 JCS containing only
+canonical principal id, verified authorization-session id or null, declared purpose or
+null, the SHA-256 request digest, next visible offset, and one caller-visible snapshot
+digest. The request digest SHALL be SHA-256 over RFC 8785 JCS of the closed typed object
+`{auto_rerank, graph, limit, mode, prefer_active, prefer_compiled, query, rerank,
+scope}` after public defaults are applied. The
+snapshot digest SHALL stream the ordered item/variant-id pairs under NUL-terminated ASCII
+domain `exomem.projected-visible-snapshot.v1\0`, followed by a big-endian u32 pair count and, for
+each UTF-8 field, a big-endian u32 byte length plus its bytes. It SHALL exclude
+vault/root identity, L0 identities, catalog count/generation, issuance
+time, randomness, and server-only authorization facts. A bounded process-local record
+SHALL retain the exact immutable runtime, authorization-map/selected-projection/request/
+principal/visible-snapshot digests, next offset, and the first page's repository-derived
+candidate depth for 15 monotonic minutes, with a hard 4,096-record process cap and
+expired-record collection before admission. The token is a lookup key, not authority.
+
+Every continuation SHALL be exact-vault/principal/session/purpose/request-bound. The
+server SHALL require current policy fingerprint and projector schema parity, re-run
+current authorization against the retained namespace, compare the current namespace's
+selected-projection digest while excluding L0 rows, and compare the complete
+authorization-map and visible-snapshot digests before returning the next slice. Policy,
+projector, session, grant, revocation, or visible-result drift SHALL return the same
+content-free `INVALID_CONTINUATION` refusal; hidden-only catalog change SHALL continue
+over the retained namespace. Invalid, malformed, expired, evicted, restart-lost, cross-
+binding, and registry-capacity outcomes SHALL share that refusal under the fixed public
+completion class. Retry SHALL be deterministic, read-only, non-consuming, and SHALL NOT
+extend expiry. Old runtimes SHALL remain strongly referenced only by live continuation
+records and become collectible when the last record expires or is removed.
+A separately issued first page MAY refresh a byte-identical token to the current
+verified runtime and fixed expiry; a continuation replay MUST NOT replace that newer
+record with prior state.
+
+Later pages SHALL reuse the first page's retained candidate depth exactly. Advancing an
+offset MUST NOT widen a primary vector/BM25 prefix, reclassify a graph-only hit, or
+recompute a different ordered window; exhaustion of that bounded window SHALL omit the
+continuation.
+
 Serialized timing suppression alone SHALL NOT satisfy timing non-interference. Governed
 non-owner payloads SHALL use one stable `timings_suppressed` shape chosen from public
 policy/principal state. The repository SHALL normatively define
@@ -255,6 +295,20 @@ identity or authorization bearers.
 - **WHEN** L0 items sort before, between, or after permitted items across multiple pages
 - **THEN** page membership, cursor/continuation, total, ordering, and exhaustion are
   identical to a corpus where the L0 items do not exist
+
+#### Scenario: Hidden-only change preserves a live continuation
+
+- **WHEN** a caller obtains a continuation and only L0 catalog items change before the
+  next page
+- **THEN** the retained projected snapshot returns the identical next page and token
+  behavior while current authorization is revalidated
+
+#### Scenario: Authority drift invalidates rather than broadens a cursor
+
+- **WHEN** policy, projector, principal, verified session, grant, revocation, purpose,
+  request shape, or any caller-visible selected variant differs from the cursor record
+- **THEN** the request returns the same content-free `INVALID_CONTINUATION` refusal and
+  emits no stale page, count, path, or drift detail
 
 #### Scenario: Ranking uses only projected fields
 
