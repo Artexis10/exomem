@@ -1797,6 +1797,16 @@ class GraphRebuildStopped(GraphRebuildRegistrationError):
         )
 
 
+class GraphRebuildInProgress(GraphRebuildRegistrationError):
+    """A verified rebuild owner is live, so this caller should retry later."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "GRAPH_SYNC_REBUILD_IN_PROGRESS",
+            "Retry after the active graph rebuild owner publishes or releases its claim.",
+        )
+
+
 class GraphSidecarReplaceUnavailable(GraphRebuildRegistrationError):
     """Windows has an open reader; retain the old sidecar and recover later."""
 
@@ -2507,6 +2517,18 @@ class GraphRebuildCoordinator:
             try:
                 outcome = builder(required)
             except BaseException as error:  # noqa: BLE001 - integration path
+                if isinstance(error, GraphRebuildInProgress):
+                    logger.info(
+                        "graph rebuild coalesced with active external owner "
+                        "checkpoint_sha256=%s generation=%s",
+                        required.checkpoint_sha256,
+                        required.generation,
+                    )
+                    with self._condition:
+                        self._error = error
+                        self._running = False
+                        self._condition.notify_all()
+                    return
                 if isinstance(error, GraphRebuildRegistrationError):
                     projection = self._advice_for(error)
                 else:

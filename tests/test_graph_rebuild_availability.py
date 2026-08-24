@@ -1058,7 +1058,7 @@ def test_an_enqueue_that_failed_still_earns_a_whole_vault_rebuild(
     def refuse(*_args, **_kwargs):
         raise sqlite3.OperationalError("queue unavailable")
 
-    monkeypatch.setattr(deferred_index, "add_graph", refuse)
+    monkeypatch.setattr(deferred_index, "add_graph_receipts", refuse)
     monkeypatch.setattr(
         graph_sync,
         "register_rebuild",

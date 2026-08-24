@@ -54,6 +54,7 @@ def open_readonly_connection(vault_root: Path) -> sqlite3.Connection | None:
         with reserved_paths._identity_coordination_scope(
             vault_root,
             descriptor_ids=("governance-store",),
+            identity_may_change=False,
         ):
             return _open_readonly_connection_owned(vault_root)
 
@@ -170,6 +171,7 @@ def open_active_governance_read_connection(vault_root: Path) -> sqlite3.Connecti
         with reserved_paths._identity_coordination_scope(
             vault_root,
             descriptor_ids=("governance-store",),
+            identity_may_change=False,
         ):
             path = sidecar_path(vault_root)
             try:
@@ -675,6 +677,7 @@ def guard_generation_probe(vault_root: Path) -> dict[str, object]:
             with reserved_paths._identity_coordination_scope(
                 vault_root,
                 descriptor_ids=("governance-store",),
+                identity_may_change=False,
             ):
                 with reserved_paths._sqlite_owner_target_scope(
                     vault_root,

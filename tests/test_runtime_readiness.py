@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -206,6 +208,111 @@ def test_runtime_readiness_measures_the_configured_vault(
     readiness_module.runtime_readiness(mcp_tool_surface_sha256="f" * 64)
 
     assert observed == [vault]
+
+
+def test_runtime_readiness_fails_closed_within_a_tight_bound_when_status_blocks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import runtime_readiness as readiness_module
+    from exomem import session_validation_cache, writer_lease
+
+    vault = tmp_path / "blocked-vault"
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocked_coordination_status(_vault_root=None):  # noqa: ANN001
+        entered.set()
+        assert release.wait(5)
+        return {
+            "enabled": False,
+            "role": "standalone",
+            "replica_id": None,
+            "coordinator_healthy": True,
+            "mutation_boundary": {"state": "free"},
+        }
+
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
+    monkeypatch.setattr(writer_lease, "coordination_status", blocked_coordination_status)
+    monkeypatch.setattr(session_validation_cache, "session_store_readiness", lambda: {})
+    monkeypatch.setattr(readiness_module, "_measure_observability", lambda: {})
+
+    started = time.monotonic()
+    try:
+        snapshot = readiness_module.runtime_readiness(
+            mcp_tool_surface_sha256="a" * 64,
+            traffic={},
+        )
+    finally:
+        release.set()
+
+    assert entered.is_set()
+    assert time.monotonic() - started < 0.75
+    assert snapshot["status"] == "not_ready"
+    assert snapshot["takeover_eligible"] is False
+    assert snapshot["reasons"] == ["coordination_status_timeout"]
+    assert snapshot["coordination"]["mutation_boundary"] == {
+        "state": "unknown",
+        "reason": "status_timeout",
+    }
+
+
+def test_bounded_coordination_status_is_single_flight_and_reuses_late_result(
+    tmp_path: Path,
+) -> None:
+    from exomem import runtime_readiness as readiness_module
+
+    vault = tmp_path / "single-flight-vault"
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    calls = 0
+    expected = {"enabled": False, "coordinator_healthy": True}
+
+    def blocked_probe(_vault_root: Path | None):
+        nonlocal calls
+        calls += 1
+        entered.set()
+        assert release.wait(5)
+        finished.set()
+        return expected
+
+    results: list[object] = []
+    workers = [
+        threading.Thread(
+            target=lambda: results.append(
+                readiness_module._bounded_coordination_status(
+                    vault,
+                    blocked_probe,
+                    timeout_seconds=0.05,
+                )
+            )
+        )
+        for _ in range(4)
+    ]
+    for worker in workers:
+        worker.start()
+    assert entered.wait(2)
+    for worker in workers:
+        worker.join(2)
+    assert all(not worker.is_alive() for worker in workers)
+    assert results == [None] * 4
+    assert calls == 1
+
+    release.set()
+    assert finished.wait(2)
+
+    assert readiness_module._bounded_coordination_status(
+        vault,
+        blocked_probe,
+        timeout_seconds=0.5,
+    ) == expected
+    assert calls == 1
+    assert readiness_module._bounded_coordination_status(
+        vault,
+        blocked_probe,
+        timeout_seconds=0.5,
+    ) == expected
+    assert calls == 2
 
 
 def test_runtime_readiness_uses_vault_path_identity_for_a_real_held_boundary(
