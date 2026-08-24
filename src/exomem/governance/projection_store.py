@@ -1073,6 +1073,7 @@ def verify_variant_store(
         with reserved_paths._identity_coordination_scope(
             root,
             descriptor_ids=(_DESCRIPTOR_ID,),
+            identity_may_change=False,
         ):
             with reserved_paths._sqlite_owner_target_scope(
                 root,
@@ -1121,6 +1122,7 @@ def load_projection_catalog(
         with reserved_paths._identity_coordination_scope(
             root,
             descriptor_ids=(_DESCRIPTOR_ID,),
+            identity_may_change=False,
         ):
             with reserved_paths._sqlite_owner_target_scope(
                 root,
@@ -1176,6 +1178,7 @@ def load_projection_variant(
         with reserved_paths._identity_coordination_scope(
             root,
             descriptor_ids=(_DESCRIPTOR_ID,),
+            identity_may_change=False,
         ):
             with reserved_paths._sqlite_owner_target_scope(
                 root,

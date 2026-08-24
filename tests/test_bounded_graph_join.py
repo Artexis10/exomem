@@ -303,6 +303,23 @@ def test_a_write_that_leaves_before_convergence_says_the_graph_is_catching_up(
     assert compact["graph_sync_remediation"]
 
 
+def test_a_registered_external_owner_is_reported_as_pending_not_failed(
+    vault: Path,
+) -> None:
+    required = _checkpoint(1)
+
+    def build(
+        _checkpoint: graph_sync.GraphSyncCheckpoint,
+    ) -> graph_sync.GraphBuildOutcome:
+        raise graph_sync.GraphRebuildInProgress()
+
+    compact = _invoke_with_registered_rebuild(vault, build, checkpoint=required)
+
+    assert compact["graph_sync"] == "pending"
+    assert compact["graph_sync_code"] == "GRAPH_SYNC_REBUILD_IN_PROGRESS"
+    assert compact["graph_sync_checkpoint"] == required.checkpoint_sha256
+
+
 def test_a_write_whose_repair_is_queued_says_the_graph_is_catching_up(
     vault: Path,
 ) -> None:

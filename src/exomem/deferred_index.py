@@ -61,6 +61,7 @@ def _connect_readonly(vault_root: Path) -> sqlite3.Connection:
         with reserved_paths._identity_coordination_scope(
             vault_root,
             descriptor_ids=("deferred-index-store",),
+            identity_may_change=False,
         ):
             return _connect_readonly_owned(vault_root)
 
@@ -98,6 +99,7 @@ def _connect(
         with reserved_paths._identity_coordination_scope(
             vault_root,
             descriptor_ids=("deferred-index-store",),
+            identity_may_change=create,
         ):
             return _connect_owned(
                 vault_root,
