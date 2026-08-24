@@ -293,6 +293,11 @@ def test_startup_preactivates_bound_vector_clip_and_graph_once(
                 AssertionError("request reloaded a projected measurement family")
             ),
         )
+    monkeypatch.setattr(
+        projection_runtime,
+        "_PROJECTED_SERVING_RELEASE_ACCEPTED",
+        True,
+    )
     assert projection_runtime.load_active_projection_runtime(tmp_path) is runtime
 
 

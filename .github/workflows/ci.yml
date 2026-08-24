@@ -258,13 +258,13 @@ jobs:
         run: uv run --frozen python -m pytest tests/test_latency_gate.py -q
 
   governance-projection-wire:
-    name: governance projected wire (${{ matrix.route }})
+    name: governance projected wire characterization (${{ matrix.route }})
     runs-on: ubuntu-latest
     timeout-minutes: 8
     strategy:
       fail-fast: false
       matrix:
-        route: [keyword, bm25, vector-hard-off, rerank-hard-off, clip-hard-off, graph, graph-rerank-hard-off, max-query, max-limit, max-shape, error, pagination]
+        route: [keyword, bm25, vector-hard-off, rerank-hard-off, clip-hard-off, graph, graph-rerank-hard-off, max-query, max-limit, max-shape, invalid-limit, minimum-limit]
     steps:
       - uses: actions/checkout@v4
       - name: Install uv
@@ -273,7 +273,7 @@ jobs:
           enable-cache: true
       - name: Verify lockfile is current
         run: uv lock --check
-      - name: Exact-capacity hidden-corpus actual-wire gate
+      - name: Characterize exact-capacity hidden-corpus actual-wire routes
         env:
           EXOMEM_GOVERNANCE_TIMING_ROUTE: ${{ matrix.route }}
           EXOMEM_DISABLE_EMBEDDINGS: "1"

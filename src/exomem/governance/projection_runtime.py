@@ -48,12 +48,17 @@ class _PreactivatedProjectionRuntime:
 
 
 _PREACTIVATED_RUNTIMES: dict[str, _PreactivatedProjectionRuntime] = {}
+_PROJECTED_COMPLETION_ROOTS: set[str] = set()
 _PREACTIVATED_RUNTIME_LOCK = threading.RLock()
 # Repository-owned release fence. The checked release manifest and required
 # actual-wire CI matrix currently certify only the exact model-hard-off runtime
 # profile. Environment cannot opt an uncertified model-enabled profile into
 # serving; those configurations remain closed until their own evidence lands.
-_PROJECTED_SERVING_RELEASE_ACCEPTED = True
+# The model-hard-off implementation remains installed but unavailable until the
+# actual-wire gate covers genuine hidden-state error reduction and real
+# pagination.  A malformed-argument response and ``limit=1`` are not evidence
+# for those two release claims.
+_PROJECTED_SERVING_RELEASE_ACCEPTED = False
 
 
 def projected_serving_release_profile() -> str | None:
@@ -280,6 +285,7 @@ def _clear_preactivated_runtimes_for_tests() -> None:
 
     with _PREACTIVATED_RUNTIME_LOCK:
         _PREACTIVATED_RUNTIMES.clear()
+        _PROJECTED_COMPLETION_ROOTS.clear()
 
 
 def has_preactivated_projection_runtime(vault_root: Path) -> bool:
@@ -287,6 +293,28 @@ def has_preactivated_projection_runtime(vault_root: Path) -> bool:
 
     with _PREACTIVATED_RUNTIME_LOCK:
         return _root_key(Path(vault_root)) in _PREACTIVATED_RUNTIMES
+
+
+def requires_fixed_projected_completion(vault_root: Path) -> bool:
+    """Return the process-classified timing boundary without request IO."""
+
+    with _PREACTIVATED_RUNTIME_LOCK:
+        return _root_key(Path(vault_root)) in _PROJECTED_COMPLETION_ROOTS
+
+
+def classify_projected_completion_boundary(vault_root: Path) -> bool:
+    """Observe and retain the irreversible projected timing boundary."""
+
+    root = Path(vault_root)
+    root_key = _root_key(root)
+    with _PREACTIVATED_RUNTIME_LOCK:
+        if root_key in _PROJECTED_COMPLETION_ROOTS:
+            return True
+    completion_required = requires_projected_read_boundary(root)
+    if completion_required:
+        with _PREACTIVATED_RUNTIME_LOCK:
+            _PROJECTED_COMPLETION_ROOTS.add(root_key)
+    return completion_required
 
 
 def preactivate_projection_runtime(
@@ -300,6 +328,8 @@ def preactivate_projection_runtime(
     """
 
     root = Path(vault_root)
+    root_key = _root_key(root)
+    classify_projected_completion_boundary(root)
     if not _configured_external_custody():
         return None
     connection: sqlite3.Connection | None = None
@@ -310,6 +340,8 @@ def preactivate_projection_runtime(
         )
         activation = _control_activation(custody)
         if activation is None:
+            with _PREACTIVATED_RUNTIME_LOCK:
+                _PROJECTED_COMPLETION_ROOTS.discard(root_key)
             return None
         cell_id, logical_vault_id, store_id, epoch, digest = activation
         connection = store.open_active_governance_read_connection(root)
@@ -769,6 +801,55 @@ def _projected_rank_multiplier(
     return multiplier
 
 
+def _order_projected_scope(
+    ordered_identities: tuple[str, ...],
+    *,
+    scope: str,
+    limit: int,
+    knowledge_base_name: str,
+) -> tuple[str, ...]:
+    """Apply the public KB-first reserve without reopening raw pages."""
+
+    if scope != "kb":
+        return ordered_identities
+    inside: list[str] = []
+    outside: list[str] = []
+    for identity in ordered_identities:
+        parts = PurePosixPath(identity).parts
+        target = inside if parts and parts[0] == knowledge_base_name else outside
+        target.append(identity)
+    if not outside:
+        return ordered_identities
+    reserve = min(len(outside), max(1, limit // 5), max(0, limit - 1))
+    kb_keep = limit - reserve
+    return tuple((inside[:kb_keep] + outside)[:limit])
+
+
+def _retain_projected_scope_lane(
+    hits: tuple[projected_retrieval.ProjectedLexicalHit, ...],
+    *,
+    scope: str,
+    candidate_depth: int,
+    outside_depth: int,
+    knowledge_base_name: str,
+) -> tuple[projected_retrieval.ProjectedLexicalHit, ...]:
+    """Keep a bounded outside-KB pool before per-lane truncation."""
+
+    head = hits[:candidate_depth]
+    if scope != "kb":
+        return head
+    outside = tuple(
+        hit
+        for hit in hits
+        if not (
+            (parts := PurePosixPath(hit.item_identity).parts)
+            and parts[0] == knowledge_base_name
+        )
+    )[:outside_depth]
+    retained = {hit.item_identity for hit in (*head, *outside)}
+    return tuple(hit for hit in hits if hit.item_identity in retained)
+
+
 def _retain_projected_bm25_hits(
     lane_hits: Mapping[
         str,
@@ -836,6 +917,7 @@ def find_projected_hits(
     *,
     query: str,
     limit: int,
+    scope: str = "vault",
     mode: str,
     graph: bool,
     rerank: bool | None,
@@ -874,6 +956,7 @@ def find_projected_hits(
     if (
         not query
         or mode not in {"keyword", "hybrid", "vector"}
+        or scope not in {"kb", "vault"}
         or (graph and mode == "keyword")
         or rerank not in {None, False, True}
     ):
@@ -1136,8 +1219,15 @@ def find_projected_hits(
                 ) from error
 
     lane_order = ranking_config.LANE_ORDER[:5]
+    knowledge_base_name = kb_dirname()
     lane_hits = {
-        lane: hits[:candidate_depth]
+        lane: _retain_projected_scope_lane(
+            hits,
+            scope=scope,
+            candidate_depth=candidate_depth,
+            outside_depth=limit,
+            knowledge_base_name=knowledge_base_name,
+        )
         for lane, hits in lane_hits.items()
     }
     active_lanes = [lane for lane in lane_order if lane_hits.get(lane)]
@@ -1250,6 +1340,13 @@ def find_projected_hits(
                 "governed projected retrieval is unavailable"
             ) from error
 
+    ordered_identities = _order_projected_scope(
+        ordered_identities,
+        scope=scope,
+        limit=limit,
+        knowledge_base_name=knowledge_base_name,
+    )
+
     hits_by_lane = {
         lane: {hit.item_identity: hit for hit in hits}
         for lane, hits in lane_hits.items()
@@ -1263,7 +1360,6 @@ def find_projected_hits(
     reranked_by_identity = (
         {} if reranked is None else {hit.item_identity: hit for hit in reranked}
     )
-    knowledge_base_name = kb_dirname()
     hits: list[Hit] = []
     for final_rank, identity in enumerate(ordered_identities[:limit], 1):
         source_hit = reranked_by_identity.get(identity)
@@ -1322,9 +1418,11 @@ __all__ = [
     "ActiveProjectionRuntime",
     "ProjectedFindResult",
     "ProjectionRuntimeUnavailable",
+    "classify_projected_completion_boundary",
     "find_projected_hits",
     "has_preactivated_projection_runtime",
     "load_active_projection_runtime",
     "preactivate_projection_runtime",
+    "requires_fixed_projected_completion",
     "requires_projected_read_boundary",
 ]

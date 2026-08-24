@@ -161,6 +161,7 @@ def test_startup_preactivates_one_digest_and_serves_only_that_revalidated_runtim
         "catalog",
         "stabilize",
     ]
+    assert projection_runtime.requires_fixed_projected_completion(tmp_path) is True
 
     monkeypatch.setattr(
         schema_v4,
@@ -176,7 +177,18 @@ def test_startup_preactivates_one_digest_and_serves_only_that_revalidated_runtim
             AssertionError("request reloaded projection catalog")
         ),
     )
-    assert projection_runtime._PROJECTED_SERVING_RELEASE_ACCEPTED is True
+    assert projection_runtime._PROJECTED_SERVING_RELEASE_ACCEPTED is False
+    with pytest.raises(
+        projection_runtime.ProjectionRuntimeUnavailable,
+        match="governed projected retrieval is unavailable",
+    ):
+        projection_runtime.load_active_projection_runtime(tmp_path)
+
+    monkeypatch.setattr(
+        projection_runtime,
+        "_PROJECTED_SERVING_RELEASE_ACCEPTED",
+        True,
+    )
     assert projection_runtime.load_active_projection_runtime(tmp_path) is activated
 
     current_control[0] = replace(control, activation_epoch=control.activation_epoch + 1)
@@ -196,6 +208,63 @@ def test_startup_preactivates_one_digest_and_serves_only_that_revalidated_runtim
         match="governed projected retrieval is unavailable",
     ):
         projection_runtime.load_active_projection_runtime(tmp_path)
+
+
+def test_unavailable_projected_startup_keeps_the_fixed_completion_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv(
+        authorization_custody.KEYRING_FILE_ENV,
+        str(tmp_path / "keyring"),
+    )
+    monkeypatch.setattr(
+        projection_runtime.store,
+        "open_active_governance_read_connection",
+        lambda _root: (_ for _ in ()).throw(OSError("unavailable sidecar")),
+    )
+    monkeypatch.setattr(
+        authorization_custody,
+        "load_authorization_custody",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            authorization_custody.AuthorizationCustodyUnavailable(
+                "unavailable custody"
+            )
+        ),
+    )
+
+    projection_runtime._clear_preactivated_runtimes_for_tests()
+    with pytest.raises(
+        projection_runtime.ProjectionRuntimeUnavailable,
+        match="governed projected retrieval is unavailable",
+    ):
+        projection_runtime.preactivate_projection_runtime(tmp_path)
+
+    assert projection_runtime.requires_fixed_projected_completion(tmp_path) is True
+
+
+def test_completion_boundary_rechecks_legacy_until_governance_is_observed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    observations = iter((False, True))
+    calls: list[Path] = []
+
+    def observe(root: Path) -> bool:
+        calls.append(root)
+        return next(observations)
+
+    monkeypatch.setattr(
+        projection_runtime,
+        "requires_projected_read_boundary",
+        observe,
+    )
+    projection_runtime._clear_preactivated_runtimes_for_tests()
+
+    assert projection_runtime.classify_projected_completion_boundary(tmp_path) is False
+    assert projection_runtime.classify_projected_completion_boundary(tmp_path) is True
+    assert projection_runtime.classify_projected_completion_boundary(tmp_path) is True
+    assert calls == [tmp_path, tmp_path]
 
 
 def test_runtime_stabilization_finishes_collection_before_publication(
