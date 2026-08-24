@@ -800,6 +800,7 @@ def load_measurement_store(
         with reserved_paths._identity_coordination_scope(
             root,
             descriptor_ids=(_DESCRIPTOR_ID,),
+            identity_may_change=False,
         ):
             with reserved_paths._sqlite_owner_target_scope(
                 root,

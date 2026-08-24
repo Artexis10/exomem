@@ -2344,10 +2344,11 @@ class LeaseManager:
         *,
         domains: Iterable[str],
         exclusive: bool,
+        advance_generation: bool = True,
         request_id: str | None = None,
         operation: str | None = None,
         holder_kind: str = "reserved-state",
-    ) -> Iterator[None]:
+    ) -> Iterator[str]:
         """Coordinate one owner's identities without serializing other owners."""
 
         ordered_domains = tuple(sorted(set(domains)))
@@ -2392,15 +2393,26 @@ class LeaseManager:
                 enter(gate_stack, gate, operation_label=gate_label)
                 with ExitStack() as domains_stack:
                     enter_domains(domains_stack)
-                    yield
+                    yield _read_reserved_identity_generation(
+                        self.config.state_dir, vault_root
+                    )
             return
 
         with ExitStack() as domains_stack:
             with ExitStack() as gate_stack:
                 gate_label = f"{operation}:gate" if operation is not None else "gate"
                 enter(gate_stack, gate, operation_label=gate_label)
+                # Admission order matches the exclusive scanner: gate first,
+                # then domains.  The domain stack outlives the gate so exact
+                # owners still release admission before doing their work,
+                # without the gate/domain inversion that can deadlock a scan.
                 enter_domains(domains_stack)
-            yield
+                generation = (
+                    _bump_reserved_identity_generation(self.config.state_dir, vault_root)
+                    if advance_generation
+                    else _read_reserved_identity_generation(self.config.state_dir, vault_root)
+                )
+            yield generation
 
     @contextmanager
     def mutation_guard(
@@ -2662,6 +2674,8 @@ class LeaseManager:
         def graph_failure(checkpoint: Any, error: BaseException | None = None) -> dict[str, str]:
             from . import graph_sync
 
+            if isinstance(error, graph_sync.GraphRebuildInProgress):
+                return graph_sync.committed_graph_pending(checkpoint)
             if isinstance(error, graph_sync.GraphRebuildRegistrationError):
                 return graph_sync.committed_graph_failure(
                     checkpoint, code=error.code, remediation=error.remediation
@@ -3561,6 +3575,58 @@ def _commit_generation_path(
         canonical_mutation_identity(vault_or_cell).encode("utf-8")
     ).hexdigest()[:20]
     return Path(state_dir) / "commit-generations" / f"{digest}.txt"
+
+
+def _reserved_identity_generation_path(
+    state_dir: Path, vault_or_cell: os.PathLike[str] | str
+) -> Path:
+    digest = hashlib.sha256(
+        canonical_mutation_identity(vault_or_cell).encode("utf-8")
+    ).hexdigest()[:20]
+    return Path(state_dir) / "reserved-identity-generations" / f"{digest}.txt"
+
+
+def _read_reserved_identity_generation(
+    state_dir: Path, vault_or_cell: os.PathLike[str] | str
+) -> str:
+    """Read the cross-process private-identity seqlock token.
+
+    The caller holds the identity gate. Missing means no owner has entered yet;
+    malformed or unreadable state fails closed instead of blessing a stale
+    catalogue.
+    """
+
+    path = _reserved_identity_generation_path(state_dir, vault_or_cell)
+    try:
+        value = path.read_text(encoding="ascii").strip()
+    except FileNotFoundError:
+        return "0" * 32
+    except (OSError, UnicodeError) as error:
+        raise RuntimeError("reserved identity generation is unreadable") from error
+    if re.fullmatch(r"[0-9a-f]{32}", value) is None:
+        raise RuntimeError("reserved identity generation is malformed")
+    return value
+
+
+def _bump_reserved_identity_generation(
+    state_dir: Path, vault_or_cell: os.PathLike[str] | str
+) -> str:
+    """Advance the token before an exact owner may change private identities."""
+
+    path = _reserved_identity_generation_path(state_dir, vault_or_cell)
+    token = secrets.token_hex(16)
+    temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary.write_text(token, encoding="ascii")
+        os.replace(temporary, path)
+    except OSError as error:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise RuntimeError("reserved identity generation could not advance") from error
+    return token
 
 
 def read_commit_generation(vault_or_cell: os.PathLike[str] | str) -> int | None:

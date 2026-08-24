@@ -612,7 +612,7 @@ class FileWatcher:
         """
         if freshness.external_pending_epoch(self._vault_root) is None:
             return
-        from . import epistemic_graph
+        from . import epistemic_graph, graph_sync
         from . import find as find_module
         from . import vault as vault_module
 
@@ -643,6 +643,9 @@ class FileWatcher:
                     "rebuilt graph did not publish an available marker"
                 )
         except Exception as error:  # noqa: BLE001 - retain a retry signal and fail closed
+            if isinstance(error, graph_sync.GraphRebuildInProgress):
+                log.info("file watcher: graph recovery joined an active external owner")
+                return
             # A refused publication is Class B: the registry observed and
             # recorded every event, and only this projection failed to publish.
             # Re-marking here would allocate a fresh external-pending epoch on
@@ -676,7 +679,7 @@ class FileWatcher:
         the watcher's background startup pass is the only complete proof of
         source bytes and resolver topology across that crash boundary.
         """
-        from . import epistemic_graph
+        from . import epistemic_graph, graph_sync
         from . import find as find_module
         from . import vault as vault_module
 
@@ -695,6 +698,11 @@ class FileWatcher:
             if not graph.available():
                 raise RuntimeError("startup graph rebuild did not publish availability")
             return True
+        except graph_sync.GraphRebuildInProgress:
+            # The external owner will publish after the initial startup fence.
+            # A second suspension here could land after that publication.
+            log.info("file watcher: startup graph validation joined an active external owner")
+            return False
         except Exception:  # noqa: BLE001 - persisted barrier keeps reads fail-closed
             try:
                 graph.suspend_reads()
