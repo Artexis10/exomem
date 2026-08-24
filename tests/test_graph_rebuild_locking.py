@@ -318,7 +318,7 @@ def test_background_rebuild_treats_verified_external_owner_as_coalescing(
         vault_root,
         mutation_coordinator=SimpleNamespace(state_root=tmp_path / "state"),
     )
-    assert finished.wait(2)
+    assert finished.wait(_OBSERVE_SECONDS)
     deadline = time.monotonic() + 2
     while epistemic_graph._REBUILDING and time.monotonic() < deadline:
         time.sleep(0.01)
