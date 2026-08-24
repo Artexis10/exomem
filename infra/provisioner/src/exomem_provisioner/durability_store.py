@@ -40,6 +40,20 @@ def _as_utc(value: datetime | None) -> datetime | None:
     return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
+def provider_retention_covers(
+    actual: datetime | None,
+    required: datetime | None,
+) -> bool:
+    """Compare provider retention at the portable whole-second precision."""
+    normalized_actual = _as_utc(actual)
+    normalized_required = _as_utc(required)
+    if normalized_required is None:
+        return normalized_actual is None
+    if normalized_actual is None:
+        return False
+    return normalized_actual.replace(microsecond=0) >= normalized_required.replace(microsecond=0)
+
+
 class _B2StoreBase:
     def __init__(self, client: Any, *, bucket: str) -> None:
         if not bucket:
@@ -137,13 +151,9 @@ class B2UploadOnlyObjectStore(_B2StoreBase):
 
     @staticmethod
     def _require_retention(receipt: ProviderObjectHead, retain_until: datetime | None) -> None:
-        actual = _as_utc(receipt.retain_until)
-        expected = _as_utc(retain_until)
-        if expected is None:
-            if actual is not None:
+        if not provider_retention_covers(receipt.retain_until, retain_until):
+            if retain_until is None:
                 raise ProviderObjectConflict("provider object has an unexpected retention lock")
-            return
-        if actual is None or actual < expected:
             raise ProviderObjectConflict("provider object retention proof is insufficient")
 
 

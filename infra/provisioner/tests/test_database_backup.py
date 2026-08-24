@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -260,6 +260,41 @@ class RecordingDatabaseStore:
 
     async def head(self, key):
         return self.heads.get(key)
+
+
+def test_database_remote_proof_accepts_provider_retention_precision() -> None:
+    required = datetime(2030, 1, 8, 12, 0, 0, 987654, tzinfo=UTC)
+    observed = required.replace(microsecond=987000)
+    metadata = {"artifact-kind": "database-recovery"}
+
+    DatabaseBackupWorkflow._verify_remote(
+        ProviderObjectHead(
+            key="database-backup/opaque.recovery",
+            size=4096,
+            metadata=metadata,
+            version_id="opaque-version",
+            retain_until=observed,
+        ),
+        key="database-backup/opaque.recovery",
+        expected_size=4096,
+        metadata=metadata,
+        lock_until=required,
+    )
+
+    with pytest.raises(DatabaseRecoveryVerificationError, match="proof differs"):
+        DatabaseBackupWorkflow._verify_remote(
+            ProviderObjectHead(
+                key="database-backup/opaque.recovery",
+                size=4096,
+                metadata=metadata,
+                version_id="opaque-version",
+                retain_until=required - timedelta(seconds=1),
+            ),
+            key="database-backup/opaque.recovery",
+            expected_size=4096,
+            metadata=metadata,
+            lock_until=required,
+        )
 
 
 class RemoteArtifactStore(RecordingDatabaseStore):
