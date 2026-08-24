@@ -697,7 +697,28 @@ def clear_graph_full_rebuild(vault_root: Path, *, generation: int | None = None)
         return False
     conn = _connect(vault_root, create=True)
     try:
-        with conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            rows = dict(
+                conn.execute(
+                    "SELECT key, value FROM maintenance_state WHERE key IN (?, ?)",
+                    (_GRAPH_FULL_REBUILD_KEY, _GRAPH_FULL_REBUILD_SEQUENCE_KEY),
+                ).fetchall()
+            )
+            if _GRAPH_FULL_REBUILD_KEY not in rows:
+                conn.commit()
+                return False
+            marker = int(rows[_GRAPH_FULL_REBUILD_KEY])
+            sequence = int(rows.get(_GRAPH_FULL_REBUILD_SEQUENCE_KEY, 0))
+            # Upgrade migration and steady-state safety share the same seam:
+            # persist the marker's generation before deleting it. A legacy
+            # sidecar has no sequence row, and a delayed second drain may still
+            # hold this marker value after the first one clears it.
+            conn.execute(
+                "INSERT INTO maintenance_state(key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (_GRAPH_FULL_REBUILD_SEQUENCE_KEY, str(max(sequence, marker))),
+            )
             if generation is None:
                 changed = conn.execute(
                     "DELETE FROM maintenance_state WHERE key = ?",
@@ -709,6 +730,10 @@ def clear_graph_full_rebuild(vault_root: Path, *, generation: int | None = None)
                     "AND CAST(value AS INTEGER) <= ?",
                     (_GRAPH_FULL_REBUILD_KEY, int(generation)),
                 ).rowcount
+        except Exception:
+            conn.rollback()
+            raise
+        conn.commit()
         return bool(changed)
     finally:
         conn.close()
