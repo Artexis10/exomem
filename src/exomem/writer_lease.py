@@ -3719,10 +3719,19 @@ def _fixed_projected_command_completion(
             getattr(command, "name", None) not in {"ask_memory", "find"}
             or not injected
             or not isinstance(injected[0], (str, os.PathLike))
-            or not projection_runtime.has_preactivated_projection_runtime(
-                Path(injected[0])
-            )
         ):
+            return invoke()
+        started_at = time.perf_counter()
+        vault_root = Path(injected[0])
+        preactivated = projection_runtime.has_preactivated_projection_runtime(
+            vault_root
+        )
+        completion_required = (
+            preactivated
+            or projection_runtime.requires_fixed_projected_completion(vault_root)
+            or projection_runtime.classify_projected_completion_boundary(vault_root)
+        )
+        if not completion_required:
             return invoke()
         request_class = projection_timing.request_class_for_command(
             command,
@@ -3731,7 +3740,15 @@ def _fixed_projected_command_completion(
         )
         if request_class is None:
             return invoke()
-        with projection_timing.fixed_public_completion(request_class):
+        completion = (
+            projection_timing.fixed_public_completion(request_class)
+            if preactivated
+            else projection_timing.fixed_public_completion(
+                request_class,
+                started_at=started_at,
+            )
+        )
+        with completion:
             return invoke()
 
     return wrapped
