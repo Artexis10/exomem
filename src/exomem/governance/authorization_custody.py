@@ -191,6 +191,7 @@ def _path_is_within(candidate: Path, root: Path) -> bool:
 
 
 def _owner_identity(
+    root: Path,
     info: os.stat_result,
     filesystem: held_fs.HeldFilesystem,
 ) -> str:
@@ -201,9 +202,16 @@ def _owner_identity(
         if not isinstance(descriptor, int):
             raise AuthorizationCustodyUnavailable
         sid = mutation_lock._windows_current_user_sid()
-        sddl = mutation_lock._windows_dacl_sddl_for_handle(
-            msvcrt.get_osfhandle(descriptor)
-        )
+        retained_handle = msvcrt.get_osfhandle(descriptor)
+        security_handle = mutation_lock._windows_open_path(root, directory=True)
+        try:
+            if mutation_lock._windows_handle_identity(
+                security_handle
+            ) != mutation_lock._windows_handle_identity(retained_handle):
+                raise AuthorizationCustodyUnavailable
+            sddl = mutation_lock._windows_dacl_sddl_for_handle(security_handle)
+        finally:
+            mutation_lock._windows_close_handle(security_handle)
         if not mutation_lock._windows_owner_admits_current_user(
             mutation_lock._windows_sddl_owner(sddl),
             sid,
@@ -255,7 +263,7 @@ def standalone_attachment_id(vault_root: Path) -> str:
             ):
                 raise AuthorizationCustodyUnavailable
             canonical = os.path.normcase(str(root.resolve(strict=True))).encode("utf-8")
-            owner = _owner_identity(after, filesystem).encode("utf-8")
+            owner = _owner_identity(root, after, filesystem).encode("utf-8")
             digest = hashlib.sha256(
                 _framed(
                     _ATTACHMENT_DOMAIN,
