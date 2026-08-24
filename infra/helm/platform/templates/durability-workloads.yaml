@@ -750,7 +750,7 @@ spec:
                 - name: EXOMEM_DATABASE_BACKUP_VERIFICATION_SQL
                   value: {{ .Values.durability.databaseBackup.verificationSql | quote }}
                 - name: EXOMEM_DURABILITY_SCRATCH_ROOT
-                  value: /var/lib/exomem-scratch
+                  value: /var/lib/exomem-scratch/database-backup
                 - name: HOME
                   value: /tmp
               resources:
