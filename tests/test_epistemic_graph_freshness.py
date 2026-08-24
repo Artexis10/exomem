@@ -258,7 +258,10 @@ def test_spawned_mutator_commits_while_full_rebuild_is_running(
         assert completed.wait(_OBSERVE_SECONDS)
         if operation == "refresh":
             if rel_path.startswith("Knowledge Base/"):
-                assert rel_path in deferred_index.list_graph_paths(vault)
+                assert (
+                    rel_path in deferred_index.list_graph_paths(vault)
+                    or deferred_index.graph_full_rebuild_pending(vault) is not None
+                )
             else:
                 assert deferred_index.graph_full_rebuild_pending(vault) is not None
     finally:

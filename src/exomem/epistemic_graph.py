@@ -3193,12 +3193,26 @@ class EpistemicGraphIndex:
                 return self._rebuild_all_off_boundary(accept_stabilized_build=True)
             except graph_sync.GraphRebuildInProgress:
                 # A defer-disposition fallback has already persisted these exact
-                # paths and signalled the graph drain. The active owner cannot
-                # cover a mutation that landed after its snapshot, so leave the
-                # receipt for the next drain instead of blocking this mutator or
-                # pretending an unqueued rebuild request was safely coalesced.
+                # paths. A rebuild-disposition fallback knows only that the
+                # affected scope is wider, so append whole-vault debt now. The
+                # active owner cannot cover a mutation that landed after its
+                # snapshot; only durable debt makes coalescing truthful.
                 if not durable_before_rebuild:
-                    raise
+                    graph_generation = int(
+                        graph_sync.status(self.vault_root).get("generation") or 0
+                    )
+                    checkpoint_generation = (
+                        int(graph_checkpoint.generation)
+                        if graph_checkpoint is not None
+                        else 0
+                    )
+                    deferred_index.advance_graph_full_rebuild(
+                        self.vault_root,
+                        after_generation=max(
+                            graph_generation,
+                            checkpoint_generation,
+                        ),
+                    )
                 return {
                     "indexed_files": 0,
                     "nodes": 0,

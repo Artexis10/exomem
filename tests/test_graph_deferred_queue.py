@@ -228,6 +228,7 @@ def test_direct_full_rebuild_debt_advances_atomically(vault: Path) -> None:
 
 def test_legacy_marker_clear_seeds_the_durable_generation_sequence(vault: Path) -> None:
     """The first post-upgrade drain cannot reset generation history to zero."""
+    deferred_index.mark_graph_full_rebuild(vault, generation=1)
     conn = sqlite3.connect(deferred_index.store_path(vault))
     try:
         with conn:
