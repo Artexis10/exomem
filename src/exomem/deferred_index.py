@@ -20,6 +20,7 @@ _SEMANTIC_ISOLATION_CURSOR_KEY = "semantic_isolation_cursors:v1"
 _SEMANTIC_UPSERTS_GENERATION_KEY = "semantic_upserts_generation"
 _GRAPH_UPSERTS_GENERATION_KEY = "graph_upserts_generation"
 _GRAPH_FULL_REBUILD_KEY = "graph_full_rebuild_generation"
+_GRAPH_FULL_REBUILD_SEQUENCE_KEY = "graph_full_rebuild_sequence"
 
 #: The queues this store carries, and the tables behind them.  The graph queue
 #: is the newest and the reason the mapping exists: it reuses the semantic
@@ -575,14 +576,44 @@ def mark_graph_full_rebuild(vault_root: Path, *, generation: int) -> None:
     """Record that a whole-vault rebuild is owed, at or after this generation."""
     conn = _connect(vault_root, create=True)
     try:
-        with conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            rows = dict(
+                conn.execute(
+                    "SELECT key, value FROM maintenance_state WHERE key IN (?, ?)",
+                    (_GRAPH_FULL_REBUILD_KEY, _GRAPH_FULL_REBUILD_SEQUENCE_KEY),
+                ).fetchall()
+            )
+            current = (
+                int(rows[_GRAPH_FULL_REBUILD_KEY])
+                if _GRAPH_FULL_REBUILD_KEY in rows
+                else None
+            )
+            sequence = int(rows.get(_GRAPH_FULL_REBUILD_SEQUENCE_KEY, 0))
+            requested = int(generation)
+            # An absent marker means the previous debt was retired. New debt
+            # must advance past that retired generation so a delayed old drain
+            # cannot clear it. While debt remains, an equal checkpoint is an
+            # idempotent repeat and a newer checkpoint advances naturally.
+            recorded = (
+                max(sequence + 1, requested)
+                if current is None
+                else max(current, requested)
+            )
             conn.execute(
                 "INSERT INTO maintenance_state(key, value) VALUES (?, ?) "
-                "ON CONFLICT(key) DO UPDATE SET value = "
-                "CASE WHEN CAST(excluded.value AS INTEGER) > CAST(value AS INTEGER) "
-                "THEN excluded.value ELSE value END",
-                (_GRAPH_FULL_REBUILD_KEY, str(int(generation))),
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (_GRAPH_FULL_REBUILD_KEY, str(recorded)),
             )
+            conn.execute(
+                "INSERT INTO maintenance_state(key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (_GRAPH_FULL_REBUILD_SEQUENCE_KEY, str(max(sequence, recorded))),
+            )
+        except Exception:
+            conn.rollback()
+            raise
+        conn.commit()
     finally:
         conn.close()
     # A whole-vault marker is graph debt too, and the one the drain most needs
@@ -603,16 +634,24 @@ def advance_graph_full_rebuild(vault_root: Path, *, after_generation: int = 0) -
     try:
         conn.execute("BEGIN IMMEDIATE")
         try:
-            row = conn.execute(
-                "SELECT value FROM maintenance_state WHERE key = ?",
-                (_GRAPH_FULL_REBUILD_KEY,),
-            ).fetchone()
-            current = int(row[0]) if row is not None else 0
-            generation = max(current, int(after_generation)) + 1
+            rows = dict(
+                conn.execute(
+                    "SELECT key, value FROM maintenance_state WHERE key IN (?, ?)",
+                    (_GRAPH_FULL_REBUILD_KEY, _GRAPH_FULL_REBUILD_SEQUENCE_KEY),
+                ).fetchall()
+            )
+            current = int(rows.get(_GRAPH_FULL_REBUILD_KEY, 0))
+            sequence = int(rows.get(_GRAPH_FULL_REBUILD_SEQUENCE_KEY, 0))
+            generation = max(current, sequence, int(after_generation)) + 1
             conn.execute(
                 "INSERT INTO maintenance_state(key, value) VALUES (?, ?) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 (_GRAPH_FULL_REBUILD_KEY, str(generation)),
+            )
+            conn.execute(
+                "INSERT INTO maintenance_state(key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (_GRAPH_FULL_REBUILD_SEQUENCE_KEY, str(generation)),
             )
         except Exception:
             conn.rollback()

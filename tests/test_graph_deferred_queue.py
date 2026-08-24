@@ -210,16 +210,18 @@ def test_direct_full_rebuild_debt_advances_atomically(vault: Path) -> None:
     """A drain between direct writers must not clear the later writer's debt."""
     deferred_index.clear_graph_full_rebuild(vault)
     deferred_index.mark_graph_full_rebuild(vault, generation=7)
+    assert deferred_index.clear_graph_full_rebuild(vault, generation=7) is True
+    assert deferred_index.advance_graph_full_rebuild(vault) == 8
 
-    with ThreadPoolExecutor(max_workers=4) as pool:
+    with ThreadPoolExecutor(max_workers=3) as pool:
         generations = list(
             pool.map(
                 lambda _item: deferred_index.advance_graph_full_rebuild(vault),
-                range(4),
+                range(3),
             )
         )
 
-    assert sorted(generations) == [8, 9, 10, 11]
+    assert sorted(generations) == [9, 10, 11]
     assert deferred_index.clear_graph_full_rebuild(vault, generation=7) is False
     assert deferred_index.graph_full_rebuild_pending(vault) == 11
 
