@@ -74,10 +74,6 @@ media capture is safe to offer.
 - [x] 9.4 Run `openspec validate ingest-attachments-as-sources --strict` and `openspec validate --specs --strict`.
 - [x] 9.5 Run the affected suites, plus lint, plus the tool-surface fidelity test.
 
-## 10. Follow-up filed, not fixed here
+## 10. Closure
 
-- [ ] 10.1 `capture_source` is not in `writer_lease._NARROW_BOUNDARY_COMMANDS`, so unlike its Evidence twin `preserve_artifacts` it holds the wide mutation boundary across network retrieval — up to eight fetches against a 60-second batch deadline, blocking every other writer for the duration. Adding the name unconditionally is not the fix: it would also move the boundary for an ordinary text capture, which relies on the wide guard. The boundary needs to follow the invocation rather than the command name.
-
-## 11. Closure
-
-- [ ] 11.1 Once this change is merged and therefore demonstrably shipped, sync its deltas into `openspec/specs/` and archive it with `openspec archive` in the same delivery, re-running `openspec validate --all --strict` before and after. Left open deliberately: archiving before the merge would claim a shipped state that does not exist yet, and the archive-discipline check treats a fully-ticked active change as debt.
+- [x] 10.1 Once this change is merged and therefore demonstrably shipped, sync its deltas into `openspec/specs/` and archive it with `openspec archive` in the same delivery, re-running `openspec validate --all --strict` before and after. Left open deliberately: archiving before the merge would claim a shipped state that does not exist yet, and the archive-discipline check treats a fully-ticked active change as debt.

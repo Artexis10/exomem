@@ -351,6 +351,27 @@ arguments, and no artifact is written to two trees.
 filename, or content would put the decision back where the defect came from —
 somewhere other than the caller's intent.
 
+## Follow-ups filed, not fixed here
+
+**`capture_source` holds the wide mutation boundary across network retrieval.**
+It is not in `writer_lease._NARROW_BOUNDARY_COMMANDS`, so unlike its Evidence
+twin `preserve_artifacts` it keeps the vault lock through up to eight fetches
+against a 60-second batch deadline, blocking every other writer for the
+duration. Adding the name unconditionally is not the fix: it would also move the
+boundary for an ordinary text capture, which relies on the wide guard. The
+boundary needs to follow the invocation rather than the command name, which is
+its own change.
+
+**The hosted transfer-grant route carries no lane.** It is a different mechanism
+from the upload tokens this change binds, so the out-of-band Sources path is
+available on the personal surface only.
+
+**The ChatGPT Personal Plugin connector is unrefreshed.** The rollout is
+acknowledged — `pending_tool_surface_sha256` tracks the current local surface
+while `registered_` and `last_verified_` stay at what the connector actually
+holds and `refresh_required` stays true — but refreshing and verifying that
+external consumer is a release step, not a code change.
+
 ## Risks
 
 1. **Tool surface movement.** Adding `files` to `capture_source` changes its
