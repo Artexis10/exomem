@@ -197,6 +197,39 @@ def test_retrieval_gates_run_as_three_independent_jobs() -> None:
     assert "scripts/semantic_write_latency.py --check" in semantic_command
 
 
+def test_governance_wire_gate_runs_every_closed_route_on_the_registered_profile() -> None:
+    workflow = _workflow()
+    job = workflow["jobs"]["governance-projection-wire"]
+
+    assert job["runs-on"] == "ubuntu-latest"
+    assert job["timeout-minutes"] == 8
+    assert job["strategy"]["fail-fast"] is False
+    assert set(job["strategy"]["matrix"]["route"]) == {
+        "keyword",
+        "bm25",
+        "vector-hard-off",
+        "rerank-hard-off",
+        "clip-hard-off",
+        "graph",
+        "graph-rerank-hard-off",
+        "max-query",
+        "max-limit",
+        "max-shape",
+        "error",
+        "pagination",
+    }
+    command = job["steps"][-1]["run"]
+    assert "--python 3.13" in command
+    assert "tests/test_governance_projection_wire_gate.py" in command
+    assert job["steps"][-1]["env"]["EXOMEM_GOVERNANCE_TIMING_ROUTE"] == (
+        "${{ matrix.route }}"
+    )
+    assert job["steps"][-1]["env"]["EXOMEM_DISABLE_EMBEDDINGS"] == "1"
+    assert job["steps"][-1]["env"]["EXOMEM_DISABLE_CLIP"] == "1"
+    assert job["steps"][-1]["env"]["EXOMEM_DISABLE_RANKING"] == "1"
+    assert "governance-projection-wire" in workflow["jobs"]["gate"]["needs"]
+
+
 def test_superseded_pr_runs_cancel_and_one_stable_gate_requires_every_ci_job() -> None:
     workflow = _workflow()
 

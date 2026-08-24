@@ -274,6 +274,7 @@ def build_authorization_map(
         grants_by_item.setdefault(grant.item_identity, []).append(grant)
 
     selections: list[projected_retrieval.ProjectionSelection] = []
+    withheld_identities: list[str] = []
     decision_cache: dict[
         tuple[tuple[str, ...], tuple[StandingGrant, ...]],
         Decision,
@@ -312,14 +313,7 @@ def build_authorization_map(
                     )
             decision_cache[decision_key] = decision
         if decision.level == 0:
-            selections.append(
-                projected_retrieval.ProjectionSelection(
-                    item_identity=request_item.item_identity,
-                    content_hash=request_item.content_hash,
-                    projection_variant_id=None,
-                    decision=decision,
-                )
-            )
+            withheld_identities.append(request_item.item_identity)
             continue
         candidate_descriptors = descriptor_cache.get(decision_key)
         if candidate_descriptors is None:
@@ -369,6 +363,7 @@ def build_authorization_map(
     return projected_retrieval.AuthorizationProjectionMap(
         namespace_key,
         tuple(selections),
+        frozenset(withheld_identities),
     )
 
 

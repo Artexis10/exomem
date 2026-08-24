@@ -99,6 +99,7 @@ class AuthorizationProjectionMap:
 
     namespace_key: projections.ProjectionNamespaceKey
     selections: tuple[ProjectionSelection, ...]
+    withheld_identities: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         if not isinstance(self.namespace_key, projections.ProjectionNamespaceKey):
@@ -120,11 +121,24 @@ class AuthorizationProjectionMap:
                     "authorization map contains a duplicate item identity"
                 )
             by_identity[selection.item_identity] = selection
+        if not isinstance(self.withheld_identities, frozenset):
+            raise projections.ProjectionCanonicalizationError(
+                "authorization map withheld identities must be an immutable set"
+            )
+        withheld = frozenset(
+            _bounded_text(identity, "withheld item identity", maximum=4096)
+            for identity in self.withheld_identities
+        )
+        if withheld.intersection(by_identity):
+            raise projections.ProjectionCanonicalizationError(
+                "authorization map selects and withholds the same item"
+            )
         object.__setattr__(
             self,
             "selections",
             tuple(by_identity[key] for key in sorted(by_identity, key=_sort_key)),
         )
+        object.__setattr__(self, "withheld_identities", withheld)
 
 
 @dataclass(frozen=True, slots=True)
@@ -262,15 +276,27 @@ def _selected_variants(
     selections = {
         selection.item_identity: selection for selection in authorization.selections
     }
-    if frozenset(selections) != frozenset(items):
+    inline_withheld = frozenset(
+        identity
+        for identity, selection in selections.items()
+        if selection.projection_variant_id is None
+    )
+    explicit_withheld = authorization.withheld_identities
+    if (
+        inline_withheld.intersection(explicit_withheld)
+        or frozenset(selections).union(explicit_withheld) != frozenset(items)
+    ):
         raise ProjectedRetrievalUnavailable(
             "authorization map does not cover the exact projection catalog"
         )
 
     selected: list[projections.ProjectionVariant] = []
-    for identity in sorted(items, key=_sort_key):
-        item = items[identity]
-        selection = selections[identity]
+    for identity, selection in selections.items():
+        item = items.get(identity)
+        if item is None:
+            raise ProjectedRetrievalUnavailable(
+                "authorization map does not cover the exact projection catalog"
+            )
         if selection.content_hash != item.content_hash:
             raise ProjectedRetrievalUnavailable(
                 "authorization selection content hash does not match catalog"
@@ -471,6 +497,14 @@ class ProjectedLexicalIndex:
             token: len(self._postings.get(token, frozenset()) & selected_ids)
             for token in frozenset(query_tokens)
         }
+        inverse_frequencies = {
+            token: math.log(
+                1
+                + (len(documents) - document_frequency + 0.5)
+                / (document_frequency + 0.5)
+            )
+            for token, document_frequency in frequencies.items()
+        }
         average_length = max(
             sum(len(document.tokens) for document in documents) / len(documents),
             1.0,
@@ -479,18 +513,12 @@ class ProjectedLexicalIndex:
         for document in candidates:
             term_counts = Counter(document.tokens)
             score = 0.0
+            length_normalization = 1 - _BM25_B + _BM25_B * (
+                len(document.tokens) / average_length
+            )
             for token in query_tokens:
                 frequency = term_counts[token]
-                document_frequency = frequencies[token]
-                inverse_document_frequency = math.log(
-                    1
-                    + (len(documents) - document_frequency + 0.5)
-                    / (document_frequency + 0.5)
-                )
-                length_normalization = 1 - _BM25_B + _BM25_B * (
-                    len(document.tokens) / average_length
-                )
-                score += inverse_document_frequency * (
+                score += inverse_frequencies[token] * (
                     frequency * (_BM25_K1 + 1)
                 ) / (frequency + _BM25_K1 * length_normalization)
             if score > 0:
@@ -522,11 +550,11 @@ class ProjectedLexicalIndex:
         )
         if not query_tokens:
             return ()
-        matches = [
-            document
-            for document in documents
-            if all(token in document.text.casefold() for token in query_tokens)
-        ]
+        matches: list[_SelectedDocument] = []
+        for document in documents:
+            folded_text = document.text.casefold()
+            if all(token in folded_text for token in query_tokens):
+                matches.append(document)
         matches.sort(
             key=lambda document: (
                 _sort_key(document.variant.item_identity),

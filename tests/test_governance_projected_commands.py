@@ -97,17 +97,111 @@ def test_v4_find_never_acquires_from_the_raw_corpus(monkeypatch, tmp_path) -> No
             rerank=False,
         )
 
-    assert response == [
-        {
-            "path": "Knowledge Base/visible.md",
-            "type": "note",
-            "scope": "kb",
-            "title": "Visible",
-            "updated": "",
-            "excerpt": "projection-only term",
-            "signals": {"bm25_rank": 1},
-        }
-    ]
+    assert response == {
+        "hits": [
+            {
+                "path": "Knowledge Base/visible.md",
+                "type": "note",
+                "scope": "kb",
+                "title": "Visible",
+                "updated": "",
+                "excerpt": "projection-only term",
+                "signals": {"bm25_rank": 1},
+            }
+        ],
+        "timings_suppressed": {"status": "governed_projection"},
+    }
+
+
+def test_projected_find_suppresses_application_timings_with_one_stable_shape(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    runtime = SimpleNamespace(
+        snapshot=SimpleNamespace(policy=Policy(fingerprint="f" * 64, scopes={}))
+    )
+    monkeypatch.setattr(
+        commands.projection_runtime_module,
+        "load_active_projection_runtime",
+        lambda _root: runtime,
+    )
+    monkeypatch.setattr(
+        commands.projection_runtime_module,
+        "find_projected_hits",
+        lambda *_args, **_kwargs: projection_runtime.ProjectedFindResult(
+            hits=(),
+            withheld_paths=frozenset(),
+        ),
+    )
+    monkeypatch.setattr(
+        commands.find_module,
+        "FindTimings",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("governed projected requests must not collect public timings")
+        ),
+    )
+
+    with principal.request_scope(principal.owner_principal(surface="library")):
+        response = commands.op_find(
+            tmp_path,
+            query="projection-only term",
+            scope="vault",
+            mode="keyword",
+            graph=False,
+            rerank=False,
+            include_timings=True,
+        )
+
+    assert response == {
+        "hits": [],
+        "timings_suppressed": {"status": "governed_projection"},
+    }
+
+
+def test_projected_warming_marker_omits_process_age(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    runtime = SimpleNamespace(
+        snapshot=SimpleNamespace(policy=Policy(fingerprint="f" * 64, scopes={}))
+    )
+    monkeypatch.setattr(
+        commands.projection_runtime_module,
+        "load_active_projection_runtime",
+        lambda _root: runtime,
+    )
+    monkeypatch.setattr(
+        commands.projection_runtime_module,
+        "find_projected_hits",
+        lambda *_args, **_kwargs: projection_runtime.ProjectedFindResult(
+            hits=(),
+            withheld_paths=frozenset(),
+            warming_components=("vector",),
+        ),
+    )
+    monkeypatch.setattr(
+        commands.readiness_module,
+        "warming_info",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("projected warming must not sample process age")
+        ),
+    )
+
+    with principal.request_scope(principal.owner_principal(surface="library")):
+        response = commands.op_find(
+            tmp_path,
+            query="projection-only term",
+            scope="vault",
+            mode="hybrid",
+            graph=False,
+            rerank=False,
+        )
+
+    assert response == {
+        "hits": [],
+        "timings_suppressed": {"status": "governed_projection"},
+        "warming": {"components": ["vector"]},
+    }
 
 
 def test_low_projection_never_enters_path_bearing_query_log(monkeypatch, tmp_path) -> None:
@@ -181,14 +275,17 @@ def test_low_projection_never_enters_path_bearing_query_log(monkeypatch, tmp_pat
             rerank=False,
         )
 
-    assert response == [
-        {
-            "withheld": True,
-            "level": 2,
-            "scope_label": "closed",
-            "constraint": "Approved readers only",
-        }
-    ]
+    assert response == {
+        "hits": [
+            {
+                "withheld": True,
+                "level": 2,
+                "scope_label": "closed",
+                "constraint": "Approved readers only",
+            }
+        ],
+        "timings_suppressed": {"status": "governed_projection"},
+    }
     assert logged == []
 
 

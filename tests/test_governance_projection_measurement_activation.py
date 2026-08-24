@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from exomem import writer_lease
 from exomem.governance import (
     authorization_custody,
     projected_graph,
@@ -21,6 +22,16 @@ from exomem.governance import (
 )
 from exomem.governance.decisions import Decision
 from exomem.governance.policy import Policy, Scope
+
+
+@pytest.fixture(autouse=True)
+def _private_writer_state(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    state = tmp_path / "writer-state"
+    state.mkdir()
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(state))
+    writer_lease.reset_managers_for_tests()
+    yield
+    writer_lease.reset_managers_for_tests()
 
 
 def _fixture(tmp_path: Path):
@@ -236,6 +247,9 @@ def test_startup_preactivates_bound_vector_clip_and_graph_once(
 
     monkeypatch.setenv(authorization_custody.KEYRING_FILE_ENV, str(tmp_path / "keyring"))
     monkeypatch.setenv(authorization_custody.CONTROL_FILE_ENV, str(tmp_path / "control"))
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
+    monkeypatch.setenv("EXOMEM_DISABLE_RANKING", "1")
     monkeypatch.setattr(
         authorization_custody,
         "load_authorization_custody",
@@ -279,7 +293,6 @@ def test_startup_preactivates_bound_vector_clip_and_graph_once(
                 AssertionError("request reloaded a projected measurement family")
             ),
         )
-    monkeypatch.setattr(projection_runtime, "_PROJECTED_SERVING_RELEASE_ACCEPTED", True)
     assert projection_runtime.load_active_projection_runtime(tmp_path) is runtime
 
 

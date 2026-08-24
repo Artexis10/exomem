@@ -655,9 +655,13 @@ def test_projected_models_respect_hard_off_and_readiness(
     )
     def model_called(*_args, **_kwargs):
         raise AssertionError("disabled or warming model must not run")
+    clip_enabled = embeddings.clip_enabled
+    ranking_enabled = embeddings.ranking_enabled
     monkeypatch.setattr(embeddings, "embed_texts", model_called)
     monkeypatch.setattr(embeddings, "embed_clip_text", model_called)
     monkeypatch.setattr(embeddings, "rerank_pairs", model_called)
+    monkeypatch.setattr(embeddings, "clip_enabled", model_called)
+    monkeypatch.setattr(embeddings, "ranking_enabled", model_called)
     monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
     monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
     monkeypatch.setenv("EXOMEM_DISABLE_RANKING", "1")
@@ -675,6 +679,8 @@ def test_projected_models_respect_hard_off_and_readiness(
     )
     assert disabled.warming_components == ()
 
+    monkeypatch.setattr(embeddings, "clip_enabled", clip_enabled)
+    monkeypatch.setattr(embeddings, "ranking_enabled", ranking_enabled)
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS")
     monkeypatch.delenv("EXOMEM_DISABLE_CLIP")
     monkeypatch.delenv("EXOMEM_DISABLE_RANKING")

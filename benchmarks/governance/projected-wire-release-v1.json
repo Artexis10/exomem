@@ -1,0 +1,39 @@
+{
+  "schema": "exomem.governed-projection-timing-release/v1",
+  "hidden_corpus_wire_delta_ms": 25,
+  "sample_count_per_condition": 200,
+  "bootstrap_resamples": 2000,
+  "bootstrap_seed": 20260822,
+  "hardware_runtime_profile": "github-hosted-ubuntu-latest-x64-python3.13",
+  "model_runtime_profile": "models-hard-off-v1",
+  "request_classes": [
+    {
+      "name": "projected-find-v1",
+      "padding_ms": 250,
+      "deadline_ms": 300,
+      "max_query_chars": 4096,
+      "max_limit": 100
+    }
+  ],
+  "routes": [
+    "keyword",
+    "bm25",
+    "vector-hard-off",
+    "rerank-hard-off",
+    "clip-hard-off",
+    "graph",
+    "graph-rerank-hard-off",
+    "max-query",
+    "max-limit",
+    "max-shape",
+    "error",
+    "pagination"
+  ],
+  "capacity": {
+    "catalog_items": 16384,
+    "searchable_bytes_per_item": 1048576,
+    "graph_edges": 262144
+  },
+  "scheduler_tolerance_subtracted": false,
+  "padding_selected_before_sampling": true
+}
