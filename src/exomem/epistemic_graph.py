@@ -3188,7 +3188,7 @@ class EpistemicGraphIndex:
                 graph_checkpoint=graph_checkpoint,
             )
         if report.pop("_rebuild_after_release", False):
-            queued_before_rebuild = bool(report.pop("_queued_before_rebuild", False))
+            durable_before_rebuild = bool(report.pop("_durable_before_rebuild", False))
             try:
                 return self._rebuild_all_off_boundary(accept_stabilized_build=True)
             except graph_sync.GraphRebuildInProgress:
@@ -3197,7 +3197,7 @@ class EpistemicGraphIndex:
                 # cover a mutation that landed after its snapshot, so leave the
                 # receipt for the next drain instead of blocking this mutator or
                 # pretending an unqueued rebuild request was safely coalesced.
-                if not queued_before_rebuild:
+                if not durable_before_rebuild:
                     raise
                 return {
                     "indexed_files": 0,
@@ -3252,7 +3252,37 @@ class EpistemicGraphIndex:
             nothing.
             """
             try:
-                deferred_index.add_graph(self.vault_root, sorted(deferred_scope))
+                receipts = deferred_index.add_graph_receipts(
+                    self.vault_root, sorted(deferred_scope)
+                )
+                queued_scope = {receipt.rel_path for receipt in receipts}
+                if queued_scope != deferred_scope:
+                    # The path queue admits only canonical Knowledge Base
+                    # Markdown. A vault-wide resolver change can include a
+                    # supported recall path outside that root, and silently
+                    # dropping it would make a later coalesced response false.
+                    # Escalate incomplete path coverage to monotonic whole-vault
+                    # debt that an already-running drain cannot clear.
+                    pending_generation = deferred_index.graph_full_rebuild_pending(
+                        self.vault_root
+                    )
+                    graph_generation = int(
+                        graph_sync.status(self.vault_root).get("generation") or 0
+                    )
+                    checkpoint_generation = (
+                        int(graph_checkpoint.generation)
+                        if graph_checkpoint is not None
+                        else 0
+                    )
+                    deferred_index.mark_graph_full_rebuild(
+                        self.vault_root,
+                        generation=max(
+                            graph_generation,
+                            checkpoint_generation,
+                            int(pending_generation or 0),
+                        )
+                        + 1,
+                    )
             except Exception:  # noqa: BLE001 - a queue failure must not lose the rebuild
                 log.warning(
                     "graph deferral enqueue failed reason=%s; falling back to rebuild",
@@ -3266,7 +3296,7 @@ class EpistemicGraphIndex:
                     "nodes": 0,
                     "edges": 0,
                     "_rebuild_after_release": 1,
-                    "_queued_before_rebuild": 1,
+                    "_durable_before_rebuild": 1,
                 }
             self._mark_unavailable()
             # `queued` is what separates this from `fallback()`'s own deferral
