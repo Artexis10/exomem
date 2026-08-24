@@ -590,6 +590,40 @@ def mark_graph_full_rebuild(vault_root: Path, *, generation: int) -> None:
     _note_graph_debt()
 
 
+def advance_graph_full_rebuild(vault_root: Path, *, after_generation: int = 0) -> int:
+    """Atomically append whole-vault debt after every marker already observed.
+
+    A direct refresh has no canonical graph checkpoint generation to use. Read-
+    then-write arithmetic would let two writers choose the same next value, so
+    a drain that started between them could clear the later writer's debt. The
+    immediate transaction serializes the increment with the drain's marker
+    snapshot and returns the exact generation it persisted.
+    """
+    conn = _connect(vault_root, create=True)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = conn.execute(
+                "SELECT value FROM maintenance_state WHERE key = ?",
+                (_GRAPH_FULL_REBUILD_KEY,),
+            ).fetchone()
+            current = int(row[0]) if row is not None else 0
+            generation = max(current, int(after_generation)) + 1
+            conn.execute(
+                "INSERT INTO maintenance_state(key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (_GRAPH_FULL_REBUILD_KEY, str(generation)),
+            )
+        except Exception:
+            conn.rollback()
+            raise
+        conn.commit()
+    finally:
+        conn.close()
+    _note_graph_debt()
+    return generation
+
+
 def graph_full_rebuild_pending(vault_root: Path) -> int | None:
     """The generation a whole-vault rebuild is owed for, or None."""
     if not store_path(vault_root).exists():

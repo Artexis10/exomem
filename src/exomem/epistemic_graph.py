@@ -3263,9 +3263,6 @@ class EpistemicGraphIndex:
                     # dropping it would make a later coalesced response false.
                     # Escalate incomplete path coverage to monotonic whole-vault
                     # debt that an already-running drain cannot clear.
-                    pending_generation = deferred_index.graph_full_rebuild_pending(
-                        self.vault_root
-                    )
                     graph_generation = int(
                         graph_sync.status(self.vault_root).get("generation") or 0
                     )
@@ -3274,14 +3271,12 @@ class EpistemicGraphIndex:
                         if graph_checkpoint is not None
                         else 0
                     )
-                    deferred_index.mark_graph_full_rebuild(
+                    deferred_index.advance_graph_full_rebuild(
                         self.vault_root,
-                        generation=max(
+                        after_generation=max(
                             graph_generation,
                             checkpoint_generation,
-                            int(pending_generation or 0),
-                        )
-                        + 1,
+                        ),
                     )
             except Exception:  # noqa: BLE001 - a queue failure must not lose the rebuild
                 log.warning(
