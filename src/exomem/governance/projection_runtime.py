@@ -848,7 +848,7 @@ def find_projected_hits(
 ) -> ProjectedFindResult:
     """Acquire public candidates without opening a raw corpus/index lane."""
 
-    from .. import embeddings, readiness
+    from .. import readiness
 
     if not isinstance(runtime, ActiveProjectionRuntime):
         raise ProjectionRuntimeUnavailable(
@@ -902,10 +902,15 @@ def find_projected_hits(
         verified_session_grants=verified_grants,
         catalog=runtime.catalog,
     )
-    withheld = authorization.withheld_identities.union(
+    inline_withheld = frozenset(
         selection.item_identity
         for selection in authorization.selections
         if selection.projection_variant_id is None
+    )
+    withheld = (
+        authorization.withheld_identities
+        if not inline_withheld
+        else authorization.withheld_identities.union(inline_withheld)
     )
     by_identity = {
         selection.item_identity: selection
@@ -940,6 +945,7 @@ def find_projected_hits(
     )
     lane_hits: dict[str, tuple[projected_retrieval.ProjectedLexicalHit, ...]] = {}
     warming: set[str] = set()
+    embeddings_module = None
 
     if mode == "keyword":
         lane_hits["keyword"] = runtime.lexical_index.search_keyword(
@@ -965,67 +971,78 @@ def find_projected_hits(
             lane_hits["vector"] = ()
         elif readiness.should_defer("embeddings"):
             warming.add("vector")
-        elif (
-            vector_index is None
-            or vector_index.extractor_version != "projected-text-v1"
-            or vector_index.model_version != embeddings.MODEL_NAME
-        ):
-            warming.add("vector")
         else:
-            try:
-                query_vector = tuple(
-                    float(value)
-                    for value in embeddings.embed_texts([query], is_query=True)[0]
-                )
-            except Exception:  # noqa: BLE001 - optional query model soft-fails
+            from .. import embeddings as embeddings_module
+
+            if (
+                vector_index is None
+                or vector_index.extractor_version != "projected-text-v1"
+                or vector_index.model_version != embeddings_module.MODEL_NAME
+            ):
                 warming.add("vector")
             else:
                 try:
-                    lane_hits["vector"] = vector_index.search_vector(
-                        authorization,
-                        query_vector,
-                        k=lane_depth,
+                    query_vector = tuple(
+                        float(value)
+                        for value in embeddings_module.embed_texts(
+                            [query],
+                            is_query=True,
+                        )[0]
                     )
-                except projected_retrieval.ProjectedLaneUnavailable:
+                except Exception:  # noqa: BLE001 - optional query model soft-fails
                     warming.add("vector")
-                except projected_retrieval.ProjectedRetrievalUnavailable as error:
-                    raise ProjectionRuntimeUnavailable(
-                        "governed projected retrieval is unavailable"
-                    ) from error
+                else:
+                    try:
+                        lane_hits["vector"] = vector_index.search_vector(
+                            authorization,
+                            query_vector,
+                            k=lane_depth,
+                        )
+                    except projected_retrieval.ProjectedLaneUnavailable:
+                        warming.add("vector")
+                    except projected_retrieval.ProjectedRetrievalUnavailable as error:
+                        raise ProjectionRuntimeUnavailable(
+                            "governed projected retrieval is unavailable"
+                        ) from error
 
         clip_index = runtime.clip_index
-        if not has_selected_clip:
+        if not has_selected_clip or os.environ.get("EXOMEM_DISABLE_CLIP"):
             lane_hits["clip"] = ()
-        elif not embeddings.clip_enabled():
-            lane_hits["clip"] = ()
-        elif readiness.should_defer("clip"):
-            warming.add("clip")
-        elif (
-            clip_index is None
-            or clip_index.extractor_version != "pixels-v1"
-            or clip_index.model_version != embeddings.CLIP_MODEL_NAME
-        ):
-            warming.add("clip")
         else:
-            try:
-                clip_query = tuple(
-                    float(value) for value in embeddings.embed_clip_text(query)
-                )
-            except Exception:  # noqa: BLE001 - optional query model soft-fails
+            if embeddings_module is None:
+                from .. import embeddings as embeddings_module
+
+            if not embeddings_module.clip_enabled():
+                lane_hits["clip"] = ()
+            elif readiness.should_defer("clip"):
+                warming.add("clip")
+            elif (
+                clip_index is None
+                or clip_index.extractor_version != "pixels-v1"
+                or clip_index.model_version != embeddings_module.CLIP_MODEL_NAME
+            ):
                 warming.add("clip")
             else:
                 try:
-                    lane_hits["clip"] = clip_index.search_clip(
-                        authorization,
-                        clip_query,
-                        k=lane_depth,
+                    clip_query = tuple(
+                        float(value)
+                        for value in embeddings_module.embed_clip_text(query)
                     )
-                except projected_retrieval.ProjectedLaneUnavailable:
+                except Exception:  # noqa: BLE001 - optional query model soft-fails
                     warming.add("clip")
-                except projected_retrieval.ProjectedRetrievalUnavailable as error:
-                    raise ProjectionRuntimeUnavailable(
-                        "governed projected retrieval is unavailable"
-                    ) from error
+                else:
+                    try:
+                        lane_hits["clip"] = clip_index.search_clip(
+                            authorization,
+                            clip_query,
+                            k=lane_depth,
+                        )
+                    except projected_retrieval.ProjectedLaneUnavailable:
+                        warming.add("clip")
+                    except projected_retrieval.ProjectedRetrievalUnavailable as error:
+                        raise ProjectionRuntimeUnavailable(
+                            "governed projected retrieval is unavailable"
+                        ) from error
 
     raw_bm25_hits = lane_hits.get("bm25", ())
     if mode == "hybrid":
@@ -1171,7 +1188,11 @@ def find_projected_hits(
             and _should_auto_rerank(lane_hits, query)
         )
     )
-    if do_rerank and not embeddings.ranking_enabled():
+    if do_rerank and os.environ.get("EXOMEM_DISABLE_RANKING"):
+        do_rerank = False
+    if do_rerank and embeddings_module is None:
+        from .. import embeddings as embeddings_module
+    if do_rerank and not embeddings_module.ranking_enabled():
         do_rerank = False
     if do_rerank and readiness.should_defer("reranker"):
         warming.add("rerank")
@@ -1181,7 +1202,11 @@ def find_projected_hits(
             scorer_query: str,
             passages: list[str],
         ) -> list[float]:
-            raw_scores = tuple(embeddings.rerank_pairs(scorer_query, passages))
+            if embeddings_module is None:
+                raise ValueError("reranker runtime is unavailable")
+            raw_scores = tuple(
+                embeddings_module.rerank_pairs(scorer_query, passages)
+            )
             if len(raw_scores) != len(ordered_identities):
                 raise ValueError("reranker returned an invalid score count")
             pending_raw: dict[str, float] = {}

@@ -497,6 +497,14 @@ class ProjectedLexicalIndex:
             token: len(self._postings.get(token, frozenset()) & selected_ids)
             for token in frozenset(query_tokens)
         }
+        inverse_frequencies = {
+            token: math.log(
+                1
+                + (len(documents) - document_frequency + 0.5)
+                / (document_frequency + 0.5)
+            )
+            for token, document_frequency in frequencies.items()
+        }
         average_length = max(
             sum(len(document.tokens) for document in documents) / len(documents),
             1.0,
@@ -505,18 +513,12 @@ class ProjectedLexicalIndex:
         for document in candidates:
             term_counts = Counter(document.tokens)
             score = 0.0
+            length_normalization = 1 - _BM25_B + _BM25_B * (
+                len(document.tokens) / average_length
+            )
             for token in query_tokens:
                 frequency = term_counts[token]
-                document_frequency = frequencies[token]
-                inverse_document_frequency = math.log(
-                    1
-                    + (len(documents) - document_frequency + 0.5)
-                    / (document_frequency + 0.5)
-                )
-                length_normalization = 1 - _BM25_B + _BM25_B * (
-                    len(document.tokens) / average_length
-                )
-                score += inverse_document_frequency * (
+                score += inverse_frequencies[token] * (
                     frequency * (_BM25_K1 + 1)
                 ) / (frequency + _BM25_K1 * length_normalization)
             if score > 0:
@@ -548,11 +550,11 @@ class ProjectedLexicalIndex:
         )
         if not query_tokens:
             return ()
-        matches = [
-            document
-            for document in documents
-            if all(token in document.text.casefold() for token in query_tokens)
-        ]
+        matches: list[_SelectedDocument] = []
+        for document in documents:
+            folded_text = document.text.casefold()
+            if all(token in folded_text for token in query_tokens):
+                matches.append(document)
         matches.sort(
             key=lambda document: (
                 _sort_key(document.variant.item_identity),
