@@ -400,6 +400,62 @@ def test_projected_find_continuation_returns_the_next_authorized_page(
     assert second.continuation != first.continuation
 
 
+def test_exhausted_first_page_does_not_materialize_continuation_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
+    monkeypatch.setenv("EXOMEM_DISABLE_RANKING", "1")
+    runtime = _active_runtime(
+        visible_count=2,
+        visible_body="wire-visible projected exhaustive page",
+        hidden_count=1,
+        graph_edge_count=2,
+    )
+    who = principal.RequestPrincipal(
+        audience_id="wire-external-principal",
+        surface="rest",
+        resolved=True,
+        issuer_family="wire-release",
+    )
+
+    def unexpected_digest(*_args, **_kwargs):
+        raise AssertionError("exhausted pages must not build continuation state")
+
+    monkeypatch.setattr(
+        projection_runtime,
+        "_authorization_map_digest",
+        unexpected_digest,
+    )
+    monkeypatch.setattr(
+        projection_runtime,
+        "_visible_authorization_digest",
+        unexpected_digest,
+    )
+    monkeypatch.setattr(
+        projection_runtime,
+        "_visible_snapshot_digest",
+        unexpected_digest,
+    )
+
+    result = projection_runtime.find_projected_hits(
+        tmp_path,
+        runtime,
+        query="wire-visible",
+        limit=2,
+        scope="vault",
+        mode="hybrid",
+        graph=True,
+        rerank=True,
+        principal=who,
+        purpose=None,
+    )
+
+    assert len(result.hits) == 2
+    assert result.continuation is None
+
+
 def test_projected_continuation_is_hidden_independent_bound_and_replayable(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -1308,17 +1308,17 @@ def find_projected_hits(
         verified_session_grants=verified_grants,
         catalog=runtime.catalog,
     )
-    authorization_digest = _authorization_map_digest(authorization)
-    visible_authorization_digest = _visible_authorization_digest(authorization)
-    if (
-        continuation_record is not None
-        and (
+    authorization_digest: str | None = None
+    visible_authorization_digest: str | None = None
+    if continuation_record is not None:
+        authorization_digest = _authorization_map_digest(authorization)
+        visible_authorization_digest = _visible_authorization_digest(authorization)
+        if (
             continuation_record.authorization_digest != authorization_digest
             or continuation_record.visible_authorization_digest
             != visible_authorization_digest
-        )
-    ):
-        raise _invalid_continuation()
+        ):
+            raise _invalid_continuation()
     if continuation_record is not None and current_runtime is not runtime:
         current_purpose, current_grants = _verified_session_grants(
             Path(vault_root),
@@ -1709,18 +1709,33 @@ def find_projected_hits(
         page_size=limit,
         knowledge_base_name=knowledge_base_name,
     )
-    visible_snapshot_digest = _visible_snapshot_digest(
-        ordered_identities,
-        selected_variants,
-    )
-    if continuation_record is not None and (
-        continuation_record.visible_snapshot_digest != visible_snapshot_digest
-        or page_offset >= len(ordered_identities)
-    ):
-        raise _invalid_continuation()
+    visible_snapshot_digest: str | None = None
+    if continuation_record is not None:
+        visible_snapshot_digest = _visible_snapshot_digest(
+            ordered_identities,
+            selected_variants,
+        )
+        if (
+            continuation_record.visible_snapshot_digest
+            != visible_snapshot_digest
+            or page_offset >= len(ordered_identities)
+        ):
+            raise _invalid_continuation()
     page_end = min(page_offset + limit, len(ordered_identities))
-    next_continuation = (
-        _register_projected_continuation(
+    next_continuation = None
+    if page_end < len(ordered_identities):
+        if authorization_digest is None:
+            authorization_digest = _authorization_map_digest(authorization)
+        if visible_authorization_digest is None:
+            visible_authorization_digest = _visible_authorization_digest(
+                authorization
+            )
+        if visible_snapshot_digest is None:
+            visible_snapshot_digest = _visible_snapshot_digest(
+                ordered_identities,
+                selected_variants,
+            )
+        next_continuation = _register_projected_continuation(
             Path(vault_root),
             runtime=runtime,
             principal_binding=principal_binding,
@@ -1733,9 +1748,6 @@ def find_projected_hits(
             candidate_depth=candidate_depth,
             replace_existing=continuation_record is None,
         )
-        if page_end < len(ordered_identities)
-        else None
-    )
 
     hits_by_lane = {
         lane: {hit.item_identity: hit for hit in hits}
