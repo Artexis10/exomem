@@ -209,6 +209,7 @@ def test_a_full_scope_batch_enqueues_a_marker_rather_than_a_path_list(vault: Pat
 def test_direct_full_rebuild_debt_advances_atomically(vault: Path) -> None:
     """A drain between direct writers must not clear the later writer's debt."""
     deferred_index.clear_graph_full_rebuild(vault)
+    deferred_index.mark_graph_full_rebuild(vault, generation=7)
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         generations = list(
@@ -218,8 +219,9 @@ def test_direct_full_rebuild_debt_advances_atomically(vault: Path) -> None:
             )
         )
 
-    assert sorted(generations) == [1, 2, 3, 4]
-    assert deferred_index.graph_full_rebuild_pending(vault) == 4
+    assert sorted(generations) == [8, 9, 10, 11]
+    assert deferred_index.clear_graph_full_rebuild(vault, generation=7) is False
+    assert deferred_index.graph_full_rebuild_pending(vault) == 11
 
 
 def test_a_poisoned_path_is_rotated_behind_the_rest_of_the_queue(vault: Path) -> None:
