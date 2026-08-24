@@ -416,6 +416,40 @@ def test_graph_promotes_a_target_below_the_complete_vector_candidate_prefix(
     assert result.hits[1].graph_hop is True
 
 
+def test_default_scope_retains_outside_target_beyond_the_lane_candidate_floor(
+    tmp_path,
+):
+    variants = (
+        _variant("Knowledge Base/a.md", "1" * 64, "needle"),
+        _variant("Knowledge Base/b.md", "2" * 64, "needle"),
+        _variant("Knowledge Base/c.md", "3" * 64, "needle"),
+        _variant("Sources/target.md", "4" * 64, "needle"),
+    )
+    runtime = _runtime(tuple(_item(variant) for variant in variants))
+
+    result = projection_runtime.find_projected_hits(
+        tmp_path,
+        runtime,
+        query="needle",
+        limit=2,
+        scope="kb",
+        mode="keyword",
+        graph=False,
+        rerank=False,
+        rank_config=projection_runtime.ranking_config.RankingConfig(
+            candidate_multiplier=1,
+            candidate_floor=2,
+        ),
+        principal=principal.owner_principal(surface="library"),
+        purpose=None,
+    )
+
+    assert [hit.path for hit in result.hits] == [
+        "Knowledge Base/a.md",
+        "Sources/target.md",
+    ]
+
+
 def test_graph_does_not_reintroduce_a_rejected_raw_bm25_candidate(tmp_path):
     seed = _variant("Knowledge Base/seed.md", "4" * 64, "what alpha")
     rejected = _variant("Knowledge Base/rejected.md", "5" * 64, "alpha only")

@@ -102,8 +102,8 @@ _REQUIRED_ROUTES = frozenset(
         "max-query",
         "max-limit",
         "max-shape",
-        "error",
-        "pagination",
+        "invalid-limit",
+        "minimum-limit",
     }
 )
 _HARDWARE_RUNTIME_PROFILE = "github-hosted-ubuntu-latest-x64-python3.13"
@@ -584,7 +584,7 @@ def request_class_for_find(
 
     if (
         mode not in {"keyword", "hybrid", "vector"}
-        or scope != "vault"
+        or scope not in {"kb", "vault"}
         or type(graph) is not bool
         or rerank not in {None, False, True}
         or (mode == "keyword" and graph)
@@ -666,14 +666,16 @@ def complete_public_request(
 @contextmanager
 def fixed_public_completion(
     request_class: PublicRequestClass,
+    *,
+    started_at: float | None = None,
 ) -> Iterator[None]:
     """Apply one class to success and error completion paths alike."""
 
-    started_at = time.perf_counter()
+    started = time.perf_counter() if started_at is None else started_at
     try:
         yield
     finally:
-        complete_public_request(request_class, started_at=started_at)
+        complete_public_request(request_class, started_at=started)
 
 
 __all__ = [

@@ -197,7 +197,7 @@ def test_retrieval_gates_run_as_three_independent_jobs() -> None:
     assert "scripts/semantic_write_latency.py --check" in semantic_command
 
 
-def test_governance_wire_gate_runs_every_closed_route_on_the_registered_profile() -> None:
+def test_governance_wire_characterization_runs_every_registered_route() -> None:
     workflow = _workflow()
     job = workflow["jobs"]["governance-projection-wire"]
 
@@ -215,8 +215,8 @@ def test_governance_wire_gate_runs_every_closed_route_on_the_registered_profile(
         "max-query",
         "max-limit",
         "max-shape",
-        "error",
-        "pagination",
+        "invalid-limit",
+        "minimum-limit",
     }
     command = job["steps"][-1]["run"]
     assert "--python 3.13" in command

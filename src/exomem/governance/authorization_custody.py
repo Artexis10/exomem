@@ -758,13 +758,10 @@ def _private_parent_is_safe(path: Path) -> bool:
             return False
         if os.name == "nt":  # pragma: no cover - exercised by Windows CI
             sid = mutation_lock._windows_current_user_sid()
-            return (
-                mutation_lock._windows_private_dacl_verdict(
-                    mutation_lock._windows_dacl_sddl(path),
-                    sid,
-                    directory=True,
-                )
-                == "valid"
+            return mutation_lock._windows_private_dacl_is_valid(
+                mutation_lock._windows_dacl_sddl(path),
+                sid,
+                directory=True,
             )
         return int(info.st_uid) == os.geteuid() and not stat.S_IMODE(info.st_mode) & 0o077
     except (OSError, RuntimeError, ValueError):

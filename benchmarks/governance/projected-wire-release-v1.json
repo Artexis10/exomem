@@ -26,8 +26,8 @@
     "max-query",
     "max-limit",
     "max-shape",
-    "error",
-    "pagination"
+    "invalid-limit",
+    "minimum-limit"
   ],
   "capacity": {
     "catalog_items": 16384,
