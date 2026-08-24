@@ -1266,6 +1266,7 @@ def op_find(
     filters: dict[str, Any] | None = None,
     result_level: str = "auto",
     limit: int = 15,
+    continuation: str | None = None,
     scope: str = "kb",
     mode: str = "hybrid",
     graph: bool = True,
@@ -1321,6 +1322,9 @@ def op_find(
         result_level: auto, page, unit, or mixed. Auto preserves page recall
             unless semantic-unit filters request independently ranked units.
         limit: Max hits to return. Default 15, hard cap 100.
+        continuation: Opaque governed-projection continuation returned by a prior page.
+            It is bound to the same principal, authorization session, purpose, request,
+            and retained projected snapshot. Omit for the first page.
         scope: "kb" (default) searches Knowledge Base/ first and
             AUTO-WIDENS to the whole vault when the KB doesn't fill
             `limit` — so content in sibling folders (Tracking/,
@@ -1476,6 +1480,10 @@ def op_find(
     projection_runtime = projection_runtime_module.load_active_projection_runtime(
         vault_root
     )
+    if continuation is not None and projection_runtime is None:
+        raise projection_runtime_module.ProjectedContinuationUnavailable(
+            "INVALID_CONTINUATION: continuation is invalid or expired"
+        )
     if projection_runtime is not None:
         _require_supported_projected_find_request(
             query=query,
@@ -1572,6 +1580,7 @@ def op_find(
         )
     degraded: list[str] = []
     failed: list[str] = []
+    projected_continuation: str | None = None
     if projection_runtime is not None:
         who = principal_module.effective_principal()
         projected = projection_runtime_module.find_projected_hits(
@@ -1589,7 +1598,9 @@ def op_find(
             rank_config=find_module._active_ranking(),
             principal=who,
             purpose=purpose,
+            continuation=continuation,
         )
+        projected_continuation = projected.continuation
         projected_hits = list(projected.hits)
         degraded.extend(projected.warming_components)
         release = egress_module.annotate_projected_hits(
@@ -1744,6 +1755,7 @@ def op_find(
         and warming is None
         and degraded_marker is None
         and retrieval_trace is None
+        and projected_continuation is None
     ):
         if not pack and referents is None:
             return hit_dicts
@@ -1760,6 +1772,8 @@ def op_find(
         out["timings"] = timings_dict
     if timings_suppressed is not None:
         out["timings_suppressed"] = timings_suppressed
+    if projected_continuation is not None:
+        out["continuation"] = projected_continuation
     if warming is not None:
         out["warming"] = warming
     if degraded_marker is not None:
@@ -4528,6 +4542,7 @@ def op_ask_memory(
     filters: dict[str, Any] | None = None,
     result_level: str = "auto",
     limit: int = 15,
+    continuation: str | None = None,
     scope: str = "kb",
     mode: str = "hybrid",
     detail: str = "compact",
@@ -4576,6 +4591,7 @@ def op_ask_memory(
         filters: Structured page/unit metadata filters.
         result_level: auto, page, unit, or mixed.
         limit: Max hits. Default 15.
+        continuation: Opaque continuation returned by a prior governed recall page.
         scope: kb, vault, or kb-only.
         mode: hybrid, keyword, or vector.
         detail: compact or full hit detail.
@@ -4615,6 +4631,7 @@ def op_ask_memory(
         filters=filters,
         result_level=result_level,
         limit=limit,
+        continuation=continuation,
         scope=scope,
         mode=mode,
         graph=graph,

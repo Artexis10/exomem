@@ -81,6 +81,20 @@ def test_reconcile_graph_reset_guidance_is_shared_by_rest_and_cli_registry() -> 
         assert "unavailable" in rebuild_graph.help.lower()
 
 
+def test_governed_continuation_is_shared_by_product_read_surfaces() -> None:
+    for surface in ("mcp", "rest", "cli"):
+        command = next(
+            item
+            for item in commands_module.product_commands_for(surface)
+            if item.name == "ask_memory"
+        )
+        continuation = next(
+            item for item in command.params if item.name == "continuation"
+        )
+        assert continuation.type == "str"
+        assert continuation.required is False
+
+
 def _client(vault, monkeypatch: pytest.MonkeyPatch, **env: str) -> TestClient:
     monkeypatch.setattr(server, "load_dotenv", lambda *a, **k: None)
     for leaky in (
@@ -802,6 +816,7 @@ def test_openapi_lists_real_product_params(vault, monkeypatch: pytest.MonkeyPatc
     assert {
         "query",
         "limit",
+        "continuation",
         "scope",
         "mode",
         "tags",
@@ -814,6 +829,7 @@ def test_openapi_lists_real_product_params(vault, monkeypatch: pytest.MonkeyPatc
         "rerank_max_candidates",
     } <= set(props)
     assert props["limit"]["type"] == "integer"
+    assert props["continuation"]["type"] == "string"
     assert props["rerank_max_candidates"]["type"] == "integer"
     assert props["graph"]["type"] == "boolean"
     assert props["tags"]["type"] == "array"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gc
+import hashlib
 import math
 import os
 import sqlite3
@@ -26,6 +27,7 @@ from . import (
     projection_measurement_store,
     projection_store,
     projection_timing,
+    projections,
     schema_v4,
     store,
 )
@@ -50,15 +52,21 @@ class _PreactivatedProjectionRuntime:
 _PREACTIVATED_RUNTIMES: dict[str, _PreactivatedProjectionRuntime] = {}
 _PROJECTED_COMPLETION_ROOTS: set[str] = set()
 _PREACTIVATED_RUNTIME_LOCK = threading.RLock()
+_PROJECTED_CONTINUATION_TTL_S = 15 * 60.0
+_MAX_PROJECTED_CONTINUATIONS = 4_096
+_PROJECTED_CONTINUATION_PREFIX = "pc1."
+_PROJECTED_CONTINUATION_DOMAIN = b"exomem.projected-find-continuation.v1\0"
+_VISIBLE_SNAPSHOT_DOMAIN = b"exomem.projected-visible-snapshot.v1\0"
+_AUTHORIZATION_MAP_DOMAIN = b"exomem.projected-authorization-map.v1\0"
+_VISIBLE_AUTHORIZATION_DOMAIN = b"exomem.projected-visible-authorization.v1\0"
 # Repository-owned release fence. The checked release manifest and required
 # actual-wire CI matrix currently certify only the exact model-hard-off runtime
 # profile. Environment cannot opt an uncertified model-enabled profile into
 # serving; those configurations remain closed until their own evidence lands.
-# The model-hard-off implementation remains installed but unavailable until the
-# actual-wire gate covers genuine hidden-state error reduction and real
-# pagination.  A malformed-argument response and ``limit=1`` are not evidence
-# for those two release claims.
-_PROJECTED_SERVING_RELEASE_ACCEPTED = False
+# The model-hard-off implementation is accepted only with the repository-owned
+# actual-wire matrix, including hidden-only missing-index reduction and a real
+# second-page continuation. Model-enabled profiles remain closed.
+_PROJECTED_SERVING_RELEASE_ACCEPTED = True
 
 
 def projected_serving_release_profile() -> str | None:
@@ -213,6 +221,29 @@ class ActiveProjectionRuntime:
 
 
 @dataclass(frozen=True, slots=True)
+class _ProjectedContinuationRecord:
+    root_key: str
+    token: str
+    runtime: ActiveProjectionRuntime
+    principal_binding: tuple[str, str | None]
+    declared_purpose: str | None
+    request_digest: str
+    authorization_digest: str
+    visible_authorization_digest: str
+    visible_snapshot_digest: str
+    next_offset: int
+    candidate_depth: int
+    expires_at: float
+
+
+_PROJECTED_CONTINUATIONS: dict[
+    tuple[str, str],
+    _ProjectedContinuationRecord,
+] = {}
+_PROJECTED_CONTINUATION_LOCK = threading.RLock()
+
+
+@dataclass(frozen=True, slots=True)
 class ProjectedFindResult:
     """One public acquisition result derived only from the pinned namespace."""
 
@@ -220,6 +251,240 @@ class ProjectedFindResult:
     withheld_paths: frozenset[str]
     warming_components: tuple[str, ...] = ()
     declared_purpose: str | None = None
+    continuation: str | None = None
+
+
+class ProjectedContinuationUnavailable(ValueError):
+    """A governed continuation is malformed, stale, expired, or unavailable."""
+
+
+def _invalid_continuation() -> ProjectedContinuationUnavailable:
+    return ProjectedContinuationUnavailable(
+        "INVALID_CONTINUATION: continuation is invalid or expired"
+    )
+
+
+def _framed_pairs_digest(
+    domain: bytes,
+    pairs: tuple[tuple[str, str | None], ...],
+) -> str:
+    digest = hashlib.sha256()
+    digest.update(domain)
+    digest.update(len(pairs).to_bytes(4, "big"))
+    for left, right in pairs:
+        for value in (left, right):
+            encoded = b"" if value is None else value.encode("utf-8")
+            digest.update(len(encoded).to_bytes(4, "big"))
+            digest.update(encoded)
+    return digest.hexdigest()
+
+
+def _principal_binding(principal: RequestPrincipal) -> tuple[str, str | None]:
+    return (principal.audience_id, principal.authorization_session_id)
+
+
+def _projected_request_digest(
+    *,
+    query: str,
+    limit: int,
+    scope: str,
+    mode: str,
+    graph: bool,
+    rerank: bool | None,
+    auto_rerank: bool,
+    prefer_compiled: bool,
+    prefer_active: bool,
+) -> str:
+    value = {
+        "auto_rerank": auto_rerank,
+        "graph": graph,
+        "limit": limit,
+        "mode": mode,
+        "prefer_active": prefer_active,
+        "prefer_compiled": prefer_compiled,
+        "query": query,
+        "rerank": rerank,
+        "scope": scope,
+    }
+    return hashlib.sha256(projections.canonical_jcs(value)).hexdigest()
+
+
+def _authorization_map_digest(
+    authorization: projected_retrieval.AuthorizationProjectionMap,
+) -> str:
+    selected = {
+        selection.item_identity: selection.projection_variant_id
+        for selection in authorization.selections
+    }
+    pairs = tuple(
+        (identity, selected.get(identity))
+        for identity in sorted(
+            set(selected).union(authorization.withheld_identities),
+            key=lambda value: value.encode("utf-16-be"),
+        )
+    )
+    return _framed_pairs_digest(_AUTHORIZATION_MAP_DOMAIN, pairs)
+
+
+def _visible_authorization_digest(
+    authorization: projected_retrieval.AuthorizationProjectionMap,
+) -> str:
+    return _framed_pairs_digest(
+        _VISIBLE_AUTHORIZATION_DOMAIN,
+        tuple(
+            sorted(
+                (
+                    (selection.item_identity, selection.projection_variant_id)
+                    for selection in authorization.selections
+                    if selection.projection_variant_id is not None
+                ),
+                key=lambda pair: pair[0].encode("utf-16-be"),
+            )
+        ),
+    )
+
+
+def _visible_snapshot_digest(
+    ordered_identities: tuple[str, ...],
+    selected_variants: Mapping[str, projections.ProjectionVariant],
+) -> str:
+    return _framed_pairs_digest(
+        _VISIBLE_SNAPSHOT_DOMAIN,
+        tuple(
+            (
+                identity,
+                selected_variants[identity].projection_variant_id,
+            )
+            for identity in ordered_identities
+        ),
+    )
+
+
+def _continuation_token(
+    *,
+    principal_binding: tuple[str, str | None],
+    declared_purpose: str | None,
+    request_digest: str,
+    visible_snapshot_digest: str,
+    next_offset: int,
+) -> str:
+    value = {
+        "authorization_session_id": principal_binding[1],
+        "principal_id": principal_binding[0],
+        "purpose": declared_purpose,
+        "request_digest": request_digest,
+        "next_offset": next_offset,
+        "visible_snapshot_digest": visible_snapshot_digest,
+    }
+    return _PROJECTED_CONTINUATION_PREFIX + hashlib.sha256(
+        _PROJECTED_CONTINUATION_DOMAIN + projections.canonical_jcs(value)
+    ).hexdigest()
+
+
+def _purge_projected_continuations(now: float) -> None:
+    expired = [
+        key
+        for key, record in _PROJECTED_CONTINUATIONS.items()
+        if record.expires_at <= now
+    ]
+    for key in expired:
+        del _PROJECTED_CONTINUATIONS[key]
+
+
+def _clear_projected_continuations_for_tests() -> None:
+    with _PROJECTED_CONTINUATION_LOCK:
+        _PROJECTED_CONTINUATIONS.clear()
+
+
+def _lookup_projected_continuation(
+    vault_root: Path,
+    continuation: object,
+) -> _ProjectedContinuationRecord:
+    if (
+        not isinstance(continuation, str)
+        or len(continuation) != len(_PROJECTED_CONTINUATION_PREFIX) + 64
+        or not continuation.startswith(_PROJECTED_CONTINUATION_PREFIX)
+        or any(
+            character not in "0123456789abcdef"
+            for character in continuation[len(_PROJECTED_CONTINUATION_PREFIX) :]
+        )
+    ):
+        raise _invalid_continuation()
+    now = time.monotonic()
+    key = (_root_key(Path(vault_root)), continuation)
+    with _PROJECTED_CONTINUATION_LOCK:
+        _purge_projected_continuations(now)
+        record = _PROJECTED_CONTINUATIONS.get(key)
+    if record is None:
+        raise _invalid_continuation()
+    return record
+
+
+def _register_projected_continuation(
+    vault_root: Path,
+    *,
+    runtime: ActiveProjectionRuntime,
+    principal_binding: tuple[str, str | None],
+    declared_purpose: str | None,
+    request_digest: str,
+    authorization_digest: str,
+    visible_authorization_digest: str,
+    visible_snapshot_digest: str,
+    next_offset: int,
+    candidate_depth: int,
+    replace_existing: bool,
+) -> str:
+    token = _continuation_token(
+        principal_binding=principal_binding,
+        declared_purpose=declared_purpose,
+        request_digest=request_digest,
+        visible_snapshot_digest=visible_snapshot_digest,
+        next_offset=next_offset,
+    )
+    now = time.monotonic()
+    root_key = _root_key(Path(vault_root))
+    key = (root_key, token)
+    with _PROJECTED_CONTINUATION_LOCK:
+        _purge_projected_continuations(now)
+        existing = _PROJECTED_CONTINUATIONS.get(key)
+        if existing is not None:
+            public_binding_mismatch = (
+                existing.principal_binding != principal_binding
+                or existing.declared_purpose != declared_purpose
+                or existing.request_digest != request_digest
+                or existing.visible_authorization_digest
+                != visible_authorization_digest
+                or existing.visible_snapshot_digest != visible_snapshot_digest
+                or existing.next_offset != next_offset
+                or existing.candidate_depth != candidate_depth
+            )
+            if public_binding_mismatch:
+                raise _invalid_continuation()
+            if not replace_existing:
+                if (
+                    existing.runtime is not runtime
+                    or existing.authorization_digest != authorization_digest
+                ):
+                    raise _invalid_continuation()
+                return token
+        if len(_PROJECTED_CONTINUATIONS) >= _MAX_PROJECTED_CONTINUATIONS:
+            if existing is None:
+                raise _invalid_continuation()
+        _PROJECTED_CONTINUATIONS[key] = _ProjectedContinuationRecord(
+            root_key=root_key,
+            token=token,
+            runtime=runtime,
+            principal_binding=principal_binding,
+            declared_purpose=declared_purpose,
+            request_digest=request_digest,
+            authorization_digest=authorization_digest,
+            visible_authorization_digest=visible_authorization_digest,
+            visible_snapshot_digest=visible_snapshot_digest,
+            next_offset=next_offset,
+            candidate_depth=candidate_depth,
+            expires_at=now + _PROJECTED_CONTINUATION_TTL_S,
+        )
+    return token
 
 
 def _stabilize_projection_runtime(
@@ -805,10 +1070,10 @@ def _order_projected_scope(
     ordered_identities: tuple[str, ...],
     *,
     scope: str,
-    limit: int,
+    page_size: int,
     knowledge_base_name: str,
 ) -> tuple[str, ...]:
-    """Apply the public KB-first reserve without reopening raw pages."""
+    """Apply the public KB-first reserve as one stable paginatable order."""
 
     if scope != "kb":
         return ordered_identities
@@ -818,11 +1083,33 @@ def _order_projected_scope(
         parts = PurePosixPath(identity).parts
         target = inside if parts and parts[0] == knowledge_base_name else outside
         target.append(identity)
-    if not outside:
+    if not inside or not outside:
         return ordered_identities
-    reserve = min(len(outside), max(1, limit // 5), max(0, limit - 1))
-    kb_keep = limit - reserve
-    return tuple((inside[:kb_keep] + outside)[:limit])
+    reserve = min(max(1, page_size // 5), max(0, page_size - 1))
+    kb_keep = page_size - reserve
+    ordered: list[str] = []
+    inside_offset = 0
+    outside_offset = 0
+    while inside_offset < len(inside) or outside_offset < len(outside):
+        page = inside[inside_offset : inside_offset + kb_keep]
+        inside_offset += len(page)
+        widened = outside[outside_offset : outside_offset + reserve]
+        outside_offset += len(widened)
+        if len(page) < kb_keep:
+            fill = outside[
+                outside_offset : outside_offset + (kb_keep - len(page))
+            ]
+            widened.extend(fill)
+            outside_offset += len(fill)
+        if len(widened) < reserve:
+            fill = inside[
+                inside_offset : inside_offset + (reserve - len(widened))
+            ]
+            page.extend(fill)
+            inside_offset += len(fill)
+        ordered.extend(page)
+        ordered.extend(widened)
+    return tuple(ordered)
 
 
 def _retain_projected_scope_lane(
@@ -927,6 +1214,7 @@ def find_projected_hits(
     rank_config: ranking_config.RankingConfig = ranking_config.DEFAULT_RANKING,
     principal: RequestPrincipal,
     purpose: str | None,
+    continuation: str | None = None,
 ) -> ProjectedFindResult:
     """Acquire public candidates without opening a raw corpus/index lane."""
 
@@ -936,6 +1224,21 @@ def find_projected_hits(
         raise ProjectionRuntimeUnavailable(
             "governed projected retrieval is unavailable"
         )
+    current_runtime = runtime
+    continuation_record = (
+        None
+        if continuation is None
+        else _lookup_projected_continuation(Path(vault_root), continuation)
+    )
+    if continuation_record is not None:
+        if (
+            continuation_record.runtime.snapshot.policy.fingerprint
+            != current_runtime.snapshot.policy.fingerprint
+            or continuation_record.runtime.namespace.namespace_key.projector_schema_version
+            != current_runtime.namespace.namespace_key.projector_schema_version
+        ):
+            raise _invalid_continuation()
+        runtime = continuation_record.runtime
     if type(limit) is not int or not 1 <= limit <= 100:
         raise ValueError("find: limit must be an integer from 1 through 100")
     if (
@@ -964,6 +1267,8 @@ def find_projected_hits(
             "governed projected retrieval is unavailable"
         )
     if not isinstance(principal, RequestPrincipal) or not principal.resolved:
+        if continuation_record is not None:
+            raise _invalid_continuation()
         return ProjectedFindResult(
             hits=(),
             withheld_paths=frozenset(
@@ -977,6 +1282,24 @@ def find_projected_hits(
         principal=principal,
         purpose=purpose if purpose is not None else principal.purpose,
     )
+    principal_binding = _principal_binding(principal)
+    request_digest = _projected_request_digest(
+        query=query,
+        limit=limit,
+        scope=scope,
+        mode=mode,
+        graph=graph,
+        rerank=rerank,
+        auto_rerank=auto_rerank,
+        prefer_compiled=prefer_compiled,
+        prefer_active=prefer_active,
+    )
+    if continuation_record is not None and (
+        continuation_record.principal_binding != principal_binding
+        or continuation_record.declared_purpose != declared_purpose
+        or continuation_record.request_digest != request_digest
+    ):
+        raise _invalid_continuation()
     authorization = projection_authorization.build_authorization_map(
         runtime.namespace,
         policy=runtime.snapshot.policy,
@@ -985,6 +1308,39 @@ def find_projected_hits(
         verified_session_grants=verified_grants,
         catalog=runtime.catalog,
     )
+    authorization_digest: str | None = None
+    visible_authorization_digest: str | None = None
+    if continuation_record is not None:
+        authorization_digest = _authorization_map_digest(authorization)
+        visible_authorization_digest = _visible_authorization_digest(authorization)
+        if (
+            continuation_record.authorization_digest != authorization_digest
+            or continuation_record.visible_authorization_digest
+            != visible_authorization_digest
+        ):
+            raise _invalid_continuation()
+    if continuation_record is not None and current_runtime is not runtime:
+        current_purpose, current_grants = _verified_session_grants(
+            Path(vault_root),
+            current_runtime,
+            principal=principal,
+            purpose=purpose if purpose is not None else principal.purpose,
+        )
+        if current_purpose != declared_purpose:
+            raise _invalid_continuation()
+        current_authorization = projection_authorization.build_authorization_map(
+            current_runtime.namespace,
+            policy=current_runtime.snapshot.policy,
+            audience=principal.audience_id,
+            purpose=current_purpose,
+            verified_session_grants=current_grants,
+            catalog=current_runtime.catalog,
+        )
+        if (
+            _visible_authorization_digest(current_authorization)
+            != continuation_record.visible_authorization_digest
+        ):
+            raise _invalid_continuation()
     inline_withheld = frozenset(
         selection.item_identity
         for selection in authorization.selections
@@ -1018,13 +1374,20 @@ def find_projected_hits(
             withheld_paths=withheld,
             declared_purpose=declared_purpose,
         )
+    page_offset = (
+        0 if continuation_record is None else continuation_record.next_offset
+    )
     lane_depth = selected_count
-    candidate_depth = min(
-        selected_count,
-        max(
-            limit * rank_config.candidate_multiplier,
-            rank_config.candidate_floor,
-        ),
+    candidate_depth = (
+        min(
+            selected_count,
+            max(
+                limit * rank_config.candidate_multiplier,
+                rank_config.candidate_floor,
+            ),
+        )
+        if continuation_record is None
+        else continuation_record.candidate_depth
     )
     lane_hits: dict[str, tuple[projected_retrieval.ProjectedLexicalHit, ...]] = {}
     warming: set[str] = set()
@@ -1343,9 +1706,48 @@ def find_projected_hits(
     ordered_identities = _order_projected_scope(
         ordered_identities,
         scope=scope,
-        limit=limit,
+        page_size=limit,
         knowledge_base_name=knowledge_base_name,
     )
+    visible_snapshot_digest: str | None = None
+    if continuation_record is not None:
+        visible_snapshot_digest = _visible_snapshot_digest(
+            ordered_identities,
+            selected_variants,
+        )
+        if (
+            continuation_record.visible_snapshot_digest
+            != visible_snapshot_digest
+            or page_offset >= len(ordered_identities)
+        ):
+            raise _invalid_continuation()
+    page_end = min(page_offset + limit, len(ordered_identities))
+    next_continuation = None
+    if page_end < len(ordered_identities):
+        if authorization_digest is None:
+            authorization_digest = _authorization_map_digest(authorization)
+        if visible_authorization_digest is None:
+            visible_authorization_digest = _visible_authorization_digest(
+                authorization
+            )
+        if visible_snapshot_digest is None:
+            visible_snapshot_digest = _visible_snapshot_digest(
+                ordered_identities,
+                selected_variants,
+            )
+        next_continuation = _register_projected_continuation(
+            Path(vault_root),
+            runtime=runtime,
+            principal_binding=principal_binding,
+            declared_purpose=declared_purpose,
+            request_digest=request_digest,
+            authorization_digest=authorization_digest,
+            visible_authorization_digest=visible_authorization_digest,
+            visible_snapshot_digest=visible_snapshot_digest,
+            next_offset=page_end,
+            candidate_depth=candidate_depth,
+            replace_existing=continuation_record is None,
+        )
 
     hits_by_lane = {
         lane: {hit.item_identity: hit for hit in hits}
@@ -1361,7 +1763,10 @@ def find_projected_hits(
         {} if reranked is None else {hit.item_identity: hit for hit in reranked}
     )
     hits: list[Hit] = []
-    for final_rank, identity in enumerate(ordered_identities[:limit], 1):
+    for final_rank, identity in enumerate(
+        ordered_identities[page_offset:page_end],
+        page_offset + 1,
+    ):
         source_hit = reranked_by_identity.get(identity)
         if source_hit is None:
             source_hit = next(
@@ -1411,11 +1816,13 @@ def find_projected_hits(
             lane for lane in ("vector", "clip", "graph", "rerank") if lane in warming
         ),
         declared_purpose=declared_purpose,
+        continuation=next_continuation,
     )
 
 
 __all__ = [
     "ActiveProjectionRuntime",
+    "ProjectedContinuationUnavailable",
     "ProjectedFindResult",
     "ProjectionRuntimeUnavailable",
     "classify_projected_completion_boundary",

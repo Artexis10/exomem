@@ -264,7 +264,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        route: [keyword, bm25, vector-hard-off, rerank-hard-off, clip-hard-off, graph, graph-rerank-hard-off, max-query, max-limit, max-shape, invalid-limit, minimum-limit]
+        route: [keyword, bm25, vector-hard-off, rerank-hard-off, clip-hard-off, graph, graph-rerank-hard-off, max-query, max-limit, max-shape, hidden-index-missing, pagination]
     steps:
       - uses: actions/checkout@v4
       - name: Install uv

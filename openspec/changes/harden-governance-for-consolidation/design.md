@@ -651,6 +651,51 @@ The search lanes consume that map directly:
    pagination, and error reduction operate only on complete lane outputs from this
    projected view. Public limits count projected candidates only.
 
+Governed find pagination uses one opaque `pc1.<64-lowercase-hex>` continuation. The
+token is the SHA-256 digest of NUL-terminated ASCII domain
+`exomem.projected-find-continuation.v1\0` followed by RFC 8785 JCS containing only the
+canonical principal id, verified authorization-session id or `null`, declared purpose
+or `null`, the SHA-256 request digest, the next visible offset, and a
+caller-visible snapshot digest. That snapshot digest is streamed over the ordered
+`(item_identity, projection_variant_id)` pairs using the NUL-terminated ASCII domain
+`exomem.projected-visible-snapshot.v1\0`, a big-endian u32 pair count, then for each UTF-8
+field a big-endian u32 byte length followed by its bytes. It excludes
+the vault root, hidden/L0 identities, catalog size/generation, issuance time, random
+bytes, and every server-only authorization fact, so an L0 item present versus absent
+produces the same continuation bytes. The token grants no authority and is useful only
+as a key into a bounded process-local record created by the first page.
+
+The request digest is SHA-256 over RFC 8785 JCS of the closed object
+`{auto_rerank, graph, limit, mode, prefer_active, prefer_compiled, query, rerank,
+scope}` with booleans, bounded integer `limit`, strings, and `rerank` boolean or `null`
+encoded at their JSON types. No omitted default, presentation-only field, or server-only
+ranking configuration enters that object.
+
+That record retains the exact immutable runtime, authorization-map digest, selected-
+projection digest, request and principal bindings, visible-snapshot digest, next offset,
+the first page's repository-derived candidate depth, and a fixed repository-owned
+15-minute monotonic expiry. At most 4,096 records may exist per process; expired records
+are removed before admission and capacity exhaustion returns the same content-free
+continuation refusal. A continuation request resolves the record for the exact vault,
+requires the current policy fingerprint and projector schema to match, re-runs current
+session/grant authorization against the retained namespace, compares the selected-
+projection digest against the current namespace while excluding L0 rows, and requires
+the resulting authorization-map and visible-snapshot digests to match before slicing the
+next page.
+Thus a policy/session/grant/revocation or visible-item change refuses rather than serving
+stale authority or skipping rows, while a hidden-only catalog change continues over the
+retained projected snapshot without changing page membership or revealing the change.
+Unknown, malformed, expired, evicted, restart-lost, cross-vault, cross-principal,
+cross-session, cross-purpose, or request-mismatched cursors all return the one bounded
+`INVALID_CONTINUATION` application refusal under the fixed completion class. Replays are
+read-only and deterministic; they do not consume or extend the record. A separately
+issued first page may refresh a byte-identical token to the current verified runtime and
+fixed expiry; a continuation replay may not replace that newer record with prior state.
+
+Later pages reuse the first page's retained candidate depth exactly: offset growth never
+widens a primary vector/BM25 prefix, changes graph-only classification, or recomputes a
+different visible order. Exhausting that bounded ranked window omits the continuation.
+
 Projection namespaces are built and validated before a governed compiled-policy
 generation is activated. An item write creates the next catalog generation, reuses only
 content-addressed unchanged rows, and publishes the complete catalog plus required

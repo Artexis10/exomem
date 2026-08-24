@@ -215,8 +215,8 @@ def test_governance_wire_characterization_runs_every_registered_route() -> None:
         "max-query",
         "max-limit",
         "max-shape",
-        "invalid-limit",
-        "minimum-limit",
+        "hidden-index-missing",
+        "pagination",
     }
     command = job["steps"][-1]["run"]
     assert "--python 3.13" in command

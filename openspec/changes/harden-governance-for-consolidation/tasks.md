@@ -534,6 +534,10 @@ made before both PRs and their combined verification are complete.
 - [ ] 8.14 Move fusion, final sort/top-k, pagination/cursor creation, counts/facets,
   ambiguity, diagnostics, and error reduction after complete projected lane acquisition;
   add cross-principal hot-cache reuse tests proving decisions/order stay request-local.
+  Governed find continuation SHALL use the exact bounded `pc1` visible-snapshot digest
+  and retained-runtime registry specified in `release-gate`; add red first/next/exhausted,
+  hidden-only catalog drift, authority drift, expiry/cap/restart, replay, cross-binding,
+  and generated-surface parity tests before enabling the release fence.
 - [ ] 8.15 Implement stable payload timing suppression and fixed repository-registered
   public-request deadline/padding classes; fail if either bound exceeds any ceiling or
   maximum capacity cannot complete. Do not claim cryptographic constant time or pass by

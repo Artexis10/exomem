@@ -161,6 +161,7 @@ class _SelectedDocument:
     variant: projections.ProjectionVariant
     text: str
     tokens: tuple[str, ...]
+    keyword_tokens: frozenset[str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -423,7 +424,12 @@ class ProjectedLexicalIndex:
             for variant in item.variants:
                 text = _variant_text(variant)
                 tokens = tuple(bm25.tokenize(text))
-                document = _SelectedDocument(variant, text, tokens)
+                document = _SelectedDocument(
+                    variant,
+                    text,
+                    tokens,
+                    frozenset(token for token in text.casefold().split() if token),
+                )
                 documents[variant.projection_variant_id] = document
                 for token in frozenset(tokens):
                     postings.setdefault(token, set()).add(
@@ -455,12 +461,16 @@ class ProjectedLexicalIndex:
         selected_ids = frozenset(
             document.variant.projection_variant_id for document in documents
         )
-        posting_sets = [self._postings.get(token, frozenset()) for token in query_tokens]
-        if not posting_sets:
+        unique_query_tokens = frozenset(query_tokens)
+        if not unique_query_tokens:
             return ()
-        candidate_ids = selected_ids.intersection(
-            frozenset().union(*posting_sets)
-        )
+        candidate_ids: set[str] = set()
+        for token in unique_query_tokens:
+            candidate_ids.update(
+                selected_ids.intersection(
+                    self._postings.get(token, frozenset())
+                )
+            )
         return tuple(
             document
             for document in documents
@@ -550,10 +560,13 @@ class ProjectedLexicalIndex:
         )
         if not query_tokens:
             return ()
+        exact_query_tokens = frozenset(query_tokens)
         matches: list[_SelectedDocument] = []
         for document in documents:
             folded_text = document.text.casefold()
-            if all(token in folded_text for token in query_tokens):
+            if exact_query_tokens.issubset(document.keyword_tokens) or all(
+                token in folded_text for token in query_tokens
+            ):
                 matches.append(document)
         matches.sort(
             key=lambda document: (

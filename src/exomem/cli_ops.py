@@ -104,6 +104,7 @@ _REMEDIATION: dict[str, str] = {
     "STALE_PLAN_ITEM": "Re-read the exact plan and retry with its current item version.",
     "INVALID_PLAN_RELATION": "Use valid authorized same-collection Planning relationships.",
     "INVALID_PLAN_CONTINUATION": "Restart the Planning query without this continuation.",
+    "INVALID_CONTINUATION": "Restart governed recall without this continuation.",
     "STALE_PLAN_SNAPSHOT": "Re-run the Planning query against the current snapshot.",
     "PLAN_RESPONSE_TOO_LARGE": "Narrow the Planning query or request fewer rows.",
     "STALE_RECORD": "Re-read the record and retry with its current versions.",

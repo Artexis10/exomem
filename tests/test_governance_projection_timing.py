@@ -58,8 +58,8 @@ def _release_manifest() -> dict[str, object]:
             "max-query",
             "max-limit",
             "max-shape",
-            "invalid-limit",
-            "minimum-limit",
+            "hidden-index-missing",
+            "pagination",
         ],
         "capacity": {
             "catalog_items": projections.MAX_GOVERNED_CATALOG_ITEMS,
@@ -91,8 +91,8 @@ def test_checked_release_manifest_is_the_validated_nonwaivable_contract() -> Non
             "max-query",
             "max-limit",
             "max-shape",
-            "invalid-limit",
-            "minimum-limit",
+            "hidden-index-missing",
+            "pagination",
         }
     )
 
@@ -424,8 +424,8 @@ def test_unavailable_projected_boundary_still_uses_fixed_completion(
     assert events == ["classify", "enter", "leaf", "complete"]
 
 
-def test_incomplete_error_and_pagination_evidence_keeps_serving_gate_closed() -> None:
-    assert projection_runtime._PROJECTED_SERVING_RELEASE_ACCEPTED is False
+def test_hidden_error_and_pagination_evidence_opens_the_exact_release_profile() -> None:
+    assert projection_runtime._PROJECTED_SERVING_RELEASE_ACCEPTED is True
 
 
 def test_unactivated_command_skips_projected_class_selection(
@@ -671,7 +671,7 @@ def test_route_release_gate_requires_exact_schedule_and_byte_equal_pairs() -> No
 def test_route_release_gate_derives_deadline_failure_from_wire_observation() -> None:
     timing = _timing_module()
     manifest = timing.validate_release_manifest(_release_manifest())
-    schedule = timing.release_sample_schedule(manifest, route="minimum-limit")
+    schedule = timing.release_sample_schedule(manifest, route="pagination")
     observations = [
         timing.WireObservation(
             sample=sample,
@@ -688,7 +688,7 @@ def test_route_release_gate_derives_deadline_failure_from_wire_observation() -> 
 
     report = timing.evaluate_wire_route(
         manifest,
-        route="minimum-limit",
+        route="pagination",
         observations=tuple(observations),
     )
 

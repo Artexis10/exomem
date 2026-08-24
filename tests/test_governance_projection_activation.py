@@ -177,18 +177,7 @@ def test_startup_preactivates_one_digest_and_serves_only_that_revalidated_runtim
             AssertionError("request reloaded projection catalog")
         ),
     )
-    assert projection_runtime._PROJECTED_SERVING_RELEASE_ACCEPTED is False
-    with pytest.raises(
-        projection_runtime.ProjectionRuntimeUnavailable,
-        match="governed projected retrieval is unavailable",
-    ):
-        projection_runtime.load_active_projection_runtime(tmp_path)
-
-    monkeypatch.setattr(
-        projection_runtime,
-        "_PROJECTED_SERVING_RELEASE_ACCEPTED",
-        True,
-    )
+    assert projection_runtime._PROJECTED_SERVING_RELEASE_ACCEPTED is True
     assert projection_runtime.load_active_projection_runtime(tmp_path) is activated
 
     current_control[0] = replace(control, activation_epoch=control.activation_epoch + 1)

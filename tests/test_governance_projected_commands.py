@@ -202,6 +202,86 @@ def test_projected_find_accepts_the_public_default_kb_scope(
     assert calls[0]["scope"] == "kb"
 
 
+def test_projected_find_threads_and_returns_the_governed_continuation(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    token = "pc1." + "a" * 64
+    runtime = SimpleNamespace(
+        snapshot=SimpleNamespace(policy=Policy(fingerprint="f" * 64, scopes={}))
+    )
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        commands.projection_runtime_module,
+        "load_active_projection_runtime",
+        lambda _root: runtime,
+    )
+
+    def projected(*_args, **kwargs):
+        calls.append(kwargs)
+        return projection_runtime.ProjectedFindResult(
+            hits=(),
+            withheld_paths=frozenset(),
+            continuation=token,
+        )
+
+    monkeypatch.setattr(
+        commands.projection_runtime_module,
+        "find_projected_hits",
+        projected,
+    )
+
+    with principal.request_scope(principal.owner_principal(surface="library")):
+        response = commands.op_find(
+            tmp_path,
+            query="projection-only term",
+            scope="vault",
+            mode="keyword",
+            graph=False,
+            rerank=False,
+            continuation=token,
+        )
+
+    assert calls[0]["continuation"] == token
+    assert response == {
+        "hits": [],
+        "timings_suppressed": {"status": "governed_projection"},
+        "continuation": token,
+    }
+
+
+def test_continuation_without_governed_runtime_uses_one_content_free_refusal(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setattr(
+        commands.projection_runtime_module,
+        "load_active_projection_runtime",
+        lambda _root: None,
+    )
+    monkeypatch.setattr(
+        commands.find_module,
+        "find",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("invalid continuation reached the raw corpus")
+        ),
+    )
+
+    with pytest.raises(
+        projection_runtime.ProjectedContinuationUnavailable,
+        match="^INVALID_CONTINUATION: continuation is invalid or expired$",
+    ):
+        commands.op_find(
+            tmp_path,
+            query="term",
+            continuation="pc1." + "a" * 64,
+            scope="vault",
+            mode="keyword",
+            graph=False,
+            rerank=False,
+        )
+
+
 def test_projected_warming_marker_omits_process_age(
     monkeypatch,
     tmp_path,
@@ -606,7 +686,7 @@ def test_projected_default_scope_reserves_outside_kb_slots() -> None:
     assert projection_runtime._order_projected_scope(
         ordered,
         scope="kb",
-        limit=5,
+        page_size=5,
         knowledge_base_name="Knowledge Base",
     ) == (
         "Knowledge Base/a.md",
@@ -614,11 +694,13 @@ def test_projected_default_scope_reserves_outside_kb_slots() -> None:
         "Knowledge Base/c.md",
         "Knowledge Base/d.md",
         "Sources/target.md",
+        "Knowledge Base/e.md",
+        "Sources/second.md",
     )
     assert projection_runtime._order_projected_scope(
         ordered,
         scope="vault",
-        limit=5,
+        page_size=5,
         knowledge_base_name="Knowledge Base",
     ) == ordered
 
@@ -695,7 +777,13 @@ def test_product_recall_does_not_reopen_due_state_on_projected_boundary(
     tmp_path,
 ) -> None:
     result = [{"path": "Knowledge Base/visible.md"}]
-    monkeypatch.setattr(commands, "op_find", lambda *_args, **_kwargs: result)
+    calls: list[dict[str, object]] = []
+
+    def find(*_args, **kwargs):
+        calls.append(kwargs)
+        return result
+
+    monkeypatch.setattr(commands, "op_find", find)
     monkeypatch.setattr(
         commands.projection_runtime_module,
         "requires_projected_read_boundary",
@@ -703,7 +791,13 @@ def test_product_recall_does_not_reopen_due_state_on_projected_boundary(
         raising=False,
     )
 
-    assert commands.op_ask_memory(tmp_path, query="term") is result
+    token = "pc1." + "a" * 64
+    assert (
+        commands.op_ask_memory(tmp_path, query="term", continuation=token)
+        is result
+    )
+    assert len(calls) == 1
+    assert calls[0]["continuation"] == token
 
 
 def test_exact_v4_public_loader_never_builds_namespace_on_request(
