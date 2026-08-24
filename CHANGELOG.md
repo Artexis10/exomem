@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.60.0](https://github.com/Artexis10/exomem/compare/v0.59.0...v0.60.0) (2026-08-24)
+
+
+### Features
+
+* **governance:** release projected retrieval paging ([#781](https://github.com/Artexis10/exomem/issues/781)) ([2530ae7](https://github.com/Artexis10/exomem/commit/2530ae7641bbfdceaf23111aef1271cb97c20321))
+
+
+### Bug Fixes
+
+* **hosted:** accept provider retention precision ([4f7adc3](https://github.com/Artexis10/exomem/commit/4f7adc30ef55974201d65a2a676f19f5b83359eb))
+* **hosted:** rotate database backup credential ([#784](https://github.com/Artexis10/exomem/issues/784)) ([7fda7ba](https://github.com/Artexis10/exomem/commit/7fda7bac36b4eb7b0c90bd3f1ade9c788f1dc363))
+* **hosted:** rotate provisioner database credential ([#786](https://github.com/Artexis10/exomem/issues/786)) ([c999ebe](https://github.com/Artexis10/exomem/commit/c999ebed23349297868bfc5ac6398440613d4d6d))
+* **runtime:** bound startup graph coordination ([#776](https://github.com/Artexis10/exomem/issues/776)) ([57f725c](https://github.com/Artexis10/exomem/commit/57f725c1d89b38c40dd223cae52f81519032f8e1))
+
 ## [0.59.0](https://github.com/Artexis10/exomem/compare/v0.58.0...v0.59.0) (2026-08-24)
 
 
