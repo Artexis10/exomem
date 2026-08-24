@@ -99,6 +99,7 @@ class AuthorizationProjectionMap:
 
     namespace_key: projections.ProjectionNamespaceKey
     selections: tuple[ProjectionSelection, ...]
+    withheld_identities: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         if not isinstance(self.namespace_key, projections.ProjectionNamespaceKey):
@@ -120,11 +121,24 @@ class AuthorizationProjectionMap:
                     "authorization map contains a duplicate item identity"
                 )
             by_identity[selection.item_identity] = selection
+        if not isinstance(self.withheld_identities, frozenset):
+            raise projections.ProjectionCanonicalizationError(
+                "authorization map withheld identities must be an immutable set"
+            )
+        withheld = frozenset(
+            _bounded_text(identity, "withheld item identity", maximum=4096)
+            for identity in self.withheld_identities
+        )
+        if withheld.intersection(by_identity):
+            raise projections.ProjectionCanonicalizationError(
+                "authorization map selects and withholds the same item"
+            )
         object.__setattr__(
             self,
             "selections",
             tuple(by_identity[key] for key in sorted(by_identity, key=_sort_key)),
         )
+        object.__setattr__(self, "withheld_identities", withheld)
 
 
 @dataclass(frozen=True, slots=True)
@@ -262,15 +276,27 @@ def _selected_variants(
     selections = {
         selection.item_identity: selection for selection in authorization.selections
     }
-    if frozenset(selections) != frozenset(items):
+    inline_withheld = frozenset(
+        identity
+        for identity, selection in selections.items()
+        if selection.projection_variant_id is None
+    )
+    explicit_withheld = authorization.withheld_identities
+    if (
+        inline_withheld.intersection(explicit_withheld)
+        or frozenset(selections).union(explicit_withheld) != frozenset(items)
+    ):
         raise ProjectedRetrievalUnavailable(
             "authorization map does not cover the exact projection catalog"
         )
 
     selected: list[projections.ProjectionVariant] = []
-    for identity in sorted(items, key=_sort_key):
-        item = items[identity]
-        selection = selections[identity]
+    for identity, selection in selections.items():
+        item = items.get(identity)
+        if item is None:
+            raise ProjectedRetrievalUnavailable(
+                "authorization map does not cover the exact projection catalog"
+            )
         if selection.content_hash != item.content_hash:
             raise ProjectedRetrievalUnavailable(
                 "authorization selection content hash does not match catalog"

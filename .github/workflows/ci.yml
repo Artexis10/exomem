@@ -257,6 +257,35 @@ jobs:
         # home next to the golden quality gate.
         run: uv run --frozen python -m pytest tests/test_latency_gate.py -q
 
+  governance-projection-wire:
+    name: governance projected wire (${{ matrix.route }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    strategy:
+      fail-fast: false
+      matrix:
+        route: [keyword, bm25, vector-hard-off, rerank-hard-off, clip-hard-off, graph, graph-rerank-hard-off, max-query, max-limit, max-shape, error, pagination]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Verify lockfile is current
+        run: uv lock --check
+      - name: Exact-capacity hidden-corpus actual-wire gate
+        env:
+          EXOMEM_GOVERNANCE_TIMING_ROUTE: ${{ matrix.route }}
+          EXOMEM_DISABLE_EMBEDDINGS: "1"
+          EXOMEM_DISABLE_MEDIA_EXTRACTION: "1"
+          EXOMEM_DISABLE_CLIP: "1"
+          EXOMEM_DISABLE_RANKING: "1"
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: >-
+          uv run --frozen --python 3.13 python -m pytest -q
+          tests/test_governance_projection_wire_gate.py
+          --session-timeout=360
+
   semantic-write-latency:
     name: semantic write latency (2k and 8k)
     runs-on: ubuntu-latest
@@ -479,6 +508,7 @@ jobs:
       - product-e2e
       - retrieval-quality
       - retrieval-latency
+      - governance-projection-wire
       - semantic-write-latency
       - graph-convergence
       - onboarding

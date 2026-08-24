@@ -1210,6 +1210,7 @@ def _require_supported_projected_find_request(
 ) -> None:
     """Refuse v4 features that do not yet have a projected implementation."""
 
+    del include_timings
     collections = (
         types,
         projects,
@@ -1239,7 +1240,6 @@ def _require_supported_projected_find_request(
         or prefer_used
         or pack
         or graph_enrich
-        or include_timings
         or explain
     ):
         raise projection_runtime_module.ProjectionRuntimeUnavailable(
@@ -1464,7 +1464,8 @@ def op_find(
         Right after a server start, while models are still warming in the
         background, semantic lanes are skipped rather than blocked on — the
         result is then the envelope {"hits": [...], "warming": {"components":
-        [...], "since_s": N}} and the hits are lexical-only ranking. If
+        [...]}} and the hits are lexical-only ranking. Legacy retrieval also
+        includes process age, while governed projection suppresses it. If
         recall quality matters for the query, retry once "warming" stops
         appearing (typically well under a minute).
     """
@@ -1534,7 +1535,20 @@ def op_find(
         if explain
         else None
     )
-    timings = find_module.FindTimings() if include_timings else None
+    timings = (
+        find_module.FindTimings()
+        if include_timings and projection_runtime is None
+        else None
+    )
+    timings_suppressed = (
+        {"status": "governed_projection"}
+        if projection_runtime is not None
+        else None
+    )
+    # Deliberately not declared in retrieval_models.FindEnvelope: its schema
+    # permits additive properties, while declaring this optional marker would
+    # rewrite the byte-frozen Hosted v1/v2 contracts. This is the same
+    # compatibility boundary used by the advisory due-state carrier below.
     if timings is not None:
         from . import mode as mode_module
 
@@ -1713,11 +1727,10 @@ def op_find(
     # (~30s per process start; minutes on a first-ever model download).
     warming: dict | None = None
     if degraded:
-        info = readiness_module.warming_info() or {}
-        warming = {
-            "components": sorted(set(degraded)),
-            "since_s": info.get("since_s", 0.0),
-        }
+        warming = {"components": sorted(set(degraded))}
+        if projection_runtime is None:
+            info = readiness_module.warming_info() or {}
+            warming["since_s"] = info.get("since_s", 0.0)
     # Degraded marker: a semantic lane FAILED post-warm (not merely deferred) so
     # the hits are a silently weaker ranking — vector→BM25, or every-lane-empty→
     # keyword. Distinct from `warming`: warming is the transient, expected boot
@@ -1726,6 +1739,7 @@ def op_find(
     degraded_marker: list[str] | None = sorted(set(failed)) if failed else None
     if (
         timings_dict is None
+        and timings_suppressed is None
         and warming is None
         and degraded_marker is None
         and retrieval_trace is None
@@ -1743,6 +1757,8 @@ def op_find(
         out["pack"] = pack_obj
     if timings_dict is not None:
         out["timings"] = timings_dict
+    if timings_suppressed is not None:
+        out["timings_suppressed"] = timings_suppressed
     if warming is not None:
         out["warming"] = warming
     if degraded_marker is not None:

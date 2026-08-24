@@ -24,6 +24,7 @@ from . import (
     projection_authorization,
     projection_measurement_store,
     projection_store,
+    projection_timing,
     schema_v4,
     store,
 )
@@ -47,11 +48,26 @@ class _PreactivatedProjectionRuntime:
 
 _PREACTIVATED_RUNTIMES: dict[str, _PreactivatedProjectionRuntime] = {}
 _PREACTIVATED_RUNTIME_LOCK = threading.RLock()
-# Repository-owned release fence.  Preactivation proves startup readiness, but
-# public v4 serving stays closed until every required projected lane and the
-# exact-capacity actual-wire gate land together.  This is deliberately not an
-# environment or operator switch.
-_PROJECTED_SERVING_RELEASE_ACCEPTED = False
+# Repository-owned release fence. The checked release manifest and required
+# actual-wire CI matrix currently certify only the exact model-hard-off runtime
+# profile. Environment cannot opt an uncertified model-enabled profile into
+# serving; those configurations remain closed until their own evidence lands.
+_PROJECTED_SERVING_RELEASE_ACCEPTED = True
+
+
+def projected_serving_release_profile() -> str | None:
+    """Return the one repository-certified runtime profile, if exact."""
+
+    if all(
+        os.environ.get(name) == "1"
+        for name in (
+            "EXOMEM_DISABLE_EMBEDDINGS",
+            "EXOMEM_DISABLE_CLIP",
+            "EXOMEM_DISABLE_RANKING",
+        )
+    ):
+        return projection_timing.MODEL_RUNTIME_PROFILE
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -525,7 +541,11 @@ def load_active_projection_runtime(
     root = Path(vault_root)
     preactivated = _preactivated_runtime(root)
     if preactivated is not None:
-        if not _PROJECTED_SERVING_RELEASE_ACCEPTED:
+        if (
+            not _PROJECTED_SERVING_RELEASE_ACCEPTED
+            or projected_serving_release_profile()
+            != projection_timing.MODEL_RUNTIME_PROFILE
+        ):
             raise ProjectionRuntimeUnavailable(
                 "governed projected retrieval is unavailable"
             )
@@ -812,7 +832,13 @@ def find_projected_hits(
         )
     if type(limit) is not int or not 1 <= limit <= 100:
         raise ValueError("find: limit must be an integer from 1 through 100")
-    if not isinstance(query, str) or len(query) > 1_048_576:
+    if (
+        not isinstance(query, str)
+        or len(query)
+        > projection_timing.PUBLIC_REQUEST_CLASSES[
+            "projected-find-v1"
+        ].max_query_chars
+    ):
         raise ValueError("find: query must be bounded text")
     if (
         type(auto_rerank) is not bool
@@ -852,7 +878,7 @@ def find_projected_hits(
         verified_session_grants=verified_grants,
         catalog=runtime.catalog,
     )
-    withheld = frozenset(
+    withheld = authorization.withheld_identities.union(
         selection.item_identity
         for selection in authorization.selections
         if selection.projection_variant_id is None
@@ -860,11 +886,9 @@ def find_projected_hits(
     by_identity = {
         selection.item_identity: selection
         for selection in authorization.selections
+        if selection.projection_variant_id is not None
     }
-    selected_count = sum(
-        selection.projection_variant_id is not None
-        for selection in authorization.selections
-    )
+    selected_count = len(by_identity)
     selected_variants = {
         variant.item_identity: variant
         for variant in runtime.catalog.select(authorization)

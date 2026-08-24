@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -63,7 +64,7 @@ def _active_runtime():
     return runtime, items
 
 
-def test_startup_preactivates_one_digest_but_release_fence_stays_closed(
+def test_startup_preactivates_one_digest_and_serves_only_that_revalidated_runtime(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -107,6 +108,9 @@ def test_startup_preactivates_one_digest_but_release_fence_stays_closed(
 
     monkeypatch.setenv(authorization_custody.KEYRING_FILE_ENV, str(tmp_path / "keyring"))
     monkeypatch.setenv(authorization_custody.CONTROL_FILE_ENV, str(tmp_path / "control"))
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
+    monkeypatch.setenv("EXOMEM_DISABLE_RANKING", "1")
     monkeypatch.setattr(
         authorization_custody,
         "load_authorization_custody",
@@ -165,17 +169,7 @@ def test_startup_preactivates_one_digest_but_release_fence_stays_closed(
             AssertionError("request reloaded projection catalog")
         ),
     )
-    with pytest.raises(
-        projection_runtime.ProjectionRuntimeUnavailable,
-        match="governed projected retrieval is unavailable",
-    ):
-        projection_runtime.load_active_projection_runtime(tmp_path)
-
-    monkeypatch.setattr(
-        projection_runtime,
-        "_PROJECTED_SERVING_RELEASE_ACCEPTED",
-        True,
-    )
+    assert projection_runtime._PROJECTED_SERVING_RELEASE_ACCEPTED is True
     assert projection_runtime.load_active_projection_runtime(tmp_path) is activated
 
     current_control[0] = replace(control, activation_epoch=control.activation_epoch + 1)
@@ -195,3 +189,36 @@ def test_startup_preactivates_one_digest_but_release_fence_stays_closed(
         match="governed projected retrieval is unavailable",
     ):
         projection_runtime.load_active_projection_runtime(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "enabled_model_variable",
+    [
+        "EXOMEM_DISABLE_EMBEDDINGS",
+        "EXOMEM_DISABLE_CLIP",
+        "EXOMEM_DISABLE_RANKING",
+    ],
+)
+def test_release_fence_refuses_every_uncertified_model_enabled_profile(
+    monkeypatch,
+    enabled_model_variable: str,
+) -> None:
+    runtime, _items = _active_runtime()
+    for name in (
+        "EXOMEM_DISABLE_EMBEDDINGS",
+        "EXOMEM_DISABLE_CLIP",
+        "EXOMEM_DISABLE_RANKING",
+    ):
+        monkeypatch.setenv(name, "1")
+    monkeypatch.delenv(enabled_model_variable)
+    monkeypatch.setattr(
+        projection_runtime,
+        "_preactivated_runtime",
+        lambda _root: runtime,
+    )
+
+    with pytest.raises(
+        projection_runtime.ProjectionRuntimeUnavailable,
+        match="governed projected retrieval is unavailable",
+    ):
+        projection_runtime.load_active_projection_runtime(Path("/fixture"))
