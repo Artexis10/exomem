@@ -775,7 +775,7 @@ def _drain_graph_work(
     `epoch_admits_incremental_repair`, which re-reads under the canonical
     boundary rather than condemning a lineage on one sample taken mid-batch.
     """
-    from . import epistemic_graph
+    from . import epistemic_graph, graph_sync
 
     pending_generation = deferred_index.graph_full_rebuild_pending(vault_root)
     receipts = deferred_index.snapshot_graph(
@@ -793,6 +793,9 @@ def _drain_graph_work(
     if pending_generation is not None:
         try:
             index.rebuild_all()
+        except graph_sync.GraphRebuildInProgress:
+            log.info("deferred graph rebuild joined an active external owner")
+            return 0
         except Exception:  # noqa: BLE001 - durable work must survive a failed rebuild
             log.warning("deferred graph rebuild failed; marker remains", exc_info=True)
             return 0
