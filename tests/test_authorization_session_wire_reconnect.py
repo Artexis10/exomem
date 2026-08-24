@@ -17,6 +17,7 @@ from starlette.testclient import TestClient
 from exomem import commands, server, video_frames, writer_lease
 from exomem.governance import (
     authorization_custody,
+    authorization_serving_membership,
     authorization_session_authority,
     authorization_session_lifecycle,
     membership,
@@ -219,6 +220,61 @@ def _configure_v4_authority(
         "expires_at": expires_at,
         "signing_key_id": key_id,
     }
+    keyring_record = authorization_custody.parse_keyring(
+        json.dumps(keyring, separators=(",", ":")).encode()
+    )
+    basis_control = authorization_custody.AuthorizationControlRecord(
+        version=1,
+        keyring_id=keyring_id,
+        cell_id=cell_id,
+        logical_vault_id=logical_vault_id,
+        registry_attachment_id="attachment-wire",
+        attachment_epoch=1,
+        governance_enrolled=True,
+        activation_store_id=migration.activation_store_id,
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        serving_membership_epoch=1,
+        serving_membership_digest="4" * 64,
+        issued_at=issued_at,
+        expires_at=expires_at,
+        signing_key_id=key_id,
+    )
+    attestation = authorization_serving_membership.ReplicaReadinessAttestation(
+        version=1,
+        epoch=1,
+        replica_id="replica-wire",
+        state="SERVING",
+        software_version=authorization_custody.runtime_software_version(),
+        schema_version=4,
+        cell_id=cell_id,
+        active_key_id=key_id,
+        accepted_key_ids=(key_id,),
+        control_digest=authorization_custody.control_attestation_digest(basis_control),
+        keyring_digest=authorization_custody.keyring_attestation_digest(keyring_record),
+        attested_at=issued_at,
+        expires_at=expires_at,
+        issuance_stopped=False,
+        no_in_flight=False,
+        signing_key_id=key_id,
+    )
+    membership_raw = authorization_serving_membership.encode_serving_membership(
+        authorization_serving_membership.ServingMembershipEpoch(
+            version=1,
+            epoch=1,
+            cell_id=cell_id,
+            logical_vault_id=logical_vault_id,
+            previous_epoch_digest=None,
+            issued_at=issued_at,
+            expires_at=expires_at,
+            replicas=(attestation,),
+            signing_key_id=key_id,
+        ),
+        verifier_keys={key_id: key},
+    )
+    control["serving_membership_digest"] = (
+        authorization_serving_membership.serving_membership_digest(membership_raw)
+    )
     fields = [
         str(control["version"]).encode(),
         str(control["keyring_id"]).encode(),
@@ -250,10 +306,16 @@ def _configure_v4_authority(
 
     keyring_path = custody_root / "authorization-keyring.json"
     control_path = custody_root / "authorization-control.json"
+    membership_path = custody_root / "authorization-serving-membership.json"
     _private_file(keyring_path, json.dumps(keyring, separators=(",", ":")).encode())
     _private_file(control_path, json.dumps(control, separators=(",", ":")).encode())
+    _private_file(membership_path, membership_raw)
     monkeypatch.setenv(authorization_custody.KEYRING_FILE_ENV, str(keyring_path))
     monkeypatch.setenv(authorization_custody.CONTROL_FILE_ENV, str(control_path))
+    monkeypatch.setenv(
+        authorization_custody.MEMBERSHIP_FILE_ENV, str(membership_path)
+    )
+    monkeypatch.setenv(authorization_custody.REPLICA_ID_ENV, "replica-wire")
 
 
 def _build_replica(vault: Path, monkeypatch: pytest.MonkeyPatch):

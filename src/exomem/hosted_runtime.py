@@ -25,6 +25,10 @@ from typing import Any
 
 from . import __version__
 from . import init as init_module
+from .governance.authorization_serving_membership import (
+    ServingMembershipReadiness,
+    unavailable_readiness,
+)
 from .kbdir import kb_dirname
 
 HOSTED_PROTOCOL_VERSION = "1"
@@ -572,7 +576,14 @@ class HostedLifecycleSnapshot:
 class HostedCellLifecycle:
     """Thread-safe admission and lifecycle state for one immutable cell."""
 
-    def __init__(self, config: HostedCellConfig) -> None:
+    def __init__(
+        self,
+        config: HostedCellConfig,
+        *,
+        authorization_session_readiness_provider: (
+            Callable[[], ServingMembershipReadiness] | None
+        ) = None,
+    ) -> None:
         self.config = config
         self._condition = threading.Condition(threading.RLock())
         self._phase = self._load_durable_phase()
@@ -584,6 +595,9 @@ class HostedCellLifecycle:
         self._active_mutations = 0
         self._active_transfers = 0
         self._worker_status: dict[str, tuple[bool, str]] = {}
+        self._authorization_session_readiness_provider = (
+            authorization_session_readiness_provider
+        )
         self._background_workers: list[tuple[Callable[[], Any], Callable[[], Any] | None]] = []
 
     def _load_durable_phase(self) -> str:
@@ -707,6 +721,15 @@ class HostedCellLifecycle:
         single coarse ``ready`` boolean.
         """
 
+        session_readiness = unavailable_readiness()
+        provider = self._authorization_session_readiness_provider
+        if provider is not None:
+            try:
+                candidate = provider()
+                if isinstance(candidate, ServingMembershipReadiness):
+                    session_readiness = candidate
+            except Exception:  # noqa: BLE001 - readiness must remain content-free
+                session_readiness = unavailable_readiness()
         with self._condition:
             readiness = self.readiness()
             workers_enabled = self.config.resource_limits.worker_count > 0
@@ -725,6 +748,7 @@ class HostedCellLifecycle:
                     "semantic": workers_enabled and "embeddings" in self.config.feature_grants,
                     "media": workers_enabled and "media" in self.config.feature_grants,
                 },
+                "authorizationSession": session_readiness.as_public_dict(),
                 "code": "CELL_READY" if readiness.ready else readiness.reason_code,
             }
 

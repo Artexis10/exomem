@@ -1010,6 +1010,7 @@ def register_hosted_routes(
         except gateway.HostedGatewayError as exc:
             return _error_response(exc.code, config=config, operation="ready", started=started)
         readiness = lifecycle.readiness()
+        control_plane = lifecycle.control_plane_readiness()
         if private_authenticator is not None:
             assert config.vault_id is not None
             assert config.worker_policy_digest is not None
@@ -1023,14 +1024,15 @@ def register_hosted_routes(
                 "authenticated_credential_version": (context.authenticated_credential_version),
                 "security_revision": context.security_revision,
                 "service_authenticated": True,
-                "mutation_authority": lifecycle.control_plane_readiness()["mutationAuthority"],
+                "mutation_authority": control_plane["mutationAuthority"],
+                "authorization_session": control_plane["authorizationSession"],
                 "admission_phase": readiness.phase,
                 "read_admission": readiness.read_admitted,
                 "write_admission": readiness.write_admitted,
                 "worker_policy_digest": config.worker_policy_digest,
             }
         else:
-            data = {**readiness.as_dict(), **lifecycle.control_plane_readiness()}
+            data = {**readiness.as_dict(), **control_plane}
         return _success_response(
             data,
             config=config,

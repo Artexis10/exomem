@@ -9,6 +9,7 @@ import pytest
 
 from exomem.governance import (
     authorization_custody,
+    authorization_serving_membership,
     authorization_session_lifecycle,
     policy,
     schema_v4,
@@ -102,11 +103,43 @@ def _custody(activation_digest: str) -> authorization_custody.AuthorizationCusto
         expires_at=NOW + 86_400,
         signing_key_id=key.key_id,
     )
+    membership = authorization_serving_membership.ServingMembershipEpoch(
+        version=1,
+        epoch=1,
+        cell_id=control.cell_id,
+        logical_vault_id=control.logical_vault_id,
+        previous_epoch_digest=None,
+        issued_at=NOW - 1,
+        expires_at=NOW + 299,
+        replicas=(
+            authorization_serving_membership.ReplicaReadinessAttestation(
+                version=1,
+                epoch=1,
+                replica_id="replica-7",
+                state="SERVING",
+                software_version=authorization_custody.runtime_software_version(),
+                schema_version=4,
+                cell_id=control.cell_id,
+                active_key_id=key.key_id,
+                accepted_key_ids=(key.key_id,),
+                control_digest=authorization_custody.control_attestation_digest(control),
+                keyring_digest=authorization_custody.keyring_attestation_digest(keyring),
+                attested_at=NOW - 1,
+                expires_at=NOW + 299,
+                issuance_stopped=False,
+                no_in_flight=False,
+                signing_key_id=key.key_id,
+            ),
+        ),
+        signing_key_id=key.key_id,
+    )
     return authorization_custody.AuthorizationCustody(
         keyring_path=Path("/external/keyring.json"),
         control_path=Path("/external/control.json"),
         keyring=keyring,
         control=control,
+        serving_membership=membership,
+        local_replica_id="replica-7",
     )
 
 

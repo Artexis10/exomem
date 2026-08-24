@@ -16,11 +16,14 @@ import os
 import re
 import secrets
 import stat
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from exomem import held_fs, mutation_lock
+from exomem import __version__, held_fs, mutation_lock
+
+from . import authorization_serving_membership
+from .authorization_serving_membership import ServingMembershipEpoch
 
 if TYPE_CHECKING:
     from .schema_v4 import (
@@ -30,6 +33,8 @@ if TYPE_CHECKING:
 
 KEYRING_FILE_ENV = "EXOMEM_AUTH_SESSION_KEYRING_FILE"
 CONTROL_FILE_ENV = "EXOMEM_AUTH_SESSION_CONTROL_FILE"
+MEMBERSHIP_FILE_ENV = "EXOMEM_AUTH_SESSION_MEMBERSHIP_FILE"
+REPLICA_ID_ENV = "EXOMEM_AUTH_SESSION_REPLICA_ID"
 MAX_CUSTODY_FILE_BYTES = 64 * 1024
 _MAX_SIGNED_SQLITE_INTEGER = (1 << 63) - 1
 _MAX_ACCEPTED_KEYS = 32
@@ -66,7 +71,6 @@ _CONTROL_FIELDS = frozenset(
 )
 _CONTROL_MAC_DOMAIN = b"exomem.authorization-session.control/v1"
 _ATTACHMENT_DOMAIN = b"exomem.authorization-session.attachment/v1"
-_BOOTSTRAP_MEMBERSHIP_DOMAIN = b"exomem.authorization-session.membership-bootstrap/v1"
 _STANDALONE_STAGING_DOMAIN = b"exomem.authorization-session.standalone-staging/v1"
 _SHA256_HEX = re.compile(r"[0-9a-f]{64}\Z")
 _STANDALONE_ATTACHMENT = re.compile(r"attachment-v1-[0-9a-f]{64}\Z")
@@ -146,6 +150,9 @@ class AuthorizationCustody:
     control_path: Path
     keyring: AuthorizationKeyring
     control: AuthorizationControlRecord
+    serving_membership: ServingMembershipEpoch | None = None
+    local_replica_id: str | None = None
+    membership_path: Path | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,11 +161,13 @@ class StandaloneProvisioningResult:
 
     keyring_path: Path
     control_path: Path
+    membership_path: Path
     keyring_id: str
     cell_id: str
     logical_vault_id: str
     registry_attachment_id: str
     attachment_epoch: int
+    replica_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -471,6 +480,47 @@ def _framed(domain: bytes, fields: tuple[bytes, ...]) -> bytes:
     return bytes(output)
 
 
+def runtime_software_version() -> str:
+    """Return the release identity bound by the local replica attestation."""
+
+    return __version__
+
+
+def keyring_attestation_digest(keyring: AuthorizationKeyring) -> str:
+    """Digest the canonical semantic keyring bound by readiness attestations."""
+
+    if not isinstance(keyring, AuthorizationKeyring):
+        raise AuthorizationCustodyUnavailable
+    return hashlib.sha256(_keyring_bytes(keyring)).hexdigest()
+
+
+def control_attestation_digest(record: AuthorizationControlRecord) -> str:
+    """Digest the stable control identity without creating a membership cycle.
+
+    The signed control record binds the complete membership-record digest.  A
+    replica attestation therefore binds the immutable identity and attachment
+    basis.  Mutable enrollment/activation/lifetime fields are independently
+    authenticated and checked on every request; including them here would make
+    an unrelated policy publication rewrite an otherwise unchanged fleet epoch.
+    """
+
+    if not isinstance(record, AuthorizationControlRecord):
+        raise AuthorizationCustodyUnavailable
+    return hashlib.sha256(
+        _framed(
+            b"exomem.authorization-session.control-attestation-basis/v1",
+            (
+                str(record.version).encode("ascii"),
+                record.keyring_id.encode("utf-8"),
+                record.cell_id.encode("utf-8"),
+                record.logical_vault_id.encode("utf-8"),
+                record.registry_attachment_id.encode("utf-8"),
+                str(record.attachment_epoch).encode("ascii"),
+            ),
+        )
+    ).hexdigest()
+
+
 def _control_mac_input(value: dict[str, object]) -> bytes:
     activation_store = value["activation_store_id"]
     activation_epoch = value["activation_epoch"]
@@ -674,12 +724,73 @@ def load_authorization_custody(
     _verify_registered_attachment(
         Path(vault_root), control.registry_attachment_id
     )
+    serving_membership, local_replica_id, membership_path = (
+        _load_optional_serving_membership(
+            Path(vault_root),
+            external=external,
+            keyring=keyring,
+            control=control,
+            now=now,
+        )
+    )
     return AuthorizationCustody(
         keyring_path=external.keyring_path,
         control_path=external.control_path,
         keyring=keyring,
         control=control,
+        serving_membership=serving_membership,
+        local_replica_id=local_replica_id,
+        membership_path=membership_path,
     )
+
+
+def _load_optional_serving_membership(
+    vault_root: Path,
+    *,
+    external: ExternalAuthorizationCustody,
+    keyring: AuthorizationKeyring,
+    control: AuthorizationControlRecord,
+    now: int,
+) -> tuple[ServingMembershipEpoch | None, str | None, Path | None]:
+    """Load session-only fleet state without blocking standing-policy content.
+
+    Enrollment/activation custody remains mandatory for governed content.  Fleet
+    membership is a narrower authority used only for session issuance and
+    resumption, so an absent or bad record disables that capability rather than
+    turning a healthy standing-policy read into a content outage.
+    """
+
+    configured_path = os.environ.get(MEMBERSHIP_FILE_ENV, "").strip()
+    configured_replica = os.environ.get(REPLICA_ID_ENV, "").strip()
+    if not configured_path or not configured_replica:
+        return None, None, None
+    try:
+        membership_path = _configured_external_path(MEMBERSHIP_FILE_ENV, vault_root)
+        if membership_path in {external.keyring_path, external.control_path}:
+            raise AuthorizationCustodyUnavailable
+        loaded = _load_file(membership_path)
+        record = authorization_serving_membership.parse_serving_membership(
+            loaded.data,
+            verifier_keys={item.key_id: item.key for item in keyring.accepted_keys},
+            now=now,
+            expected_cell_id=control.cell_id,
+            expected_logical_vault_id=control.logical_vault_id,
+            expected_epoch=control.serving_membership_epoch,
+            expected_digest=control.serving_membership_digest,
+        )
+        replica_id = _bounded_identifier(configured_replica)
+        if not any(item.replica_id == replica_id for item in record.replicas):
+            raise AuthorizationCustodyUnavailable
+        return record, replica_id, membership_path
+    except (
+        AuthorizationCustodyUnavailable,
+        authorization_serving_membership.ServingMembershipUnavailable,
+        OSError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+    ):
+        return None, None, None
 
 
 def _control_value(record: AuthorizationControlRecord) -> dict[str, object]:
@@ -962,29 +1073,58 @@ def _keyring_bytes(keyring: AuthorizationKeyring) -> bytes:
     return encoded
 
 
-def _bootstrap_membership_digest(
+def _standalone_membership_bytes(
     *,
-    cell_id: str,
-    logical_vault_id: str,
-    attachment_id: str,
-    keyring_id: str,
-    active_key_id: str,
-) -> str:
-    return hashlib.sha256(
-        _framed(
-            _BOOTSTRAP_MEMBERSHIP_DOMAIN,
-            tuple(
-                value.encode("utf-8")
-                for value in (
-                    cell_id,
-                    logical_vault_id,
-                    attachment_id,
-                    keyring_id,
-                    active_key_id,
-                )
-            ),
-        )
-    ).hexdigest()
+    keyring: AuthorizationKeyring,
+    control: AuthorizationControlRecord,
+    replica_id: str,
+) -> bytes:
+    """Build the authenticated singleton form of the fleet record."""
+
+    if control.serving_membership_epoch != 1:
+        raise AuthorizationCustodyUnavailable
+    accepted_key_ids = tuple(sorted(key.key_id for key in keyring.accepted_keys))
+    attestation = authorization_serving_membership.ReplicaReadinessAttestation(
+        version=1,
+        epoch=control.serving_membership_epoch,
+        replica_id=_bounded_identifier(replica_id),
+        state="SERVING",
+        software_version=runtime_software_version(),
+        schema_version=4,
+        cell_id=control.cell_id,
+        active_key_id=keyring.active_key_id,
+        accepted_key_ids=accepted_key_ids,
+        control_digest=control_attestation_digest(control),
+        keyring_digest=keyring_attestation_digest(keyring),
+        attested_at=control.issued_at,
+        expires_at=min(
+            control.expires_at,
+            control.issued_at
+            + authorization_serving_membership.MAX_ATTESTATION_TTL_SECONDS,
+        ),
+        issuance_stopped=False,
+        no_in_flight=False,
+        signing_key_id=keyring.active_key_id,
+    )
+    record = authorization_serving_membership.ServingMembershipEpoch(
+        version=1,
+        epoch=control.serving_membership_epoch,
+        cell_id=control.cell_id,
+        logical_vault_id=control.logical_vault_id,
+        previous_epoch_digest=None,
+        issued_at=control.issued_at,
+        expires_at=min(
+            control.expires_at,
+            control.issued_at
+            + authorization_serving_membership.MAX_ATTESTATION_TTL_SECONDS,
+        ),
+        replicas=(attestation,),
+        signing_key_id=keyring.active_key_id,
+    )
+    return authorization_serving_membership.encode_serving_membership(
+        record,
+        verifier_keys={item.key_id: item.key for item in keyring.accepted_keys},
+    )
 
 
 def _governance_negative_scan(vault_root: Path) -> None:
@@ -1021,14 +1161,22 @@ def _governance_negative_scan(vault_root: Path) -> None:
 def _provisioning_result(
     custody: AuthorizationCustody,
 ) -> StandaloneProvisioningResult:
+    if (
+        custody.local_replica_id is None
+        or custody.serving_membership is None
+        or custody.membership_path is None
+    ):
+        raise AuthorizationCustodyUnavailable
     return StandaloneProvisioningResult(
         keyring_path=custody.keyring_path,
         control_path=custody.control_path,
+        membership_path=custody.membership_path,
         keyring_id=custody.keyring.keyring_id,
         cell_id=custody.keyring.cell_id,
         logical_vault_id=custody.keyring.logical_vault_id,
         registry_attachment_id=custody.control.registry_attachment_id,
         attachment_epoch=custody.control.attachment_epoch,
+        replica_id=custody.local_replica_id,
     )
 
 
@@ -1040,9 +1188,9 @@ def provision_standalone_custody(
     """Explicitly provision one never-enrolled standalone attachment.
 
     This is never called from an ordinary loader.  It creates no vault state;
-    the externally authenticated control record is the final registration
-    point, and a keyring-only interruption can be retried without rotating the
-    generated identity.
+    the externally authenticated control and serving-membership records are
+    the final registration points, and an interrupted publication can be
+    retried without rotating the generated identity.
     """
 
     root = Path(vault_root)
@@ -1052,7 +1200,9 @@ def provision_standalone_custody(
     attachment_id = standalone_attachment_id(root)
     keyring_path = _configured_external_path(KEYRING_FILE_ENV, root)
     control_path = _configured_external_path(CONTROL_FILE_ENV, root)
-    if keyring_path == control_path:
+    membership_path = _configured_external_path(MEMBERSHIP_FILE_ENV, root)
+    replica_id = _bounded_identifier(os.environ.get(REPLICA_ID_ENV, ""))
+    if len({keyring_path, control_path, membership_path}) != 3:
         raise AuthorizationCustodyUnavailable
 
     from .. import reserved_paths
@@ -1064,6 +1214,7 @@ def provision_standalone_custody(
         _governance_negative_scan(root)
         keyring_loaded: _LoadedCustodyFile | None = None
         control_loaded: _LoadedCustodyFile | None = None
+        membership_loaded: _LoadedCustodyFile | None = None
         try:
             keyring_loaded = _load_file(keyring_path)
         except AuthorizationCustodyUnavailable:
@@ -1074,8 +1225,16 @@ def provision_standalone_custody(
         except AuthorizationCustodyUnavailable:
             if control_path.exists():
                 raise
+        try:
+            membership_loaded = _load_file(membership_path)
+        except AuthorizationCustodyUnavailable:
+            if membership_path.exists():
+                raise
 
-        if control_loaded is not None and keyring_loaded is None:
+        if (
+            (control_loaded is not None and keyring_loaded is None)
+            or (membership_loaded is not None and control_loaded is None)
+        ):
             raise AuthorizationCustodyUnavailable
         if keyring_loaded is not None:
             keyring = parse_keyring(keyring_loaded.data)
@@ -1129,14 +1288,7 @@ def provision_standalone_custody(
                 keyring,
                 attachment_id=attachment_id,
             )
-            membership_digest = _bootstrap_membership_digest(
-                cell_id=keyring.cell_id,
-                logical_vault_id=keyring.logical_vault_id,
-                attachment_id=attachment_id,
-                keyring_id=keyring.keyring_id,
-                active_key_id=keyring.active_key_id,
-            )
-            control = AuthorizationControlRecord(
+            provisional_control = AuthorizationControlRecord(
                 version=1,
                 keyring_id=keyring.keyring_id,
                 cell_id=keyring.cell_id,
@@ -1148,10 +1300,23 @@ def provision_standalone_custody(
                 activation_epoch=None,
                 activation_state_digest=None,
                 serving_membership_epoch=1,
-                serving_membership_digest=membership_digest,
+                serving_membership_digest="0" * 64,
                 issued_at=current_time,
                 expires_at=keyring.active_key.not_after,
                 signing_key_id=keyring.active_key_id,
+            )
+            encoded_membership = _standalone_membership_bytes(
+                keyring=keyring,
+                control=provisional_control,
+                replica_id=replica_id,
+            )
+            control = replace(
+                provisional_control,
+                serving_membership_digest=(
+                    authorization_serving_membership.serving_membership_digest(
+                        encoded_membership
+                    )
+                ),
             )
             encoded_control = _signed_control_bytes(
                 control,
@@ -1159,6 +1324,31 @@ def provision_standalone_custody(
             )
             _governance_negative_scan(root)
             _publish_private_file(control_path, encoded_control)
+            _publish_private_file(membership_path, encoded_membership)
+        else:
+            control = parse_control_record(
+                control_loaded.data,
+                keyring=keyring,
+                now=current_time,
+            )
+            if control.serving_membership_epoch != 1:
+                raise AuthorizationCustodyUnavailable
+            encoded_membership = _standalone_membership_bytes(
+                keyring=keyring,
+                control=control,
+                replica_id=replica_id,
+            )
+            if (
+                authorization_serving_membership.serving_membership_digest(
+                    encoded_membership
+                )
+                != control.serving_membership_digest
+            ):
+                raise AuthorizationCustodyUnavailable
+            if membership_loaded is None:
+                _publish_private_file(membership_path, encoded_membership)
+            elif not hmac.compare_digest(membership_loaded.data, encoded_membership):
+                raise AuthorizationCustodyUnavailable
 
     return _provisioning_result(load_authorization_custody(root, now=current_time))
 

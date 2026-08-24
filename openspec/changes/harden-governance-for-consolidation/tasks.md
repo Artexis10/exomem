@@ -318,7 +318,7 @@ made before both PRs and their combined verification are complete.
   path does not self-refuse. Restore the v3 snapshot and test offline v4→v3 closure/
   expiry/schema plus exact pointed-source workspace parity before booting v3. Do not
   permit or claim mixed v3/v4 service.
-- [ ] 5.8 Add red authoritative serving-membership-epoch tests with two+ replicas:
+- [x] 5.8 Add red authoritative serving-membership-epoch tests with two+ replicas:
   authenticated current/stale attestations, active/accepted intersections, unreachable
   member blocking, old/new key overlap, issuance switch, max-TTL+skew/live-row drain,
   explicit `SERVING -> DRAINING`, no-in-flight acknowledgement, epoch advance/removal,

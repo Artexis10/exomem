@@ -794,6 +794,24 @@ intersection. A stopped or unreachable member remains included and blocks issuan
 A rejoin must attest the current epoch and accepted intersection before becoming
 `SERVING`; a stale-epoch process cannot issue or resume credentials.
 
+The version-1 wire record is a closed, canonical UTF-8 JSON object bounded to 64 KiB and
+64 admitted replicas. It carries `{version, epoch, cell_id, logical_vault_id,
+previous_epoch_digest, issued_at, expires_at, replicas, signing_key_id, mac}`; each
+replica entry carries `{version, epoch, replica_id, state, software_version,
+schema_version, cell_id, active_key_id, accepted_key_ids, control_digest,
+keyring_digest, attested_at, expires_at, issuance_stopped, no_in_flight,
+signing_key_id, mac}`. Identifiers are bounded opaque ASCII, keys and replicas are
+sorted/unique, numbers are bounded integers, duplicate/extra keys and noncanonical bytes
+are rejected, and epoch/attestation freshness is bounded to the maximum session TTL plus
+30 seconds of skew. The membership digest is SHA-256 over the complete canonical signed
+record. To avoid a circular commitment, replica `control_digest` is domain-separated over
+the immutable control identity/attachment basis only; the signed control record separately
+binds the complete membership digest and the mutable enrollment/activation tuple on every
+request. An epoch successor binds the exact predecessor digest. Removal is legal only from
+an already committed `DRAINING` predecessor with issuance stopped and no in-flight work;
+the current runtime additionally refuses any accepted-key intersection that omits a key
+named by a live unexpired session row.
+
 Startup/readiness fails session capability service when either external key/control file
 is missing/unsafe, identity binding differs, an admitted attestation is missing/stale, an
 active key falls outside the epoch intersection, or a live row names an unavailable key.

@@ -12,6 +12,9 @@ from pathlib import Path
 import pytest
 
 from exomem import get_page, hosted_runtime, list_directory, server_runtime, vault
+from exomem.governance.authorization_serving_membership import (
+    ServingMembershipReadiness,
+)
 from exomem.hosted_runtime import (
     HostedCellConfig,
     HostedCellLifecycle,
@@ -649,6 +652,52 @@ def test_lifecycle_reports_content_free_readiness_and_degradation(
     readiness = lifecycle.readiness()
     assert readiness.ready is False
     assert readiness.reason_code == "HOSTED_MUTATION_LOCK_UNAVAILABLE"
+
+
+def test_control_plane_readiness_rechecks_content_free_session_membership(
+    tmp_path: Path,
+) -> None:
+    _values, config = _provisioned(tmp_path)
+    states = [
+        ServingMembershipReadiness(
+            ready=True,
+            code="AUTHORIZATION_MEMBERSHIP_READY",
+            epoch=17,
+            serving_replicas=2,
+            draining_replicas=0,
+        ),
+        ServingMembershipReadiness(
+            ready=False,
+            code="AUTHORIZATION_MEMBERSHIP_UNAVAILABLE",
+            epoch=17,
+            serving_replicas=2,
+            draining_replicas=0,
+        ),
+    ]
+    lifecycle = HostedCellLifecycle(
+        config,
+        authorization_session_readiness_provider=lambda: states.pop(0),
+    )
+    lifecycle.complete_startup(
+        vault_ready=True,
+        mutation_authority_ready=True,
+        service_auth_ready=True,
+    )
+
+    first = lifecycle.control_plane_readiness()["authorizationSession"]
+    second = lifecycle.control_plane_readiness()["authorizationSession"]
+
+    assert first == {
+        "ready": True,
+        "code": "AUTHORIZATION_MEMBERSHIP_READY",
+        "servingMembershipEpoch": 17,
+        "servingReplicaCount": 2,
+        "drainingReplicaCount": 0,
+    }
+    assert second == {**first, "ready": False, "code": "AUTHORIZATION_MEMBERSHIP_UNAVAILABLE"}
+    assert "replica-a" not in repr(first)
+    assert "auth-key" not in repr(first)
+    assert "digest" not in repr(first).lower()
 
 
 def test_quiesce_and_deletion_sealing_wait_for_an_admitted_download(tmp_path: Path) -> None:
