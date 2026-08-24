@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import stat
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -108,6 +109,43 @@ def test_explicit_standalone_provisioning_is_private_idempotent_and_copy_bound(
         authorization_custody.load_authorization_custody(copied, now=now + 1)
 
 
+def test_standalone_provisioning_refuses_opaque_hosted_attachment(
+    tmp_path: Path,
+) -> None:
+    vault = _vault(tmp_path)
+    now = 1_800_000_000
+    provisioned = authorization_custody.provision_standalone_custody(vault, now=now)
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    opaque_control = replace(
+        custody.control,
+        registry_attachment_id="hosted-opaque-attachment",
+    )
+    provisioned.control_path.write_bytes(
+        authorization_custody._signed_control_bytes(
+            opaque_control,
+            signing_key=custody.keyring.active_key.key,
+        )
+    )
+
+    with pytest.raises(authorization_custody.AuthorizationCustodyUnavailable):
+        authorization_custody.provision_standalone_custody(vault, now=now + 1)
+
+
+def test_standalone_control_remains_valid_past_bootstrap_hour(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+    now = 1_800_000_000
+    authorization_custody.provision_standalone_custody(vault, now=now)
+    initial = authorization_custody.load_authorization_custody(vault, now=now + 1)
+
+    loaded = authorization_custody.load_authorization_custody(
+        vault,
+        now=now + 24 * 60 * 60,
+    )
+
+    assert initial.control.expires_at == initial.keyring.active_key.not_after
+    assert loaded.control == initial.control
+
+
 @pytest.mark.parametrize(
     "relative",
     (
@@ -179,6 +217,34 @@ def test_initial_enrollment_is_irreversible_exact_and_idempotent(
             target=_target(prior, digest="e" * 64),
             now=now + 1,
         )
+
+
+def test_initial_enrollment_exact_retry_survives_store_creation(
+    tmp_path: Path,
+) -> None:
+    vault = _vault(tmp_path)
+    now = 1_800_000_000
+    authorization_custody.provision_standalone_custody(vault, now=now)
+    prior = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    target = _target(prior)
+    first = authorization_custody.enroll_initial_activation_tuple(
+        vault,
+        expected_control=prior.control,
+        target=target,
+        now=now + 1,
+    )
+    control_before = prior.control_path.read_bytes()
+    (vault / "Knowledge Base" / ".governance.sqlite").write_bytes(b"authority")
+
+    replay = authorization_custody.enroll_initial_activation_tuple(
+        vault,
+        expected_control=prior.control,
+        target=target,
+        now=now + 1,
+    )
+
+    assert replay == first
+    assert prior.control_path.read_bytes() == control_before
 
 
 def test_bound_attachment_refuses_successor_cas_from_a_copied_root(
@@ -292,6 +358,12 @@ def test_keyring_only_interruption_retries_without_rotating_identity(
     keyring_before = keyring_path.read_bytes()
 
     monkeypatch.setattr(authorization_custody, "_publish_private_file", original)
+    copied = _vault(tmp_path, "copied-vault")
+    with pytest.raises(authorization_custody.AuthorizationCustodyUnavailable):
+        authorization_custody.provision_standalone_custody(copied, now=now)
+    assert not control_path.exists()
+    assert keyring_path.read_bytes() == keyring_before
+
     result = authorization_custody.provision_standalone_custody(vault, now=now)
 
     assert keyring_path.read_bytes() == keyring_before
