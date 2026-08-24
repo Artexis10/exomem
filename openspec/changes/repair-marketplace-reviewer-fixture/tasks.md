@@ -23,5 +23,5 @@
 
 - [x] 4.1 Run focused fixture, semantic-write, marketplace-release, plugin-rendering, and reviewer-bootstrap tests with embeddings disabled.
 - [x] 4.2 Run strict OpenSpec validation, Ruff on changed Python, generated-artifact checks, public-artifact privacy validation, and secret-pattern review.
-- [ ] 4.3 Inspect the final diff, commit only the repair scope, integrate current `origin/main`, push, and open a ready Conventional-Commit PR with verification evidence.
+- [x] 4.3 Inspect the final diff, commit only the repair scope, integrate current `origin/main`, push, and open a ready Conventional-Commit PR with verification evidence.
 - [ ] 4.4 After merge, cut a fresh release/candidate and reviewer window; complete genuine ChatGPT and Claude evidence before promotion, then continue to Paddle paid-flow proof and invitations.
