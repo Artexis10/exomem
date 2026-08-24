@@ -33,6 +33,11 @@ def _custody_paths(
         authorization_custody.CONTROL_FILE_ENV,
         str(external / "authorization-control.json"),
     )
+    monkeypatch.setenv(
+        authorization_custody.MEMBERSHIP_FILE_ENV,
+        str(external / "authorization-serving-membership.json"),
+    )
+    monkeypatch.setenv(authorization_custody.REPLICA_ID_ENV, "standalone")
     monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(lease_state))
     writer_lease.reset_managers_for_tests()
     yield
@@ -86,6 +91,7 @@ def test_explicit_standalone_provisioning_is_private_idempotent_and_copy_bound(
     first = authorization_custody.provision_standalone_custody(vault, now=now)
     keyring_before = first.keyring_path.read_bytes()
     control_before = first.control_path.read_bytes()
+    membership_before = first.membership_path.read_bytes()
     replay = authorization_custody.provision_standalone_custody(vault, now=now)
     loaded = authorization_custody.load_authorization_custody(vault, now=now + 1)
 
@@ -95,6 +101,10 @@ def test_explicit_standalone_provisioning_is_private_idempotent_and_copy_bound(
     assert loaded.control.registry_attachment_id == first.registry_attachment_id
     assert first.keyring_path.read_bytes() == keyring_before
     assert first.control_path.read_bytes() == control_before
+    assert first.membership_path.read_bytes() == membership_before
+    assert loaded.serving_membership is not None
+    assert loaded.serving_membership.epoch == 1
+    assert loaded.local_replica_id == "standalone"
     assert first.cell_id == loaded.keyring.cell_id
     assert first.logical_vault_id == loaded.keyring.logical_vault_id
     assert first.keyring_id == loaded.keyring.keyring_id
@@ -103,6 +113,7 @@ def test_explicit_standalone_provisioning_is_private_idempotent_and_copy_bound(
     if os.name != "nt":
         assert stat.S_IMODE(first.keyring_path.stat().st_mode) == 0o600
         assert stat.S_IMODE(first.control_path.stat().st_mode) == 0o600
+        assert stat.S_IMODE(first.membership_path.stat().st_mode) == 0o600
 
     copied = _vault(tmp_path, "copied-vault")
     with pytest.raises(authorization_custody.AuthorizationCustodyUnavailable):
@@ -372,3 +383,48 @@ def test_keyring_only_interruption_retries_without_rotating_identity(
         vault,
         now=now + 1,
     ).control.governance_enrolled is False
+
+
+def test_control_before_membership_interruption_retries_without_session_fail_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _vault(tmp_path)
+    now = 1_800_000_000
+    original = authorization_custody._publish_private_file
+    failed = False
+
+    def interrupt_membership(path: Path, data: bytes) -> bytes:
+        nonlocal failed
+        if path.name == "authorization-serving-membership.json" and not failed:
+            failed = True
+            raise authorization_custody.AuthorizationCustodyUnavailable
+        return original(path, data)
+
+    monkeypatch.setattr(
+        authorization_custody,
+        "_publish_private_file",
+        interrupt_membership,
+    )
+    with pytest.raises(authorization_custody.AuthorizationCustodyUnavailable):
+        authorization_custody.provision_standalone_custody(vault, now=now)
+
+    control_path = Path(os.environ[authorization_custody.CONTROL_FILE_ENV])
+    membership_path = Path(os.environ[authorization_custody.MEMBERSHIP_FILE_ENV])
+    control_before = control_path.read_bytes()
+    assert not membership_path.exists()
+    interrupted = authorization_custody.load_authorization_custody(
+        vault,
+        now=now + 1,
+    )
+    assert interrupted.serving_membership is None
+
+    monkeypatch.setattr(authorization_custody, "_publish_private_file", original)
+    result = authorization_custody.provision_standalone_custody(vault, now=now)
+
+    assert control_path.read_bytes() == control_before
+    assert result.membership_path == membership_path
+    assert authorization_custody.load_authorization_custody(
+        vault,
+        now=now + 1,
+    ).serving_membership is not None

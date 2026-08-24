@@ -340,6 +340,13 @@ def test_private_routes_use_the_injected_dynamic_authority_for_every_request(
         "security_revision": 1,
         "service_authenticated": True,
         "mutation_authority": True,
+        "authorization_session": {
+            "ready": False,
+            "code": "AUTHORIZATION_MEMBERSHIP_UNAVAILABLE",
+            "servingMembershipEpoch": None,
+            "servingReplicaCount": 0,
+            "drainingReplicaCount": 0,
+        },
         "admission_phase": "active",
         "read_admission": True,
         "write_admission": True,
@@ -1055,6 +1062,13 @@ def test_private_readiness_is_a_complete_control_plane_binding_proof(tmp_path: P
         "readAdmission": True,
         "writeAdmission": True,
         "workerPolicy": {"workerCount": 0, "semantic": False, "media": False},
+        "authorizationSession": {
+            "ready": False,
+            "code": "AUTHORIZATION_MEMBERSHIP_UNAVAILABLE",
+            "servingMembershipEpoch": None,
+            "servingReplicaCount": 0,
+            "drainingReplicaCount": 0,
+        },
         "code": "CELL_READY",
     }
 

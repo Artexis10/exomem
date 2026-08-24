@@ -26,7 +26,7 @@ from . import (
     project_keys,
     schema,
 )
-from .governance import projection_runtime
+from .governance import authorization_session_lifecycle, projection_runtime
 from .hosted_runtime import (
     HostedBindingV2,
     HostedCellConfig,
@@ -127,7 +127,14 @@ def _initialize_locked_hosted_runtime(
 
     config.apply_process_environment()
     _start_metrics_persistence()
-    lifecycle = HostedCellLifecycle(config)
+    lifecycle = HostedCellLifecycle(
+        config,
+        authorization_session_readiness_provider=lambda: (
+            authorization_session_lifecycle.serving_membership_readiness(
+                config.vault_root
+            )
+        ),
+    )
     security_authority = _initialize_hosted_security(config)
     vault_root = config.vault_root
 
