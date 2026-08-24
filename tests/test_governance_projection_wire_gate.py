@@ -279,9 +279,9 @@ def _route_body(route: str) -> dict[str, object]:
         body["detail"] = "full"
         body["graph"] = True
         body["rerank"] = True
-    elif route == "error":
+    elif route == "invalid-limit":
         body["limit"] = 101
-    elif route == "pagination":
+    elif route == "minimum-limit":
         body["limit"] = 1
     return body
 
@@ -310,7 +310,7 @@ def _canonical_response_digest(response) -> str:  # noqa: ANN001
 
 
 def _assert_route_response(response, route: str) -> None:  # noqa: ANN001
-    expected_status = 400 if route == "error" else 200
+    expected_status = 400 if route == "invalid-limit" else 200
     assert response.status_code == expected_status, response.text
     if response.status_code == 200:
         data = response.json()["data"]
@@ -323,11 +323,16 @@ def _assert_route_response(response, route: str) -> None:  # noqa: ANN001
 
 @pytest.mark.governance_timing_release
 @pytest.mark.timeout(240)
-def test_projected_hidden_corpus_actual_wire_release_gate(
+def test_projected_hidden_corpus_actual_wire_characterization(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    """Characterize implemented routes; release acceptance stays closed.
+
+    Invalid input and a minimum limit do not certify hidden-state failures or
+    real cursor pagination, so this harness must not be treated as that proof.
+    """
     route = os.environ.get(_ROUTE_ENV)
     if route is None:
         pytest.skip("dedicated governance actual-wire route job only")

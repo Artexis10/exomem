@@ -1233,7 +1233,7 @@ def _require_supported_projected_find_request(
         or not query
         or mode not in {"keyword", "hybrid", "vector"}
         or (graph and mode == "keyword")
-        or scope != "vault"
+        or scope not in {"kb", "vault"}
         or rerank_max_candidates is not None
         or not prefer_compiled
         or not prefer_active
@@ -1579,6 +1579,7 @@ def op_find(
             projection_runtime,
             query=query,
             limit=limit,
+            scope=scope,
             mode=mode,
             graph=graph,
             rerank=rerank,

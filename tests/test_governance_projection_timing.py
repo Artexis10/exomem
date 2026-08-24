@@ -58,8 +58,8 @@ def _release_manifest() -> dict[str, object]:
             "max-query",
             "max-limit",
             "max-shape",
-            "error",
-            "pagination",
+            "invalid-limit",
+            "minimum-limit",
         ],
         "capacity": {
             "catalog_items": projections.MAX_GOVERNED_CATALOG_ITEMS,
@@ -91,8 +91,8 @@ def test_checked_release_manifest_is_the_validated_nonwaivable_contract() -> Non
             "max-query",
             "max-limit",
             "max-shape",
-            "error",
-            "pagination",
+            "invalid-limit",
+            "minimum-limit",
         }
     )
 
@@ -119,6 +119,17 @@ def test_keyword_request_class_is_closed_and_repository_owned() -> None:
     )
     with pytest.raises(TypeError):
         timing.PUBLIC_REQUEST_CLASSES["caller-selected"] = request_class
+
+
+def test_public_default_kb_scope_uses_the_registered_completion_class() -> None:
+    timing = _timing_module()
+
+    assert timing.request_class_for_find(
+        mode="hybrid",
+        scope="kb",
+        graph=True,
+        rerank=None,
+    ) is timing.PUBLIC_REQUEST_CLASSES["projected-find-v1"]
 
 
 @pytest.mark.parametrize(
@@ -345,6 +356,78 @@ def test_projected_completion_wraps_the_default_shape_and_its_error_path(
     assert events == ["enter", "leaf", "complete"]
 
 
+def test_unavailable_projected_boundary_still_uses_fixed_completion(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    timing = _timing_module()
+    events: list[str] = []
+
+    def leaf(vault_root, query: str = ""):
+        assert vault_root == tmp_path
+        assert query == "projection-only term"
+        events.append("leaf")
+        raise projection_runtime.ProjectionRuntimeUnavailable(
+            "governed projected retrieval is unavailable"
+        )
+
+    command = SimpleNamespace(
+        name="ask_memory",
+        leaf=leaf,
+        read_only=True,
+        response_detail=None,
+        path_roles=(),
+    )
+
+    class Manager:
+        def invoke(self, current, injected, kwargs, **_metadata):
+            return current.leaf(*injected, **kwargs)
+
+    @contextmanager
+    def fixed_completion(request_class, *, started_at=None):
+        assert request_class.name == "projected-find-v1"
+        assert started_at is not None
+        events.append("enter")
+        try:
+            yield
+        finally:
+            events.append("complete")
+
+    monkeypatch.setattr(writer_lease, "get_manager", lambda: Manager())
+    monkeypatch.setattr(egress, "is_vault_root", lambda _value: False)
+    monkeypatch.setattr(
+        projection_runtime,
+        "has_preactivated_projection_runtime",
+        lambda _root: False,
+    )
+    monkeypatch.setattr(
+        projection_runtime,
+        "requires_fixed_projected_completion",
+        lambda _root: False,
+    )
+    monkeypatch.setattr(
+        projection_runtime,
+        "classify_projected_completion_boundary",
+        lambda _root: (events.append("classify"), True)[1],
+    )
+    monkeypatch.setattr(timing, "fixed_public_completion", fixed_completion)
+
+    with pytest.raises(
+        projection_runtime.ProjectionRuntimeUnavailable,
+        match="governed projected retrieval is unavailable",
+    ):
+        writer_lease.invoke_command(
+            command,
+            tmp_path,
+            query="projection-only term",
+        )
+    assert events == ["classify", "enter", "leaf", "complete"]
+
+
+def test_incomplete_error_and_pagination_evidence_keeps_serving_gate_closed() -> None:
+    assert projection_runtime._PROJECTED_SERVING_RELEASE_ACCEPTED is False
+
+
 def test_unactivated_command_skips_projected_class_selection(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
@@ -378,6 +461,16 @@ def test_unactivated_command_skips_projected_class_selection(
     monkeypatch.setattr(
         projection_runtime,
         "has_preactivated_projection_runtime",
+        lambda _root: False,
+    )
+    monkeypatch.setattr(
+        projection_runtime,
+        "requires_fixed_projected_completion",
+        lambda _root: False,
+    )
+    monkeypatch.setattr(
+        projection_runtime,
+        "classify_projected_completion_boundary",
         lambda _root: False,
     )
 
@@ -578,7 +671,7 @@ def test_route_release_gate_requires_exact_schedule_and_byte_equal_pairs() -> No
 def test_route_release_gate_derives_deadline_failure_from_wire_observation() -> None:
     timing = _timing_module()
     manifest = timing.validate_release_manifest(_release_manifest())
-    schedule = timing.release_sample_schedule(manifest, route="pagination")
+    schedule = timing.release_sample_schedule(manifest, route="minimum-limit")
     observations = [
         timing.WireObservation(
             sample=sample,
@@ -595,7 +688,7 @@ def test_route_release_gate_derives_deadline_failure_from_wire_observation() -> 
 
     report = timing.evaluate_wire_route(
         manifest,
-        route="pagination",
+        route="minimum-limit",
         observations=tuple(observations),
     )
 
