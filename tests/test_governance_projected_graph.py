@@ -172,6 +172,29 @@ def test_edges_to_hidden_targets_are_removed_before_relation_matching() -> None:
     assert graph.neighbors("source") == ("visible",)
 
 
+def test_index_compacts_measurements_before_runtime_publication() -> None:
+    source = _variant("source", "d" * 64)
+    target = _variant("target", "e" * 64)
+    source_item, target_item = _item(source), _item(target)
+    index = projected_graph.ProjectedGraphIndex(
+        _namespace(source_item, target_item),
+        (
+            _measurement(source, _edge("source", "target", "supports")),
+            _measurement(target),
+        ),
+        extractor_version="relations-v1",
+        model_version="graph-schema-v1",
+    )
+
+    assert all(
+        not isinstance(value, projected_graph.ProjectionGraphMeasurement)
+        for value in index._measurements.values()
+    )
+    assert index.authorize(_map((source_item, source), (target_item, target))).edges == (
+        _edge("source", "target", "supports"),
+    )
+
+
 def test_missing_selected_graph_measurement_disables_lane_without_raw_fallback() -> None:
     source = _variant("source", "a" * 64)
     source_item = _item(source)

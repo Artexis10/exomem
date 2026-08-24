@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import math
 import os
 import sqlite3
@@ -216,6 +217,27 @@ class ProjectedFindResult:
     declared_purpose: str | None = None
 
 
+def _stabilize_projection_runtime(
+    runtime: ActiveProjectionRuntime,
+) -> ActiveProjectionRuntime:
+    """Finish tracing the immutable runtime before it becomes request-visible.
+
+    Exact-capacity catalogs and graph families contain hundreds of thousands of
+    long-lived immutable objects. Leaving their first full GC traversal to a
+    public request makes that request's completion depend on hidden corpus
+    size. Collect once at the startup publication boundary, before routing can
+    resolve this runtime; request-local allocations then stay in the young
+    generations covered by the fixed completion class.
+    """
+
+    if not isinstance(runtime, ActiveProjectionRuntime):
+        raise ProjectionRuntimeUnavailable(
+            "governed projected retrieval is unavailable"
+        )
+    gc.collect()
+    return runtime
+
+
 def _root_key(vault_root: Path) -> str:
     return os.path.normcase(os.path.abspath(os.fspath(Path(vault_root))))
 
@@ -363,13 +385,15 @@ def preactivate_projection_runtime(
                 raise ProjectionRuntimeUnavailable(
                     "governed projected retrieval is unavailable"
                 )
-        runtime = ActiveProjectionRuntime(
-            snapshot,
-            namespace,
-            evidence.required_measurement_roots,
-            vector_index=vector_index,
-            clip_index=clip_index,
-            graph_index=graph_index,
+        runtime = _stabilize_projection_runtime(
+            ActiveProjectionRuntime(
+                snapshot,
+                namespace,
+                evidence.required_measurement_roots,
+                vector_index=vector_index,
+                clip_index=clip_index,
+                graph_index=graph_index,
+            )
         )
         record = _PreactivatedProjectionRuntime(
             root_key=_root_key(root),

@@ -138,6 +138,12 @@ def test_startup_preactivates_one_digest_and_serves_only_that_revalidated_runtim
             items,
         )[1:],
     )
+    monkeypatch.setattr(
+        projection_runtime,
+        "_stabilize_projection_runtime",
+        lambda candidate: (events.append("stabilize"), candidate)[1],
+        raising=False,
+    )
     store_pointer = [runtime.snapshot.active]
     monkeypatch.setattr(
         schema_v4,
@@ -153,6 +159,7 @@ def test_startup_preactivates_one_digest_and_serves_only_that_revalidated_runtim
         "begin",
         f"policy:{control.activation_state_digest}",
         "catalog",
+        "stabilize",
     ]
 
     monkeypatch.setattr(
@@ -189,6 +196,21 @@ def test_startup_preactivates_one_digest_and_serves_only_that_revalidated_runtim
         match="governed projected retrieval is unavailable",
     ):
         projection_runtime.load_active_projection_runtime(tmp_path)
+
+
+def test_runtime_stabilization_finishes_collection_before_publication(
+    monkeypatch,
+) -> None:
+    runtime, _items = _active_runtime()
+    collections: list[int] = []
+    monkeypatch.setattr(
+        projection_runtime.gc,
+        "collect",
+        lambda: (collections.append(1), 0)[1],
+    )
+
+    assert projection_runtime._stabilize_projection_runtime(runtime) is runtime
+    assert collections == [1]
 
 
 @pytest.mark.parametrize(

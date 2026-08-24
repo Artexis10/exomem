@@ -404,6 +404,10 @@ def test_projected_hidden_corpus_actual_wire_release_gate(
             graph_edge_count=projections.MAX_GOVERNED_GRAPH_EDGES,
         ),
     }
+    # Production settles one immutable runtime before publication. This wire
+    # fixture holds three replica states in one process, so settle their
+    # combined object graph before any client becomes observable.
+    projection_runtime._stabilize_projection_runtime(runtimes[roots["maximum"]])
     monkeypatch.setattr(
         projection_runtime,
         "has_preactivated_projection_runtime",
