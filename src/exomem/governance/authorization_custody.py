@@ -67,9 +67,9 @@ _CONTROL_FIELDS = frozenset(
 _CONTROL_MAC_DOMAIN = b"exomem.authorization-session.control/v1"
 _ATTACHMENT_DOMAIN = b"exomem.authorization-session.attachment/v1"
 _BOOTSTRAP_MEMBERSHIP_DOMAIN = b"exomem.authorization-session.membership-bootstrap/v1"
+_STANDALONE_STAGING_DOMAIN = b"exomem.authorization-session.standalone-staging/v1"
 _SHA256_HEX = re.compile(r"[0-9a-f]{64}\Z")
 _STANDALONE_ATTACHMENT = re.compile(r"attachment-v1-[0-9a-f]{64}\Z")
-_DEFAULT_CONTROL_TTL_SECONDS = 3_600
 _DEFAULT_KEY_TTL_SECONDS = 366 * 24 * 60 * 60
 _GOVERNANCE_AUTHORITY_NAMES = (
     ".governance.sqlite",
@@ -872,8 +872,65 @@ def _replace_control_bytes(
         raise AuthorizationCustodyUnavailable from None
 
 
-def _opaque_identifier(prefix: str) -> str:
-    return f"{prefix}-{secrets.token_hex(16)}"
+def _standalone_staging_identifier(
+    prefix: str,
+    *,
+    attachment_id: str,
+    key: bytes,
+) -> str:
+    digest = hmac.new(
+        key,
+        _framed(
+            _STANDALONE_STAGING_DOMAIN,
+            (prefix.encode("ascii"), attachment_id.encode("ascii")),
+        ),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"{prefix}-{digest}"
+
+
+def _verify_standalone_staging_keyring(
+    keyring: AuthorizationKeyring,
+    *,
+    attachment_id: str,
+) -> None:
+    if keyring.version != 1 or len(keyring.accepted_keys) != 1:
+        raise AuthorizationCustodyUnavailable
+    active_key = keyring.active_key
+    expected = (
+        _standalone_staging_identifier(
+            "auth-key",
+            attachment_id=attachment_id,
+            key=active_key.key,
+        ),
+        _standalone_staging_identifier(
+            "keyring",
+            attachment_id=attachment_id,
+            key=active_key.key,
+        ),
+        _standalone_staging_identifier(
+            "cell",
+            attachment_id=attachment_id,
+            key=active_key.key,
+        ),
+        _standalone_staging_identifier(
+            "vault",
+            attachment_id=attachment_id,
+            key=active_key.key,
+        ),
+    )
+    observed = (
+        active_key.key_id,
+        keyring.keyring_id,
+        keyring.cell_id,
+        keyring.logical_vault_id,
+    )
+    matches = tuple(
+        hmac.compare_digest(actual, required)
+        for actual, required in zip(observed, expected, strict=True)
+    )
+    if not all(matches):
+        raise AuthorizationCustodyUnavailable
 
 
 def _keyring_bytes(keyring: AuthorizationKeyring) -> bytes:
@@ -1023,17 +1080,34 @@ def provision_standalone_custody(
         if keyring_loaded is not None:
             keyring = parse_keyring(keyring_loaded.data)
         else:
+            key_bytes = secrets.token_bytes(32)
             key = AuthorizationVerifierKey(
-                key_id=_opaque_identifier("auth-key"),
-                key=secrets.token_bytes(32),
+                key_id=_standalone_staging_identifier(
+                    "auth-key",
+                    attachment_id=attachment_id,
+                    key=key_bytes,
+                ),
+                key=key_bytes,
                 not_before=current_time,
                 not_after=current_time + _DEFAULT_KEY_TTL_SECONDS,
             )
             keyring = AuthorizationKeyring(
                 version=1,
-                keyring_id=_opaque_identifier("keyring"),
-                cell_id=_opaque_identifier("cell"),
-                logical_vault_id=_opaque_identifier("vault"),
+                keyring_id=_standalone_staging_identifier(
+                    "keyring",
+                    attachment_id=attachment_id,
+                    key=key_bytes,
+                ),
+                cell_id=_standalone_staging_identifier(
+                    "cell",
+                    attachment_id=attachment_id,
+                    key=key_bytes,
+                ),
+                logical_vault_id=_standalone_staging_identifier(
+                    "vault",
+                    attachment_id=attachment_id,
+                    key=key_bytes,
+                ),
                 active_key_id=key.key_id,
                 accepted_keys=(key,),
             )
@@ -1042,7 +1116,19 @@ def provision_standalone_custody(
 
         if not keyring.active_key.not_before <= current_time < keyring.active_key.not_after:
             raise AuthorizationCustodyUnavailable
+        if control_loaded is not None:
+            existing_control = parse_control_record(
+                control_loaded.data,
+                keyring=keyring,
+                now=current_time,
+            )
+            if existing_control.registry_attachment_id != attachment_id:
+                raise AuthorizationCustodyUnavailable
         if control_loaded is None:
+            _verify_standalone_staging_keyring(
+                keyring,
+                attachment_id=attachment_id,
+            )
             membership_digest = _bootstrap_membership_digest(
                 cell_id=keyring.cell_id,
                 logical_vault_id=keyring.logical_vault_id,
@@ -1064,10 +1150,7 @@ def provision_standalone_custody(
                 serving_membership_epoch=1,
                 serving_membership_digest=membership_digest,
                 issued_at=current_time,
-                expires_at=min(
-                    current_time + _DEFAULT_CONTROL_TTL_SECONDS,
-                    keyring.active_key.not_after,
-                ),
+                expires_at=keyring.active_key.not_after,
                 signing_key_id=keyring.active_key_id,
             )
             encoded_control = _signed_control_bytes(
@@ -1109,7 +1192,6 @@ def enroll_initial_activation_tuple(
     from .. import reserved_paths
 
     with reserved_paths._identity_coordination_scope(root):
-        _governance_negative_scan(root)
         external = load_external_custody(root)
         keyring = parse_keyring(external.keyring)
         current = parse_control_record(external.control, keyring=keyring, now=now)
@@ -1140,6 +1222,7 @@ def enroll_initial_activation_tuple(
             return acknowledgement
         if current != expected_control:
             raise AuthorizationCustodyUnavailable
+        _governance_negative_scan(root)
         signing_key = next(
             (
                 item.key
