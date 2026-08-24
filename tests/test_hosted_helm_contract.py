@@ -1168,6 +1168,9 @@ def test_platform_renders_disjoint_durability_workloads() -> None:
         "/run/secrets/exomem/database-backup/.pgpass"
     )
     assert database_env["EXOMEM_DATABASE_BACKUP_PG_DUMP"] == "/usr/bin/pg_dump"
+    assert database_env["EXOMEM_DURABILITY_SCRATCH_ROOT"] == (
+        "/var/lib/exomem-scratch/database-backup"
+    )
     assert database_env["EXOMEM_DATABASE_BACKUP_PROOF_TENANT_ID"] == "tenant-owner-proof"
     assert database_env["EXOMEM_DATABASE_BACKUP_PROOF_CELL_ID"] == "cell-owner-proof"
 
