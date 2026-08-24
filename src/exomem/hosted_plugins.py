@@ -12,7 +12,7 @@ import re
 import shutil
 import stat
 import zipfile
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -155,6 +155,10 @@ class HostedDefinition:
     author_url: str
     claude_schema_version: str
     openai_schema_version: str
+
+
+class MarketplaceFixtureSeedError(ValueError):
+    """The checked reviewer fixture could not be seeded and verified exactly."""
 
 
 def _canonical_json(value: Any) -> bytes:
@@ -495,7 +499,7 @@ def validate_hosted_public_inputs(
         hosted_root / "acceptance-fixture-v1.json",
         hosted_root / "marketplace-definition.json",
         hosted_root / "marketplace-review-cases.json",
-        hosted_root / "marketplace-review-fixture-v1.json",
+        hosted_root / "marketplace-review-fixture-v2.json",
     ]
     paths = [path for path in paths if path.exists()]
     paths.extend(_skill_paths(root))
@@ -911,7 +915,7 @@ def load_marketplace_definition(repo_root: Path | None = None) -> dict[str, Any]
 
 def _load_marketplace_review_fixture(root: Path) -> dict[str, Any]:
     fixture = _load_marketplace_json(
-        _marketplace_path(root, "marketplace-review-fixture-v1.json"),
+        _marketplace_path(root, "marketplace-review-fixture-v2.json"),
         "marketplace review fixture",
     )
     if set(fixture) != {"schema_version", "fixture_version", "payload", "payload_sha256", "reset"}:
@@ -989,6 +993,185 @@ def _load_marketplace_review_fixture(root: Path) -> dict[str, Any]:
     ) or reset["create_tool"] != target["create_tool"]:
         raise ValueError("marketplace review fixture reset is invalid")
     return fixture
+
+
+_FIXTURE_REVIEW_REASON = "No honest relation exists in the deterministic reviewer fixture."
+
+
+def _fixture_note_path(note: Mapping[str, Any]) -> str:
+    return f"Knowledge Base/Notes/Insights/{note['key']}.md"
+
+
+def _fixture_tool_error_code(result: Mapping[str, Any]) -> str | None:
+    if result.get("success") is not False:
+        return None
+    error = result.get("error")
+    if not isinstance(error, Mapping):
+        return "malformed_error"
+    code = error.get("code")
+    return str(code).strip().lower() if code else "malformed_error"
+
+
+def _verified_fixture_readback(
+    note: Mapping[str, Any], result: Mapping[str, Any], *, allow_missing: bool
+) -> bool:
+    error_code = _fixture_tool_error_code(result)
+    if error_code is not None:
+        if allow_missing and error_code in {"not_found", "not-found"}:
+            return False
+        raise MarketplaceFixtureSeedError(
+            f"fixture note {note['key']} readback failed: {error_code}"
+        )
+    frontmatter = result.get("frontmatter")
+    body = result.get("body")
+    expected_body = f"# {note['title']}\n\n{str(note['content']).rstrip()}\n"
+    if (
+        not isinstance(frontmatter, Mapping)
+        or frontmatter.get("title") != note["title"]
+        or body != expected_body
+    ):
+        raise MarketplaceFixtureSeedError(
+            f"fixture note {note['key']} exact readback mismatch"
+        )
+    return True
+
+
+def seed_marketplace_review_fixture(
+    fixture: Mapping[str, Any],
+    call_tool: Callable[[str, Mapping[str, Any]], Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Seed and exactly verify one checked reviewer fixture through product tools.
+
+    ``call_tool`` is deliberately transport-neutral. Local conformance binds it
+    to the real command leaves; the live bootstrap binds it to authenticated MCP.
+    Existing exact pages count as verified partial progress. Existing mismatches
+    fail closed and are never overwritten.
+    """
+    payload = fixture.get("payload")
+    payload_digest = fixture.get("payload_sha256")
+    if (
+        not isinstance(payload, Mapping)
+        or not isinstance(payload_digest, str)
+        or payload_digest != _sha256(_canonical_json(payload))
+    ):
+        raise MarketplaceFixtureSeedError("fixture payload identity is invalid")
+    notes = payload.get("notes")
+    if not isinstance(notes, list) or not notes:
+        raise MarketplaceFixtureSeedError("fixture notes are invalid")
+
+    for note in notes:
+        if not isinstance(note, Mapping):
+            raise MarketplaceFixtureSeedError("fixture note is invalid")
+        path = _fixture_note_path(note)
+        try:
+            existing = call_tool("read_memory", {"path": path})
+        except Exception as error:  # noqa: BLE001 - callback is a transport boundary
+            raise MarketplaceFixtureSeedError(
+                f"fixture note {note['key']} initial readback failed: {type(error).__name__}"
+            ) from error
+        if not isinstance(existing, Mapping):
+            raise MarketplaceFixtureSeedError(
+                f"fixture note {note['key']} initial readback was malformed"
+            )
+        if _verified_fixture_readback(note, existing, allow_missing=True):
+            continue
+
+        base_arguments = {
+            "title": note["title"],
+            "slug": note["key"],
+            "content": note["content"],
+            "note_type": "insight",
+            "suggestions": False,
+        }
+        try:
+            validation = call_tool(
+                "remember", {**base_arguments, "validate_only": True}
+            )
+        except Exception as error:  # noqa: BLE001 - callback is a transport boundary
+            code = str(error).partition(":")[0].strip().lower() or type(error).__name__.lower()
+            raise MarketplaceFixtureSeedError(
+                f"fixture note {note['key']} validation failed: {code}"
+            ) from error
+        if not isinstance(validation, Mapping):
+            raise MarketplaceFixtureSeedError(
+                f"fixture note {note['key']} validation response was malformed"
+            )
+        validation_error = _fixture_tool_error_code(validation)
+        if validation_error is not None:
+            raise MarketplaceFixtureSeedError(
+                f"fixture note {note['key']} validation failed: {validation_error}"
+            )
+        if validation.get("has_non_review_blockers") is not False:
+            findings = validation.get("contract_result")
+            finding_code = "non_review_blocker"
+            if isinstance(findings, Mapping):
+                blocking = findings.get("blocking_findings")
+                if isinstance(blocking, list) and blocking and isinstance(blocking[0], Mapping):
+                    finding_code = str(blocking[0].get("code") or finding_code).lower()
+            raise MarketplaceFixtureSeedError(
+                f"fixture note {note['key']} validation failed: {finding_code}"
+            )
+
+        draft_fields: dict[str, str] = {}
+        for field in ("draft_id", "draft_hash", "draft_token"):
+            value = validation.get(field)
+            if not isinstance(value, str) or not value:
+                raise MarketplaceFixtureSeedError(
+                    f"fixture note {note['key']} validation omitted {field}"
+                )
+            draft_fields[field] = value
+        if validation.get("destination") != path:
+            raise MarketplaceFixtureSeedError(
+                f"fixture note {note['key']} validation destination mismatch"
+            )
+
+        commit_arguments: dict[str, Any] = {**base_arguments, **draft_fields}
+        if validation.get("reviewed_none_required") is True:
+            relation_hash = validation.get("relation_review_hash")
+            if not isinstance(relation_hash, str) or relation_hash != draft_fields["draft_hash"]:
+                raise MarketplaceFixtureSeedError(
+                    f"fixture note {note['key']} relation review response was malformed"
+                )
+            commit_arguments.update(
+                {
+                    "relation_disposition": "reviewed_none",
+                    "relation_review_hash": relation_hash,
+                    "relation_review_reason": _FIXTURE_REVIEW_REASON,
+                }
+            )
+        elif validation.get("committable_without_review") is not True:
+            raise MarketplaceFixtureSeedError(
+                f"fixture note {note['key']} is not committable"
+            )
+
+        try:
+            committed = call_tool("remember", commit_arguments)
+        except Exception as error:  # noqa: BLE001 - callback is a transport boundary
+            raise MarketplaceFixtureSeedError(
+                f"fixture note {note['key']} commit failed: {type(error).__name__}"
+            ) from error
+        if not isinstance(committed, Mapping) or committed.get("path") != path:
+            raise MarketplaceFixtureSeedError(
+                f"fixture note {note['key']} commit response was malformed"
+            )
+        try:
+            readback = call_tool("read_memory", {"path": path})
+        except Exception as error:  # noqa: BLE001 - callback is a transport boundary
+            raise MarketplaceFixtureSeedError(
+                f"fixture note {note['key']} final readback failed: {type(error).__name__}"
+            ) from error
+        if not isinstance(readback, Mapping):
+            raise MarketplaceFixtureSeedError(
+                f"fixture note {note['key']} final readback was malformed"
+            )
+        _verified_fixture_readback(note, readback, allow_missing=False)
+
+    return {
+        "fixture_version": fixture.get("fixture_version"),
+        "payload_sha256": payload_digest,
+        "note_count": len(notes),
+        "verified": True,
+    }
 
 
 def _remember_review_prompt(target: dict[str, Any]) -> str:
