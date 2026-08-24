@@ -14,6 +14,7 @@ import hmac
 import json
 import os
 import re
+import secrets
 import stat
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -64,7 +65,18 @@ _CONTROL_FIELDS = frozenset(
     }
 )
 _CONTROL_MAC_DOMAIN = b"exomem.authorization-session.control/v1"
+_ATTACHMENT_DOMAIN = b"exomem.authorization-session.attachment/v1"
+_BOOTSTRAP_MEMBERSHIP_DOMAIN = b"exomem.authorization-session.membership-bootstrap/v1"
 _SHA256_HEX = re.compile(r"[0-9a-f]{64}\Z")
+_STANDALONE_ATTACHMENT = re.compile(r"attachment-v1-[0-9a-f]{64}\Z")
+_DEFAULT_CONTROL_TTL_SECONDS = 3_600
+_DEFAULT_KEY_TTL_SECONDS = 366 * 24 * 60 * 60
+_GOVERNANCE_AUTHORITY_NAMES = (
+    ".governance.sqlite",
+    ".governance.sqlite-wal",
+    ".governance.sqlite-shm",
+    ".governance.sqlite-journal",
+)
 
 
 class AuthorizationCustodyUnavailable(RuntimeError):
@@ -137,6 +149,19 @@ class AuthorizationCustody:
 
 
 @dataclass(frozen=True, slots=True)
+class StandaloneProvisioningResult:
+    """Non-secret identity returned by explicit standalone provisioning."""
+
+    keyring_path: Path
+    control_path: Path
+    keyring_id: str
+    cell_id: str
+    logical_vault_id: str
+    registry_attachment_id: str
+    attachment_epoch: int
+
+
+@dataclass(frozen=True, slots=True)
 class _LoadedCustodyFile:
     path: Path
     data: bytes = field(repr=False)
@@ -163,6 +188,114 @@ def _path_is_within(candidate: Path, root: Path) -> bool:
     except ValueError:
         return False
     return common == os.path.normcase(str(root))
+
+
+def _owner_identity(
+    root: Path,
+    info: os.stat_result,
+    filesystem: held_fs.HeldFilesystem,
+) -> str:
+    if os.name == "nt":  # pragma: no cover - exercised by Windows CI
+        import msvcrt
+
+        descriptor = getattr(filesystem, "descriptor", None)
+        if not isinstance(descriptor, int):
+            raise AuthorizationCustodyUnavailable
+        sid = mutation_lock._windows_current_user_sid()
+        retained_handle = msvcrt.get_osfhandle(descriptor)
+        security_handle = mutation_lock._windows_open_path(root, directory=True)
+        try:
+            if mutation_lock._windows_handle_identity(
+                security_handle
+            ) != mutation_lock._windows_handle_identity(retained_handle):
+                raise AuthorizationCustodyUnavailable
+            sddl = mutation_lock._windows_dacl_sddl_for_handle(security_handle)
+        finally:
+            mutation_lock._windows_close_handle(security_handle)
+        if not mutation_lock._windows_owner_admits_current_user(
+            mutation_lock._windows_sddl_owner(sddl),
+            sid,
+        ):
+            raise AuthorizationCustodyUnavailable
+        return f"sid:{sid}"
+    owner = int(info.st_uid)
+    if owner != os.geteuid():
+        raise AuthorizationCustodyUnavailable
+    return f"uid:{owner}"
+
+
+def standalone_attachment_id(vault_root: Path) -> str:
+    """Bind one standalone registration to the held vault-root identity.
+
+    A copied vault and copied custody files therefore do not become a second
+    serving attachment merely because their logical ids still match.
+    """
+
+    root = Path(vault_root)
+    acquired: held_fs.HeldResult[held_fs.HeldFilesystem] | None = None
+    try:
+        before = os.lstat(root)
+        reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        if (
+            not stat.S_ISDIR(before.st_mode)
+            or stat.S_ISLNK(before.st_mode)
+            or getattr(before, "st_file_attributes", 0) & reparse
+        ):
+            raise AuthorizationCustodyUnavailable
+        acquired = held_fs.acquire(root)
+        if not acquired.ok:
+            raise AuthorizationCustodyUnavailable
+        with acquired.require() as filesystem:
+            identity = filesystem.root_identity
+            after = os.lstat(root)
+            if (
+                not stat.S_ISDIR(after.st_mode)
+                or stat.S_ISLNK(after.st_mode)
+                or getattr(after, "st_file_attributes", 0) & reparse
+                or identity.kind != "directory"
+                or (
+                    os.name != "nt"
+                    and (
+                        int(after.st_dev) != identity.device
+                        or int(after.st_ino) != identity.inode
+                    )
+                )
+            ):
+                raise AuthorizationCustodyUnavailable
+            canonical = os.path.normcase(str(root.resolve(strict=True))).encode("utf-8")
+            owner = _owner_identity(root, after, filesystem).encode("utf-8")
+            digest = hashlib.sha256(
+                _framed(
+                    _ATTACHMENT_DOMAIN,
+                    (
+                        canonical,
+                        str(identity.device).encode("ascii"),
+                        str(identity.inode).encode("ascii"),
+                        owner,
+                    ),
+                )
+            ).hexdigest()
+            return f"attachment-v1-{digest}"
+    except AuthorizationCustodyUnavailable:
+        raise
+    except (OSError, RuntimeError, UnicodeError, ValueError, held_fs.HeldFsError):
+        raise AuthorizationCustodyUnavailable from None
+
+
+def _verify_registered_attachment(vault_root: Path, attachment_id: str) -> None:
+    """Verify records minted by the standalone root-identity protocol.
+
+    Existing Hosted/control-plane records use their own opaque attachment
+    identifiers.  They remain the control plane's responsibility until that
+    protocol is integrated; the locally minted namespace is closed and always
+    verified here.
+    """
+
+    if attachment_id.startswith("attachment-v1-") and (
+        _STANDALONE_ATTACHMENT.fullmatch(attachment_id) is None
+        or attachment_id != standalone_attachment_id(vault_root)
+    ):
+        raise AuthorizationCustodyUnavailable
 
 
 def _configured_external_path(variable: str, vault_root: Path) -> Path:
@@ -538,6 +671,9 @@ def load_authorization_custody(
     external = load_external_custody(Path(vault_root))
     keyring = parse_keyring(external.keyring)
     control = parse_control_record(external.control, keyring=keyring, now=now)
+    _verify_registered_attachment(
+        Path(vault_root), control.registry_attachment_id
+    )
     return AuthorizationCustody(
         keyring_path=external.keyring_path,
         control_path=external.control_path,
@@ -591,7 +727,7 @@ def _signed_control_bytes(
     return encoded
 
 
-def _prepare_private_control_stage(control_path: Path, staged: held_fs.HeldFile) -> None:
+def _prepare_private_stage(target_path: Path, staged: held_fs.HeldFile) -> None:
     descriptor = getattr(staged, "descriptor", None)
     if not isinstance(descriptor, int):
         raise AuthorizationCustodyUnavailable
@@ -600,12 +736,89 @@ def _prepare_private_control_stage(control_path: Path, staged: held_fs.HeldFile)
         if not isinstance(name, str) or not name:
             raise AuthorizationCustodyUnavailable
         mutation_lock._windows_apply_private_dacl(
-            control_path.parent / name,
+            target_path.parent / name,
             mutation_lock._windows_current_user_sid(),
         )
+    else:
+        os.fchmod(descriptor, 0o600)
     info = os.fstat(descriptor)
     if not _file_is_owner_protected(descriptor, info):
         raise AuthorizationCustodyUnavailable
+
+
+def _private_parent_is_safe(path: Path) -> bool:
+    try:
+        info = os.lstat(path)
+        reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or stat.S_ISLNK(info.st_mode)
+            or getattr(info, "st_file_attributes", 0) & reparse
+        ):
+            return False
+        if os.name == "nt":  # pragma: no cover - exercised by Windows CI
+            sid = mutation_lock._windows_current_user_sid()
+            return (
+                mutation_lock._windows_private_dacl_verdict(
+                    mutation_lock._windows_dacl_sddl(path),
+                    sid,
+                    directory=True,
+                )
+                == "valid"
+            )
+        return int(info.st_uid) == os.geteuid() and not stat.S_IMODE(info.st_mode) & 0o077
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _publish_private_file(path: Path, data: bytes) -> bytes:
+    """Create one exact private custody file, or adopt an exact concurrent retry."""
+
+    if not isinstance(data, bytes) or not 1 <= len(data) <= MAX_CUSTODY_FILE_BYTES:
+        raise AuthorizationCustodyUnavailable
+    parent_path = path.parent
+    anchor = parent_path.parent
+    if (
+        anchor == parent_path
+        or not parent_path.name
+        or not path.name
+        or not _private_parent_is_safe(parent_path)
+    ):
+        raise AuthorizationCustodyUnavailable
+    try:
+        acquired = held_fs.acquire(anchor)
+        if not acquired.ok:
+            raise AuthorizationCustodyUnavailable
+        with acquired.require() as filesystem:
+            parent_result = filesystem.parent(parent_path.name, access="flush")
+            if not parent_result.ok:
+                raise AuthorizationCustodyUnavailable
+            with parent_result.require() as parent:
+                published = held_fs.publish_bytes(
+                    filesystem,
+                    parent,
+                    path.name,
+                    data,
+                    prepare=lambda staged: _prepare_private_stage(path, staged),
+                )
+                if not published.ok:
+                    if published.error is None or published.error.code != "DESTINATION_EXISTS":
+                        raise AuthorizationCustodyUnavailable
+                    installed = _load_file(path)
+                    if not hmac.compare_digest(installed.data, data):
+                        raise AuthorizationCustodyUnavailable
+                    return installed.data
+                flushed = filesystem.flush_directory(parent)
+                if not flushed.ok:
+                    raise AuthorizationCustodyUnavailable
+        installed = _load_file(path)
+        if not hmac.compare_digest(installed.data, data):
+            raise AuthorizationCustodyUnavailable
+        return installed.data
+    except AuthorizationCustodyUnavailable:
+        raise
+    except (OSError, RuntimeError, TypeError, ValueError, held_fs.HeldFsError):
+        raise AuthorizationCustodyUnavailable from None
 
 
 def _replace_control_bytes(
@@ -646,7 +859,7 @@ def _replace_control_bytes(
                     target,
                     expected_identity=identity,
                     expected_sha256=hashlib.sha256(expected).hexdigest(),
-                    prepare=lambda staged: _prepare_private_control_stage(path, staged),
+                    prepare=lambda staged: _prepare_private_stage(path, staged),
                 )
                 if not published.ok:
                     raise AuthorizationCustodyUnavailable
@@ -660,6 +873,295 @@ def _replace_control_bytes(
         raise
     except (OSError, RuntimeError, TypeError, ValueError, held_fs.HeldFsError):
         raise AuthorizationCustodyUnavailable from None
+
+
+def _opaque_identifier(prefix: str) -> str:
+    return f"{prefix}-{secrets.token_hex(16)}"
+
+
+def _keyring_bytes(keyring: AuthorizationKeyring) -> bytes:
+    value = {
+        "version": keyring.version,
+        "keyring_id": keyring.keyring_id,
+        "cell_id": keyring.cell_id,
+        "logical_vault_id": keyring.logical_vault_id,
+        "active_key_id": keyring.active_key_id,
+        "accepted_keys": [
+            {
+                "key_id": item.key_id,
+                "key": base64.urlsafe_b64encode(item.key).rstrip(b"=").decode("ascii"),
+                "not_before": item.not_before,
+                "not_after": item.not_after,
+            }
+            for item in keyring.accepted_keys
+        ],
+    }
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if not 1 <= len(encoded) <= MAX_CUSTODY_FILE_BYTES:
+        raise AuthorizationCustodyUnavailable
+    return encoded
+
+
+def _bootstrap_membership_digest(
+    *,
+    cell_id: str,
+    logical_vault_id: str,
+    attachment_id: str,
+    keyring_id: str,
+    active_key_id: str,
+) -> str:
+    return hashlib.sha256(
+        _framed(
+            _BOOTSTRAP_MEMBERSHIP_DOMAIN,
+            tuple(
+                value.encode("utf-8")
+                for value in (
+                    cell_id,
+                    logical_vault_id,
+                    attachment_id,
+                    keyring_id,
+                    active_key_id,
+                )
+            ),
+        )
+    ).hexdigest()
+
+
+def _governance_negative_scan(vault_root: Path) -> None:
+    try:
+        acquired = held_fs.acquire(vault_root)
+        if not acquired.ok:
+            raise AuthorizationCustodyUnavailable
+        with acquired.require() as filesystem:
+            kb_result = filesystem.parent("Knowledge Base")
+            if not kb_result.ok:
+                raise AuthorizationCustodyUnavailable
+            with kb_result.require() as knowledge_base:
+                governance = filesystem.parent("Knowledge Base/_Governance")
+                if governance.ok:
+                    governance.require().close()
+                    raise AuthorizationCustodyUnavailable
+                if governance.error is None or governance.error.code != "MISSING":
+                    raise AuthorizationCustodyUnavailable
+                for name in _GOVERNANCE_AUTHORITY_NAMES:
+                    candidate = filesystem.file(knowledge_base, name)
+                    if candidate.ok:
+                        candidate.require().close()
+                        raise AuthorizationCustodyUnavailable
+                    if candidate.error is None or candidate.error.code != "MISSING":
+                        raise AuthorizationCustodyUnavailable
+                if not filesystem.validate_directory(knowledge_base).ok:
+                    raise AuthorizationCustodyUnavailable
+    except AuthorizationCustodyUnavailable:
+        raise
+    except (OSError, RuntimeError, ValueError, held_fs.HeldFsError):
+        raise AuthorizationCustodyUnavailable from None
+
+
+def _provisioning_result(
+    custody: AuthorizationCustody,
+) -> StandaloneProvisioningResult:
+    return StandaloneProvisioningResult(
+        keyring_path=custody.keyring_path,
+        control_path=custody.control_path,
+        keyring_id=custody.keyring.keyring_id,
+        cell_id=custody.keyring.cell_id,
+        logical_vault_id=custody.keyring.logical_vault_id,
+        registry_attachment_id=custody.control.registry_attachment_id,
+        attachment_epoch=custody.control.attachment_epoch,
+    )
+
+
+def provision_standalone_custody(
+    vault_root: Path,
+    *,
+    now: int,
+) -> StandaloneProvisioningResult:
+    """Explicitly provision one never-enrolled standalone attachment.
+
+    This is never called from an ordinary loader.  It creates no vault state;
+    the externally authenticated control record is the final registration
+    point, and a keyring-only interruption can be retried without rotating the
+    generated identity.
+    """
+
+    root = Path(vault_root)
+    current_time = _bounded_time(now)
+    if current_time > _MAX_SIGNED_SQLITE_INTEGER - _DEFAULT_KEY_TTL_SECONDS:
+        raise AuthorizationCustodyUnavailable
+    attachment_id = standalone_attachment_id(root)
+    keyring_path = _configured_external_path(KEYRING_FILE_ENV, root)
+    control_path = _configured_external_path(CONTROL_FILE_ENV, root)
+    if keyring_path == control_path:
+        raise AuthorizationCustodyUnavailable
+
+    from .. import reserved_paths
+
+    # First attachment is the one operation that must prove the vault has no
+    # private owner state at all.  Take the registry-wide identity guard rather
+    # than pretending to hold dispatcher authority for two different owners.
+    with reserved_paths._identity_coordination_scope(root):
+        _governance_negative_scan(root)
+        keyring_loaded: _LoadedCustodyFile | None = None
+        control_loaded: _LoadedCustodyFile | None = None
+        try:
+            keyring_loaded = _load_file(keyring_path)
+        except AuthorizationCustodyUnavailable:
+            if keyring_path.exists():
+                raise
+        try:
+            control_loaded = _load_file(control_path)
+        except AuthorizationCustodyUnavailable:
+            if control_path.exists():
+                raise
+
+        if control_loaded is not None and keyring_loaded is None:
+            raise AuthorizationCustodyUnavailable
+        if keyring_loaded is not None:
+            keyring = parse_keyring(keyring_loaded.data)
+        else:
+            key = AuthorizationVerifierKey(
+                key_id=_opaque_identifier("auth-key"),
+                key=secrets.token_bytes(32),
+                not_before=current_time,
+                not_after=current_time + _DEFAULT_KEY_TTL_SECONDS,
+            )
+            keyring = AuthorizationKeyring(
+                version=1,
+                keyring_id=_opaque_identifier("keyring"),
+                cell_id=_opaque_identifier("cell"),
+                logical_vault_id=_opaque_identifier("vault"),
+                active_key_id=key.key_id,
+                accepted_keys=(key,),
+            )
+            encoded_keyring = _keyring_bytes(keyring)
+            _publish_private_file(keyring_path, encoded_keyring)
+
+        if not keyring.active_key.not_before <= current_time < keyring.active_key.not_after:
+            raise AuthorizationCustodyUnavailable
+        if control_loaded is None:
+            membership_digest = _bootstrap_membership_digest(
+                cell_id=keyring.cell_id,
+                logical_vault_id=keyring.logical_vault_id,
+                attachment_id=attachment_id,
+                keyring_id=keyring.keyring_id,
+                active_key_id=keyring.active_key_id,
+            )
+            control = AuthorizationControlRecord(
+                version=1,
+                keyring_id=keyring.keyring_id,
+                cell_id=keyring.cell_id,
+                logical_vault_id=keyring.logical_vault_id,
+                registry_attachment_id=attachment_id,
+                attachment_epoch=1,
+                governance_enrolled=False,
+                activation_store_id=None,
+                activation_epoch=None,
+                activation_state_digest=None,
+                serving_membership_epoch=1,
+                serving_membership_digest=membership_digest,
+                issued_at=current_time,
+                expires_at=min(
+                    current_time + _DEFAULT_CONTROL_TTL_SECONDS,
+                    keyring.active_key.not_after,
+                ),
+                signing_key_id=keyring.active_key_id,
+            )
+            encoded_control = _signed_control_bytes(
+                control,
+                signing_key=keyring.active_key.key,
+            )
+            _governance_negative_scan(root)
+            _publish_private_file(control_path, encoded_control)
+
+    return _provisioning_result(load_authorization_custody(root, now=current_time))
+
+
+def enroll_initial_activation_tuple(
+    vault_root: Path,
+    *,
+    expected_control: AuthorizationControlRecord,
+    target: VerifiedActiveGovernanceState,
+    now: int,
+) -> ActivationRegistryAcknowledgement:
+    """Irreversibly CAS never-enrolled custody to one exact initial tuple."""
+
+    from . import schema_v4
+
+    if (
+        not isinstance(expected_control, AuthorizationControlRecord)
+        or not isinstance(target, schema_v4.VerifiedActiveGovernanceState)
+        or expected_control.governance_enrolled
+        or expected_control.activation_store_id is not None
+        or expected_control.activation_epoch is not None
+        or expected_control.activation_state_digest is not None
+        or target.logical_vault_id != expected_control.logical_vault_id
+        or target.activation_epoch != 1
+    ):
+        raise AuthorizationCustodyUnavailable
+    _bounded_identifier(target.activation_store_id)
+    _sha256_hex(target.activation_state_digest)
+
+    root = Path(vault_root)
+    from .. import reserved_paths
+
+    with reserved_paths._identity_coordination_scope(root):
+        _governance_negative_scan(root)
+        external = load_external_custody(root)
+        keyring = parse_keyring(external.keyring)
+        current = parse_control_record(external.control, keyring=keyring, now=now)
+        _verify_registered_attachment(root, current.registry_attachment_id)
+        target_control = AuthorizationControlRecord(
+            version=expected_control.version,
+            keyring_id=expected_control.keyring_id,
+            cell_id=expected_control.cell_id,
+            logical_vault_id=expected_control.logical_vault_id,
+            registry_attachment_id=expected_control.registry_attachment_id,
+            attachment_epoch=expected_control.attachment_epoch,
+            governance_enrolled=True,
+            activation_store_id=target.activation_store_id,
+            activation_epoch=target.activation_epoch,
+            activation_state_digest=target.activation_state_digest,
+            serving_membership_epoch=expected_control.serving_membership_epoch,
+            serving_membership_digest=expected_control.serving_membership_digest,
+            issued_at=expected_control.issued_at,
+            expires_at=expected_control.expires_at,
+            signing_key_id=expected_control.signing_key_id,
+        )
+        acknowledgement = schema_v4.ActivationRegistryAcknowledgement(
+            activation_store_id=target.activation_store_id,
+            activation_epoch=target.activation_epoch,
+            activation_state_digest=target.activation_state_digest,
+        )
+        if current == target_control:
+            return acknowledgement
+        if current != expected_control:
+            raise AuthorizationCustodyUnavailable
+        signing_key = next(
+            (
+                item.key
+                for item in keyring.accepted_keys
+                if item.key_id == current.signing_key_id
+            ),
+            None,
+        )
+        if signing_key is None:
+            raise AuthorizationCustodyUnavailable
+        _replace_control_bytes(
+            external.control_path,
+            expected=external.control,
+            target=_signed_control_bytes(target_control, signing_key=signing_key),
+        )
+    verified = load_authorization_custody(root, now=now)
+    if verified.control != target_control:
+        raise AuthorizationCustodyUnavailable
+    return acknowledgement
 
 
 def acknowledge_activation_tuple(
@@ -686,9 +1188,11 @@ def acknowledge_activation_tuple(
     ):
         raise AuthorizationCustodyUnavailable
 
-    external = load_external_custody(Path(vault_root))
+    root = Path(vault_root)
+    external = load_external_custody(root)
     keyring = parse_keyring(external.keyring)
     current = parse_control_record(external.control, keyring=keyring, now=now)
+    _verify_registered_attachment(root, current.registry_attachment_id)
     target_control = AuthorizationControlRecord(
         version=expected_control.version,
         keyring_id=expected_control.keyring_id,
@@ -731,7 +1235,7 @@ def acknowledge_activation_tuple(
         expected=external.control,
         target=encoded,
     )
-    verified = load_authorization_custody(Path(vault_root), now=now)
+    verified = load_authorization_custody(root, now=now)
     if verified.control != target_control:
         raise AuthorizationCustodyUnavailable
     return acknowledgement
