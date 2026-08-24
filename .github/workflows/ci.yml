@@ -4,9 +4,12 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
 
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
+  group: ci-${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && format('full-{0}', github.ref) || github.event.pull_request.number || github.ref }}
   # New pushes supersede PR feedback, but main/release evidence must finish.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
@@ -18,10 +21,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Compatibility boundaries are sufficient here: 3.11 is the minimum
-        # supported runtime and 3.13 is the newest. Testing the middle release
-        # duplicated the full lean suite without expanding the support range.
-        python-version: ["3.11", "3.13"]
+        # PRs and main pushes pay for the newest runtime only. The minimum
+        # supported runtime joins on nightly/manual runs and release PRs, where
+        # compatibility evidence is useful without doubling every feedback run.
+        python-version: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'release-please--branches--main')) && fromJSON('["3.11", "3.13"]') || fromJSON('["3.13"]') }}
         # Separate runners keep process, port, filesystem, and mutation-lock
         # state isolated while cutting the serial critical path by roughly 4x.
         shard: [1, 2, 3, 4]
@@ -215,6 +218,7 @@ jobs:
 
   retrieval-quality:
     name: retrieval quality (golden gate, embeddings)
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'release-please--branches--main') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -241,6 +245,7 @@ jobs:
 
   retrieval-latency:
     name: retrieval latency (2k synthetic vault)
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'release-please--branches--main') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -259,6 +264,7 @@ jobs:
 
   governance-projection-wire:
     name: governance projected wire characterization (${{ matrix.route }})
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'release-please--branches--main') }}
     runs-on: ubuntu-latest
     timeout-minutes: 8
     strategy:
@@ -288,6 +294,7 @@ jobs:
 
   semantic-write-latency:
     name: semantic write latency (2k and 8k)
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'release-please--branches--main') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -306,6 +313,7 @@ jobs:
 
   graph-convergence:
     name: graph convergence (concurrent writer)
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'release-please--branches--main') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -349,6 +357,7 @@ jobs:
 
   docker:
     name: docker (lean build + smoke)
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'release-please--branches--main') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -519,10 +528,18 @@ jobs:
       - lint
     runs-on: ubuntu-latest
     steps:
-      - name: Require every CI job to succeed
+      - name: Require the selected CI tier to succeed
         env:
           RESULTS: ${{ join(needs.*.result, ' ') }}
+          FULL_CI: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'release-please--branches--main') }}
         run: |
           for result in $RESULTS; do
-            test "$result" = success
+            if test "$result" = success; then
+              continue
+            fi
+            if test "$FULL_CI" != true && test "$result" = skipped; then
+              continue
+            fi
+            echo "unexpected CI result for full_ci=$FULL_CI: $result" >&2
+            exit 1
           done
