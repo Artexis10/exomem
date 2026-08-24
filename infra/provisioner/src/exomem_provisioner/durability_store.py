@@ -37,7 +37,7 @@ def _not_found(error: Exception) -> bool:
 def _as_utc(value: datetime | None) -> datetime | None:
     if value is None:
         return None
-    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    return value.astimezone(UTC) if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
 def provider_retention_covers(

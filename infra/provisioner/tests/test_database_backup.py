@@ -264,7 +264,7 @@ class RecordingDatabaseStore:
 
 def test_database_remote_proof_accepts_provider_retention_precision() -> None:
     required = datetime(2030, 1, 8, 12, 0, 0, 987654, tzinfo=UTC)
-    observed = required.replace(microsecond=987000)
+    observed = required.replace(microsecond=0)
     metadata = {"artifact-kind": "database-recovery"}
 
     DatabaseBackupWorkflow._verify_remote(
