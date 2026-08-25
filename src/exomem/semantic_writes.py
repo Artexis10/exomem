@@ -2063,6 +2063,25 @@ def _commit_existing_locked(
             guard=preflight.primary_guard,
         )
     )
+    from .governance import catalog_publication
+
+    try:
+        catalog_target = catalog_publication.prepare_markdown_upsert(
+            root,
+            path=preflight.path,
+            source=preflight.after_source,
+            expected_before_hash=preflight.before.source_hash,
+        )
+    except catalog_publication.CatalogPublicationError as error:
+        raise SemanticWriteError(
+            "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
+            str(error),
+        ) from error
+    if catalog_target is not None and (lifecycle_writes or auxiliaries):
+        raise SemanticWriteError(
+            "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
+            "v4 catalog publication does not yet admit auxiliary content writes",
+        )
     reports: list[Any] = []
     written = vault.batch_atomic_write(
         writes,
@@ -2071,6 +2090,13 @@ def _commit_existing_locked(
         index_reports=reports,
         semantic_states={preflight.path: semantic_index.from_semantic_page_state(preflight.after)},
     )
+    try:
+        catalog_publication.publish_markdown_upsert(catalog_target)
+    except catalog_publication.CatalogPublicationError as error:
+        raise SemanticWriteError(
+            "GOVERNANCE_CATALOG_PUBLICATION_UNCERTAIN",
+            str(error),
+        ) from error
     report = reports[0] if reports else None
     return ExistingCommit(
         preflight.applicability,
@@ -3616,6 +3642,25 @@ def _commit_creation(
         holder_kind="command",
     ):
         if prepared is not None:
+            from .governance import catalog_publication
+
+            try:
+                catalog_target = catalog_publication.prepare_markdown_upsert(
+                    root,
+                    path=preflight.destination,
+                    source=preflight.source,
+                    expected_before_hash=None,
+                )
+            except catalog_publication.CatalogPublicationError as error:
+                raise SemanticWriteError(
+                    "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
+                    str(error),
+                ) from error
+            if catalog_target is not None and auxiliary_writes:
+                raise SemanticWriteError(
+                    "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
+                    "v4 catalog publication does not yet admit auxiliary content writes",
+                )
             committed = relation_review.commit_prepared_creation_draft(
                 root,
                 prepared,
@@ -3628,6 +3673,13 @@ def _commit_creation(
                 predecessor_content_hash=predecessor_content_hash,
                 semantic_state=semantic_index.from_semantic_page_state(preflight.semantic_state),
             )
+            try:
+                catalog_publication.publish_markdown_upsert(catalog_target)
+            except catalog_publication.CatalogPublicationError as error:
+                raise SemanticWriteError(
+                    "GOVERNANCE_CATALOG_PUBLICATION_UNCERTAIN",
+                    str(error),
+                ) from error
             return CreationCommit(
                 "full", True, committed.written_paths, committed.contract_result, committed
             )
@@ -3659,6 +3711,25 @@ def _commit_creation(
                 )
         else:
             relation_review._record_prevalidated_commit_outcome("reused")
+        from .governance import catalog_publication
+
+        try:
+            catalog_target = catalog_publication.prepare_markdown_upsert(
+                root,
+                path=preflight.destination,
+                source=preflight.source,
+                expected_before_hash=None,
+            )
+        except catalog_publication.CatalogPublicationError as error:
+            raise SemanticWriteError(
+                "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
+                str(error),
+            ) from error
+        if catalog_target is not None and auxiliary_writes:
+            raise SemanticWriteError(
+                "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
+                "v4 catalog publication does not yet admit auxiliary content writes",
+            )
         writes = [*auxiliary_writes]
         writes.append(
             vault.PlannedWrite(
@@ -3681,6 +3752,13 @@ def _commit_creation(
             ) from error
         finally:
             semantic_index.reset_parent_states(token)
+        try:
+            catalog_publication.publish_markdown_upsert(catalog_target)
+        except catalog_publication.CatalogPublicationError as error:
+            raise SemanticWriteError(
+                "GOVERNANCE_CATALOG_PUBLICATION_UNCERTAIN",
+                str(error),
+            ) from error
         paths = tuple(path.relative_to(root).as_posix() for path in written)
         return CreationCommit(
             preflight.applicability,
