@@ -15,10 +15,11 @@ name: cross-platform
 # with WinError 32 -- a failure mode Linux does not have. Four such defects were
 # found manually against this suite before this lane existed.
 #
-# It is intentionally a full-confidence lane: nightly, manual, and release PRs
-# only. Ordinary PRs already exercise the focused native-NTFS contract in the
-# required workflow, so repeating four full Windows shards there spends the
-# whole repository runner allowance before Linux feedback can start.
+# It is intentionally a diagnostic lane: nightly and manual only. Ordinary and
+# release PRs already exercise the focused native-NTFS contract in the required
+# workflow, while release PRs additionally run the full Linux confidence lanes.
+# Repeating eight advisory shards there spends the repository runner allowance
+# and lets a platform-wide diagnostic failure block an otherwise proven patch.
 
 on:
   pull_request:
@@ -33,14 +34,11 @@ concurrency:
 jobs:
   suite:
     name: tests (${{ matrix.os }}, py3.13, shard ${{ matrix.shard }}/4)
-    # A normal PR produces one cheap skipped check. The full matrix runs on the
-    # nightly/manual confidence lanes and once more for the exact release tree.
+    # Pull requests retain one visible, cheap skipped check; only scheduled and
+    # explicit manual runs spend the eight-runner diagnostic matrix.
     if: >-
       github.event_name == 'schedule'
       || github.event_name == 'workflow_dispatch'
-      || (github.event_name == 'pull_request'
-      && github.event.pull_request.head.repo.full_name == github.repository
-      && github.head_ref == 'release-please--branches--main')
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
