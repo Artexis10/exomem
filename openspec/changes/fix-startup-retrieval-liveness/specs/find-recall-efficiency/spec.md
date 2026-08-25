@@ -33,7 +33,7 @@ When startup warm-up is enabled, the system SHALL first reconcile the maintained
 
 - **WHEN** the server starts with warm-up enabled
 - **AND** the active resource policy allows CPU cache preloading
-- **THEN** maintained lexical catalogs are reconciled before the first `find` call is served
+- **THEN** maintained lexical catalogs are reconciled before the first admitted, result-bearing `find` call is served
 - **AND** the parsed-page, resolver, semantic, and applicable matrix caches are proactively populated
 - **AND** the first `find` call's results are identical to what it would return without warm-up
 
@@ -46,7 +46,7 @@ When startup warm-up is enabled, the system SHALL first reconcile the maintained
 
 #### Scenario: Quiet mode skips CPU cache warm-up
 
-- **WHEN** the server starts in `quiet` mode
+- **WHEN** the server starts in `quiet` mode with warm-up enabled
 - **THEN** maintained lexical catalogs are reconciled without populating parsed-page, resolver, embedding-matrix, or CLIP-matrix caches solely for warm-up
 - **AND** ordinary retrieval uses the maintained catalog without requiring those resident caches
 

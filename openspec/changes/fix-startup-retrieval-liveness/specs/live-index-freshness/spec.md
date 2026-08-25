@@ -49,6 +49,6 @@ The system SHALL keep the lexical sidecar synchronized with the vault's Markdown
 
 #### Scenario: Out-of-band drift self-heals
 
-- **WHEN** Markdown changed without the lexical sidecar being updated
+- **WHEN** Markdown changed without the lexical sidecar being updated and the resulting drift is unknown or incomplete
 - **THEN** freshness verification detects the mismatch and schedules background repair
 - **AND** retrieval admission remains withheld until the affected state is current again
