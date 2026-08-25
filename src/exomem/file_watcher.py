@@ -80,6 +80,26 @@ RECONCILE_INTERVAL_SECONDS = 300.0
 RECONCILE_MAX_EMBED_FILES = 500
 RECONCILE_MAX_MEDIA_FILES = media_processing.DEFAULT_RECONCILE_LIMIT
 
+
+def _background_deferred_limit(
+    policy: mode.WatcherPolicy, remaining: int | None
+) -> int | None:
+    """Keep old queued work inside the smaller live-publication envelope.
+
+    The reconcile cap governs real disk drift.  It is deliberately larger in
+    performance mode, but reusing it for deferred repair turned a 500-file
+    allowance into one 250-file full-index transaction.  A failed component
+    then expanded that transaction into serial replay.  Background queue work
+    has no freshness deadline, so it takes the smaller live cap and converges
+    over later passes instead.
+    """
+    caps = [
+        cap
+        for cap in (remaining, policy.max_embed_files_per_batch)
+        if cap is not None
+    ]
+    return min(caps) if caps else None
+
 # ---- Self-write suppression registry (module-level: available to writers even
 # when no FileWatcher is running; keyed by (resolved vault root, vault-rel path)) ----
 UPSERT_SUPPRESS_TTL_SECONDS = 30.0
@@ -545,7 +565,10 @@ class FileWatcher:
             if baselines_current and self._validate_existing_graph_on_seed():
                 from . import deferred_index
 
-                full_limit = self._watcher_policy().max_reconcile_embed_files
+                policy = self._watcher_policy()
+                full_limit = _background_deferred_limit(
+                    policy, policy.max_reconcile_embed_files
+                )
                 full_paths = [
                     self._vault_root / receipt.rel_path
                     for receipt in deferred_index.snapshot_full(
@@ -583,8 +606,9 @@ class FileWatcher:
             if policy.max_reconcile_embed_files is None
             else max(0, policy.max_reconcile_embed_files - drift_admission)
         )
+        drain_limit = _background_deferred_limit(policy, remaining)
         try:
-            index_sync.drain_deferred_work(self._vault_root, limit=remaining)
+            index_sync.drain_deferred_work(self._vault_root, limit=drain_limit)
         except Exception:  # noqa: BLE001 - queued work remains retryable
             log.exception("file watcher: deferred index drain failed")
         if not drifted:

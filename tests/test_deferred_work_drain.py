@@ -411,8 +411,8 @@ def test_failed_full_prefix_rotates_so_later_work_is_not_starved(
 
     monkeypatch.setattr(index_sync, "upsert_after_write", dispatch)
 
-    assert index_sync.drain_deferred_work(vault, limit=12) == 0
-    assert index_sync.drain_deferred_work(vault, limit=12) == 1
+    outcomes = [index_sync.drain_deferred_work(vault, limit=12) for _ in range(4)]
+    assert outcomes == [0, 0, 0, 1]
     assert good_rel not in deferred_index.list_full_paths(vault)
 
 
@@ -479,8 +479,8 @@ def test_failed_semantic_prefix_rotates_so_later_work_is_not_starved(
 
     monkeypatch.setattr(index_sync, "replay_deferred_embedding", replay)
 
-    assert index_sync.drain_deferred_work(vault, limit=12) == 0
-    assert index_sync.drain_deferred_work(vault, limit=12) == 1
+    outcomes = [index_sync.drain_deferred_work(vault, limit=12) for _ in range(4)]
+    assert outcomes == [0, 0, 0, 1]
     assert good_rel not in deferred_index.list_paths(vault)
 
 
@@ -627,6 +627,94 @@ def test_reconcile_drift_spends_budget_before_deferred_drain(
     watcher._reconcile_once(seed=False)
 
     assert limits == [18]
+
+
+def test_performance_reconcile_backlog_uses_the_smaller_live_batch_cap(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    policy = mode.WatcherPolicy(0.5, 300.0, 32, 500, False)
+    watcher = file_watcher.FileWatcher(vault)
+    monkeypatch.setattr(watcher, "_watcher_policy", lambda: policy)
+    monkeypatch.setattr(file_watcher.freshness, "SCOPES", ())
+    monkeypatch.setattr(
+        file_watcher.media_processing, "reconcile_all_media", lambda *_a, **_kw: 0
+    )
+    monkeypatch.setattr(
+        file_watcher.freshness, "external_pending_epoch", lambda _root: None
+    )
+    monkeypatch.setattr(file_watcher.freshness, "external_pending", lambda _root: False)
+    monkeypatch.setattr(watcher, "_recover_suspended_graph", lambda: None)
+    limits: list[int | None] = []
+    monkeypatch.setattr(
+        index_sync,
+        "drain_deferred_work",
+        lambda _root, *, limit=None: limits.append(limit) or 0,
+    )
+
+    watcher._reconcile_once(seed=False)
+
+    assert limits == [32]
+
+
+def test_bounded_full_drain_limits_incomplete_batch_isolation(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rels = [f"Knowledge Base/full-{index:02d}.md" for index in range(10)]
+    for rel in rels:
+        target = vault / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("# queued\n", encoding="utf-8")
+    deferred_index.add_full(vault, rels)
+    monkeypatch.setattr(
+        index_sync, "recover_full_receipt_graph_epoch", lambda _root: True
+    )
+    attempts: list[list[str]] = []
+
+    def incomplete(_root: Path, paths: list[Path]):
+        attempts.append([path.relative_to(vault).as_posix() for path in paths])
+        return index_sync.IndexSyncReport(
+            "upsert",
+            tuple(attempts[-1]),
+            tuple(attempts[-1]),
+            (index_sync.IndexComponentOutcome("lexstore", "degraded", "failed"),),
+        )
+
+    monkeypatch.setattr(index_sync, "upsert_after_write", incomplete)
+
+    assert index_sync.drain_deferred_work(vault, limit=10) == 0
+    assert attempts[0] == rels
+    assert attempts[1:] == [[rel] for rel in rels[:4]]
+    assert set(deferred_index.list_full_paths(vault)) == set(rels)
+
+
+def test_bounded_semantic_drain_limits_incomplete_batch_isolation(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rels = [f"Knowledge Base/semantic-{index:02d}.md" for index in range(10)]
+    for rel in rels:
+        target = vault / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("# queued\n", encoding="utf-8")
+    deferred_index.add(vault, rels)
+    monkeypatch.setattr(
+        deferred_index,
+        "inspect_embedding_freshness",
+        lambda _root, paths, **_kwargs: {
+            rel: deferred_index.EmbeddingFreshness.STALE for rel in paths
+        },
+    )
+    attempts: list[list[str]] = []
+
+    def incomplete(_root: Path, _paths: list[Path], receipts):  # noqa: ANN001
+        attempts.append([receipt.rel_path for receipt in receipts])
+        return SimpleNamespace(status="degraded")
+
+    monkeypatch.setattr(index_sync, "replay_deferred_embedding", incomplete)
+
+    assert index_sync.drain_deferred_work(vault, limit=10) == 0
+    assert attempts[0] == rels
+    assert attempts[1:] == [[rel] for rel in rels[:4]]
+    assert set(deferred_index.list_paths(vault)) == set(rels)
 
 
 def test_doctor_warns_on_deferred_queue_fraction(

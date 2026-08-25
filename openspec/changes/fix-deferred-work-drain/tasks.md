@@ -77,3 +77,15 @@ existing soft-fail seams; the lean suite runs with `EXOMEM_DISABLE_EMBEDDINGS=1`
 - [ ] 9.2 `PYTHONPATH=src EXOMEM_DISABLE_EMBEDDINGS=1 python -m pytest -q` green
 - [x] 9.3 `openspec validate fix-deferred-work-drain --strict`
 - [x] 9.4 Record before/after queue counts from a seeded backlog in the PR body.
+
+## 10. Bound production backlog repair
+
+- [x] 10.1 Add a failing watcher regression proving performance-mode deferred repair uses
+      the smaller live-batch cap rather than the 500-file reconcile cap.
+- [x] 10.2 Add failing full and semantic drain regressions proving a bounded incomplete
+      batch isolates only a small fixed prefix while retaining every other receipt.
+- [x] 10.3 Implement the background drain cap without changing real-drift admission or
+      explicit unbounded operator-drain semantics.
+- [x] 10.4 Bound per-receipt failure isolation for bounded drains and preserve fair rotation.
+- [ ] 10.5 Run focused watcher/deferred tests, Ruff, strict OpenSpec validation, privacy
+      validation, and the lean suite before delivery.

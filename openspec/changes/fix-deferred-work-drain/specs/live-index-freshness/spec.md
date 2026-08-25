@@ -8,6 +8,11 @@ unrelated operation running as a side effect, in order to be retried.
 
 The drain SHALL be bounded by the active compute mode's policy, and SHALL share the
 reconciliation pass budget rather than opening an independent write path.
+The periodic background drain SHALL also respect the mode's smaller live-batch cap;
+the larger reconcile cap MUST NOT turn queued repair into one vault-sized publication.
+If a bounded batch is incomplete, the drain SHALL isolate only a fixed small number of
+receipts in that pass. Unattempted and unsuccessful receipts remain durable for later
+passes, while an explicit unbounded operator drain may continue through the whole queue.
 
 #### Scenario: Queued semantic work drains without operator action
 
@@ -27,6 +32,26 @@ reconciliation pass budget rather than opening an independent write path.
 
 - **WHEN** a mutation is committed while entries are queued
 - **THEN** the mutation does not block on draining those entries
+
+#### Scenario: Performance mode does not create a vault-sized background batch
+
+- **WHEN** performance mode allows a reconcile admission larger than its live-batch cap
+- **AND** deferred work remains after drift admission
+- **THEN** the periodic drain admits no more than the live-batch cap
+- **AND** the remaining receipts stay queued for later passes
+
+#### Scenario: Incomplete background batch has bounded isolation
+
+- **WHEN** a bounded full or semantic batch reports incomplete work
+- **THEN** that pass retries only a fixed small number of individual receipts
+- **AND** it does not replay every admitted receipt serially in the same pass
+- **AND** unsuccessful and unattempted receipts remain durable and rotate across later passes
+
+#### Scenario: Explicit operator drain retains completion semantics
+
+- **WHEN** an operator invokes an unbounded drain explicitly
+- **THEN** incomplete batch isolation may continue through every admitted receipt
+- **AND** the background-only isolation bound does not silently weaken explicit repair
 
 ### Requirement: Deferral Throttles Rather Than Halts
 
