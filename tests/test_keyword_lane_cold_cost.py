@@ -407,6 +407,7 @@ def test_ready_runtime_losing_projection_demotes_without_walk(
     )
     _seed_live(tmp_path)
     monkeypatch.setenv("EXOMEM_VAULT_PATH", str(tmp_path.resolve()))
+    readiness.manage_runtime()
     readiness.begin_warm()
     readiness.mark_ready("retrieval_catalog")
     readiness.finish_warm()
@@ -543,6 +544,7 @@ def test_vector_graph_resolver_inherits_strict_server_projection_policy(
         "strictresolverpropagation payload",
     )
     _seed_live(tmp_path)
+    readiness.manage_runtime()
     monkeypatch.setattr(
         readiness,
         "retrieval_admission",
@@ -844,6 +846,7 @@ def test_discovered_catalog_staleness_revokes_configured_runtime_admission(
     lexstore.ensure_fresh(tmp_path)
     store = lexstore.get_store(tmp_path)
     monkeypatch.setenv("EXOMEM_VAULT_PATH", str(tmp_path.resolve()))
+    readiness.manage_runtime()
     readiness.begin_warm()
     readiness.mark_ready("retrieval_catalog")
     readiness.finish_warm()

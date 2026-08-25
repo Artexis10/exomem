@@ -1145,6 +1145,10 @@ class FileWatcher:
         if not self._vault_root.is_dir():
             log.info("file watcher: %s not found; not watching", self._vault_root)
             return False
+        kb_root = self._vault_root / kb_dirname()
+        if not kb_root.is_dir():
+            log.info("file watcher: %s not found; not watching", kb_root)
+            return False
 
         # Hosted quiesce/resume deliberately reuses the watcher instance. A
         # stopped threading.Event is sticky, so reset both loop controls before

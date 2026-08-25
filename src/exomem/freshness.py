@@ -568,40 +568,120 @@ def recall_projection_snapshot(
                 continue
             return current, entries
 
-        identity = recall_policy.recall_policy_identity(root)
-        if scope == "vault":
-            from .vault import walk_vault_md
-
-            walk = walk_vault_md(root)
-        else:
-            from . import find as find_module
-
-            kb = root / kb_dirname()
-            walk = find_module._walk_md(kb) if kb.is_dir() else ()
-        walk_entries: dict[str, FileSignature] = {}
-        for path in recall_policy.iter_recall_markdown(root, walk):
-            try:
-                walk_entries[str(path)] = stat_signature(path)
-            except OSError:
-                continue
-        if recall_policy.recall_policy_identity(root) != identity:
+        cold = _cold_recall_projection_scope_snapshot(root, scope)
+        if cold is None:
             continue
+        checkpoint, projected_entries, _scope_triple = cold
+        return checkpoint, projected_entries
+
+
+def _cold_recall_projection_scope_snapshot(
+    root: Path,
+    scope: str,
+) -> tuple[
+    RecallFreshnessCheckpoint,
+    dict[str, FileSignature],
+    tuple[int, int, str],
+] | None:
+    """Build projected and generic scope identities from one cold stat walk.
+
+    ``None`` means a watcher became authoritative before publication; callers
+    retry against the live registry instead of publishing a stale cold view.
+    """
+    from . import recall_policy
+
+    key = _key(root, scope)
+    with _lock:
+        if event_indexes_enabled() and key in _recall_live:
+            return None
+    identity = recall_policy.recall_policy_identity(root)
+    if scope == "vault":
+        from .vault import walk_vault_md
+
+        walk = walk_vault_md(root)
+    else:
+        from . import find as find_module
+
+        kb = root / kb_dirname()
+        walk = find_module._walk_md(kb) if kb.is_dir() else ()
+    scope_entries: dict[str, FileSignature] = {}
+    projected_entries: dict[str, FileSignature] = {}
+    for path in walk:
+        admitted = recall_policy.is_recall_candidate(root, path)
+        try:
+            signature = stat_signature(path)
+        except OSError:
+            continue
+        raw_path = str(path)
+        scope_entries[raw_path] = signature
+        if admitted:
+            projected_entries[raw_path] = signature
+    if recall_policy.recall_policy_identity(root) != identity:
+        return None
+    with _lock:
+        if event_indexes_enabled() and key in _recall_live:
+            return None
+        instance_id = _instance_id
+        generation = _recall_generations.get(key, 0)
+    return (
+        RecallFreshnessCheckpoint(
+            instance_id,
+            generation,
+            triple_from_entries(projected_entries.items()),
+            identity[0],
+            identity[1],
+        ),
+        projected_entries,
+        triple_from_entries(scope_entries.items()),
+    )
+
+
+def recall_projection_scope_snapshot(
+    vault_root: Path,
+    scope: str,
+) -> tuple[
+    RecallFreshnessCheckpoint,
+    dict[str, FileSignature],
+    tuple[int, int, str],
+]:
+    """Return projected paths and generic freshness from one scope snapshot.
+
+    This is the offline ``find`` seam: a direct caller still gets an exact
+    bounded fallback, but projected recall and generic cache identity share one
+    filesystem walk instead of independently walking the same scope.
+    """
+    root = Path(vault_root)
+    key = _key(root, scope)
+    while True:
         with _lock:
-            # A watcher may have become authoritative while the cold walk ran.
-            if event_indexes_enabled() and key in _recall_live:
-                continue
-            instance_id = _instance_id
-            generation = _recall_generations.get(key, 0)
-        return (
-            RecallFreshnessCheckpoint(
-                instance_id,
-                generation,
-                triple_from_entries(walk_entries.items()),
-                identity[0],
-                identity[1],
-            ),
-            walk_entries,
-        )
+            live = event_indexes_enabled() and key in _recall_live
+        if live:
+            checkpoint, projected_entries = recall_projection_snapshot(root, scope)
+            with _lock:
+                if not event_indexes_enabled() or key not in _recall_live:
+                    continue
+                identity = _recall_identities.get(key)
+                projected_triple = _recall_triples.get(key)
+                if projected_triple is None:
+                    projected_triple = triple_from_entries(_recall_maps.get(key, {}).items())
+                    _recall_triples[key] = projected_triple
+                current = RecallFreshnessCheckpoint(
+                    _instance_id,
+                    _recall_generations.get(key, 0),
+                    projected_triple,
+                    identity[0] if identity is not None else "",
+                    identity[1] if identity is not None else "",
+                )
+                scope_triple = _triples.get(key)
+                if scope_triple is None:
+                    scope_triple = triple_from_entries(_maps.get(key, {}).items())
+                    _triples[key] = scope_triple
+            if current == checkpoint:
+                return checkpoint, projected_entries, scope_triple
+            continue
+        cold = _cold_recall_projection_scope_snapshot(root, scope)
+        if cold is not None:
+            return cold
 
 
 def live_recall_entries(vault_root: Path, scope: str) -> dict[str, FileSignature] | None:

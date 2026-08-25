@@ -510,31 +510,35 @@ class FreshnessSnapshot:
             try:
                 root = self._root.absolute()
                 cache_key = (root, scope)
+                projection_live = freshness.recall_is_live(self._root, scope)
                 checkpoint = (
                     freshness.live_recall_checkpoint(self._root, scope)
                     if self._require_live_recall
                     else freshness.recall_checkpoint(self._root, scope)
+                    if projection_live
+                    else None
                 )
-                if checkpoint is None:
+                if checkpoint is None and self._require_live_recall:
                     raise freshness.RecallProjectionUnavailable(
                         f"maintained recall projection is not live for scope={scope!r}"
                     )
                 expected = self._expected_recall_checkpoints.get(scope)
-                if expected is not None and checkpoint != expected:
+                if checkpoint is not None and expected is not None and checkpoint != expected:
                     raise freshness.RecallProjectionUnavailable(
                         f"maintained recall projection advanced for scope={scope!r}"
                     )
-                with _RECALL_PATH_CACHE_LOCK:
-                    cached = _RECALL_PATH_CACHE.get(cache_key)
-                    if cached is not None and cached[0] == checkpoint:
-                        _RECALL_PATH_CACHE.move_to_end(cache_key)
-                        self._recall[scope] = checkpoint
-                        self._recall_paths[scope] = cached[1]
-                        _set_recall_projection_timing_outcome(
-                            self._timings,
-                            "live_cache" if self._require_live_recall else "cache",
-                        )
-                        return
+                if checkpoint is not None:
+                    with _RECALL_PATH_CACHE_LOCK:
+                        cached = _RECALL_PATH_CACHE.get(cache_key)
+                        if cached is not None and cached[0] == checkpoint:
+                            _RECALL_PATH_CACHE.move_to_end(cache_key)
+                            self._recall[scope] = checkpoint
+                            self._recall_paths[scope] = cached[1]
+                            _set_recall_projection_timing_outcome(
+                                self._timings,
+                                "live_cache" if self._require_live_recall else "cache",
+                            )
+                            return
 
                 if self._require_live_recall:
                     checkpoint, entries = freshness.recall_projection_snapshot(
@@ -542,11 +546,19 @@ class FreshnessSnapshot:
                         scope,
                         allow_fallback=False,
                     )
-                else:
+                elif projection_live and freshness.recall_is_live(self._root, scope):
                     checkpoint, entries = freshness.recall_projection_snapshot(
                         self._root,
                         scope,
                     )
+                else:
+                    checkpoint, entries, scope_triple = (
+                        freshness.recall_projection_scope_snapshot(self._root, scope)
+                    )
+                    if scope == "vault":
+                        self._vault = scope_triple
+                    else:
+                        self._kb = scope_triple
                 if expected is not None and checkpoint != expected:
                     raise freshness.RecallProjectionUnavailable(
                         f"maintained recall projection advanced for scope={scope!r}"
@@ -869,7 +881,7 @@ def find(
 
     admission = readiness.retrieval_admission()
     state = str(admission["state"])
-    require_live_recall = state != "unverified" and freshness.event_indexes_enabled()
+    require_live_recall = readiness.runtime_managed() and freshness.event_indexes_enabled()
     catalog_proof: dict[str, freshness.RecallFreshnessCheckpoint] | None = None
     with _span(timings, "recall_projection"):
         if state == "ready" and require_live_recall:

@@ -57,6 +57,12 @@ def manage_runtime() -> None:
         _runtime_managed = True
 
 
+def runtime_managed() -> bool:
+    """Whether request admission is owned by the activated server runtime."""
+    with _lock:
+        return _runtime_managed
+
+
 def begin_warm() -> None:
     """Mark a warm in-flight. Resets per-component events and deferred items."""
     global _warm_active, _warm_finished, _started_at

@@ -112,6 +112,19 @@ def test_retrieval_admission_distinguishes_unverified_warming_ready_and_failed()
     }
 
 
+def test_runtime_management_is_separate_from_the_warm_phase() -> None:
+    assert readiness.runtime_managed() is False
+
+    readiness.begin_warm()
+    assert readiness.runtime_managed() is False
+
+    readiness.manage_runtime()
+    assert readiness.runtime_managed() is True
+
+    readiness.reset()
+    assert readiness.runtime_managed() is False
+
+
 def test_retrieval_admission_revokes_ready_when_projection_is_lost(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
