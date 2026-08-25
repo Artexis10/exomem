@@ -509,10 +509,17 @@ def _mark_runtime_retrieval_unavailable_if_current(vault_root: Path) -> None:
     readiness.mark_unready("retrieval_catalog")
 
 
-def _schedule_runtime_catalog_repair(vault_root: Path) -> None:
+def _schedule_runtime_catalog_repair(
+    vault_root: Path,
+    *,
+    deferred_paths: list[Path] | None = None,
+) -> None:
     """Order admission revocation before the repair that may restore it."""
     _mark_runtime_retrieval_unavailable_if_current(vault_root)
-    _schedule_repair(vault_root)
+    if deferred_paths is None:
+        _schedule_repair(vault_root)
+    else:
+        _schedule_repair(vault_root, deferred_paths=deferred_paths)
 
 
 def request_repair(vault_root: Path) -> None:
@@ -2673,7 +2680,7 @@ class LexicalStore:
         Returns whether the bounded row update committed.
         """
         if self._failed:
-            _schedule_repair(self.vault_root)
+            _schedule_runtime_catalog_repair(self.vault_root)
             return False
         from .vault import VaultLockError
 
@@ -2685,18 +2692,21 @@ class LexicalStore:
             # fine and the store is healthy. Retry exactly these paths in the
             # background instead of rebuilding the corpus for one page (#526).
             log.info("lexical sidecar upsert deferred (%s); retrying these paths", e)
-            _schedule_repair(self.vault_root, deferred_paths=list(paths))
+            _schedule_runtime_catalog_repair(
+                self.vault_root,
+                deferred_paths=list(paths),
+            )
             return False
         except sqlite3.Error as e:
             self._note_query_failure(e, "lexical sidecar upsert deferred (%s)")
-            _schedule_repair(self.vault_root)
+            _schedule_runtime_catalog_repair(self.vault_root)
             return False
         except OSError as e:
             log.info("lexical sidecar upsert source changed during repair (%s)", e)
-            _schedule_repair(self.vault_root)
+            _schedule_runtime_catalog_repair(self.vault_root)
             return False
         if not applied:
-            _schedule_repair(self.vault_root)
+            _schedule_runtime_catalog_repair(self.vault_root)
         return applied
 
     def retry_deferred_upsert(self, paths: list[Path]) -> bool:
@@ -2801,7 +2811,7 @@ class LexicalStore:
     def delete_rel_paths(self, rel_paths: list[str]) -> bool:
         """Bounded inline delete under the barrier (see `upsert_paths`)."""
         if self._failed:
-            _schedule_repair(self.vault_root)
+            _schedule_runtime_catalog_repair(self.vault_root)
             return False
         from .vault import VaultLockError
 
@@ -2810,14 +2820,14 @@ class LexicalStore:
                 applied = self._delete_rel_paths_locked(rel_paths)
         except VaultLockError as e:
             log.info("lexical sidecar delete deferred (%s); heals on next sync", e)
-            _schedule_repair(self.vault_root)
+            _schedule_runtime_catalog_repair(self.vault_root)
             return False
         except sqlite3.Error as e:
             self._note_query_failure(e, "lexical sidecar delete deferred (%s)")
-            _schedule_repair(self.vault_root)
+            _schedule_runtime_catalog_repair(self.vault_root)
             return False
         if not applied:
-            _schedule_repair(self.vault_root)
+            _schedule_runtime_catalog_repair(self.vault_root)
         return applied
 
     def purge_exact_persisted_rows(

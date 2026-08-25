@@ -495,6 +495,44 @@ def test_discovered_catalog_staleness_revokes_configured_runtime_admission(
     }
 
 
+@pytest.mark.parametrize("operation", ["upsert", "delete"])
+def test_failed_catalog_mutation_revokes_configured_runtime_before_repair(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    page = _write_page(
+        tmp_path,
+        "Knowledge Base/Notes/target.md",
+        "mutationfailure payload",
+    )
+    store = lexstore.get_store(tmp_path)
+    store._failed = True
+    scheduled: list[Path] = []
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(tmp_path.resolve()))
+    monkeypatch.setattr(
+        lexstore,
+        "_schedule_repair",
+        lambda root, **_kwargs: scheduled.append(root),
+    )
+    readiness.begin_warm()
+    readiness.mark_ready("retrieval_catalog")
+    readiness.finish_warm()
+
+    applied = (
+        store.upsert_paths([page])
+        if operation == "upsert"
+        else store.delete_rel_paths(["Knowledge Base/Notes/target.md"])
+    )
+
+    assert applied is False
+    assert scheduled == [tmp_path]
+    assert readiness.retrieval_admission() == {
+        "state": "unavailable",
+        "admitted": False,
+    }
+
+
 def test_large_cold_vault_widening_returns_typed_warming_without_a_walk(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -28,3 +28,9 @@ The `/health/ready` response SHALL include a content-free `retrieval` block desc
 - **WHEN** a catalog previously marked ready is later proven stale or fatally unavailable
 - **THEN** retrieval admission is revoked before background repair is scheduled
 - **AND** readiness remains withheld until a successful repair proves both recall scopes current again
+
+#### Scenario: Mutation maintenance failure revokes admission
+
+- **WHEN** a writer or watcher cannot apply a required catalog upsert or delete
+- **THEN** retrieval admission is revoked before targeted or full background repair is scheduled
+- **AND** successful repair may restore admission only after both scopes are current
