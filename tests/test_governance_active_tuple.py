@@ -18,6 +18,9 @@ from exomem import (
     create_file as create_file_module,
 )
 from exomem import (
+    delete_file as delete_file_module,
+)
+from exomem import (
     find_corpus,
     reserved_paths,
     semantic_writes,
@@ -2334,6 +2337,118 @@ def test_semantic_creation_publishes_index_and_log_auxiliaries_in_one_generation
     assert active.active.catalog_generation == 2
     assert manifest.item_count == 3
     assert {item.item_identity: item.content_hash for item in items} == expected
+
+
+def test_markdown_removal_and_log_write_publish_one_v4_catalog_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = int(time.time())
+    monkeypatch.setenv(
+        "EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-state")
+    )
+    writer_lease.reset_managers_for_tests()
+    vault = tmp_path / "vault"
+    relative = "Knowledge Base/Notes/private.md"
+    log_relative = "Knowledge Base/log.md"
+    before = "---\ntitle: Private\nstatus: draft\n---\n\nbefore\n"
+    log_before = "# Log\n\n---\n"
+    for existing, source in ((relative, before), (log_relative, log_before)):
+        target = vault / existing
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(source, encoding="utf-8")
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_projection_items(
+        vault,
+        items=((relative, before), (log_relative, log_before)),
+        now=now,
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+
+    removed = delete_file_module.delete_file(
+        vault,
+        path=relative,
+        confirm=True,
+        today=dt.date(2026, 8, 25),
+        now=dt.datetime.fromtimestamp(now),
+    )
+
+    assert not (vault / relative).exists()
+    assert (vault / removed.trash_path).is_file()
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    assert custody.control.activation_epoch == 2
+    connection = store.open_authorization_session_connection(vault)
+    try:
+        active = schema_v4.load_active_policy(
+            connection,
+            expected_logical_vault_id=LOGICAL_VAULT_ID,
+            expected_activation_store_id=ACTIVATION_STORE_ID,
+            expected_activation_epoch=2,
+            expected_activation_state_digest=custody.control.activation_state_digest or "",
+        )
+    finally:
+        connection.close()
+    evidence = projection_store.namespace_evidence_from_snapshot(active)
+    manifest, items = projection_store.load_projection_catalog(
+        vault,
+        key=evidence.manifest.namespace_key,
+        expected_rows_digest=evidence.manifest.rows_digest,
+    )
+    assert active.active.catalog_generation == 2
+    assert manifest.item_count == 1
+    assert [(item.item_identity, item.content_hash) for item in items] == [
+        (
+            log_relative,
+            vault_module.content_hash((vault / log_relative).read_text(encoding="utf-8")),
+        )
+    ]
+
+
+def test_v4_trash_refuses_unsupported_non_markdown_before_moving_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = int(time.time())
+    monkeypatch.setenv(
+        "EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-state")
+    )
+    writer_lease.reset_managers_for_tests()
+    vault = tmp_path / "vault"
+    relative = "Knowledge Base/Notes/private.bin"
+    target = vault / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"private bytes")
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_empty_projection_catalog(vault, now=now)
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+
+    with pytest.raises(delete_file_module.DeleteFileError) as blocked:
+        delete_file_module.delete_file(
+            vault,
+            path=relative,
+            confirm=True,
+            today=dt.date(2026, 8, 25),
+            now=dt.datetime.fromtimestamp(now),
+        )
+
+    assert blocked.value.code == "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED"
+    assert blocked.value.reason == "non-Markdown content publication is not available"
+    assert target.read_bytes() == b"private bytes"
+    assert not (vault / "Knowledge Base/_trash").exists()
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    assert custody.control.activation_epoch == 1
 
 
 def test_open_vault_skips_v4_only_auxiliary_predecessor_validation(

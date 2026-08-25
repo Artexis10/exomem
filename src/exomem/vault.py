@@ -6513,20 +6513,12 @@ def write_log_entry(
     Returns None on success; a warning string if log.md was missing (so the
     op can include it in its warnings list). Atomic via `replace`.
     """
-    operation_token = hashlib.sha256(
-        json.dumps(
-            [date_iso, op, rel_path_no_ext, body],
-            ensure_ascii=False,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
-    plan = plan_log_writes(
+    plan = plan_log_entry(
         vault_root,
         date_iso=date_iso,
         op=op,
         rel_path_no_ext=rel_path_no_ext,
         body=body,
-        operation_token="standalone-entry:" + operation_token,
     )
     if plan.warning is not None:
         return plan.warning
@@ -6536,6 +6528,33 @@ def write_log_entry(
     except Exception as error:  # noqa: BLE001 — standalone logging is best-effort
         log.warning("log write skipped (%s)", error)
         return f"log entry skipped: {error}"
+
+
+def plan_log_entry(
+    vault_root: Path,
+    *,
+    date_iso: str,
+    op: str,
+    rel_path_no_ext: str,
+    body: str,
+) -> LogWritePlan:
+    """Plan the exact writes used by :func:`write_log_entry`."""
+
+    operation_token = hashlib.sha256(
+        json.dumps(
+            [date_iso, op, rel_path_no_ext, body],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return plan_log_writes(
+        vault_root,
+        date_iso=date_iso,
+        op=op,
+        rel_path_no_ext=rel_path_no_ext,
+        body=body,
+        operation_token="standalone-entry:" + operation_token,
+    )
 
 
 # Matches a single log.md entry header, at either recorded precision:
