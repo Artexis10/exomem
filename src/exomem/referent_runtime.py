@@ -124,7 +124,7 @@ def resolve_for_find(
         if state in {"warming", "unavailable"}:
             return None
         require_live_recall = expected_recall_checkpoints is not None
-        if require_live_recall:
+        if expected_recall_checkpoints is not None:
             if set(expected_recall_checkpoints) != set(freshness.SCOPES):
                 return None
         elif state != "unverified" and freshness.event_indexes_enabled():
