@@ -108,7 +108,7 @@ jobs:
       # same modules again in this Windows matrix pushed a shard past its 45m
       # session cap; macOS still gets them here, and Linux keeps its ordinary
       # CI coverage.
-      - name: Run tests (lean - BM25/keyword, server media extraction off)
+      - name: Run tests (lean — BM25/keyword, server media extraction off)
         env:
           KB_MCP_DISABLE_EMBEDDINGS: "1"
           KB_MCP_DISABLE_MEDIA_EXTRACTION: "1"
