@@ -174,10 +174,11 @@ def warm_caches(
 
 
 def warm_all(vault_root: Path) -> dict[str, float]:
-    """Lexical caches, then model preloads, marking readiness as each lands.
+    """Required catalog/corpus state, then optional caches and model preloads.
 
-    Order is the product contract (lexical-first): a `find` is useful the
-    moment the BM25/page caches are hot, long before torch finishes loading.
+    Order is the product contract (catalog-first): retrieval admission lands
+    first, then semantic write admission, before optional full-corpus caches
+    and models can extend the warm window.
     Each stage soft-fails; a failed model preload leaves its component
     not-ready (never marked), so requests defer for the rest of the warm and
     then return to inline lazy-load semantics. Never raises.
@@ -198,14 +199,6 @@ def warm_all(vault_root: Path) -> dict[str, float]:
             (time.perf_counter() - catalog_started) * 1000.0,
             1,
         )
-    durations.update(
-        warm_caches(
-            vault_root,
-            preload_models=preload,
-            preload_cpu_caches=mode.preload_cpu_caches(),
-        )
-    )
-    readiness.mark_ready("lexical")
     semantic_started = time.perf_counter()
     try:
         from . import semantic_contract
@@ -219,6 +212,14 @@ def warm_all(vault_root: Path) -> dict[str, float]:
             (time.perf_counter() - semantic_started) * 1000.0,
             1,
         )
+    durations.update(
+        warm_caches(
+            vault_root,
+            preload_models=preload,
+            preload_cpu_caches=mode.preload_cpu_caches(),
+        )
+    )
+    readiness.mark_ready("lexical")
 
     def _model_step(name: str, fn) -> bool:
         t0 = time.perf_counter()

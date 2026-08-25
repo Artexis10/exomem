@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import threading
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
@@ -75,20 +76,99 @@ def initialize_runtime(*, load_dotenv_func: Callable[..., object]) -> ServerRunt
     project_keys_hint = project_keys.keys_hint(vault_root)
     projection_runtime.preactivate_projection_runtime(vault_root)
     _start_metrics_persistence()
-    _start_compute_runtime(vault_root)
-    media_worker = _start_media_worker(vault_root)
-    file_watcher = _start_file_watcher(vault_root)
-    _start_graph_drain(vault_root)
-
     base_url = os.environ.get("EXOMEM_BASE_URL", "").strip().rstrip("/")
     return ServerRuntime(
         vault_root=vault_root,
         source_schema=source_schema,
         project_keys_hint=project_keys_hint,
         base_url=base_url,
-        media_worker=media_worker,
-        file_watcher=file_watcher,
     )
+
+
+class LocalRuntimeActivation:
+    """Start local background workers after transport liveness is observable."""
+
+    def __init__(self, vault_root: Path, *, fallback_seconds: float = 5.0) -> None:
+        self.vault_root = vault_root
+        self.fallback_seconds = fallback_seconds
+        self._lock = threading.Lock()
+        self._started = False
+        self._timer: threading.Timer | None = None
+        self._thread: threading.Thread | None = None
+        self.media_worker: Any | None = None
+        self.file_watcher: Any | None = None
+
+    def start(self) -> None:
+        """Launch local workers once; safe from health and timer races."""
+        with self._lock:
+            if self._started:
+                return
+            self._started = True
+            timer = self._timer
+        if timer is not None:
+            timer.cancel()
+        thread = threading.Thread(
+            target=self._activate,
+            name="exomem-local-activation",
+            daemon=True,
+        )
+        with self._lock:
+            self._thread = thread
+        thread.start()
+
+    def _activate(self) -> None:
+        self._start_component("retrieval", _start_compute_runtime)
+        self._wait_for_required_admission()
+        starters = (
+            ("file watcher", self._start_file_watcher),
+            ("graph drain", _start_graph_drain),
+            ("media", self._start_media_worker),
+        )
+        for label, starter in starters:
+            self._start_component(label, starter)
+
+    def _wait_for_required_admission(self) -> None:
+        """Keep reconcilers out until retrieval and mutation state are admitted."""
+        from . import readiness
+
+        while readiness.is_warming():
+            if readiness.wait("semantic_corpus", timeout=1.0):
+                return
+
+    def _start_component(self, label: str, starter: Callable[[Path], Any]) -> None:
+        try:
+            starter(self.vault_root)
+        except Exception:  # noqa: BLE001 - workers cannot deny transport liveness
+            log.warning(
+                "%s runtime startup failed; transport continuing",
+                label,
+                exc_info=True,
+            )
+
+    def _start_media_worker(self, vault_root: Path) -> None:
+        self.media_worker = _start_media_worker(vault_root)
+
+    def _start_file_watcher(self, vault_root: Path) -> None:
+        self.file_watcher = _start_file_watcher(vault_root)
+
+    def lifespan(self):
+        """Arm a fallback for clients that never call the liveness endpoint."""
+        from fastmcp.server.lifespan import lifespan
+
+        @lifespan
+        async def _lifespan(_server):
+            timer = threading.Timer(self.fallback_seconds, self.start)
+            timer.daemon = True
+            with self._lock:
+                if not self._started:
+                    self._timer = timer
+                    timer.start()
+            try:
+                yield {}
+            finally:
+                timer.cancel()
+
+        return _lifespan
 
 
 def _initialize_hosted_runtime() -> ServerRuntime:
@@ -152,7 +232,9 @@ def _initialize_locked_hosted_runtime(
     startup = lifecycle.complete_startup(
         vault_ready=True,
         mutation_authority_ready=mutation_ready,
-        service_auth_ready=(security_authority is not None or config.service_credential is not None),
+        service_auth_ready=(
+            security_authority is not None or config.service_credential is not None
+        ),
     )
     if config.has_feature("diarization"):
         lifecycle.set_worker_status(

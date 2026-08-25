@@ -2,13 +2,19 @@
 
 ### Requirement: Startup Cache Warm-Up
 
-When startup warm-up is enabled, the system SHALL first reconcile the maintained lexical catalog for KB and vault scopes. When the active resource policy allows CPU cache preloading, it SHALL then warm the parsed-page cache, wikilink resolver, semantic corpus, and applicable matrices so later `find` calls avoid their first-use construction costs. Quiet mode SHALL retain only the maintained-catalog phase and skip resident full-corpus caches. `EXOMEM_DISABLE_WARMUP` SHALL skip proactive work and report retrieval admission as unverified until a later repair establishes it. Every stage SHALL soft-fail without preventing transport liveness and MUST NOT change returned results.
+When startup warm-up is enabled, the system SHALL first reconcile the maintained lexical catalog for KB and vault scopes, then establish the semantic corpus required for mutation admission. When the active resource policy allows CPU cache preloading, it SHALL then warm the parsed-page cache, wikilink resolver, and applicable matrices so later `find` calls avoid their first-use construction costs. Quiet mode SHALL retain the maintained-catalog and semantic-corpus phases while skipping resident optional full-corpus caches. `EXOMEM_DISABLE_WARMUP` SHALL skip proactive work and report retrieval admission as unverified until a later repair establishes it. Every stage SHALL soft-fail without preventing transport liveness and MUST NOT change returned results.
 
 #### Scenario: Maintained catalog is the first warm stage
 
 - **WHEN** the server starts with warm-up enabled
 - **THEN** KB- and vault-scope maintained lexical catalogs are reconciled before any full parsed-page, resolver, semantic, matrix, or model warm
 - **AND** ordinary lexical requests become admissible as soon as that catalog phase succeeds
+
+#### Scenario: Mutation admission precedes optional cache warm-up
+
+- **WHEN** maintained catalog admission succeeds during startup warm-up
+- **THEN** the semantic corpus is established and marked ready before parsed-page, resolver, matrix, or model cache preloading begins
+- **AND** mutations do not remain refused solely because optional performance caches are still warming
 
 #### Scenario: Warm-up can be disabled truthfully
 

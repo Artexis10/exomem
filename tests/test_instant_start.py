@@ -25,6 +25,7 @@ after), regardless of whether the test itself also calls finish_warm().
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 import threading
@@ -283,12 +284,10 @@ def test_model_preload_allowed_defaults_lazy_in_normal_mode(
     assert warmup.model_preload_allowed("normal") is True
 
 
-def test_warm_all_marks_components_ready_in_lexical_embeddings_reranker_clip_order(
+def test_warm_all_marks_components_ready_in_semantic_lexical_model_order(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """warm_all runs warm_caches (lexical) first, then bge, then the
-    reranker, then CLIP — in that exact order — marking each component
-    ready as it lands."""
+    """Required semantic write state lands before optional caches and models."""
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
     call_order: list[str] = []
     monkeypatch.setattr(
@@ -298,6 +297,10 @@ def test_warm_all_marks_components_ready_in_lexical_embeddings_reranker_clip_ord
         raising=False,
     )
     monkeypatch.setattr(warmup, "warm_caches", lambda vr, **_kw: call_order.append("lexical") or {})
+    monkeypatch.setattr(
+        "exomem.semantic_contract.build_corpus_context",
+        lambda _root: call_order.append("semantic"),
+    )
     monkeypatch.setattr(
         embeddings, "get_model", lambda: call_order.append("embeddings") or object()
     )
@@ -309,17 +312,22 @@ def test_warm_all_marks_components_ready_in_lexical_embeddings_reranker_clip_ord
 
     warmup.warm_all(tmp_path)
 
-    assert call_order == ["catalog", "lexical", "embeddings", "reranker", "clip"]
+    assert call_order == [
+        "catalog",
+        "semantic",
+        "lexical",
+        "embeddings",
+        "reranker",
+        "clip",
+    ]
     for c in readiness.COMPONENTS:
         assert readiness.is_ready(c) is True
 
 
-def test_warm_all_marks_lexical_ready_before_semantic_corpus_build(
+def test_warm_all_marks_semantic_corpus_ready_before_optional_cache_warm(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The rebuildable semantic corpus can be slow on a large vault, so it must
-    not sit in front of restart retrieval.  Lexical caches and their readiness
-    signal land first; semantic warming remains background follow-up work."""
+    """Mutation admission must not wait behind optional full-corpus caches."""
     monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
     call_order: list[str] = []
 
@@ -336,17 +344,23 @@ def test_warm_all_marks_lexical_ready_before_semantic_corpus_build(
     )
 
     def _semantic_warm(_vault_root: Path) -> None:
-        assert readiness.is_ready("lexical") is True
+        assert readiness.is_ready("retrieval_catalog") is True
         call_order.append("semantic")
+
+    def _optional_caches(_vault_root: Path, **_kwargs) -> dict:
+        assert readiness.is_ready("semantic_corpus") is True
+        call_order.append("lexical")
+        return {}
 
     monkeypatch.setattr(
         "exomem.semantic_contract.build_corpus_context",
         _semantic_warm,
     )
+    monkeypatch.setattr(warmup, "warm_caches", _optional_caches)
 
     warmup.warm_all(tmp_path)
 
-    assert call_order == ["catalog", "lexical", "semantic"]
+    assert call_order == ["catalog", "semantic", "lexical"]
     assert readiness.is_ready("semantic_corpus") is True
 
 
@@ -378,7 +392,7 @@ def test_warm_all_marks_catalog_ready_before_optional_cache_work(
 
     warmup.warm_all(tmp_path)
 
-    assert call_order == ["catalog", "optional_caches", "semantic"]
+    assert call_order == ["catalog", "semantic", "optional_caches"]
     assert readiness.is_ready("retrieval_catalog") is True
 
 
@@ -816,6 +830,17 @@ def test_start_background_runs_finish_warm_in_finally_even_on_crash(
 # ============================================================================
 
 
+def _enter_server_lifespan(mcp) -> None:
+    async def exercise() -> None:
+        async with mcp._lifespan_manager():
+            activation = mcp._exomem_local_runtime_activation
+            activation.start()
+            assert activation._thread is not None
+            activation._thread.join(timeout=1.0)
+
+    asyncio.run(exercise())
+
+
 def test_build_server_uses_background_warmup_by_default(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -833,8 +858,10 @@ def test_build_server_uses_background_warmup_by_default(
     monkeypatch.setattr(warmup, "start_background", lambda vr: calls.append("background"))
     monkeypatch.setattr(warmup, "warm_all", lambda vr: calls.append("eager"))
 
-    server.build_server(require_auth=False)
+    mcp = server.build_server(require_auth=False)
 
+    assert calls == []
+    _enter_server_lifespan(mcp)
     assert calls == ["background"]
 
 
@@ -850,8 +877,10 @@ def test_build_server_uses_eager_warmup_when_env_set(
     monkeypatch.setattr(warmup, "start_background", lambda vr: calls.append("background"))
     monkeypatch.setattr(warmup, "warm_all", lambda vr: calls.append("eager"))
 
-    server.build_server(require_auth=False)
+    mcp = server.build_server(require_auth=False)
 
+    assert calls == []
+    _enter_server_lifespan(mcp)
     assert calls == ["eager"]
 
 
@@ -867,8 +896,9 @@ def test_build_server_calls_neither_warmup_path_when_disabled(
     monkeypatch.setattr(warmup, "start_background", lambda vr: calls.append("background"))
     monkeypatch.setattr(warmup, "warm_all", lambda vr: calls.append("eager"))
 
-    server.build_server(require_auth=False)
+    mcp = server.build_server(require_auth=False)
 
+    _enter_server_lifespan(mcp)
     assert calls == []
 
 

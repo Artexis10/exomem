@@ -16,9 +16,16 @@ The system SHALL NOT block the MCP transport on any model preload or cache warm-
 - **THEN** the server accepts connections and responds to liveness requests before any model preload or lexical warm-up has necessarily finished
 - **AND** an ordinary keyword or hybrid request that arrives before maintained-catalog readiness returns `RETRIEVAL_INDEX_WARMING` promptly without a corpus walk
 
+#### Scenario: Local reconcilers cannot delay or contend with catalog startup
+
+- **WHEN** a local HTTP service starts against an incomplete maintained lexical catalog
+- **THEN** liveness responds before retrieval, watcher, graph-drain, or media startup work is activated
+- **AND** watcher reconciliation, graph recovery, and media discovery wait until catalog and semantic-corpus admission are established or warm-up finishes unsuccessfully
+- **AND** those reconcilers cannot contend with required startup repair on the process-local mutation boundary during that phase
+
 ### Requirement: Lexical-First Warm Ordering
 
-The background warm sequence SHALL reconcile the maintained lexical catalog for KB and vault scopes before warming parsed pages, the wikilink resolver, the semantic corpus, embedding/CLIP matrices, or any model. It SHALL mark `retrieval_catalog` ready immediately after both maintained scopes succeed. It SHALL mark the broader `lexical` component after the remaining lexical/derived caches finish, then mark enabled model components in their existing order.
+The background warm sequence SHALL reconcile the maintained lexical catalog for KB and vault scopes before warming any other corpus or model state. It SHALL mark `retrieval_catalog` ready immediately after both maintained scopes succeed, establish and mark the semantic corpus next, then warm optional parsed pages, the wikilink resolver, embedding/CLIP matrices, and models. It SHALL mark the broader `lexical` component after the optional lexical/derived caches finish, then mark enabled model components in their existing order.
 
 #### Scenario: Retrieval catalog readiness lands before optional cache readiness
 
