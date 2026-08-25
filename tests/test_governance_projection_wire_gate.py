@@ -388,8 +388,33 @@ def _client_for_root(
 
 
 def _canonical_response_digest(response) -> str:  # noqa: ANN001
-    value = {"status": response.status_code, "body": response.json()}
-    return hashlib.sha256(projections.canonical_jcs(value)).hexdigest()
+    """Hash the actual status/body bytes observed at the HTTP boundary."""
+
+    status = response.status_code
+    content = bytes(response.content)
+    framed = (
+        b"exomem.governed-wire-envelope.v1\0"
+        + status.to_bytes(2, "big")
+        + len(content).to_bytes(8, "big")
+        + content
+    )
+    return hashlib.sha256(framed).hexdigest()
+
+
+def test_wire_digest_uses_the_actual_serialized_model_score_envelope() -> None:
+    response = SimpleNamespace(
+        status_code=200,
+        content=b'{"data":{"hits":[{"vector_score":0.0498}]}}',
+        json=lambda: {"data": {"hits": [{"vector_score": 0.0498}]}},
+    )
+
+    expected = hashlib.sha256(
+        b"exomem.governed-wire-envelope.v1\0"
+        + (200).to_bytes(2, "big")
+        + len(response.content).to_bytes(8, "big")
+        + response.content
+    ).hexdigest()
+    assert _canonical_response_digest(response) == expected
 
 
 def _assert_route_response(response, route: str) -> None:  # noqa: ANN001
