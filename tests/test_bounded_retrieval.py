@@ -305,16 +305,16 @@ def test_unavailable_outside_lexstore_never_walks_the_vault(
     monkeypatch.setattr(find_module, "_outside_kb_keyword_paths", forbidden)
     failed: list[str] = []
 
-    hits = find_module._find_outside_kb(
-        tmp_path,
-        query="outside unavailable needle",
-        query_norm="outside unavailable needle",
-        types=None,
-        projects=None,
-        tags=None,
-        limit=5,
-        failed_out=failed,
-    )
+    with pytest.raises(find_module.RetrievalIndexWarming):
+        find_module._find_outside_kb(
+            tmp_path,
+            query="outside unavailable needle",
+            query_norm="outside unavailable needle",
+            types=None,
+            projects=None,
+            tags=None,
+            limit=5,
+            failed_out=failed,
+        )
 
-    assert hits == []
-    assert failed == ["outside_kb_lexical"]
+    assert failed == []

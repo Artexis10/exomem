@@ -22,3 +22,9 @@ The `/health/ready` response SHALL include a content-free `retrieval` block desc
 - **WHEN** startup warm-up is explicitly disabled and no maintained-catalog readiness has been established
 - **THEN** retrieval reports `unverified`
 - **AND** overall readiness does not claim ordinary retrieval admission
+
+#### Scenario: Later catalog staleness revokes admission
+
+- **WHEN** a catalog previously marked ready is later proven stale or fatally unavailable
+- **THEN** retrieval admission is revoked before background repair is scheduled
+- **AND** readiness remains withheld until a successful repair proves both recall scopes current again

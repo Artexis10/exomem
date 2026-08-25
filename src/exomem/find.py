@@ -793,10 +793,12 @@ def find(
     query_norm = (query or "").lower().strip()
 
     if mode != "vector":
-        from . import readiness
+        from . import lexstore, readiness
 
         admission = readiness.retrieval_admission()
         state = admission["state"]
+        if state == "unavailable":
+            lexstore.request_repair(vault_root)
         if state == "unavailable" or (
             state == "warming" and not readiness.is_ready("lexical")
         ):
@@ -2703,6 +2705,7 @@ def _find_keyword(
     failed_out: list[str] | None = None,
 ) -> list[Hit]:
     """Keyword-mode recall, hydrating only maintained-index matches."""
+    lexical_repair = _bounded_lexical_repair_allowed(freshness_key)
     if query_norm:
         candidate_paths = _keyword_match_paths(
             vault_root,
@@ -2710,7 +2713,7 @@ def _find_keyword(
             scope,
             freshness=freshness_key,
             failed_out=failed_out,
-            repair=_bounded_lexical_repair_allowed(freshness_key),
+            repair=lexical_repair,
         )
         if eligible_paths is not None:
             # A finite eligible set (a complete category/kind plan resolved
@@ -2724,6 +2727,26 @@ def _find_keyword(
         # plan resolved through the maintained index) iterates those parents
         # directly rather than walking the scope to rediscover them.
         walk = (vault_root / rel_path for rel_path in eligible_paths)
+    elif not lexical_repair:
+        from . import lexstore
+
+        if lexstore.maintained_content_index_enabled():
+            catalog = lexstore.get_store(vault_root).catalog_readiness(
+                scope,
+                freshness_key,
+            )
+            if not catalog.complete:
+                _raise_catalog_outcome(catalog)
+        if scope == "kb":
+            kb = vault_root / kb_dirname()
+            if not kb.is_dir():
+                log.error("KB directory missing: %s", kb)
+                return []
+            walk = _walk_md(kb)
+        else:
+            from .vault import walk_vault_md
+
+            walk = walk_vault_md(vault_root)
     elif scope == "kb":
         kb = vault_root / kb_dirname()
         if not kb.is_dir():

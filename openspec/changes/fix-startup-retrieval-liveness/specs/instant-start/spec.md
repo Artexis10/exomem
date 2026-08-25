@@ -36,3 +36,14 @@ The background warm sequence SHALL reconcile the maintained lexical catalog for 
 - **WHEN** the resource policy is `quiet` and startup warm-up is enabled
 - **THEN** the maintained lexical catalog phase still runs and may mark `retrieval_catalog` ready
 - **AND** full parsed-page, resolver, matrix, and model cache preloading remains skipped
+
+#### Scenario: Lazy empty-query recall remains bounded
+
+- **WHEN** startup warm-up is disabled and an empty keyword or hybrid query reaches a production-sized incomplete catalog
+- **THEN** the request returns `RETRIEVAL_INDEX_WARMING` without walking or parsing the corpus
+
+#### Scenario: Small lazy repair converges readiness
+
+- **WHEN** a bounded small-corpus request repairs and serves one maintained scope during lazy startup
+- **THEN** the runtime arranges repair of any missing sibling scope
+- **AND** retrieval admission becomes ready once both scopes are proven current

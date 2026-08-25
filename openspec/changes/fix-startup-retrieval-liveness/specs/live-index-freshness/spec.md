@@ -33,3 +33,9 @@ The system SHALL keep the lexical sidecar synchronized with the vault's Markdown
 - **WHEN** Markdown changed without a complete retained lexical delta
 - **THEN** the next use detects incomplete readiness and schedules single-flight background repair
 - **AND** the request returns `RETRIEVAL_INDEX_WARMING` instead of rebuilding or scanning the corpus
+
+#### Scenario: Failed background repair is retried by later demand
+
+- **WHEN** startup catalog repair failed and warm-up finished without admission
+- **THEN** each later refused ordinary request may re-arm the single-flight repair before returning its typed retry outcome
+- **AND** the request does not walk or parse the corpus to trigger that retry

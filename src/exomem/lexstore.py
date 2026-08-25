@@ -458,15 +458,20 @@ def get_store(vault_root: Path) -> LexicalStore:
         return store
 
 
-def _mark_runtime_retrieval_ready_if_current(vault_root: Path) -> None:
-    """Admit the configured runtime after a repair proves both scopes current."""
+def _is_configured_runtime_vault(vault_root: Path) -> bool:
     configured_raw = os.environ.get("EXOMEM_VAULT_PATH", "").strip()
     configured = Path(configured_raw) if configured_raw else None
-    if (
-        configured is None
-        or not configured.is_absolute()
-        or configured.resolve(strict=False) != vault_root.resolve(strict=False)
-    ):
+    if configured is None:
+        return False
+    return bool(
+        configured.is_absolute()
+        and configured.resolve(strict=False) == vault_root.resolve(strict=False)
+    )
+
+
+def _mark_runtime_retrieval_ready_if_current(vault_root: Path) -> None:
+    """Admit the configured runtime after a repair proves both scopes current."""
+    if not _is_configured_runtime_vault(vault_root):
         return
     from . import freshness as freshness_module
     from . import readiness
@@ -481,6 +486,39 @@ def _mark_runtime_retrieval_ready_if_current(vault_root: Path) -> None:
         for scope in ("kb", "vault")
     ):
         readiness.mark_ready("retrieval_catalog")
+
+
+def _admit_after_bounded_runtime_repair(vault_root: Path, repaired: object) -> None:
+    """Converge lazy-mode admission after a successful small-corpus repair."""
+    if repaired is None or not _is_configured_runtime_vault(vault_root):
+        return
+    from . import readiness
+
+    if not readiness.is_ready("retrieval_catalog"):
+        # This re-proves both scopes. A missing sibling scope schedules the
+        # ordinary background repair, whose successful publish marks admission.
+        _mark_runtime_retrieval_ready_if_current(vault_root)
+
+
+def _mark_runtime_retrieval_unavailable_if_current(vault_root: Path) -> None:
+    """Revoke configured-runtime admission before scheduling catalog recovery."""
+    if not _is_configured_runtime_vault(vault_root):
+        return
+    from . import readiness
+
+    readiness.mark_unready("retrieval_catalog")
+
+
+def _schedule_runtime_catalog_repair(vault_root: Path) -> None:
+    """Order admission revocation before the repair that may restore it."""
+    _mark_runtime_retrieval_unavailable_if_current(vault_root)
+    _schedule_repair(vault_root)
+
+
+def request_repair(vault_root: Path) -> None:
+    """Non-walking retry seam for a request refused by runtime admission."""
+    if maintained_content_index_enabled():
+        _schedule_repair(vault_root)
 
 
 def clear_stores() -> None:
@@ -676,7 +714,10 @@ def search_bm25(
     if not tokens:
         return []
     store = get_store(vault_root)
-    return store.search_bm25(tokens, k, scope, freshness, allowed_paths, repair)
+    result = store.search_bm25(tokens, k, scope, freshness, allowed_paths, repair)
+    if repair:
+        _admit_after_bounded_runtime_repair(vault_root, result)
+    return result
 
 
 def search_bm25_result(
@@ -728,7 +769,10 @@ def search_substring(
     if not tokens:
         return []
     store = get_store(vault_root)
-    return store.search_substring(tokens, scope, freshness, repair, k)
+    result = store.search_substring(tokens, scope, freshness, repair, k)
+    if repair:
+        _admit_after_bounded_runtime_repair(vault_root, result)
+    return result
 
 
 def search_substring_result(
@@ -3555,10 +3599,10 @@ class LexicalStore:
             # single failed attempt would strand the store as fatal for the
             # process. `_schedule_repair` is itself single-flight, so this cannot
             # storm.
-            _schedule_repair(self.vault_root)
+            _schedule_runtime_catalog_repair(self.vault_root)
             return CatalogReadiness("fatal_failure", False, backend_name)
         if not self.path.exists():
-            _schedule_repair(self.vault_root)
+            _schedule_runtime_catalog_repair(self.vault_root)
             return CatalogReadiness("stale", False, backend_name)
         try:
             conn = self._connect()
@@ -3566,17 +3610,17 @@ class LexicalStore:
                 if not self._schema_is_current(conn):
                     # Read-only probe: an absent/old-shape (v4) or version-stale
                     # sidecar defers to the atomic rebuild — this seam emits no DDL.
-                    _schedule_repair(self.vault_root)
+                    _schedule_runtime_catalog_repair(self.vault_root)
                     return CatalogReadiness("stale", False, backend_name)
                 checkpoint = self._meta_checkpoint(conn, scope)
                 if checkpoint is None:
-                    _schedule_repair(self.vault_root)
+                    _schedule_runtime_catalog_repair(self.vault_root)
                     return CatalogReadiness("stale", False, backend_name)
                 if _checkpoint_state(checkpoint) == target_state:
                     if self._meta_catalog_identity(conn) != catalog_semantic_identity(
                         self.vault_root
                     ):
-                        _schedule_repair(self.vault_root)
+                        _schedule_runtime_catalog_repair(self.vault_root)
                         return CatalogReadiness("stale", False, backend_name)
                     return CatalogReadiness("available", True, backend_name)
             finally:
@@ -3600,12 +3644,12 @@ class LexicalStore:
                             # from under this delta (no longer bound), so it could
                             # not be applied. Defer to the repair worker rather than
                             # letting the mismatch escape this seam.
-                            _schedule_repair(self.vault_root)
+                            _schedule_runtime_catalog_repair(self.vault_root)
                             return CatalogReadiness("stale", False, backend_name)
                         return self.catalog_readiness(
                             scope, freshness, allow_delta=False
                         )
-            _schedule_repair(self.vault_root)
+            _schedule_runtime_catalog_repair(self.vault_root)
             return CatalogReadiness("stale", False, backend_name)
         except sqlite3.Error as e:
             return self._catalog_readiness_error(e, backend_name)
@@ -3697,7 +3741,7 @@ class LexicalStore:
                     # publication landed between the verdict and this transaction.
                     # Defer rather than serve an unvalidated (possibly regressed)
                     # generation; the repair worker reconciles it.
-                    _schedule_repair(self.vault_root)
+                    _schedule_runtime_catalog_repair(self.vault_root)
                     return CatalogQueryResult(
                         None, CatalogReadiness("stale", False, readiness.backend)
                     )
@@ -3730,13 +3774,13 @@ class LexicalStore:
         if kind == "fatal":
             # A proven-fatal disposable sidecar recovers only by whole replacement.
             self._failed = True
-            _schedule_repair(self.vault_root)
+            _schedule_runtime_catalog_repair(self.vault_root)
             return CatalogReadiness("fatal_failure", False, backend_name)
         if kind == "transient":
             # A passing lock/interrupt fails only this call; the next request
             # reopens and retries. It must NOT schedule a whole-corpus repair.
             return CatalogReadiness("transient_failure", False, backend_name)
-        _schedule_repair(self.vault_root)
+        _schedule_runtime_catalog_repair(self.vault_root)
         return CatalogReadiness("stale", False, backend_name)
 
     def search_semantic_units(

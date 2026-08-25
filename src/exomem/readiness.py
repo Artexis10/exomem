@@ -81,6 +81,13 @@ def mark_ready(component: str) -> list:
         return drained
 
 
+def mark_unready(component: str) -> None:
+    """Revoke a component whose live backing state was later proven unavailable."""
+    _check(component)
+    with _lock:
+        _events[component].clear()
+
+
 def drain_deferred(component: str) -> list:
     """Atomically drain and return `component`'s deferred items WITHOUT marking
     it ready.

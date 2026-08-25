@@ -235,6 +235,41 @@ def test_large_cold_keyword_catalog_returns_typed_warming_without_a_walk(
     assert parsed == 0
 
 
+def test_large_lazy_empty_query_returns_typed_warming_without_a_walk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for index in range(70):
+        _write_page(
+            tmp_path,
+            f"Knowledge Base/Notes/page-{index:03d}.md",
+            f"emptyquery payload {index}",
+        )
+    _seed_live(tmp_path)
+    walked = 0
+    parsed = 0
+
+    def forbidden_walk(_root: Path):
+        nonlocal walked
+        walked += 1
+        raise AssertionError("an incomplete empty query must not walk the vault")
+        yield  # pragma: no cover - keep this a generator-shaped test double
+
+    def forbidden_parse(*_args, **_kwargs):
+        nonlocal parsed
+        parsed += 1
+        raise AssertionError("an incomplete empty query must not parse pages")
+
+    monkeypatch.setattr(find_module, "_walk_md", forbidden_walk)
+    monkeypatch.setattr(find_module._CACHE, "get", forbidden_parse)
+    monkeypatch.setattr(lexstore, "_schedule_repair", lambda _root: None)
+
+    with pytest.raises(find_module.RetrievalIndexWarming):
+        find_module.find(tmp_path, query="", mode="keyword", scope="kb")
+
+    assert walked == 0
+    assert parsed == 0
+
+
 def test_transient_large_catalog_query_returns_typed_unavailable_without_a_walk(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -308,6 +343,37 @@ def test_active_catalog_warm_refuses_before_a_cold_freshness_walk(
     assert walked == 0
 
 
+def test_failed_catalog_warm_retries_repair_before_refusing_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for index in range(80):
+        _write_page(
+            tmp_path,
+            f"Knowledge Base/Notes/page-{index:03d}.md",
+            f"retryrepair payload {index}",
+        )
+    scheduled: list[Path] = []
+
+    def forbidden_walk(_root: Path):
+        raise AssertionError("failed-warm retry must precede cold freshness walks")
+        yield  # pragma: no cover - keep this a generator-shaped test double
+
+    readiness.begin_warm()
+    readiness.finish_warm()
+    monkeypatch.setattr(find_module, "_walk_md", forbidden_walk)
+    monkeypatch.setattr(
+        lexstore,
+        "request_repair",
+        lambda root: scheduled.append(root),
+        raising=False,
+    )
+
+    with pytest.raises(find_module.RetrievalIndexWarming):
+        find_module.find(tmp_path, query="retryrepair", mode="keyword", scope="kb")
+
+    assert scheduled == [tmp_path]
+
+
 def test_large_cold_hybrid_catalog_returns_typed_warming_without_a_walk(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -371,6 +437,61 @@ def test_successful_background_repair_marks_configured_catalog_ready(
     assert readiness.retrieval_admission() == {
         "state": "ready",
         "admitted": True,
+    }
+
+
+def test_small_lazy_repair_eventually_admits_configured_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for index in range(4):
+        _write_page(
+            tmp_path,
+            f"Knowledge Base/Notes/page-{index:03d}.md",
+            f"smalllazy payload {index}",
+        )
+    _seed_live(tmp_path)
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(tmp_path.resolve()))
+
+    hits = find_module.find(
+        tmp_path,
+        query="smalllazy",
+        mode="keyword",
+        scope="kb-only",
+    )
+
+    assert len(hits) == 4
+    assert lexstore.await_repairs_idle(tmp_path, timeout=30.0) is True
+    assert readiness.retrieval_admission() == {
+        "state": "ready",
+        "admitted": True,
+    }
+
+
+def test_discovered_catalog_staleness_revokes_configured_runtime_admission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for index in range(80):
+        _write_page(
+            tmp_path,
+            f"Knowledge Base/Notes/page-{index:03d}.md",
+            f"laterstale payload {index}",
+        )
+    _seed_live(tmp_path)
+    lexstore.ensure_fresh(tmp_path)
+    store = lexstore.get_store(tmp_path)
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(tmp_path.resolve()))
+    readiness.begin_warm()
+    readiness.mark_ready("retrieval_catalog")
+    readiness.finish_warm()
+    store.path.unlink()
+    monkeypatch.setattr(lexstore, "_schedule_repair", lambda _root: None)
+
+    with pytest.raises(find_module.RetrievalIndexWarming):
+        find_module.find(tmp_path, query="laterstale", mode="keyword", scope="kb")
+
+    assert readiness.retrieval_admission() == {
+        "state": "unavailable",
+        "admitted": False,
     }
 
 
