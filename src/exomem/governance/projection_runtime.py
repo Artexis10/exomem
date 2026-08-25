@@ -59,29 +59,49 @@ _PROJECTED_CONTINUATION_DOMAIN = b"exomem.projected-find-continuation.v1\0"
 _VISIBLE_SNAPSHOT_DOMAIN = b"exomem.projected-visible-snapshot.v1\0"
 _AUTHORIZATION_MAP_DOMAIN = b"exomem.projected-authorization-map.v1\0"
 _VISIBLE_AUTHORIZATION_DOMAIN = b"exomem.projected-visible-authorization.v1\0"
-# Repository-owned release fence. The checked release manifest and required
-# actual-wire CI matrix currently certify only the exact model-hard-off runtime
-# profile. Environment cannot opt an uncertified model-enabled profile into
-# serving; those configurations remain closed until their own evidence lands.
-# The model-hard-off implementation is accepted only with the repository-owned
-# actual-wire matrix, including hidden-only missing-index reduction and a real
-# second-page continuation. Model-enabled profiles remain closed.
+_PROJECTED_VECTOR_QUERY_MAX_CODEPOINTS = 600
+# Repository-owned release fence. Checked manifests and required actual-wire CI
+# matrices certify the exact hard-off and CPU/Torch-vector profiles. Environment
+# cannot opt any other model configuration into serving; reranker, CLIP, GPU,
+# ONNX, mixed, and device-override profiles remain closed until their own evidence
+# lands. Both accepted profiles include hidden-only missing-index reduction and a
+# real second-page continuation.
 _PROJECTED_SERVING_RELEASE_ACCEPTED = True
 
 
 def projected_serving_release_profile() -> str | None:
-    """Return the one repository-certified runtime profile, if exact."""
+    """Return a repository-certified runtime profile only when exact."""
 
-    if all(
-        os.environ.get(name) == "1"
-        for name in (
-            "EXOMEM_DISABLE_EMBEDDINGS",
-            "EXOMEM_DISABLE_CLIP",
-            "EXOMEM_DISABLE_RANKING",
-        )
-    ):
-        return projection_timing.MODEL_RUNTIME_PROFILE
-    return None
+    return projection_timing.model_runtime_profile_from_environment()
+
+
+def _runtime_supports_release_profile(
+    runtime: ActiveProjectionRuntime,
+    profile: str,
+) -> bool:
+    if profile == projection_timing.MODEL_RUNTIME_PROFILE:
+        return True
+    if profile != projection_timing.VECTOR_CPU_MODEL_RUNTIME_PROFILE:
+        return False
+    from .. import embeddings
+
+    return (
+        runtime.vector_index is not None
+        and runtime.vector_index.extractor_version == "projected-text-v1"
+        and runtime.vector_index.model_version == embeddings.MODEL_NAME
+    )
+
+
+def _projected_vector_query(query: str) -> str:
+    """Return the fixed, model-only query projection certified by release CI."""
+
+    normalized = " ".join(query.split())
+    if len(normalized) <= _PROJECTED_VECTOR_QUERY_MAX_CODEPOINTS:
+        return normalized
+    prefix = normalized[:_PROJECTED_VECTOR_QUERY_MAX_CODEPOINTS]
+    if " " in prefix:
+        prefix = prefix.rsplit(" ", 1)[0]
+    return prefix
 
 
 @dataclass(frozen=True, slots=True)
@@ -862,10 +882,14 @@ def load_active_projection_runtime(
     root = Path(vault_root)
     preactivated = _preactivated_runtime(root)
     if preactivated is not None:
+        release_profile = projected_serving_release_profile()
         if (
             not _PROJECTED_SERVING_RELEASE_ACCEPTED
-            or projected_serving_release_profile()
-            != projection_timing.MODEL_RUNTIME_PROFILE
+            or release_profile is None
+            or not _runtime_supports_release_profile(
+                preactivated,
+                release_profile,
+            )
         ):
             raise ProjectionRuntimeUnavailable(
                 "governed projected retrieval is unavailable"
@@ -1431,7 +1455,7 @@ def find_projected_hits(
                     query_vector = tuple(
                         float(value)
                         for value in embeddings_module.embed_texts(
-                            [query],
+                            [_projected_vector_query(query)],
                             is_query=True,
                         )[0]
                     )
