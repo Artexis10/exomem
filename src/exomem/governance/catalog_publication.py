@@ -12,10 +12,11 @@ import hashlib
 import os
 import sqlite3
 import time
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from .. import find_corpus
+from .. import find_corpus, reserved_paths, vault
 from . import (
     authorization_custody,
     membership,
@@ -32,6 +33,15 @@ class CatalogPublicationError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class MarkdownCatalogMutation:
+    """One intended canonical Markdown successor and its exact predecessor."""
+
+    path: str
+    source: str
+    expected_before_hash: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class PreparedMarkdownCatalogPublication:
     """One complete lexical-only catalog successor awaiting canonical bytes."""
 
@@ -42,6 +52,7 @@ class PreparedMarkdownCatalogPublication:
     target_items: tuple[projection_store.ProjectionItemVariants, ...]
     catalog_descriptor: bytes
     activated_at: int
+    mutation_count: int
 
 
 def _custody_configured() -> bool:
@@ -69,6 +80,76 @@ def _relative_markdown_path(vault_root: Path, path: str) -> str:
     except (OSError, ValueError):
         raise CatalogPublicationError("catalog publication path is outside the vault") from None
     return value
+
+
+def _is_catalog_markdown_path(path: str) -> bool:
+    candidate = PurePosixPath(path)
+    if (
+        candidate.name.casefold().endswith(".md")
+        and ".sync-conflict-" not in candidate.name
+        and not any(
+            part in find_corpus.EXCLUDED_DIR_NAMES
+            or part.startswith(find_corpus.EXCLUDED_DIR_PREFIXES)
+            for part in candidate.parts[:-1]
+        )
+        and not reserved_paths.classify_logical(path).blocked
+    ):
+        return True
+    return False
+
+
+def mutation_from_planned_write(
+    vault_root: Path,
+    write: vault.PlannedWrite,
+) -> MarkdownCatalogMutation | None:
+    """Bind one canonical Markdown write to the same predecessor as its file CAS."""
+
+    root = Path(vault_root).absolute()
+    try:
+        relative = write.path.absolute().relative_to(root).as_posix()
+    except (AttributeError, ValueError):
+        raise CatalogPublicationError(
+            "catalog publication write is outside the vault"
+        ) from None
+    if PurePosixPath(relative).suffix.casefold() != ".md":
+        return None
+    relative = _relative_markdown_path(root, relative)
+    if not _is_catalog_markdown_path(relative):
+        return None
+
+    expected = write.expected_hash
+    if expected == vault.MISSING_CONTENT_HASH:
+        expected = None
+    guard = write.guard
+    if guard is not None:
+        if guard.target != relative:
+            raise CatalogPublicationError(
+                "catalog publication guard does not bind its Markdown target"
+            )
+        if guard.leaf_policy == "absent":
+            guarded_expected = None
+        elif guard.leaf_policy == "content":
+            guarded_expected = guard.expected_content_hash
+        else:
+            guarded_expected = expected
+        if expected is not None and guarded_expected != expected:
+            raise CatalogPublicationError(
+                "catalog publication predecessor bindings disagree"
+            )
+        expected = guarded_expected
+    elif expected is None and not write.create_only:
+        raise CatalogPublicationError(
+            "catalog Markdown mutation lacks an exact predecessor binding"
+        )
+    if expected is not None and (
+        type(expected) is not str
+        or len(expected) != 64
+        or any(character not in "0123456789abcdef" for character in expected)
+    ):
+        raise CatalogPublicationError(
+            "catalog publication predecessor hash is invalid"
+        )
+    return MarkdownCatalogMutation(relative, write.content, expected)
 
 
 def _search_fields(page: find_corpus.ParsedPage) -> dict[str, str]:
@@ -234,15 +315,42 @@ def _replacement_item(
         ) from error
 
 
-def prepare_markdown_upsert(
+def _normalize_markdown_mutations(
+    vault_root: Path,
+    mutations: tuple[MarkdownCatalogMutation, ...],
+) -> tuple[tuple[str, MarkdownCatalogMutation], ...]:
+    if type(mutations) is not tuple or not mutations:
+        raise CatalogPublicationError(
+            "catalog publication requires a finite Markdown mutation batch"
+        )
+    normalized: list[tuple[str, MarkdownCatalogMutation]] = []
+    aliases: set[str] = set()
+    for mutation in mutations:
+        if type(mutation) is not MarkdownCatalogMutation or type(mutation.source) is not str:
+            raise CatalogPublicationError("catalog publication mutation is invalid")
+        relative = _relative_markdown_path(vault_root, mutation.path)
+        if not _is_catalog_markdown_path(relative):
+            raise CatalogPublicationError(
+                "catalog publication mutation is not canonical Markdown"
+            )
+        alias = unicodedata.normalize("NFC", relative).casefold()
+        if alias in aliases:
+            raise CatalogPublicationError(
+                "catalog publication Markdown targets collide"
+            )
+        aliases.add(alias)
+        normalized.append((relative, mutation))
+    return tuple(normalized)
+
+
+def _prepare_markdown_batch(
     vault_root: Path,
     *,
-    path: str,
-    source: str,
-    expected_before_hash: str | None,
+    normalized: tuple[tuple[str, MarkdownCatalogMutation], ...] | None,
+    planned_writes: tuple[vault.PlannedWrite, ...] | None,
     now: int | None = None,
 ) -> PreparedMarkdownCatalogPublication | None:
-    """Prepare one complete catalog successor, or return ``None`` for v3/open.
+    """Prepare one complete batch successor, or return ``None`` for v3/open.
 
     The current slice intentionally supports lexical-only active namespaces.
     Model and graph measurement roots are content-bound, so reusing them after
@@ -251,7 +359,8 @@ def prepare_markdown_upsert(
     """
 
     root = Path(vault_root)
-    relative = _relative_markdown_path(root, path)
+    if (normalized is None) == (planned_writes is None):
+        raise CatalogPublicationError("catalog publication batch input is invalid")
     connection: sqlite3.Connection | None = None
     try:
         connection = store.open_active_governance_read_connection(root)
@@ -348,28 +457,44 @@ def prepare_markdown_upsert(
     finally:
         connection.close()
 
-    by_identity = {item.item_identity: item for item in verified.items}
-    predecessor = by_identity.get(relative)
-    if expected_before_hash is None:
-        if predecessor is not None:
-            raise CatalogPublicationError("catalog creation target already exists")
-    elif predecessor is None or predecessor.content_hash != expected_before_hash:
-        raise CatalogPublicationError(
-            "catalog content identity no longer matches the reviewed predecessor"
+    if normalized is None:
+        assert planned_writes is not None
+        if type(planned_writes) is not tuple or not planned_writes:
+            raise CatalogPublicationError(
+                "catalog publication requires a finite planned-write batch"
+            )
+        mutations = tuple(
+            mutation
+            for write in planned_writes
+            if (mutation := mutation_from_planned_write(root, write)) is not None
         )
+        normalized = _normalize_markdown_mutations(root, mutations)
 
+    by_identity = {item.item_identity: item for item in verified.items}
     target_key = projections.ProjectionNamespaceKey(
         policy_fingerprint=snapshot.active.policy_fingerprint,
         projector_schema_version=snapshot.active.projector_schema_version,
         catalog_generation=snapshot.active.catalog_generation + 1,
     )
-    by_identity[relative] = _replacement_item(
-        vault_root=root,
-        path=relative,
-        source=source,
-        snapshot=snapshot,
-        target_key=target_key,
-    )
+    for relative, mutation in normalized:
+        predecessor = by_identity.get(relative)
+        if mutation.expected_before_hash is None:
+            if predecessor is not None:
+                raise CatalogPublicationError("catalog creation target already exists")
+        elif (
+            predecessor is None
+            or predecessor.content_hash != mutation.expected_before_hash
+        ):
+            raise CatalogPublicationError(
+                "catalog content identity no longer matches the reviewed predecessor"
+            )
+        by_identity[relative] = _replacement_item(
+            vault_root=root,
+            path=relative,
+            source=mutation.source,
+            snapshot=snapshot,
+            target_key=target_key,
+        )
     target_items = tuple(by_identity.values())
     try:
         descriptor = projection_store.catalog_descriptor_bytes(
@@ -387,13 +512,64 @@ def prepare_markdown_upsert(
         target_items=target_items,
         catalog_descriptor=descriptor,
         activated_at=activated_at,
+        mutation_count=len(normalized),
     )
 
 
-def publish_markdown_upsert(
+def prepare_markdown_batch(
+    vault_root: Path,
+    *,
+    mutations: tuple[MarkdownCatalogMutation, ...],
+    now: int | None = None,
+) -> PreparedMarkdownCatalogPublication | None:
+    """Prepare an explicit canonical Markdown mutation batch."""
+
+    root = Path(vault_root)
+    return _prepare_markdown_batch(
+        root,
+        normalized=_normalize_markdown_mutations(root, mutations),
+        planned_writes=None,
+        now=now,
+    )
+
+
+def prepare_planned_markdown_batch(
+    vault_root: Path,
+    *,
+    writes: tuple[vault.PlannedWrite, ...],
+    now: int | None = None,
+) -> PreparedMarkdownCatalogPublication | None:
+    """Prepare catalog rows lazily so v3/open planned writes remain unchanged."""
+
+    return _prepare_markdown_batch(
+        vault_root,
+        normalized=None,
+        planned_writes=writes,
+        now=now,
+    )
+
+
+def prepare_markdown_upsert(
+    vault_root: Path,
+    *,
+    path: str,
+    source: str,
+    expected_before_hash: str | None,
+    now: int | None = None,
+) -> PreparedMarkdownCatalogPublication | None:
+    """Compatibility wrapper for a one-item Markdown catalog batch."""
+
+    return prepare_markdown_batch(
+        vault_root,
+        mutations=(MarkdownCatalogMutation(path, source, expected_before_hash),),
+        now=now,
+    )
+
+
+def publish_markdown_batch(
     prepared: PreparedMarkdownCatalogPublication | None,
 ) -> schema_v4.TuplePublicationResult | None:
-    """Advance one prepared v4 catalog after canonical bytes have committed."""
+    """Advance one prepared v4 batch after canonical bytes have committed."""
 
     if prepared is None:
         return None
@@ -419,7 +595,7 @@ def publish_markdown_upsert(
         )
         receipt_event_id = receipts.critical_event_id(
             {
-                "operation": "governance_catalog_markdown_upsert",
+                "operation": "governance_catalog_markdown_batch",
                 "logical_vault_id": prepared.expected.logical_vault_id,
                 "predecessor_activation_state_digest": (
                     prepared.expected.activation_state_digest
@@ -430,6 +606,7 @@ def publish_markdown_upsert(
                 ).hexdigest(),
                 "namespace_id": prepared.target_key.namespace_id,
                 "projection_rows_digest": target_manifest.rows_digest,
+                "mutation_count": prepared.mutation_count,
             }
         )
         connection = store.open_authorization_session_connection(
@@ -510,9 +687,22 @@ def publish_markdown_upsert(
             connection.close()
 
 
+def publish_markdown_upsert(
+    prepared: PreparedMarkdownCatalogPublication | None,
+) -> schema_v4.TuplePublicationResult | None:
+    """Compatibility wrapper for publishing a one-item prepared batch."""
+
+    return publish_markdown_batch(prepared)
+
+
 __all__ = [
     "CatalogPublicationError",
+    "MarkdownCatalogMutation",
     "PreparedMarkdownCatalogPublication",
+    "mutation_from_planned_write",
+    "prepare_markdown_batch",
+    "prepare_planned_markdown_batch",
     "prepare_markdown_upsert",
+    "publish_markdown_batch",
     "publish_markdown_upsert",
 ]

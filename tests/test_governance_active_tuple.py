@@ -376,6 +376,19 @@ def _migrate_with_projection_item(
     source: str,
     now: int,
 ) -> schema_v4.MigrationResult:
+    return _migrate_with_projection_items(
+        vault,
+        items=((path, source),),
+        now=now,
+    )
+
+
+def _migrate_with_projection_items(
+    vault: Path,
+    *,
+    items: tuple[tuple[str, str], ...],
+    now: int,
+) -> schema_v4.MigrationResult:
     documents = _documents(ceiling=2)
     compiled = _compiled(documents)
     key = projections.ProjectionNamespaceKey(
@@ -383,14 +396,21 @@ def _migrate_with_projection_item(
         projector_schema_version=1,
         catalog_generation=1,
     )
-    item = _projection_item(
-        vault=vault,
-        compiled=compiled,
-        path=path,
-        source=source,
-        catalog_generation=1,
+    projected_items = tuple(
+        _projection_item(
+            vault=vault,
+            compiled=compiled,
+            path=path,
+            source=source,
+            catalog_generation=1,
+        )
+        for path, source in items
     )
-    manifest = projection_store.stage_variant_store(vault, key=key, items=(item,))
+    manifest = projection_store.stage_variant_store(
+        vault,
+        key=key,
+        items=projected_items,
+    )
     connection = store.open_connection(vault)
     try:
         return schema_v4.migrate_v3_connection(
@@ -408,8 +428,11 @@ def _migrate_with_projection_item(
                 ),
                 catalog=schema_v4.CatalogGenerationSeed(
                     catalog_generation=1,
-                    descriptor=projection_store.catalog_descriptor_bytes(key, (item,)),
-                    artifact_count=1,
+                    descriptor=projection_store.catalog_descriptor_bytes(
+                        key,
+                        projected_items,
+                    ),
+                    artifact_count=len(projected_items),
                     created_at=now,
                 ),
                 namespace=schema_v4.ProjectionNamespaceSeed(
@@ -2238,6 +2261,312 @@ def test_semantic_creation_publishes_the_next_v4_catalog_before_returning(
     assert [(item.item_identity, item.content_hash) for item in items] == [
         (relative, vault_module.content_hash(source))
     ]
+
+
+def test_semantic_creation_publishes_index_and_log_auxiliaries_in_one_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = int(time.time())
+    monkeypatch.setenv(
+        "EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-state")
+    )
+    writer_lease.reset_managers_for_tests()
+    vault = tmp_path / "vault"
+    relative = "Knowledge Base/Notes/new.md"
+    index_relative = "Knowledge Base/index.md"
+    log_relative = "Knowledge Base/log.md"
+    index_before = "# Knowledge Base\n\n## Recent activity\n"
+    log_before = "# Log\n\n---\n"
+    for existing, source in (
+        (index_relative, index_before),
+        (log_relative, log_before),
+    ):
+        target = vault / existing
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(source, encoding="utf-8")
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_projection_items(
+        vault,
+        items=((index_relative, index_before), (log_relative, log_before)),
+        now=now,
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+
+    created = create_file_module.create_file(
+        vault,
+        path=relative,
+        content="New governed note.\n",
+        frontmatter={"title": "New", "status": "draft"},
+        today=dt.date(2026, 8, 25),
+    )
+
+    assert created.creation is not None
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    assert custody.control.activation_epoch == 2
+    connection = store.open_authorization_session_connection(vault)
+    try:
+        active = schema_v4.load_active_policy(
+            connection,
+            expected_logical_vault_id=LOGICAL_VAULT_ID,
+            expected_activation_store_id=ACTIVATION_STORE_ID,
+            expected_activation_epoch=2,
+            expected_activation_state_digest=custody.control.activation_state_digest or "",
+        )
+    finally:
+        connection.close()
+    evidence = projection_store.namespace_evidence_from_snapshot(active)
+    manifest, items = projection_store.load_projection_catalog(
+        vault,
+        key=evidence.manifest.namespace_key,
+        expected_rows_digest=evidence.manifest.rows_digest,
+    )
+    expected = {
+        path: vault_module.content_hash((vault / path).read_text(encoding="utf-8"))
+        for path in (relative, index_relative, log_relative)
+    }
+    assert active.active.catalog_generation == 2
+    assert manifest.item_count == 3
+    assert {item.item_identity: item.content_hash for item in items} == expected
+
+
+def test_open_vault_skips_v4_only_auxiliary_predecessor_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-state")
+    )
+    writer_lease.reset_managers_for_tests()
+    vault = tmp_path / "vault"
+    relative = "Knowledge Base/Notes/legacy.md"
+    target = vault / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("legacy\n", encoding="utf-8")
+
+    prepared = catalog_publication.prepare_planned_markdown_batch(
+        vault,
+        writes=(vault_module.PlannedWrite(target, "updated\n"),),
+    )
+
+    assert prepared is None
+
+
+def test_v4_batch_refuses_existing_markdown_without_exact_predecessor_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = int(time.time())
+    monkeypatch.setenv(
+        "EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-state")
+    )
+    writer_lease.reset_managers_for_tests()
+    vault = tmp_path / "vault"
+    relative = "Knowledge Base/Notes/private.md"
+    before = "---\ntitle: Private\nstatus: draft\n---\n\nbefore\n"
+    target = vault / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(before, encoding="utf-8")
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_projection_item(
+        vault,
+        path=relative,
+        source=before,
+        now=now,
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+
+    with pytest.raises(catalog_publication.CatalogPublicationError) as blocked:
+        catalog_publication.prepare_planned_markdown_batch(
+            vault,
+            writes=(vault_module.PlannedWrite(target, before.replace("before", "after")),),
+            now=now + 1,
+        )
+
+    assert "exact predecessor" in str(blocked.value)
+
+
+def test_semantic_edit_publishes_auxiliary_markdown_in_the_same_v4_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = int(time.time())
+    monkeypatch.setenv(
+        "EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-state")
+    )
+    writer_lease.reset_managers_for_tests()
+    vault = tmp_path / "vault"
+    primary_relative = "Knowledge Base/Notes/private.md"
+    auxiliary_relative = "Knowledge Base/Notes/backlinks.md"
+    primary_before = "---\ntitle: Private\nstatus: draft\n---\n\nbefore\n"
+    primary_after = primary_before.replace("before", "after")
+    auxiliary_before = "---\ntitle: Backlinks\nstatus: draft\n---\n\nold link\n"
+    auxiliary_after = auxiliary_before.replace("old link", "new link")
+    for relative, source in (
+        (primary_relative, primary_before),
+        (auxiliary_relative, auxiliary_before),
+    ):
+        target = vault / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(source, encoding="utf-8")
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_projection_items(
+        vault,
+        items=(
+            (primary_relative, primary_before),
+            (auxiliary_relative, auxiliary_before),
+        ),
+        now=now,
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    _auxiliary_source, auxiliary_guard = vault_module.read_guarded_text(
+        vault,
+        vault / auxiliary_relative,
+    )
+    preflight = semantic_writes.preflight_existing(
+        vault,
+        path=primary_relative,
+        after_source=primary_after,
+        operation="edit",
+        expected_before_hash=vault_module.content_hash(primary_before),
+    )
+
+    committed = semantic_writes.commit_existing(
+        vault,
+        preflight=preflight,
+        auxiliary_writes=(
+            vault_module.PlannedWrite(
+                vault / auxiliary_relative,
+                auxiliary_after,
+                guard=auxiliary_guard,
+            ),
+        ),
+    )
+
+    assert committed.mutated is True
+    assert (vault / primary_relative).read_text(encoding="utf-8") == primary_after
+    assert (vault / auxiliary_relative).read_text(encoding="utf-8") == auxiliary_after
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    assert custody.control.activation_epoch == 2
+    connection = store.open_authorization_session_connection(vault)
+    try:
+        active = schema_v4.load_active_policy(
+            connection,
+            expected_logical_vault_id=LOGICAL_VAULT_ID,
+            expected_activation_store_id=ACTIVATION_STORE_ID,
+            expected_activation_epoch=2,
+            expected_activation_state_digest=custody.control.activation_state_digest or "",
+        )
+    finally:
+        connection.close()
+    evidence = projection_store.namespace_evidence_from_snapshot(active)
+    manifest, items = projection_store.load_projection_catalog(
+        vault,
+        key=evidence.manifest.namespace_key,
+        expected_rows_digest=evidence.manifest.rows_digest,
+    )
+    assert active.active.catalog_generation == 2
+    assert manifest.item_count == 2
+    assert sorted(
+        (item.item_identity, item.content_hash) for item in items
+    ) == sorted(
+        (
+            (primary_relative, vault_module.content_hash(primary_after)),
+            (auxiliary_relative, vault_module.content_hash(auxiliary_after)),
+        )
+    )
+
+
+def test_semantic_edit_refuses_auxiliary_catalog_drift_before_changing_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = int(time.time())
+    monkeypatch.setenv(
+        "EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-state")
+    )
+    writer_lease.reset_managers_for_tests()
+    vault = tmp_path / "vault"
+    primary_relative = "Knowledge Base/Notes/private.md"
+    auxiliary_relative = "Knowledge Base/Notes/backlinks.md"
+    primary_before = "---\ntitle: Private\nstatus: draft\n---\n\nbefore\n"
+    primary_after = primary_before.replace("before", "after")
+    auxiliary_active = "---\ntitle: Backlinks\nstatus: draft\n---\n\nactive\n"
+    auxiliary_drifted = auxiliary_active.replace("active", "out-of-band")
+    auxiliary_requested = auxiliary_drifted.replace("out-of-band", "requested")
+    for relative, source in (
+        (primary_relative, primary_before),
+        (auxiliary_relative, auxiliary_active),
+    ):
+        target = vault / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(source, encoding="utf-8")
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_projection_items(
+        vault,
+        items=(
+            (primary_relative, primary_before),
+            (auxiliary_relative, auxiliary_active),
+        ),
+        now=now,
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    (vault / auxiliary_relative).write_text(auxiliary_drifted, encoding="utf-8")
+    _auxiliary_source, auxiliary_guard = vault_module.read_guarded_text(
+        vault,
+        vault / auxiliary_relative,
+    )
+    preflight = semantic_writes.preflight_existing(
+        vault,
+        path=primary_relative,
+        after_source=primary_after,
+        operation="edit",
+        expected_before_hash=vault_module.content_hash(primary_before),
+    )
+
+    with pytest.raises(semantic_writes.SemanticWriteError) as blocked:
+        semantic_writes.commit_existing(
+            vault,
+            preflight=preflight,
+            auxiliary_writes=(
+                vault_module.PlannedWrite(
+                    vault / auxiliary_relative,
+                    auxiliary_requested,
+                    guard=auxiliary_guard,
+                ),
+            ),
+        )
+
+    assert blocked.value.code == "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED"
+    assert "content identity" in blocked.value.reason
+    assert (vault / primary_relative).read_text(encoding="utf-8") == primary_before
+    assert (vault / auxiliary_relative).read_text(encoding="utf-8") == auxiliary_drifted
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    assert custody.control.activation_epoch == 1
 
 
 def test_semantic_edit_refuses_catalog_drift_before_changing_bytes(
