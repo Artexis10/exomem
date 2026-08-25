@@ -243,10 +243,10 @@ def test_watcher_seed_recovers_floor_ahead_receipt_before_rebuild_without_extrac
     assert sidecar.read_bytes() == committed_bytes
 
 
-def test_watcher_seed_caps_full_receipt_snapshot_before_targeted_drain(
+def test_watcher_seed_routes_configured_receipt_cap_through_fair_drain(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Startup replay admits only its configured receipt cap from a large backlog."""
+    """Startup replay gives its configured cap to the mixed-queue allocator."""
     rels = [f"Knowledge Base/Notes/backlog-{index:02d}.md" for index in range(24)]
     for rel in rels:
         path = vault / rel
@@ -254,14 +254,7 @@ def test_watcher_seed_caps_full_receipt_snapshot_before_targeted_drain(
         path.write_text("# queued\n", encoding="utf-8")
     deferred_index.add_full(vault, rels)
     watcher = file_watcher.FileWatcher(vault)
-    observed_limits: list[int | None] = []
-    real_snapshot_full = deferred_index.snapshot_full
-    drains: list[tuple[list[Path], int | None]] = []
-
-    def observe_snapshot_full(root: Path, *, limit=None, paths=None):  # noqa: ANN001
-        assert paths is None
-        observed_limits.append(limit)
-        return real_snapshot_full(root, limit=limit, paths=paths)
+    drains: list[int | None] = []
 
     monkeypatch.setattr(watcher, "_validate_existing_graph_on_seed", lambda: True)
     monkeypatch.setattr(
@@ -269,14 +262,12 @@ def test_watcher_seed_caps_full_receipt_snapshot_before_targeted_drain(
         "_watcher_policy",
         lambda: mode.WatcherPolicy(0.5, 300.0, 2, 2, False),
     )
-    monkeypatch.setattr(deferred_index, "snapshot_full", observe_snapshot_full)
     monkeypatch.setattr(
         index_sync,
         "drain_deferred_work",
-        lambda _root, *, paths, limit: drains.append((paths, limit)),
+        lambda _root, *, limit: drains.append(limit),
     )
 
     watcher._reconcile_once(seed=True)
 
-    assert observed_limits == [2]
-    assert drains == [([vault / rels[0], vault / rels[1]], 2)]
+    assert drains == [2]
