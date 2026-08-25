@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.62.0](https://github.com/Artexis10/exomem/compare/v0.61.1...v0.62.0) (2026-08-25)
+
+
+### Features
+
+* **governance:** bind v4 policy proposals to active authority ([#800](https://github.com/Artexis10/exomem/issues/800)) ([064fa3b](https://github.com/Artexis10/exomem/commit/064fa3bae5071b3ee0702c7efbf6983c2d0b79c2))
+* **governance:** mirror reviewed v4 policy workspace ([#803](https://github.com/Artexis10/exomem/issues/803)) ([8217825](https://github.com/Artexis10/exomem/commit/8217825a0acc593e5de95c96bf10bb284641dcf4))
+* **governance:** publish reviewed v4 policy authority ([#802](https://github.com/Artexis10/exomem/issues/802)) ([16fdf32](https://github.com/Artexis10/exomem/commit/16fdf3203f439cc6f1b558584bc78527a6543d8d))
+* **governance:** publish semantic content batches ([#805](https://github.com/Artexis10/exomem/issues/805)) ([0ea0cb7](https://github.com/Artexis10/exomem/commit/0ea0cb7335a1e86e1b2cf75979eb4e2d00a57386))
+* **governance:** publish semantic writes through v4 catalog ([#804](https://github.com/Artexis10/exomem/issues/804)) ([056d1aa](https://github.com/Artexis10/exomem/commit/056d1aad3833d48c91d674c43a02fa7ada7e7eb4))
+* **governance:** publish trash through v4 catalog ([#807](https://github.com/Artexis10/exomem/issues/807)) ([1e10f05](https://github.com/Artexis10/exomem/commit/1e10f0563ee5610ce8eda2e111f8b5c2c5b7397b))
+
+
+### Bug Fixes
+
+* bound background deferred index repair ([#798](https://github.com/Artexis10/exomem/issues/798)) ([ee0f3ab](https://github.com/Artexis10/exomem/commit/ee0f3ab34328ec3cbaf55f3a5cecd3965f8451c3))
+* preserve low-cap deferred fairness ([#801](https://github.com/Artexis10/exomem/issues/801)) ([3ceda58](https://github.com/Artexis10/exomem/commit/3ceda58608a318231449f199d7e78acc7788287f))
+* refuse unbounded remote maintenance ([#797](https://github.com/Artexis10/exomem/issues/797)) ([d7dc55c](https://github.com/Artexis10/exomem/commit/d7dc55ce823f74ee7a64758f2d6283c7167dce21))
+
 ## [0.61.1](https://github.com/Artexis10/exomem/compare/v0.61.0...v0.61.1) (2026-08-25)
 
 
