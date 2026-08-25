@@ -12,7 +12,16 @@ from pathlib import Path
 
 import pytest
 
-from exomem.governance import authorization_custody, policy, schema_v4, store
+from exomem import reserved_paths
+from exomem.governance import (
+    authorization_custody,
+    policy,
+    projection_store,
+    projections,
+    schema_v4,
+    store,
+)
+from exomem.governance.principal import owner_principal
 
 SCOPE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
 RULE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FAW"
@@ -240,6 +249,328 @@ def _migrate(vault: Path, *, now: int) -> schema_v4.MigrationResult:
     finally:
         connection.close()
     return result
+
+
+def _migrate_with_empty_projection_catalog(
+    vault: Path,
+    *,
+    now: int,
+) -> schema_v4.MigrationResult:
+    documents = _documents(ceiling=2)
+    compiled = _compiled(documents)
+    key = projections.ProjectionNamespaceKey(
+        policy_fingerprint=compiled.fingerprint,
+        projector_schema_version=1,
+        catalog_generation=1,
+    )
+    manifest = projection_store.stage_variant_store(vault, key=key, items=())
+    connection = store.open_connection(vault)
+    try:
+        result = schema_v4.migrate_v3_connection(
+            connection,
+            schema_v4.MigrationSeed(
+                activation_store_id=ACTIVATION_STORE_ID,
+                logical_vault_id=LOGICAL_VAULT_ID,
+                activation_epoch=1,
+                policy=_policy_seed(
+                    generation_id=FIRST_GENERATION_ID,
+                    documents=documents,
+                    predecessor_generation_id=None,
+                    event_suffix="first",
+                    now=now,
+                ),
+                catalog=schema_v4.CatalogGenerationSeed(
+                    catalog_generation=1,
+                    descriptor=projection_store.catalog_descriptor_bytes(key, ()),
+                    artifact_count=0,
+                    created_at=now,
+                ),
+                namespace=schema_v4.ProjectionNamespaceSeed(
+                    namespace_id=key.namespace_id,
+                    evidence=projection_store.projection_namespace_evidence_bytes(
+                        manifest
+                    ),
+                    ready_at=now,
+                ),
+                migrated_at=now,
+            ),
+        )
+    finally:
+        connection.close()
+    return result
+
+
+def test_govern_memory_v4_proposal_persists_exact_authority_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance.tool import op_govern_memory
+
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_empty_projection_catalog(vault, now=now)
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    target_documents = {
+        relative: content.decode("utf-8")
+        for relative, content in _documents(ceiling=1)
+    }
+
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        proposed = op_govern_memory(
+            vault,
+            operation="propose",
+            principal=owner_principal(),
+            intent="Lower the external ceiling",
+            documents=target_documents,
+            target_ceiling=1,
+            now=now + 1,
+        )
+
+    with sqlite3.connect(store.sidecar_path(vault)) as connection:
+        proposal_json, membership_manifest = connection.execute(
+            "SELECT proposal_json, membership_manifest FROM governance_proposals "
+            "WHERE proposal_id=?",
+            (proposed["proposal_id"],),
+        ).fetchone()
+    payload = json.loads(proposal_json)
+    binding = payload["authority_binding"]
+    target = binding["target"]
+    reviewed = binding["reviewed_active_tuple"]
+    snapshot = binding["authoring_snapshot"]
+    target_policy = _compiled(_documents(ceiling=1))
+    target_key = projections.ProjectionNamespaceKey(
+        policy_fingerprint=target_policy.fingerprint,
+        projector_schema_version=1,
+        catalog_generation=1,
+    )
+
+    assert binding["schema"] == "exomem.governance-policy-proposal/v1"
+    assert reviewed == {
+        "activation_epoch": 1,
+        "activation_state_digest": migration.activation_state_digest,
+        "activation_store_id": ACTIVATION_STORE_ID,
+        "catalog_generation": 1,
+        "logical_vault_id": LOGICAL_VAULT_ID,
+        "policy_fingerprint": _compiled(_documents(ceiling=2)).fingerprint,
+        "policy_generation_id": FIRST_GENERATION_ID,
+        "projection_namespace_id": projections.ProjectionNamespaceKey(
+            policy_fingerprint=_compiled(_documents(ceiling=2)).fingerprint,
+            projector_schema_version=1,
+            catalog_generation=1,
+        ).namespace_id,
+        "projector_schema_version": 1,
+    }
+    assert snapshot["source_fingerprint"] == reviewed["policy_fingerprint"]
+    assert snapshot["conflict_set_digest"] == hashlib.sha256(
+        b"exomem.governance-conflict-set.v1\0"
+    ).hexdigest()
+    assert snapshot["guard_generation"]
+    assert len(snapshot["documents"]) == 2
+    assert len(snapshot["file_identities"]) == 2
+    assert target["policy_fingerprint"] == target_policy.fingerprint
+    assert target["source_fingerprint"] == target_policy.fingerprint
+    assert target["compiled_policy"] == base64.b64encode(
+        policy.canonical_compiled_bytes(target_policy)
+    ).decode("ascii")
+    assert target["projection_namespace"] == {
+        "catalog_generation": 1,
+        "evidence": base64.b64encode(
+            projection_store.projection_namespace_evidence_bytes(
+                projection_store.verify_variant_store(
+                    vault,
+                    key=target_key,
+                    expected_rows_digest=target["projection_rows_digest"],
+                )
+            )
+        ).decode("ascii"),
+        "namespace_id": target_key.namespace_id,
+        "projector_schema_version": 1,
+        "ready_at": now + 1,
+    }
+    assert json.loads(membership_manifest) == binding["membership_manifest"]
+
+
+def test_govern_memory_v4_proposal_refuses_unprepared_model_measurements(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance.tool import GovernanceError, op_govern_memory
+
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_empty_projection_catalog(vault, now=now)
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    load_evidence = projection_store.namespace_evidence_from_snapshot
+
+    def model_backed_evidence(
+        snapshot: schema_v4.ActivePolicySnapshot,
+    ) -> projection_store.ProjectionNamespaceEvidence:
+        evidence = load_evidence(snapshot)
+        return projection_store.ProjectionNamespaceEvidence(
+            manifest=evidence.manifest,
+            required_measurement_roots=(object(),),
+        )
+
+    monkeypatch.setattr(
+        projection_store,
+        "namespace_evidence_from_snapshot",
+        model_backed_evidence,
+    )
+
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        with pytest.raises(GovernanceError) as error:
+            op_govern_memory(
+                vault,
+                operation="propose",
+                principal=owner_principal(),
+                intent="Lower the external ceiling",
+                documents={
+                    relative: content.decode("utf-8")
+                    for relative, content in _documents(ceiling=1)
+                },
+                target_ceiling=1,
+                now=now + 1,
+            )
+    assert error.value.code == "GOVERNANCE_PROJECTION_REBUILD_REQUIRED"
+    with sqlite3.connect(store.sidecar_path(vault)) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM governance_proposals"
+        ).fetchone() == (0,)
+
+
+def test_govern_memory_v4_commit_validates_binding_before_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance.tool import GovernanceError, op_govern_memory
+
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_empty_projection_catalog(vault, now=now)
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        proposed = op_govern_memory(
+            vault,
+            operation="propose",
+            principal=owner_principal(),
+            intent="Lower the external ceiling",
+            documents={
+                relative: content.decode("utf-8")
+                for relative, content in _documents(ceiling=1)
+            },
+            target_ceiling=1,
+            now=now + 1,
+        )
+        with pytest.raises(GovernanceError) as error:
+            op_govern_memory(
+                vault,
+                operation="commit",
+                principal=owner_principal(),
+                proposal_id=proposed["proposal_id"],
+                now=now + 2,
+            )
+    assert error.value.code == "GOVERNANCE_POLICY_PUBLICATION_UNAVAILABLE"
+
+    with sqlite3.connect(store.sidecar_path(vault)) as connection:
+        assert connection.execute(
+            "SELECT status, reserved_event_id FROM governance_proposals "
+            "WHERE proposal_id=?",
+            (proposed["proposal_id"],),
+        ).fetchone() == ("pending", None)
+        assert connection.execute(
+            "SELECT policy_generation_id, policy_fingerprint, "
+            "projector_schema_version, catalog_generation "
+            "FROM active_governance_tuple WHERE singleton=1"
+        ).fetchone() == (
+            FIRST_GENERATION_ID,
+            _compiled(_documents(ceiling=2)).fingerprint,
+            1,
+            1,
+        )
+
+
+def test_govern_memory_v4_commit_refuses_reviewed_tuple_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance.tool import GovernanceError, op_govern_memory
+
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_empty_projection_catalog(vault, now=now)
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        proposed = op_govern_memory(
+            vault,
+            operation="propose",
+            principal=owner_principal(),
+            intent="Lower the external ceiling",
+            documents={
+                relative: content.decode("utf-8")
+                for relative, content in _documents(ceiling=1)
+            },
+            target_ceiling=1,
+            now=now + 1,
+        )
+    with sqlite3.connect(store.sidecar_path(vault)) as connection:
+        row = connection.execute(
+            "SELECT proposal_json FROM governance_proposals WHERE proposal_id=?",
+            (proposed["proposal_id"],),
+        ).fetchone()
+        payload = json.loads(row[0])
+        payload["authority_binding"]["reviewed_active_tuple"]["activation_epoch"] = 2
+        connection.execute(
+            "UPDATE governance_proposals SET proposal_json=? WHERE proposal_id=?",
+            (
+                json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                proposed["proposal_id"],
+            ),
+        )
+        connection.commit()
+
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        with pytest.raises(GovernanceError) as error:
+            op_govern_memory(
+                vault,
+                operation="commit",
+                principal=owner_principal(),
+                proposal_id=proposed["proposal_id"],
+                now=now + 2,
+            )
+    assert error.value.code == "STALE_GOVERNANCE_POLICY"
 
 
 def _acknowledge(

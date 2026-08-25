@@ -7,6 +7,7 @@ proposal and token bounds, current membership, durable receipts, and recovery.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -42,7 +43,10 @@ from . import (
     companion_backfill,
     decisions,
     membership,
+    projection_store,
+    projections,
     receipts,
+    schema_v4,
     store,
 )
 from . import policy as policy_module
@@ -118,6 +122,262 @@ def _prospective_policy(
             "the policy workspace changed or could not be acquired safely",
         )
     return prospective.policy
+
+
+def _v4_active_policy_snapshot(
+    vault_root: Path,
+    *,
+    now: int,
+) -> schema_v4.ActivePolicySnapshot:
+    connection: sqlite3.Connection | None = None
+    try:
+        custody = authorization_custody.load_authorization_custody(
+            vault_root,
+            now=now,
+        )
+        control = custody.control
+        if (
+            not control.governance_enrolled
+            or control.activation_store_id is None
+            or control.activation_epoch is None
+            or control.activation_state_digest is None
+        ):
+            raise schema_v4.SchemaV4Error("external activation authority is incomplete")
+        connection = store.open_authorization_session_connection(vault_root)
+        connection.execute("BEGIN")
+        snapshot = schema_v4.load_active_policy(
+            connection,
+            expected_logical_vault_id=control.logical_vault_id,
+            expected_activation_store_id=control.activation_store_id,
+            expected_activation_epoch=control.activation_epoch,
+            expected_activation_state_digest=control.activation_state_digest,
+        )
+        connection.commit()
+        return snapshot
+    except (
+        authorization_custody.AuthorizationCustodyUnavailable,
+        schema_v4.SchemaV4Error,
+        store.UnsupportedGovernanceSchema,
+        FileNotFoundError,
+        OSError,
+        sqlite3.Error,
+        RuntimeError,
+        ValueError,
+    ):
+        if connection is not None and connection.in_transaction:
+            connection.rollback()
+        raise GovernanceError(
+            "GOVERNANCE_BLOCKED",
+            "the active governance tuple cannot be verified",
+        ) from None
+    finally:
+        if connection is not None:
+            connection.close()
+
+
+def _stable_identity_value(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    return {
+        "device": int(value.device),
+        "inode": int(value.inode),
+        "kind": str(value.kind),
+        "link_count": int(value.link_count),
+    }
+
+
+def _snapshot_value(snapshot: policy_module.AuthoringSnapshot) -> dict[str, Any]:
+    return {
+        "documents": [
+            {
+                "path": relative,
+                "bytes": base64.b64encode(content).decode("ascii"),
+            }
+            for relative, content in snapshot.documents
+        ],
+        "source_fingerprint": snapshot.source_fingerprint,
+        "conflict_set_digest": snapshot.conflict_set_digest,
+        "guard_generation": snapshot.guard_generation,
+        "file_identities": [
+            {
+                "path": item.path,
+                "identity": _stable_identity_value(item.identity),
+                "sha256": item.sha256,
+            }
+            for item in snapshot.file_identities
+        ],
+        "governance_root_identity": _stable_identity_value(
+            snapshot.governance_root_identity
+        ),
+    }
+
+
+def _active_tuple_value(
+    active: schema_v4.VerifiedActiveGovernanceState,
+) -> dict[str, Any]:
+    return {
+        "logical_vault_id": active.logical_vault_id,
+        "activation_store_id": active.activation_store_id,
+        "activation_epoch": active.activation_epoch,
+        "activation_state_digest": active.activation_state_digest,
+        "policy_generation_id": active.policy_generation_id,
+        "policy_fingerprint": active.policy_fingerprint,
+        "projector_schema_version": active.projector_schema_version,
+        "catalog_generation": active.catalog_generation,
+        "projection_namespace_id": active.projection_namespace_id,
+    }
+
+
+def _full_search_fields(
+    item: projection_store.ProjectionItemVariants,
+) -> Mapping[str, str]:
+    candidates: list[Mapping[str, str]] = []
+    for variant in item.variants:
+        if variant.decision_level != policy_module.DISCLOSURE_MAX:
+            continue
+        try:
+            value = json.loads(variant.value_jcs)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if value.get("release_strip") == []:
+            candidates.append(variant.search_fields)
+    if not candidates:
+        raise GovernanceError(
+            "GOVERNANCE_PROJECTION_REBUILD_REQUIRED",
+            "the active catalog lacks an unstripped full projection",
+        )
+    canonical = {_canonical_json(dict(candidate)) for candidate in candidates}
+    if len(canonical) != 1:
+        raise GovernanceError(
+            "GOVERNANCE_PROJECTION_REBUILD_REQUIRED",
+            "the active catalog has ambiguous full projections",
+        )
+    return dict(candidates[0])
+
+
+def _stage_target_projection_namespace(
+    vault_root: Path,
+    *,
+    active_snapshot: schema_v4.ActivePolicySnapshot,
+    target_policy: policy_module.Policy,
+    ready_at: int,
+) -> dict[str, Any]:
+    try:
+        active_evidence = projection_store.namespace_evidence_from_snapshot(
+            active_snapshot
+        )
+        active_manifest, active_items = projection_store.load_projection_catalog(
+            vault_root,
+            key=active_evidence.manifest.namespace_key,
+            expected_rows_digest=active_evidence.manifest.rows_digest,
+        )
+        projection_store.bind_active_projection_namespace(
+            active_snapshot,
+            manifest=active_manifest,
+            items=active_items,
+        )
+        if active_evidence.required_measurement_roots:
+            raise GovernanceError(
+                "GOVERNANCE_PROJECTION_REBUILD_REQUIRED",
+                "the active model/graph lanes require a prepared measurement rebuild",
+            )
+        key = projections.ProjectionNamespaceKey(
+            policy_fingerprint=target_policy.fingerprint,
+            projector_schema_version=active_snapshot.active.projector_schema_version,
+            catalog_generation=active_snapshot.active.catalog_generation,
+        )
+        target_items = tuple(
+            projection_store.ProjectionItemVariants(
+                item_identity=item.item_identity,
+                content_hash=item.content_hash,
+                scope_ids=item.scope_ids,
+                variants=projections.enumerate_projection_variants(
+                    item_identity=item.item_identity,
+                    content_hash=item.content_hash,
+                    scope_ids=item.scope_ids,
+                    policy=target_policy,
+                    projector_schema_version=key.projector_schema_version,
+                    full_search_fields=_full_search_fields(item),
+                ),
+            )
+            for item in active_items
+        )
+        if not __import__("hmac").compare_digest(
+            projection_store.catalog_descriptor_bytes(key, target_items),
+            active_snapshot.catalog_descriptor,
+        ):
+            raise GovernanceError(
+                "GOVERNANCE_PROJECTION_REBUILD_REQUIRED",
+                "the prepared projection catalog does not match the reviewed catalog",
+            )
+        target_manifest = projection_store.stage_variant_store(
+            vault_root,
+            key=key,
+            items=target_items,
+        )
+        evidence = projection_store.projection_namespace_evidence_bytes(target_manifest)
+    except GovernanceError:
+        raise
+    except (
+        projection_store.ProjectionStoreError,
+        projections.ProjectionError,
+        FileNotFoundError,
+        OSError,
+        sqlite3.Error,
+        TypeError,
+        ValueError,
+    ):
+        raise GovernanceError(
+            "GOVERNANCE_PROJECTION_REBUILD_REQUIRED",
+            "the target authorization-projection namespace is unavailable",
+        ) from None
+    return {
+        "namespace_id": key.namespace_id,
+        "projector_schema_version": key.projector_schema_version,
+        "catalog_generation": key.catalog_generation,
+        "projection_rows_digest": target_manifest.rows_digest,
+        "evidence": base64.b64encode(evidence).decode("ascii"),
+        "ready_at": ready_at,
+    }
+
+
+def _v4_proposal_authority_binding(
+    vault_root: Path,
+    *,
+    active_snapshot: schema_v4.ActivePolicySnapshot,
+    prospective: policy_module.ProspectiveCompile,
+    membership_manifest: list[dict[str, Any]],
+    ready_at: int,
+) -> dict[str, Any]:
+    namespace = _stage_target_projection_namespace(
+        vault_root,
+        active_snapshot=active_snapshot,
+        target_policy=prospective.policy,
+        ready_at=ready_at,
+    )
+    return {
+        "schema": "exomem.governance-policy-proposal/v1",
+        "reviewed_active_tuple": _active_tuple_value(active_snapshot.active),
+        "authoring_snapshot": _snapshot_value(prospective.snapshot),
+        "membership_manifest": membership_manifest,
+        "target": {
+            "source_documents": [
+                {
+                    "path": relative,
+                    "bytes": base64.b64encode(content).decode("ascii"),
+                }
+                for relative, content in prospective.target_documents
+            ],
+            "source_fingerprint": prospective.policy.fingerprint,
+            "policy_fingerprint": prospective.policy.fingerprint,
+            "compiled_policy": base64.b64encode(
+                policy_module.canonical_compiled_bytes(prospective.policy)
+            ).decode("ascii"),
+            "compiler_schema_version": 1,
+            "projection_rows_digest": namespace.pop("projection_rows_digest"),
+            "projection_namespace": namespace,
+        },
+    }
 
 
 def _require_authorization_session(
@@ -533,10 +793,27 @@ def _proposal(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
             "INVALID_GOVERNANCE_PROPOSAL", "selector_paths must be a list of strings"
         )
     patterns = sorted(set(raw_patterns))
-    current_policy = policy_module.load(vault_root)
+    now = float(kwargs.get("now", time.time()))
+    schema_version = store.authorization_session_schema_version(vault_root)
+    active_snapshot = (
+        _v4_active_policy_snapshot(vault_root, now=int(now))
+        if schema_version == schema_v4.SCHEMA_USER_VERSION
+        else None
+    )
+    current_policy = (
+        active_snapshot.policy
+        if active_snapshot is not None
+        else policy_module.load(vault_root)
+    )
     if current_policy.blocked:
         raise GovernanceError("GOVERNANCE_BLOCKED", "current policy cannot be evaluated")
-    prospective = _prospective_policy(vault_root, documents)
+    prospective_compile = policy_module.compile_prospective(vault_root, documents)
+    if prospective_compile is None:
+        raise GovernanceError(
+            "GOVERNANCE_AUTHORING_UNSTABLE",
+            "the policy workspace changed or could not be acquired safely",
+        )
+    prospective = prospective_compile.policy
     if prospective.blocked:
         raise GovernanceError(
             "INVALID_GOVERNANCE_POLICY",
@@ -545,7 +822,6 @@ def _proposal(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
     manifest = _membership_manifest(
         vault_root, current_policy, prospective, set(documents)
     )
-    now = float(kwargs.get("now", time.time()))
     expires_at = now + max(1, int(kwargs.get("ttl_seconds", DEFAULT_PROPOSAL_TTL_SECONDS)))
     intent = str(kwargs.get("intent") or "").strip()
     if not intent:
@@ -573,6 +849,19 @@ def _proposal(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
         "documents": documents,
         "duration": kwargs.get("duration"),
     }
+    if active_snapshot is not None:
+        if current_policy.fingerprint != active_snapshot.active.policy_fingerprint:
+            raise GovernanceError(
+                "GOVERNANCE_BLOCKED",
+                "the active governance policy does not match its tuple",
+            )
+        payload["authority_binding"] = _v4_proposal_authority_binding(
+            vault_root,
+            active_snapshot=active_snapshot,
+            prospective=prospective_compile,
+            membership_manifest=manifest,
+            ready_at=int(now),
+        )
     conn = store.open_connection(vault_root)
     try:
         conn.execute(
@@ -2288,16 +2577,271 @@ def _validate_proposal_drift(vault_root: Path, proposal_id: str, *, now: float) 
     )
 
 
+def _decoded_bound_documents(value: Any) -> tuple[tuple[str, bytes], ...]:
+    if not isinstance(value, list):
+        raise GovernanceError(
+            "INVALID_GOVERNANCE_PROPOSAL",
+            "bound policy source documents are malformed",
+        )
+    documents: list[tuple[str, bytes]] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, dict) or set(item) != {"path", "bytes"}:
+            raise GovernanceError(
+                "INVALID_GOVERNANCE_PROPOSAL",
+                "bound policy source documents are malformed",
+            )
+        relative = item["path"]
+        encoded = item["bytes"]
+        if (
+            not isinstance(relative, str)
+            or not isinstance(encoded, str)
+            or relative in seen
+        ):
+            raise GovernanceError(
+                "INVALID_GOVERNANCE_PROPOSAL",
+                "bound policy source documents are malformed",
+            )
+        try:
+            content = base64.b64decode(encoded, validate=True)
+        except (ValueError, TypeError):
+            raise GovernanceError(
+                "INVALID_GOVERNANCE_PROPOSAL",
+                "bound policy source documents are malformed",
+            ) from None
+        if base64.b64encode(content).decode("ascii") != encoded:
+            raise GovernanceError(
+                "INVALID_GOVERNANCE_PROPOSAL",
+                "bound policy source documents are non-canonical",
+            )
+        seen.add(relative)
+        documents.append((relative, content))
+    ordered = tuple(sorted(documents))
+    if tuple(documents) != ordered:
+        raise GovernanceError(
+            "INVALID_GOVERNANCE_PROPOSAL",
+            "bound policy source documents are not ordered",
+        )
+    return ordered
+
+
+def _validate_v4_proposal_binding(
+    vault_root: Path,
+    *,
+    proposal_json: str,
+    membership_manifest: str,
+    now: int,
+) -> dict[str, Any]:
+    try:
+        payload = json.loads(proposal_json)
+    except (TypeError, json.JSONDecodeError):
+        raise GovernanceError(
+            "INVALID_GOVERNANCE_PROPOSAL",
+            "stored governance proposal is malformed",
+        ) from None
+    if not isinstance(payload, dict) or _canonical_json(payload) != proposal_json:
+        raise GovernanceError(
+            "INVALID_GOVERNANCE_PROPOSAL",
+            "stored governance proposal is not canonical",
+        )
+    binding = payload.get("authority_binding")
+    if (
+        not isinstance(binding, dict)
+        or set(binding)
+        != {
+            "schema",
+            "reviewed_active_tuple",
+            "authoring_snapshot",
+            "membership_manifest",
+            "target",
+        }
+        or binding.get("schema") != "exomem.governance-policy-proposal/v1"
+    ):
+        raise GovernanceError(
+            "INVALID_GOVERNANCE_PROPOSAL",
+            "stored governance authority binding is invalid",
+        )
+    try:
+        parsed_manifest = json.loads(membership_manifest)
+    except (TypeError, json.JSONDecodeError):
+        raise GovernanceError(
+            "INVALID_GOVERNANCE_PROPOSAL",
+            "stored governance membership is malformed",
+        ) from None
+    if (
+        _canonical_json(parsed_manifest) != membership_manifest
+        or binding["membership_manifest"] != parsed_manifest
+    ):
+        raise GovernanceError(
+            "INVALID_GOVERNANCE_PROPOSAL",
+            "stored governance membership does not match its authority binding",
+        )
+
+    active_snapshot = _v4_active_policy_snapshot(vault_root, now=now)
+    if binding["reviewed_active_tuple"] != _active_tuple_value(active_snapshot.active):
+        raise GovernanceError(
+            "STALE_GOVERNANCE_POLICY",
+            "the reviewed active policy tuple changed",
+        )
+    documents = payload.get("documents")
+    if not isinstance(documents, dict):
+        raise GovernanceError(
+            "INVALID_GOVERNANCE_PROPOSAL",
+            "stored governance documents are malformed",
+        )
+    prospective = policy_module.compile_prospective(vault_root, documents)
+    if prospective is None:
+        raise GovernanceError(
+            "GOVERNANCE_AUTHORING_UNSTABLE",
+            "the policy workspace changed or could not be acquired safely",
+        )
+    if binding["authoring_snapshot"] != _snapshot_value(prospective.snapshot):
+        raise GovernanceError(
+            "STALE_GOVERNANCE_POLICY",
+            "the reviewed policy workspace changed",
+        )
+    current_manifest = _membership_manifest(
+        vault_root,
+        active_snapshot.policy,
+        prospective.policy,
+        set(documents),
+    )
+    if current_manifest != parsed_manifest:
+        raise GovernanceError(
+            "STALE_GOVERNANCE_POLICY",
+            "the reviewed affected membership changed",
+        )
+
+    target = binding["target"]
+    if not isinstance(target, dict) or set(target) != {
+        "source_documents",
+        "source_fingerprint",
+        "policy_fingerprint",
+        "compiled_policy",
+        "compiler_schema_version",
+        "projection_rows_digest",
+        "projection_namespace",
+    }:
+        raise GovernanceError(
+            "INVALID_GOVERNANCE_PROPOSAL",
+            "stored governance target is invalid",
+        )
+    target_documents = _decoded_bound_documents(target["source_documents"])
+    if target_documents != prospective.target_documents:
+        raise GovernanceError(
+            "STALE_GOVERNANCE_POLICY",
+            "the reviewed immutable policy target changed",
+        )
+    compiled = policy_module.compile_documents(dict(target_documents))
+    try:
+        compiled_bytes = base64.b64decode(target["compiled_policy"], validate=True)
+    except (TypeError, ValueError):
+        raise GovernanceError(
+            "INVALID_GOVERNANCE_PROPOSAL",
+            "stored compiled policy is malformed",
+        ) from None
+    if (
+        compiled.empty
+        or compiled.blocked
+        or target["source_fingerprint"] != compiled.fingerprint
+        or target["policy_fingerprint"] != compiled.fingerprint
+        or target["compiler_schema_version"] != 1
+        or compiled_bytes != policy_module.canonical_compiled_bytes(compiled)
+    ):
+        raise GovernanceError(
+            "INVALID_GOVERNANCE_PROPOSAL",
+            "stored compiled policy does not verify",
+        )
+    namespace = target["projection_namespace"]
+    if not isinstance(namespace, dict) or set(namespace) != {
+        "namespace_id",
+        "projector_schema_version",
+        "catalog_generation",
+        "evidence",
+        "ready_at",
+    }:
+        raise GovernanceError(
+            "INVALID_GOVERNANCE_PROPOSAL",
+            "stored projection namespace is invalid",
+        )
+    try:
+        key = projections.ProjectionNamespaceKey(
+            policy_fingerprint=compiled.fingerprint,
+            projector_schema_version=namespace["projector_schema_version"],
+            catalog_generation=namespace["catalog_generation"],
+        )
+        manifest = projection_store.verify_variant_store(
+            vault_root,
+            key=key,
+            expected_rows_digest=target["projection_rows_digest"],
+        )
+        expected_evidence = projection_store.projection_namespace_evidence_bytes(
+            manifest
+        )
+        stored_evidence = base64.b64decode(namespace["evidence"], validate=True)
+    except (
+        projection_store.ProjectionStoreError,
+        projections.ProjectionError,
+        FileNotFoundError,
+        OSError,
+        sqlite3.Error,
+        TypeError,
+        ValueError,
+    ):
+        raise GovernanceError(
+            "GOVERNANCE_PROJECTION_REBUILD_REQUIRED",
+            "the reviewed target projection namespace does not verify",
+        ) from None
+    if (
+        namespace["namespace_id"] != key.namespace_id
+        or namespace["catalog_generation"] != active_snapshot.active.catalog_generation
+        or namespace["projector_schema_version"]
+        != active_snapshot.active.projector_schema_version
+        or stored_evidence != expected_evidence
+    ):
+        raise GovernanceError(
+            "GOVERNANCE_PROJECTION_REBUILD_REQUIRED",
+            "the reviewed target projection namespace does not verify",
+        )
+    return payload
+
+
 def _commit(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
     who = _require_owner(kwargs.get("principal"))
     proposal_id = str(kwargs.get("proposal_id") or "")
     if not proposal_id:
         raise GovernanceError("PROPOSAL_UNKNOWN", "proposal_id is required")
+    now = float(kwargs.get("now", time.time()))
+    if store.authorization_session_schema_version(vault_root) == schema_v4.SCHEMA_USER_VERSION:
+        connection = store.open_authorization_session_connection(vault_root)
+        try:
+            row = connection.execute(
+                "SELECT proposal_json, membership_manifest, status, expires_at "
+                "FROM governance_proposals WHERE proposal_id=?",
+                (proposal_id,),
+            ).fetchone()
+        finally:
+            connection.close()
+        if row is None:
+            raise GovernanceError("PROPOSAL_UNKNOWN", "no such proposal")
+        if str(row[2]) == "spent":
+            raise GovernanceError("PROPOSAL_SPENT", "proposal was already activated")
+        if str(row[2]) != "pending" or float(row[3]) < now:
+            raise GovernanceError("PROPOSAL_EXPIRED", "proposal is not active")
+        _validate_v4_proposal_binding(
+            vault_root,
+            proposal_json=str(row[0]),
+            membership_manifest=str(row[1]),
+            now=int(now),
+        )
+        raise GovernanceError(
+            "GOVERNANCE_POLICY_PUBLICATION_UNAVAILABLE",
+            "the atomic policy publication coordinator is not active yet",
+        )
     reconcile = reconcile_governance_operations(vault_root)
     if reconcile["blocked"]:
         raise GovernanceError("GOVERNANCE_BLOCKED", "pending operation needs manual repair")
     store.require_authoring_schema(vault_root)
-    now = float(kwargs.get("now", time.time()))
     _validate_proposal_drift(vault_root, proposal_id, now=now)
     conn = store.open_connection(vault_root)
     try:
