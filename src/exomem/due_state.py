@@ -561,7 +561,9 @@ def reconcile(vault_root: Path, *, today: dt.date | None = None) -> dict[str, An
     return payload
 
 
-def _schedule_reconcile(vault_root: Path, *, today: dt.date) -> None:
+def _schedule_reconcile(
+    vault_root: Path, *, today: dt.date
+) -> dict[str, Any] | None:
     """Start one fail-soft projection rebuild without delaying the caller."""
     if os.environ.get("EXOMEM_SYNC_DUE_STATE_WARM", "").strip().lower() in {
         "1",
@@ -572,8 +574,7 @@ def _schedule_reconcile(vault_root: Path, *, today: dt.date) -> None:
         # them down immediately. Let those tests preserve deterministic carrier
         # assertions without leaving daemon workers racing tmpdir cleanup; the
         # focused warm-up tests remove this seam and exercise the production path.
-        reconcile(vault_root, today=today)
-        return
+        return reconcile(vault_root, today=today)
     vault_root = Path(vault_root)
     key = str(vault_root)
 
@@ -1440,8 +1441,9 @@ def served_entries(
         # An unpersistable vault recomputes ONCE per process, not once per read.
         payload = _UNPERSISTED.get(str(vault_root))
     if payload is None:
-        _schedule_reconcile(vault_root, today=today)
-        return []
+        payload = _schedule_reconcile(vault_root, today=today)
+        if payload is None:
+            return []
 
     if not _has_entries(payload):
         # Nothing stored, so nothing to filter, count or order — and no disclosure
