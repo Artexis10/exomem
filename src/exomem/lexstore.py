@@ -469,24 +469,41 @@ def _is_configured_runtime_vault(vault_root: Path) -> bool:
     )
 
 
-def _mark_runtime_retrieval_ready_if_current(vault_root: Path) -> bool:
-    """Admit the configured runtime after live projections and catalogs agree.
+def runtime_retrieval_catalog_proof(
+    vault_root: Path,
+    *,
+    require_live_projection: bool = True,
+) -> dict[str, object] | None:
+    """Prove both recall projections and maintained catalogs name one state.
 
-    This proof is deliberately read-only and never takes freshness's cold walk
-    fallback.  A repair can finish before the watcher seed; catalog bytes alone
-    are not authority to admit server reads in that state.
+    Normal server admission requires live checkpoints and never walks.  The
+    explicit event-index kill switch may call this from background repair with
+    ``require_live_projection=False`` to preserve its legacy polling fallback;
+    request admission never takes that branch.
     """
-    if not _is_configured_runtime_vault(vault_root):
-        return False
     from . import freshness as freshness_module
-    from . import readiness
 
     checkpoints: dict[str, freshness_module.RecallFreshnessCheckpoint] = {}
     for scope in ("kb", "vault"):
-        checkpoint = freshness_module.live_recall_checkpoint(vault_root, scope)
+        checkpoint = (
+            freshness_module.live_recall_checkpoint(vault_root, scope)
+            if require_live_projection
+            else freshness_module.recall_checkpoint(vault_root, scope)
+        )
         if checkpoint is None:
-            return False
+            return None
         checkpoints[scope] = checkpoint
+    if not maintained_content_index_enabled():
+        stable = all(
+            (
+                freshness_module.live_recall_checkpoint(vault_root, scope)
+                if require_live_projection
+                else freshness_module.recall_checkpoint(vault_root, scope)
+            )
+            == checkpoints[scope]
+            for scope in ("kb", "vault")
+        )
+        return checkpoints if stable else None
     store = get_store(vault_root)
     complete = all(
         store.catalog_readiness(
@@ -497,13 +514,47 @@ def _mark_runtime_retrieval_ready_if_current(vault_root: Path) -> bool:
         for scope in ("kb", "vault")
     )
     if not complete:
-        return False
+        return None
     # Do not bless a catalog proof whose projection advanced while SQLite was
     # being checked.  The next repair attempt will prove the newer pair.
     if any(
-        freshness_module.live_recall_checkpoint(vault_root, scope)
+        (
+            freshness_module.live_recall_checkpoint(vault_root, scope)
+            if require_live_projection
+            else freshness_module.recall_checkpoint(vault_root, scope)
+        )
         != checkpoints[scope]
         for scope in ("kb", "vault")
+    ):
+        return None
+    return checkpoints
+
+
+def runtime_retrieval_catalog_current(
+    vault_root: Path,
+    *,
+    require_live_projection: bool = True,
+) -> bool:
+    """Whether :func:`runtime_retrieval_catalog_proof` can bind both scopes."""
+    return (
+        runtime_retrieval_catalog_proof(
+            vault_root,
+            require_live_projection=require_live_projection,
+        )
+        is not None
+    )
+
+
+def _mark_runtime_retrieval_ready_if_current(vault_root: Path) -> bool:
+    """Admit the configured runtime after projections and catalogs agree."""
+    if not _is_configured_runtime_vault(vault_root):
+        return False
+    from . import freshness as freshness_module
+    from . import readiness
+
+    if not runtime_retrieval_catalog_current(
+        vault_root,
+        require_live_projection=freshness_module.event_indexes_enabled(),
     ):
         return False
     readiness.mark_ready("retrieval_catalog")
@@ -3687,7 +3738,7 @@ class LexicalStore:
             return self._catalog_readiness_error(e, backend_name)
 
     def recall_resolver_entries(
-        self, scope: str, freshness: tuple | None
+        self, scope: str, checkpoint: Any | None
     ) -> list[tuple[str, str | None]] | None:
         """Return exact resolver `(path, title)` entries from a current sidecar.
 
@@ -3699,8 +3750,6 @@ class LexicalStore:
         that policy before any row receives its scope flag. The sidecar test
         pins the resulting `in_vault` row set against a fresh full policy walk.
         """
-        from . import freshness as freshness_module
-
         backend_name = backend()
         if backend_name == "python":
             return None
@@ -3712,11 +3761,10 @@ class LexicalStore:
             conn = self._connect()
             try:
                 conn.execute("BEGIN")
-                target = freshness_module.recall_checkpoint(self.vault_root, scope)
                 if (
                     not self._schema_is_current(conn)
                     or _checkpoint_state(self._meta_checkpoint(conn, scope))
-                    != _checkpoint_state(target)
+                    != _checkpoint_state(checkpoint)
                 ):
                     return None
                 col = "in_vault" if scope == "vault" else "in_kb"

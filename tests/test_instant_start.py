@@ -39,6 +39,7 @@ from exomem import (
     deferred_index,
     embeddings,
     freshness,
+    lexstore,
     readiness,
     server,
     warmup,
@@ -111,8 +112,18 @@ def test_retrieval_admission_distinguishes_unverified_warming_ready_and_failed()
     }
 
 
-def test_retrieval_admission_revokes_ready_when_projection_is_lost(tmp_path: Path) -> None:
+def test_retrieval_admission_revokes_ready_when_projection_is_lost(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     _seed_runtime_recall(tmp_path)
+    monkeypatch.setattr(
+        lexstore,
+        "runtime_retrieval_catalog_current",
+        lambda root: all(
+            freshness.live_recall_checkpoint(root, scope) is not None
+            for scope in freshness.SCOPES
+        ),
+    )
     readiness.begin_warm()
     readiness.mark_ready("retrieval_catalog")
     readiness.finish_warm()

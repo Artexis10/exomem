@@ -28,17 +28,17 @@ Earlier changes already provide the right building blocks: event-maintained fres
 
 ### 1. Start observation and projection seeding before retrieval warm-up
 
-`LocalRuntimeActivation` will start the file watcher first. `FileWatcher` will expose a process-local seed-completion signal reporting whether both recall scopes became live. Activation will wait on that condition before starting catalogue warm-up when event indexes are enabled. Graph drain and media work remain behind required retrieval and semantic admission so they cannot contend with the critical seed/catalogue path.
+`LocalRuntimeActivation` will start the file watcher first. `FileWatcher` will expose a process-local seed-completion signal reporting whether both recall scopes became live and every event observed during the seed was replayed. Activation will wait on that condition before starting catalogue warm-up when event indexes are enabled. Graph drain and media work remain behind actual retrieval admission, including after a terminal first catalogue-warm failure, so they cannot contend with recovery of the critical seed/catalogue path. They also serialize behind semantic-corpus work while the initial warm remains active, but a terminal semantic soft-failure cannot strand them because that component has no independent repair signal. A successful later catalogue repair releases them without requiring a restart.
 
-If watchdog or event indexes are explicitly unavailable, startup continues through the existing background walk fallback. The transport stays live throughout; the fallback remains background work and never migrates to a request thread.
+Observation is armed before the seed begins. Events seen while the seed is walking are retained in the dispatch buffer and replayed only after the authoritative replacement maps are published; the seed-completion barrier is released only after that catch-up flush finishes, so a stale seed snapshot cannot overwrite an edit or admit its catalogue during startup. If watchdog is missing or cannot start while event indexes remain enabled, the runtime stays projection-first through reconcile-only polling rather than silently losing event-index maintenance. If event indexes are explicitly disabled, startup continues through the existing background walk fallback. The transport stays live throughout; the fallback remains background work and never migrates to a request thread.
 
 Alternative rejected: start warm-up and watcher concurrently. That retains a race in which both can perform the same full walk and makes the result machine-speed dependent.
 
 ### 2. Bind server reads to live projection admission
 
-All `find` modes, including vector-only mode, will consult retrieval admission. A runtime in `warming` or `unavailable` state cannot construct a request snapshot that is allowed to walk. `FreshnessSnapshot` will carry an explicit projection policy: server requests require a live projection; offline/CLI callers may retain the current bounded correctness fallback.
+All `find` modes, including vector-only mode, will consult retrieval admission. A runtime in `warming` or `unavailable` state cannot construct a request snapshot that is allowed to walk. `FreshnessSnapshot` will carry an explicit projection policy: server requests require a live projection; offline/CLI callers may retain the current bounded correctness fallback. Admission produces an exact pair of catalogue-matching projection checkpoints and pins that proof into the request snapshot. If either projection advances before its paths are copied, the request declines and retries after repair rather than mixing a catalogue from one generation with an allowlist from another.
 
-If readiness says ready but the required projection is not live, the request will downgrade admission, schedule repair, and return the existing retryable warming outcome rather than walking. This makes the invariant local and testable instead of trusting startup order alone.
+If readiness says ready but the required projection is not live or its catalogue checkpoint no longer matches, the request will downgrade admission, schedule repair, and return the existing retryable warming outcome rather than walking. Resolver acquisition uses only the already-live checkpoint and never re-enters the reprojecting checkpoint seam. Vector/hybrid expansion inherits the same strict snapshot policy. A cold optional referent registry is omitted and single-flighted onto a background thread rather than enumerated by the request. This makes the invariant local and testable instead of trusting startup order alone.
 
 Alternative rejected: delete the fallback globally. CLI, maintenance, tests, and deliberately watcher-free deployments still need a correct source-of-truth path.
 
@@ -53,6 +53,8 @@ Alternative rejected: set readiness directly when the watcher seed finishes. A l
 ### 4. Keep heavy and model-backed lanes optional
 
 Lexical catalogue/projection admission is the minimum useful read surface. Embeddings, reranker, CLIP, graph, and referent enrichment remain optional and soft-failing, and their warming cannot revoke lexical recall once admitted. Embedding and reranking models remain deterministic measurement components under the pure-substrate boundary; no reasoning model is introduced.
+
+The existing rollback switches keep their declared behavior. `EXOMEM_DISABLE_WARMUP=1` leaves the process in the unverified lazy mode instead of manufacturing a permanently warming managed runtime. `EXOMEM_DISABLE_EVENT_INDEXES=1` retains the legacy walk-backed lazy request path while any catalogue verification remains background work. These are explicit operator choices, not accidental fallbacks from the normal managed-server path.
 
 ### 5. Measure the invariant directly
 

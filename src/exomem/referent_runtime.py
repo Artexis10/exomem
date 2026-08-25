@@ -7,8 +7,8 @@ import os
 from pathlib import Path
 from typing import Any
 
-from . import epistemic_graph, memory_refs
-from .entity_registry import load_entity_registry
+from . import epistemic_graph, freshness, memory_refs, readiness
+from .entity_registry import load_entity_registry, schedule_entity_registry_warm
 from .entity_types import load_entity_types
 from .find import FreshnessSnapshot
 from .governance import egress
@@ -118,12 +118,28 @@ def resolve_for_find(
         cue = cue or detect_cue(query, registry=type_registry)
         if cue is None:
             return None
-        freshness_key = FreshnessSnapshot(vault_root).projection_key("kb")
+        admission = readiness.retrieval_admission(vault_root)
+        state = str(admission["state"])
+        if state in {"warming", "unavailable"}:
+            return None
+        require_live_recall = state != "unverified" and freshness.event_indexes_enabled()
+        freshness_key = FreshnessSnapshot(
+            vault_root,
+            require_live_recall=require_live_recall,
+        ).projection_key("kb")
         registry = load_entity_registry(
             vault_root,
             freshness_key=freshness_key,
             type_registry=type_registry,
+            allow_build=not require_live_recall,
         )
+        if registry is None:
+            schedule_entity_registry_warm(
+                vault_root,
+                freshness_key=freshness_key,
+                type_registry=type_registry,
+            )
+            return None
         hit_facts = _hit_facts(hits)
         edges = _edge_facts(
             vault_root,

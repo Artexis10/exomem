@@ -2,7 +2,7 @@
 
 ### Requirement: Event-Maintained Markdown Freshness Keys
 
-The system SHALL maintain, in memory, a per-scope registry of policy-admitted `{path: signature}` rows for markdown under each recall scope (`kb`, `vault`), updated from a safely enumerated seed, the live file watcher, and in-process writer events. A live registry SHALL answer a scope's freshness triple and exact allowed-path projection without a request-time filesystem walk. Seed and reconcile SHALL publish a complete replacement map and its checkpoint atomically; readers SHALL continue observing the last proven map until the replacement is authoritative. Event-derived paths SHALL retain Windows long-name canonicalisation, reparse/no-follow validation, access-policy checks, and Records/Planning admission before publication.
+The system SHALL maintain, in memory, a per-scope registry of policy-admitted `{path: signature}` rows for markdown under each recall scope (`kb`, `vault`), updated from a safely enumerated seed, the live file watcher, and in-process writer events. A live registry SHALL answer a scope's freshness triple and exact allowed-path projection without a request-time filesystem walk. Seed and reconcile SHALL publish a complete replacement map and its checkpoint atomically; readers SHALL continue observing the last proven map until the replacement is authoritative. Observation events received before initial seed publication SHALL be retained and replayed against the published generation. Event-derived paths SHALL retain Windows long-name canonicalisation, reparse/no-follow validation, access-policy checks, and Records/Planning admission before publication.
 
 Activated server consumers MUST NOT fall back to a walk when a registry is not live; they SHALL report retrieval warming/unavailable and allow background recovery to establish authority. Explicit offline callers and deployments with event indexes disabled MAY use the prior walk fallback. A rename MUST change the scope digest even when mtime is preserved, and a suppressed self-write MUST still update every affected live projection.
 
@@ -29,6 +29,12 @@ Activated server consumers MUST NOT fall back to a walk when a registry is not l
 - **WHEN** periodic reconciliation derives a replacement projection while readers are active
 - **THEN** readers observe either the complete previous checkpoint/map or the complete replacement checkpoint/map
 - **AND** no reader observes a mixed or empty intermediate generation
+
+#### Scenario: Startup event survives seed replacement
+
+- **WHEN** a create, modify, delete, or move is observed after enumeration begins but before initial replacement publication
+- **THEN** the event remains buffered until the replacement is authoritative
+- **AND** applying the event advances the resulting live generation before consumers rely on it
 
 #### Scenario: Event path aliases are validated once before publication
 

@@ -2,7 +2,7 @@
 
 ### Requirement: Per-Request Freshness Snapshot
 
-The system SHALL compute markdown freshness for a single `find` request at most once per scope and SHALL distinguish activated server requests from explicit offline callers. An activated server request MUST use a live checkpoint-bound recall projection and MUST NOT perform a KB or vault markdown stat-walk to construct recall admission. When a required server projection is not live, the request SHALL return the retryable retrieval-warming outcome and schedule or observe repair without walking. An offline/CLI caller with no activated runtime MAY fall back to the walk-based computation, still bounded to at most one KB walk and one vault walk per request. A `scope="kb-only"` request MUST NOT perform a vault-wide walk in either execution context. A live registry's triple and path set MUST equal a fresh policy-projected walk over the same state.
+The system SHALL compute markdown freshness for a single `find` request at most once per scope and SHALL distinguish activated managed-server requests from explicit offline callers. An activated managed-server request MUST use one exact live checkpoint pair that is proven equal to both maintained catalogue checkpoints, pin that proof into its freshness snapshot, and MUST NOT perform a KB or vault markdown stat-walk to construct recall admission. When a required server projection is not live, its catalogue is not equal, or the projection advances before path-copy completion, the request SHALL return the retryable retrieval-warming outcome and schedule or observe repair without walking. An offline/CLI caller with no activated runtime MAY fall back to the walk-based computation, still bounded to at most one KB walk and one vault walk per request. A `scope="kb-only"` request MUST NOT perform a vault-wide walk in either execution context. A live registry's triple and path set MUST equal a fresh policy-projected walk over the same state.
 
 #### Scenario: Activated server request never walks for recall admission
 
@@ -27,6 +27,12 @@ The system SHALL compute markdown freshness for a single `find` request at most 
 - **WHEN** `find` is called for a scope whose event-maintained recall projection is live
 - **THEN** that scope's freshness and allowed paths are obtained from the registry with no filesystem stat-walk
 - **AND** the returned hits are identical to a policy-projected walk over the same vault state
+
+#### Scenario: Catalogue proof is pinned through path acquisition
+
+- **WHEN** a managed request proves catalogues against live checkpoints and one projection advances before its path set is copied
+- **THEN** the request declines with the retryable retrieval-warming outcome
+- **AND** it does not serve a mixed-generation result
 
 ## ADDED Requirements
 

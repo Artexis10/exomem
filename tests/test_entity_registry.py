@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import importlib
+import threading
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import yaml
 
@@ -81,6 +84,61 @@ def test_registry_cache_hits_on_same_freshness_key_and_rebuilds_on_new_key(
     assert first is second
     assert third is not second
     assert calls == 2
+
+
+def test_cache_only_registry_lookup_never_builds(tmp_path: Path, monkeypatch) -> None:
+    module = _registry()
+    module.clear_entity_registry_cache()
+    monkeypatch.setattr(
+        module,
+        "_build_registry",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("managed request must not build a cold entity registry")
+        ),
+    )
+
+    assert (
+        module.load_entity_registry(
+            tmp_path,
+            freshness_key=("cold",),
+            allow_build=False,
+        )
+        is None
+    )
+
+
+def test_background_registry_warm_populates_the_exact_cache_key(
+    tmp_path: Path, monkeypatch
+) -> None:
+    module = _registry()
+    module.clear_entity_registry_cache()
+    type_registry = SimpleNamespace(core_version="core", extension_hash="extension")
+    expected = {"Knowledge Base/Entities/People/aria.md": object()}
+    built = threading.Event()
+
+    def build(*_args, **_kwargs):
+        built.set()
+        return expected
+
+    monkeypatch.setattr(module, "_build_registry", build)
+    module.schedule_entity_registry_warm(
+        tmp_path,
+        freshness_key=("live",),
+        type_registry=type_registry,
+    )
+    assert built.wait(timeout=1.0)
+
+    deadline = time.monotonic() + 1.0
+    cached = None
+    while cached is None and time.monotonic() < deadline:
+        cached = module.load_entity_registry(
+            tmp_path,
+            freshness_key=("live",),
+            type_registry=type_registry,
+            allow_build=False,
+        )
+        time.sleep(0.01)
+    assert cached is expected
 
 
 def test_registry_enumerates_extension_type_folders(tmp_path: Path) -> None:

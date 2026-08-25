@@ -87,6 +87,7 @@ def test_initialize_runtime_does_not_start_workers_before_transport(
 def test_local_runtime_activation_waits_for_liveness_and_starts_once(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.delenv("EXOMEM_DISABLE_WARMUP", raising=False)
     vault = tmp_path / "vault"
     vault.mkdir()
     calls: list[str] = []
@@ -177,6 +178,7 @@ def test_local_runtime_activation_waits_for_liveness_and_starts_once(
 def test_local_runtime_activation_waits_for_terminal_warm_after_catalog_failure(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.delenv("EXOMEM_DISABLE_WARMUP", raising=False)
     vault = tmp_path / "vault"
     vault.mkdir()
     compute_started = threading.Event()
@@ -209,12 +211,57 @@ def test_local_runtime_activation_waits_for_terminal_warm_after_catalog_failure(
             readiness.mark_ready("semantic_corpus")
             assert not downstream_activated.wait(timeout=0.05)
             readiness.finish_warm()
+            assert not downstream_activated.wait(timeout=0.05)
+            readiness.mark_ready("retrieval_catalog")
             assert downstream_activated.wait(timeout=1.0)
 
     try:
         asyncio.run(exercise())
     finally:
         readiness.reset()
+
+
+def test_disable_warmup_preserves_unverified_lazy_runtime_admission(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_DISABLE_WARMUP", "1")
+    vault = tmp_path / "vault"
+    vault.mkdir()
+
+    server_runtime.LocalRuntimeActivation(vault, fallback_seconds=60.0)
+
+    try:
+        assert readiness.retrieval_admission(vault) == {
+            "state": "unverified",
+            "admitted": False,
+        }
+    finally:
+        readiness.reset()
+
+
+def test_terminal_semantic_warm_failure_does_not_strand_startup_recovery(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("EXOMEM_DISABLE_WARMUP", raising=False)
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    activation = server_runtime.LocalRuntimeActivation(vault, fallback_seconds=60.0)
+    readiness.begin_warm()
+    readiness.mark_ready("retrieval_catalog")
+    returned = threading.Event()
+
+    thread = threading.Thread(
+        target=lambda: (activation._wait_for_required_admission(), returned.set()),
+        daemon=True,
+    )
+    thread.start()
+    try:
+        assert not returned.wait(timeout=0.05)
+        readiness.finish_warm()
+        assert returned.wait(timeout=1.0)
+    finally:
+        readiness.reset()
+        thread.join(timeout=1.0)
 
 
 def test_local_runtime_activation_falls_back_without_liveness_probe(

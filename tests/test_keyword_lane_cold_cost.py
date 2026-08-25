@@ -9,6 +9,7 @@ import pytest
 
 from exomem import find as find_module
 from exomem import freshness, lexstore, readiness
+from exomem import vault as vault_module
 from exomem.vault import walk_vault_md
 
 pytestmark = pytest.mark.skipif(
@@ -434,6 +435,225 @@ def test_ready_runtime_losing_projection_demotes_without_walk(
     assert readiness.retrieval_admission() == {
         "state": "unavailable",
         "admitted": False,
+    }
+
+
+def test_ready_runtime_projection_advance_revokes_stale_catalog_proof(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_page(
+        tmp_path,
+        "Knowledge Base/Notes/target.md",
+        "checkpointbound oldpayload",
+    )
+    _seed_live(tmp_path)
+    proven = {
+        scope: freshness.live_recall_checkpoint(tmp_path, scope)
+        for scope in freshness.SCOPES
+    }
+    assert all(proven.values())
+
+    class CheckpointBoundStore:
+        def catalog_readiness(self, scope, *_args, **_kwargs):  # noqa: ANN001
+            current = freshness.live_recall_checkpoint(tmp_path, scope)
+            return lexstore.CatalogReadiness(
+                "available" if current == proven[scope] else "stale",
+                current == proven[scope],
+                "fts5",
+            )
+
+    monkeypatch.setattr(lexstore, "get_store", lambda _root: CheckpointBoundStore())
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(tmp_path.resolve()))
+    readiness.manage_runtime()
+    readiness.begin_warm()
+    readiness.mark_ready("retrieval_catalog")
+    readiness.finish_warm()
+
+    assert readiness.retrieval_admission(tmp_path) == {
+        "state": "ready",
+        "admitted": True,
+    }
+
+    added = _write_page(
+        tmp_path,
+        "Knowledge Base/Notes/added.md",
+        "checkpointbound newpayload",
+    )
+    freshness.on_files_changed(tmp_path, changed=[added])
+
+    assert readiness.retrieval_admission(tmp_path) == {
+        "state": "unavailable",
+        "admitted": False,
+    }
+
+
+def test_strict_resolver_declines_missing_catalog_without_walking(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_page(
+        tmp_path,
+        "Knowledge Base/Notes/target.md",
+        "strictresolver payload",
+    )
+    _seed_live(tmp_path)
+    checkpoint = freshness.live_recall_checkpoint(tmp_path, "vault")
+    assert checkpoint is not None
+    observed_checkpoints: list[freshness.RecallFreshnessCheckpoint | None] = []
+
+    class MissingResolverCatalog:
+        def recall_resolver_entries(self, _scope, candidate):  # noqa: ANN001
+            observed_checkpoints.append(candidate)
+            return None
+
+    monkeypatch.setattr(lexstore, "get_store", lambda _root: MissingResolverCatalog())
+    walked = 0
+
+    def forbidden_walk(_root: Path):
+        nonlocal walked
+        walked += 1
+        raise AssertionError("strict resolver must not walk the vault")
+        yield  # pragma: no cover - generator-shaped test double
+
+    monkeypatch.setattr(vault_module, "walk_vault_md", forbidden_walk)
+    monkeypatch.setattr(
+        freshness,
+        "recall_checkpoint",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("strict resolver must not enter the reprojecting checkpoint seam")
+        ),
+    )
+
+    with pytest.raises(find_module.RetrievalIndexWarming):
+        find_module.recall_resolver_snapshot(
+            tmp_path,
+            freshness=checkpoint.triple,
+            allow_fallback=False,
+        )
+
+    assert walked == 0
+    assert observed_checkpoints == [checkpoint]
+
+
+def test_vector_graph_resolver_inherits_strict_server_projection_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_page(
+        tmp_path,
+        "Knowledge Base/Notes/target.md",
+        "strictresolverpropagation payload",
+    )
+    _seed_live(tmp_path)
+    monkeypatch.setattr(
+        readiness,
+        "retrieval_admission",
+        lambda _root=None: {"state": "ready", "admitted": True},
+    )
+    monkeypatch.setattr(
+        lexstore,
+        "runtime_retrieval_catalog_proof",
+        lambda _root: {
+            scope: freshness.live_recall_checkpoint(tmp_path, scope)
+            for scope in freshness.SCOPES
+        },
+    )
+    observed: list[bool] = []
+
+    def resolver(_root: Path, freshness=None, *, allow_fallback=True):  # noqa: ANN001
+        observed.append(allow_fallback)
+        raise find_module.RetrievalIndexWarming(status="temporarily_unavailable")
+
+    def collect(root: Path, **kwargs):  # noqa: ANN003
+        kwargs["get_query_resolver"](
+            root,
+            freshness=kwargs["snapshot"].projection_key("vault"),
+        )
+        raise AssertionError("resolver refusal must escape candidate collection")
+
+    monkeypatch.setattr(find_module, "recall_resolver_snapshot", resolver)
+    monkeypatch.setattr(find_module.find_candidates, "collect_candidates", collect)
+
+    with pytest.raises(find_module.RetrievalIndexWarming):
+        find_module.find(
+            tmp_path,
+            query="strictresolverpropagation",
+            mode="vector",
+            scope="kb",
+            graph=False,
+            temporal=False,
+        )
+
+    assert observed == [False]
+
+
+def test_request_projection_cannot_advance_past_its_catalog_proof(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_page(
+        tmp_path,
+        "Knowledge Base/Notes/target.md",
+        "requestproof payload",
+    )
+    _seed_live(tmp_path)
+    readiness.manage_runtime()
+    readiness.begin_warm()
+    readiness.mark_ready("retrieval_catalog")
+    readiness.finish_warm()
+    proof_calls = 0
+
+    def proof(_root: Path):
+        nonlocal proof_calls
+        proof_calls += 1
+        checkpoints = {
+            scope: freshness.live_recall_checkpoint(tmp_path, scope)
+            for scope in freshness.SCOPES
+        }
+        added = _write_page(
+            tmp_path,
+            "Knowledge Base/Notes/racing.md",
+            "requestproof racing payload",
+        )
+        freshness.on_files_changed(tmp_path, changed=[added])
+        return checkpoints
+
+    monkeypatch.setattr(lexstore, "runtime_retrieval_catalog_proof", proof)
+    monkeypatch.setattr(
+        freshness,
+        "recall_projection_snapshot",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("advanced request must decline before projection fallback")
+        ),
+    )
+
+    with pytest.raises(find_module.RetrievalIndexWarming):
+        find_module.find(
+            tmp_path,
+            query="requestproof",
+            mode="vector",
+            scope="kb",
+            graph=False,
+            temporal=False,
+        )
+
+    assert proof_calls == 1
+
+
+def test_event_index_kill_switch_keeps_managed_runtime_on_lazy_rollback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_page(
+        tmp_path,
+        "Knowledge Base/Notes/target.md",
+        "killrollback payload",
+    )
+    monkeypatch.setenv("EXOMEM_DISABLE_EVENT_INDEXES", "1")
+    readiness.manage_runtime()
+    readiness.begin_warm()
+    readiness.mark_ready("retrieval_catalog")
+    readiness.finish_warm()
+
+    assert readiness.retrieval_admission(tmp_path) == {
+        "state": "ready",
+        "admitted": True,
     }
 
 

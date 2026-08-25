@@ -125,6 +125,12 @@ def is_warming() -> bool:
         return _warm_active and not _warm_finished
 
 
+def warm_started() -> bool:
+    """Whether this process has entered a managed warm at least once."""
+    with _lock:
+        return _warm_active or _warm_finished
+
+
 def retrieval_admission(vault_root: Path | None = None) -> dict[str, object]:
     """Admission state for ordinary maintained-catalog recall.
 
@@ -148,14 +154,17 @@ def retrieval_admission(vault_root: Path | None = None) -> dict[str, object]:
         return admission
     from . import freshness
 
+    if not freshness.event_indexes_enabled():
+        # Explicit rollback mode retains its historical request-time polling
+        # fallback.  Startup catalog verification still happens off-thread.
+        return admission
     try:
-        projections_live = all(
-            freshness.live_recall_checkpoint(vault_root, scope) is not None
-            for scope in freshness.SCOPES
-        )
+        from . import lexstore
+
+        proof_current = lexstore.runtime_retrieval_catalog_current(vault_root)
     except Exception:  # noqa: BLE001 - readiness uncertainty fails closed
-        projections_live = False
-    if projections_live:
+        proof_current = False
+    if proof_current:
         return admission
     mark_unready("retrieval_catalog")
     with _lock:

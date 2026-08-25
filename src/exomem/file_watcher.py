@@ -333,9 +333,11 @@ class FileWatcher:
         self._thread: threading.Thread | None = None
         self._observer = None
         self._reconcile_thread: threading.Thread | None = None
+        self._seed_published = threading.Event()
         self._seed_complete = threading.Event()
         self._seed_succeeded = False
         self._startup_recovery_started = False
+        self._dispatch_waits_for_seed = False
 
     def _watcher_policy(self) -> mode.WatcherPolicy:
         return mode.watcher_policy()
@@ -484,6 +486,25 @@ class FileWatcher:
     # ---- debounce loop ----
 
     def _run_dispatch(self) -> None:
+        if self._dispatch_waits_for_seed:
+            # Observation is armed before the long seed.  Keep those events in
+            # the coalescing buffer until both scope maps are published, then
+            # replay them against the live generation instead of dropping them
+            # while ``on_files_changed`` has no authoritative map to patch.
+            while not self._stop.is_set() and not self._seed_published.wait(0.1):
+                pass
+            if not self._stop.is_set():
+                try:
+                    # Admission waits for this catch-up flush, not merely for
+                    # replacement-map publication.  Every event observed while
+                    # the seed was walking is therefore reflected before the
+                    # catalogue warm can prove a checkpoint.
+                    self._flush()
+                except Exception:  # noqa: BLE001 - failed catch-up is a failed seed
+                    self._seed_succeeded = False
+                    log.exception("file watcher: startup event catch-up failed")
+                finally:
+                    self._seed_complete.set()
         while not self._stop.is_set():
             self._wake.wait()
             if self._stop.is_set():
@@ -1089,7 +1110,9 @@ class FileWatcher:
             log.exception("file watcher: startup freshness seed failed")
         finally:
             self._seed_succeeded = succeeded
-            self._seed_complete.set()
+            self._seed_published.set()
+            if not self._dispatch_waits_for_seed:
+                self._seed_complete.set()
         while not self._stop.wait(self._reconcile_interval_seconds()):
             self._reconcile_once(seed=False)
 
@@ -1105,23 +1128,20 @@ class FileWatcher:
             return False
         return self._seed_succeeded
 
+    def _start_reconcile_thread(self) -> None:
+        if self._reconcile_thread is not None and self._reconcile_thread.is_alive():
+            return
+        self._reconcile_thread = threading.Thread(
+            target=self._run_reconcile,
+            name="kb-freshness-reconcile",
+            daemon=True,
+        )
+        self._reconcile_thread.start()
+
     # ---- lifecycle ----
 
     def start(self) -> bool:
-        """Start watching. Returns False (no-op) when watchdog is unavailable.
-
-        Soft-fail: a missing `watchdog` dep leaves the server fully functional — edits
-        just won't be live-re-embedded until the next `reconcile`.
-        """
-        try:
-            Observer, FileSystemEventHandler = _import_watchdog()
-        except Exception as e:  # noqa: BLE001 — optional dep
-            log.info(
-                "file watcher: watchdog not available (%s); live re-embed disabled (no-op). "
-                "Out-of-band edits re-embed on the next reconcile.",
-                e,
-            )
-            return False
+        """Start observation, or reconcile-only polling when watchdog is absent."""
         if not self._vault_root.is_dir():
             log.info("file watcher: %s not found; not watching", self._vault_root)
             return False
@@ -1131,9 +1151,24 @@ class FileWatcher:
         # recreating the dispatch/observer threads.
         self._stop.clear()
         self._wake.clear()
+        self._seed_published.clear()
         self._seed_complete.clear()
         self._seed_succeeded = False
         self._startup_recovery_started = False
+        self._dispatch_waits_for_seed = False
+
+        try:
+            Observer, FileSystemEventHandler = _import_watchdog()
+        except Exception as e:  # noqa: BLE001 — optional dep
+            if freshness.event_indexes_enabled():
+                log.info(
+                    "file watcher: watchdog not available (%s); using reconcile-only polling",
+                    e,
+                )
+                self._start_reconcile_thread()
+                return True
+            log.info("file watcher: watchdog not available (%s); watcher disabled", e)
+            return False
 
         watcher = self
 
@@ -1155,6 +1190,7 @@ class FileWatcher:
                     watcher._record(Path(event.src_path), deleted=True)
                     watcher._record(Path(event.dest_path), deleted=False)
 
+        self._dispatch_waits_for_seed = freshness.event_indexes_enabled()
         self._thread = threading.Thread(
             target=self._run_dispatch, name="kb-file-watcher", daemon=True
         )
@@ -1170,12 +1206,17 @@ class FileWatcher:
             log.warning("file watcher: observer failed to start (%s); live re-embed disabled", e)
             self._stop.set()
             self._wake.set()
+            self._thread.join(timeout=2)
+            self._thread = None
+            if freshness.event_indexes_enabled():
+                self._dispatch_waits_for_seed = False
+                self._stop.clear()
+                self._wake.clear()
+                self._start_reconcile_thread()
+                return True
             return False
         if freshness.event_indexes_enabled():
-            self._reconcile_thread = threading.Thread(
-                target=self._run_reconcile, name="kb-freshness-reconcile", daemon=True
-            )
-            self._reconcile_thread.start()
+            self._start_reconcile_thread()
         log.info("file watcher started on %s", self._vault_root)
         return True
 

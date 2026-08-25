@@ -2,7 +2,7 @@
 
 ### Requirement: Projection-First Runtime Activation
 
-The local runtime SHALL start filesystem observation and seed both event-maintained recall scopes before maintained-catalog verification begins. When event indexes or the watcher are unavailable, the system SHALL run the existing full verification only as background startup work. Graph drain, media reconciliation, and other optional/heavy workers MUST NOT contend with the projection/catalogue admission path before required retrieval and semantic state is admitted.
+The local runtime SHALL start filesystem observation and seed both event-maintained recall scopes before maintained-catalog verification begins. Events observed during the seed SHALL be replayed after authoritative seed publication, and activation SHALL wait for that catch-up replay before catalogue verification begins. When watchdog is unavailable but event indexes remain enabled, reconcile-only polling SHALL establish and maintain the projection; when event indexes are explicitly disabled, the system SHALL run the existing full verification only as background startup work. Graph drain, media reconciliation, and other optional/heavy workers MUST NOT contend with the projection/catalogue path before retrieval is actually admitted. They SHALL serialize behind semantic-corpus work while the initial warm is active, but a terminal semantic soft-failure MUST NOT strand them.
 
 #### Scenario: Watcher seed precedes catalogue verification
 
@@ -12,14 +12,39 @@ The local runtime SHALL start filesystem observation and seed both event-maintai
 
 #### Scenario: Watcher-free startup remains functional
 
-- **WHEN** watchdog or event-maintained indexes are explicitly unavailable
+- **WHEN** watchdog is unavailable while event-maintained indexes remain enabled
+- **THEN** reconcile-only polling seeds and maintains the recall projection
+- **AND** transport liveness remains available
+
+#### Scenario: Event indexes disabled retains explicit rollback behavior
+
+- **WHEN** event-maintained indexes are explicitly disabled
 - **THEN** transport liveness remains available
 - **AND** required catalogue verification may use the existing background walk fallback
-- **AND** no server request performs that fallback
+- **AND** the declared legacy lazy request fallback remains available
+
+#### Scenario: An edit observed during seed is not overwritten
+
+- **WHEN** filesystem observation reports an edit while the startup seed is still deriving its replacement maps
+- **THEN** dispatch retains that event until seed publication completes
+- **AND** activation remains behind the seed barrier until replay updates the published generation
+- **AND** catalogue verification cannot admit the stale pre-replay checkpoint
+
+#### Scenario: Terminal catalogue warm failure keeps heavy recovery gated
+
+- **WHEN** the first managed warm finishes without retrieval-catalog admission
+- **THEN** graph drain, media reconciliation, and other optional heavy workers remain gated
+- **AND** a later proven repair releases them without a process restart
+
+#### Scenario: Terminal semantic warm failure remains soft
+
+- **WHEN** retrieval is admitted but the one-shot semantic-corpus warm finishes unsuccessfully
+- **THEN** graph drain, media reconciliation, and other optional heavy workers continue
+- **AND** the missing semantic ready bit does not create an unrecoverable startup wait
 
 ### Requirement: Retrieval Readiness Recovers After Repair
 
-Retrieval admission SHALL be derived from proven current projection and catalogue state, not only from the outcome of the first warm attempt. If startup catalogue warming fails and a later seed or catalogue repair converges, the runtime SHALL promote retrieval to ready without a process restart. If a previously ready runtime loses its live projection or catalogue proof, it SHALL demote before serving another recall request.
+Retrieval admission SHALL be derived from proven current projection and catalogue state, not only from the outcome of the first warm attempt. The proof SHALL bind both maintained catalogue checkpoints to the exact live projection checkpoints used by the request. If startup catalogue warming fails and a later seed or catalogue repair converges, the runtime SHALL promote retrieval to ready without a process restart. If a previously ready runtime loses its live projection, catalogue equality, or request-pinned generation, it SHALL demote before serving another recall request.
 
 #### Scenario: Later repair heals failed startup admission
 
@@ -33,6 +58,12 @@ Retrieval admission SHALL be derived from proven current projection and catalogu
 - **THEN** the next server recall request does not use walk fallback or stale ready admission
 - **AND** retrieval is reported as warming or unavailable until proof converges again
 
+#### Scenario: Projection advance cannot mix request generations
+
+- **WHEN** a projection advances after catalogue admission proof but before the request copies its allowed paths
+- **THEN** the request returns the retryable retrieval-warming outcome
+- **AND** it does not combine the older catalogue with the newer projection
+
 ### Requirement: All Retrieval Modes Obey Admission
 
 Keyword, hybrid, and vector-only requests SHALL obey the same required recall-projection admission boundary. Optional model-backed lanes remain soft-failing after lexical admission and MUST NOT be promoted into required readiness components.
@@ -42,3 +73,13 @@ Keyword, hybrid, and vector-only requests SHALL obey the same required recall-pr
 - **WHEN** a vector-only server request arrives before the recall projection is live
 - **THEN** it returns the same retryable retrieval-warming outcome as other modes
 - **AND** it does not construct a walk-backed allowlist
+
+### Requirement: Disabled Warmup Preserves Lazy Operation
+
+Explicitly disabling startup warmup SHALL leave local recall in its unverified lazy mode. The runtime MUST NOT create a managed warming state that can never finish when no warm was started.
+
+#### Scenario: Warmup kill switch does not strand readiness
+
+- **WHEN** `EXOMEM_DISABLE_WARMUP=1` is set at local runtime construction
+- **THEN** retrieval admission remains unverified rather than permanently warming
+- **AND** the existing lazy caller behavior remains available

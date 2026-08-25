@@ -852,14 +852,98 @@ def test_dispatch_thread_uses_quiet_policy_for_burst_coalescing(
         t.join(timeout=2)
 
 
-def test_start_soft_fails_when_watchdog_missing(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_start_without_watchdog_runs_reconcile_only_polling(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     def _boom():
         raise ImportError("No module named 'watchdog'")
 
     monkeypatch.setattr(file_watcher, "_import_watchdog", _boom)
+    monkeypatch.setattr(file_watcher.index_sync, "drain_deferred_work", lambda *_a, **_k: None)
+    freshness.invalidate(vault)
     w = file_watcher.FileWatcher(vault)
-    assert w.start() is False  # no-op, server keeps running
-    assert w._thread is None and w._observer is None
+    monkeypatch.setattr(w, "_reconcile_interval_seconds", lambda: 0.01)
+    monkeypatch.setattr(w, "_dispatch_reconcile_delta", lambda *_a, **_k: 0)
+    monkeypatch.setattr(w, "_recover_external_pending", lambda *_a, **_k: None)
+    monkeypatch.setattr(w, "_recover_suspended_graph", lambda: None)
+    started = w.start()
+    try:
+        assert started is True
+        assert w._thread is None and w._observer is None
+        assert w.wait_until_seeded(timeout=2.0)
+        created = vault / "Knowledge Base" / "Notes" / "poll-only.md"
+        created.parent.mkdir(parents=True, exist_ok=True)
+        created.write_text("# polling fallback\n", encoding="utf-8")
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            entries = freshness.live_recall_entries(vault, "kb") or {}
+            if str(created) in entries:
+                break
+            time.sleep(0.02)
+        assert str(created) in (freshness.live_recall_entries(vault, "kb") or {})
+    finally:
+        w.stop()
+
+
+def test_dispatch_replays_observed_edit_after_seed_publication(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = vault / "Knowledge Base" / "Notes" / "seed-race.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("# before\n", encoding="utf-8")
+    stale_signature = freshness.stat_signature(target)
+    freshness.invalidate(vault)
+    watcher = file_watcher.FileWatcher(vault, debounce_seconds=0.01)
+    watcher._dispatch_waits_for_seed = True
+    replay_started = threading.Event()
+    release_replay = threading.Event()
+
+    def publish_only(ups, _up_rels, del_rels, **_kwargs):  # noqa: ANN001
+        replay_started.set()
+        assert release_replay.wait(timeout=2.0)
+        freshness.on_files_changed(
+            vault,
+            changed=ups,
+            deleted=[vault / rel for rel in del_rels],
+        )
+
+    monkeypatch.setattr(watcher, "_dispatch_batch", publish_only)
+    dispatch = threading.Thread(target=watcher._run_dispatch, daemon=True)
+    dispatch.start()
+    try:
+        target.write_text("# after seed scan\n", encoding="utf-8")
+        current_signature = freshness.stat_signature(target)
+        assert current_signature != stale_signature
+        watcher._record(target, deleted=False)
+        time.sleep(0.05)
+
+        for scope in freshness.SCOPES:
+            freshness.seed(vault, scope, [(str(target), stale_signature)])
+        watcher._seed_succeeded = True
+        watcher._seed_published.set()
+
+        assert replay_started.wait(timeout=2.0)
+        assert not watcher.wait_until_seeded(timeout=0.05)
+        assert (freshness.live_recall_entries(vault, "kb") or {})[str(target)] == (
+            stale_signature
+        )
+        release_replay.set()
+        assert watcher.wait_until_seeded(timeout=2.0)
+
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            published = (freshness.live_recall_entries(vault, "kb") or {}).get(str(target))
+            if published == current_signature:
+                break
+            time.sleep(0.02)
+        assert (freshness.live_recall_entries(vault, "kb") or {})[str(target)] == (
+            current_signature
+        )
+    finally:
+        release_replay.set()
+        watcher._stop.set()
+        watcher._wake.set()
+        dispatch.join(timeout=2.0)
 
 
 def test_start_no_op_when_kb_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

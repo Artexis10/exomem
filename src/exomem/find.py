@@ -426,14 +426,23 @@ class FreshnessSnapshot:
         *,
         require_live_recall: bool = False,
         timings: FindTimings | None = None,
+        expected_recall_checkpoints: dict[
+            str, freshness.RecallFreshnessCheckpoint
+        ]
+        | None = None,
     ) -> None:
         self._root = vault_root
         self._require_live_recall = require_live_recall
         self._timings = timings
+        self._expected_recall_checkpoints = expected_recall_checkpoints or {}
         self._kb: tuple[int, int, str] | None = None
         self._vault: tuple[int, int, str] | None = None
         self._recall: dict[str, freshness.RecallFreshnessCheckpoint] = {}
         self._recall_paths: dict[str, frozenset[str]] = {}
+
+    @property
+    def requires_live_recall(self) -> bool:
+        return self._require_live_recall
 
     def kb(self) -> tuple[int, int, str]:
         if self._kb is None:
@@ -510,6 +519,11 @@ class FreshnessSnapshot:
                     raise freshness.RecallProjectionUnavailable(
                         f"maintained recall projection is not live for scope={scope!r}"
                     )
+                expected = self._expected_recall_checkpoints.get(scope)
+                if expected is not None and checkpoint != expected:
+                    raise freshness.RecallProjectionUnavailable(
+                        f"maintained recall projection advanced for scope={scope!r}"
+                    )
                 with _RECALL_PATH_CACHE_LOCK:
                     cached = _RECALL_PATH_CACHE.get(cache_key)
                     if cached is not None and cached[0] == checkpoint:
@@ -532,6 +546,10 @@ class FreshnessSnapshot:
                     checkpoint, entries = freshness.recall_projection_snapshot(
                         self._root,
                         scope,
+                    )
+                if expected is not None and checkpoint != expected:
+                    raise freshness.RecallProjectionUnavailable(
+                        f"maintained recall projection advanced for scope={scope!r}"
                     )
                 paths: set[str] = set()
                 for raw_path in entries:
@@ -846,10 +864,22 @@ def find(
 
     from . import lexstore, readiness
 
-    admission = readiness.retrieval_admission(vault_root)
+    admission = readiness.retrieval_admission()
     state = str(admission["state"])
-    require_live_recall = state != "unverified"
+    require_live_recall = state != "unverified" and freshness.event_indexes_enabled()
+    catalog_proof: dict[str, freshness.RecallFreshnessCheckpoint] | None = None
     with _span(timings, "recall_projection"):
+        if state == "ready" and require_live_recall:
+            raw_proof = lexstore.runtime_retrieval_catalog_proof(vault_root)
+            if raw_proof is None:
+                readiness.mark_unready("retrieval_catalog")
+                state = "unavailable"
+            else:
+                catalog_proof = {
+                    scope: checkpoint
+                    for scope, checkpoint in raw_proof.items()
+                    if isinstance(checkpoint, freshness.RecallFreshnessCheckpoint)
+                }
         if state in {"warming", "unavailable"}:
             if state == "unavailable":
                 lexstore.request_repair(vault_root)
@@ -959,6 +989,7 @@ def find(
         vault_root,
         require_live_recall=require_live_recall,
         timings=timings,
+        expected_recall_checkpoints=catalog_proof,
     )
     page_memo: dict[str, ParsedPage | None] = {}
 
@@ -2993,7 +3024,11 @@ def _find_semantic(
             page_of=_page_of,
             keyword_match_paths=_keyword_match_paths,
             outbound_wikilink_paths=_outbound_wikilink_paths,
-            get_query_resolver=recall_resolver_snapshot,
+            get_query_resolver=lambda root, freshness=None: recall_resolver_snapshot(
+                root,
+                freshness=freshness,
+                allow_fallback=not snapshot.requires_live_recall,
+            ),
             record_degradation=_record_degradation,
             degraded_out=degraded_out,
             failed_out=failed_out,
@@ -4113,7 +4148,12 @@ def shared_resolver(vault_root: Path):
     return _get_query_resolver(vault_root)
 
 
-def recall_resolver_snapshot(vault_root: Path, freshness: tuple | None = None):
+def recall_resolver_snapshot(
+    vault_root: Path,
+    freshness: tuple | None = None,
+    *,
+    allow_fallback: bool = True,
+):
     """Resolver for ordinary recall and graph expansion only.
 
     Unlike the writer resolver, this view is intentionally constructed from
@@ -4146,10 +4186,14 @@ def recall_resolver_snapshot(vault_root: Path, freshness: tuple | None = None):
     else:
         identity = (freshness_key, policy_version, access_fingerprint)
     checkpoint: freshness_module.RecallFreshnessCheckpoint | None = None
-    if freshness_module.recall_is_live(root, "vault"):
+    candidate = freshness_module.live_recall_checkpoint(root, "vault")
+    if candidate is None and allow_fallback:
         candidate = freshness_module.recall_checkpoint(root, "vault")
-        if identity == _recall_checkpoint_identity(candidate):
-            checkpoint = candidate
+    if candidate is not None and identity == _recall_checkpoint_identity(candidate):
+        checkpoint = candidate
+    if not allow_fallback and checkpoint is None:
+        lexstore.request_repair(root)
+        raise RetrievalIndexWarming(status="temporarily_unavailable")
     with _RESOLVER_LOCK:
         cached = _RECALL_RESOLVER_CACHE.get(root)
         if cached and cached[0] == identity:
@@ -4190,10 +4234,11 @@ def recall_resolver_snapshot(vault_root: Path, freshness: tuple | None = None):
     # would then elect itself leader and rebuild -- reintroducing the stampede
     # this exists to prevent, just narrowed to a race window.
     try:
-        entries = lexstore.get_store(root).recall_resolver_entries(
-            "vault", checkpoint.triple if checkpoint is not None else None
-        )
+        entries = lexstore.get_store(root).recall_resolver_entries("vault", checkpoint)
         if entries is None:
+            if not allow_fallback:
+                lexstore.request_repair(root)
+                raise RetrievalIndexWarming(status="temporarily_unavailable")
             entries = []
             for path in walk_vault_md(root):
                 if not recall_policy.is_recall_candidate(root, path):

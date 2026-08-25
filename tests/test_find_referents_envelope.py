@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from exomem import commands, epistemic_graph
+from exomem import commands, epistemic_graph, readiness
 from exomem import embeddings as embeddings_module
 from exomem import find as find_module
 
@@ -191,6 +191,67 @@ def test_resolver_exception_is_logged_and_soft_fails(
     assert isinstance(result, list) or "referents" not in result
     assert "referent resolution failed" in caplog.text
     assert "registry boom" in caplog.text
+
+
+def test_managed_referent_stage_requires_live_projection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = _runtime()
+    observed: list[bool] = []
+    build_permissions: list[bool] = []
+    scheduled: list[tuple] = []
+    vault = tmp_path / "vault"
+    vault.mkdir()
+
+    class Snapshot:
+        def __init__(self, _root: Path, *, require_live_recall: bool = False, **_kwargs):
+            observed.append(require_live_recall)
+
+        def projection_key(self, _scope: str):
+            return ("live-projection",)
+
+    def cache_only(
+        _root: Path,
+        *,
+        freshness_key: tuple,
+        type_registry,
+        allow_build: bool = True,
+    ):
+        build_permissions.append(allow_build)
+        return None
+
+    monkeypatch.setattr(runtime, "FreshnessSnapshot", Snapshot)
+    monkeypatch.setattr(runtime, "load_entity_types", lambda _root: {})
+    monkeypatch.setattr(runtime, "load_entity_registry", cache_only)
+    monkeypatch.setattr(
+        runtime,
+        "schedule_entity_registry_warm",
+        lambda _root, **kwargs: scheduled.append(tuple(kwargs["freshness_key"])),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        readiness,
+        "retrieval_admission",
+        lambda _root=None: {"state": "ready", "admitted": True},
+    )
+    cue = runtime.detect_cue("my two coastal friends")
+    assert cue is not None
+
+    result = runtime.resolve_for_find(
+        vault,
+        query="my two coastal friends",
+        hits=[],
+        mode="vector",
+        graph=False,
+        release=object(),
+        purpose=None,
+        cue=cue,
+    )
+
+    assert result is None
+    assert observed == [True]
+    assert build_permissions == [False]
+    assert scheduled == [("live-projection",)]
 
 
 def test_kill_switch_env_disables_resolver(referent_vault: Path, monkeypatch) -> None:

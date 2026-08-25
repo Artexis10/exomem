@@ -89,9 +89,10 @@ class LocalRuntimeActivation:
     """Start local background workers after transport liveness is observable."""
 
     def __init__(self, vault_root: Path, *, fallback_seconds: float = 5.0) -> None:
-        from . import readiness
+        from . import readiness, warmup
 
-        readiness.manage_runtime()
+        if warmup.warmup_enabled():
+            readiness.manage_runtime()
         self.vault_root = vault_root
         self.fallback_seconds = fallback_seconds
         self._lock = threading.Lock()
@@ -155,12 +156,21 @@ class LocalRuntimeActivation:
 
     def _wait_for_required_admission(self) -> None:
         """Keep reconcilers out until retrieval and mutation state are admitted."""
-        from . import readiness
+        from . import readiness, warmup
 
-        while readiness.is_warming():
+        if not warmup.warmup_enabled():
+            return
+        while True:
             catalog_ready = readiness.is_ready("retrieval_catalog")
             semantic_ready = readiness.is_ready("semantic_corpus")
-            if catalog_ready and semantic_ready:
+            if catalog_ready and (semantic_ready or not readiness.is_warming()):
+                # Semantic corpus has no independent post-warm repair signal.
+                # Let it serialize behind retrieval while the one-shot warm is
+                # active, then preserve the historical soft-failure behavior
+                # instead of stranding graph/media recovery forever.
+                return
+            if not readiness.warm_started():
+                # A custom/hosted starter elected not to open a managed warm.
                 return
             missing = "retrieval_catalog" if not catalog_ready else "semantic_corpus"
             readiness.wait(missing, timeout=0.1)
@@ -445,7 +455,13 @@ def _start_retrieval_runtime(vault_root: Path) -> None:
 
     if warmup.warmup_enabled():
         if os.environ.get("EXOMEM_EAGER_BOOT"):
-            warmup.warm_all(vault_root)
+            from . import readiness
+
+            readiness.begin_warm()
+            try:
+                warmup.warm_all(vault_root)
+            finally:
+                readiness.finish_warm()
         else:
             warmup.start_background(vault_root)
 
