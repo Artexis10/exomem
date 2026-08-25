@@ -42,6 +42,14 @@ class MarkdownCatalogMutation:
 
 
 @dataclass(frozen=True, slots=True)
+class CatalogRemoval:
+    """One intended catalog membership removal and its exact predecessor."""
+
+    path: str
+    expected_before_hash: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class PreparedMarkdownCatalogPublication:
     """One complete lexical-only catalog successor awaiting canonical bytes."""
 
@@ -319,7 +327,7 @@ def _normalize_markdown_mutations(
     vault_root: Path,
     mutations: tuple[MarkdownCatalogMutation, ...],
 ) -> tuple[tuple[str, MarkdownCatalogMutation], ...]:
-    if type(mutations) is not tuple or not mutations:
+    if type(mutations) is not tuple:
         raise CatalogPublicationError(
             "catalog publication requires a finite Markdown mutation batch"
         )
@@ -343,11 +351,50 @@ def _normalize_markdown_mutations(
     return tuple(normalized)
 
 
+def _normalize_catalog_removals(
+    vault_root: Path,
+    removals: tuple[CatalogRemoval, ...],
+) -> tuple[tuple[str, CatalogRemoval], ...]:
+    if type(removals) is not tuple:
+        raise CatalogPublicationError(
+            "catalog publication requires a finite removal batch"
+        )
+    normalized: list[tuple[str, CatalogRemoval]] = []
+    aliases: set[str] = set()
+    for removal in removals:
+        if type(removal) is not CatalogRemoval:
+            raise CatalogPublicationError("catalog publication removal is invalid")
+        candidate = PurePosixPath(str(removal.path).replace("\\", "/"))
+        if candidate.suffix.casefold() != ".md":
+            raise CatalogPublicationError(
+                "non-Markdown content publication is not available"
+            )
+        relative = _relative_markdown_path(vault_root, removal.path)
+        if not _is_catalog_markdown_path(relative):
+            continue
+        expected = removal.expected_before_hash
+        if (
+            type(expected) is not str
+            or len(expected) != 64
+            or any(character not in "0123456789abcdef" for character in expected)
+        ):
+            raise CatalogPublicationError(
+                "catalog removal lacks an exact predecessor binding"
+            )
+        alias = unicodedata.normalize("NFC", relative).casefold()
+        if alias in aliases:
+            raise CatalogPublicationError("catalog publication removal targets collide")
+        aliases.add(alias)
+        normalized.append((relative, removal))
+    return tuple(normalized)
+
+
 def _prepare_markdown_batch(
     vault_root: Path,
     *,
     normalized: tuple[tuple[str, MarkdownCatalogMutation], ...] | None,
     planned_writes: tuple[vault.PlannedWrite, ...] | None,
+    removals: tuple[CatalogRemoval, ...] = (),
     now: int | None = None,
 ) -> PreparedMarkdownCatalogPublication | None:
     """Prepare one complete batch successor, or return ``None`` for v3/open.
@@ -459,9 +506,13 @@ def _prepare_markdown_batch(
 
     if normalized is None:
         assert planned_writes is not None
-        if type(planned_writes) is not tuple or not planned_writes:
+        if type(planned_writes) is not tuple:
             raise CatalogPublicationError(
                 "catalog publication requires a finite planned-write batch"
+            )
+        if not planned_writes and not removals:
+            raise CatalogPublicationError(
+                "catalog publication requires a non-empty planned-write batch"
             )
         mutations = tuple(
             mutation
@@ -469,6 +520,15 @@ def _prepare_markdown_batch(
             if (mutation := mutation_from_planned_write(root, write)) is not None
         )
         normalized = _normalize_markdown_mutations(root, mutations)
+    normalized_removals = _normalize_catalog_removals(root, removals)
+    membership_aliases = [
+        unicodedata.normalize("NFC", relative).casefold()
+        for relative, _mutation in (*normalized_removals, *normalized)
+    ]
+    if len(membership_aliases) != len(set(membership_aliases)):
+        raise CatalogPublicationError("catalog membership targets collide")
+    if not normalized and not normalized_removals:
+        return None
 
     by_identity = {item.item_identity: item for item in verified.items}
     target_key = projections.ProjectionNamespaceKey(
@@ -476,6 +536,16 @@ def _prepare_markdown_batch(
         projector_schema_version=snapshot.active.projector_schema_version,
         catalog_generation=snapshot.active.catalog_generation + 1,
     )
+    for relative, removal in normalized_removals:
+        predecessor = by_identity.get(relative)
+        if (
+            predecessor is None
+            or predecessor.content_hash != removal.expected_before_hash
+        ):
+            raise CatalogPublicationError(
+                "catalog removal no longer matches the reviewed predecessor"
+            )
+        del by_identity[relative]
     for relative, mutation in normalized:
         predecessor = by_identity.get(relative)
         if mutation.expected_before_hash is None:
@@ -512,7 +582,7 @@ def _prepare_markdown_batch(
         target_items=target_items,
         catalog_descriptor=descriptor,
         activated_at=activated_at,
-        mutation_count=len(normalized),
+        mutation_count=len(normalized) + len(normalized_removals),
     )
 
 
@@ -524,11 +594,16 @@ def prepare_markdown_batch(
 ) -> PreparedMarkdownCatalogPublication | None:
     """Prepare an explicit canonical Markdown mutation batch."""
 
+    if type(mutations) is not tuple or not mutations:
+        raise CatalogPublicationError(
+            "catalog publication requires a finite Markdown mutation batch"
+        )
     root = Path(vault_root)
     return _prepare_markdown_batch(
         root,
         normalized=_normalize_markdown_mutations(root, mutations),
         planned_writes=None,
+        removals=(),
         now=now,
     )
 
@@ -545,6 +620,30 @@ def prepare_planned_markdown_batch(
         vault_root,
         normalized=None,
         planned_writes=writes,
+        removals=(),
+        now=now,
+    )
+
+
+def prepare_catalog_membership_batch(
+    vault_root: Path,
+    *,
+    writes: tuple[vault.PlannedWrite, ...] = (),
+    removals: tuple[CatalogRemoval, ...] = (),
+    now: int | None = None,
+) -> PreparedMarkdownCatalogPublication | None:
+    """Prepare lazy write/removal membership changes for a product mutation.
+
+    Open and schema-v3 vaults retain their existing behavior. Exact-v4 vaults
+    validate every removal only after enrollment is established, so unsupported
+    content kinds fail before the caller mutates canonical bytes.
+    """
+
+    return _prepare_markdown_batch(
+        vault_root,
+        normalized=None,
+        planned_writes=writes,
+        removals=removals,
         now=now,
     )
 
@@ -697,10 +796,12 @@ def publish_markdown_upsert(
 
 __all__ = [
     "CatalogPublicationError",
+    "CatalogRemoval",
     "MarkdownCatalogMutation",
     "PreparedMarkdownCatalogPublication",
     "mutation_from_planned_write",
     "prepare_markdown_batch",
+    "prepare_catalog_membership_batch",
     "prepare_planned_markdown_batch",
     "prepare_markdown_upsert",
     "publish_markdown_batch",
