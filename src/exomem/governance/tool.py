@@ -29,6 +29,7 @@ from .. import (
     epistemic_graph,
     find_corpus,
     graph_sync,
+    held_fs,
     index_paths,
     lexstore,
     media_jobs,
@@ -92,7 +93,10 @@ _LEXICAL_REBUILD_TEMP_RE = re.compile(
 _CROCKFORD32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 _ULID_RE = re.compile(r"^[0-9A-HJKMNP-TV-Z]{26}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-_V4_POLICY_PROPOSAL_SCHEMA = "exomem.governance-policy-proposal/v2"
+_V4_POLICY_PROPOSAL_SCHEMA = "exomem.governance-policy-proposal/v3"
+_V4_POLICY_MIRROR_SCHEMA = "exomem.governance-policy-workspace-mirror/v1"
+_V4_POLICY_MIRROR_OPERATION = "governance_policy_workspace_mirror"
+_V4_POLICY_MIRROR_OUTCOMES = frozenset({"complete", "diverged"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +106,7 @@ class _DecodedV4PolicyProposal:
     policy: schema_v4.PolicyGenerationSeed
     namespace: schema_v4.ProjectionNamespaceSeed
     direction: str
+    authoring_snapshot: policy_module.AuthoringSnapshot
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,6 +241,13 @@ def _snapshot_value(snapshot: policy_module.AuthoringSnapshot) -> dict[str, Any]
                 "sha256": item.sha256,
             }
             for item in snapshot.file_identities
+        ],
+        "directory_identities": [
+            {
+                "path": relative,
+                "identity": _stable_identity_value(identity),
+            }
+            for relative, identity in snapshot.directory_identities
         ],
         "governance_root_identity": _stable_identity_value(
             snapshot.governance_root_identity
@@ -2732,6 +2744,196 @@ def _decoded_bound_documents(value: Any) -> tuple[tuple[str, bytes], ...]:
     return ordered
 
 
+def _v4_mirror_relative_path(relative: str) -> bool:
+    path = Path(relative)
+    return (
+        not path.is_absolute()
+        and len(path.parts) == 2
+        and path.parts[0] in {"scopes", "rules", "grants"}
+        and path.parts[1] not in {"", ".", ".."}
+        and path.parts[1].endswith(".yaml")
+        and relative == path.as_posix()
+    )
+
+
+def _decoded_stable_identity(value: object, *, kind: str) -> held_fs.StableIdentity:
+    if not isinstance(value, dict) or set(value) != {
+        "device",
+        "inode",
+        "kind",
+        "link_count",
+    }:
+        raise GovernanceError(
+            "INVALID_GOVERNANCE_PROPOSAL",
+            "stored governance authoring identity is invalid",
+        )
+    integer_fields = ("device", "inode", "link_count")
+    if (
+        any(
+            isinstance(value[field], bool)
+            or not isinstance(value[field], int)
+            or value[field] < 0
+            for field in integer_fields
+        )
+        or value["link_count"] < 1
+        or value["kind"] != kind
+        or (kind == "file" and value["link_count"] != 1)
+    ):
+        raise GovernanceError(
+            "INVALID_GOVERNANCE_PROPOSAL",
+            "stored governance authoring identity is invalid",
+        )
+    return held_fs.StableIdentity(
+        device=value["device"],
+        inode=value["inode"],
+        kind=value["kind"],
+        link_count=value["link_count"],
+    )
+
+
+def _decoded_v4_authoring_snapshot(value: object) -> policy_module.AuthoringSnapshot:
+    expected_fields = {
+        "documents",
+        "source_fingerprint",
+        "conflict_set_digest",
+        "guard_generation",
+        "file_identities",
+        "directory_identities",
+        "governance_root_identity",
+    }
+    if not isinstance(value, dict) or set(value) != expected_fields:
+        raise GovernanceError(
+            "INVALID_GOVERNANCE_PROPOSAL",
+            "stored governance authoring snapshot is invalid",
+        )
+    documents = _decoded_bound_documents(value["documents"])
+    document_map = dict(documents)
+    if any(not _v4_mirror_relative_path(relative) for relative in document_map):
+        raise GovernanceError(
+            "INVALID_GOVERNANCE_PROPOSAL",
+            "stored governance authoring path is invalid",
+        )
+    raw_identities = value["file_identities"]
+    if not isinstance(raw_identities, list):
+        raise GovernanceError(
+            "INVALID_GOVERNANCE_PROPOSAL",
+            "stored governance authoring identities are invalid",
+        )
+    identities: list[policy_module.AuthoringFileIdentity] = []
+    seen: set[str] = set()
+    for item in raw_identities:
+        if not isinstance(item, dict) or set(item) != {"path", "identity", "sha256"}:
+            raise GovernanceError(
+                "INVALID_GOVERNANCE_PROPOSAL",
+                "stored governance authoring identities are invalid",
+            )
+        relative = item["path"]
+        digest = item["sha256"]
+        if (
+            not isinstance(relative, str)
+            or relative in seen
+            or relative not in document_map
+            or not isinstance(digest, str)
+            or _SHA256_RE.fullmatch(digest) is None
+            or hashlib.sha256(document_map[relative]).hexdigest() != digest
+        ):
+            raise GovernanceError(
+                "INVALID_GOVERNANCE_PROPOSAL",
+                "stored governance authoring identities are invalid",
+            )
+        seen.add(relative)
+        identities.append(
+            policy_module.AuthoringFileIdentity(
+                path=relative,
+                identity=_decoded_stable_identity(item["identity"], kind="file"),
+                sha256=digest,
+            )
+        )
+    if tuple(item.path for item in identities) != tuple(sorted(document_map)):
+        raise GovernanceError(
+            "INVALID_GOVERNANCE_PROPOSAL",
+            "stored governance authoring identities are incomplete",
+        )
+    raw_directories = value["directory_identities"]
+    if not isinstance(raw_directories, list):
+        raise GovernanceError(
+            "INVALID_GOVERNANCE_PROPOSAL",
+            "stored governance authoring directories are invalid",
+        )
+    directories: list[tuple[str, held_fs.StableIdentity]] = []
+    seen_directories: set[str] = set()
+    for item in raw_directories:
+        if not isinstance(item, dict) or set(item) != {"path", "identity"}:
+            raise GovernanceError(
+                "INVALID_GOVERNANCE_PROPOSAL",
+                "stored governance authoring directories are invalid",
+            )
+        relative = item["path"]
+        path = Path(relative) if isinstance(relative, str) else None
+        if (
+            path is None
+            or path.is_absolute()
+            or relative != path.as_posix()
+            or any(part in {"", ".", ".."} for part in path.parts)
+            or relative in seen_directories
+        ):
+            raise GovernanceError(
+                "INVALID_GOVERNANCE_PROPOSAL",
+                "stored governance authoring directories are invalid",
+            )
+        seen_directories.add(relative)
+        directories.append(
+            (
+                relative,
+                _decoded_stable_identity(item["identity"], kind="directory"),
+            )
+        )
+    if tuple(relative for relative, _ in directories) != tuple(
+        sorted(seen_directories)
+    ):
+        raise GovernanceError(
+            "INVALID_GOVERNANCE_PROPOSAL",
+            "stored governance authoring directories are not ordered",
+        )
+    root_value = value["governance_root_identity"]
+    root_identity = (
+        None
+        if root_value is None
+        else _decoded_stable_identity(root_value, kind="directory")
+    )
+    if (root_identity is None) != (not documents):
+        raise GovernanceError(
+            "INVALID_GOVERNANCE_PROPOSAL",
+            "stored governance authoring root is invalid",
+        )
+    source_fingerprint = value["source_fingerprint"]
+    conflict_digest = value["conflict_set_digest"]
+    guard_generation = value["guard_generation"]
+    compiled = policy_module.compile_documents(document_map)
+    if (
+        not isinstance(source_fingerprint, str)
+        or _SHA256_RE.fullmatch(source_fingerprint) is None
+        or source_fingerprint != compiled.fingerprint
+        or not isinstance(conflict_digest, str)
+        or _SHA256_RE.fullmatch(conflict_digest) is None
+        or not isinstance(guard_generation, str)
+        or not guard_generation
+    ):
+        raise GovernanceError(
+            "INVALID_GOVERNANCE_PROPOSAL",
+            "stored governance authoring snapshot is invalid",
+        )
+    return policy_module.AuthoringSnapshot(
+        documents=documents,
+        source_fingerprint=source_fingerprint,
+        conflict_set_digest=conflict_digest,
+        guard_generation=guard_generation,
+        file_identities=tuple(identities),
+        directory_identities=tuple(directories),
+        governance_root_identity=root_identity,
+    )
+
+
 def _reviewed_active_state(value: object) -> schema_v4.VerifiedActiveGovernanceState:
     expected_keys = {
         "logical_vault_id",
@@ -2861,6 +3063,11 @@ def _decode_v4_proposal_binding(
             "stored governance target is invalid",
         )
     target_documents = _decoded_bound_documents(target["source_documents"])
+    if any(not _v4_mirror_relative_path(relative) for relative, _ in target_documents):
+        raise GovernanceError(
+            "INVALID_GOVERNANCE_PROPOSAL",
+            "stored governance target path is invalid",
+        )
     compiled = policy_module.compile_documents(dict(target_documents))
     try:
         compiled_bytes = base64.b64decode(target["compiled_policy"], validate=True)
@@ -2957,16 +3164,7 @@ def _decode_v4_proposal_binding(
             "GOVERNANCE_PROJECTION_REBUILD_REQUIRED",
             "the reviewed target projection namespace does not verify",
         )
-    snapshot = binding["authoring_snapshot"]
-    if (
-        not isinstance(snapshot, dict)
-        or not isinstance(snapshot.get("conflict_set_digest"), str)
-        or _SHA256_RE.fullmatch(snapshot["conflict_set_digest"]) is None
-    ):
-        raise GovernanceError(
-            "INVALID_GOVERNANCE_PROPOSAL",
-            "stored governance authoring snapshot is invalid",
-        )
+    snapshot = _decoded_v4_authoring_snapshot(binding["authoring_snapshot"])
     return _DecodedV4PolicyProposal(
         payload=payload,
         expected=expected,
@@ -2974,7 +3172,7 @@ def _decode_v4_proposal_binding(
             generation_id=target["generation_id"],
             source_documents=target_documents,
             source_fingerprint=target["source_fingerprint"],
-            conflict_digest=snapshot["conflict_set_digest"],
+            conflict_digest=snapshot.conflict_set_digest,
             compiled_policy=compiled_bytes,
             policy_fingerprint=target["policy_fingerprint"],
             compiler_schema_version=target["compiler_schema_version"],
@@ -2990,6 +3188,7 @@ def _decode_v4_proposal_binding(
             ready_at=namespace["ready_at"],
         ),
         direction=direction,
+        authoring_snapshot=snapshot,
     )
 
 
@@ -3237,20 +3436,417 @@ def _spend_v4_policy_proposal(
         connection.close()
 
 
+def _v4_workspace_mirror_barrier(_phase: str, _path: str | None = None) -> None:
+    """Deterministic test seam around the non-authoritative workspace mirror."""
+
+
+def _v4_workspace_mirror_event_id(decoded: _DecodedV4PolicyProposal) -> str:
+    return receipts.critical_event_id(
+        {
+            "schema": _V4_POLICY_MIRROR_SCHEMA,
+            "policy_receipt_event_id": decoded.policy.receipt_event_id,
+            "policy_generation_id": decoded.policy.generation_id,
+        }
+    )
+
+
+def _v4_workspace_mirror_terminal(
+    vault_root: Path,
+    decoded: _DecodedV4PolicyProposal,
+) -> str | None:
+    event_id = _v4_workspace_mirror_event_id(decoded)
+    prior, prepared, target, affected = _v4_workspace_mirror_receipt_digests(decoded)
+    try:
+        event_records = receipts.event_records(vault_root)
+        intents = [
+            record
+            for record in event_records
+            if record.get("event_id") == event_id and record.get("phase") == "intent"
+        ]
+        terminals = [
+            record
+            for record in event_records
+            if record.get("causation_id") == event_id
+            and record.get("phase") in {"committed", "aborted"}
+        ]
+    except receipts.ReceiptError:
+        raise GovernanceError(
+            "GOVERNANCE_BLOCKED",
+            "policy workspace mirror evidence cannot be verified",
+        ) from None
+    if not intents and not terminals:
+        return None
+    if len(intents) != 1 or any(
+        intents[0].get(field) != expected
+        for field, expected in {
+            "event_type": "critical",
+            "operation": _V4_POLICY_MIRROR_OPERATION,
+            "prior": prior,
+            "prepared": prepared,
+            "target": target,
+            "affected_ids": affected,
+            "parent_causation_id": decoded.policy.receipt_event_id,
+        }.items()
+    ):
+        raise GovernanceError(
+            "GOVERNANCE_BLOCKED",
+            "policy workspace mirror intent evidence is contradictory",
+        )
+    if not terminals:
+        return None
+    if len(terminals) != 1 or terminals[0].get("phase") != "committed":
+        raise GovernanceError(
+            "GOVERNANCE_BLOCKED",
+            "policy workspace mirror evidence is contradictory",
+        )
+    outcome = terminals[0].get("outcome")
+    if outcome not in _V4_POLICY_MIRROR_OUTCOMES:
+        raise GovernanceError(
+            "GOVERNANCE_BLOCKED",
+            "policy workspace mirror evidence has an unknown outcome",
+        )
+    return str(outcome)
+
+
+def _v4_workspace_mirror_receipt_digests(
+    decoded: _DecodedV4PolicyProposal,
+) -> tuple[str, str, str, list[str]]:
+    reviewed = decoded.authoring_snapshot
+    prior = _digest(
+        {
+            "schema": _V4_POLICY_MIRROR_SCHEMA,
+            "policy_generation_id": decoded.expected.policy_generation_id,
+            "source_fingerprint": reviewed.source_fingerprint,
+            "authoring_snapshot": _snapshot_value(reviewed),
+        }
+    )
+    prepared = _digest(
+        {
+            "schema": _V4_POLICY_MIRROR_SCHEMA,
+            "policy_generation_id": decoded.policy.generation_id,
+            "policy_receipt_event_id": decoded.policy.receipt_event_id,
+            "source_fingerprint": decoded.policy.source_fingerprint,
+        }
+    )
+    target = _digest(
+        {
+            "schema": _V4_POLICY_MIRROR_SCHEMA,
+            "policy_generation_id": decoded.policy.generation_id,
+            "source_fingerprint": decoded.policy.source_fingerprint,
+            "source_documents": [
+                {
+                    "path_digest": hashlib.sha256(relative.encode("utf-8")).hexdigest(),
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                }
+                for relative, content in decoded.policy.source_documents
+            ],
+        }
+    )
+    affected = [
+        hashlib.sha256(
+            _canonical_json(
+                sorted(
+                    set(dict(reviewed.documents))
+                    | set(dict(decoded.policy.source_documents))
+                )
+            ).encode("utf-8")
+        ).hexdigest()
+    ]
+    return prior, prepared, target, affected
+
+
+def _same_v4_mirror_identity(
+    observed: held_fs.StableIdentity | None,
+    expected: held_fs.StableIdentity | None,
+) -> bool:
+    if observed is None or expected is None:
+        return observed is expected
+    return (
+        observed.device == expected.device
+        and observed.inode == expected.inode
+        and observed.kind == expected.kind
+        and (observed.kind != "file" or observed.link_count == expected.link_count == 1)
+    )
+
+
+def _v4_workspace_mirror_plan(
+    current: policy_module.AuthoringSnapshot,
+    reviewed: policy_module.AuthoringSnapshot,
+    target_documents: tuple[tuple[str, bytes], ...],
+) -> list[tuple[str, bytes | None, policy_module.AuthoringFileIdentity | None]] | None:
+    prior = dict(reviewed.documents)
+    target = dict(target_documents)
+    observed = dict(current.documents)
+    reviewed_identities = {item.path: item for item in reviewed.file_identities}
+    observed_identities = {item.path: item for item in current.file_identities}
+    reviewed_directories = dict(reviewed.directory_identities)
+    observed_directories = dict(current.directory_identities)
+    target_directories = {Path(relative).parent.as_posix() for relative in target}
+    if reviewed.governance_root_identity is not None and not _same_v4_mirror_identity(
+        current.governance_root_identity,
+        reviewed.governance_root_identity,
+    ):
+        return None
+    if set(observed) - (set(prior) | set(target)):
+        return None
+    if set(observed_directories) - (set(reviewed_directories) | target_directories):
+        return None
+    for relative, expected in reviewed_directories.items():
+        if not _same_v4_mirror_identity(observed_directories.get(relative), expected):
+            return None
+    effects: list[
+        tuple[str, bytes | None, policy_module.AuthoringFileIdentity | None]
+    ] = []
+    for relative in sorted(set(prior) | set(target)):
+        prior_bytes = prior.get(relative)
+        target_bytes = target.get(relative)
+        observed_bytes = observed.get(relative)
+        reviewed_identity = reviewed_identities.get(relative)
+        observed_identity = observed_identities.get(relative)
+        if prior_bytes == target_bytes:
+            if (
+                observed_bytes != prior_bytes
+                or reviewed_identity is None
+                or observed_identity != reviewed_identity
+            ):
+                return None
+            continue
+        if observed_bytes == target_bytes:
+            continue
+        if observed_bytes != prior_bytes:
+            return None
+        if prior_bytes is not None and (
+            reviewed_identity is None or observed_identity != reviewed_identity
+        ):
+            return None
+        effects.append((relative, target_bytes, observed_identity))
+    return effects
+
+
+def _v4_mirror_failure_status(error: held_fs.HeldFsError | None) -> str:
+    if error is not None and error.code in {
+        "DESTINATION_EXISTS",
+        "IDENTITY_CHANGED",
+        "MISSING",
+        "UNSAFE_PATH",
+    }:
+        return "diverged"
+    return "pending"
+
+
+def _apply_v4_workspace_mirror(
+    vault_root: Path,
+    decoded: _DecodedV4PolicyProposal,
+    *,
+    crash_at: object,
+) -> str:
+    base = f"{kb_dirname()}/{policy_module.GOVERNANCE_DIRNAME}"
+    reviewed = decoded.authoring_snapshot
+    target_documents = decoded.policy.source_documents
+    reviewed_directories = dict(reviewed.directory_identities)
+    with reserved_paths._identity_coordination_scope(
+        vault_root,
+        descriptor_ids=("governance-tree",),
+        identity_may_change=True,
+    ):
+        current = policy_module.observe_authoring_snapshot(vault_root)
+        if current is None:
+            return "diverged"
+        effects = _v4_workspace_mirror_plan(current, reviewed, target_documents)
+        if effects is None:
+            return "diverged"
+        acquired = held_fs.acquire(vault_root)
+        if not acquired.ok:
+            return _v4_mirror_failure_status(acquired.error)
+        publications = reserved_paths._reachable_owner_publications(
+            vault_root, "governance-tree"
+        )
+        with acquired.require() as filesystem:
+            root_result = filesystem.parent(
+                base,
+                create=reviewed.governance_root_identity is None,
+                access="flush",
+            )
+            if not root_result.ok:
+                return _v4_mirror_failure_status(root_result.error)
+            with root_result.require() as governance_root:
+                if reviewed.governance_root_identity is not None and not (
+                    _same_v4_mirror_identity(
+                        governance_root.identity,
+                        reviewed.governance_root_identity,
+                    )
+                ):
+                    return "diverged"
+                publications[base] = governance_root.identity
+                for index, (relative, target_bytes, current_identity) in enumerate(
+                    effects, start=1
+                ):
+                    _v4_workspace_mirror_barrier("before_write", relative)
+                    path = Path(relative)
+                    parent_relative = Path(base, path.parent).as_posix()
+                    parent_result = filesystem.parent(
+                        parent_relative,
+                        create=current_identity is None,
+                        access="flush",
+                    )
+                    if not parent_result.ok:
+                        return _v4_mirror_failure_status(parent_result.error)
+                    with parent_result.require() as parent:
+                        expected_parent = reviewed_directories.get(path.parent.as_posix())
+                        if expected_parent is not None and not _same_v4_mirror_identity(
+                            parent.identity,
+                            expected_parent,
+                        ):
+                            return "diverged"
+                        publications[parent_relative] = parent.identity
+                        if target_bytes is None:
+                            mutable = filesystem.file(parent, path.name, access="mutate")
+                            if not mutable.ok:
+                                return _v4_mirror_failure_status(mutable.error)
+                            with mutable.require() as existing:
+                                if current_identity is None or (
+                                    existing.identity != current_identity.identity
+                                ):
+                                    return "diverged"
+                                observed = filesystem.read(existing)
+                                if (
+                                    not observed.ok
+                                    or hashlib.sha256(observed.require()).hexdigest()
+                                    != current_identity.sha256
+                                ):
+                                    return "diverged"
+                                removed = filesystem.unlink(existing)
+                                if not removed.ok:
+                                    return _v4_mirror_failure_status(removed.error)
+                            flushed = filesystem.flush_directory(parent)
+                            if not flushed.ok:
+                                return _v4_mirror_failure_status(flushed.error)
+                            publications.pop(f"{base}/{relative}", None)
+                        else:
+                            published = held_fs.publish_bytes(
+                                filesystem,
+                                parent,
+                                path.name,
+                                target_bytes,
+                                expected_identity=(
+                                    None
+                                    if current_identity is None
+                                    else current_identity.identity
+                                ),
+                                expected_sha256=(
+                                    None
+                                    if current_identity is None
+                                    else current_identity.sha256
+                                ),
+                            )
+                            if not published.ok:
+                                return _v4_mirror_failure_status(published.error)
+                            flushed = filesystem.flush_directory(parent)
+                            if not flushed.ok:
+                                return _v4_mirror_failure_status(flushed.error)
+                            publications[f"{base}/{relative}"] = published.require()
+                        if (
+                            not filesystem.validate_directory(parent).ok
+                            or not filesystem.validate_directory(governance_root).ok
+                        ):
+                            return "diverged"
+                    _v4_workspace_mirror_barrier("after_write", relative)
+                    if crash_at in {
+                        "v4_after_mirror_write",
+                        f"v4_after_mirror_write:{index}",
+                    }:
+                        raise GovernanceCrash(str(crash_at))
+                if not filesystem.validate_directory(governance_root).ok:
+                    return "diverged"
+        final = policy_module.observe_authoring_snapshot(vault_root)
+        if (
+            final is None
+            or final.documents != target_documents
+            or (
+                reviewed.governance_root_identity is not None
+                and not _same_v4_mirror_identity(
+                    final.governance_root_identity,
+                    reviewed.governance_root_identity,
+                )
+            )
+        ):
+            return "diverged"
+        for item in final.file_identities:
+            publications[f"{base}/{item.path}"] = item.identity
+        for relative, identity in final.directory_identities:
+            publications[f"{base}/{relative}"] = identity
+        reserved_paths._publish_owner_identities(
+            vault_root, "governance-tree", publications
+        )
+    return "complete"
+
+
+def _mirror_v4_policy_workspace(
+    vault_root: Path,
+    decoded: _DecodedV4PolicyProposal,
+    *,
+    crash_at: object,
+) -> str:
+    event_id = _v4_workspace_mirror_event_id(decoded)
+    existing = _v4_workspace_mirror_terminal(vault_root, decoded)
+    if existing is not None:
+        return existing
+    prior, prepared, target, affected = _v4_workspace_mirror_receipt_digests(decoded)
+    try:
+        receipts.begin_event(
+            vault_root,
+            operation=_V4_POLICY_MIRROR_OPERATION,
+            prior=prior,
+            prepared=prepared,
+            target=target,
+            affected_ids=affected,
+            event_id=event_id,
+            parent_causation_id=decoded.policy.receipt_event_id,
+        )
+    except receipts.ReceiptError:
+        raise GovernanceError(
+            "GOVERNANCE_BLOCKED",
+            "policy workspace mirror intent could not be recorded",
+        ) from None
+    _v4_workspace_mirror_barrier("after_intent")
+    if crash_at == "v4_after_mirror_intent":
+        raise GovernanceCrash("v4_after_mirror_intent")
+    outcome = _apply_v4_workspace_mirror(
+        vault_root,
+        decoded,
+        crash_at=crash_at,
+    )
+    if crash_at == "v4_after_mirror_effect":
+        raise GovernanceCrash("v4_after_mirror_effect")
+    if outcome == "pending":
+        raise GovernanceError(
+            "GOVERNANCE_BLOCKED",
+            "the committed policy tuple is active but its workspace mirror needs retry",
+        )
+    try:
+        receipts.commit_event(vault_root, event_id, outcome=outcome)
+    except receipts.ReceiptError:
+        raise GovernanceError(
+            "GOVERNANCE_BLOCKED",
+            "policy workspace mirror outcome could not be recorded",
+        ) from None
+    if crash_at == "v4_after_mirror_terminal":
+        raise GovernanceCrash("v4_after_mirror_terminal")
+    return outcome
+
+
 def _v4_commit_terminal(
     *,
     proposal_id: str,
     decoded: _DecodedV4PolicyProposal,
+    mirror_status: str,
 ) -> dict[str, Any]:
-    # Publication never treats mutable YAML as authority.  The held-handle
-    # workspace mirror is a separate protocol; until that lands, surface the
-    # divergence explicitly instead of falling back to pathname writes.
     return {
         "status": "committed",
         "event_id": decoded.policy.receipt_event_id,
         "proposal_id": proposal_id,
         "direction": decoded.direction,
-        "mirror_status": "pending",
+        "mirror_status": mirror_status,
     }
 
 
@@ -3270,9 +3866,8 @@ def _commit(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
             ).fetchone()
             if row is None:
                 raise GovernanceError("PROPOSAL_UNKNOWN", "no such proposal")
-            if str(row[2]) == "spent":
-                raise GovernanceError("PROPOSAL_SPENT", "proposal was already activated")
-            if str(row[2]) != "pending":
+            status = str(row[2])
+            if status not in {"pending", "spent"}:
                 raise GovernanceError("PROPOSAL_EXPIRED", "proposal is not active")
             proposal_json = str(row[0])
             manifest_json = str(row[1])
@@ -3292,6 +3887,22 @@ def _commit(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
             )
         finally:
             connection.close()
+        if status == "spent":
+            if recovered is None:
+                raise GovernanceError(
+                    "GOVERNANCE_BLOCKED",
+                    "spent policy proposal has no exact committed publication",
+                )
+            mirror_status = _mirror_v4_policy_workspace(
+                vault_root,
+                decoded,
+                crash_at=kwargs.get("crash_at"),
+            )
+            return _v4_commit_terminal(
+                proposal_id=proposal_id,
+                decoded=decoded,
+                mirror_status=mirror_status,
+            )
         if recovered is not None:
             _spend_v4_policy_proposal(
                 vault_root,
@@ -3300,9 +3911,15 @@ def _commit(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
                 membership_manifest=manifest_json,
                 spent_at=int(now),
             )
+            mirror_status = _mirror_v4_policy_workspace(
+                vault_root,
+                decoded,
+                crash_at=kwargs.get("crash_at"),
+            )
             return _v4_commit_terminal(
                 proposal_id=proposal_id,
                 decoded=decoded,
+                mirror_status=mirror_status,
             )
         if float(row[3]) < now:
             raise GovernanceError("PROPOSAL_EXPIRED", "proposal is not active")
@@ -3365,9 +3982,15 @@ def _commit(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
             membership_manifest=manifest_json,
             spent_at=int(now),
         )
+        mirror_status = _mirror_v4_policy_workspace(
+            vault_root,
+            validated.decoded,
+            crash_at=kwargs.get("crash_at"),
+        )
         return _v4_commit_terminal(
             proposal_id=proposal_id,
             decoded=validated.decoded,
+            mirror_status=mirror_status,
         )
     reconcile = reconcile_governance_operations(vault_root)
     if reconcile["blocked"]:
