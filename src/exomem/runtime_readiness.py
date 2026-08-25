@@ -23,7 +23,13 @@ log = logging.getLogger(__name__)
 # cadence of at least one probe per five minutes rather than one late burst.
 SILENT_TRAFFIC_WINDOW_SECONDS = 24 * 60 * 60
 SILENT_TRAFFIC_MINIMUM_HEALTH_PROBES = 288
-COORDINATION_STATUS_TIMEOUT_SECONDS = 0.25
+# A 2.4k-note Windows vault needs about 0.27 seconds to read its mutation
+# boundary plus graph epoch under memory pressure.  The former 0.25-second
+# ceiling therefore rejected ordinary work and made successive readiness
+# probes alternate 503/200 as the second probe reused the first one's late
+# result.  Keep a hard sub-second bound, with enough headroom for the measured
+# steady state; genuinely blocked graph publication still fails closed.
+COORDINATION_STATUS_TIMEOUT_SECONDS = 0.75
 
 _COORDINATION_PROBES_LOCK = threading.Lock()
 _COORDINATION_PROBES: dict[str, tuple[threading.Event, dict[str, object]]] = {}

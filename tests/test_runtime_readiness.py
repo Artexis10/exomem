@@ -236,6 +236,7 @@ def test_runtime_readiness_fails_closed_within_a_tight_bound_when_status_blocks(
     monkeypatch.setattr(session_validation_cache, "session_store_readiness", lambda: {})
     monkeypatch.setattr(readiness_module, "_measure_observability", lambda: {})
 
+    assert readiness_module.COORDINATION_STATUS_TIMEOUT_SECONDS < 1.0
     started = time.monotonic()
     try:
         snapshot = readiness_module.runtime_readiness(
@@ -246,7 +247,7 @@ def test_runtime_readiness_fails_closed_within_a_tight_bound_when_status_blocks(
         release.set()
 
     assert entered.is_set()
-    assert time.monotonic() - started < 0.75
+    assert time.monotonic() - started < 1.25
     assert snapshot["status"] == "not_ready"
     assert snapshot["takeover_eligible"] is False
     assert snapshot["reasons"] == ["coordination_status_timeout"]
@@ -254,6 +255,50 @@ def test_runtime_readiness_fails_closed_within_a_tight_bound_when_status_blocks(
         "state": "unknown",
         "reason": "status_timeout",
     }
+
+
+def test_runtime_readiness_admits_a_slow_but_bounded_real_vault_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A normal large-vault snapshot must not trip the fail-fast ceiling.
+
+    The 2.4k-note Windows service takes about 0.27 seconds to read the mutation
+    boundary and graph epoch under memory pressure.  The former 0.25-second
+    ceiling therefore alternated 503 and 200 as each late result was reused by
+    the following probe.  Preserve sub-second failure for a genuinely blocked
+    snapshot while leaving measured steady-state work enough headroom.
+    """
+    from exomem import runtime_readiness as readiness_module
+    from exomem import session_validation_cache, writer_lease
+
+    vault = tmp_path / "large-vault"
+
+    def slow_coordination_status(_vault_root=None):  # noqa: ANN001
+        time.sleep(0.35)
+        return {
+            "enabled": False,
+            "role": "standalone",
+            "replica_id": None,
+            "coordinator_healthy": True,
+            "mutation_boundary": {"state": "free"},
+        }
+
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
+    monkeypatch.setattr(writer_lease, "coordination_status", slow_coordination_status)
+    monkeypatch.setattr(session_validation_cache, "session_store_readiness", lambda: {})
+    monkeypatch.setattr(readiness_module, "_measure_observability", lambda: {})
+
+    started = time.monotonic()
+    snapshot = readiness_module.runtime_readiness(
+        mcp_tool_surface_sha256="a" * 64,
+        traffic={},
+    )
+
+    assert time.monotonic() - started < 1.25
+    assert snapshot["status"] == "ready"
+    assert snapshot["takeover_eligible"] is True
+    assert snapshot["reasons"] == []
+    assert snapshot["coordination"]["mutation_boundary"] == {"state": "free"}
 
 
 def test_bounded_coordination_status_is_single_flight_and_reuses_late_result(
