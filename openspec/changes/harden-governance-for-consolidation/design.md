@@ -758,7 +758,8 @@ switch. A manifest, route set, completion class, exact device/backend/hard-off t
 required measurement families belong to exactly one profile and cannot certify another.
 The first live-model profile is `vectors-cpu-torch-v1`: text embeddings are enabled with
 `EXOMEM_DEVICE=cpu` and `EXOMEM_EMBED_BACKEND=torch`, the embedding and legacy device
-overrides are absent, and CLIP plus reranking remain hard-off. It requires an exact
+overrides are absent, `OMP_NUM_THREADS=1` and `MKL_NUM_THREADS=1`, and CLIP plus
+reranking remain hard-off. It requires an exact
 `projected-text-v1`/`BAAI/bge-base-en-v1.5` vector family before serving and uses the
 repository class `projected-find-vector-cpu-v1` (1,000 ms padding, 1,500 ms deadline).
 Only the vector-model input uses `" ".join(query.split())`, capped to the first 600

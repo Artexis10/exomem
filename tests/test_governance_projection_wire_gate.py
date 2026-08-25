@@ -997,6 +997,13 @@ def test_projected_hidden_corpus_actual_wire_characterization(
             ),
         ),
     }
+    assert all(
+        projection_runtime._runtime_supports_release_profile(
+            runtime,
+            selected_profile,
+        )
+        for runtime in runtimes.values()
+    )
     # Production settles one immutable runtime before publication. This wire
     # fixture holds three replica states in one process, so settle their
     # combined object graph before any client becomes observable.

@@ -543,7 +543,8 @@ made before both PRs and their combined verification are complete.
   maximum capacity cannot complete. Do not claim cryptographic constant time or pass by
   deleting timing fields; keep server-only aggregates content- and bearer-free.
 - [x] 8.15a Register the exact `vectors-cpu-torch-v1` model/device/hard-off tuple and its
-  distinct 1,000/1,500 ms completion class; bind serving to the exact active vector
+  distinct single-threaded 1,000/1,500 ms completion class; bind serving to the exact
+  active vector
   measurement family, refuse mixed/override configurations, and cap only vector-model
   query input with the fixed 600-code-point whole-token projection.
 - [ ] 8.16 Run the full no-model counterfactual and exact-capacity actual-wire suites, then optional live

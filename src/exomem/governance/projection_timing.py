@@ -665,6 +665,8 @@ def model_runtime_profile_from_environment() -> str | None:
         and os.environ.get("EXOMEM_DISABLE_RANKING") == "1"
         and os.environ.get("EXOMEM_DEVICE") == "cpu"
         and os.environ.get("EXOMEM_EMBED_BACKEND") == "torch"
+        and os.environ.get("OMP_NUM_THREADS") == "1"
+        and os.environ.get("MKL_NUM_THREADS") == "1"
         and "EXOMEM_EMBED_DEVICE" not in os.environ
         and "EXOMEM_TORCH_DEVICE" not in os.environ
     ):

@@ -229,8 +229,8 @@ hard-off configuration, exact required measurement families, exact route set, an
 one repository-owned completion class. Evidence or a manifest for one profile MUST NOT
 activate another profile. `vectors-cpu-torch-v1` SHALL mean text embeddings enabled,
 `EXOMEM_DEVICE=cpu`, `EXOMEM_EMBED_BACKEND=torch`, absent per-model and legacy device
-overrides for the embedding lane, CLIP hard-off, and reranking hard-off. It SHALL require
-the exact active
+overrides for the embedding lane, `OMP_NUM_THREADS=1`, `MKL_NUM_THREADS=1`, CLIP
+hard-off, and reranking hard-off. It SHALL require the exact active
 `projected-text-v1`/`BAAI/bge-base-en-v1.5` vector family and SHALL use only
 `projected-find-vector-cpu-v1` with 1,000 ms padding and a 1,500 ms deadline. Its vector
 model input SHALL normalize whitespace with `" ".join(query.split())`, retain at most

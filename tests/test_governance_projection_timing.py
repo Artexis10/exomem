@@ -170,6 +170,8 @@ def test_exact_vector_cpu_environment_selects_its_own_completion_class(
     monkeypatch.setenv("EXOMEM_DISABLE_RANKING", "1")
     monkeypatch.setenv("EXOMEM_DEVICE", "cpu")
     monkeypatch.setenv("EXOMEM_EMBED_BACKEND", "torch")
+    monkeypatch.setenv("OMP_NUM_THREADS", "1")
+    monkeypatch.setenv("MKL_NUM_THREADS", "1")
 
     assert (
         timing.model_runtime_profile_from_environment()
@@ -186,6 +188,9 @@ def test_exact_vector_cpu_environment_selects_its_own_completion_class(
     assert request_class.deadline_ms == 1_500
 
     monkeypatch.setenv("EXOMEM_EMBED_DEVICE", "cuda")
+    assert timing.model_runtime_profile_from_environment() is None
+    monkeypatch.delenv("EXOMEM_EMBED_DEVICE")
+    monkeypatch.setenv("OMP_NUM_THREADS", "2")
     assert timing.model_runtime_profile_from_environment() is None
 
 
