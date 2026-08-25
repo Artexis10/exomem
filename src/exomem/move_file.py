@@ -17,21 +17,26 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import re
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 from . import reserved_paths, semantic_index, semantic_writes
+from .governance import catalog_publication
 from .kbdir import kb_dirname
 from .vault import (
+    LogWritePlan,
     PathGuard,
     PathGuardError,
     PlannedWrite,
     VaultPathError,
     batch_atomic_write,
+    content_hash,
     find_inbound_wikilinks,
     in_append_only_tree,
     in_curated_tree,
+    plan_log_entry,
     read_guarded_text,
     resolve_under_vault,
     walk_vault_md,
@@ -426,8 +431,40 @@ def move_file(
                 files_touched.append(rel)
                 wikilinks_updated += n_changed
 
+    today = today or dt.date.today()
+
+    def plan_activity_log() -> tuple[str, str, LogWritePlan]:
+        date_iso = today.isoformat()
+        new_rel_no_ext = (
+            new_rel.removesuffix(".md") if new_rel.endswith(".md") else new_rel
+        )
+        body = (
+            f"Moved {old_rel!r} → {new_rel!r} via exomem Tier 2. "
+            f"wikilinks_updated={wikilinks_updated} across "
+            f"{len(files_touched)} file(s)."
+        )
+        if src_curated or dst_curated:
+            body += f" allow_curated=true (tree: {src_curated or dst_curated})."
+        if promotion:
+            body += f" Promoted Sources → Evidence: {promotion_reason.strip()}"
+        return (
+            new_rel_no_ext,
+            body,
+            plan_log_entry(
+                vault_root,
+                date_iso=date_iso,
+                op="move_file",
+                rel_path_no_ext=new_rel_no_ext,
+                body=body,
+            ),
+        )
+
     semantic: dict | None = None
     semantic_states: dict[str, semantic_index.SemanticParentIndexState] = {}
+    catalog_target: catalog_publication.PreparedMarkdownCatalogPublication | None = None
+    log_rel_no_ext: str
+    log_body: str
+    log_plan: LogWritePlan
     if old_rel.lower().endswith(".md") and new_rel.lower().endswith(".md"):
         try:
             source, source_guard = read_guarded_text(vault_root, old_abs)
@@ -451,6 +488,7 @@ def move_file(
                     wikilinks_updated += source_changes
             if content_transform is not None:
                 moved_source = content_transform(moved_source)
+            log_rel_no_ext, log_body, log_plan = plan_activity_log()
             destination_guard = PathGuard.capture(
                 vault_root, new_rel, leaf_policy="absent"
             )
@@ -475,7 +513,46 @@ def move_file(
                 required_guards,
                 bound_destination: PathGuard,
             ) -> None:
+                nonlocal catalog_target
                 bound_destination.recheck(vault_root)
+                catalog_removals = [
+                    catalog_publication.CatalogRemoval(
+                        old_rel,
+                        content_hash(source),
+                    )
+                ]
+                if paired_binary is not None:
+                    catalog_removals.append(
+                        catalog_publication.CatalogRemoval(
+                            paired_binary[0],
+                            None,
+                        )
+                    )
+                catalog_writes = [
+                    *lifecycle_writes,
+                    PlannedWrite(
+                        path=new_abs,
+                        content=moved_source,
+                        create_only=True,
+                    ),
+                    *writes,
+                    *extra_writes,
+                    *log_plan.writes,
+                ]
+                try:
+                    catalog_target = (
+                        catalog_publication.prepare_catalog_membership_batch(
+                            vault_root,
+                            writes=tuple(catalog_writes),
+                            removals=tuple(catalog_removals),
+                            now=int(time.time()),
+                        )
+                    )
+                except catalog_publication.CatalogPublicationError as error:
+                    raise MoveFileError(
+                        code="GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
+                        reason=str(error),
+                    ) from error
                 _held_rename(vault_root, old_rel, new_rel)
                 # The bytes follow the page inside the same transaction. A
                 # rollback below undoes both, so a failure can never leave an
@@ -498,6 +575,8 @@ def move_file(
                         *writes,
                         *extra_writes,
                     ]
+                    if catalog_target is not None:
+                        combined.extend(log_plan.writes)
                     if combined:
                         batch_fanout_paths[:] = [write.path for write in combined]
                         batch_atomic_write(
@@ -539,7 +618,39 @@ def move_file(
             raise MoveFileError(code=error.code, reason=error.reason) from error
         except PathGuardError as error:
             raise MoveFileError(code=error.code, reason=error.reason) from error
+        if catalog_target is not None:
+            try:
+                catalog_publication.publish_markdown_batch(catalog_target)
+            except catalog_publication.CatalogPublicationError as error:
+                raise MoveFileError(
+                    code="GOVERNANCE_CATALOG_PUBLICATION_UNCERTAIN",
+                    reason=(
+                        "the file move committed but its active catalog publication "
+                        "did not reach a verified terminal"
+                    ),
+                ) from error
     else:
+        log_rel_no_ext, log_body, log_plan = plan_activity_log()
+        unsupported_rel = (
+            old_rel if not old_rel.lower().endswith(".md") else new_rel
+        )
+        try:
+            catalog_target = catalog_publication.prepare_catalog_membership_batch(
+                vault_root,
+                writes=log_plan.writes,
+                removals=(
+                    catalog_publication.CatalogRemoval(
+                        unsupported_rel,
+                        None,
+                    ),
+                ),
+                now=int(time.time()),
+            )
+        except catalog_publication.CatalogPublicationError as error:
+            raise MoveFileError(
+                code="GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
+                reason=str(error),
+            ) from error
         _held_rename(vault_root, old_rel, new_rel)
         try:
             if writes:
@@ -644,27 +755,15 @@ def move_file(
         ),
     }
 
-    today = today or dt.date.today()
-    date_iso = today.isoformat()
-    new_rel_no_ext = new_rel.removesuffix(".md") if new_rel.endswith(".md") else new_rel
-    log_body = (
-        f"Moved {old_rel!r} → {new_rel!r} via exomem Tier 2. "
-        f"wikilinks_updated={wikilinks_updated} across {len(files_touched)} file(s)."
-    )
-    if src_curated or dst_curated:
-        log_body += f" allow_curated=true (tree: {src_curated or dst_curated})."
-    if promotion:
-        # The reason is the whole audit trail for a reclassification: it records
-        # which claim or case made this raw item proof-bearing, at the moment
-        # someone judged that it had.
-        log_body += f" Promoted Sources → Evidence: {promotion_reason.strip()}"
-    log_warning = write_log_entry(
-        vault_root,
-        date_iso=date_iso,
-        op="move_file",
-        rel_path_no_ext=new_rel_no_ext,
-        body=log_body,
-    )
+    log_warning = log_plan.warning
+    if catalog_target is None:
+        log_warning = write_log_entry(
+            vault_root,
+            date_iso=today.isoformat(),
+            op="move_file",
+            rel_path_no_ext=log_rel_no_ext,
+            body=log_body,
+        )
     if log_warning:
         warnings.append(log_warning)
 

@@ -27,6 +27,9 @@ from exomem import (
     writer_lease,
 )
 from exomem import (
+    move_file as move_file_module,
+)
+from exomem import (
     vault as vault_module,
 )
 from exomem.governance import (
@@ -2449,6 +2452,288 @@ def test_v4_trash_refuses_unsupported_non_markdown_before_moving_bytes(
     assert not (vault / "Knowledge Base/_trash").exists()
     custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
     assert custody.control.activation_epoch == 1
+
+
+def test_v4_move_replaces_membership_and_publishes_auxiliaries_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = int(time.time())
+    monkeypatch.setenv(
+        "EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-state")
+    )
+    writer_lease.reset_managers_for_tests()
+    vault = tmp_path / "vault"
+    old_relative = "Knowledge Base/Notes/private.md"
+    new_relative = "Knowledge Base/Notes/renamed-private.md"
+    inbound_relative = "Knowledge Base/Notes/referrer.md"
+    log_relative = "Knowledge Base/log.md"
+    source = "---\ntitle: Private\nstatus: draft\n---\n\nMove me.\n"
+    inbound_before = (
+        "---\ntitle: Referrer\nstatus: draft\n---\n\n"
+        "See [[Knowledge Base/Notes/private]].\n"
+    )
+    log_before = "# Log\n\n---\n"
+    for existing, content in (
+        (old_relative, source),
+        (inbound_relative, inbound_before),
+        (log_relative, log_before),
+    ):
+        target = vault / existing
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_projection_items(
+        vault,
+        items=(
+            (old_relative, source),
+            (inbound_relative, inbound_before),
+            (log_relative, log_before),
+        ),
+        now=now,
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+
+    moved = move_file_module.move_file(
+        vault,
+        old_path=old_relative,
+        new_path=new_relative,
+        today=dt.date(2026, 8, 25),
+    )
+
+    assert moved.wikilinks_updated == 1
+    assert not (vault / old_relative).exists()
+    assert (vault / new_relative).read_text(encoding="utf-8") == source
+    assert "renamed-private" in (vault / inbound_relative).read_text(encoding="utf-8")
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    assert custody.control.activation_epoch == 2
+    connection = store.open_authorization_session_connection(vault)
+    try:
+        active = schema_v4.load_active_policy(
+            connection,
+            expected_logical_vault_id=LOGICAL_VAULT_ID,
+            expected_activation_store_id=ACTIVATION_STORE_ID,
+            expected_activation_epoch=2,
+            expected_activation_state_digest=custody.control.activation_state_digest or "",
+        )
+    finally:
+        connection.close()
+    evidence = projection_store.namespace_evidence_from_snapshot(active)
+    manifest, items = projection_store.load_projection_catalog(
+        vault,
+        key=evidence.manifest.namespace_key,
+        expected_rows_digest=evidence.manifest.rows_digest,
+    )
+    expected_paths = (new_relative, inbound_relative, log_relative)
+    expected = {
+        path: vault_module.content_hash((vault / path).read_text(encoding="utf-8"))
+        for path in expected_paths
+    }
+    assert active.active.catalog_generation == 2
+    assert manifest.item_count == len(expected_paths)
+    assert {item.item_identity: item.content_hash for item in items} == expected
+
+
+def test_v4_move_refuses_unsupported_non_markdown_before_moving_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = int(time.time())
+    monkeypatch.setenv(
+        "EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-state")
+    )
+    writer_lease.reset_managers_for_tests()
+    vault = tmp_path / "vault"
+    old_relative = "Knowledge Base/Notes/private.bin"
+    new_relative = "Knowledge Base/Notes/renamed-private.bin"
+    source = vault / old_relative
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(b"private bytes")
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_empty_projection_catalog(vault, now=now)
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+
+    with pytest.raises(move_file_module.MoveFileError) as blocked:
+        move_file_module.move_file(
+            vault,
+            old_path=old_relative,
+            new_path=new_relative,
+            today=dt.date(2026, 8, 25),
+        )
+
+    assert blocked.value.code == "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED"
+    assert blocked.value.reason == "non-Markdown content publication is not available"
+    assert source.read_bytes() == b"private bytes"
+    assert not (vault / new_relative).exists()
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    assert custody.control.activation_epoch == 1
+
+
+def test_v4_move_refuses_markdown_to_non_markdown_before_moving_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = int(time.time())
+    monkeypatch.setenv(
+        "EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-state")
+    )
+    writer_lease.reset_managers_for_tests()
+    vault = tmp_path / "vault"
+    old_relative = "Knowledge Base/Notes/private.md"
+    new_relative = "Knowledge Base/Notes/private.txt"
+    source = "---\ntitle: Private\nstatus: draft\n---\n\nPrivate bytes.\n"
+    target = vault / old_relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(source, encoding="utf-8")
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_projection_item(
+        vault,
+        path=old_relative,
+        source=source,
+        now=now,
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+
+    with pytest.raises(move_file_module.MoveFileError) as blocked:
+        move_file_module.move_file(
+            vault,
+            old_path=old_relative,
+            new_path=new_relative,
+            today=dt.date(2026, 8, 25),
+        )
+
+    assert blocked.value.code == "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED"
+    assert blocked.value.reason == "non-Markdown content publication is not available"
+    assert target.read_text(encoding="utf-8") == source
+    assert not (vault / new_relative).exists()
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    assert custody.control.activation_epoch == 1
+
+
+def test_v4_move_refuses_paired_artifact_until_companion_publication_exists(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = int(time.time())
+    monkeypatch.setenv(
+        "EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-state")
+    )
+    writer_lease.reset_managers_for_tests()
+    vault = tmp_path / "vault"
+    old_binary = "Knowledge Base/Notes/private.bin"
+    old_page = f"{old_binary}.md"
+    new_binary = "Knowledge Base/Notes/renamed-private.bin"
+    new_page = f"{new_binary}.md"
+    page_source = (
+        "---\ntitle: Private artifact\nstatus: draft\n"
+        f"evidence_file: {old_binary}\n---\n\nPrivate artifact.\n"
+    )
+    binary = vault / old_binary
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    binary.write_bytes(b"private bytes")
+    (vault / old_page).write_text(page_source, encoding="utf-8")
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_projection_item(
+        vault,
+        path=old_page,
+        source=page_source,
+        now=now,
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+
+    with pytest.raises(move_file_module.MoveFileError) as blocked:
+        move_file_module.move_file(
+            vault,
+            old_path=old_page,
+            new_path=new_page,
+            today=dt.date(2026, 8, 25),
+        )
+
+    assert blocked.value.code == "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED"
+    assert blocked.value.reason == "non-Markdown content publication is not available"
+    assert binary.read_bytes() == b"private bytes"
+    assert (vault / old_page).read_text(encoding="utf-8") == page_source
+    assert not (vault / new_binary).exists()
+    assert not (vault / new_page).exists()
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    assert custody.control.activation_epoch == 1
+
+
+def test_v4_move_does_not_undo_bytes_after_catalog_outcome_becomes_uncertain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = int(time.time())
+    monkeypatch.setenv(
+        "EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-state")
+    )
+    writer_lease.reset_managers_for_tests()
+    vault = tmp_path / "vault"
+    old_relative = "Knowledge Base/Notes/private.md"
+    new_relative = "Knowledge Base/Notes/renamed-private.md"
+    source = "---\ntitle: Private\nstatus: draft\n---\n\nMove me.\n"
+    target = vault / old_relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(source, encoding="utf-8")
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_projection_item(
+        vault,
+        path=old_relative,
+        source=source,
+        now=now,
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+
+    def lose_publication_terminal(_prepared) -> None:
+        raise catalog_publication.CatalogPublicationError("lost terminal")
+
+    monkeypatch.setattr(
+        catalog_publication,
+        "publish_markdown_batch",
+        lose_publication_terminal,
+    )
+
+    with pytest.raises(move_file_module.MoveFileError) as uncertain:
+        move_file_module.move_file(
+            vault,
+            old_path=old_relative,
+            new_path=new_relative,
+            today=dt.date(2026, 8, 25),
+        )
+
+    assert uncertain.value.code == "GOVERNANCE_CATALOG_PUBLICATION_UNCERTAIN"
+    assert not (vault / old_relative).exists()
+    assert (vault / new_relative).read_text(encoding="utf-8") == source
 
 
 def test_open_vault_skips_v4_only_auxiliary_predecessor_validation(
