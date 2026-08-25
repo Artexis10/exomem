@@ -6703,6 +6703,11 @@ def op_maintain_memory(
     `op_reconcile` itself (idempotent, non-destructive) — so it defaults to
     writing; pass `dry_run=true` to preview instead.
 
+    MCP, REST, and hosted callers may audit or preview with `dry_run=true`, but
+    write-mode maintenance is operator-only: run `exomem maintain --fix` or
+    `exomem maintain --reconcile` on the host. Remote write attempts return
+    `MAINTENANCE_REQUIRES_CLI` before acquiring the mutation boundary.
+
     `mode="fix"` also collapses media sidecars that accumulated nested copies of
     themselves (audit category `duplicated_sidecar`, reportable on its own via
     `mode="audit", categories=["duplicated_sidecar"]`). It keeps the longest

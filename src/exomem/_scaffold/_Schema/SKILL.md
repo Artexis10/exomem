@@ -342,7 +342,7 @@ experiments, proof-bearing records, review, and supersession.
 | `relations` | "review suggested relations," "pay down relation debt," "accept/reject suggested links" | `review_memory(mode="relation-queue")` for the batched read; accept one reviewed candidate via `connect_memory(operation="accept-relation")` (requires the queue fingerprint, target `expected_hash`, and an audit reason); reject via `triage_memory` |
 | `connect` | "connect these ideas," "suggest relations," "show the surrounding context" | `connect_memory`; use `operation="context"` for bounded graph, provenance, evidence, and history |
 | `adopt` | "what does this existing vault contain," "import/adopt this vault safely" | `adopt_vault(mode="scan-only")` first; explicit modes for manifest/copy/compile planning |
-| `maintain` | "check vault health," "fix safe drift" | `maintain_memory(mode="audit")`; explicit `fix` or `reconcile` modes only with fix intent |
+| `maintain` | "check vault health," "fix safe drift" | Remote tools may use `maintain_memory(mode="audit")` or explicit dry runs. Actual `fix`/`reconcile` writes are host-operator work via `exomem maintain --fix` / `--reconcile` |
 | `schema` | "what structure or relation vocabulary recurs," "validate this graph lens" | `schema_memory`; infer before saving, and keep governance optional |
 
 Records routing is semantic: use it for durable observed events or current state
@@ -497,7 +497,7 @@ and index updates are determined by the operation, not the caller.
 | **adopt** | Safe first-run adoption workflow for an existing vault: scan-only by default; can save a manifest or copy selected legacy text files as Sources while preserving originals | `Knowledge Base/_Adoption/` or `Sources/Imported/` only in explicit write modes |
 | **propose_compilation** | Draft a note scaffold from unprocessed source(s) — the backlog-drain companion to audit (read-only) | proposals only |
 | **replace** | Supersession: mark old, write new with header pointer | both old + new |
-| **reconcile** | Heal drift from out-of-band edits (any editor/sync/mobile, e.g. Obsidian): recompute index counts + re-embed stale files + report remaining drift. Idempotent; `dry_run` reports only | drifted indexes + embedding sidecar |
+| **reconcile** | Heal drift from out-of-band edits (any editor/sync/mobile, e.g. Obsidian): recompute index counts + re-embed stale files + report remaining drift. Remote tools may preview with `dry_run=true`; actual repair is host-operator work via `exomem maintain --reconcile` | drifted indexes + embedding sidecar |
 | **provenance_report** | Scan note bodies for `<!-- key:value -->` provenance tags (filter by key/value/path). Read-only | — |
 
 For the full per-operation spec — inputs, validation, write rules, edge cases —
@@ -625,7 +625,7 @@ reference for the canonical operation leaves that product commands route to.
 - "audit the KB," "lint the vault," "check for orphans" → **audit**
 - "what does this vault look like," "assess my vault," "how is this vault organized" → **overview**
 - "what should Exomem do with this existing vault," "how can we migrate this safely" → **adopt**
-- "I edited the vault directly / on my phone — sync it up," "heal the drift" → **reconcile**
+- "I edited the vault directly / on my phone — sync it up," "heal the drift" → preview remotely, then have the host operator run **reconcile**
 - "this replaces the old strategy," "supersede the old note on X" → **replace**
 - "make a new folder for X" → **create_file** (`kind="dir"`, Tier 2)
 - "rename this page," "move this note to Patterns/" → **move_file** (Tier 2)
