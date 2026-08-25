@@ -563,11 +563,16 @@ def reconcile(vault_root: Path, *, today: dt.date | None = None) -> dict[str, An
 
 def _schedule_reconcile(vault_root: Path, *, today: dt.date) -> None:
     """Start one fail-soft projection rebuild without delaying the caller."""
-    if os.environ.get("EXOMEM_DISABLE_DUE_STATE_WARM", "").strip().lower() in {
+    if os.environ.get("EXOMEM_SYNC_DUE_STATE_WARM", "").strip().lower() in {
         "1",
         "true",
         "yes",
     }:
+        # The pytest suite creates hundreds of disposable vaults and then tears
+        # them down immediately. Let those tests preserve deterministic carrier
+        # assertions without leaving daemon workers racing tmpdir cleanup; the
+        # focused warm-up tests remove this seam and exercise the production path.
+        reconcile(vault_root, today=today)
         return
     vault_root = Path(vault_root)
     key = str(vault_root)

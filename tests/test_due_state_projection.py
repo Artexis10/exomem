@@ -512,7 +512,7 @@ def test_removing_the_vanished_path_drop_fails_this_module(
 def test_missing_state_warms_once_in_background_without_blocking_a_read(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.delenv("EXOMEM_DISABLE_DUE_STATE_WARM", raising=False)
+    monkeypatch.delenv("EXOMEM_SYNC_DUE_STATE_WARM", raising=False)
     assert not due_state_module.state_path(vault).exists()
 
     started = threading.Event()
@@ -567,7 +567,7 @@ def test_missing_state_warms_once_in_background_without_blocking_a_read(
 def test_unreadable_state_recomputes_rather_than_raising(
     vault: Path, corrupt: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.delenv("EXOMEM_DISABLE_DUE_STATE_WARM", raising=False)
+    monkeypatch.delenv("EXOMEM_SYNC_DUE_STATE_WARM", raising=False)
     _prediction(vault, "one", check_by="2026-08-01")
     path = due_state_module.state_path(vault)
     path.parent.mkdir(parents=True, exist_ok=True)

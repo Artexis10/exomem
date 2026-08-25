@@ -558,9 +558,10 @@ def _disable_embeddings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
     monkeypatch.setenv("EXOMEM_DISABLE_RESOLVER_WARM", "1")
     # A cold due-state projection now heals in a daemon thread so an ordinary
     # read never pays a vault-wide audit. Production is one long-lived process;
-    # this suite creates hundreds of short-lived tmp vaults, so disable that
-    # worker by default and let its focused recovery tests opt back in.
-    monkeypatch.setenv("EXOMEM_DISABLE_DUE_STATE_WARM", "1")
+    # this suite creates hundreds of short-lived tmp vaults, so make that warm
+    # synchronous by default and let its focused recovery tests opt back into
+    # the real background path.
+    monkeypatch.setenv("EXOMEM_SYNC_DUE_STATE_WARM", "1")
 
 
 @pytest.fixture
