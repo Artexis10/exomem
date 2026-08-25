@@ -33,7 +33,9 @@ Alternative rejected: globally enable eager boot. It avoids request-time work on
 
 ### Split maintained-catalog warm-up from optional cache warm-up
 
-Warm-up becomes two CPU phases. First, KB- and vault-scope maintained lexical catalogs are reconciled. A new `retrieval_catalog` readiness component is marked only when both scopes succeed. Second, parsed pages, resolver state, semantic corpus, matrices, and models warm under their existing soft-fail and resource-mode rules. Quiet mode still performs the disk-backed maintained-catalog phase because it does not require retaining a full parsed corpus in RAM.
+Warm-up becomes ordered admission and optimization phases. First, KB- and vault-scope maintained lexical catalogs are reconciled. A new `retrieval_catalog` readiness component is marked only when both scopes succeed. The semantic corpus required for mutation admission lands next. Only then do parsed pages, resolver state, matrices, and models warm under their existing soft-fail and resource-mode rules. Quiet mode still performs the disk-backed maintained-catalog and semantic-corpus phases because neither requires retaining all optional search caches in RAM.
+
+Local service composition also becomes transport-first. The HTTP server is built and allowed to answer liveness before local retrieval, watcher, graph-drain, or media startup work is activated. After activation, required catalog and semantic-corpus state gets exclusive startup priority: watcher reconciliation, graph recovery, and media discovery wait until retrieval and mutation admission are established, or warm-up reaches a terminal failed outcome. This prevents independent startup reconcilers from contending on the process-local mutation boundary while required state is being rebuilt.
 
 Alternative rejected: only reorder the existing steps while keeping one `lexical` marker. That would either report readiness too late after the catalog is already usable or too early when fallback pages are still cold.
 
@@ -53,6 +55,7 @@ Regression tests use a production-sized synthetic freshness tuple and instrument
 
 - [Clients see a retryable warming error where they previously waited for eventual results] -> The outcome already exists in the public operation contract, is bounded, and is preferable to an edge-generated 504 with no useful remediation.
 - [A catalog repair failure can hold readiness at 503] -> Liveness remains 200, logs preserve per-stage failure, and the existing single-flight repair keeps retrying without touching canonical data.
+- [Watcher, graph, and media reconciliation start later on a cold catalog] -> Their existing startup scans recover changes made while the service was stopped; deferring them avoids mutation contention without losing durable work.
 - [Quiet or explicitly disabled warm-up changes readiness behavior] -> Quiet still warms only the disk-backed catalog; fully disabled warm-up is explicitly lazy and reports that truth instead of claiming full admission.
 - [Readiness consumers may not expect the added field/reason] -> The payload extension is additive; the existing status/reasons contract already supports not-ready causes.
 
