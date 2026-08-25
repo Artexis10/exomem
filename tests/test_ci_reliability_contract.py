@@ -346,7 +346,7 @@ def test_the_cross_platform_split_count_matches_its_shard_matrix() -> None:
     assert job["name"].endswith(f"shard ${{{{ matrix.shard }}}}/{len(shards)})")
 
 
-def test_cross_platform_matrix_runs_nightly_manually_and_for_releases() -> None:
+def test_cross_platform_matrix_runs_nightly_and_manually_only() -> None:
     workflow = _cross_platform_workflow()
     triggers = _triggers(workflow)
 
@@ -359,10 +359,12 @@ def test_cross_platform_matrix_runs_nightly_manually_and_for_releases() -> None:
     condition = " ".join(job["if"].split())
     assert "github.event_name == 'schedule'" in condition
     assert "github.event_name == 'workflow_dispatch'" in condition
-    assert "github.event_name == 'pull_request'" in condition
-    assert "github.event.pull_request.head.repo.full_name == github.repository" in condition
-    assert "github.head_ref == 'release-please--branches--main'" in condition
-    assert "startsWith(github.head_ref" not in condition
+    assert "github.event_name == 'pull_request'" not in condition
+    assert "release-please--branches--main" not in condition
+    assert workflow["concurrency"] == {
+        "group": "cross-platform-${{ github.event.pull_request.number || github.ref }}",
+        "cancel-in-progress": "${{ github.event_name == 'pull_request' }}",
+    }
     assert job["strategy"]["matrix"]["os"] == [
         "windows-latest",
         "macos-latest",
