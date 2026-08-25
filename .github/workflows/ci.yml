@@ -294,7 +294,7 @@ jobs:
 
   governance-projection-wire-vector-cpu:
     name: governance projected vector CPU wire (${{ matrix.route }})
-    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'release-please--branches--main') }}
     runs-on: ubuntu-latest
     timeout-minutes: 12
     strategy:
