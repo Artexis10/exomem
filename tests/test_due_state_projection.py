@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -507,14 +509,55 @@ def test_removing_the_vanished_path_drop_fails_this_module(
     assert stale is not None and stale["total"] == 1
 
 
-def test_missing_state_recomputes_at_serve_time(vault: Path) -> None:
-    _prediction(vault, "one", check_by="2026-08-01")
+def test_missing_state_warms_once_in_background_without_blocking_a_read(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("EXOMEM_DISABLE_DUE_STATE_WARM", raising=False)
     assert not due_state_module.state_path(vault).exists()
 
-    block = _served(vault)
+    started = threading.Event()
+    release = threading.Event()
+    completed = threading.Event()
+    calls = 0
 
-    assert block is not None and block["total"] == 1
-    assert due_state_module.state_path(vault).exists()
+    def _blocked_reconcile(vault_root: Path, *, today=None):
+        nonlocal calls
+        calls += 1
+        started.set()
+        assert release.wait(timeout=5)
+        try:
+            payload = {
+                "version": due_state_module.SCHEMA_VERSION,
+                "computed_on": (today or TODAY).isoformat(),
+                "categories": {
+                    category: {} for category in due_state_module.PROJECTION_CATEGORIES
+                },
+                "bindings": {},
+            }
+            due_state_module.save(vault_root, payload)
+            return payload
+        finally:
+            completed.set()
+
+    monkeypatch.setattr(due_state_module, "reconcile", _blocked_reconcile)
+
+    before = time.perf_counter()
+    first = _served(vault)
+    elapsed = time.perf_counter() - before
+    second = _served(vault)
+
+    assert first is None and second is None
+    assert elapsed < 0.25
+    assert started.wait(timeout=1)
+    assert calls == 1
+    assert not due_state_module.state_path(vault).exists()
+
+    release.set()
+    assert completed.wait(timeout=5)
+
+    assert _served(vault) is None
+    assert due_state_module.load(vault) is not None
+    assert calls == 1
 
 
 @pytest.mark.parametrize(
@@ -522,13 +565,18 @@ def test_missing_state_recomputes_at_serve_time(vault: Path) -> None:
     ["", "{", "null", "[]", '{"version": 999, "categories": {}}', '{"version": 1}'],
 )
 def test_unreadable_state_recomputes_rather_than_raising(
-    vault: Path, corrupt: str
+    vault: Path, corrupt: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.delenv("EXOMEM_DISABLE_DUE_STATE_WARM", raising=False)
     _prediction(vault, "one", check_by="2026-08-01")
     path = due_state_module.state_path(vault)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(corrupt, encoding="utf-8")
 
+    assert _served(vault) is None
+    deadline = time.monotonic() + 5
+    while due_state_module.load(vault) is None and time.monotonic() < deadline:
+        time.sleep(0.01)
     block = _served(vault)
 
     assert block is not None and block["total"] == 1
