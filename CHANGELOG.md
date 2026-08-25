@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.60.1](https://github.com/Artexis10/exomem/compare/v0.60.0...v0.60.1) (2026-08-25)
+
+
+### Bug Fixes
+
+* **ci:** keep cross-platform matrix nightly ([#790](https://github.com/Artexis10/exomem/issues/790)) ([b4beee1](https://github.com/Artexis10/exomem/commit/b4beee10627e5c107c2fa2562534699558e56775))
+* **runtime:** allow real-vault readiness snapshots ([#788](https://github.com/Artexis10/exomem/issues/788)) ([c60a61d](https://github.com/Artexis10/exomem/commit/c60a61d0e25ac1501a574085329f960eb42b9659))
+* **runtime:** warm due state off interactive reads ([#791](https://github.com/Artexis10/exomem/issues/791)) ([a25ba2f](https://github.com/Artexis10/exomem/commit/a25ba2f960386426ff0066130a6f99b37a8522b4))
+
 ## [0.60.0](https://github.com/Artexis10/exomem/compare/v0.59.0...v0.60.0) (2026-08-24)
 
 
