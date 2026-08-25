@@ -68,7 +68,10 @@ _IMPLICIT_RETRY_TTL_SECONDS = 600.0
 _REQUEST_BOUND_REMOTE_SURFACES = frozenset(
     {"mcp", "rest", "hosted", "hosted-agent"}
 )
-_REMOTE_MAINTENANCE_REMEDIATION = (
+REMOTE_MAINTENANCE_MESSAGE = (
+    "write-mode maintenance is unavailable through request-bound remote commands"
+)
+REMOTE_MAINTENANCE_REMEDIATION = (
     "Run `exomem maintain --fix` or `exomem maintain --reconcile` on the host; "
     "for ID backfill, run `exomem maintain_memory --mode backfill-ids "
     "--no-dry-run`. Use audit or dry_run=true remotely."
@@ -3823,8 +3826,8 @@ def invoke_command(
     ):
         raise OpError(
             "MAINTENANCE_REQUIRES_CLI",
-            "write-mode maintenance is unavailable through request-bound remote commands",
-            _REMOTE_MAINTENANCE_REMEDIATION,
+            REMOTE_MAINTENANCE_MESSAGE,
+            REMOTE_MAINTENANCE_REMEDIATION,
             details={"status": "terminal", "committed": False},
         )
 
