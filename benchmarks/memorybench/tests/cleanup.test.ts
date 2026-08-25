@@ -35,6 +35,16 @@ async function privateJson(path: string, payload: unknown): Promise<void> {
   await chmod(path, 0o600)
 }
 
+async function replaceRunPlan(f: Fixture, source: string): Promise<void> {
+  const runPlan = structuredClone(f.runPlan)
+  runPlan.dataset.source = source
+  await privateJson(f.runPlanPath, runPlan)
+  await privateJson(f.cleanupPlanPath, {
+    ...f.cleanupPlan,
+    run_plan_sha256: await digest(await readFile(f.runPlanPath)),
+  })
+}
+
 interface Fixture {
   root: string
   output: string
@@ -214,6 +224,39 @@ describe("guest cleanup v1", () => {
     for (const [domain, raw, expected] of vectors) {
       expect(await cleanup.privacyHmacSha256(HMAC_KEY_HEX, domain, raw)).toBe(expected)
     }
+  })
+
+  test("accepts the frozen registry source and rejects non-public source forms", async () => {
+    const cleanup = await load()
+    const f = await fixture()
+
+    await replaceRunPlan(f, "xiaowu0162/longmemeval-cleaned")
+    await expect(cleanup.parseCleanupPlan(f.cleanupPlanPath)).resolves.toEqual(expect.any(Object))
+
+    for (const source of ["/abs", "file:x", "./x", "../x", "a//b", "a/./b", "a/../b", "a\\b"]) {
+      await replaceRunPlan(f, source)
+      await expect(cleanup.parseCleanupPlan(f.cleanupPlanPath)).rejects.toThrow(/dataset identity/)
+    }
+  })
+
+  test("CLI reports cleanup-plan failures on stderr without a stdout proof", async () => {
+    const f = await fixture()
+    await replaceRunPlan(f, "./x")
+
+    const child = Bun.spawn({
+      cmd: ["bun", "run", join(process.cwd(), "benchmarks/memorybench/cleanup.ts"), "--plan", f.cleanupPlanPath],
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    const [exit, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ])
+
+    expect(exit).toBe(3)
+    expect(stdout).toBe("")
+    expect(stderr).toMatch(/run plan dataset identity is invalid/)
   })
 
   test("reads a real owned mode-0600 full plan and refuses relative, symlinked, and insecure files", async () => {
