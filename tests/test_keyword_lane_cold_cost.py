@@ -331,6 +331,7 @@ def test_active_catalog_warm_refuses_every_mode_before_a_cold_freshness_walk(
         raise AssertionError("admission must run before cold freshness walks")
         yield  # pragma: no cover - keep this a generator-shaped test double
 
+    readiness.manage_runtime()
     readiness.begin_warm()
     monkeypatch.setattr(find_module, "_walk_md", forbidden_walk)
     monkeypatch.setattr(
@@ -668,6 +669,7 @@ def test_event_index_kill_switch_keeps_managed_runtime_on_lazy_rollback(
 
 def test_declined_projection_is_named_in_find_timings(tmp_path: Path) -> None:
     timings = find_module.FindTimings()
+    readiness.manage_runtime()
     readiness.begin_warm()
 
     with pytest.raises(find_module.RetrievalIndexWarming):
@@ -681,9 +683,9 @@ def test_declined_projection_is_named_in_find_timings(tmp_path: Path) -> None:
             timings=timings,
         )
 
-    stage = timings.as_dict()["stages"]["recall_projection"]
-    assert stage["outcome"] == "warming"
-    assert stage["ms"] >= 0.0
+    report = timings.as_dict()
+    assert report["profile"]["recall_projection"]["outcome"] == "warming"
+    assert report["stages"]["recall_projection"]["ms"] >= 0.0
 
 
 def test_managed_runtime_refuses_before_warm_begins_without_projection_fallback(
