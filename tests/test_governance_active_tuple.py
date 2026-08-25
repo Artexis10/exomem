@@ -26,6 +26,9 @@ from exomem import (
 from exomem import (
     find_corpus,
     graph_sync,
+    media_jobs,
+    media_processing,
+    preserve,
     reserved_paths,
     semantic_writes,
     writer_lease,
@@ -490,6 +493,41 @@ def _load_active_projection_items(
         expected_rows_digest=evidence.manifest.rows_digest,
     )
     return active, manifest, items
+
+
+def _configure_media_v4(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    sidecar_source: str | None,
+    now: int,
+) -> tuple[Path, Path, schema_v4.MigrationResult]:
+    vault = tmp_path / "vault"
+    binary = vault / "Knowledge Base" / "Evidence" / "Audio" / "interview.m4a"
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    binary.write_bytes(b"\x00\x00\x00\x18ftypM4A governed audio")
+    sidecar = binary.with_name(f"{binary.name}.md")
+    if sidecar_source is not None:
+        sidecar.write_text(sidecar_source, encoding="utf-8")
+    _write_workspace(vault, _documents(ceiling=2))
+    if sidecar_source is None:
+        migration = _migrate_with_empty_projection_catalog(vault, now=now)
+    else:
+        migration = _migrate_with_projection_item(
+            vault,
+            path=sidecar.relative_to(vault).as_posix(),
+            source=sidecar_source,
+            now=now,
+        )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    media_processing.set_media_runtime_available(vault)
+    return vault, sidecar, migration
 
 
 def _legacy_companion_backfill_input(
@@ -2927,6 +2965,7 @@ def test_v4_directory_trash_does_not_restore_tree_after_publication_uncertainty(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     now = int(time.time())
+    today = dt.datetime.fromtimestamp(now).date()
     monkeypatch.setenv(
         "EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-state")
     )
@@ -2968,13 +3007,13 @@ def test_v4_directory_trash_does_not_restore_tree_after_publication_uncertainty(
             path=directory,
             confirm=True,
             recursive=True,
-            today=dt.date(2026, 8, 25),
+            today=today,
             now=dt.datetime.fromtimestamp(now),
         )
 
     assert uncertain.value.code == "GOVERNANCE_CATALOG_PUBLICATION_UNCERTAIN"
     assert not (vault / directory).exists()
-    trash_day = vault / "Knowledge Base/_trash/2026-08-25"
+    trash_day = vault / f"Knowledge Base/_trash/{today.isoformat()}"
     assert any(path.is_dir() for path in trash_day.iterdir())
 
 
@@ -3683,6 +3722,294 @@ def test_v4_batch_refuses_existing_markdown_without_exact_predecessor_binding(
         )
 
     assert "exact predecessor" in str(blocked.value)
+
+
+def test_media_reconciliation_publishes_new_sidecar_in_next_v4_catalog(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = int(time.time())
+    vault, sidecar, _migration = _configure_media_v4(
+        tmp_path,
+        monkeypatch,
+        sidecar_source=None,
+        now=now,
+    )
+
+    result = media_processing.reconcile_media(vault, sidecar.with_suffix(""))
+
+    assert result is not None
+    assert result.sidecar_path == sidecar
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    assert custody.control.activation_epoch == 2
+    active, _manifest, items = _load_active_projection_items(
+        vault,
+        activation_epoch=2,
+        activation_state_digest=custody.control.activation_state_digest or "",
+    )
+    assert active.active.catalog_generation == 2
+    assert [(item.item_identity, item.content_hash) for item in items] == [
+        (
+            sidecar.relative_to(vault).as_posix(),
+            vault_module.content_hash(sidecar.read_text(encoding="utf-8")),
+        )
+    ]
+
+
+def test_media_extraction_update_publishes_exact_v4_catalog_successor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = int(time.time())
+    pending = (
+        "---\ntitle: Interview\ntype: source\nstatus: draft\n"
+        "media_type: audio\nextracted_by: pending\n"
+        "processing_state: pending\n---\n\n## Extracted text\n\nPending.\n"
+    )
+    vault, sidecar, _migration = _configure_media_v4(
+        tmp_path,
+        monkeypatch,
+        sidecar_source=pending,
+        now=now,
+    )
+
+    preserve.update_sidecar_extraction(
+        vault,
+        sidecar,
+        text="Governed transcript.",
+        engine="test-engine",
+    )
+
+    after = sidecar.read_text(encoding="utf-8")
+    assert "Governed transcript." in after
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    assert custody.control.activation_epoch == 2
+    active, _manifest, items = _load_active_projection_items(
+        vault,
+        activation_epoch=2,
+        activation_state_digest=custody.control.activation_state_digest or "",
+    )
+    assert active.active.catalog_generation == 2
+    assert [(item.item_identity, item.content_hash) for item in items] == [
+        (
+            sidecar.relative_to(vault).as_posix(),
+            vault_module.content_hash(after),
+        )
+    ]
+
+
+def test_media_reconciliation_refuses_model_bound_v4_before_sidecar_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = int(time.time())
+    vault, sidecar, _migration = _configure_media_v4(
+        tmp_path,
+        monkeypatch,
+        sidecar_source=None,
+        now=now,
+    )
+    load_evidence = projection_store.namespace_evidence_from_snapshot
+
+    def model_bound(snapshot):
+        return dataclasses.replace(
+            load_evidence(snapshot),
+            required_measurement_roots=(object(),),
+        )
+
+    monkeypatch.setattr(
+        projection_store,
+        "namespace_evidence_from_snapshot",
+        model_bound,
+    )
+
+    with pytest.raises(media_processing.MediaProcessingError) as blocked:
+        media_processing.reconcile_media(vault, sidecar.with_suffix(""))
+
+    assert blocked.value.code == "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED"
+    assert not sidecar.exists()
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    assert custody.control.activation_epoch == 1
+
+
+def test_media_catalog_uncertainty_keeps_committed_sidecar_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = int(time.time())
+    pending = (
+        "---\ntitle: Interview\ntype: source\nstatus: draft\n"
+        "media_type: audio\nextracted_by: pending\n"
+        "processing_state: pending\n---\n\n## Extracted text\n\nPending.\n"
+    )
+    vault, sidecar, _migration = _configure_media_v4(
+        tmp_path,
+        monkeypatch,
+        sidecar_source=pending,
+        now=now,
+    )
+
+    def lose_publication_terminal(_prepared) -> None:
+        raise catalog_publication.CatalogPublicationError("lost terminal")
+
+    monkeypatch.setattr(
+        catalog_publication,
+        "publish_markdown_batch",
+        lose_publication_terminal,
+    )
+
+    with pytest.raises(catalog_publication.CatalogPublicationError, match="lost terminal"):
+        preserve.update_sidecar_extraction(
+            vault,
+            sidecar,
+            text="Committed before the terminal was lost.",
+            engine="test-engine",
+        )
+
+    assert "Committed before the terminal was lost." in sidecar.read_text(encoding="utf-8")
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    assert custody.control.activation_epoch == 1
+
+
+def test_media_failure_and_pending_updates_each_publish_a_v4_successor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = int(time.time())
+    pending = (
+        "---\ntitle: Interview\ntype: source\nstatus: draft\n"
+        "media_type: audio\nextracted_by: pending\n"
+        "processing_state: pending\n---\n\n## Extracted text\n\nPending.\n"
+    )
+    vault, sidecar, _migration = _configure_media_v4(
+        tmp_path,
+        monkeypatch,
+        sidecar_source=pending,
+        now=now,
+    )
+
+    preserve.update_sidecar_processing_failure(
+        vault,
+        sidecar,
+        state=media_jobs.BLOCKED,
+        attempts=1,
+        error="runtime unavailable",
+        retryable=True,
+        next_action="restore the runtime",
+    )
+    blocked = sidecar.read_text(encoding="utf-8")
+    first = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    assert first.control.activation_epoch == 2
+
+    assert preserve.update_sidecar_processing_pending(
+        vault,
+        sidecar,
+        attempts=2,
+        expected_hash=vault_module.content_hash(blocked),
+    )
+    after = sidecar.read_text(encoding="utf-8")
+    second = authorization_custody.load_authorization_custody(vault, now=now + 2)
+    assert second.control.activation_epoch == 3
+    active, _manifest, items = _load_active_projection_items(
+        vault,
+        activation_epoch=3,
+        activation_state_digest=second.control.activation_state_digest or "",
+    )
+    assert active.active.catalog_generation == 3
+    assert items[0].content_hash == vault_module.content_hash(after)
+    assert "processing_attempts: 2" in after
+
+
+def test_mark_processing_unavailable_publishes_sidecar_before_job_terminal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = int(time.time())
+    pending = (
+        "---\ntitle: Interview\ntype: source\nstatus: draft\n"
+        "media_type: audio\nextracted_by: pending\n"
+        "processing_state: pending\n---\n\n## Extracted text\n\nPending.\n"
+    )
+    vault, sidecar, _migration = _configure_media_v4(
+        tmp_path,
+        monkeypatch,
+        sidecar_source=pending,
+        now=now,
+    )
+    binary = sidecar.with_suffix("")
+    store_instance = media_jobs.MediaJobStore(vault)
+    job_id = store_instance.enqueue(
+        media_jobs.MediaJob(
+            binary_path=binary,
+            sidecar_path=sidecar,
+            media_type="audio",
+        )
+    )
+
+    changed = media_processing.mark_processing_unavailable(
+        vault,
+        reason="runtime unavailable",
+        next_action="restore the runtime",
+    )
+
+    assert changed == 1
+    assert store_instance.get(job_id).state == media_jobs.BLOCKED
+    after = sidecar.read_text(encoding="utf-8")
+    assert "processing_state: blocked" in after
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    assert custody.control.activation_epoch == 2
+    _active, _manifest, items = _load_active_projection_items(
+        vault,
+        activation_epoch=2,
+        activation_state_digest=custody.control.activation_state_digest or "",
+    )
+    assert items[0].content_hash == vault_module.content_hash(after)
+
+
+def test_existing_binary_backfill_pages_publish_v4_catalog_membership(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = int(time.time())
+    vault, media_sidecar, _migration = _configure_media_v4(
+        tmp_path,
+        monkeypatch,
+        sidecar_source=None,
+        now=now,
+    )
+
+    created_media, media_created = preserve.ensure_media_sidecar(
+        vault,
+        media_sidecar.with_suffix(""),
+        today=dt.date(2026, 8, 25),
+    )
+
+    assert media_created and created_media == media_sidecar
+    first = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    assert first.control.activation_epoch == 2
+
+    artifact = vault / "Knowledge Base" / "Evidence" / "Files" / "sample.bin"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_bytes(b"existing artifact")
+    artifact_page, page_created = preserve.ensure_artifact_page(
+        vault,
+        artifact,
+        today=dt.date(2026, 8, 25),
+    )
+
+    assert page_created
+    second = authorization_custody.load_authorization_custody(vault, now=now + 2)
+    assert second.control.activation_epoch == 3
+    active, _manifest, items = _load_active_projection_items(
+        vault,
+        activation_epoch=3,
+        activation_state_digest=second.control.activation_state_digest or "",
+    )
+    assert active.active.catalog_generation == 3
+    assert {item.item_identity for item in items} == {
+        media_sidecar.relative_to(vault).as_posix(),
+        artifact_page.relative_to(vault).as_posix(),
+    }
 
 
 def test_semantic_edit_publishes_auxiliary_markdown_in_the_same_v4_generation(

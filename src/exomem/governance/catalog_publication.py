@@ -32,6 +32,15 @@ class CatalogPublicationError(RuntimeError):
     """A content change cannot safely advance the active v4 catalog."""
 
 
+class CatalogCommitError(CatalogPublicationError):
+    """A product write was blocked before bytes or became uncertain after them."""
+
+    def __init__(self, code: str, reason: str):
+        self.code = code
+        self.reason = reason
+        super().__init__(reason)
+
+
 @dataclass(frozen=True, slots=True)
 class MarkdownCatalogMutation:
     """One intended canonical Markdown successor and its exact predecessor."""
@@ -220,7 +229,8 @@ def mutation_from_planned_write(
         return None
 
     expected = write.expected_hash
-    if expected == vault.MISSING_CONTENT_HASH:
+    expected_missing = expected == vault.MISSING_CONTENT_HASH
+    if expected_missing:
         expected = None
     guard = write.guard
     if guard is not None:
@@ -239,7 +249,7 @@ def mutation_from_planned_write(
                 "catalog publication predecessor bindings disagree"
             )
         expected = guarded_expected
-    elif expected is None and not write.create_only:
+    elif expected is None and not write.create_only and not expected_missing:
         raise CatalogPublicationError(
             "catalog Markdown mutation lacks an exact predecessor binding"
         )
@@ -941,6 +951,7 @@ def publish_markdown_upsert(
 
 
 __all__ = [
+    "CatalogCommitError",
     "CatalogPublicationError",
     "CatalogRemoval",
     "MarkdownCatalogMutation",
