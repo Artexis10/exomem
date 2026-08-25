@@ -897,6 +897,10 @@ def drain_deferred_work(
         if full_receipts and semantic_receipts and budget > 1:
             full_budget = budget // 2
             semantic_budget = budget - full_budget
+        elif full_receipts and semantic_receipts and budget == 1:
+            turn = deferred_index.claim_mixed_drain_queue(vault_root)
+            full_budget = int(turn == "full")
+            semantic_budget = int(turn == "semantic")
         elif full_receipts:
             full_budget, semantic_budget = budget, 0
         else:

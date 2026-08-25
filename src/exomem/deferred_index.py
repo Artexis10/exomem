@@ -17,6 +17,7 @@ from . import reserved_paths, sidecar_store
 from .kbdir import kb_dirname
 
 _SEMANTIC_ISOLATION_CURSOR_KEY = "semantic_isolation_cursors:v1"
+_MIXED_DRAIN_TURN_KEY = "mixed_drain_turn:v1"
 _SEMANTIC_UPSERTS_GENERATION_KEY = "semantic_upserts_generation"
 _GRAPH_UPSERTS_GENERATION_KEY = "graph_upserts_generation"
 _GRAPH_FULL_REBUILD_KEY = "graph_full_rebuild_generation"
@@ -332,6 +333,31 @@ def set_semantic_isolation_cursors(
     except (OSError, sqlite3.Error):
         return False
     return True
+
+
+def claim_mixed_drain_queue(vault_root: Path) -> str:
+    """Atomically alternate a one-slot drain between full and semantic work."""
+    conn = _connect(vault_root, create=True)
+    try:
+        with conn:
+            row = conn.execute(
+                "SELECT value FROM maintenance_state WHERE key = ?",
+                (_MIXED_DRAIN_TURN_KEY,),
+            ).fetchone()
+            current = (
+                str(row[0])
+                if row is not None and str(row[0]) in {"full", "semantic"}
+                else "full"
+            )
+            next_queue = "semantic" if current == "full" else "full"
+            conn.execute(
+                "INSERT INTO maintenance_state(key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (_MIXED_DRAIN_TURN_KEY, next_queue),
+            )
+        return current
+    finally:
+        conn.close()
 
 
 @dataclass(frozen=True, slots=True)

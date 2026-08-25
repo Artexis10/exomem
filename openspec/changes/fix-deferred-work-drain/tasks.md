@@ -89,3 +89,7 @@ existing soft-fail seams; the lean suite runs with `EXOMEM_DISABLE_EMBEDDINGS=1`
 - [x] 10.4 Bound per-receipt failure isolation for bounded drains and preserve fair rotation.
 - [ ] 10.5 Run focused watcher/deferred tests, Ruff, strict OpenSpec validation, privacy
       validation, and the lean suite before delivery.
+- [x] 10.6 Add red regressions for zero-cap progress and one-slot cross-queue fairness, then
+      reserve one background convergence slot and alternate it durably.
+- [x] 10.7 Prove an explicit unbounded operator drain still isolates more than the bounded
+      four-receipt prefix for both full and semantic work.

@@ -151,6 +151,12 @@ prefix is isolated in that pass; attempted failures rotate behind untouched rece
 next periodic pass continues fairly. An unbounded operator drain keeps the exhaustive
 isolation behavior because waiting for repair is the explicit purpose of that command.
 
+The live cap can be overridden to zero or one. Zero still reserves one background slot when
+reconcile budget remains: it may defer a live burst, but cannot turn durable repair back into
+a halt. With one shared slot and both queues populated, a durable turn marker alternates the
+slot between full and semantic work. Keeping the turn in the deferred-work sidecar preserves
+fairness across restarts and avoids permanently favoring whichever queue is checked first.
+
 Alternatives rejected:
 
 - Reducing only the performance reconcile cap conflates real missed-event admission with

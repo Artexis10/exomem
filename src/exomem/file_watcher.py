@@ -93,11 +93,13 @@ def _background_deferred_limit(
     has no freshness deadline, so it takes the smaller live cap and converges
     over later passes instead.
     """
-    caps = [
-        cap
-        for cap in (remaining, policy.max_embed_files_per_batch)
-        if cap is not None
-    ]
+    live_cap = policy.max_embed_files_per_batch
+    if live_cap is not None:
+        # Zero may defer a live burst, but background correctness still needs
+        # one convergence slot. A zero remaining reconcile budget continues to
+        # win below, so drift admission is never overspent.
+        live_cap = max(1, live_cap)
+    caps = [cap for cap in (remaining, live_cap) if cap is not None]
     return min(caps) if caps else None
 
 # ---- Self-write suppression registry (module-level: available to writers even
