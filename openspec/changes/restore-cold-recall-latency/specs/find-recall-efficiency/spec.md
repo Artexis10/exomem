@@ -17,12 +17,19 @@ The system SHALL compute markdown freshness for a single `find` request at most 
 - **AND** the vault markdown tree is stat-walked at most once when vault scope is required
 - **AND** the result reflects the same policy-projected source state as before this change
 
+#### Scenario: One KB walk and one vault walk per request
+
+- **WHEN** an explicit offline `find` caller uses `scope="kb"` with a non-empty query that also triggers auto-widen's vault-scope check and the event-maintained freshness registry is not live
+- **THEN** the KB markdown tree is stat-walked at most once for that request
+- **AND** the vault markdown tree is stat-walked at most once for that request, shared between auto-widen and every other vault-scope freshness check
+- **AND** the returned hits are identical to the same request over the same policy-projected source state
+
 #### Scenario: kb-only scope never walks the vault
 
 - **WHEN** `find` is called with `scope="kb-only"`
 - **THEN** no vault-wide markdown stat-walk occurs for that request
 
-#### Scenario: Live registry answers freshness with no walk and identical results
+#### Scenario: A live registry answers freshness with no walk and identical results
 
 - **WHEN** `find` is called for a scope whose event-maintained recall projection is live
 - **THEN** that scope's freshness and allowed paths are obtained from the registry with no filesystem stat-walk

@@ -445,7 +445,9 @@ jobs:
         with:
           node-version: "22"
       - name: Validate all OpenSpec records
-        run: npm exec --yes @fission-ai/openspec -- validate --all --strict
+        run: |
+          source infra/tool-versions.env
+          npm exec --yes @fission-ai/openspec@${OPENSPEC_VERSION} -- validate --all --strict
       - name: Refuse task-complete active changes
         run: python scripts/check_openspec_archive_discipline.py
 
