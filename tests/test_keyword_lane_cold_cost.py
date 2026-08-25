@@ -571,6 +571,7 @@ def test_vector_graph_resolver_inherits_strict_server_projection_policy(
 
     monkeypatch.setattr(find_module, "recall_resolver_snapshot", resolver)
     monkeypatch.setattr(find_module.find_candidates, "collect_candidates", collect)
+    catalog_proof_out: dict[str, object] = {"stale": object()}
 
     with pytest.raises(find_module.RetrievalIndexWarming):
         find_module.find(
@@ -580,9 +581,15 @@ def test_vector_graph_resolver_inherits_strict_server_projection_policy(
             scope="kb",
             graph=False,
             temporal=False,
+            catalog_proof_out=catalog_proof_out,
         )
 
     assert observed == [False]
+    assert set(catalog_proof_out) == set(freshness.SCOPES)
+    assert all(
+        catalog_proof_out[scope] == freshness.live_recall_checkpoint(tmp_path, scope)
+        for scope in freshness.SCOPES
+    )
 
 
 def test_request_projection_cannot_advance_past_its_catalog_proof(

@@ -718,6 +718,7 @@ def find(
     degraded_out: list[str] | None = None,
     failed_out: list[str] | None = None,
     retrieval_trace: Any | None = None,
+    catalog_proof_out: dict[str, freshness.RecallFreshnessCheckpoint] | None = None,
 ) -> list[Hit] | list[SemanticUnitHit] | list[Hit | SemanticUnitHit]:
     """Search the vault. Returns up to `limit` hits.
 
@@ -818,6 +819,8 @@ def find(
     and `signals.usage_boost`. Strict no-op on cold start, absent logs, or
     `EXOMEM_DISABLE_USAGE_BOOST`. Bypasses the hot find cache.
     """
+    if catalog_proof_out is not None:
+        catalog_proof_out.clear()
     if scope not in ("kb", "vault", "kb-only"):
         raise ValueError(f"find: scope must be 'kb', 'vault', or 'kb-only', got {scope!r}")
     if mode not in ("hybrid", "keyword", "vector"):
@@ -880,6 +883,12 @@ def find(
                     for scope, checkpoint in raw_proof.items()
                     if isinstance(checkpoint, freshness.RecallFreshnessCheckpoint)
                 }
+                if set(catalog_proof) != set(freshness.SCOPES):
+                    readiness.mark_unready("retrieval_catalog")
+                    catalog_proof = None
+                    state = "unavailable"
+                elif catalog_proof_out is not None:
+                    catalog_proof_out.update(catalog_proof)
         if state in {"warming", "unavailable"}:
             if state == "unavailable":
                 lexstore.request_repair(vault_root)

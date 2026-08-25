@@ -107,6 +107,7 @@ def resolve_for_find(
     release: Any,
     purpose: str | None,
     cue: ReferentCue | None = None,
+    expected_recall_checkpoints: dict[str, freshness.RecallFreshnessCheckpoint] | None = None,
 ) -> dict[str, Any] | None:
     """Resolve a bounded referent block; every exception soft-fails."""
     try:
@@ -118,14 +119,22 @@ def resolve_for_find(
         cue = cue or detect_cue(query, registry=type_registry)
         if cue is None:
             return None
-        admission = readiness.retrieval_admission(vault_root)
+        admission = readiness.retrieval_admission()
         state = str(admission["state"])
         if state in {"warming", "unavailable"}:
             return None
-        require_live_recall = state != "unverified" and freshness.event_indexes_enabled()
+        require_live_recall = expected_recall_checkpoints is not None
+        if require_live_recall:
+            if set(expected_recall_checkpoints) != set(freshness.SCOPES):
+                return None
+        elif state != "unverified" and freshness.event_indexes_enabled():
+            # A managed request without the proof admitted by its primary find
+            # cannot safely enrich from a potentially different generation.
+            return None
         freshness_key = FreshnessSnapshot(
             vault_root,
             require_live_recall=require_live_recall,
+            expected_recall_checkpoints=expected_recall_checkpoints,
         ).projection_key("kb")
         registry = load_entity_registry(
             vault_root,

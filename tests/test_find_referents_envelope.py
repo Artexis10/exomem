@@ -198,14 +198,23 @@ def test_managed_referent_stage_requires_live_projection(
 ) -> None:
     runtime = _runtime()
     observed: list[bool] = []
+    expected_proofs: list[dict[str, object]] = []
     build_permissions: list[bool] = []
     scheduled: list[tuple] = []
     vault = tmp_path / "vault"
     vault.mkdir()
 
     class Snapshot:
-        def __init__(self, _root: Path, *, require_live_recall: bool = False, **_kwargs):
+        def __init__(
+            self,
+            _root: Path,
+            *,
+            require_live_recall: bool = False,
+            expected_recall_checkpoints=None,
+            **_kwargs,
+        ):
             observed.append(require_live_recall)
+            expected_proofs.append(expected_recall_checkpoints or {})
 
         def projection_key(self, _scope: str):
             return ("live-projection",)
@@ -234,6 +243,14 @@ def test_managed_referent_stage_requires_live_projection(
         "retrieval_admission",
         lambda _root=None: {"state": "ready", "admitted": True},
     )
+    checkpoint = runtime.freshness.RecallFreshnessCheckpoint(
+        "instance",
+        7,
+        (1, 2, "digest"),
+        "policy",
+        "access",
+    )
+    proof = {scope: checkpoint for scope in runtime.freshness.SCOPES}
     cue = runtime.detect_cue("my two coastal friends")
     assert cue is not None
 
@@ -246,12 +263,65 @@ def test_managed_referent_stage_requires_live_projection(
         release=object(),
         purpose=None,
         cue=cue,
+        expected_recall_checkpoints=proof,
     )
 
     assert result is None
     assert observed == [True]
+    assert expected_proofs == [proof]
     assert build_permissions == [False]
     assert scheduled == [("live-projection",)]
+
+
+def test_commands_pass_find_catalog_proof_to_referents(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = _runtime()
+    checkpoint = find_module.freshness.RecallFreshnessCheckpoint(
+        "instance",
+        11,
+        (3, 4, "proof"),
+        "policy",
+        "access",
+    )
+    proof = {scope: checkpoint for scope in find_module.freshness.SCOPES}
+    emitted: list[dict[str, object]] = []
+    received: list[dict[str, object] | None] = []
+
+    def fake_find(_root: Path, **kwargs):
+        catalog_proof_out = kwargs["catalog_proof_out"]
+        catalog_proof_out.update(proof)
+        emitted.append(catalog_proof_out)
+        return []
+
+    monkeypatch.setattr(find_module, "find", fake_find)
+    monkeypatch.setattr(
+        commands.projection_runtime_module,
+        "load_active_projection_runtime",
+        lambda _root: None,
+    )
+    monkeypatch.setattr(
+        commands.projection_runtime_module,
+        "requires_projected_read_boundary",
+        lambda _root: False,
+    )
+    monkeypatch.setattr(runtime, "cue_for_find", lambda **_kwargs: object())
+    monkeypatch.setattr(
+        runtime,
+        "resolve_for_find",
+        lambda *_args, **kwargs: received.append(kwargs["expected_recall_checkpoints"]),
+    )
+
+    commands.op_find(
+        tmp_path,
+        query="my two coastal friends",
+        limit=10,
+        mode="hybrid",
+        rerank=False,
+    )
+
+    assert received == [proof]
+    assert received[0] is emitted[0]
 
 
 def test_kill_switch_env_disables_resolver(referent_vault: Path, monkeypatch) -> None:
