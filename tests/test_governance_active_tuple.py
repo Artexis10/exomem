@@ -492,6 +492,312 @@ def _load_active_projection_items(
     return active, manifest, items
 
 
+def _legacy_companion_backfill_input(
+    vault: Path,
+) -> tuple[str, str, str, dict[str, object]]:
+    artifact_path = "Knowledge Base/Notes/private.bin"
+    companion_path = f"{artifact_path}.md"
+    artifact = b"\x00private-bytes\xff"
+    companion = (
+        "---\n"
+        "title: Private binary\n"
+        "type: source\n"
+        "status: draft\n"
+        "---\n\n"
+        "# Private binary\n\n"
+        "Legacy companion.\n"
+    )
+    artifact_target = vault / artifact_path
+    artifact_target.parent.mkdir(parents=True, exist_ok=True)
+    artifact_target.write_bytes(artifact)
+    (vault / companion_path).write_text(companion, encoding="utf-8")
+    payload: dict[str, object] = {
+        "version": 1,
+        "artifact_class": "binary",
+        "artifact_path": artifact_path,
+        "expected_artifact_sha256": hashlib.sha256(artifact).hexdigest(),
+        "expected_artifact_size": len(artifact),
+        "expected_companion_path": companion_path,
+        "expected_companion_sha256": hashlib.sha256(companion.encode()).hexdigest(),
+        "semantics": {
+            "projects": ["private"],
+            "tags": ["confidential"],
+            "types": ["source"],
+            "classes": ["pii"],
+        },
+    }
+    return artifact_path, companion_path, companion, payload
+
+
+def _preview_companion_backfill(
+    vault: Path,
+    payload: dict[str, object],
+    *,
+    now: int,
+) -> dict[str, object]:
+    from exomem.governance.tool import op_govern_memory
+
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        return op_govern_memory(
+            vault,
+            operation="backfill_companion",
+            backfill_action="preview",
+            companion_input=payload,
+            principal=owner_principal(),
+            now=now,
+        )
+
+
+def _commit_companion_backfill(
+    vault: Path,
+    payload: dict[str, object],
+    *,
+    proposal_id: str,
+    now: int,
+    crash_at: str | None = None,
+) -> dict[str, object]:
+    from exomem.governance.tool import op_govern_memory
+
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        return op_govern_memory(
+            vault,
+            operation="backfill_companion",
+            backfill_action="commit",
+            proposal_id=proposal_id,
+            companion_input=payload,
+            principal=owner_principal(),
+            now=now,
+            crash_at=crash_at,
+        )
+
+
+def test_v4_companion_backfill_publishes_catalog_successor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    _artifact_path, companion_path, _companion, payload = (
+        _legacy_companion_backfill_input(vault)
+    )
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_projection_items(
+        vault,
+        items=((companion_path, (vault / companion_path).read_text(encoding="utf-8")),),
+        now=now,
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    preview = _preview_companion_backfill(vault, payload, now=now + 1)
+
+    committed = _commit_companion_backfill(
+        vault,
+        payload,
+        proposal_id=str(preview["proposal_id"]),
+        now=now + 2,
+    )
+
+    assert committed["status"] == "committed"
+    companion_after = (vault / companion_path).read_text(encoding="utf-8")
+    assert "governance_companion:" in companion_after
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 3)
+    assert custody.control.activation_epoch == 2
+    active, manifest, items = _load_active_projection_items(
+        vault,
+        activation_epoch=2,
+        activation_state_digest=custody.control.activation_state_digest or "",
+    )
+    assert active.active.catalog_generation == 2
+    assert manifest.item_count == 1
+    assert {item.item_identity: item.content_hash for item in items} == {
+        companion_path: vault_module.content_hash(companion_after)
+    }
+    connection = store.open_connection(vault)
+    try:
+        component_kinds = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT component_kind FROM governance_operation_components "
+                "WHERE event_id=?",
+                (str(committed["event_id"]),),
+            ).fetchall()
+        }
+        catalog_target = connection.execute(
+            "SELECT value_json FROM governance_operation_components "
+            "WHERE event_id=? AND phase='final' AND component_kind='catalog'",
+            (str(committed["event_id"]),),
+        ).fetchone()
+    finally:
+        connection.close()
+    assert component_kinds == {"catalog", "companion", "proposal"}
+    assert catalog_target is not None
+    assert json.loads(str(catalog_target[0]))["activation_state_digest"] == (
+        custody.control.activation_state_digest
+    )
+
+
+@pytest.mark.parametrize("crash_at", ["after_catalog", "after_terminal"])
+def test_v4_companion_backfill_recovers_after_catalog_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    crash_at: str,
+) -> None:
+    from exomem.governance.recovery import reconcile_governance_operations
+    from exomem.governance.tool import GovernanceCrash
+
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    _artifact_path, companion_path, _companion, payload = (
+        _legacy_companion_backfill_input(vault)
+    )
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_projection_items(
+        vault,
+        items=((companion_path, (vault / companion_path).read_text(encoding="utf-8")),),
+        now=now,
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    preview = _preview_companion_backfill(vault, payload, now=now + 1)
+
+    with pytest.raises(GovernanceCrash, match=crash_at):
+        _commit_companion_backfill(
+            vault,
+            payload,
+            proposal_id=str(preview["proposal_id"]),
+            now=now + 2,
+            crash_at=crash_at,
+        )
+
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 3)
+    assert custody.control.activation_epoch == 2
+    recovered = reconcile_governance_operations(vault)
+    assert recovered["blocked"] is False
+    assert recovered["activated"] == 1
+    replayed = _commit_companion_backfill(
+        vault,
+        payload,
+        proposal_id=str(preview["proposal_id"]),
+        now=now + 4,
+    )
+    assert replayed["status"] == "committed"
+
+
+def test_v4_companion_backfill_recovers_catalog_after_companion_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance.recovery import reconcile_governance_operations
+    from exomem.governance.tool import GovernanceCrash
+
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    _artifact_path, companion_path, _companion, payload = (
+        _legacy_companion_backfill_input(vault)
+    )
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_projection_items(
+        vault,
+        items=((companion_path, (vault / companion_path).read_text(encoding="utf-8")),),
+        now=now,
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    preview = _preview_companion_backfill(vault, payload, now=now + 1)
+
+    with pytest.raises(GovernanceCrash, match="after_publish"):
+        _commit_companion_backfill(
+            vault,
+            payload,
+            proposal_id=str(preview["proposal_id"]),
+            now=now + 2,
+            crash_at="after_publish",
+        )
+
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 3)
+    assert custody.control.activation_epoch == 1
+    assert "governance_companion:" in (vault / companion_path).read_text(encoding="utf-8")
+    recovered = reconcile_governance_operations(vault)
+    assert recovered["blocked"] is False
+    assert recovered["activated"] == 1
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 3)
+    assert custody.control.activation_epoch == 2
+    replayed = _commit_companion_backfill(
+        vault,
+        payload,
+        proposal_id=str(preview["proposal_id"]),
+        now=now + 4,
+    )
+    assert replayed["status"] == "committed"
+
+
+def test_v4_companion_backfill_publication_uncertainty_keeps_pending_journal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance.recovery import reconcile_governance_operations
+    from exomem.governance.tool import GovernanceError
+
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    _artifact_path, companion_path, _companion, payload = (
+        _legacy_companion_backfill_input(vault)
+    )
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_projection_items(
+        vault,
+        items=((companion_path, (vault / companion_path).read_text(encoding="utf-8")),),
+        now=now,
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    preview = _preview_companion_backfill(vault, payload, now=now + 1)
+
+    def lose_catalog_terminal(_prepared) -> None:
+        raise catalog_publication.CatalogPublicationError("lost catalog terminal")
+
+    monkeypatch.setattr(
+        catalog_publication,
+        "publish_markdown_batch",
+        lose_catalog_terminal,
+    )
+    with pytest.raises(GovernanceError) as uncertain:
+        _commit_companion_backfill(
+            vault,
+            payload,
+            proposal_id=str(preview["proposal_id"]),
+            now=now + 2,
+        )
+
+    assert uncertain.value.code == "GOVERNANCE_CATALOG_PUBLICATION_UNCERTAIN"
+    assert "governance_companion:" in (vault / companion_path).read_text(encoding="utf-8")
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 3)
+    assert custody.control.activation_epoch == 1
+    recovered = reconcile_governance_operations(vault)
+    assert recovered["blocked"] is True
+    assert recovered["activated"] == 0
+
+
 def test_govern_memory_v4_proposal_persists_exact_authority_binding(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -482,16 +482,27 @@ def _migrate_v3(conn: sqlite3.Connection) -> None:
     )
 
 
-def require_authoring_schema(vault_root: Path) -> None:
+def require_authoring_schema(
+    vault_root: Path,
+    *,
+    supported_versions: tuple[int, ...] = (SCHEMA_USER_VERSION,),
+) -> None:
     """Refuse authoring on a schema this release cannot interpret."""
+    if (
+        type(supported_versions) is not tuple
+        or not supported_versions
+        or any(type(version) is not int or version < 1 for version in supported_versions)
+    ):
+        raise ValueError("supported authoring schema versions are invalid")
     conn = open_connection(vault_root)
     try:
         version = int(conn.execute("PRAGMA user_version").fetchone()[0])
     finally:
         conn.close()
-    if version != SCHEMA_USER_VERSION:
+    if version not in supported_versions:
         raise UnsupportedGovernanceSchema(
-            f"governance authoring requires schema v{SCHEMA_USER_VERSION}, found v{version}"
+            "governance authoring requires schema "
+            f"{','.join(f'v{item}' for item in supported_versions)}, found v{version}"
         )
 
 

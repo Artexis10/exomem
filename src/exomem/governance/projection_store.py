@@ -986,6 +986,17 @@ def _connect(
         raise
 
 
+def preview_variant_store(
+    *,
+    key: projections.ProjectionNamespaceKey,
+    items: Iterable[ProjectionItemVariants],
+) -> VariantStoreManifest:
+    """Derive the exact immutable store manifest without publishing files."""
+
+    _material, expected = _materialize(key, items)
+    return expected
+
+
 def stage_variant_store(
     vault_root: Path,
     *,
