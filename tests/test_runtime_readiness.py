@@ -148,6 +148,59 @@ def test_missing_replica_identity_is_not_ready_when_coordination_enabled() -> No
     assert snapshot["reasons"] == ["replica_identity_missing"]
 
 
+@pytest.mark.parametrize(
+    ("state", "reason"),
+    [
+        ("warming", "retrieval_warming"),
+        ("unavailable", "retrieval_unavailable"),
+        ("unverified", "retrieval_unverified"),
+    ],
+)
+def test_retrieval_admission_withholds_runtime_readiness(
+    state: str, reason: str
+) -> None:
+    snapshot = build_runtime_readiness(
+        coordination={
+            "enabled": False,
+            "role": "standalone",
+            "replica_id": None,
+            "coordinator_healthy": True,
+        },
+        release="1.2.3",
+        mcp_tool_surface_sha256="d" * 64,
+        retrieval={
+            "state": state,
+            "admitted": False,
+            "vault_path": "must-not-leak",
+            "query": "must-not-leak-either",
+        },
+    )
+
+    assert snapshot["status"] == "not_ready"
+    assert snapshot["takeover_eligible"] is False
+    assert snapshot["retrieval"] == {"state": state, "admitted": False}
+    assert snapshot["reasons"] == [reason]
+    assert "must-not-leak" not in repr(snapshot)
+
+
+def test_ready_retrieval_catalog_admits_runtime_readiness() -> None:
+    snapshot = build_runtime_readiness(
+        coordination={
+            "enabled": False,
+            "role": "standalone",
+            "replica_id": None,
+            "coordinator_healthy": True,
+        },
+        release="1.2.3",
+        mcp_tool_surface_sha256="d" * 64,
+        retrieval={"state": "ready", "admitted": True},
+    )
+
+    assert snapshot["status"] == "ready"
+    assert snapshot["retrieval"] == {"state": "ready", "admitted": True}
+    assert snapshot["reasons"] == []
+
+
 def test_readiness_exposes_only_bounded_mutation_holder_metadata() -> None:
     snapshot = build_runtime_readiness(
         coordination={
@@ -213,8 +266,8 @@ def test_runtime_readiness_measures_the_configured_vault(
 def test_runtime_readiness_fails_closed_within_a_tight_bound_when_status_blocks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from exomem import readiness, session_validation_cache, writer_lease
     from exomem import runtime_readiness as readiness_module
-    from exomem import session_validation_cache, writer_lease
 
     vault = tmp_path / "blocked-vault"
     entered = threading.Event()
@@ -235,6 +288,7 @@ def test_runtime_readiness_fails_closed_within_a_tight_bound_when_status_blocks(
     monkeypatch.setattr(writer_lease, "coordination_status", blocked_coordination_status)
     monkeypatch.setattr(session_validation_cache, "session_store_readiness", lambda: {})
     monkeypatch.setattr(readiness_module, "_measure_observability", lambda: {})
+    readiness.mark_ready("retrieval_catalog")
 
     assert readiness_module.COORDINATION_STATUS_TIMEOUT_SECONDS < 1.0
     started = time.monotonic()
@@ -268,8 +322,8 @@ def test_runtime_readiness_admits_a_slow_but_bounded_real_vault_snapshot(
     the following probe.  Preserve sub-second failure for a genuinely blocked
     snapshot while leaving measured steady-state work enough headroom.
     """
+    from exomem import readiness, session_validation_cache, writer_lease
     from exomem import runtime_readiness as readiness_module
-    from exomem import session_validation_cache, writer_lease
 
     vault = tmp_path / "large-vault"
 
@@ -287,6 +341,7 @@ def test_runtime_readiness_admits_a_slow_but_bounded_real_vault_snapshot(
     monkeypatch.setattr(writer_lease, "coordination_status", slow_coordination_status)
     monkeypatch.setattr(session_validation_cache, "session_store_readiness", lambda: {})
     monkeypatch.setattr(readiness_module, "_measure_observability", lambda: {})
+    readiness.mark_ready("retrieval_catalog")
 
     started = time.monotonic()
     snapshot = readiness_module.runtime_readiness(
@@ -394,7 +449,8 @@ def test_coordination_graph_health_requires_a_readable_sidecar(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Epoch state alone must not make readiness claim the graph is current."""
-    from exomem import epistemic_graph, vault as vault_module, writer_lease
+    from exomem import epistemic_graph, writer_lease
+    from exomem import vault as vault_module
 
     manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "state"))
     empty = tmp_path / "empty"

@@ -59,6 +59,31 @@ def model_preload_allowed(mode_name: str | None = None) -> bool:
     return mode.preload_models(mode_name or "normal")
 
 
+def warm_retrieval_catalog(vault_root: Path) -> None:
+    """Reconcile and verify both maintained lexical scopes before optional caches."""
+    from . import freshness, lexstore
+
+    if not lexstore.maintained_content_index_enabled():
+        # Explicit Python mode and SQLite builds without FTS retain the supported
+        # reference implementation; there is no maintained content index to gate.
+        return
+    lexstore.ensure_fresh(vault_root)
+    store = lexstore.get_store(vault_root)
+    incomplete = [
+        (scope, verdict.status)
+        for scope in ("kb", "vault")
+        if not (
+            verdict := store.catalog_readiness(
+                scope,
+                freshness.recall_checkpoint(vault_root, scope).triple,
+                allow_delta=False,
+            )
+        ).complete
+    ]
+    if incomplete:
+        raise RuntimeError(f"maintained lexical catalog incomplete: {incomplete!r}")
+
+
 def warm_caches(
     vault_root: Path,
     *,
@@ -149,10 +174,11 @@ def warm_caches(
 
 
 def warm_all(vault_root: Path) -> dict[str, float]:
-    """Lexical caches, then model preloads, marking readiness as each lands.
+    """Required catalog/corpus state, then optional caches and model preloads.
 
-    Order is the product contract (lexical-first): a `find` is useful the
-    moment the BM25/page caches are hot, long before torch finishes loading.
+    Order is the product contract (catalog-first): retrieval admission lands
+    first, then semantic write admission, before optional full-corpus caches
+    and models can extend the warm window.
     Each stage soft-fails; a failed model preload leaves its component
     not-ready (never marked), so requests defer for the rest of the warm and
     then return to inline lazy-load semantics. Never raises.
@@ -162,14 +188,17 @@ def warm_all(vault_root: Path) -> dict[str, float]:
     mode_name = mode.resolve_mode()
     preload = model_preload_allowed(mode_name)
     durations: dict[str, float] = {}
-    durations.update(
-        warm_caches(
-            vault_root,
-            preload_models=preload,
-            preload_cpu_caches=mode.preload_cpu_caches(),
+    catalog_started = time.perf_counter()
+    try:
+        warm_retrieval_catalog(vault_root)
+        readiness.mark_ready("retrieval_catalog")
+    except Exception:  # noqa: BLE001 — startup stays live while repair retries
+        log.warning("maintained retrieval catalog warm-up failed", exc_info=True)
+    finally:
+        durations["retrieval_catalog"] = round(
+            (time.perf_counter() - catalog_started) * 1000.0,
+            1,
         )
-    )
-    readiness.mark_ready("lexical")
     semantic_started = time.perf_counter()
     try:
         from . import semantic_contract
@@ -183,6 +212,14 @@ def warm_all(vault_root: Path) -> dict[str, float]:
             (time.perf_counter() - semantic_started) * 1000.0,
             1,
         )
+    durations.update(
+        warm_caches(
+            vault_root,
+            preload_models=preload,
+            preload_cpu_caches=mode.preload_cpu_caches(),
+        )
+    )
+    readiness.mark_ready("lexical")
 
     def _model_step(name: str, fn) -> bool:
         t0 = time.perf_counter()

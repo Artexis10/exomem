@@ -31,7 +31,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import epistemic_graph, freshness
+from exomem import epistemic_graph, freshness, lexstore
 from exomem import find as find_module
 from exomem import vault as vault_module
 from exomem.vault import WikilinkResolver, normalize_wikilink, walk_vault_md
@@ -96,6 +96,7 @@ def dense_vault(tmp_path: Path) -> tuple[Path, list[str]]:
     vault = tmp_path / "vault"
     rels = _gen_dense_vault(vault, N_NOTES)
     _seed_freshness_live(vault)
+    lexstore.ensure_fresh(vault)
     yield vault, rels
     find_module.clear_cache()
     freshness.clear()
@@ -216,6 +217,7 @@ def typed_dense_vault(tmp_path: Path) -> tuple[Path, list[str]]:
     vault = tmp_path / "vault"
     rels = _gen_dense_vault(vault, 200)
     _seed_freshness_live(vault)
+    lexstore.ensure_fresh(vault)
     epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
     yield vault, rels
     find_module.clear_cache()

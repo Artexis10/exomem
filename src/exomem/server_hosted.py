@@ -45,7 +45,11 @@ from .hosted_runtime import (
     HostedLifecycleError,
 )
 from .vault import VaultPathError, resolve_under_vault
-from .writer_lease import IdempotencyStore
+from .writer_lease import (
+    REMOTE_MAINTENANCE_MESSAGE,
+    REMOTE_MAINTENANCE_REMEDIATION,
+    IdempotencyStore,
+)
 
 log = logging.getLogger(__name__)
 _call_log = logging.getLogger("exomem.calls")
@@ -65,6 +69,7 @@ _HOSTED_MUTATION_DETAIL_FIELDS = (
     "idempotency_key",
 )
 _HOSTED_MUTATION_ERROR_SHAPES = {
+    "MAINTENANCE_REQUIRES_CLI": ("terminal", False),
     "MUTATION_BUSY": ("retryable", False),
     "MUTATION_WARMING": ("retryable", False),
     "MUTATION_ACKNOWLEDGEMENT_PENDING": ("uncertain", None),
@@ -178,6 +183,10 @@ def _hosted_refusal_guidance() -> dict[str, tuple[str, str]]:
         "settled conclusion."
     )
     return {
+        "MAINTENANCE_REQUIRES_CLI": (
+            REMOTE_MAINTENANCE_MESSAGE,
+            REMOTE_MAINTENANCE_REMEDIATION,
+        ),
         "missing_semantic_unit": (
             "the memory has no semantic unit to record",
             f"{unit['compact_remediation']} {unit['rich_remediation']}",

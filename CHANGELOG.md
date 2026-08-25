@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.61.1](https://github.com/Artexis10/exomem/compare/v0.61.0...v0.61.1) (2026-08-25)
+
+
+### Bug Fixes
+
+* bind transport before startup warm ([#795](https://github.com/Artexis10/exomem/issues/795)) ([53cb58f](https://github.com/Artexis10/exomem/commit/53cb58fbaa58220433153c8e08dd3da44aa8c450))
+
+## [0.61.0](https://github.com/Artexis10/exomem/compare/v0.60.1...v0.61.0) (2026-08-25)
+
+
+### Features
+
+* **governance:** certify CPU vector profile ([#792](https://github.com/Artexis10/exomem/issues/792)) ([ce1bc60](https://github.com/Artexis10/exomem/commit/ce1bc607fd9a446c2d12c2a30e993583361936c1))
+
+
+### Bug Fixes
+
+* bound startup retrieval admission ([#794](https://github.com/Artexis10/exomem/issues/794)) ([ca76818](https://github.com/Artexis10/exomem/commit/ca768183a10d048ef5898593734e17ff1b8a6f63))
+
 ## [0.60.1](https://github.com/Artexis10/exomem/compare/v0.60.0...v0.60.1) (2026-08-25)
 
 

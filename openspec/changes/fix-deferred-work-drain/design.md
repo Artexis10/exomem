@@ -134,3 +134,28 @@ only while the service is stopped.
 - **Separate private roots also separate host-local mutation locks.** Operators must quiesce
   the service before direct CLI maintenance; supporting concurrent cross-principal local
   mutation would require a separate lock-root design outside this change.
+
+## Production follow-up: bound background publication, not only admission
+
+The first production backlog after deployment exposed two bounds that were individually
+finite but operationally unsafe together. Performance mode admitted 500 deferred files per
+reconcile pass, split them into a 250-file full-index batch, and an incomplete component then
+fell back to serial replay of every receipt. Against a large lexical catalog, one watcher
+pass could therefore keep derived retrieval warming for tens of minutes even though writes
+and the public transport stayed alive.
+
+Background repair now takes the smaller of the remaining reconcile budget and the live
+batch cap. This keeps performance mode's real-drift policy separate from the amount of old
+queued work it may publish at once. When a bounded batch is incomplete, only a small fixed
+prefix is isolated in that pass; attempted failures rotate behind untouched receipts and the
+next periodic pass continues fairly. An unbounded operator drain keeps the exhaustive
+isolation behavior because waiting for repair is the explicit purpose of that command.
+
+Alternatives rejected:
+
+- Reducing only the performance reconcile cap conflates real missed-event admission with
+  deferred backlog replay and leaves failure isolation unbounded.
+- Removing isolation entirely lets one poison receipt pin every later item forever.
+- Clearing a full receipt after only some component outcomes succeed loses durable repair
+  authority for the failed components; per-component receipt custody would be a larger
+  schema change.
