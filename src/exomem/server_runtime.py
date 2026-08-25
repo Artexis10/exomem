@@ -165,6 +165,14 @@ def _initialize_locked_hosted_runtime(
 
     media_worker = None
     file_watcher = None
+    if mutation_ready and startup.phase == "active":
+        # Retrieval catalog warm-up is core service work, not an optional
+        # hosted worker.  A zero optional-worker budget must still converge
+        # truthful retrieval admission for lean cells.
+        if config.has_feature("embeddings") and config.resource_limits.worker_count > 0:
+            _start_compute_runtime(vault_root)
+        else:
+            _start_retrieval_runtime(vault_root)
     if not mutation_ready:
         for feature in ("embeddings", "file-watcher", "media"):
             if config.has_feature(feature):
@@ -212,13 +220,6 @@ def _initialize_locked_hosted_runtime(
                     reason_code="HOSTED_CELL_NOT_ACTIVE",
                 )
     else:
-        if config.has_feature("embeddings"):
-            _start_compute_runtime(vault_root)
-        else:
-            # Maintained lexical admission is core service work, not an
-            # embeddings feature. Lean hosted cells still need the catalog warm
-            # and truthful public readiness transition.
-            _start_retrieval_runtime(vault_root)
         if config.has_feature("media"):
             media_worker = _start_media_worker(vault_root)
             lifecycle.set_worker_status(

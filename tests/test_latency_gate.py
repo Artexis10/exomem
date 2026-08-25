@@ -359,6 +359,7 @@ def test_referent_stage_stays_bounded_at_scale(
     vault = _build_dense_vault(tmp_path, N_NOTES)
     gen_entity_overlay(vault, 500, seed=19)
     _seed_freshness_live(vault)
+    lexstore.ensure_fresh(vault)
     cold_referents_ms, referents_ms, block = _measure_referent_stage(vault)
     assert cold_referents_ms < CEIL_REFERENTS_COLD_MS
     assert referents_ms < CEIL_REFERENTS_MS
@@ -404,11 +405,13 @@ def test_referent_stage_does_not_scale_linearly(tmp_path: Path, model_free) -> N
     small = _build_dense_vault(tmp_path, N_NOTES)
     gen_entity_overlay(small, 125, seed=23)
     _seed_freshness_live(small)
+    lexstore.ensure_fresh(small)
     _, small_ms, _ = _measure_referent_stage(small)
 
     large = _build_dense_vault(tmp_path, N_NOTES_LARGE)
     gen_entity_overlay(large, 500, seed=23)
     _seed_freshness_live(large)
+    lexstore.ensure_fresh(large)
     _, large_ms, _ = _measure_referent_stage(large)
 
     bound = max(
