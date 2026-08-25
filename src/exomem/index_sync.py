@@ -35,6 +35,9 @@ log = logging.getLogger(__name__)
 
 _REPORT_PATH_LIMIT = 256
 _REPORT_PATH_BYTE_LIMIT = 1024
+# A bounded daemon pass must not turn one failed batch into every receipt
+# replayed serially. Explicit unbounded maintenance retains exhaustive repair.
+_BOUNDED_FAILURE_ISOLATION_LIMIT = 4
 
 _FULL_UPSERT_COMPONENTS = frozenset(
     {
@@ -921,7 +924,12 @@ def drain_deferred_work(
                 processed += deferred_index.clear_full_receipts(vault_root, full_receipts)
             else:
                 log.warning("deferred full-index batch incomplete; isolating receipts")
-            for receipt in () if full_batch_completed else full_receipts:
+            isolation_receipts = () if full_batch_completed else full_receipts
+            if limit is not None:
+                isolation_receipts = isolation_receipts[
+                    :_BOUNDED_FAILURE_ISOLATION_LIMIT
+                ]
+            for receipt in isolation_receipts:
                 try:
                     dispatched = upsert_after_write(
                         vault_root, [vault_root / receipt.rel_path]
@@ -978,7 +986,10 @@ def drain_deferred_work(
     # A single malformed source must not pin every later receipt in the sorted
     # batch. The optimistic batch above is the fast path; only a failed batch
     # falls back to per-receipt replay so successful work can retire by CAS.
-    for receipt in semantic_receipts:
+    isolation_receipts = semantic_receipts
+    if limit is not None:
+        isolation_receipts = isolation_receipts[:_BOUNDED_FAILURE_ISOLATION_LIMIT]
+    for receipt in isolation_receipts:
         try:
             status = replay_deferred_embedding(
                 vault_root, [vault_root / receipt.rel_path], [receipt]
