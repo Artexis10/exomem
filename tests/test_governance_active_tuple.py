@@ -19,6 +19,7 @@ from exomem.governance import (
     policy,
     projection_store,
     projections,
+    receipts,
     schema_v4,
     store,
 )
@@ -352,7 +353,7 @@ def test_govern_memory_v4_proposal_persists_exact_authority_binding(
         catalog_generation=1,
     )
 
-    assert binding["schema"] == "exomem.governance-policy-proposal/v2"
+    assert binding["schema"] == "exomem.governance-policy-proposal/v3"
     assert reviewed == {
         "activation_epoch": 1,
         "activation_state_digest": migration.activation_state_digest,
@@ -375,6 +376,10 @@ def test_govern_memory_v4_proposal_persists_exact_authority_binding(
     assert snapshot["guard_generation"]
     assert len(snapshot["documents"]) == 2
     assert len(snapshot["file_identities"]) == 2
+    assert [item["path"] for item in snapshot["directory_identities"]] == [
+        "rules",
+        "scopes",
+    ]
     assert target["policy_fingerprint"] == target_policy.fingerprint
     assert target["source_fingerprint"] == target_policy.fingerprint
     assert re.fullmatch(r"[0-9A-HJKMNP-TV-Z]{26}", target["generation_id"])
@@ -502,7 +507,7 @@ def test_govern_memory_v4_commit_publishes_the_exact_reviewed_authority(
         "event_id": committed["event_id"],
         "proposal_id": proposed["proposal_id"],
         "direction": "narrowing",
-        "mirror_status": "pending",
+        "mirror_status": "complete",
     }
     assert re.fullmatch(r"[0-9a-f]{64}", committed["event_id"])
     assert served.fingerprint == _compiled(_documents(ceiling=1)).fingerprint
@@ -511,7 +516,19 @@ def test_govern_memory_v4_commit_publishes_the_exact_reviewed_authority(
     assert custody.control.activation_state_digest is not None
     assert (
         vault / "Knowledge Base" / "_Governance" / "rules" / "external.yaml"
-    ).read_bytes() == dict(_documents(ceiling=2))["rules/external.yaml"]
+    ).read_bytes() == dict(_documents(ceiling=1))["rules/external.yaml"]
+
+    mirror_records = [
+        record
+        for record in receipts.event_records(vault)
+        if record.get("operation") == "governance_policy_workspace_mirror"
+        or record.get("outcome") == "complete"
+    ]
+    assert [record["phase"] for record in mirror_records] == ["intent", "committed"]
+    assert mirror_records[0]["parent_causation_id"] == committed["event_id"]
+    assert re.fullmatch(r"[0-9a-f]{64}", mirror_records[0]["prior"])
+    assert re.fullmatch(r"[0-9a-f]{64}", mirror_records[0]["prepared"])
+    assert re.fullmatch(r"[0-9a-f]{64}", mirror_records[0]["target"])
 
     with sqlite3.connect(store.sidecar_path(vault)) as connection:
         assert connection.execute(
@@ -530,6 +547,433 @@ def test_govern_memory_v4_commit_publishes_the_exact_reviewed_authority(
             "SELECT COUNT(*) FROM governance_tuple_publications "
             "WHERE publication_kind='policy'"
         ).fetchone() == (1,)
+
+
+def test_govern_memory_v4_commit_recovers_mirror_after_lost_terminal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance.tool import GovernanceCrash, op_govern_memory
+
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    _write_workspace(vault, _documents(ceiling=2))
+    target_documents = dict(_documents(ceiling=1))
+    target_documents["scopes/private.yaml"] = target_documents[
+        "scopes/private.yaml"
+    ].replace(b"name: private\n", b"name: sensitive\n")
+    migration = _migrate_with_empty_projection_catalog(vault, now=now)
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        proposed = op_govern_memory(
+            vault,
+            operation="propose",
+            principal=owner_principal(),
+            intent="Lower the external ceiling",
+            documents={
+                relative: content.decode("utf-8")
+                for relative, content in target_documents.items()
+            },
+            target_ceiling=1,
+            now=now + 1,
+        )
+        with pytest.raises(GovernanceCrash, match="v4_after_mirror_write:1"):
+            op_govern_memory(
+                vault,
+                operation="commit",
+                principal=owner_principal(),
+                proposal_id=proposed["proposal_id"],
+                crash_at="v4_after_mirror_write:1",
+                now=now + 2,
+            )
+
+    assert (
+        vault / "Knowledge Base" / "_Governance" / "rules" / "external.yaml"
+    ).read_bytes() == target_documents["rules/external.yaml"]
+    assert (
+        vault / "Knowledge Base" / "_Governance" / "scopes" / "private.yaml"
+    ).read_bytes() == dict(_documents(ceiling=2))["scopes/private.yaml"]
+    with sqlite3.connect(store.sidecar_path(vault)) as connection:
+        assert connection.execute(
+            "SELECT status FROM governance_proposals WHERE proposal_id=?",
+            (proposed["proposal_id"],),
+        ).fetchone() == ("spent",)
+
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        recovered = op_govern_memory(
+            vault,
+            operation="commit",
+            principal=owner_principal(),
+            proposal_id=proposed["proposal_id"],
+            now=now + 3,
+        )
+
+    assert recovered["mirror_status"] == "complete"
+    assert (
+        vault / "Knowledge Base" / "_Governance" / "scopes" / "private.yaml"
+    ).read_bytes() == target_documents["scopes/private.yaml"]
+    records = receipts.event_records(vault)
+    intents = [
+        record
+        for record in records
+        if record.get("operation") == "governance_policy_workspace_mirror"
+    ]
+    terminals = [
+        record
+        for record in records
+        if record.get("causation_id") == intents[0]["event_id"]
+    ]
+    assert len(intents) == 1
+    assert [(record["phase"], record["outcome"]) for record in terminals] == [
+        ("committed", "complete")
+    ]
+    with sqlite3.connect(store.sidecar_path(vault)) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM governance_tuple_publications "
+            "WHERE publication_kind='policy'"
+        ).fetchone() == (1,)
+
+
+def test_govern_memory_v4_commit_retries_transient_mirror_refusal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import held_fs
+    from exomem.governance import tool
+
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_empty_projection_catalog(vault, now=now)
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    original_acquire = held_fs.acquire
+    armed = False
+    mirror_acquires = 0
+
+    def arm_after_intent(phase: str, _path: str | None = None) -> None:
+        nonlocal armed
+        if phase == "after_intent":
+            armed = True
+
+    def refuse_effect_acquire(root: Path):
+        nonlocal mirror_acquires
+        if armed:
+            mirror_acquires += 1
+            if mirror_acquires == 4:
+                return held_fs.HeldResult(
+                    error=held_fs.HeldFsError(
+                        "CAPABILITY_UNAVAILABLE",
+                        "test-only transient capability refusal",
+                    )
+                )
+        return original_acquire(root)
+
+    monkeypatch.setattr(tool, "_v4_workspace_mirror_barrier", arm_after_intent)
+    monkeypatch.setattr(held_fs, "acquire", refuse_effect_acquire)
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        proposed = tool.op_govern_memory(
+            vault,
+            operation="propose",
+            principal=owner_principal(),
+            intent="Lower the external ceiling",
+            documents={
+                relative: content.decode("utf-8")
+                for relative, content in _documents(ceiling=1)
+            },
+            target_ceiling=1,
+            now=now + 1,
+        )
+        with pytest.raises(tool.GovernanceError) as refused:
+            tool.op_govern_memory(
+                vault,
+                operation="commit",
+                principal=owner_principal(),
+                proposal_id=proposed["proposal_id"],
+                now=now + 2,
+            )
+
+    assert refused.value.code == "GOVERNANCE_BLOCKED"
+    assert policy.load(vault).rules[0].ceiling == 1
+    assert (
+        vault / "Knowledge Base" / "_Governance" / "rules" / "external.yaml"
+    ).read_bytes() == dict(_documents(ceiling=2))["rules/external.yaml"]
+
+    monkeypatch.setattr(held_fs, "acquire", original_acquire)
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        recovered = tool.op_govern_memory(
+            vault,
+            operation="commit",
+            principal=owner_principal(),
+            proposal_id=proposed["proposal_id"],
+            now=now + 3,
+        )
+
+    assert recovered["mirror_status"] == "complete"
+    assert (
+        vault / "Knowledge Base" / "_Governance" / "rules" / "external.yaml"
+    ).read_bytes() == dict(_documents(ceiling=1))["rules/external.yaml"]
+
+
+def test_govern_memory_v4_commit_replays_after_mirror_terminal_crash(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance.tool import GovernanceCrash, op_govern_memory
+
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_empty_projection_catalog(vault, now=now)
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        proposed = op_govern_memory(
+            vault,
+            operation="propose",
+            principal=owner_principal(),
+            intent="Lower the external ceiling",
+            documents={
+                relative: content.decode("utf-8")
+                for relative, content in _documents(ceiling=1)
+            },
+            target_ceiling=1,
+            now=now + 1,
+        )
+        with pytest.raises(GovernanceCrash, match="v4_after_mirror_terminal"):
+            op_govern_memory(
+                vault,
+                operation="commit",
+                principal=owner_principal(),
+                proposal_id=proposed["proposal_id"],
+                crash_at="v4_after_mirror_terminal",
+                now=now + 2,
+            )
+        recovered = op_govern_memory(
+            vault,
+            operation="commit",
+            principal=owner_principal(),
+            proposal_id=proposed["proposal_id"],
+            now=now + 3,
+        )
+
+    assert recovered["mirror_status"] == "complete"
+    records = receipts.event_records(vault)
+    intents = [
+        record
+        for record in records
+        if record.get("operation") == "governance_policy_workspace_mirror"
+    ]
+    assert len(intents) == 1
+    assert sum(
+        record.get("causation_id") == intents[0]["event_id"] for record in records
+    ) == 1
+    with sqlite3.connect(store.sidecar_path(vault)) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM governance_tuple_publications "
+            "WHERE publication_kind='policy'"
+        ).fetchone() == (1,)
+
+
+def test_govern_memory_v4_commit_preserves_observed_workspace_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance import tool
+
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_empty_projection_catalog(vault, now=now)
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    drift = dict(_documents(ceiling=3))["rules/external.yaml"]
+    changed = False
+
+    def mutate_after_intent(phase: str, _path: str | None = None) -> None:
+        nonlocal changed
+        if phase == "after_intent" and not changed:
+            changed = True
+            (
+                vault
+                / "Knowledge Base"
+                / "_Governance"
+                / "rules"
+                / "external.yaml"
+            ).write_bytes(drift)
+
+    monkeypatch.setattr(tool, "_v4_workspace_mirror_barrier", mutate_after_intent)
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        proposed = tool.op_govern_memory(
+            vault,
+            operation="propose",
+            principal=owner_principal(),
+            intent="Lower the external ceiling",
+            documents={
+                relative: content.decode("utf-8")
+                for relative, content in _documents(ceiling=1)
+            },
+            target_ceiling=1,
+            now=now + 1,
+        )
+        committed = tool.op_govern_memory(
+            vault,
+            operation="commit",
+            principal=owner_principal(),
+            proposal_id=proposed["proposal_id"],
+            now=now + 2,
+        )
+
+    assert committed["mirror_status"] == "diverged"
+    assert (
+        vault / "Knowledge Base" / "_Governance" / "rules" / "external.yaml"
+    ).read_bytes() == drift
+    assert policy.load(vault).rules[0].ceiling == 1
+    mirror_terminal = next(
+        record
+        for record in receipts.event_records(vault)
+        if record.get("outcome") == "diverged"
+    )
+    assert mirror_terminal["phase"] == "committed"
+
+
+def test_govern_memory_v4_commit_refuses_swapped_reviewed_parent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance import tool
+
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_empty_projection_catalog(vault, now=now)
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    changed = False
+    rules = vault / "Knowledge Base" / "_Governance" / "rules"
+    displaced = tmp_path / "reviewed-rules"
+
+    def exchange_parent_after_intent(phase: str, _path: str | None = None) -> None:
+        nonlocal changed
+        if phase == "after_intent" and not changed:
+            changed = True
+            rules.rename(displaced)
+            rules.mkdir()
+            (displaced / "external.yaml").rename(rules / "external.yaml")
+            displaced.rmdir()
+
+    monkeypatch.setattr(
+        tool,
+        "_v4_workspace_mirror_barrier",
+        exchange_parent_after_intent,
+    )
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        proposed = tool.op_govern_memory(
+            vault,
+            operation="propose",
+            principal=owner_principal(),
+            intent="Lower the external ceiling",
+            documents={
+                relative: content.decode("utf-8")
+                for relative, content in _documents(ceiling=1)
+            },
+            target_ceiling=1,
+            now=now + 1,
+        )
+        committed = tool.op_govern_memory(
+            vault,
+            operation="commit",
+            principal=owner_principal(),
+            proposal_id=proposed["proposal_id"],
+            now=now + 2,
+        )
+
+    assert committed["mirror_status"] == "diverged"
+    assert (rules / "external.yaml").read_bytes() == dict(_documents(ceiling=2))[
+        "rules/external.yaml"
+    ]
+    assert policy.load(vault).rules[0].ceiling == 1
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink race fixture")
+def test_govern_memory_v4_commit_refuses_symlinked_mirror_leaf(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance import tool
+
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_empty_projection_catalog(vault, now=now)
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    changed = False
+    leaf = vault / "Knowledge Base" / "_Governance" / "rules" / "external.yaml"
+
+    def alias_after_intent(phase: str, _path: str | None = None) -> None:
+        nonlocal changed
+        if phase == "after_intent" and not changed:
+            changed = True
+            leaf.unlink()
+            leaf.symlink_to("../scopes/private.yaml")
+
+    monkeypatch.setattr(tool, "_v4_workspace_mirror_barrier", alias_after_intent)
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        proposed = tool.op_govern_memory(
+            vault,
+            operation="propose",
+            principal=owner_principal(),
+            intent="Lower the external ceiling",
+            documents={
+                relative: content.decode("utf-8")
+                for relative, content in _documents(ceiling=1)
+            },
+            target_ceiling=1,
+            now=now + 1,
+        )
+        committed = tool.op_govern_memory(
+            vault,
+            operation="commit",
+            principal=owner_principal(),
+            proposal_id=proposed["proposal_id"],
+            now=now + 2,
+        )
+
+    assert committed["mirror_status"] == "diverged"
+    assert leaf.is_symlink()
+    assert policy.load(vault).blocked
 
 
 def test_govern_memory_v4_commit_recovers_lost_registry_ack_exactly_once(
