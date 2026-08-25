@@ -1128,6 +1128,9 @@ class RecoveryPreflight:
     destination_root_guard: vault.PathGuard
     trash_census_guards: tuple[vault.DirectoryCensusGuard, ...] = ()
     recovery_sidecar_guard: vault.PathGuard | None = None
+    catalog_auxiliary_writes: tuple[vault.PlannedWrite, ...] = ()
+    catalog_content_paths: tuple[str, ...] = ()
+    catalog_publication_now: int | None = None
     mutated: Literal[False] = False
 
     @property
@@ -1142,6 +1145,7 @@ class RecoveryPreflight:
 class RecoveryCommit:
     preflight: RecoveryPreflight
     lifecycle_states: tuple[tuple[str, str], ...]
+    catalog_published: bool = False
     mutated: Literal[True] = True
 
     def as_dict(self) -> dict[str, Any]:
@@ -2944,6 +2948,9 @@ def preflight_recovery(
     destination_root_guard: vault.PathGuard | None = None,
     trash_census_guards: tuple[vault.DirectoryCensusGuard, ...] = (),
     recovery_sidecar_guard: vault.PathGuard | None = None,
+    catalog_auxiliary_writes: tuple[vault.PlannedWrite, ...] = (),
+    catalog_content_paths: tuple[str, ...] = (),
+    catalog_publication_now: int | None = None,
     relation_reviews: Mapping[str, Mapping[str, str]] | None = None,
 ) -> RecoveryPreflight:
     """Evaluate exact trashed Markdown bytes at all final restore paths."""
@@ -3195,6 +3202,9 @@ def preflight_recovery(
         root_destination,
         tuple(trash_census_guards),
         recovery_sidecar_guard,
+        tuple(catalog_auxiliary_writes),
+        tuple(catalog_content_paths),
+        catalog_publication_now,
     )
     preflight.as_dict()
     return preflight
@@ -3323,6 +3333,32 @@ def commit_recovery(
                 census_guard.recheck(root)
             if preflight.recovery_sidecar_guard is not None:
                 preflight.recovery_sidecar_guard.recheck(root)
+            from .governance import catalog_publication
+
+            catalog_writes = [*lifecycle_writes, *preflight.catalog_auxiliary_writes]
+            catalog_writes.extend(
+                vault.PlannedWrite(
+                    root / item.restore_path,
+                    item.source,
+                    create_only=True,
+                    guard=destination_guard,
+                )
+                for item, destination_guard in zip(
+                    preflight.entries, destination_guards, strict=True
+                )
+            )
+            try:
+                catalog_target = catalog_publication.prepare_catalog_membership_batch(
+                    root,
+                    writes=tuple(catalog_writes),
+                    content_paths=preflight.catalog_content_paths,
+                    now=preflight.catalog_publication_now,
+                )
+            except catalog_publication.CatalogPublicationError as error:
+                raise SemanticWriteError(
+                    "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
+                    str(error),
+                ) from error
             if lifecycle_writes:
                 vault.batch_atomic_write(
                     lifecycle_writes,
@@ -3333,6 +3369,23 @@ def commit_recovery(
             for destination_guard in destination_guards:
                 destination_guard.recheck(root)
             mutate()
+            if catalog_target is not None:
+                if preflight.catalog_auxiliary_writes:
+                    vault.batch_atomic_write(
+                        preflight.catalog_auxiliary_writes,
+                        vault_root=root,
+                    )
+            from .writer_lease import mark_active_mutation_committed
+
+            mark_active_mutation_committed()
+            if catalog_target is not None:
+                try:
+                    catalog_publication.publish_markdown_batch(catalog_target)
+                except catalog_publication.CatalogPublicationError as error:
+                    raise SemanticWriteError(
+                        "GOVERNANCE_CATALOG_PUBLICATION_UNCERTAIN",
+                        str(error),
+                    ) from error
     except vault.VaultLockTimeout as error:
         raise SemanticWriteError(
             "SEMANTIC_CREATION_LOCK_TIMEOUT",
@@ -3340,7 +3393,11 @@ def commit_recovery(
         ) from error
     except vault.VaultLockError as error:
         raise SemanticWriteError(error.code, error.reason) from error
-    return RecoveryCommit(preflight, lifecycle_states)
+    return RecoveryCommit(
+        preflight,
+        lifecycle_states,
+        catalog_published=catalog_target is not None,
+    )
 
 
 def _evaluate_structural(

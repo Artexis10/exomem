@@ -389,12 +389,33 @@ def _normalize_catalog_removals(
     return tuple(normalized)
 
 
+def _validate_catalog_content_paths(content_paths: tuple[str, ...]) -> None:
+    if type(content_paths) is not tuple:
+        raise CatalogPublicationError(
+            "catalog publication requires a finite content-path batch"
+        )
+    aliases: set[str] = set()
+    for path in content_paths:
+        if type(path) is not str:
+            raise CatalogPublicationError("catalog publication content path is invalid")
+        candidate = PurePosixPath(path.replace("\\", "/"))
+        if candidate.suffix.casefold() != ".md":
+            raise CatalogPublicationError(
+                "non-Markdown content publication is not available"
+            )
+        alias = unicodedata.normalize("NFC", candidate.as_posix()).casefold()
+        if alias in aliases:
+            raise CatalogPublicationError("catalog publication content paths collide")
+        aliases.add(alias)
+
+
 def _prepare_markdown_batch(
     vault_root: Path,
     *,
     normalized: tuple[tuple[str, MarkdownCatalogMutation], ...] | None,
     planned_writes: tuple[vault.PlannedWrite, ...] | None,
     removals: tuple[CatalogRemoval, ...] = (),
+    content_paths: tuple[str, ...] = (),
     now: int | None = None,
 ) -> PreparedMarkdownCatalogPublication | None:
     """Prepare one complete batch successor, or return ``None`` for v3/open.
@@ -504,6 +525,7 @@ def _prepare_markdown_batch(
     finally:
         connection.close()
 
+    _validate_catalog_content_paths(content_paths)
     if normalized is None:
         assert planned_writes is not None
         if type(planned_writes) is not tuple:
@@ -630,6 +652,7 @@ def prepare_catalog_membership_batch(
     *,
     writes: tuple[vault.PlannedWrite, ...] = (),
     removals: tuple[CatalogRemoval, ...] = (),
+    content_paths: tuple[str, ...] = (),
     now: int | None = None,
 ) -> PreparedMarkdownCatalogPublication | None:
     """Prepare lazy write/removal membership changes for a product mutation.
@@ -644,6 +667,7 @@ def prepare_catalog_membership_batch(
         normalized=None,
         planned_writes=writes,
         removals=removals,
+        content_paths=content_paths,
         now=now,
     )
 

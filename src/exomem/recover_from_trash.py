@@ -12,7 +12,9 @@ a different `restore_path` if the original location is now occupied.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import logging
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,16 +26,18 @@ from . import (
     semantic_index,
     semantic_writes,
 )
-from .governance import lifecycle
+from .governance import catalog_publication, lifecycle
 from .kbdir import kb_dirname, kb_prefix
 from .vault import (
     DirectoryCensusGuard,
     PathGuard,
     PathGuardError,
     VaultPathError,
+    batch_atomic_write,
     content_hash,
     in_append_only_tree,
     in_curated_tree,
+    plan_log_entry,
     read_guarded_text,
     resolve_under_vault,
     write_log_entry,
@@ -107,11 +111,15 @@ def recover_from_trash(
     # Bind and classify the complete source before reading its sidecar, parsing
     # Markdown, counting children, or allocating lifecycle state. The later
     # lifecycle manifest performs the immediate pre-rename recheck.
+    trash_file_snapshot = None
+    trash_tree: tuple[reserved_paths.GenericTreeFile, ...] = ()
     try:
         if trash_abs.is_file():
-            reserved_paths.read_generic_bytes(vault_root, trash_rel)
+            trash_kind = "file"
+            trash_file_snapshot = reserved_paths.read_generic_bytes(vault_root, trash_rel)
         elif trash_abs.is_dir():
-            reserved_paths.read_generic_tree(vault_root, trash_rel)
+            trash_kind = "directory"
+            trash_tree = reserved_paths.read_generic_tree(vault_root, trash_rel)
         else:
             raise reserved_paths.ReservedPathLeafError("UNSAFE_PATH")
     except reserved_paths.ReservedPathLeafError as error:
@@ -266,6 +274,60 @@ def recover_from_trash(
             ),
         )
 
+    if trash_kind == "file":
+        assert trash_file_snapshot is not None
+        initial_restore_state = (
+            (restore_rel, hashlib.sha256(trash_file_snapshot.data).hexdigest()),
+        )
+    else:
+        initial_restore_state = tuple(
+            sorted(
+                (
+                    f"{restore_rel.rstrip('/')}/{item.relative_path}",
+                    hashlib.sha256(item.snapshot.data).hexdigest(),
+                )
+                for item in trash_tree
+            )
+        )
+    catalog_content_paths = tuple(path for path, _digest in initial_restore_state)
+
+    today = today or dt.date.today()
+    date_iso = today.isoformat()
+    restore_no_ext = (
+        restore_rel.removesuffix(".md") if restore_rel.endswith(".md") else restore_rel
+    )
+    log_body = (
+        f"Recovered {trash_rel!r} → {restore_rel!r} via exomem Tier 2. "
+        f"kind={trash_kind}."
+    )
+    if curated and allow_curated:
+        log_body += f" allow_curated=true (target tree: {curated})."
+    log_plan = plan_log_entry(
+        vault_root,
+        date_iso=date_iso,
+        op="recover_from_trash",
+        rel_path_no_ext=restore_no_ext,
+        body=log_body,
+    )
+    catalog_now = int(time.time())
+
+    # Open/schema-v3 restores keep their existing behavior. Exact-v4 restores
+    # must refuse every currently unsupported content kind before lifecycle
+    # state or canonical placement changes.
+    if any(not path.lower().endswith(".md") for path in catalog_content_paths):
+        try:
+            catalog_publication.prepare_catalog_membership_batch(
+                vault_root,
+                writes=log_plan.writes,
+                content_paths=catalog_content_paths,
+                now=catalog_now,
+            )
+        except catalog_publication.CatalogPublicationError as error:
+            raise RecoverError(
+                code="GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
+                reason=str(error),
+            ) from error
+
     semantic: dict | None = None
     lifecycle_operation: lifecycle.LifecycleOperation | None = None
     graph_transition: graph_sync.GraphLifecycleTransition | None = None
@@ -273,7 +335,8 @@ def recover_from_trash(
     recovery_entries: list[semantic_writes.RecoveryEntry] = []
     destination_root_guard: PathGuard | None = None
     trash_census_guards: tuple[DirectoryCensusGuard, ...] = ()
-    if trash_abs.is_file() and trash_rel.lower().endswith(".md"):
+    catalog_published = False
+    if trash_kind == "file" and trash_rel.lower().endswith(".md"):
         try:
             source, source_guard = read_guarded_text(vault_root, trash_abs)
             destination_guard = PathGuard.capture(
@@ -295,7 +358,7 @@ def recover_from_trash(
         except (OSError, UnicodeDecodeError, PathGuardError) as error:
             code = getattr(error, "code", "RECOVER_FAILED")
             raise RecoverError(code=code, reason=str(error)) from error
-    elif trash_abs.is_dir():
+    elif trash_kind == "directory":
         try:
             markdown = sorted(
                 trash_abs.rglob("*.md"), key=lambda item: item.as_posix()
@@ -358,6 +421,9 @@ def recover_from_trash(
                 destination_root_guard=destination_root_guard,
                 trash_census_guards=trash_census_guards,
                 recovery_sidecar_guard=sidecar_guard,
+                catalog_auxiliary_writes=log_plan.writes,
+                catalog_content_paths=catalog_content_paths,
+                catalog_publication_now=catalog_now,
                 relation_reviews=relation_reviews,
             )
             semantic_states = {
@@ -368,7 +434,7 @@ def recover_from_trash(
                 return RecoverResult(
                     trash_path=trash_rel,
                     restored_path=restore_rel,
-                    kind="directory" if trash_abs.is_dir() else "file",
+                    kind=trash_kind,
                     warnings=[],
                     semantic=preflight.as_dict(),
                 )
@@ -396,6 +462,17 @@ def recover_from_trash(
                     reason="the staged recovery transition could not be restored",
                 ) from error
             lifecycle_operation = graph_transition.operation
+            transition_restore_state = tuple(
+                sorted(
+                    (item.source_path, item.content_hash)
+                    for item in lifecycle_operation.manifest
+                )
+            )
+            if transition_restore_state != initial_restore_state:
+                raise RecoverError(
+                    code="PATH_GUARD_CHANGED",
+                    reason="trash contents changed before the recovery transition",
+                )
 
             def restore() -> None:
                 try:
@@ -413,16 +490,16 @@ def recover_from_trash(
                         code="GRAPH_SYNC_RECOVERY_CHECKPOINT_FAILED",
                         reason="graph checkpoint failed; recovery will be reversed",
                     ) from error
-                from .writer_lease import mark_active_mutation_committed
-
-                mark_active_mutation_committed()
-
             committed = semantic_writes.commit_recovery(
                 vault_root, preflight=preflight, mutate=restore
             )
+            catalog_published = committed.catalog_published
             semantic = committed.as_dict()
         except semantic_writes.SemanticWriteError as error:
-            if graph_transition is not None:
+            if (
+                graph_transition is not None
+                and error.code != "GOVERNANCE_CATALOG_PUBLICATION_UNCERTAIN"
+            ):
                 try:
                     graph_transition.abort()
                 except graph_sync.GraphLifecycleRollbackError as rollback_error:
@@ -461,9 +538,25 @@ def recover_from_trash(
             return RecoverResult(
                 trash_path=trash_rel,
                 restored_path=restore_rel,
-                kind="directory" if trash_abs.is_dir() else "file",
+                kind=trash_kind,
                 warnings=[],
             )
+        direct_catalog_target = None
+        if log_plan.writes:
+            try:
+                direct_catalog_target = (
+                    catalog_publication.prepare_catalog_membership_batch(
+                        vault_root,
+                        writes=log_plan.writes,
+                        content_paths=catalog_content_paths,
+                        now=catalog_now,
+                    )
+                )
+            except catalog_publication.CatalogPublicationError as error:
+                raise RecoverError(
+                    code="GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
+                    reason=str(error),
+                ) from error
         try:
             graph_transition = graph_sync.begin_recovery_transition(
                 vault_root,
@@ -484,9 +577,32 @@ def recover_from_trash(
                 reason="the staged recovery transition could not be restored",
             ) from error
         lifecycle_operation = graph_transition.operation
+        transition_restore_state = tuple(
+            sorted(
+                (item.source_path, item.content_hash)
+                for item in lifecycle_operation.manifest
+            )
+        )
+        if transition_restore_state != initial_restore_state:
+            try:
+                graph_transition.abort()
+            except graph_sync.GraphLifecycleRollbackError as rollback_error:
+                raise RecoverError(
+                    code="GRAPH_SYNC_RECOVERY_ROLLBACK_FAILED",
+                    reason="recovery could not be reversed; reconcile is required",
+                ) from rollback_error
+            raise RecoverError(
+                code="PATH_GUARD_CHANGED",
+                reason="trash contents changed before the recovery transition",
+            )
         try:
             graph_transition.rename()
             graph_transition.publish_checkpoint()
+            if direct_catalog_target is not None and log_plan.writes:
+                batch_atomic_write(log_plan.writes, vault_root=vault_root)
+            from .writer_lease import mark_active_mutation_committed
+
+            mark_active_mutation_committed()
         except lifecycle.LifecycleError as e:
             try:
                 graph_transition.abort()
@@ -499,6 +615,15 @@ def recover_from_trash(
                 code=e.code,
                 reason=e.reason,
             ) from e
+        except RecoverError:
+            try:
+                graph_transition.abort()
+            except graph_sync.GraphLifecycleRollbackError as rollback_error:
+                raise RecoverError(
+                    code="GRAPH_SYNC_RECOVERY_ROLLBACK_FAILED",
+                    reason="recovery could not be reversed; reconcile is required",
+                ) from rollback_error
+            raise
         except Exception as error:  # noqa: BLE001 - reverse a caught epoch failure
             try:
                 graph_transition.abort()
@@ -511,9 +636,15 @@ def recover_from_trash(
                 code="GRAPH_SYNC_RECOVERY_CHECKPOINT_FAILED",
                 reason="graph checkpoint failed; recovery was reversed",
             ) from error
-        from .writer_lease import mark_active_mutation_committed
-
-        mark_active_mutation_committed()
+        if direct_catalog_target is not None:
+            try:
+                catalog_publication.publish_markdown_batch(direct_catalog_target)
+            except catalog_publication.CatalogPublicationError as error:
+                raise RecoverError(
+                    code="GOVERNANCE_CATALOG_PUBLICATION_UNCERTAIN",
+                    reason=str(error),
+                ) from error
+            catalog_published = True
 
     warnings: list[str] = []
     if sidecar_guard.leaf_policy == "content":
@@ -626,25 +757,15 @@ def recover_from_trash(
             "content remains tombstoned until reconcile"
         )
 
-    today = today or dt.date.today()
-    date_iso = today.isoformat()
-    kind = "directory" if restore_abs.is_dir() else "file"
-    restore_no_ext = (
-        restore_rel.removesuffix(".md") if restore_rel.endswith(".md") else restore_rel
-    )
-    log_body = (
-        f"Recovered {trash_rel!r} → {restore_rel!r} via exomem Tier 2. "
-        f"kind={kind}."
-    )
-    if curated and allow_curated:
-        log_body += f" allow_curated=true (target tree: {curated})."
-    log_warning = write_log_entry(
-        vault_root,
-        date_iso=date_iso,
-        op="recover_from_trash",
-        rel_path_no_ext=restore_no_ext,
-        body=log_body,
-    )
+    log_warning = log_plan.warning
+    if not catalog_published:
+        log_warning = write_log_entry(
+            vault_root,
+            date_iso=date_iso,
+            op="recover_from_trash",
+            rel_path_no_ext=restore_no_ext,
+            body=log_body,
+        )
     if log_warning:
         warnings.append(log_warning)
 
@@ -661,7 +782,7 @@ def recover_from_trash(
     return RecoverResult(
         trash_path=trash_rel,
         restored_path=restore_rel,
-        kind=kind,
+        kind=trash_kind,
         warnings=warnings,
         semantic=semantic,
         index=index_feedback,
