@@ -292,6 +292,45 @@ jobs:
           tests/test_governance_projection_wire_gate.py
           --session-timeout=360
 
+  governance-projection-wire-vector-cpu:
+    name: governance projected vector CPU wire (${{ matrix.route }})
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        route: [keyword, bm25, vector-live, rerank-hard-off, clip-hard-off, graph, graph-rerank-hard-off, max-query, max-limit, max-shape, hidden-index-missing, pagination]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Cache the certified BGE vector model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-bge-base-en-v1.5-vector-cpu-v1
+      - name: Verify lockfile is current
+        run: uv lock --check
+      - name: Certify exact-capacity hidden-corpus vector CPU routes
+        env:
+          EXOMEM_GOVERNANCE_TIMING_PROFILE: vectors-cpu-torch-v1
+          EXOMEM_GOVERNANCE_TIMING_ROUTE: ${{ matrix.route }}
+          EXOMEM_DISABLE_MEDIA_EXTRACTION: "1"
+          EXOMEM_DISABLE_CLIP: "1"
+          EXOMEM_DISABLE_RANKING: "1"
+          EXOMEM_DEVICE: cpu
+          EXOMEM_EMBED_BACKEND: torch
+          OMP_NUM_THREADS: "1"
+          MKL_NUM_THREADS: "1"
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: >-
+          uv run --frozen --extra embeddings --python 3.13 python -m pytest -q
+          tests/test_governance_projection_wire_gate.py
+          --session-timeout=600
+
   semantic-write-latency:
     name: semantic write latency (2k and 8k)
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'release-please--branches--main') }}
@@ -518,6 +557,7 @@ jobs:
       - retrieval-quality
       - retrieval-latency
       - governance-projection-wire
+      - governance-projection-wire-vector-cpu
       - semantic-write-latency
       - graph-convergence
       - onboarding

@@ -20,10 +20,11 @@ import pytest
 from governance_projection_support import verified_namespace
 from starlette.testclient import TestClient
 
-from exomem import server, writer_lease
+from exomem import embeddings, server, writer_lease
 from exomem.governance import (
     principal,
     projected_graph,
+    projected_retrieval,
     projection_runtime,
     projection_store,
     projection_timing,
@@ -39,8 +40,16 @@ _MANIFEST_PATH = (
     / "governance"
     / "projected-wire-release-v1.json"
 )
+_VECTOR_MANIFEST_PATH = (
+    Path(__file__).parents[1]
+    / "benchmarks"
+    / "governance"
+    / "projected-wire-vector-cpu-release-v1.json"
+)
 _ROUTE_ENV = "EXOMEM_GOVERNANCE_TIMING_ROUTE"
+_PROFILE_ENV = "EXOMEM_GOVERNANCE_TIMING_PROFILE"
 _REST_KEY = "governance-wire-release-key"
+_VECTOR_EXTRACTOR = "projected-text-v1"
 _GRAPH_EXTRACTOR = "projected-graph-v1"
 _GRAPH_MODEL = "projected-graph-v1"
 
@@ -135,6 +144,30 @@ def _graph_measurements(
     )
 
 
+def _vector_measurements(
+    items: tuple[projection_store.ProjectionItemVariants, ...],
+    *,
+    visible_count: int,
+) -> tuple[projected_retrieval.ProjectionVectorMeasurement, ...]:
+    measurements: list[projected_retrieval.ProjectionVectorMeasurement] = []
+    for index, item in enumerate(items[:visible_count]):
+        variant = _l6_variant(item)
+        vector = [0.0] * 768
+        vector[index % len(vector)] = 1.0
+        measurements.append(
+            projected_retrieval.ProjectionVectorMeasurement(
+                measurement_key=projections.MeasurementKey(
+                    projection_variant_id=variant.projection_variant_id,
+                    lane="vector",
+                    extractor_version=_VECTOR_EXTRACTOR,
+                    model_version=embeddings.MODEL_NAME,
+                ),
+                vector=tuple(vector),
+            )
+        )
+    return tuple(measurements)
+
+
 def _active_runtime(
     *,
     visible_count: int,
@@ -142,6 +175,7 @@ def _active_runtime(
     hidden_count: int,
     graph_edge_count: int,
     omit_last_hidden_graph_measurement: bool = False,
+    vector_enabled: bool = False,
     policy_fingerprint: str = "f" * 64,
 ) -> projection_runtime.ActiveProjectionRuntime:
     visible = Scope(id="wire-visible", source="scopes/wire-visible.yaml")
@@ -243,6 +277,35 @@ def _active_runtime(
         graph_edge_count=measured_graph_edge_count,
         rows_digest=_digest(f"graph:{hidden_count}:{graph_edge_count}"),
     )
+    vector_index = None
+    vector_root = None
+    if vector_enabled:
+        vector_measurements = _vector_measurements(
+            item_tuple,
+            visible_count=visible_count,
+        )
+        vector_index = projected_retrieval.ProjectedVectorIndex(
+            namespace,
+            vector_measurements,
+            extractor_version=_VECTOR_EXTRACTOR,
+            model_version=embeddings.MODEL_NAME,
+        )
+        vector_root = projection_store.ProjectionMeasurementRoot(
+            namespace_key=key,
+            family_id=projection_store.projection_measurement_family_id(
+                key,
+                lane="vector",
+                extractor_version=_VECTOR_EXTRACTOR,
+                model_version=embeddings.MODEL_NAME,
+            ),
+            lane="vector",
+            extractor_version=_VECTOR_EXTRACTOR,
+            model_version=embeddings.MODEL_NAME,
+            measurement_count=len(vector_measurements),
+            vector_dimension=768,
+            graph_edge_count=0,
+            rows_digest=_digest(f"vector-visible:{visible_count}"),
+        )
     snapshot = schema_v4.ActivePolicySnapshot(
         active=active,
         policy=policy,
@@ -253,7 +316,8 @@ def _active_runtime(
     return projection_runtime.ActiveProjectionRuntime(
         snapshot,
         namespace,
-        (graph_root,),
+        tuple(root for root in (vector_root, graph_root) if root is not None),
+        vector_index=vector_index,
         graph_index=graph_index,
     )
 
@@ -273,7 +337,7 @@ def _route_body(
     }
     if route == "keyword":
         body["mode"] = "keyword"
-    elif route == "vector-hard-off":
+    elif route in {"vector-hard-off", "vector-live"}:
         body["mode"] = "vector"
     elif route == "rerank-hard-off":
         body["rerank"] = True
@@ -817,7 +881,7 @@ def test_projected_hidden_missing_graph_measurement_is_absence_only(
 
 
 @pytest.mark.governance_timing_release
-@pytest.mark.timeout(240)
+@pytest.mark.timeout(540)
 def test_projected_hidden_corpus_actual_wire_characterization(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -827,17 +891,36 @@ def test_projected_hidden_corpus_actual_wire_characterization(
     route = os.environ.get(_ROUTE_ENV)
     if route is None:
         pytest.skip("dedicated governance actual-wire route job only")
-    manifest = projection_timing.validate_release_manifest(
-        json.loads(_MANIFEST_PATH.read_text(encoding="utf-8"))
+    selected_profile = os.environ.get(
+        _PROFILE_ENV,
+        projection_timing.MODEL_RUNTIME_PROFILE,
     )
-    assert manifest.model_runtime_profile == "models-hard-off-v1"
+    manifest_path = (
+        _VECTOR_MANIFEST_PATH
+        if selected_profile == projection_timing.VECTOR_CPU_MODEL_RUNTIME_PROFILE
+        else _MANIFEST_PATH
+    )
+    manifest = projection_timing.validate_release_manifest(
+        json.loads(manifest_path.read_text(encoding="utf-8"))
+    )
+    assert manifest.model_runtime_profile == selected_profile
     if route not in manifest.routes:
         pytest.fail(f"unregistered governance timing route: {route!r}")
 
     monkeypatch.setenv("EXOMEM_REST_API_KEY", _REST_KEY)
-    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
-    monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
-    monkeypatch.setenv("EXOMEM_DISABLE_RANKING", "1")
+    if selected_profile == projection_timing.VECTOR_CPU_MODEL_RUNTIME_PROFILE:
+        monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+        monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
+        monkeypatch.setenv("EXOMEM_DISABLE_RANKING", "1")
+        monkeypatch.setenv("EXOMEM_DEVICE", "cpu")
+        monkeypatch.setenv("EXOMEM_EMBED_BACKEND", "torch")
+        monkeypatch.delenv("EXOMEM_EMBED_DEVICE", raising=False)
+        monkeypatch.delenv("EXOMEM_TORCH_DEVICE", raising=False)
+        embeddings.get_model()
+    else:
+        monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+        monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
+        monkeypatch.setenv("EXOMEM_DISABLE_RANKING", "1")
     assert (
         projection_runtime.projected_serving_release_profile()
         == manifest.model_runtime_profile
@@ -884,6 +967,10 @@ def test_projected_hidden_corpus_actual_wire_characterization(
             visible_body=visible_body,
             hidden_count=0,
             graph_edge_count=1,
+            vector_enabled=(
+                selected_profile
+                == projection_timing.VECTOR_CPU_MODEL_RUNTIME_PROFILE
+            ),
         ),
         roots["one"]: _active_runtime(
             visible_count=visible_count,
@@ -891,6 +978,10 @@ def test_projected_hidden_corpus_actual_wire_characterization(
             hidden_count=1,
             graph_edge_count=2,
             omit_last_hidden_graph_measurement=(route == "hidden-index-missing"),
+            vector_enabled=(
+                selected_profile
+                == projection_timing.VECTOR_CPU_MODEL_RUNTIME_PROFILE
+            ),
         ),
         roots["maximum"]: _active_runtime(
             visible_count=visible_count,
@@ -900,6 +991,10 @@ def test_projected_hidden_corpus_actual_wire_characterization(
             ),
             graph_edge_count=projections.MAX_GOVERNED_GRAPH_EDGES,
             omit_last_hidden_graph_measurement=(route == "hidden-index-missing"),
+            vector_enabled=(
+                selected_profile
+                == projection_timing.VECTOR_CPU_MODEL_RUNTIME_PROFILE
+            ),
         ),
     }
     # Production settles one immutable runtime before publication. This wire

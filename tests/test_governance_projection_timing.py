@@ -20,6 +20,12 @@ _CHECKED_RELEASE_MANIFEST = (
     / "governance"
     / "projected-wire-release-v1.json"
 )
+_CHECKED_VECTOR_RELEASE_MANIFEST = (
+    Path(__file__).parents[1]
+    / "benchmarks"
+    / "governance"
+    / "projected-wire-vector-cpu-release-v1.json"
+)
 
 
 def _timing_module():
@@ -73,6 +79,35 @@ def _release_manifest() -> dict[str, object]:
     }
 
 
+def _vector_release_manifest() -> dict[str, object]:
+    manifest = _release_manifest()
+    manifest["model_runtime_profile"] = "vectors-cpu-torch-v1"
+    manifest["request_classes"] = [
+        {
+            "name": "projected-find-vector-cpu-v1",
+            "padding_ms": 1_000,
+            "deadline_ms": 1_500,
+            "max_query_chars": 4_096,
+            "max_limit": 100,
+        }
+    ]
+    manifest["routes"] = [
+        "keyword",
+        "bm25",
+        "vector-live",
+        "rerank-hard-off",
+        "clip-hard-off",
+        "graph",
+        "graph-rerank-hard-off",
+        "max-query",
+        "max-limit",
+        "max-shape",
+        "hidden-index-missing",
+        "pagination",
+    ]
+    return manifest
+
+
 def test_checked_release_manifest_is_the_validated_nonwaivable_contract() -> None:
     timing = _timing_module()
 
@@ -95,6 +130,63 @@ def test_checked_release_manifest_is_the_validated_nonwaivable_contract() -> Non
             "pagination",
         }
     )
+
+
+def test_checked_vector_release_manifest_is_a_distinct_nonwaivable_contract() -> None:
+    timing = _timing_module()
+
+    checked = json.loads(
+        _CHECKED_VECTOR_RELEASE_MANIFEST.read_text(encoding="utf-8")
+    )
+
+    assert checked == _vector_release_manifest()
+    validated = timing.validate_release_manifest(checked)
+    assert validated.model_runtime_profile == "vectors-cpu-torch-v1"
+    assert validated.request_class_names == ("projected-find-vector-cpu-v1",)
+    assert "vector-live" in validated.routes
+    assert "vector-hard-off" not in validated.routes
+
+
+def test_hard_off_manifest_cannot_be_relabelled_as_vector_certification() -> None:
+    timing = _timing_module()
+    relabelled = _release_manifest()
+    relabelled["model_runtime_profile"] = "vectors-cpu-torch-v1"
+
+    with pytest.raises(timing.ProjectedRequestTimingUnavailable):
+        timing.validate_release_manifest(relabelled)
+
+
+def test_exact_vector_cpu_environment_selects_its_own_completion_class(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    timing = _timing_module()
+    for name in (
+        "EXOMEM_DISABLE_EMBEDDINGS",
+        "EXOMEM_EMBED_DEVICE",
+        "EXOMEM_TORCH_DEVICE",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
+    monkeypatch.setenv("EXOMEM_DISABLE_RANKING", "1")
+    monkeypatch.setenv("EXOMEM_DEVICE", "cpu")
+    monkeypatch.setenv("EXOMEM_EMBED_BACKEND", "torch")
+
+    assert (
+        timing.model_runtime_profile_from_environment()
+        == "vectors-cpu-torch-v1"
+    )
+    request_class = timing.request_class_for_find(
+        mode="hybrid",
+        scope="vault",
+        graph=True,
+        rerank=True,
+    )
+    assert request_class.name == "projected-find-vector-cpu-v1"
+    assert request_class.padding_ms == 1_000
+    assert request_class.deadline_ms == 1_500
+
+    monkeypatch.setenv("EXOMEM_EMBED_DEVICE", "cuda")
+    assert timing.model_runtime_profile_from_environment() is None
 
 
 def test_keyword_request_class_is_closed_and_repository_owned() -> None:

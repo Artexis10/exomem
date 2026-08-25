@@ -224,6 +224,21 @@ replicas for zero, one, and the exact maximum capacity across lexical, vector, r
 CLIP, graph, error, and pagination routes. Scheduler tolerance MAY be reported but MUST
 NOT be subtracted from observations or added to a ceiling.
 
+Each model execution profile SHALL have a closed literal identity, exact device/backend/
+hard-off configuration, exact required measurement families, exact route set, and exactly
+one repository-owned completion class. Evidence or a manifest for one profile MUST NOT
+activate another profile. `vectors-cpu-torch-v1` SHALL mean text embeddings enabled,
+`EXOMEM_DEVICE=cpu`, `EXOMEM_EMBED_BACKEND=torch`, absent per-model and legacy device
+overrides for the embedding lane, CLIP hard-off, and reranking hard-off. It SHALL require
+the exact active
+`projected-text-v1`/`BAAI/bge-base-en-v1.5` vector family and SHALL use only
+`projected-find-vector-cpu-v1` with 1,000 ms padding and a 1,500 ms deadline. Its vector
+model input SHALL normalize whitespace with `" ".join(query.split())`, retain at most
+the first 600 Unicode code points, and, when truncated and a U+0020 exists, retreat to
+the preceding complete token. This model-only transform MUST NOT alter lexical input or
+the full-query request/continuation binding. Every unregistered, mixed, override-bearing,
+GPU, ONNX, reranker-active, or CLIP-active profile SHALL remain non-serving.
+
 For every route/public request class, the 99% bootstrap upper confidence bounds for
 absolute median and p95 completion-time differences SHALL each be no greater than the
 manifest differential, 25 ms, and 10% of the physically-absent p95. Both conditions
@@ -241,6 +256,19 @@ identity or authorization bearers.
   absent
 - **THEN** the serialized top-k permitted results, their order, ranks, and shown count
   are byte-identical
+
+#### Scenario: Vector evidence cannot be borrowed by another runtime
+
+- **WHEN** an operator relabels hard-off evidence, supplies a device override, omits the
+  exact vector family, or enables reranking or CLIP under the vector CPU profile
+- **THEN** projected serving refuses before model invocation or content disclosure
+
+#### Scenario: Maximum public query has a fixed vector cost
+
+- **WHEN** a valid 4,096-code-point query reaches `vectors-cpu-torch-v1`
+- **THEN** lexical lanes and request binding use that complete query while the vector
+  model receives only the fixed canonical at-most-600-code-point projection used by the
+  release gate
 
 #### Scenario: Projection-only lexical match is acquired
 

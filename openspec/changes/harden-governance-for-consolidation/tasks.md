@@ -542,9 +542,17 @@ made before both PRs and their combined verification are complete.
   public-request deadline/padding classes; fail if either bound exceeds any ceiling or
   maximum capacity cannot complete. Do not claim cryptographic constant time or pass by
   deleting timing fields; keep server-only aggregates content- and bearer-free.
+- [x] 8.15a Register the exact `vectors-cpu-torch-v1` model/device/hard-off tuple and its
+  distinct 1,000/1,500 ms completion class; bind serving to the exact active vector
+  measurement family, refuse mixed/override configurations, and cap only vector-model
+  query input with the fixed 600-code-point whole-token projection.
 - [ ] 8.16 Run the full no-model counterfactual and exact-capacity actual-wire suites, then optional live
   embedding/reranker and CLIP lanes behind their existing soft-fail/marker gates; no
   optional-model absence may skip keyword/graph or the declared timing security oracle.
+- [ ] 8.16a Check in and pass the separate `vectors-cpu-torch-v1` 12-route actual-wire
+  manifest/matrix with 200 hidden-present and 200 physically-absent REST observations per
+  route at zero/one/exact capacity. Keep reranker, CLIP, GPU, ONNX, and mixed profiles
+  closed pending their own evidence.
 
 ## 9. Integration Migration And Regression Gates
 

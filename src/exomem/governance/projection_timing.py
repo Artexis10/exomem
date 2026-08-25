@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import os
 import random
 import statistics
 import time
@@ -62,9 +63,21 @@ _PROJECTED_FIND_V1 = PublicRequestClass(
     max_hidden_delta_ms=projections.MAX_HIDDEN_CORPUS_WIRE_DELTA_MS,
     max_hidden_delta_ratio=projections.MAX_HIDDEN_CORPUS_WIRE_DELTA_RATIO,
 )
+_PROJECTED_FIND_VECTOR_CPU_V1 = PublicRequestClass(
+    name="projected-find-vector-cpu-v1",
+    padding_ms=1_000,
+    deadline_ms=1_500,
+    max_query_chars=4_096,
+    max_limit=100,
+    max_hidden_delta_ms=projections.MAX_HIDDEN_CORPUS_WIRE_DELTA_MS,
+    max_hidden_delta_ratio=projections.MAX_HIDDEN_CORPUS_WIRE_DELTA_RATIO,
+)
 
 PUBLIC_REQUEST_CLASSES: Mapping[str, PublicRequestClass] = MappingProxyType(
-    {_PROJECTED_FIND_V1.name: _PROJECTED_FIND_V1}
+    {
+        _PROJECTED_FIND_V1.name: _PROJECTED_FIND_V1,
+        _PROJECTED_FIND_VECTOR_CPU_V1.name: _PROJECTED_FIND_VECTOR_CPU_V1,
+    }
 )
 
 _RELEASE_MANIFEST_SCHEMA = "exomem.governed-projection-timing-release/v1"
@@ -90,7 +103,7 @@ _REQUEST_CLASS_KEYS = frozenset(
 _CAPACITY_KEYS = frozenset(
     {"catalog_items", "searchable_bytes_per_item", "graph_edges"}
 )
-_REQUIRED_ROUTES = frozenset(
+_HARD_OFF_REQUIRED_ROUTES = frozenset(
     {
         "keyword",
         "bm25",
@@ -106,8 +119,38 @@ _REQUIRED_ROUTES = frozenset(
         "pagination",
     }
 )
+_VECTOR_CPU_REQUIRED_ROUTES = frozenset(
+    {
+        "keyword",
+        "bm25",
+        "vector-live",
+        "rerank-hard-off",
+        "clip-hard-off",
+        "graph",
+        "graph-rerank-hard-off",
+        "max-query",
+        "max-limit",
+        "max-shape",
+        "hidden-index-missing",
+        "pagination",
+    }
+)
+_ALL_REQUIRED_ROUTES = _HARD_OFF_REQUIRED_ROUTES | _VECTOR_CPU_REQUIRED_ROUTES
 _HARDWARE_RUNTIME_PROFILE = "github-hosted-ubuntu-latest-x64-python3.13"
 MODEL_RUNTIME_PROFILE = "models-hard-off-v1"
+VECTOR_CPU_MODEL_RUNTIME_PROFILE = "vectors-cpu-torch-v1"
+_PROFILE_REQUEST_CLASSES: Mapping[str, tuple[str, ...]] = MappingProxyType(
+    {
+        MODEL_RUNTIME_PROFILE: (_PROJECTED_FIND_V1.name,),
+        VECTOR_CPU_MODEL_RUNTIME_PROFILE: (_PROJECTED_FIND_VECTOR_CPU_V1.name,),
+    }
+)
+_PROFILE_REQUIRED_ROUTES: Mapping[str, frozenset[str]] = MappingProxyType(
+    {
+        MODEL_RUNTIME_PROFILE: _HARD_OFF_REQUIRED_ROUTES,
+        VECTOR_CPU_MODEL_RUNTIME_PROFILE: _VECTOR_CPU_REQUIRED_ROUTES,
+    }
+)
 _MIN_SAMPLE_COUNT_PER_CONDITION = 200
 _MIN_BOOTSTRAP_RESAMPLES = 2_000
 _TIMING_RELEASE_MANIFEST_PROOF = object()
@@ -200,7 +243,7 @@ class WireSample:
         if (
             type(self.pair_id) is not int
             or self.pair_id < 0
-            or self.route not in _REQUIRED_ROUTES
+            or self.route not in _ALL_REQUIRED_ROUTES
             or self.capacity not in {"zero", "one", "maximum"}
             or type(self.hidden_present) is not bool
         ):
@@ -300,7 +343,14 @@ def validate_release_manifest(value: object) -> TimingReleaseManifest:
         raise ProjectedRequestTimingUnavailable(
             "governed projected request timing is unavailable"
         )
-    if manifest["model_runtime_profile"] != MODEL_RUNTIME_PROFILE:
+    model_runtime_profile = manifest["model_runtime_profile"]
+    if not isinstance(model_runtime_profile, str):
+        raise ProjectedRequestTimingUnavailable(
+            "governed projected request timing is unavailable"
+        )
+    expected_class_names = _PROFILE_REQUEST_CLASSES.get(model_runtime_profile)
+    expected_routes = _PROFILE_REQUIRED_ROUTES.get(model_runtime_profile)
+    if expected_class_names is None or expected_routes is None:
         raise ProjectedRequestTimingUnavailable(
             "governed projected request timing is unavailable"
         )
@@ -338,7 +388,7 @@ def validate_release_manifest(value: object) -> TimingReleaseManifest:
                 "governed projected request timing is unavailable"
             )
         names.append(name)
-    if len(names) != len(set(names)) or set(names) != set(PUBLIC_REQUEST_CLASSES):
+    if len(names) != len(set(names)) or tuple(names) != expected_class_names:
         raise ProjectedRequestTimingUnavailable(
             "governed projected request timing is unavailable"
         )
@@ -351,7 +401,7 @@ def validate_release_manifest(value: object) -> TimingReleaseManifest:
     if (
         any(not isinstance(route, str) for route in routes)
         or len(routes) != len(set(routes))
-        or frozenset(routes) != _REQUIRED_ROUTES
+        or frozenset(routes) != expected_routes
     ):
         raise ProjectedRequestTimingUnavailable(
             "governed projected request timing is unavailable"
@@ -377,7 +427,7 @@ def validate_release_manifest(value: object) -> TimingReleaseManifest:
         bootstrap_resamples=bootstrap_resamples,
         bootstrap_seed=bootstrap_seed,
         hardware_runtime_profile=_HARDWARE_RUNTIME_PROFILE,
-        model_runtime_profile=MODEL_RUNTIME_PROFILE,
+        model_runtime_profile=model_runtime_profile,
         request_class_names=tuple(names),
         routes=frozenset(routes),
         catalog_items=expected_capacity["catalog_items"],
@@ -496,7 +546,7 @@ def release_sample_schedule(
     if (
         not isinstance(manifest, TimingReleaseManifest)
         or route not in manifest.routes
-        or route not in _REQUIRED_ROUTES
+        or route not in _ALL_REQUIRED_ROUTES
     ):
         raise ProjectedRequestTimingUnavailable(
             "governed projected request timing is unavailable"
@@ -592,7 +642,34 @@ def request_class_for_find(
         raise ProjectedRequestTimingUnavailable(
             "governed projected request timing is unavailable"
         )
+    if model_runtime_profile_from_environment() == VECTOR_CPU_MODEL_RUNTIME_PROFILE:
+        return _PROJECTED_FIND_VECTOR_CPU_V1
     return _PROJECTED_FIND_V1
+
+
+def model_runtime_profile_from_environment() -> str | None:
+    """Resolve only repository-certified, exact model execution profiles."""
+
+    if all(
+        os.environ.get(name) == "1"
+        for name in (
+            "EXOMEM_DISABLE_EMBEDDINGS",
+            "EXOMEM_DISABLE_CLIP",
+            "EXOMEM_DISABLE_RANKING",
+        )
+    ):
+        return MODEL_RUNTIME_PROFILE
+    if (
+        "EXOMEM_DISABLE_EMBEDDINGS" not in os.environ
+        and os.environ.get("EXOMEM_DISABLE_CLIP") == "1"
+        and os.environ.get("EXOMEM_DISABLE_RANKING") == "1"
+        and os.environ.get("EXOMEM_DEVICE") == "cpu"
+        and os.environ.get("EXOMEM_EMBED_BACKEND") == "torch"
+        and "EXOMEM_EMBED_DEVICE" not in os.environ
+        and "EXOMEM_TORCH_DEVICE" not in os.environ
+    ):
+        return VECTOR_CPU_MODEL_RUNTIME_PROFILE
+    return None
 
 
 def request_class_for_command(
@@ -613,6 +690,8 @@ def request_class_for_command(
     # The one class covers every registered shape up to its declared maxima,
     # plus normalized refusals. Shape-specific actual-wire routes enforce that
     # breadth; callers cannot select another padding or deadline.
+    if model_runtime_profile_from_environment() == VECTOR_CPU_MODEL_RUNTIME_PROFILE:
+        return _PROJECTED_FIND_VECTOR_CPU_V1
     return _PROJECTED_FIND_V1
 
 
@@ -692,8 +771,10 @@ __all__ = [
     "evaluate_wire_differential",
     "evaluate_wire_route",
     "fixed_public_completion",
+    "model_runtime_profile_from_environment",
     "request_class_for_command",
     "request_class_for_find",
     "release_sample_schedule",
     "validate_release_manifest",
+    "VECTOR_CPU_MODEL_RUNTIME_PROFILE",
 ]

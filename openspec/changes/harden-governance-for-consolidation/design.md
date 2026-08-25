@@ -753,6 +753,21 @@ replicas, covers zero, one, and the exact maximum supported capacity across lexi
 vector, rerank, CLIP, graph, error, and pagination paths, and computes 99% bootstrap
 upper confidence bounds for absolute median and p95 completion-time differences.
 
+Model execution is released as a closed profile, not one ambient "models enabled"
+switch. A manifest, route set, completion class, exact device/backend/hard-off tuple, and
+required measurement families belong to exactly one profile and cannot certify another.
+The first live-model profile is `vectors-cpu-torch-v1`: text embeddings are enabled with
+`EXOMEM_DEVICE=cpu` and `EXOMEM_EMBED_BACKEND=torch`, the embedding and legacy device
+overrides are absent, and CLIP plus reranking remain hard-off. It requires an exact
+`projected-text-v1`/`BAAI/bge-base-en-v1.5` vector family before serving and uses the
+repository class `projected-find-vector-cpu-v1` (1,000 ms padding, 1,500 ms deadline).
+Only the vector-model input uses `" ".join(query.split())`, capped to the first 600
+Unicode code points and retreated to the preceding complete U+0020-delimited token when
+truncated. Lexical acquisition and the request/continuation digest retain the full
+validated public query. This bound is fixed before characterization and cannot be
+caller-, manifest-, or observation-selected. Reranker-, CLIP-, GPU-, ONNX-, mixed-, and
+override-bearing configurations remain non-serving until separately characterized.
+
 For each route and public request class, both upper bounds must be no greater than all
 three applicable ceilings: the manifest differential, 25 ms absolute, and 10% of the
 physically-absent replica's measured p95. The same fixed public deadline and padding are

@@ -16,6 +16,7 @@ from exomem.governance import (
     projection_measurement_store,
     projection_runtime,
     projection_store,
+    projection_timing,
     projections,
     schema_v4,
 )
@@ -871,6 +872,63 @@ def test_vector_runtime_does_not_invent_a_lexical_rank(monkeypatch, tmp_path):
     assert result.hits[0].vector_rank == 1
     assert result.hits[0].bm25_rank is None
     assert result.hits[0].keyword_rank is None
+
+
+def test_vector_model_receives_the_fixed_bounded_query_projection(
+    monkeypatch,
+    tmp_path,
+):
+    alpha = _variant("Knowledge Base/alpha.md", "b" * 64, "semantic only")
+    runtime = _runtime(
+        (_item(alpha),),
+        vectors=(_vector(alpha, (1.0, 0.0)),),
+    )
+    observed: list[str] = []
+
+    def embed_texts(texts, *, is_query):
+        assert is_query is True
+        observed.extend(texts)
+        return [[1.0, 0.0]]
+
+    monkeypatch.setattr(embeddings, "embed_texts", embed_texts)
+    query = ("semantic    projection\n" * 80).strip()
+    normalized = " ".join(query.split())
+    expected = normalized[:600]
+    if len(normalized) > 600 and " " in expected:
+        expected = expected.rsplit(" ", 1)[0]
+
+    projection_runtime.find_projected_hits(
+        tmp_path,
+        runtime,
+        query=query,
+        limit=1,
+        mode="vector",
+        graph=False,
+        rerank=False,
+        principal=principal.owner_principal(surface="library"),
+        purpose=None,
+    )
+
+    assert observed == [expected]
+    assert len(observed[0]) <= 600
+
+
+def test_vector_release_profile_requires_the_exact_measurement_family():
+    alpha = _variant("Knowledge Base/alpha.md", "b" * 64, "semantic only")
+    without_vectors = _runtime((_item(alpha),))
+    with_vectors = _runtime(
+        (_item(alpha),),
+        vectors=(_vector(alpha, (1.0, 0.0)),),
+    )
+
+    assert not projection_runtime._runtime_supports_release_profile(
+        without_vectors,
+        projection_timing.VECTOR_CPU_MODEL_RUNTIME_PROFILE,
+    )
+    assert projection_runtime._runtime_supports_release_profile(
+        with_vectors,
+        projection_timing.VECTOR_CPU_MODEL_RUNTIME_PROFILE,
+    )
 
 
 def test_keyword_runtime_does_not_admit_bm25_only_candidates(tmp_path):
