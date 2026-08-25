@@ -42,6 +42,7 @@ from . import (
     authorization_custody,
     authorization_session_authority,
     authorization_session_lifecycle,
+    catalog_publication,
     companion_backfill,
     decisions,
     membership,
@@ -4087,7 +4088,10 @@ def _backfill_payload(
 
 def _backfill_preview(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
     _require_owner(kwargs.get("principal"))
-    store.require_authoring_schema(vault_root)
+    store.require_authoring_schema(
+        vault_root,
+        supported_versions=(store.SCHEMA_USER_VERSION, schema_v4.SCHEMA_USER_VERSION),
+    )
     plan = _backfill_plan(vault_root, kwargs.get("companion_input"))
     payload = _backfill_payload(plan)
     proposal_id = uuid.uuid4().hex
@@ -4226,7 +4230,10 @@ def _backfill_commit(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
     reconciliation = reconcile_governance_operations(vault_root)
     if reconciliation["blocked"]:
         raise GovernanceError("GOVERNANCE_BLOCKED", "pending operation needs repair")
-    store.require_authoring_schema(vault_root)
+    store.require_authoring_schema(
+        vault_root,
+        supported_versions=(store.SCHEMA_USER_VERSION, schema_v4.SCHEMA_USER_VERSION),
+    )
     now = float(kwargs.get("now", time.time()))
     row = _backfill_proposal(vault_root, proposal_id)
     payload = _validated_backfill_payload(row, kwargs.get("companion_input"))
@@ -4242,6 +4249,24 @@ def _backfill_commit(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
         raise GovernanceError(
             "STALE_COMPANION_BACKFILL", "reviewed companion snapshots changed"
         )
+    try:
+        catalog_target = catalog_publication.prepare_markdown_upsert(
+            vault_root,
+            path=plan.companion_path,
+            source=plan.target_bytes.decode("utf-8"),
+            expected_before_hash=hashlib.sha256(plan.prior_bytes).hexdigest(),
+            now=int(now),
+        )
+        catalog_values = (
+            None
+            if catalog_target is None
+            else catalog_publication.catalog_component_values(catalog_target)
+        )
+    except (UnicodeDecodeError, catalog_publication.CatalogPublicationError) as error:
+        raise GovernanceError(
+            "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
+            str(error),
+        ) from error
 
     prior_attempt = int(row[5])
     attempt_no = prior_attempt + 1
@@ -4280,6 +4305,17 @@ def _backfill_commit(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
             _component("proposal", proposal_id, final_proposal, status="spent"),
         ],
     }
+    if catalog_values is not None:
+        catalog_prior, catalog_final = catalog_values
+        phases["prior"].append(
+            _component("catalog", "active", catalog_prior, status="prior")
+        )
+        phases["prepared"].append(
+            _component("catalog", "active", catalog_final, status="prepared")
+        )
+        phases["final"].append(
+            _component("catalog", "active", catalog_final, status="active")
+        )
     digests = {phase: _composite(phase, values) for phase, values in phases.items()}
     event_id = receipts.critical_event_id(
         {
@@ -4389,6 +4425,16 @@ def _backfill_commit(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
         ) from error
     if kwargs.get("crash_at") == "after_publish":
         raise GovernanceCrash("after_publish")
+    if catalog_target is not None:
+        try:
+            catalog_publication.publish_markdown_batch(catalog_target)
+        except catalog_publication.CatalogPublicationError as error:
+            raise GovernanceError(
+                "GOVERNANCE_CATALOG_PUBLICATION_UNCERTAIN",
+                str(error),
+            ) from error
+        if kwargs.get("crash_at") == "after_catalog":
+            raise GovernanceCrash("after_catalog")
     receipts.commit_event(vault_root, event_id, outcome="prepared")
     if kwargs.get("crash_at") == "after_terminal":
         raise GovernanceCrash("after_terminal")
