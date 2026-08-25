@@ -93,3 +93,6 @@ existing soft-fail seams; the lean suite runs with `EXOMEM_DISABLE_EMBEDDINGS=1`
       reserve one background convergence slot and alternate it durably.
 - [x] 10.7 Prove an explicit unbounded operator drain still isolates more than the bounded
       four-receipt prefix for both full and semantic work.
+- [x] 10.8 Add adversarial regressions for zero-cap watcher wiring, restart fairness, and
+      concurrent turn claims; route startup through the shared allocator and serialize the
+      durable read-and-flip.

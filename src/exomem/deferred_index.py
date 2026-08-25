@@ -340,6 +340,10 @@ def claim_mixed_drain_queue(vault_root: Path) -> str:
     conn = _connect(vault_root, create=True)
     try:
         with conn:
+            # A deferred transaction would let concurrent claimants read the
+            # same turn before either writes it. Reserve the writer slot first
+            # so each claimant observes the prior claimant's committed flip.
+            conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 "SELECT value FROM maintenance_state WHERE key = ?",
                 (_MIXED_DRAIN_TURN_KEY,),

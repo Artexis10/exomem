@@ -156,6 +156,10 @@ reconcile budget remains: it may defer a live burst, but cannot turn durable rep
 a halt. With one shared slot and both queues populated, a durable turn marker alternates the
 slot between full and semantic work. Keeping the turn in the deferred-work sidecar preserves
 fairness across restarts and avoids permanently favoring whichever queue is checked first.
+The claim starts an immediate SQLite transaction before reading the turn, so concurrent
+drains serialize the read-and-flip rather than both observing the same queue. Startup uses
+the same unscoped allocator as periodic repair; targeting only full receipts there would
+bypass the turn marker and let repeated restarts starve semantic work.
 
 Alternatives rejected:
 

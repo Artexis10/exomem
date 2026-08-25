@@ -15,7 +15,8 @@ receipts in that pass. Unattempted and unsuccessful receipts remain durable for 
 passes, while an explicit unbounded operator drain may continue through the whole queue.
 An operator-configured live-batch cap of zero SHALL still reserve one background
 convergence slot when reconcile budget remains. When that effective cap is one and both
-index queues contain work, repeated passes SHALL alternate durably between the queues.
+index queues contain work, repeated passes SHALL alternate durably between the queues,
+including startup passes and concurrent drain attempts.
 
 #### Scenario: Queued semantic work drains without operator action
 
@@ -55,7 +56,8 @@ index queues contain work, repeated passes SHALL alternate durably between the q
 - **WHEN** the effective live-batch cap is zero or one
 - **AND** full and semantic work remain queued
 - **THEN** a background pass with remaining reconcile budget admits one receipt
-- **AND** repeated passes alternate between both queues so neither can starve the other
+- **AND** repeated startup or periodic passes alternate between both queues
+- **AND** concurrent drain attempts cannot claim the same turn and starve the other queue
 
 #### Scenario: Explicit operator drain retains completion semantics
 
