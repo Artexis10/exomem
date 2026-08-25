@@ -372,6 +372,13 @@ def test_hosted_initialize_skips_dotenv_and_starts_no_ungranted_workers(
     ):
         monkeypatch.delenv(key, raising=False)
 
+    core_runtime: list[str] = []
+    monkeypatch.setattr(
+        server_runtime,
+        "_start_retrieval_runtime",
+        lambda _vault: core_runtime.append("retrieval"),
+        raising=False,
+    )
     monkeypatch.setattr(
         server_runtime,
         "_start_compute_runtime",
@@ -401,6 +408,7 @@ def test_hosted_initialize_skips_dotenv_and_starts_no_ungranted_workers(
     assert readiness["reason_code"] == "HOSTED_READY"
     assert runtime.media_worker is None
     assert runtime.file_watcher is None
+    assert core_runtime == ["retrieval"]
     assert SECRET not in repr(runtime)
     assert "EXOMEM_DISABLE_QUERY_LOG" in hosted_runtime.os.environ
 

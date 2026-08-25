@@ -226,7 +226,7 @@ def _set_rerank_timing_profile(
 
 def _set_catalog_timing_profile(
     timings: FindTimings | None,
-    readiness: object | None = None,
+    readiness: Any | None = None,
     *,
     cache_hit: bool = False,
 ) -> None:
@@ -791,6 +791,22 @@ def find(
             hard_max=MAX_RERANK_CANDIDATES,
         )
     query_norm = (query or "").lower().strip()
+
+    if mode != "vector":
+        from . import readiness
+
+        admission = readiness.retrieval_admission()
+        state = admission["state"]
+        if state == "unavailable" or (
+            state == "warming" and not readiness.is_ready("lexical")
+        ):
+            raise RetrievalIndexWarming(
+                status=(
+                    "temporarily_unavailable"
+                    if state == "unavailable"
+                    else "warming"
+                )
+            )
 
     language_registry = None
 
@@ -2844,12 +2860,26 @@ def _find_semantic(
     `degraded_out`'s "the lane was deferred while a model preload is warming".
     """
     # Lazy imports — keep keyword-mode users out of the torch import path.
-    from . import embeddings, readiness, scene_frames
+    from . import embeddings, lexstore, readiness, scene_frames
 
     if snapshot is None:
         snapshot = FreshnessSnapshot(vault_root)
     if page_memo is None:
         page_memo = {}
+
+    lexical_freshness = snapshot.for_scope(scope)
+    lexical_repair = _bounded_lexical_repair_allowed(lexical_freshness)
+    if (
+        mode != "vector"
+        and not lexical_repair
+        and lexstore.maintained_content_index_enabled()
+    ):
+        catalog = lexstore.get_store(vault_root).catalog_readiness(
+            scope,
+            lexical_freshness,
+        )
+        if not catalog.complete:
+            _raise_catalog_outcome(catalog)
 
     def _page_of(rel: str) -> ParsedPage | None:
         if rel not in page_memo:
@@ -2860,33 +2890,37 @@ def _find_semantic(
             )
         return page_memo[rel]
 
-    bundle = find_candidates.collect_candidates(
-        vault_root,
-        query=query,
-        query_norm=query_norm,
-        limit=limit,
-        scope=scope,
-        mode=mode,
-        graph=graph,
-        temporal=temporal,
-        intent=intent,
-        prefer_compiled=prefer_compiled,
-        prefer_active=prefer_active,
-        prefer_used=prefer_used,
-        config=config,
-        timings=timings,
-        snapshot=snapshot,
-        page_of=_page_of,
-        keyword_match_paths=_keyword_match_paths,
-        outbound_wikilink_paths=_outbound_wikilink_paths,
-        get_query_resolver=recall_resolver_snapshot,
-        record_degradation=_record_degradation,
-        degraded_out=degraded_out,
-        failed_out=failed_out,
-        recall_paths=snapshot.recall_paths(recall_scope or scope),
-        eligible_paths=eligible_paths,
-        capture_trace=retrieval_trace is not None,
-    )
+    try:
+        bundle = find_candidates.collect_candidates(
+            vault_root,
+            query=query,
+            query_norm=query_norm,
+            limit=limit,
+            scope=scope,
+            mode=mode,
+            graph=graph,
+            temporal=temporal,
+            intent=intent,
+            prefer_compiled=prefer_compiled,
+            prefer_active=prefer_active,
+            prefer_used=prefer_used,
+            config=config,
+            timings=timings,
+            snapshot=snapshot,
+            page_of=_page_of,
+            keyword_match_paths=_keyword_match_paths,
+            outbound_wikilink_paths=_outbound_wikilink_paths,
+            get_query_resolver=recall_resolver_snapshot,
+            record_degradation=_record_degradation,
+            degraded_out=degraded_out,
+            failed_out=failed_out,
+            recall_paths=snapshot.recall_paths(recall_scope or scope),
+            lexical_repair=lexical_repair,
+            eligible_paths=eligible_paths,
+            capture_trace=retrieval_trace is not None,
+        )
+    except lexstore.CatalogUnavailable as error:
+        _raise_catalog_outcome(error.readiness)
 
     if not bundle.had_rankings:
         # Both rankers failed or produced nothing. Degrade to keyword.
@@ -3363,23 +3397,47 @@ def _find_outside_kb(
     score_by_path: dict[str, float] = {}
     lexical_backend = lexstore.cache_token(vault_root)
     try:
-        search_kwargs = {
-            "scope": "vault",
-            "freshness": snapshot.for_scope("vault") if snapshot is not None else None,
-            "allowed_paths": allowed_outside,
-        }
-        search_kwargs["repair"] = _bounded_lexical_repair_allowed(search_kwargs["freshness"])
-        bm25_hits = lexstore.search_bm25(
-            vault_root,
-            query,
-            bm25_k,
-            **search_kwargs,
-        )
+        vault_freshness = snapshot.for_scope("vault") if snapshot is not None else None
+        lexical_repair = _bounded_lexical_repair_allowed(vault_freshness)
+        bm25_hits: list[tuple[str, float]] | None
+        if (
+            not lexical_repair
+            and lexstore.maintained_content_index_enabled()
+        ):
+            catalog_result = lexstore.search_bm25_result(
+                vault_root,
+                query,
+                bm25_k,
+                scope="vault",
+                freshness=vault_freshness,
+                allowed_paths=allowed_outside,
+            )
+            if not catalog_result.readiness.complete:
+                _raise_catalog_outcome(catalog_result.readiness)
+            bm25_hits = list(catalog_result.value or [])
+        else:
+            bm25_hits = lexstore.search_bm25(
+                vault_root,
+                query,
+                bm25_k,
+                scope="vault",
+                freshness=vault_freshness,
+                allowed_paths=allowed_outside,
+                repair=lexical_repair,
+            )
         if bm25_hits is None:
             if lexstore.backend() == "python":
                 # An explicit operator rollback is allowed to use the old
                 # in-process corpus. Automatic sidecar failure is not.
-                bm25_hits = bm25.search(vault_root, query, k=bm25_k, **search_kwargs)
+                bm25_hits = bm25.search(
+                    vault_root,
+                    query,
+                    k=bm25_k,
+                    scope="vault",
+                    freshness=vault_freshness,
+                    allowed_paths=allowed_outside,
+                    repair=lexical_repair,
+                )
                 lexical_backend = "keyword_fallback"
             else:
                 if failed_out is not None:
@@ -3390,6 +3448,8 @@ def _find_outside_kb(
             if not path.startswith(kb_prefix()):
                 candidates.append(path)
                 score_by_path[path] = float(_score)
+    except RetrievalIndexWarming:
+        raise
     except Exception as e:  # noqa: BLE001 — widening must never break find
         log.warning("auto-widen lexical sidecar failed: %s", e)
         if failed_out is not None:
@@ -3639,6 +3699,17 @@ def _keyword_match_paths(
         return []
     from . import lexstore
 
+    if not repair and lexstore.maintained_content_index_enabled():
+        catalog_result = lexstore.search_substring_result(
+            vault_root,
+            query_norm,
+            scope=scope,
+            freshness=freshness,
+            k=k,
+        )
+        if not catalog_result.readiness.complete:
+            _raise_catalog_outcome(catalog_result.readiness)
+        return list(catalog_result.value or [])
     indexed = lexstore.search_substring(
         vault_root,
         query_norm,

@@ -66,6 +66,7 @@ def _reset_readiness(monkeypatch: pytest.MonkeyPatch):
 def test_components_tuple_and_initial_state() -> None:
     """The coordinated components, and the never-warmed default state."""
     assert readiness.COMPONENTS == (
+        "retrieval_catalog",
         "lexical",
         "semantic_corpus",
         "embeddings",
@@ -76,6 +77,32 @@ def test_components_tuple_and_initial_state() -> None:
     assert readiness.warming_info() is None
     for c in readiness.COMPONENTS:
         assert readiness.is_ready(c) is False
+
+
+def test_retrieval_admission_distinguishes_unverified_warming_ready_and_failed() -> None:
+    assert readiness.retrieval_admission() == {
+        "state": "unverified",
+        "admitted": False,
+    }
+
+    readiness.begin_warm()
+    assert readiness.retrieval_admission() == {
+        "state": "warming",
+        "admitted": False,
+    }
+
+    readiness.mark_ready("retrieval_catalog")
+    assert readiness.retrieval_admission() == {
+        "state": "ready",
+        "admitted": True,
+    }
+
+    readiness.begin_warm()
+    readiness.finish_warm()
+    assert readiness.retrieval_admission() == {
+        "state": "unavailable",
+        "admitted": False,
+    }
 
 
 def test_begin_warm_resets_previous_events_and_deferred_items() -> None:
@@ -162,6 +189,7 @@ def test_warming_info_shape_and_transitions() -> None:
     readiness.mark_ready("lexical")
     info2 = readiness.warming_info()
     assert set(info2["components"]) == {
+        "retrieval_catalog",
         "semantic_corpus",
         "embeddings",
         "reranker",
@@ -263,6 +291,12 @@ def test_warm_all_marks_components_ready_in_lexical_embeddings_reranker_clip_ord
     ready as it lands."""
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
     call_order: list[str] = []
+    monkeypatch.setattr(
+        warmup,
+        "warm_retrieval_catalog",
+        lambda vr: call_order.append("catalog"),
+        raising=False,
+    )
     monkeypatch.setattr(warmup, "warm_caches", lambda vr, **_kw: call_order.append("lexical") or {})
     monkeypatch.setattr(
         embeddings, "get_model", lambda: call_order.append("embeddings") or object()
@@ -275,7 +309,7 @@ def test_warm_all_marks_components_ready_in_lexical_embeddings_reranker_clip_ord
 
     warmup.warm_all(tmp_path)
 
-    assert call_order == ["lexical", "embeddings", "reranker", "clip"]
+    assert call_order == ["catalog", "lexical", "embeddings", "reranker", "clip"]
     for c in readiness.COMPONENTS:
         assert readiness.is_ready(c) is True
 
@@ -289,6 +323,12 @@ def test_warm_all_marks_lexical_ready_before_semantic_corpus_build(
     monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
     call_order: list[str] = []
 
+    monkeypatch.setattr(
+        warmup,
+        "warm_retrieval_catalog",
+        lambda vr: call_order.append("catalog"),
+        raising=False,
+    )
     monkeypatch.setattr(
         warmup,
         "warm_caches",
@@ -306,8 +346,109 @@ def test_warm_all_marks_lexical_ready_before_semantic_corpus_build(
 
     warmup.warm_all(tmp_path)
 
-    assert call_order == ["lexical", "semantic"]
+    assert call_order == ["catalog", "lexical", "semantic"]
     assert readiness.is_ready("semantic_corpus") is True
+
+
+def test_warm_all_marks_catalog_ready_before_optional_cache_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    call_order: list[str] = []
+
+    def catalog(_vault_root: Path) -> None:
+        call_order.append("catalog")
+
+    def optional_caches(_vault_root: Path, **_kwargs) -> dict:
+        assert readiness.is_ready("retrieval_catalog") is True
+        call_order.append("optional_caches")
+        return {}
+
+    monkeypatch.setattr(
+        warmup,
+        "warm_retrieval_catalog",
+        catalog,
+        raising=False,
+    )
+    monkeypatch.setattr(warmup, "warm_caches", optional_caches)
+    monkeypatch.setattr(
+        "exomem.semantic_contract.build_corpus_context",
+        lambda _root: call_order.append("semantic"),
+    )
+
+    warmup.warm_all(tmp_path)
+
+    assert call_order == ["catalog", "optional_caches", "semantic"]
+    assert readiness.is_ready("retrieval_catalog") is True
+
+
+def test_warm_retrieval_catalog_verifies_kb_and_vault_scopes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    from exomem import freshness, lexstore
+
+    calls: list[str] = []
+
+    class Store:
+        def catalog_readiness(
+            self,
+            scope: str,
+            _freshness: tuple,
+            *,
+            allow_delta: bool,
+        ) -> lexstore.CatalogReadiness:
+            assert allow_delta is False
+            calls.append(scope)
+            return lexstore.CatalogReadiness("available", True, "fts5")
+
+    monkeypatch.setattr(lexstore, "maintained_content_index_enabled", lambda: True)
+    monkeypatch.setattr(
+        lexstore,
+        "ensure_fresh",
+        lambda _root: calls.append("ensure"),
+    )
+    monkeypatch.setattr(lexstore, "get_store", lambda _root: Store())
+    monkeypatch.setattr(
+        freshness,
+        "recall_checkpoint",
+        lambda _root, _scope: SimpleNamespace(triple=(1, 1, "digest")),
+    )
+
+    warmup.warm_retrieval_catalog(tmp_path)
+
+    assert calls == ["ensure", "kb", "vault"]
+
+
+def test_warm_all_quiet_mode_still_reconciles_the_catalog(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_MODE", "quiet")
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    calls: list[str] = []
+    cache_policy: dict = {}
+    monkeypatch.setattr(
+        warmup,
+        "warm_retrieval_catalog",
+        lambda _root: calls.append("catalog"),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        warmup,
+        "warm_caches",
+        lambda _root, **kwargs: cache_policy.update(kwargs) or {},
+    )
+    monkeypatch.setattr(
+        "exomem.semantic_contract.build_corpus_context",
+        lambda _root: None,
+    )
+
+    warmup.warm_all(tmp_path)
+
+    assert calls == ["catalog"]
+    assert cache_policy["preload_cpu_caches"] is False
+    assert readiness.is_ready("retrieval_catalog") is True
 
 
 def test_warm_all_skips_model_preloads_when_embeddings_disabled(
@@ -760,6 +901,7 @@ def test_find_defers_vector_lane_mid_warm_without_calling_embed_texts(
     monkeypatch.setattr(embeddings, "embed_texts", _guarded)
 
     readiness.begin_warm()
+    readiness.mark_ready("retrieval_catalog")
     degraded: list[str] = []
     mid_warm_hits = find_module.find(
         vault, query="metabolism", mode="hybrid", degraded_out=degraded
@@ -783,6 +925,7 @@ def test_find_degraded_out_stays_empty_after_finish_warm_natural_fallback(
     readiness gate never engages)."""
     monkeypatch.setenv("EXOMEM_FIND_CACHE_SIZE", "0")
     readiness.begin_warm()
+    readiness.mark_ready("retrieval_catalog")
     readiness.finish_warm()
 
     degraded: list[str] = []
@@ -834,6 +977,7 @@ def test_op_find_warming_envelope_mid_warm_then_bare_list_after_finish(
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
     monkeypatch.setenv("EXOMEM_FIND_CACHE_SIZE", "0")
     readiness.begin_warm()
+    readiness.mark_ready("retrieval_catalog")
     out = commands.op_find(vault, query="metabolism", mode="hybrid")
 
     assert isinstance(out, dict)
@@ -1272,6 +1416,7 @@ def test_degraded_find_never_cached_even_without_degraded_out(
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
 
     readiness.begin_warm()
+    readiness.mark_ready("retrieval_catalog")
     find_module.find(vault, query="metabolism", mode="hybrid")
     with find_module._FIND_CACHE_LOCK:
         assert not find_module._FIND_CACHE, "degraded mid-warm result was cached"

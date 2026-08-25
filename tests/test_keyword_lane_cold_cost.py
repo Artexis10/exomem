@@ -8,9 +8,8 @@ from pathlib import Path
 import pytest
 
 from exomem import find as find_module
-from exomem import freshness, lexstore
+from exomem import freshness, lexstore, readiness
 from exomem.vault import walk_vault_md
-
 
 pytestmark = pytest.mark.skipif(
     not lexstore.fts5_available(), reason="this SQLite build lacks FTS5/trigram"
@@ -72,11 +71,13 @@ def _fresh_state(monkeypatch: pytest.MonkeyPatch):
     lexstore.reset_memo()
     lexstore.clear_stores()
     find_module.clear_cache()
+    readiness.reset()
     monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "fts5")
     yield
     lexstore.reset_memo()
     lexstore.clear_stores()
     find_module.clear_cache()
+    readiness.reset()
 
 
 def test_one_write_reconciles_keyword_catalog_in_proportion_to_the_change(
@@ -150,7 +151,7 @@ def test_one_write_reconciles_keyword_catalog_in_proportion_to_the_change(
     assert delta_calls == 1
 
 
-def test_declining_sidecar_still_returns_the_reference_answer(
+def test_small_repairing_sidecar_decline_still_returns_the_reference_answer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _write_page(
@@ -172,7 +173,7 @@ def test_declining_sidecar_still_returns_the_reference_answer(
         "sharedneedle",
         "kb",
         freshness=checkpoint.triple,
-        repair=False,
+        repair=True,
     )
 
     monkeypatch.setattr(lexstore, "search_substring", lambda *args, **kwargs: None)
@@ -181,13 +182,237 @@ def test_declining_sidecar_still_returns_the_reference_answer(
         "sharedneedle",
         "kb",
         freshness=checkpoint.triple,
-        repair=False,
+        repair=True,
     )
 
     assert declined == healthy == [
         "Knowledge Base/Notes/newer.md",
         "Knowledge Base/Notes/older.md",
     ]
+
+
+def test_large_cold_keyword_catalog_returns_typed_warming_without_a_walk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for index in range(80):
+        _write_page(
+            tmp_path,
+            f"Knowledge Base/Notes/page-{index:03d}.md",
+            f"coldkeyword payload {index}",
+        )
+    _seed_live(tmp_path)
+    checkpoint = freshness.recall_checkpoint(tmp_path, "kb")
+    walked = 0
+    parsed = 0
+
+    def forbidden_walk(_root: Path):
+        nonlocal walked
+        walked += 1
+        raise AssertionError("a production-size request must not walk the vault")
+        yield  # pragma: no cover - keep this a generator-shaped test double
+
+    def forbidden_parse(*_args, **_kwargs):
+        nonlocal parsed
+        parsed += 1
+        raise AssertionError("a production-size request must not parse pages")
+
+    monkeypatch.setattr(find_module, "_walk_md", forbidden_walk)
+    monkeypatch.setattr(find_module._CACHE, "get", forbidden_parse)
+    monkeypatch.setattr(lexstore, "_schedule_repair", lambda _root: None)
+
+    with pytest.raises(find_module.RetrievalIndexWarming) as raised:
+        find_module._keyword_match_paths(
+            tmp_path,
+            "coldkeyword",
+            "kb",
+            freshness=checkpoint.triple,
+            repair=False,
+        )
+
+    assert raised.value.code == "RETRIEVAL_INDEX_WARMING"
+    assert raised.value.status == "warming"
+    assert walked == 0
+    assert parsed == 0
+
+
+def test_transient_large_catalog_query_returns_typed_unavailable_without_a_walk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for index in range(80):
+        _write_page(
+            tmp_path,
+            f"Knowledge Base/Notes/page-{index:03d}.md",
+            f"transientneedle payload {index}",
+        )
+    _materialize_live_catalog(tmp_path, "transientneedle")
+    checkpoint = freshness.recall_checkpoint(tmp_path, "kb")
+    walked = 0
+
+    def forbidden_walk(_root: Path):
+        nonlocal walked
+        walked += 1
+        raise AssertionError("a transient query failure must not walk the vault")
+        yield  # pragma: no cover - keep this a generator-shaped test double
+
+    monkeypatch.setattr(find_module, "_walk_md", forbidden_walk)
+    monkeypatch.setattr(
+        lexstore,
+        "search_substring_result",
+        lambda *_args, **_kwargs: lexstore.CatalogQueryResult(
+            None,
+            lexstore.CatalogReadiness("transient_failure", False, "fts5"),
+        ),
+    )
+
+    with pytest.raises(find_module.RetrievalIndexWarming) as raised:
+        find_module._keyword_match_paths(
+            tmp_path,
+            "transientneedle",
+            "kb",
+            freshness=checkpoint.triple,
+            repair=False,
+        )
+
+    assert raised.value.status == "temporarily_unavailable"
+    assert walked == 0
+
+
+def test_active_catalog_warm_refuses_before_a_cold_freshness_walk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for index in range(80):
+        _write_page(
+            tmp_path,
+            f"Knowledge Base/Notes/page-{index:03d}.md",
+            f"preseedrace payload {index}",
+        )
+    walked = 0
+
+    def forbidden_walk(_root: Path):
+        nonlocal walked
+        walked += 1
+        raise AssertionError("admission must run before cold freshness walks")
+        yield  # pragma: no cover - keep this a generator-shaped test double
+
+    readiness.begin_warm()
+    monkeypatch.setattr(find_module, "_walk_md", forbidden_walk)
+
+    with pytest.raises(find_module.RetrievalIndexWarming):
+        find_module.find(
+            tmp_path,
+            query="preseedrace",
+            mode="keyword",
+            scope="kb",
+        )
+
+    assert walked == 0
+
+
+def test_large_cold_hybrid_catalog_returns_typed_warming_without_a_walk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for index in range(80):
+        _write_page(
+            tmp_path,
+            f"Knowledge Base/Notes/page-{index:03d}.md",
+            f"coldhybrid payload {index}",
+        )
+    _seed_live(tmp_path)
+    walked = 0
+    parsed = 0
+
+    def forbidden_walk(_root: Path):
+        nonlocal walked
+        walked += 1
+        raise AssertionError("a production-size request must not walk the vault")
+        yield  # pragma: no cover - keep this a generator-shaped test double
+
+    def forbidden_parse(*_args, **_kwargs):
+        nonlocal parsed
+        parsed += 1
+        raise AssertionError("a production-size request must not parse pages")
+
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    monkeypatch.setattr(find_module, "_walk_md", forbidden_walk)
+    monkeypatch.setattr(find_module._CACHE, "get", forbidden_parse)
+    monkeypatch.setattr(lexstore, "_schedule_repair", lambda _root: None)
+
+    with pytest.raises(find_module.RetrievalIndexWarming) as raised:
+        find_module.find(
+            tmp_path,
+            query="coldhybrid",
+            mode="hybrid",
+            scope="kb",
+            graph=False,
+            temporal=False,
+        )
+
+    assert raised.value.code == "RETRIEVAL_INDEX_WARMING"
+    assert raised.value.status == "warming"
+    assert walked == 0
+    assert parsed == 0
+
+
+def test_successful_background_repair_marks_configured_catalog_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for index in range(80):
+        _write_page(
+            tmp_path,
+            f"Knowledge Base/Notes/page-{index:03d}.md",
+            f"backgroundrepair payload {index}",
+        )
+    _seed_live(tmp_path)
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(tmp_path.resolve()))
+
+    lexstore._schedule_repair(tmp_path)
+
+    assert lexstore.await_repairs_idle(tmp_path, timeout=30.0) is True
+    assert readiness.retrieval_admission() == {
+        "state": "ready",
+        "admitted": True,
+    }
+
+
+def test_large_cold_vault_widening_returns_typed_warming_without_a_walk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_page(
+        tmp_path,
+        "Knowledge Base/Notes/kb-target.md",
+        "widenneedle kb payload",
+    )
+    _materialize_live_catalog(tmp_path, "widenneedle")
+    outside: list[Path] = []
+    for index in range(80):
+        outside.append(
+            _write_page(
+                tmp_path,
+                f"Reference/page-{index:03d}.md",
+                f"widenneedle outside payload {index}",
+            )
+        )
+    freshness.on_files_changed(tmp_path, changed=outside)
+    walked = 0
+
+    def forbidden_walk(_root: Path):
+        nonlocal walked
+        walked += 1
+        raise AssertionError("auto-widen must not walk a production-size vault")
+        yield  # pragma: no cover - keep this a generator-shaped test double
+
+    monkeypatch.setattr(find_module, "_walk_md", forbidden_walk)
+    monkeypatch.setattr(lexstore, "_schedule_repair", lambda _root: None)
+
+    with pytest.raises(find_module.RetrievalIndexWarming):
+        find_module.find(
+            tmp_path,
+            query="widenneedle",
+            mode="keyword",
+            scope="kb",
+        )
+
+    assert walked == 0
 
 
 def test_access_policy_change_is_not_served_from_a_delta(
@@ -224,13 +449,13 @@ def test_access_policy_change_is_not_served_from_a_delta(
         "policyneedle",
         "kb",
         freshness=checkpoint.triple,
-        repair=False,
+        repair=True,
     )
 
     assert paths == ["Knowledge Base/Notes/public.md"]
 
 
-def test_incomplete_delta_takes_the_full_reference_path(
+def test_nonrepairing_incomplete_delta_returns_warming_without_a_walk(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     target = _write_page(
@@ -278,13 +503,13 @@ def test_incomplete_delta_takes_the_full_reference_path(
     monkeypatch.setattr(lexstore, "_schedule_repair", lambda _root: None)
     checkpoint = freshness.recall_checkpoint(tmp_path, "kb")
 
-    paths = find_module._keyword_match_paths(
-        tmp_path,
-        "afterdelta",
-        "kb",
-        freshness=checkpoint.triple,
-        repair=False,
-    )
+    with pytest.raises(find_module.RetrievalIndexWarming):
+        find_module._keyword_match_paths(
+            tmp_path,
+            "afterdelta",
+            "kb",
+            freshness=checkpoint.triple,
+            repair=False,
+        )
 
-    assert paths == ["Knowledge Base/Notes/target.md"]
-    assert walked == 5
+    assert walked == 0

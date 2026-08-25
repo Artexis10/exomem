@@ -31,7 +31,14 @@ from __future__ import annotations
 import threading
 import time
 
-COMPONENTS = ("lexical", "semantic_corpus", "embeddings", "reranker", "clip")
+COMPONENTS = (
+    "retrieval_catalog",
+    "lexical",
+    "semantic_corpus",
+    "embeddings",
+    "reranker",
+    "clip",
+)
 
 _lock = threading.Lock()
 _events: dict[str, threading.Event] = {c: threading.Event() for c in COMPONENTS}
@@ -100,6 +107,18 @@ def is_ready(component: str) -> bool:
 def is_warming() -> bool:
     with _lock:
         return _warm_active and not _warm_finished
+
+
+def retrieval_admission() -> dict[str, object]:
+    """Content-free admission state for ordinary maintained-catalog recall."""
+    with _lock:
+        if _events["retrieval_catalog"].is_set():
+            return {"state": "ready", "admitted": True}
+        if _warm_active and not _warm_finished:
+            return {"state": "warming", "admitted": False}
+        if _warm_finished:
+            return {"state": "unavailable", "admitted": False}
+        return {"state": "unverified", "admitted": False}
 
 
 def should_defer(component: str) -> bool:

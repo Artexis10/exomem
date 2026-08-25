@@ -43,7 +43,7 @@ import pytest
 import yaml
 
 from exomem import find as find_module
-from exomem import freshness
+from exomem import freshness, lexstore
 from exomem.vault import walk_vault_md
 
 # Reuse the ONE synthetic-vault generator (scripts/synth_vault.py).
@@ -125,6 +125,10 @@ def _build_dense_vault(root: Path, n: int) -> Path:
     vault = root / f"vault-{n}"
     gen_dense_vault(vault, n)
     _seed_freshness_live(vault)
+    # Startup owns the potentially unbounded catalog build.  Interactive find
+    # calls intentionally refuse to become that build for a large corpus, so
+    # this steady-state latency fixture must perform the explicit warmup first.
+    lexstore.ensure_fresh(vault)
     # Warm every lane once so the measured passes reflect steady state, not the
     # first-touch lexical-sidecar / bm25-corpus / resolver build.
     for q in _QUERIES:

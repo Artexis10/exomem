@@ -63,9 +63,10 @@ import sqlite3
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Generic, TypeVar
 
 from . import call_spans, reserved_paths
 from .kbdir import kb_dirname
@@ -169,8 +170,11 @@ class CatalogReadiness:
     backend: str
 
 
+_CatalogValue = TypeVar("_CatalogValue")
+
+
 @dataclass(frozen=True, slots=True)
-class CatalogQueryResult:
+class CatalogQueryResult(Generic[_CatalogValue]):
     """Typed exact-catalog query result.
 
     `value` may legitimately be an empty list when `readiness.complete` is true.
@@ -178,8 +182,16 @@ class CatalogQueryResult:
     legacy list-or-None wrappers necessarily collapse.
     """
 
-    value: object | None
+    value: _CatalogValue | None
     readiness: CatalogReadiness
+
+
+class CatalogUnavailable(RuntimeError):
+    """Internal signal that a maintained content query cannot answer completely."""
+
+    def __init__(self, readiness: CatalogReadiness) -> None:
+        self.readiness = readiness
+        super().__init__(f"lexical catalog is not ready: {readiness.status}")
 
 
 class _DeltaReplayStale(RuntimeError):
@@ -446,6 +458,31 @@ def get_store(vault_root: Path) -> LexicalStore:
         return store
 
 
+def _mark_runtime_retrieval_ready_if_current(vault_root: Path) -> None:
+    """Admit the configured runtime after a repair proves both scopes current."""
+    configured_raw = os.environ.get("EXOMEM_VAULT_PATH", "").strip()
+    configured = Path(configured_raw) if configured_raw else None
+    if (
+        configured is None
+        or not configured.is_absolute()
+        or configured.resolve(strict=False) != vault_root.resolve(strict=False)
+    ):
+        return
+    from . import freshness as freshness_module
+    from . import readiness
+
+    store = get_store(vault_root)
+    if all(
+        store.catalog_readiness(
+            scope,
+            freshness_module.recall_checkpoint(vault_root, scope).triple,
+            allow_delta=False,
+        ).complete
+        for scope in ("kb", "vault")
+    ):
+        readiness.mark_ready("retrieval_catalog")
+
+
 def clear_stores() -> None:
     """Test seam: drop per-process stores (sync memos, failure flags)."""
     with _STORES_LOCK:
@@ -503,7 +540,11 @@ def _schedule_repair(vault_root: Path, *, deferred_paths: list[Path] | None = No
                         _REPAIRS_IN_FLIGHT.discard(key)
                         return
                 if rebuild or not store.retry_deferred_upsert(paths):
-                    store.rebuild_atomic()
+                    repaired = store.rebuild_atomic()
+                else:
+                    repaired = True
+                if repaired:
+                    _mark_runtime_retrieval_ready_if_current(vault_root)
                 rebuild = False
                 paths = []
         except Exception as e:  # noqa: BLE001 - daemon must not escape into stderr
@@ -594,6 +635,11 @@ def _usable() -> bool:
     return backend() != "python" and fts5_available()
 
 
+def maintained_content_index_enabled() -> bool:
+    """Whether ordinary BM25/substring recall is assigned to the sidecar."""
+    return _usable()
+
+
 def _catalog_usable() -> bool:
     """Whether the normal-table semantic catalog may serve/maintain this vault.
 
@@ -633,6 +679,34 @@ def search_bm25(
     return store.search_bm25(tokens, k, scope, freshness, allowed_paths, repair)
 
 
+def search_bm25_result(
+    vault_root: Path,
+    query: str,
+    k: int,
+    *,
+    scope: str = "kb",
+    freshness: tuple | None = None,
+    allowed_paths: set[str] | None = None,
+) -> CatalogQueryResult[list[tuple[str, float]]]:
+    """Non-walking maintained-catalog BM25 query with explicit readiness."""
+    if not _usable():
+        return CatalogQueryResult(None, CatalogReadiness("unsupported", False, backend()))
+    if not query.strip():
+        return CatalogQueryResult([], CatalogReadiness("available", True, backend()))
+    from . import bm25 as bm25_module
+
+    tokens = bm25_module.tokenize(query)
+    if not tokens:
+        return CatalogQueryResult([], CatalogReadiness("available", True, backend()))
+    return get_store(vault_root).search_bm25_result(
+        tokens,
+        k,
+        scope,
+        freshness,
+        allowed_paths,
+    )
+
+
 def search_substring(
     vault_root: Path,
     query_norm: str,
@@ -655,6 +729,30 @@ def search_substring(
         return []
     store = get_store(vault_root)
     return store.search_substring(tokens, scope, freshness, repair, k)
+
+
+def search_substring_result(
+    vault_root: Path,
+    query_norm: str,
+    *,
+    scope: str = "kb",
+    freshness: tuple | None = None,
+    k: int | None = None,
+) -> CatalogQueryResult[list[str]]:
+    """Non-walking maintained-catalog substring query with explicit readiness."""
+    if not _usable():
+        return CatalogQueryResult(None, CatalogReadiness("unsupported", False, backend()))
+    if not query_norm:
+        return CatalogQueryResult([], CatalogReadiness("available", True, backend()))
+    tokens = query_norm.split()
+    if not tokens:
+        return CatalogQueryResult([], CatalogReadiness("available", True, backend()))
+    return get_store(vault_root).search_substring_result(
+        tokens,
+        scope,
+        freshness,
+        k,
+    )
 
 
 def search_semantic_units(
@@ -812,7 +910,7 @@ def search_semantic_units_result(
     _repair_stale: bool = False,
     _validate_current: bool = True,
     repair: bool = True,
-) -> CatalogQueryResult:
+) -> CatalogQueryResult[list[SemanticUnitLexicalHit]]:
     """Typed exact-category unit query preserving every catalog outcome."""
     from .semantic_units import canonicalize_category
 
@@ -926,7 +1024,7 @@ def search_semantic_parent_paths_result(
     *,
     scope: str = "kb",
     freshness: tuple | None = None,
-) -> CatalogQueryResult:
+) -> CatalogQueryResult[list[str]]:
     """Typed counterpart to `search_semantic_parent_paths`."""
     if not _catalog_usable():
         return CatalogQueryResult(
@@ -3383,6 +3481,23 @@ class LexicalStore:
             )
             return None
 
+    def search_bm25_result(
+        self,
+        stemmed_tokens: list[str],
+        k: int,
+        scope: str,
+        freshness: tuple | None,
+        allowed_paths: set[str] | None = None,
+    ) -> CatalogQueryResult[list[tuple[str, float]]]:
+        return self._serve_from_ready_catalog_result(
+            scope,
+            freshness,
+            lambda conn: self._bm25_query(
+                conn, stemmed_tokens, k, scope, allowed_paths
+            ),
+            "lexical sidecar BM25 query failed (%s)",
+        )
+
     def _bm25_query(
         self,
         conn: sqlite3.Connection,
@@ -3539,7 +3654,13 @@ class LexicalStore:
             self._catalog_readiness_error(error, backend_name)
             return None
 
-    def _serve_from_ready_catalog_result(self, scope, freshness, query_fn, failure_message):
+    def _serve_from_ready_catalog_result(
+        self,
+        scope: str,
+        freshness: tuple | None,
+        query_fn: Callable[[sqlite3.Connection], _CatalogValue],
+        failure_message: str,
+    ) -> CatalogQueryResult[_CatalogValue]:
         """Validate readiness AND run `query_fn(conn)` bound to ONE connection and
         read transaction, so a concurrent publication cannot swap the catalog file
         between the readiness proof and the query (the readiness-query TOCTOU).
@@ -3690,7 +3811,7 @@ class LexicalStore:
         literal_tokens: tuple[str, ...] = (),
         *,
         clauses: tuple | None = None,
-    ) -> CatalogQueryResult:
+    ) -> CatalogQueryResult[list[SemanticUnitLexicalHit]]:
         """Typed exact category/kind unit query; never used for content-only lanes."""
         if not (categories or kinds or clauses):
             return CatalogQueryResult(
@@ -3868,7 +3989,7 @@ class LexicalStore:
         clauses: tuple,
         scope: str,
         freshness: tuple | None,
-    ) -> CatalogQueryResult:
+    ) -> CatalogQueryResult[list[str]]:
         """Typed distinct-parent exact catalog query."""
         return self._serve_from_ready_catalog_result(
             scope,
@@ -3933,6 +4054,20 @@ class LexicalStore:
                 "lexical sidecar failed (%s); this process serves the in-process lexical paths",
             )
             return None
+
+    def search_substring_result(
+        self,
+        tokens: list[str],
+        scope: str,
+        freshness: tuple | None,
+        k: int | None = None,
+    ) -> CatalogQueryResult[list[str]]:
+        return self._serve_from_ready_catalog_result(
+            scope,
+            freshness,
+            lambda conn: self._substring_query(conn, tokens, scope, k),
+            "lexical sidecar substring query failed (%s)",
+        )
 
     def _substring_query(
         self, conn: sqlite3.Connection, tokens: list[str], scope: str, k: int | None = None
