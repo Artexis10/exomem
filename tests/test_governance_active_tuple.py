@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import sqlite3
 import time
 from pathlib import Path
@@ -351,7 +352,7 @@ def test_govern_memory_v4_proposal_persists_exact_authority_binding(
         catalog_generation=1,
     )
 
-    assert binding["schema"] == "exomem.governance-policy-proposal/v1"
+    assert binding["schema"] == "exomem.governance-policy-proposal/v2"
     assert reviewed == {
         "activation_epoch": 1,
         "activation_state_digest": migration.activation_state_digest,
@@ -376,6 +377,9 @@ def test_govern_memory_v4_proposal_persists_exact_authority_binding(
     assert len(snapshot["file_identities"]) == 2
     assert target["policy_fingerprint"] == target_policy.fingerprint
     assert target["source_fingerprint"] == target_policy.fingerprint
+    assert re.fullmatch(r"[0-9A-HJKMNP-TV-Z]{26}", target["generation_id"])
+    assert re.fullmatch(r"[0-9a-f]{64}", target["authoring_event_id"])
+    assert re.fullmatch(r"[0-9a-f]{64}", target["receipt_event_id"])
     assert target["compiled_policy"] == base64.b64encode(
         policy.canonical_compiled_bytes(target_policy)
     ).decode("ascii")
@@ -452,11 +456,11 @@ def test_govern_memory_v4_proposal_refuses_unprepared_model_measurements(
         ).fetchone() == (0,)
 
 
-def test_govern_memory_v4_commit_validates_binding_before_publication(
+def test_govern_memory_v4_commit_publishes_the_exact_reviewed_authority(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from exomem.governance.tool import GovernanceError, op_govern_memory
+    from exomem.governance.tool import op_govern_memory
 
     now = int(time.time())
     vault = tmp_path / "vault"
@@ -482,7 +486,90 @@ def test_govern_memory_v4_commit_validates_binding_before_publication(
             target_ceiling=1,
             now=now + 1,
         )
-        with pytest.raises(GovernanceError) as error:
+        committed = op_govern_memory(
+            vault,
+            operation="commit",
+            principal=owner_principal(),
+            proposal_id=proposed["proposal_id"],
+            now=now + 2,
+        )
+
+    served = policy.load(vault)
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 2)
+
+    assert committed == {
+        "status": "committed",
+        "event_id": committed["event_id"],
+        "proposal_id": proposed["proposal_id"],
+        "direction": "narrowing",
+        "mirror_status": "pending",
+    }
+    assert re.fullmatch(r"[0-9a-f]{64}", committed["event_id"])
+    assert served.fingerprint == _compiled(_documents(ceiling=1)).fingerprint
+    assert served.rules[0].ceiling == 1
+    assert custody.control.activation_epoch == 2
+    assert custody.control.activation_state_digest is not None
+    assert (
+        vault / "Knowledge Base" / "_Governance" / "rules" / "external.yaml"
+    ).read_bytes() == dict(_documents(ceiling=2))["rules/external.yaml"]
+
+    with sqlite3.connect(store.sidecar_path(vault)) as connection:
+        assert connection.execute(
+            "SELECT status, reserved_event_id, spent_at FROM governance_proposals "
+            "WHERE proposal_id=?",
+            (proposed["proposal_id"],),
+        ).fetchone() == ("spent", None, now + 2)
+        active = connection.execute(
+            "SELECT policy_generation_id, policy_fingerprint, "
+            "projector_schema_version, catalog_generation "
+            "FROM active_governance_tuple WHERE singleton=1"
+        ).fetchone()
+        assert active[0] != FIRST_GENERATION_ID
+        assert active[1:] == (_compiled(_documents(ceiling=1)).fingerprint, 1, 1)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM governance_tuple_publications "
+            "WHERE publication_kind='policy'"
+        ).fetchone() == (1,)
+
+
+def test_govern_memory_v4_commit_recovers_lost_registry_ack_exactly_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance.tool import GovernanceCrash, op_govern_memory
+
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_empty_projection_catalog(vault, now=now)
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        proposed = op_govern_memory(
+            vault,
+            operation="propose",
+            principal=owner_principal(),
+            intent="Lower the external ceiling",
+            documents={
+                relative: content.decode("utf-8")
+                for relative, content in _documents(ceiling=1)
+            },
+            target_ceiling=1,
+            now=now + 1,
+        )
+
+    def crash(point: str) -> None:
+        if point == "policy-publication-after-commit-before-registry":
+            raise GovernanceCrash(point)
+
+    monkeypatch.setattr(schema_v4, "_crash_point", crash)
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        with pytest.raises(GovernanceCrash):
             op_govern_memory(
                 vault,
                 operation="commit",
@@ -490,24 +577,108 @@ def test_govern_memory_v4_commit_validates_binding_before_publication(
                 proposal_id=proposed["proposal_id"],
                 now=now + 2,
             )
-    assert error.value.code == "GOVERNANCE_POLICY_PUBLICATION_UNAVAILABLE"
 
+    assert policy.load(vault).blocked
     with sqlite3.connect(store.sidecar_path(vault)) as connection:
         assert connection.execute(
-            "SELECT status, reserved_event_id FROM governance_proposals "
-            "WHERE proposal_id=?",
+            "SELECT status FROM governance_proposals WHERE proposal_id=?",
             (proposed["proposal_id"],),
-        ).fetchone() == ("pending", None)
+        ).fetchone() == ("pending",)
         assert connection.execute(
-            "SELECT policy_generation_id, policy_fingerprint, "
-            "projector_schema_version, catalog_generation "
-            "FROM active_governance_tuple WHERE singleton=1"
-        ).fetchone() == (
-            FIRST_GENERATION_ID,
-            _compiled(_documents(ceiling=2)).fingerprint,
-            1,
-            1,
+            "SELECT COUNT(*) FROM governance_tuple_publications "
+            "WHERE publication_kind='policy'"
+        ).fetchone() == (1,)
+
+    monkeypatch.setattr(schema_v4, "_crash_point", lambda _point: None)
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        recovered = op_govern_memory(
+            vault,
+            operation="commit",
+            principal=owner_principal(),
+            proposal_id=proposed["proposal_id"],
+            now=now + 1_000,
         )
+
+    assert recovered["status"] == "committed"
+    assert recovered["proposal_id"] == proposed["proposal_id"]
+    assert policy.load(vault).rules[0].ceiling == 1
+    with sqlite3.connect(store.sidecar_path(vault)) as connection:
+        assert connection.execute(
+            "SELECT status, spent_at FROM governance_proposals WHERE proposal_id=?",
+            (proposed["proposal_id"],),
+        ).fetchone() == ("spent", now + 1_000)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM governance_tuple_publications "
+            "WHERE publication_kind='policy'"
+        ).fetchone() == (1,)
+
+
+def test_govern_memory_v4_commit_recovers_after_registry_ack_before_response(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance.tool import GovernanceCrash, op_govern_memory
+
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_empty_projection_catalog(vault, now=now)
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        proposed = op_govern_memory(
+            vault,
+            operation="propose",
+            principal=owner_principal(),
+            intent="Lower the external ceiling",
+            documents={
+                relative: content.decode("utf-8")
+                for relative, content in _documents(ceiling=1)
+            },
+            target_ceiling=1,
+            now=now + 1,
+        )
+        with pytest.raises(GovernanceCrash, match="v4_after_registry_ack"):
+            op_govern_memory(
+                vault,
+                operation="commit",
+                principal=owner_principal(),
+                proposal_id=proposed["proposal_id"],
+                crash_at="v4_after_registry_ack",
+                now=now + 2,
+            )
+
+    assert policy.load(vault).rules[0].ceiling == 1
+    with sqlite3.connect(store.sidecar_path(vault)) as connection:
+        assert connection.execute(
+            "SELECT status FROM governance_proposals WHERE proposal_id=?",
+            (proposed["proposal_id"],),
+        ).fetchone() == ("pending",)
+
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        recovered = op_govern_memory(
+            vault,
+            operation="commit",
+            principal=owner_principal(),
+            proposal_id=proposed["proposal_id"],
+            now=now + 3,
+        )
+
+    assert recovered["status"] == "committed"
+    with sqlite3.connect(store.sidecar_path(vault)) as connection:
+        assert connection.execute(
+            "SELECT status, spent_at FROM governance_proposals WHERE proposal_id=?",
+            (proposed["proposal_id"],),
+        ).fetchone() == ("spent", now + 3)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM governance_tuple_publications "
+            "WHERE publication_kind='policy'"
+        ).fetchone() == (1,)
 
 
 def test_govern_memory_v4_commit_refuses_reviewed_tuple_mismatch(
@@ -540,26 +711,25 @@ def test_govern_memory_v4_commit_refuses_reviewed_tuple_mismatch(
             target_ceiling=1,
             now=now + 1,
         )
-    with sqlite3.connect(store.sidecar_path(vault)) as connection:
-        row = connection.execute(
-            "SELECT proposal_json FROM governance_proposals WHERE proposal_id=?",
-            (proposed["proposal_id"],),
-        ).fetchone()
-        payload = json.loads(row[0])
-        payload["authority_binding"]["reviewed_active_tuple"]["activation_epoch"] = 2
-        connection.execute(
-            "UPDATE governance_proposals SET proposal_json=? WHERE proposal_id=?",
-            (
-                json.dumps(
-                    payload,
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ),
-                proposed["proposal_id"],
-            ),
+        winner = op_govern_memory(
+            vault,
+            operation="propose",
+            principal=owner_principal(),
+            intent="Close the external ceiling",
+            documents={
+                relative: content.decode("utf-8")
+                for relative, content in _documents(ceiling=0)
+            },
+            target_ceiling=0,
+            now=now + 1,
         )
-        connection.commit()
+        op_govern_memory(
+            vault,
+            operation="commit",
+            principal=owner_principal(),
+            proposal_id=winner["proposal_id"],
+            now=now + 2,
+        )
 
     with reserved_paths._owner_authority_scope("govern_memory"):
         with pytest.raises(GovernanceError) as error:
@@ -568,9 +738,14 @@ def test_govern_memory_v4_commit_refuses_reviewed_tuple_mismatch(
                 operation="commit",
                 principal=owner_principal(),
                 proposal_id=proposed["proposal_id"],
-                now=now + 2,
+                now=now + 3,
             )
     assert error.value.code == "STALE_GOVERNANCE_POLICY"
+    with sqlite3.connect(store.sidecar_path(vault)) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM governance_tuple_publications "
+            "WHERE publication_kind='policy'"
+        ).fetchone() == (1,)
 
 
 def _acknowledge(
