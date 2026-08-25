@@ -3333,10 +3333,17 @@ def _commit(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
                     ),
                 )
             except schema_v4.ActiveTupleStale:
-                raise GovernanceError(
-                    "STALE_GOVERNANCE_POLICY",
-                    "the reviewed active policy tuple changed",
-                ) from None
+                recovered = _recover_v4_policy_publication(
+                    vault_root,
+                    connection=connection,
+                    decoded=validated.decoded,
+                    now=int(now),
+                )
+                if recovered is None:
+                    raise GovernanceError(
+                        "STALE_GOVERNANCE_POLICY",
+                        "the reviewed active policy tuple changed",
+                    ) from None
             except authorization_custody.AuthorizationCustodyUnavailable:
                 raise GovernanceError(
                     "GOVERNANCE_BLOCKED",

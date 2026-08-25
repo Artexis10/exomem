@@ -681,6 +681,66 @@ def test_govern_memory_v4_commit_recovers_after_registry_ack_before_response(
         ).fetchone() == (1,)
 
 
+def test_govern_memory_v4_commit_adopts_its_exact_concurrent_cas_winner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance.tool import op_govern_memory
+
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_empty_projection_catalog(vault, now=now)
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        proposed = op_govern_memory(
+            vault,
+            operation="propose",
+            principal=owner_principal(),
+            intent="Lower the external ceiling",
+            documents={
+                relative: content.decode("utf-8")
+                for relative, content in _documents(ceiling=1)
+            },
+            target_ceiling=1,
+            now=now + 1,
+        )
+
+    publish = schema_v4.publish_policy_generation
+
+    def concurrent_winner(*args: object, **kwargs: object) -> object:
+        publish(*args, **kwargs)  # type: ignore[arg-type]
+        raise schema_v4.ActiveTupleStale("concurrent retry lost the CAS")
+
+    monkeypatch.setattr(schema_v4, "publish_policy_generation", concurrent_winner)
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        committed = op_govern_memory(
+            vault,
+            operation="commit",
+            principal=owner_principal(),
+            proposal_id=proposed["proposal_id"],
+            now=now + 2,
+        )
+
+    assert committed["status"] == "committed"
+    assert policy.load(vault).rules[0].ceiling == 1
+    with sqlite3.connect(store.sidecar_path(vault)) as connection:
+        assert connection.execute(
+            "SELECT status FROM governance_proposals WHERE proposal_id=?",
+            (proposed["proposal_id"],),
+        ).fetchone() == ("spent",)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM governance_tuple_publications "
+            "WHERE publication_kind='policy'"
+        ).fetchone() == (1,)
+
+
 def test_govern_memory_v4_commit_refuses_reviewed_tuple_mismatch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
