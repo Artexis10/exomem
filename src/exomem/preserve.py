@@ -30,6 +30,7 @@ import logging
 import mimetypes
 import os
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
@@ -854,6 +855,7 @@ def commit_media_sidecar_writes(
     *,
     post_commit_fanout: bool = True,
     defer_graph_completion: bool = False,
+    batch_writer: Callable[..., list[Path] | DeferredGraphCompletion] | None = None,
 ) -> list[Path] | DeferredGraphCompletion:
     """Publish machine-owned Markdown through the active catalog tuple."""
 
@@ -869,7 +871,8 @@ def commit_media_sidecar_writes(
             "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
             str(error),
         ) from error
-    written = batch_atomic_write(
+    writer = batch_atomic_write if batch_writer is None else batch_writer
+    written = writer(
         list(writes),
         vault_root=vault_root,
         post_commit_fanout=post_commit_fanout,

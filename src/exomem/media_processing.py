@@ -34,6 +34,7 @@ from .vault import (
     MISSING_CONTENT_HASH,
     VAULT_SCAN_SKIP_DIRS,
     PlannedWrite,
+    batch_atomic_write,
     content_hash,
     parse_frontmatter,
     post_commit_batch_fanout,
@@ -311,6 +312,7 @@ def reconcile_media(
                 vault,
                 (write,),
                 post_commit_fanout=commit_guard is None,
+                batch_writer=batch_atomic_write,
             )
         except catalog_publication.CatalogCommitError as error:
             raise MediaProcessingError(error.code, error.reason) from error
@@ -1318,6 +1320,7 @@ def mark_processing_unavailable(
                             ),
                         ),
                         post_commit_fanout=commit_guard is None,
+                        batch_writer=batch_atomic_write,
                     )
                     assert isinstance(written_result, list)
                     written = written_result
