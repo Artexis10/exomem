@@ -39,3 +39,16 @@ The system SHALL keep the lexical sidecar synchronized with the vault's Markdown
 - **WHEN** startup catalog repair failed and warm-up finished without admission
 - **THEN** each later refused ordinary request may re-arm the single-flight repair before returning its typed retry outcome
 - **AND** the request does not walk or parse the corpus to trigger that retry
+
+#### Scenario: A pre-existing vault is indexed on first use
+
+- **WHEN** a vault that predates the lexical sidecar is first used by an aware version
+- **THEN** background warm-up creates and populates the sidecar from the Markdown source of truth
+- **AND** a large-corpus request remains bounded while that repair is incomplete
+- **AND** no user action is required
+
+#### Scenario: Out-of-band drift self-heals
+
+- **WHEN** Markdown changed without the lexical sidecar being updated
+- **THEN** freshness verification detects the mismatch and schedules background repair
+- **AND** retrieval admission remains withheld until the affected state is current again

@@ -47,3 +47,14 @@ The background warm sequence SHALL reconcile the maintained lexical catalog for 
 - **WHEN** a bounded small-corpus request repairs and serves one maintained scope during lazy startup
 - **THEN** the runtime arranges repair of any missing sibling scope
 - **AND** retrieval admission becomes ready once both scopes are proven current
+
+#### Scenario: Lexical readiness lands before model readiness
+
+- **WHEN** background warm-up runs against a vault with Markdown content
+- **THEN** the `retrieval_catalog` readiness component becomes ready before optional model readiness components
+- **AND** ordinary lexical retrieval does not wait for embeddings, reranker, or CLIP readiness
+
+#### Scenario: Keyword find is available as soon as lexical warm completes
+
+- **WHEN** the `retrieval_catalog` readiness component is ready but embeddings are not yet ready
+- **THEN** a keyword-mode `find` call returns full results without deferring on an optional model lane
