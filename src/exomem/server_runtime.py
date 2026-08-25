@@ -132,8 +132,12 @@ class LocalRuntimeActivation:
         from . import readiness
 
         while readiness.is_warming():
-            if readiness.wait("semantic_corpus", timeout=1.0):
+            catalog_ready = readiness.is_ready("retrieval_catalog")
+            semantic_ready = readiness.is_ready("semantic_corpus")
+            if catalog_ready and semantic_ready:
                 return
+            missing = "retrieval_catalog" if not catalog_ready else "semantic_corpus"
+            readiness.wait(missing, timeout=0.1)
 
     def _start_component(self, label: str, starter: Callable[[Path], Any]) -> None:
         try:

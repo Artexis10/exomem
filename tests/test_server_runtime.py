@@ -149,6 +149,43 @@ def test_local_runtime_activation_waits_for_liveness_and_starts_once(
         readiness.reset()
 
 
+def test_local_runtime_activation_waits_for_terminal_warm_after_catalog_failure(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    compute_started = threading.Event()
+    activated = threading.Event()
+
+    def start_compute(_root) -> None:
+        readiness.begin_warm()
+        compute_started.set()
+
+    monkeypatch.setattr(server_runtime, "_start_compute_runtime", start_compute)
+    monkeypatch.setattr(
+        server_runtime,
+        "_start_file_watcher",
+        lambda _root: activated.set(),
+    )
+    monkeypatch.setattr(server_runtime, "_start_graph_drain", lambda _root: None)
+    monkeypatch.setattr(server_runtime, "_start_media_worker", lambda _root: None)
+    activation = server_runtime.LocalRuntimeActivation(vault, fallback_seconds=60.0)
+
+    async def exercise() -> None:
+        async with activation.lifespan()(SimpleNamespace()):
+            activation.start()
+            assert compute_started.wait(timeout=1.0)
+            readiness.mark_ready("semantic_corpus")
+            assert not activated.wait(timeout=0.05)
+            readiness.finish_warm()
+            assert activated.wait(timeout=1.0)
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        readiness.reset()
+
+
 def test_local_runtime_activation_falls_back_without_liveness_probe(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
