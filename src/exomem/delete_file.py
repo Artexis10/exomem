@@ -21,21 +21,25 @@ this op (they're already trashed); use the filesystem.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import logging
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from . import media_types, reserved_paths
-from .governance import lifecycle
+from .governance import catalog_publication, lifecycle
 from .kbdir import kb_dirname, kb_prefix
 from .vault import (
     VaultPathError,
+    batch_atomic_write,
     find_inbound_wikilinks,
     in_append_only_tree,
     in_curated_tree,
     kb_root,
     parse_frontmatter,
+    plan_log_entry,
     resolve_under_vault,
     write_log_entry,
 )
@@ -161,9 +165,11 @@ def delete_file(
     # Supersession history check.
     fm: dict = {}
     fm_warn: str | None = None
-    if rel_path.endswith(".md"):
+    catalog_before_hash: str | None = None
+    if rel_path.lower().endswith(".md"):
         try:
             snapshot = reserved_paths.read_generic_bytes(vault_root, rel_path)
+            catalog_before_hash = hashlib.sha256(snapshot.data).hexdigest()
             text = snapshot.data.decode("utf-8")
             fm, _, _ = parse_frontmatter(text)
             if fm.get("superseded_by") and not force_superseded:
@@ -320,6 +326,44 @@ def delete_file(
                 "DELETE_FAILED",
                 "trash metadata destination could not be acquired safely",
             ) from None
+
+    today_iso = today.isoformat()
+    rel_no_ext = rel_path.removesuffix(".md") if rel_path.endswith(".md") else rel_path
+    log_body = (
+        f"Trashed {rel_path!r} → {trash_rel!r} via exomem Tier 2. "
+        f"inbound_links_at_trash={len(inbound_all)} "
+        f"(ignored={len(inbound_ignored)}, remaining={len(inbound)})."
+    )
+    if force_orphan:
+        log_body += " force_orphan=true."
+    if force_superseded:
+        log_body += " force_superseded=true."
+    if curated and allow_curated:
+        log_body += f" allow_curated=true (target tree: {curated})."
+    log_plan = plan_log_entry(
+        vault_root,
+        date_iso=today_iso,
+        op="delete_file (trash)",
+        rel_path_no_ext=rel_no_ext,
+        body=log_body,
+    )
+    try:
+        catalog_target = catalog_publication.prepare_catalog_membership_batch(
+            vault_root,
+            writes=log_plan.writes,
+            removals=(
+                catalog_publication.CatalogRemoval(
+                    rel_path,
+                    catalog_before_hash,
+                ),
+            ),
+            now=int(time.time()),
+        )
+    except catalog_publication.CatalogPublicationError as error:
+        raise DeleteFileError(
+            code="GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
+            reason=str(error),
+        ) from error
     from . import graph_sync
 
     try:
@@ -484,26 +528,29 @@ def delete_file(
             "content remains tombstoned until reconcile"
         )
 
-    today_iso = today.isoformat()
-    rel_no_ext = rel_path.removesuffix(".md") if rel_path.endswith(".md") else rel_path
-    log_body = (
-        f"Trashed {rel_path!r} → {trash_rel!r} via exomem Tier 2. "
-        f"inbound_links_at_trash={len(inbound_all)} "
-        f"(ignored={len(inbound_ignored)}, remaining={len(inbound)})."
-    )
-    if force_orphan:
-        log_body += " force_orphan=true."
-    if force_superseded:
-        log_body += " force_superseded=true."
-    if curated and allow_curated:
-        log_body += f" allow_curated=true (target tree: {curated})."
-    log_warning = write_log_entry(
-        vault_root,
-        date_iso=today_iso,
-        op="delete_file (trash)",
-        rel_path_no_ext=rel_no_ext,
-        body=log_body,
-    )
+    if catalog_target is not None:
+        try:
+            if log_plan.writes:
+                batch_atomic_write(log_plan.writes, vault_root=vault_root)
+            catalog_publication.publish_markdown_batch(catalog_target)
+        except Exception as error:  # noqa: BLE001 - canonical removal already committed
+            raise DeleteFileError(
+                code="GOVERNANCE_CATALOG_PUBLICATION_UNCERTAIN",
+                reason=(
+                    "the file was trashed but its active catalog publication "
+                    "did not reach a verified terminal"
+                ),
+            ) from error
+
+    log_warning = log_plan.warning
+    if catalog_target is None:
+        log_warning = write_log_entry(
+            vault_root,
+            date_iso=today_iso,
+            op="delete_file (trash)",
+            rel_path_no_ext=rel_no_ext,
+            body=log_body,
+        )
     if log_warning:
         warnings.append(log_warning)
 

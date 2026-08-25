@@ -175,7 +175,7 @@ this reconciliation is `origin/main` at `1a7f30e1` (merged PR #778).
   activation epoch/digest, and ready namespace. Make policy commits CAS expected catalog,
   content/companion writers CAS expected policy, and readers pin one tuple; remove direct
   workspace loading and independent policy/catalog pointer linearization.
-- [ ] 3.11 Implement the separate cooperatively fenced, handle-relative no-follow
+- [x] 3.11 Implement the separate cooperatively fenced, handle-relative no-follow
   workspace mirror with held-parent/descriptor-identity checks. Refuse observable drift,
   record exact mirror result and pending divergence, and allow an already-exact tuple
   transaction to stand; direct OS-owner mutation is outside the filesystem guarantee.

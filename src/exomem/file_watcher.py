@@ -93,11 +93,13 @@ def _background_deferred_limit(
     has no freshness deadline, so it takes the smaller live cap and converges
     over later passes instead.
     """
-    caps = [
-        cap
-        for cap in (remaining, policy.max_embed_files_per_batch)
-        if cap is not None
-    ]
+    live_cap = policy.max_embed_files_per_batch
+    if live_cap is not None:
+        # Zero may defer a live burst, but background correctness still needs
+        # one convergence slot. A zero remaining reconcile budget continues to
+        # win below, so drift admission is never overspent.
+        live_cap = max(1, live_cap)
+    caps = [cap for cap in (remaining, live_cap) if cap is not None]
     return min(caps) if caps else None
 
 # ---- Self-write suppression registry (module-level: available to writers even
@@ -623,28 +625,17 @@ class FileWatcher:
             self._startup_recovery_started = True
         if not self._validate_existing_graph_on_seed():
             return
-        from . import deferred_index
-
         policy = self._watcher_policy()
         full_limit = _background_deferred_limit(
             policy, policy.max_reconcile_embed_files
         )
-        full_paths = [
-            self._vault_root / receipt.rel_path
-            for receipt in deferred_index.snapshot_full(
-                self._vault_root, limit=full_limit
-            )
-        ]
-        if not full_paths:
-            return
         try:
             index_sync.drain_deferred_work(
                 self._vault_root,
-                paths=full_paths,
                 limit=full_limit,
             )
         except Exception:  # noqa: BLE001 - queued work remains retryable
-            log.exception("file watcher: startup deferred full-index drain failed")
+            log.exception("file watcher: startup deferred index drain failed")
 
     def _recover_external_pending(self, pending_epoch: int) -> None:
         """Recover one drained watcher epoch after exact periodic baselines.

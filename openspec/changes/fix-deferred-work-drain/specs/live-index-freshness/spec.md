@@ -13,6 +13,10 @@ the larger reconcile cap MUST NOT turn queued repair into one vault-sized public
 If a bounded batch is incomplete, the drain SHALL isolate only a fixed small number of
 receipts in that pass. Unattempted and unsuccessful receipts remain durable for later
 passes, while an explicit unbounded operator drain may continue through the whole queue.
+An operator-configured live-batch cap of zero SHALL still reserve one background
+convergence slot when reconcile budget remains. When that effective cap is one and both
+index queues contain work, repeated passes SHALL alternate durably between the queues,
+including startup passes and concurrent drain attempts.
 
 #### Scenario: Queued semantic work drains without operator action
 
@@ -46,6 +50,14 @@ passes, while an explicit unbounded operator drain may continue through the whol
 - **THEN** that pass retries only a fixed small number of individual receipts
 - **AND** it does not replay every admitted receipt serially in the same pass
 - **AND** unsuccessful and unattempted receipts remain durable and rotate across later passes
+
+#### Scenario: Minimum background cap preserves cross-queue convergence
+
+- **WHEN** the effective live-batch cap is zero or one
+- **AND** full and semantic work remain queued
+- **THEN** a background pass with remaining reconcile budget admits one receipt
+- **AND** repeated startup or periodic passes alternate between both queues
+- **AND** concurrent drain attempts cannot claim the same turn and starve the other queue
 
 #### Scenario: Explicit operator drain retains completion semantics
 

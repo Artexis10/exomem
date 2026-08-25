@@ -494,6 +494,73 @@ def test_quiet_policy_has_nonzero_bounded_deferred_admission(
     assert policy.max_reconcile_embed_files == policy.max_embed_files_per_batch
 
 
+def test_zero_live_cap_keeps_one_background_convergence_slot() -> None:
+    policy = mode.WatcherPolicy(0.5, 300.0, 0, 500, False)
+
+    assert file_watcher._background_deferred_limit(policy, 500) == 1
+    assert file_watcher._background_deferred_limit(policy, 0) == 0
+
+
+def test_zero_live_cap_periodic_drain_progresses_without_overspending_drift(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rel = "Knowledge Base/zero-cap.md"
+    target = vault / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("# queued\n", encoding="utf-8")
+    monkeypatch.setenv("EXOMEM_MODE", "normal")
+    monkeypatch.setenv("EXOMEM_WATCHER_MAX_EMBED_FILES", "0")
+    assert mode.watcher_policy().max_embed_files_per_batch == 0
+    monkeypatch.setattr(file_watcher.freshness, "SCOPES", ())
+    monkeypatch.setattr(
+        file_watcher.media_processing, "reconcile_all_media", lambda *_a, **_kw: 0
+    )
+    monkeypatch.setattr(
+        file_watcher.freshness, "external_pending_epoch", lambda _root: None
+    )
+    monkeypatch.setattr(file_watcher.freshness, "external_pending", lambda _root: False)
+    monkeypatch.setattr(
+        file_watcher.FileWatcher, "_recover_suspended_graph", lambda _self: None
+    )
+    monkeypatch.setattr(
+        deferred_index,
+        "inspect_embedding_freshness",
+        lambda _root, paths, **_kwargs: {
+            queued: deferred_index.EmbeddingFreshness.STALE for queued in paths
+        },
+    )
+
+    def replay(root: Path, _paths: list[Path], receipts):  # noqa: ANN001
+        deferred_index.clear_receipts(root, list(receipts))
+        return SimpleNamespace(status="completed")
+
+    monkeypatch.setattr(index_sync, "replay_deferred_embedding", replay)
+    watcher = file_watcher.FileWatcher(vault)
+    deferred_index.add(vault, [rel])
+
+    watcher._reconcile_once(seed=False)
+
+    assert deferred_index.list_paths(vault) == []
+
+    deferred_index.add(vault, [rel])
+    monkeypatch.setattr(file_watcher.freshness, "SCOPES", ("kb",))
+    monkeypatch.setattr(
+        file_watcher.freshness,
+        "reconcile",
+        lambda *_a, **_kw: SimpleNamespace(drifted=True, changed=(), deleted=()),
+    )
+    monkeypatch.setattr(
+        watcher,
+        "_dispatch_reconcile_delta",
+        lambda *_a: mode.watcher_policy().max_reconcile_embed_files,
+    )
+    monkeypatch.setattr("exomem.bm25.warm", lambda *_a: None)
+
+    watcher._reconcile_once(seed=False)
+
+    assert deferred_index.list_paths(vault) == [rel]
+
+
 def test_quiet_watcher_sets_the_deferral_flag_it_logs(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -715,6 +782,222 @@ def test_bounded_semantic_drain_limits_incomplete_batch_isolation(
     assert attempts[0] == rels
     assert attempts[1:] == [[rel] for rel in rels[:4]]
     assert set(deferred_index.list_paths(vault)) == set(rels)
+
+
+def test_single_slot_bounded_drain_alternates_between_full_and_semantic_queues(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    full_rel = "Knowledge Base/full.md"
+    semantic_rel = "Knowledge Base/semantic.md"
+    for rel in (full_rel, semantic_rel):
+        target = vault / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("# queued\n", encoding="utf-8")
+    deferred_index.add_full(vault, [full_rel])
+    deferred_index.add(vault, [semantic_rel])
+    monkeypatch.setattr(
+        index_sync, "recover_full_receipt_graph_epoch", lambda _root: True
+    )
+    full_attempts: list[list[str]] = []
+
+    def incomplete_full(_root: Path, paths: list[Path]):
+        rels = [path.relative_to(vault).as_posix() for path in paths]
+        full_attempts.append(rels)
+        return index_sync.IndexSyncReport(
+            "upsert",
+            tuple(rels),
+            tuple(rels),
+            (index_sync.IndexComponentOutcome("lexstore", "degraded", "failed"),),
+        )
+
+    semantic_attempts: list[list[str]] = []
+
+    def complete_semantic(root: Path, _paths: list[Path], receipts):  # noqa: ANN001
+        semantic_attempts.append([receipt.rel_path for receipt in receipts])
+        deferred_index.clear_receipts(root, list(receipts))
+        return SimpleNamespace(status="completed")
+
+    monkeypatch.setattr(index_sync, "upsert_after_write", incomplete_full)
+    monkeypatch.setattr(
+        deferred_index,
+        "inspect_embedding_freshness",
+        lambda _root, paths, **_kwargs: {
+            rel: deferred_index.EmbeddingFreshness.STALE for rel in paths
+        },
+    )
+    monkeypatch.setattr(index_sync, "replay_deferred_embedding", complete_semantic)
+
+    assert index_sync.drain_deferred_work(vault, limit=1) == 0
+    assert index_sync.drain_deferred_work(vault, limit=1) == 1
+
+    assert full_attempts == [[full_rel], [full_rel]]
+    assert semantic_attempts == [[semantic_rel]]
+    assert deferred_index.list_paths(vault) == []
+
+
+def test_single_slot_startup_drains_both_queues_across_restarts(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    full_rel = "Knowledge Base/startup-full.md"
+    semantic_rel = "Knowledge Base/startup-semantic.md"
+    for rel in (full_rel, semantic_rel):
+        target = vault / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("# queued\n", encoding="utf-8")
+    deferred_index.add_full(vault, [full_rel])
+    deferred_index.add(vault, [semantic_rel])
+    policy = mode.WatcherPolicy(0.5, 300.0, 1, 500, False)
+    monkeypatch.setattr(file_watcher.freshness, "SCOPES", ())
+    monkeypatch.setattr(
+        file_watcher.FileWatcher, "_watcher_policy", lambda _self: policy
+    )
+    monkeypatch.setattr(
+        file_watcher.FileWatcher,
+        "_validate_existing_graph_on_seed",
+        lambda _self: True,
+    )
+    monkeypatch.setattr(
+        index_sync, "recover_full_receipt_graph_epoch", lambda _root: True
+    )
+
+    def incomplete_full(_root: Path, paths: list[Path]):
+        rels = tuple(path.relative_to(vault).as_posix() for path in paths)
+        return index_sync.IndexSyncReport(
+            "upsert",
+            rels,
+            rels,
+            (index_sync.IndexComponentOutcome("lexstore", "degraded", "failed"),),
+        )
+
+    semantic_attempts: list[str] = []
+
+    def complete_semantic(root: Path, _paths: list[Path], receipts):  # noqa: ANN001
+        semantic_attempts.extend(receipt.rel_path for receipt in receipts)
+        deferred_index.clear_receipts(root, list(receipts))
+        return SimpleNamespace(status="completed")
+
+    monkeypatch.setattr(index_sync, "upsert_after_write", incomplete_full)
+    monkeypatch.setattr(
+        deferred_index,
+        "inspect_embedding_freshness",
+        lambda _root, paths, **_kwargs: {
+            rel: deferred_index.EmbeddingFreshness.STALE for rel in paths
+        },
+    )
+    monkeypatch.setattr(index_sync, "replay_deferred_embedding", complete_semantic)
+
+    file_watcher.FileWatcher(vault)._reconcile_once(seed=True)
+    file_watcher.FileWatcher(vault)._reconcile_once(seed=True)
+
+    assert semantic_attempts == [semantic_rel]
+    assert deferred_index.list_paths(vault) == []
+
+
+def test_mixed_drain_turn_claim_serializes_concurrent_callers(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    deferred_index.add(vault, ["Knowledge Base/queued.md"])
+    real_connect = deferred_index._connect
+    simultaneous_select = threading.Barrier(2)
+
+    class ConnectionProxy:
+        def __init__(self, connection: sqlite3.Connection) -> None:
+            self._connection = connection
+
+        def __enter__(self):
+            self._connection.__enter__()
+            return self
+
+        def __exit__(self, *args):  # noqa: ANN002
+            return self._connection.__exit__(*args)
+
+        def execute(self, sql: str, *args, **kwargs):  # noqa: ANN002, ANN003
+            if sql.startswith("SELECT value") and not self._connection.in_transaction:
+                simultaneous_select.wait(timeout=5)
+            return self._connection.execute(sql, *args, **kwargs)
+
+        def __getattr__(self, name: str):
+            return getattr(self._connection, name)
+
+    monkeypatch.setattr(
+        deferred_index,
+        "_connect",
+        lambda *args, **kwargs: ConnectionProxy(real_connect(*args, **kwargs)),
+    )
+    start = threading.Barrier(3)
+    outcomes: list[str] = []
+
+    def claim() -> None:
+        start.wait(timeout=5)
+        outcomes.append(deferred_index.claim_mixed_drain_queue(vault))
+
+    threads = [threading.Thread(target=claim) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    start.wait(timeout=5)
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert sorted(outcomes) == ["full", "semantic"]
+
+
+def test_unbounded_full_drain_isolates_every_incomplete_receipt(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rels = [f"Knowledge Base/full-{index:02d}.md" for index in range(10)]
+    for rel in rels:
+        target = vault / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("# queued\n", encoding="utf-8")
+    deferred_index.add_full(vault, rels)
+    monkeypatch.setattr(
+        index_sync, "recover_full_receipt_graph_epoch", lambda _root: True
+    )
+    attempts: list[list[str]] = []
+
+    def incomplete(_root: Path, paths: list[Path]):
+        rel_paths = [path.relative_to(vault).as_posix() for path in paths]
+        attempts.append(rel_paths)
+        return index_sync.IndexSyncReport(
+            "upsert",
+            tuple(rel_paths),
+            tuple(rel_paths),
+            (index_sync.IndexComponentOutcome("lexstore", "degraded", "failed"),),
+        )
+
+    monkeypatch.setattr(index_sync, "upsert_after_write", incomplete)
+
+    assert index_sync.drain_deferred_work(vault) == 0
+    assert attempts == [rels, *[[rel] for rel in rels]]
+
+
+def test_unbounded_semantic_drain_isolates_every_incomplete_receipt(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rels = [f"Knowledge Base/semantic-{index:02d}.md" for index in range(10)]
+    for rel in rels:
+        target = vault / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("# queued\n", encoding="utf-8")
+    deferred_index.add(vault, rels)
+    monkeypatch.setattr(
+        deferred_index,
+        "inspect_embedding_freshness",
+        lambda _root, paths, **_kwargs: {
+            rel: deferred_index.EmbeddingFreshness.STALE for rel in paths
+        },
+    )
+    attempts: list[list[str]] = []
+
+    def incomplete(_root: Path, _paths: list[Path], receipts):  # noqa: ANN001
+        attempts.append([receipt.rel_path for receipt in receipts])
+        return SimpleNamespace(status="degraded")
+
+    monkeypatch.setattr(index_sync, "replay_deferred_embedding", incomplete)
+
+    assert index_sync.drain_deferred_work(vault) == 0
+    assert attempts == [rels, *[[rel] for rel in rels]]
 
 
 def test_doctor_warns_on_deferred_queue_fraction(

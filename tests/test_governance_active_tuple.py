@@ -2,22 +2,41 @@ from __future__ import annotations
 
 import base64
 import dataclasses
+import datetime as dt
 import hashlib
 import hmac
 import json
 import os
+import re
 import sqlite3
 import time
 from pathlib import Path
 
 import pytest
 
-from exomem import reserved_paths
+from exomem import (
+    create_file as create_file_module,
+)
+from exomem import (
+    delete_file as delete_file_module,
+)
+from exomem import (
+    find_corpus,
+    reserved_paths,
+    semantic_writes,
+    writer_lease,
+)
+from exomem import (
+    vault as vault_module,
+)
 from exomem.governance import (
     authorization_custody,
+    catalog_publication,
+    membership,
     policy,
     projection_store,
     projections,
+    receipts,
     schema_v4,
     store,
 )
@@ -300,6 +319,139 @@ def _migrate_with_empty_projection_catalog(
     return result
 
 
+def _projection_item(
+    *,
+    vault: Path,
+    compiled: policy.Policy,
+    path: str,
+    source: str,
+    catalog_generation: int,
+) -> projection_store.ProjectionItemVariants:
+    content = source.encode("utf-8")
+    parsed = find_corpus.parse_page(
+        vault / path,
+        0.0,
+        vault,
+        content=content,
+        resolved_relative=path,
+    )
+    assert parsed is not None
+    content_hash = hashlib.sha256(content).hexdigest()
+    scope_ids = tuple(
+        sorted(membership.evaluate_snapshot(parsed, compiled, content_hash=content_hash))
+    )
+    key = projections.ProjectionNamespaceKey(
+        policy_fingerprint=compiled.fingerprint,
+        projector_schema_version=1,
+        catalog_generation=catalog_generation,
+    )
+    search_fields = {
+        "body": parsed.body,
+        "title": parsed.title,
+    }
+    for name, value in (
+        ("status", parsed.frontmatter.get("status")),
+        ("type", parsed.page_type),
+        ("updated", parsed.updated),
+    ):
+        if value:
+            search_fields[name] = str(value)
+    variants = projections.enumerate_projection_variants(
+        item_identity=path,
+        content_hash=content_hash,
+        scope_ids=scope_ids,
+        policy=compiled,
+        projector_schema_version=key.projector_schema_version,
+        full_search_fields=search_fields,
+    )
+    return projection_store.ProjectionItemVariants(
+        item_identity=path,
+        content_hash=content_hash,
+        scope_ids=scope_ids,
+        variants=variants,
+    )
+
+
+def _migrate_with_projection_item(
+    vault: Path,
+    *,
+    path: str,
+    source: str,
+    now: int,
+) -> schema_v4.MigrationResult:
+    return _migrate_with_projection_items(
+        vault,
+        items=((path, source),),
+        now=now,
+    )
+
+
+def _migrate_with_projection_items(
+    vault: Path,
+    *,
+    items: tuple[tuple[str, str], ...],
+    now: int,
+) -> schema_v4.MigrationResult:
+    documents = _documents(ceiling=2)
+    compiled = _compiled(documents)
+    key = projections.ProjectionNamespaceKey(
+        policy_fingerprint=compiled.fingerprint,
+        projector_schema_version=1,
+        catalog_generation=1,
+    )
+    projected_items = tuple(
+        _projection_item(
+            vault=vault,
+            compiled=compiled,
+            path=path,
+            source=source,
+            catalog_generation=1,
+        )
+        for path, source in items
+    )
+    manifest = projection_store.stage_variant_store(
+        vault,
+        key=key,
+        items=projected_items,
+    )
+    connection = store.open_connection(vault)
+    try:
+        return schema_v4.migrate_v3_connection(
+            connection,
+            schema_v4.MigrationSeed(
+                activation_store_id=ACTIVATION_STORE_ID,
+                logical_vault_id=LOGICAL_VAULT_ID,
+                activation_epoch=1,
+                policy=_policy_seed(
+                    generation_id=FIRST_GENERATION_ID,
+                    documents=documents,
+                    predecessor_generation_id=None,
+                    event_suffix="first",
+                    now=now,
+                ),
+                catalog=schema_v4.CatalogGenerationSeed(
+                    catalog_generation=1,
+                    descriptor=projection_store.catalog_descriptor_bytes(
+                        key,
+                        projected_items,
+                    ),
+                    artifact_count=len(projected_items),
+                    created_at=now,
+                ),
+                namespace=schema_v4.ProjectionNamespaceSeed(
+                    namespace_id=key.namespace_id,
+                    evidence=projection_store.projection_namespace_evidence_bytes(
+                        manifest
+                    ),
+                    ready_at=now,
+                ),
+                migrated_at=now,
+            ),
+        )
+    finally:
+        connection.close()
+
+
 def test_govern_memory_v4_proposal_persists_exact_authority_binding(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -351,7 +503,7 @@ def test_govern_memory_v4_proposal_persists_exact_authority_binding(
         catalog_generation=1,
     )
 
-    assert binding["schema"] == "exomem.governance-policy-proposal/v1"
+    assert binding["schema"] == "exomem.governance-policy-proposal/v3"
     assert reviewed == {
         "activation_epoch": 1,
         "activation_state_digest": migration.activation_state_digest,
@@ -374,8 +526,15 @@ def test_govern_memory_v4_proposal_persists_exact_authority_binding(
     assert snapshot["guard_generation"]
     assert len(snapshot["documents"]) == 2
     assert len(snapshot["file_identities"]) == 2
+    assert [item["path"] for item in snapshot["directory_identities"]] == [
+        "rules",
+        "scopes",
+    ]
     assert target["policy_fingerprint"] == target_policy.fingerprint
     assert target["source_fingerprint"] == target_policy.fingerprint
+    assert re.fullmatch(r"[0-9A-HJKMNP-TV-Z]{26}", target["generation_id"])
+    assert re.fullmatch(r"[0-9a-f]{64}", target["authoring_event_id"])
+    assert re.fullmatch(r"[0-9a-f]{64}", target["receipt_event_id"])
     assert target["compiled_policy"] == base64.b64encode(
         policy.canonical_compiled_bytes(target_policy)
     ).decode("ascii")
@@ -452,11 +611,11 @@ def test_govern_memory_v4_proposal_refuses_unprepared_model_measurements(
         ).fetchone() == (0,)
 
 
-def test_govern_memory_v4_commit_validates_binding_before_publication(
+def test_govern_memory_v4_commit_publishes_the_exact_reviewed_authority(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from exomem.governance.tool import GovernanceError, op_govern_memory
+    from exomem.governance.tool import op_govern_memory
 
     now = int(time.time())
     vault = tmp_path / "vault"
@@ -482,7 +641,529 @@ def test_govern_memory_v4_commit_validates_binding_before_publication(
             target_ceiling=1,
             now=now + 1,
         )
-        with pytest.raises(GovernanceError) as error:
+        committed = op_govern_memory(
+            vault,
+            operation="commit",
+            principal=owner_principal(),
+            proposal_id=proposed["proposal_id"],
+            now=now + 2,
+        )
+
+    served = policy.load(vault)
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 2)
+
+    assert committed == {
+        "status": "committed",
+        "event_id": committed["event_id"],
+        "proposal_id": proposed["proposal_id"],
+        "direction": "narrowing",
+        "mirror_status": "complete",
+    }
+    assert re.fullmatch(r"[0-9a-f]{64}", committed["event_id"])
+    assert served.fingerprint == _compiled(_documents(ceiling=1)).fingerprint
+    assert served.rules[0].ceiling == 1
+    assert custody.control.activation_epoch == 2
+    assert custody.control.activation_state_digest is not None
+    assert (
+        vault / "Knowledge Base" / "_Governance" / "rules" / "external.yaml"
+    ).read_bytes() == dict(_documents(ceiling=1))["rules/external.yaml"]
+
+    mirror_records = [
+        record
+        for record in receipts.event_records(vault)
+        if record.get("operation") == "governance_policy_workspace_mirror"
+        or record.get("outcome") == "complete"
+    ]
+    assert [record["phase"] for record in mirror_records] == ["intent", "committed"]
+    assert mirror_records[0]["parent_causation_id"] == committed["event_id"]
+    assert re.fullmatch(r"[0-9a-f]{64}", mirror_records[0]["prior"])
+    assert re.fullmatch(r"[0-9a-f]{64}", mirror_records[0]["prepared"])
+    assert re.fullmatch(r"[0-9a-f]{64}", mirror_records[0]["target"])
+
+    with sqlite3.connect(store.sidecar_path(vault)) as connection:
+        assert connection.execute(
+            "SELECT status, reserved_event_id, spent_at FROM governance_proposals "
+            "WHERE proposal_id=?",
+            (proposed["proposal_id"],),
+        ).fetchone() == ("spent", None, now + 2)
+        active = connection.execute(
+            "SELECT policy_generation_id, policy_fingerprint, "
+            "projector_schema_version, catalog_generation "
+            "FROM active_governance_tuple WHERE singleton=1"
+        ).fetchone()
+        assert active[0] != FIRST_GENERATION_ID
+        assert active[1:] == (_compiled(_documents(ceiling=1)).fingerprint, 1, 1)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM governance_tuple_publications "
+            "WHERE publication_kind='policy'"
+        ).fetchone() == (1,)
+
+
+def test_govern_memory_v4_commit_recovers_mirror_after_lost_terminal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance.tool import GovernanceCrash, op_govern_memory
+
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    _write_workspace(vault, _documents(ceiling=2))
+    target_documents = dict(_documents(ceiling=1))
+    target_documents["scopes/private.yaml"] = target_documents[
+        "scopes/private.yaml"
+    ].replace(b"name: private\n", b"name: sensitive\n")
+    migration = _migrate_with_empty_projection_catalog(vault, now=now)
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        proposed = op_govern_memory(
+            vault,
+            operation="propose",
+            principal=owner_principal(),
+            intent="Lower the external ceiling",
+            documents={
+                relative: content.decode("utf-8")
+                for relative, content in target_documents.items()
+            },
+            target_ceiling=1,
+            now=now + 1,
+        )
+        with pytest.raises(GovernanceCrash, match="v4_after_mirror_write:1"):
+            op_govern_memory(
+                vault,
+                operation="commit",
+                principal=owner_principal(),
+                proposal_id=proposed["proposal_id"],
+                crash_at="v4_after_mirror_write:1",
+                now=now + 2,
+            )
+
+    assert (
+        vault / "Knowledge Base" / "_Governance" / "rules" / "external.yaml"
+    ).read_bytes() == target_documents["rules/external.yaml"]
+    assert (
+        vault / "Knowledge Base" / "_Governance" / "scopes" / "private.yaml"
+    ).read_bytes() == dict(_documents(ceiling=2))["scopes/private.yaml"]
+    with sqlite3.connect(store.sidecar_path(vault)) as connection:
+        assert connection.execute(
+            "SELECT status FROM governance_proposals WHERE proposal_id=?",
+            (proposed["proposal_id"],),
+        ).fetchone() == ("spent",)
+
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        recovered = op_govern_memory(
+            vault,
+            operation="commit",
+            principal=owner_principal(),
+            proposal_id=proposed["proposal_id"],
+            now=now + 3,
+        )
+
+    assert recovered["mirror_status"] == "complete"
+    assert (
+        vault / "Knowledge Base" / "_Governance" / "scopes" / "private.yaml"
+    ).read_bytes() == target_documents["scopes/private.yaml"]
+    records = receipts.event_records(vault)
+    intents = [
+        record
+        for record in records
+        if record.get("operation") == "governance_policy_workspace_mirror"
+    ]
+    terminals = [
+        record
+        for record in records
+        if record.get("causation_id") == intents[0]["event_id"]
+    ]
+    assert len(intents) == 1
+    assert [(record["phase"], record["outcome"]) for record in terminals] == [
+        ("committed", "complete")
+    ]
+    with sqlite3.connect(store.sidecar_path(vault)) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM governance_tuple_publications "
+            "WHERE publication_kind='policy'"
+        ).fetchone() == (1,)
+
+
+def test_govern_memory_v4_commit_retries_transient_mirror_refusal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import held_fs
+    from exomem.governance import tool
+
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_empty_projection_catalog(vault, now=now)
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    original_acquire = held_fs.acquire
+    armed = False
+    mirror_acquires = 0
+
+    def arm_after_intent(phase: str, _path: str | None = None) -> None:
+        nonlocal armed
+        if phase == "after_intent":
+            armed = True
+
+    def refuse_effect_acquire(root: Path):
+        nonlocal mirror_acquires
+        if armed:
+            mirror_acquires += 1
+            if mirror_acquires == 4:
+                return held_fs.HeldResult(
+                    error=held_fs.HeldFsError(
+                        "CAPABILITY_UNAVAILABLE",
+                        "test-only transient capability refusal",
+                    )
+                )
+        return original_acquire(root)
+
+    monkeypatch.setattr(tool, "_v4_workspace_mirror_barrier", arm_after_intent)
+    monkeypatch.setattr(held_fs, "acquire", refuse_effect_acquire)
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        proposed = tool.op_govern_memory(
+            vault,
+            operation="propose",
+            principal=owner_principal(),
+            intent="Lower the external ceiling",
+            documents={
+                relative: content.decode("utf-8")
+                for relative, content in _documents(ceiling=1)
+            },
+            target_ceiling=1,
+            now=now + 1,
+        )
+        with pytest.raises(tool.GovernanceError) as refused:
+            tool.op_govern_memory(
+                vault,
+                operation="commit",
+                principal=owner_principal(),
+                proposal_id=proposed["proposal_id"],
+                now=now + 2,
+            )
+
+    assert refused.value.code == "GOVERNANCE_BLOCKED"
+    assert policy.load(vault).rules[0].ceiling == 1
+    assert (
+        vault / "Knowledge Base" / "_Governance" / "rules" / "external.yaml"
+    ).read_bytes() == dict(_documents(ceiling=2))["rules/external.yaml"]
+
+    monkeypatch.setattr(held_fs, "acquire", original_acquire)
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        recovered = tool.op_govern_memory(
+            vault,
+            operation="commit",
+            principal=owner_principal(),
+            proposal_id=proposed["proposal_id"],
+            now=now + 3,
+        )
+
+    assert recovered["mirror_status"] == "complete"
+    assert (
+        vault / "Knowledge Base" / "_Governance" / "rules" / "external.yaml"
+    ).read_bytes() == dict(_documents(ceiling=1))["rules/external.yaml"]
+
+
+def test_govern_memory_v4_commit_replays_after_mirror_terminal_crash(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance.tool import GovernanceCrash, op_govern_memory
+
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_empty_projection_catalog(vault, now=now)
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        proposed = op_govern_memory(
+            vault,
+            operation="propose",
+            principal=owner_principal(),
+            intent="Lower the external ceiling",
+            documents={
+                relative: content.decode("utf-8")
+                for relative, content in _documents(ceiling=1)
+            },
+            target_ceiling=1,
+            now=now + 1,
+        )
+        with pytest.raises(GovernanceCrash, match="v4_after_mirror_terminal"):
+            op_govern_memory(
+                vault,
+                operation="commit",
+                principal=owner_principal(),
+                proposal_id=proposed["proposal_id"],
+                crash_at="v4_after_mirror_terminal",
+                now=now + 2,
+            )
+        recovered = op_govern_memory(
+            vault,
+            operation="commit",
+            principal=owner_principal(),
+            proposal_id=proposed["proposal_id"],
+            now=now + 3,
+        )
+
+    assert recovered["mirror_status"] == "complete"
+    records = receipts.event_records(vault)
+    intents = [
+        record
+        for record in records
+        if record.get("operation") == "governance_policy_workspace_mirror"
+    ]
+    assert len(intents) == 1
+    assert sum(
+        record.get("causation_id") == intents[0]["event_id"] for record in records
+    ) == 1
+    with sqlite3.connect(store.sidecar_path(vault)) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM governance_tuple_publications "
+            "WHERE publication_kind='policy'"
+        ).fetchone() == (1,)
+
+
+def test_govern_memory_v4_commit_preserves_observed_workspace_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance import tool
+
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_empty_projection_catalog(vault, now=now)
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    drift = dict(_documents(ceiling=3))["rules/external.yaml"]
+    changed = False
+
+    def mutate_after_intent(phase: str, _path: str | None = None) -> None:
+        nonlocal changed
+        if phase == "after_intent" and not changed:
+            changed = True
+            (
+                vault
+                / "Knowledge Base"
+                / "_Governance"
+                / "rules"
+                / "external.yaml"
+            ).write_bytes(drift)
+
+    monkeypatch.setattr(tool, "_v4_workspace_mirror_barrier", mutate_after_intent)
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        proposed = tool.op_govern_memory(
+            vault,
+            operation="propose",
+            principal=owner_principal(),
+            intent="Lower the external ceiling",
+            documents={
+                relative: content.decode("utf-8")
+                for relative, content in _documents(ceiling=1)
+            },
+            target_ceiling=1,
+            now=now + 1,
+        )
+        committed = tool.op_govern_memory(
+            vault,
+            operation="commit",
+            principal=owner_principal(),
+            proposal_id=proposed["proposal_id"],
+            now=now + 2,
+        )
+
+    assert committed["mirror_status"] == "diverged"
+    assert (
+        vault / "Knowledge Base" / "_Governance" / "rules" / "external.yaml"
+    ).read_bytes() == drift
+    assert policy.load(vault).rules[0].ceiling == 1
+    mirror_terminal = next(
+        record
+        for record in receipts.event_records(vault)
+        if record.get("outcome") == "diverged"
+    )
+    assert mirror_terminal["phase"] == "committed"
+
+
+def test_govern_memory_v4_commit_refuses_swapped_reviewed_parent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance import tool
+
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_empty_projection_catalog(vault, now=now)
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    changed = False
+    rules = vault / "Knowledge Base" / "_Governance" / "rules"
+    displaced = tmp_path / "reviewed-rules"
+
+    def exchange_parent_after_intent(phase: str, _path: str | None = None) -> None:
+        nonlocal changed
+        if phase == "after_intent" and not changed:
+            changed = True
+            rules.rename(displaced)
+            rules.mkdir()
+            (displaced / "external.yaml").rename(rules / "external.yaml")
+            displaced.rmdir()
+
+    monkeypatch.setattr(
+        tool,
+        "_v4_workspace_mirror_barrier",
+        exchange_parent_after_intent,
+    )
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        proposed = tool.op_govern_memory(
+            vault,
+            operation="propose",
+            principal=owner_principal(),
+            intent="Lower the external ceiling",
+            documents={
+                relative: content.decode("utf-8")
+                for relative, content in _documents(ceiling=1)
+            },
+            target_ceiling=1,
+            now=now + 1,
+        )
+        committed = tool.op_govern_memory(
+            vault,
+            operation="commit",
+            principal=owner_principal(),
+            proposal_id=proposed["proposal_id"],
+            now=now + 2,
+        )
+
+    assert committed["mirror_status"] == "diverged"
+    assert (rules / "external.yaml").read_bytes() == dict(_documents(ceiling=2))[
+        "rules/external.yaml"
+    ]
+    assert policy.load(vault).rules[0].ceiling == 1
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink race fixture")
+def test_govern_memory_v4_commit_refuses_symlinked_mirror_leaf(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance import tool
+
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_empty_projection_catalog(vault, now=now)
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    changed = False
+    leaf = vault / "Knowledge Base" / "_Governance" / "rules" / "external.yaml"
+
+    def alias_after_intent(phase: str, _path: str | None = None) -> None:
+        nonlocal changed
+        if phase == "after_intent" and not changed:
+            changed = True
+            leaf.unlink()
+            leaf.symlink_to("../scopes/private.yaml")
+
+    monkeypatch.setattr(tool, "_v4_workspace_mirror_barrier", alias_after_intent)
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        proposed = tool.op_govern_memory(
+            vault,
+            operation="propose",
+            principal=owner_principal(),
+            intent="Lower the external ceiling",
+            documents={
+                relative: content.decode("utf-8")
+                for relative, content in _documents(ceiling=1)
+            },
+            target_ceiling=1,
+            now=now + 1,
+        )
+        committed = tool.op_govern_memory(
+            vault,
+            operation="commit",
+            principal=owner_principal(),
+            proposal_id=proposed["proposal_id"],
+            now=now + 2,
+        )
+
+    assert committed["mirror_status"] == "diverged"
+    assert leaf.is_symlink()
+    assert policy.load(vault).blocked
+
+
+def test_govern_memory_v4_commit_recovers_lost_registry_ack_exactly_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance.tool import GovernanceCrash, op_govern_memory
+
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_empty_projection_catalog(vault, now=now)
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        proposed = op_govern_memory(
+            vault,
+            operation="propose",
+            principal=owner_principal(),
+            intent="Lower the external ceiling",
+            documents={
+                relative: content.decode("utf-8")
+                for relative, content in _documents(ceiling=1)
+            },
+            target_ceiling=1,
+            now=now + 1,
+        )
+
+    def crash(point: str) -> None:
+        if point == "policy-publication-after-commit-before-registry":
+            raise GovernanceCrash(point)
+
+    monkeypatch.setattr(schema_v4, "_crash_point", crash)
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        with pytest.raises(GovernanceCrash):
             op_govern_memory(
                 vault,
                 operation="commit",
@@ -490,24 +1171,168 @@ def test_govern_memory_v4_commit_validates_binding_before_publication(
                 proposal_id=proposed["proposal_id"],
                 now=now + 2,
             )
-    assert error.value.code == "GOVERNANCE_POLICY_PUBLICATION_UNAVAILABLE"
 
+    assert policy.load(vault).blocked
     with sqlite3.connect(store.sidecar_path(vault)) as connection:
         assert connection.execute(
-            "SELECT status, reserved_event_id FROM governance_proposals "
-            "WHERE proposal_id=?",
+            "SELECT status FROM governance_proposals WHERE proposal_id=?",
             (proposed["proposal_id"],),
-        ).fetchone() == ("pending", None)
+        ).fetchone() == ("pending",)
         assert connection.execute(
-            "SELECT policy_generation_id, policy_fingerprint, "
-            "projector_schema_version, catalog_generation "
-            "FROM active_governance_tuple WHERE singleton=1"
-        ).fetchone() == (
-            FIRST_GENERATION_ID,
-            _compiled(_documents(ceiling=2)).fingerprint,
-            1,
-            1,
+            "SELECT COUNT(*) FROM governance_tuple_publications "
+            "WHERE publication_kind='policy'"
+        ).fetchone() == (1,)
+
+    monkeypatch.setattr(schema_v4, "_crash_point", lambda _point: None)
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        recovered = op_govern_memory(
+            vault,
+            operation="commit",
+            principal=owner_principal(),
+            proposal_id=proposed["proposal_id"],
+            now=now + 1_000,
         )
+
+    assert recovered["status"] == "committed"
+    assert recovered["proposal_id"] == proposed["proposal_id"]
+    assert policy.load(vault).rules[0].ceiling == 1
+    with sqlite3.connect(store.sidecar_path(vault)) as connection:
+        assert connection.execute(
+            "SELECT status, spent_at FROM governance_proposals WHERE proposal_id=?",
+            (proposed["proposal_id"],),
+        ).fetchone() == ("spent", now + 1_000)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM governance_tuple_publications "
+            "WHERE publication_kind='policy'"
+        ).fetchone() == (1,)
+
+
+def test_govern_memory_v4_commit_recovers_after_registry_ack_before_response(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance.tool import GovernanceCrash, op_govern_memory
+
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_empty_projection_catalog(vault, now=now)
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        proposed = op_govern_memory(
+            vault,
+            operation="propose",
+            principal=owner_principal(),
+            intent="Lower the external ceiling",
+            documents={
+                relative: content.decode("utf-8")
+                for relative, content in _documents(ceiling=1)
+            },
+            target_ceiling=1,
+            now=now + 1,
+        )
+        with pytest.raises(GovernanceCrash, match="v4_after_registry_ack"):
+            op_govern_memory(
+                vault,
+                operation="commit",
+                principal=owner_principal(),
+                proposal_id=proposed["proposal_id"],
+                crash_at="v4_after_registry_ack",
+                now=now + 2,
+            )
+
+    assert policy.load(vault).rules[0].ceiling == 1
+    with sqlite3.connect(store.sidecar_path(vault)) as connection:
+        assert connection.execute(
+            "SELECT status FROM governance_proposals WHERE proposal_id=?",
+            (proposed["proposal_id"],),
+        ).fetchone() == ("pending",)
+
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        recovered = op_govern_memory(
+            vault,
+            operation="commit",
+            principal=owner_principal(),
+            proposal_id=proposed["proposal_id"],
+            now=now + 3,
+        )
+
+    assert recovered["status"] == "committed"
+    with sqlite3.connect(store.sidecar_path(vault)) as connection:
+        assert connection.execute(
+            "SELECT status, spent_at FROM governance_proposals WHERE proposal_id=?",
+            (proposed["proposal_id"],),
+        ).fetchone() == ("spent", now + 3)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM governance_tuple_publications "
+            "WHERE publication_kind='policy'"
+        ).fetchone() == (1,)
+
+
+def test_govern_memory_v4_commit_adopts_its_exact_concurrent_cas_winner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance.tool import op_govern_memory
+
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_empty_projection_catalog(vault, now=now)
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        proposed = op_govern_memory(
+            vault,
+            operation="propose",
+            principal=owner_principal(),
+            intent="Lower the external ceiling",
+            documents={
+                relative: content.decode("utf-8")
+                for relative, content in _documents(ceiling=1)
+            },
+            target_ceiling=1,
+            now=now + 1,
+        )
+
+    publish = schema_v4.publish_policy_generation
+
+    def concurrent_winner(*args: object, **kwargs: object) -> object:
+        publish(*args, **kwargs)  # type: ignore[arg-type]
+        raise schema_v4.ActiveTupleStale("concurrent retry lost the CAS")
+
+    monkeypatch.setattr(schema_v4, "publish_policy_generation", concurrent_winner)
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        committed = op_govern_memory(
+            vault,
+            operation="commit",
+            principal=owner_principal(),
+            proposal_id=proposed["proposal_id"],
+            now=now + 2,
+        )
+
+    assert committed["status"] == "committed"
+    assert policy.load(vault).rules[0].ceiling == 1
+    with sqlite3.connect(store.sidecar_path(vault)) as connection:
+        assert connection.execute(
+            "SELECT status FROM governance_proposals WHERE proposal_id=?",
+            (proposed["proposal_id"],),
+        ).fetchone() == ("spent",)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM governance_tuple_publications "
+            "WHERE publication_kind='policy'"
+        ).fetchone() == (1,)
 
 
 def test_govern_memory_v4_commit_refuses_reviewed_tuple_mismatch(
@@ -540,26 +1365,25 @@ def test_govern_memory_v4_commit_refuses_reviewed_tuple_mismatch(
             target_ceiling=1,
             now=now + 1,
         )
-    with sqlite3.connect(store.sidecar_path(vault)) as connection:
-        row = connection.execute(
-            "SELECT proposal_json FROM governance_proposals WHERE proposal_id=?",
-            (proposed["proposal_id"],),
-        ).fetchone()
-        payload = json.loads(row[0])
-        payload["authority_binding"]["reviewed_active_tuple"]["activation_epoch"] = 2
-        connection.execute(
-            "UPDATE governance_proposals SET proposal_json=? WHERE proposal_id=?",
-            (
-                json.dumps(
-                    payload,
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ),
-                proposed["proposal_id"],
-            ),
+        winner = op_govern_memory(
+            vault,
+            operation="propose",
+            principal=owner_principal(),
+            intent="Close the external ceiling",
+            documents={
+                relative: content.decode("utf-8")
+                for relative, content in _documents(ceiling=0)
+            },
+            target_ceiling=0,
+            now=now + 1,
         )
-        connection.commit()
+        op_govern_memory(
+            vault,
+            operation="commit",
+            principal=owner_principal(),
+            proposal_id=winner["proposal_id"],
+            now=now + 2,
+        )
 
     with reserved_paths._owner_authority_scope("govern_memory"):
         with pytest.raises(GovernanceError) as error:
@@ -568,9 +1392,14 @@ def test_govern_memory_v4_commit_refuses_reviewed_tuple_mismatch(
                 operation="commit",
                 principal=owner_principal(),
                 proposal_id=proposed["proposal_id"],
-                now=now + 2,
+                now=now + 3,
             )
     assert error.value.code == "STALE_GOVERNANCE_POLICY"
+    with sqlite3.connect(store.sidecar_path(vault)) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM governance_tuple_publications "
+            "WHERE publication_kind='policy'"
+        ).fetchone() == (1,)
 
 
 def _acknowledge(
@@ -1306,6 +2135,785 @@ def test_catalog_publication_keeps_the_reviewed_policy_and_advances_one_tuple(
         assert loaded.catalog_descriptor == b'{"artifacts":["Notes/new.md"]}'
     finally:
         connection.close()
+
+
+def test_semantic_edit_publishes_the_next_v4_catalog_before_returning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = int(time.time())
+    monkeypatch.setenv(
+        "EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-state")
+    )
+    writer_lease.reset_managers_for_tests()
+    vault = tmp_path / "vault"
+    relative = "Knowledge Base/Notes/private.md"
+    before = "---\ntitle: Private\nstatus: draft\n---\n\nbefore\n"
+    after = before.replace("before", "after")
+    target = vault / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(before, encoding="utf-8")
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_projection_item(
+        vault,
+        path=relative,
+        source=before,
+        now=now,
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+
+    preflight = semantic_writes.preflight_existing(
+        vault,
+        path=relative,
+        after_source=after,
+        operation="edit",
+        expected_before_hash=vault_module.content_hash(before),
+    )
+    committed = semantic_writes.commit_existing(vault, preflight=preflight)
+
+    assert committed.mutated is True
+    assert target.read_text(encoding="utf-8") == after
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    assert custody.control.activation_epoch == 2
+    connection = store.open_authorization_session_connection(vault)
+    try:
+        active = schema_v4.load_active_policy(
+            connection,
+            expected_logical_vault_id=LOGICAL_VAULT_ID,
+            expected_activation_store_id=ACTIVATION_STORE_ID,
+            expected_activation_epoch=2,
+            expected_activation_state_digest=custody.control.activation_state_digest or "",
+        )
+    finally:
+        connection.close()
+    assert active.active.catalog_generation == 2
+    key = projections.ProjectionNamespaceKey(
+        policy_fingerprint=active.policy.fingerprint,
+        projector_schema_version=active.active.projector_schema_version,
+        catalog_generation=2,
+    )
+    manifest, items = projection_store.load_projection_catalog(
+        vault,
+        key=key,
+        expected_rows_digest=(
+            projection_store.namespace_evidence_from_snapshot(active).manifest.rows_digest
+        ),
+    )
+    assert manifest.item_count == 1
+    assert [(item.item_identity, item.content_hash) for item in items] == [
+        (relative, vault_module.content_hash(after))
+    ]
+
+
+def test_semantic_creation_publishes_the_next_v4_catalog_before_returning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = int(time.time())
+    monkeypatch.setenv(
+        "EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-state")
+    )
+    writer_lease.reset_managers_for_tests()
+    vault = tmp_path / "vault"
+    relative = "Knowledge Base/Notes/new.md"
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_empty_projection_catalog(vault, now=now)
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+
+    created = create_file_module.create_file(
+        vault,
+        path=relative,
+        content="New governed note.\n",
+        frontmatter={"title": "New", "status": "draft"},
+        today=dt.date(2026, 8, 25),
+    )
+
+    assert created.creation is not None
+    source = (vault / relative).read_text(encoding="utf-8")
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    assert custody.control.activation_epoch == 2
+    connection = store.open_authorization_session_connection(vault)
+    try:
+        active = schema_v4.load_active_policy(
+            connection,
+            expected_logical_vault_id=LOGICAL_VAULT_ID,
+            expected_activation_store_id=ACTIVATION_STORE_ID,
+            expected_activation_epoch=2,
+            expected_activation_state_digest=custody.control.activation_state_digest or "",
+        )
+    finally:
+        connection.close()
+    evidence = projection_store.namespace_evidence_from_snapshot(active)
+    _manifest, items = projection_store.load_projection_catalog(
+        vault,
+        key=evidence.manifest.namespace_key,
+        expected_rows_digest=evidence.manifest.rows_digest,
+    )
+    assert [(item.item_identity, item.content_hash) for item in items] == [
+        (relative, vault_module.content_hash(source))
+    ]
+
+
+def test_semantic_creation_publishes_index_and_log_auxiliaries_in_one_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = int(time.time())
+    monkeypatch.setenv(
+        "EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-state")
+    )
+    writer_lease.reset_managers_for_tests()
+    vault = tmp_path / "vault"
+    relative = "Knowledge Base/Notes/new.md"
+    index_relative = "Knowledge Base/index.md"
+    log_relative = "Knowledge Base/log.md"
+    index_before = "# Knowledge Base\n\n## Recent activity\n"
+    log_before = "# Log\n\n---\n"
+    for existing, source in (
+        (index_relative, index_before),
+        (log_relative, log_before),
+    ):
+        target = vault / existing
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(source, encoding="utf-8")
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_projection_items(
+        vault,
+        items=((index_relative, index_before), (log_relative, log_before)),
+        now=now,
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+
+    created = create_file_module.create_file(
+        vault,
+        path=relative,
+        content="New governed note.\n",
+        frontmatter={"title": "New", "status": "draft"},
+        today=dt.date(2026, 8, 25),
+    )
+
+    assert created.creation is not None
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    assert custody.control.activation_epoch == 2
+    connection = store.open_authorization_session_connection(vault)
+    try:
+        active = schema_v4.load_active_policy(
+            connection,
+            expected_logical_vault_id=LOGICAL_VAULT_ID,
+            expected_activation_store_id=ACTIVATION_STORE_ID,
+            expected_activation_epoch=2,
+            expected_activation_state_digest=custody.control.activation_state_digest or "",
+        )
+    finally:
+        connection.close()
+    evidence = projection_store.namespace_evidence_from_snapshot(active)
+    manifest, items = projection_store.load_projection_catalog(
+        vault,
+        key=evidence.manifest.namespace_key,
+        expected_rows_digest=evidence.manifest.rows_digest,
+    )
+    expected = {
+        path: vault_module.content_hash((vault / path).read_text(encoding="utf-8"))
+        for path in (relative, index_relative, log_relative)
+    }
+    assert active.active.catalog_generation == 2
+    assert manifest.item_count == 3
+    assert {item.item_identity: item.content_hash for item in items} == expected
+
+
+def test_markdown_removal_and_log_write_publish_one_v4_catalog_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = int(time.time())
+    monkeypatch.setenv(
+        "EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-state")
+    )
+    writer_lease.reset_managers_for_tests()
+    vault = tmp_path / "vault"
+    relative = "Knowledge Base/Notes/private.md"
+    log_relative = "Knowledge Base/log.md"
+    before = "---\ntitle: Private\nstatus: draft\n---\n\nbefore\n"
+    log_before = "# Log\n\n---\n"
+    for existing, source in ((relative, before), (log_relative, log_before)):
+        target = vault / existing
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(source, encoding="utf-8")
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_projection_items(
+        vault,
+        items=((relative, before), (log_relative, log_before)),
+        now=now,
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+
+    removed = delete_file_module.delete_file(
+        vault,
+        path=relative,
+        confirm=True,
+        today=dt.date(2026, 8, 25),
+        now=dt.datetime.fromtimestamp(now),
+    )
+
+    assert not (vault / relative).exists()
+    assert (vault / removed.trash_path).is_file()
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    assert custody.control.activation_epoch == 2
+    connection = store.open_authorization_session_connection(vault)
+    try:
+        active = schema_v4.load_active_policy(
+            connection,
+            expected_logical_vault_id=LOGICAL_VAULT_ID,
+            expected_activation_store_id=ACTIVATION_STORE_ID,
+            expected_activation_epoch=2,
+            expected_activation_state_digest=custody.control.activation_state_digest or "",
+        )
+    finally:
+        connection.close()
+    evidence = projection_store.namespace_evidence_from_snapshot(active)
+    manifest, items = projection_store.load_projection_catalog(
+        vault,
+        key=evidence.manifest.namespace_key,
+        expected_rows_digest=evidence.manifest.rows_digest,
+    )
+    assert active.active.catalog_generation == 2
+    assert manifest.item_count == 1
+    assert [(item.item_identity, item.content_hash) for item in items] == [
+        (
+            log_relative,
+            vault_module.content_hash((vault / log_relative).read_text(encoding="utf-8")),
+        )
+    ]
+
+
+def test_v4_trash_refuses_unsupported_non_markdown_before_moving_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = int(time.time())
+    monkeypatch.setenv(
+        "EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-state")
+    )
+    writer_lease.reset_managers_for_tests()
+    vault = tmp_path / "vault"
+    relative = "Knowledge Base/Notes/private.bin"
+    target = vault / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"private bytes")
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_empty_projection_catalog(vault, now=now)
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+
+    with pytest.raises(delete_file_module.DeleteFileError) as blocked:
+        delete_file_module.delete_file(
+            vault,
+            path=relative,
+            confirm=True,
+            today=dt.date(2026, 8, 25),
+            now=dt.datetime.fromtimestamp(now),
+        )
+
+    assert blocked.value.code == "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED"
+    assert blocked.value.reason == "non-Markdown content publication is not available"
+    assert target.read_bytes() == b"private bytes"
+    assert not (vault / "Knowledge Base/_trash").exists()
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    assert custody.control.activation_epoch == 1
+
+
+def test_open_vault_skips_v4_only_auxiliary_predecessor_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-state")
+    )
+    writer_lease.reset_managers_for_tests()
+    vault = tmp_path / "vault"
+    relative = "Knowledge Base/Notes/legacy.md"
+    target = vault / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("legacy\n", encoding="utf-8")
+
+    prepared = catalog_publication.prepare_planned_markdown_batch(
+        vault,
+        writes=(vault_module.PlannedWrite(target, "updated\n"),),
+    )
+
+    assert prepared is None
+
+
+def test_v4_batch_refuses_existing_markdown_without_exact_predecessor_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = int(time.time())
+    monkeypatch.setenv(
+        "EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-state")
+    )
+    writer_lease.reset_managers_for_tests()
+    vault = tmp_path / "vault"
+    relative = "Knowledge Base/Notes/private.md"
+    before = "---\ntitle: Private\nstatus: draft\n---\n\nbefore\n"
+    target = vault / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(before, encoding="utf-8")
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_projection_item(
+        vault,
+        path=relative,
+        source=before,
+        now=now,
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+
+    with pytest.raises(catalog_publication.CatalogPublicationError) as blocked:
+        catalog_publication.prepare_planned_markdown_batch(
+            vault,
+            writes=(vault_module.PlannedWrite(target, before.replace("before", "after")),),
+            now=now + 1,
+        )
+
+    assert "exact predecessor" in str(blocked.value)
+
+
+def test_semantic_edit_publishes_auxiliary_markdown_in_the_same_v4_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = int(time.time())
+    monkeypatch.setenv(
+        "EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-state")
+    )
+    writer_lease.reset_managers_for_tests()
+    vault = tmp_path / "vault"
+    primary_relative = "Knowledge Base/Notes/private.md"
+    auxiliary_relative = "Knowledge Base/Notes/backlinks.md"
+    primary_before = "---\ntitle: Private\nstatus: draft\n---\n\nbefore\n"
+    primary_after = primary_before.replace("before", "after")
+    auxiliary_before = "---\ntitle: Backlinks\nstatus: draft\n---\n\nold link\n"
+    auxiliary_after = auxiliary_before.replace("old link", "new link")
+    for relative, source in (
+        (primary_relative, primary_before),
+        (auxiliary_relative, auxiliary_before),
+    ):
+        target = vault / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(source, encoding="utf-8")
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_projection_items(
+        vault,
+        items=(
+            (primary_relative, primary_before),
+            (auxiliary_relative, auxiliary_before),
+        ),
+        now=now,
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    _auxiliary_source, auxiliary_guard = vault_module.read_guarded_text(
+        vault,
+        vault / auxiliary_relative,
+    )
+    preflight = semantic_writes.preflight_existing(
+        vault,
+        path=primary_relative,
+        after_source=primary_after,
+        operation="edit",
+        expected_before_hash=vault_module.content_hash(primary_before),
+    )
+
+    committed = semantic_writes.commit_existing(
+        vault,
+        preflight=preflight,
+        auxiliary_writes=(
+            vault_module.PlannedWrite(
+                vault / auxiliary_relative,
+                auxiliary_after,
+                guard=auxiliary_guard,
+            ),
+        ),
+    )
+
+    assert committed.mutated is True
+    assert (vault / primary_relative).read_text(encoding="utf-8") == primary_after
+    assert (vault / auxiliary_relative).read_text(encoding="utf-8") == auxiliary_after
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    assert custody.control.activation_epoch == 2
+    connection = store.open_authorization_session_connection(vault)
+    try:
+        active = schema_v4.load_active_policy(
+            connection,
+            expected_logical_vault_id=LOGICAL_VAULT_ID,
+            expected_activation_store_id=ACTIVATION_STORE_ID,
+            expected_activation_epoch=2,
+            expected_activation_state_digest=custody.control.activation_state_digest or "",
+        )
+    finally:
+        connection.close()
+    evidence = projection_store.namespace_evidence_from_snapshot(active)
+    manifest, items = projection_store.load_projection_catalog(
+        vault,
+        key=evidence.manifest.namespace_key,
+        expected_rows_digest=evidence.manifest.rows_digest,
+    )
+    assert active.active.catalog_generation == 2
+    assert manifest.item_count == 2
+    assert sorted(
+        (item.item_identity, item.content_hash) for item in items
+    ) == sorted(
+        (
+            (primary_relative, vault_module.content_hash(primary_after)),
+            (auxiliary_relative, vault_module.content_hash(auxiliary_after)),
+        )
+    )
+
+
+def test_semantic_edit_refuses_auxiliary_catalog_drift_before_changing_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = int(time.time())
+    monkeypatch.setenv(
+        "EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-state")
+    )
+    writer_lease.reset_managers_for_tests()
+    vault = tmp_path / "vault"
+    primary_relative = "Knowledge Base/Notes/private.md"
+    auxiliary_relative = "Knowledge Base/Notes/backlinks.md"
+    primary_before = "---\ntitle: Private\nstatus: draft\n---\n\nbefore\n"
+    primary_after = primary_before.replace("before", "after")
+    auxiliary_active = "---\ntitle: Backlinks\nstatus: draft\n---\n\nactive\n"
+    auxiliary_drifted = auxiliary_active.replace("active", "out-of-band")
+    auxiliary_requested = auxiliary_drifted.replace("out-of-band", "requested")
+    for relative, source in (
+        (primary_relative, primary_before),
+        (auxiliary_relative, auxiliary_active),
+    ):
+        target = vault / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(source, encoding="utf-8")
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_projection_items(
+        vault,
+        items=(
+            (primary_relative, primary_before),
+            (auxiliary_relative, auxiliary_active),
+        ),
+        now=now,
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    (vault / auxiliary_relative).write_text(auxiliary_drifted, encoding="utf-8")
+    _auxiliary_source, auxiliary_guard = vault_module.read_guarded_text(
+        vault,
+        vault / auxiliary_relative,
+    )
+    preflight = semantic_writes.preflight_existing(
+        vault,
+        path=primary_relative,
+        after_source=primary_after,
+        operation="edit",
+        expected_before_hash=vault_module.content_hash(primary_before),
+    )
+
+    with pytest.raises(semantic_writes.SemanticWriteError) as blocked:
+        semantic_writes.commit_existing(
+            vault,
+            preflight=preflight,
+            auxiliary_writes=(
+                vault_module.PlannedWrite(
+                    vault / auxiliary_relative,
+                    auxiliary_requested,
+                    guard=auxiliary_guard,
+                ),
+            ),
+        )
+
+    assert blocked.value.code == "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED"
+    assert "content identity" in blocked.value.reason
+    assert (vault / primary_relative).read_text(encoding="utf-8") == primary_before
+    assert (vault / auxiliary_relative).read_text(encoding="utf-8") == auxiliary_drifted
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    assert custody.control.activation_epoch == 1
+
+
+def test_semantic_edit_refuses_catalog_drift_before_changing_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = int(time.time())
+    monkeypatch.setenv(
+        "EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-state")
+    )
+    writer_lease.reset_managers_for_tests()
+    vault = tmp_path / "vault"
+    relative = "Knowledge Base/Notes/private.md"
+    active_source = "---\ntitle: Private\nstatus: draft\n---\n\nactive\n"
+    drifted_source = active_source.replace("active", "out-of-band")
+    requested_source = drifted_source.replace("out-of-band", "requested")
+    target = vault / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(active_source, encoding="utf-8")
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_projection_item(
+        vault,
+        path=relative,
+        source=active_source,
+        now=now,
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    target.write_text(drifted_source, encoding="utf-8")
+    preflight = semantic_writes.preflight_existing(
+        vault,
+        path=relative,
+        after_source=requested_source,
+        operation="edit",
+        expected_before_hash=vault_module.content_hash(drifted_source),
+    )
+
+    with pytest.raises(semantic_writes.SemanticWriteError) as blocked:
+        semantic_writes.commit_existing(vault, preflight=preflight)
+
+    assert blocked.value.code == "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED"
+    assert target.read_text(encoding="utf-8") == drifted_source
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    assert custody.control.activation_epoch == 1
+
+
+def test_semantic_edit_recovers_lost_catalog_registry_acknowledgement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = int(time.time())
+    monkeypatch.setenv(
+        "EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-state")
+    )
+    writer_lease.reset_managers_for_tests()
+    vault = tmp_path / "vault"
+    relative = "Knowledge Base/Notes/private.md"
+    before = "---\ntitle: Private\nstatus: draft\n---\n\nbefore\n"
+    after = before.replace("before", "after")
+    target = vault / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(before, encoding="utf-8")
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_projection_item(
+        vault,
+        path=relative,
+        source=before,
+        now=now,
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    real_crash_point = schema_v4._crash_point
+    crashed = False
+
+    def lose_first_ack(point: str) -> None:
+        nonlocal crashed
+        if point == "catalog-publication-after-commit-before-registry" and not crashed:
+            crashed = True
+            raise RuntimeError("lost catalogue acknowledgement")
+        real_crash_point(point)
+
+    monkeypatch.setattr(schema_v4, "_crash_point", lose_first_ack)
+    preflight = semantic_writes.preflight_existing(
+        vault,
+        path=relative,
+        after_source=after,
+        operation="edit",
+        expected_before_hash=vault_module.content_hash(before),
+    )
+
+    committed = semantic_writes.commit_existing(vault, preflight=preflight)
+
+    assert crashed is True
+    assert committed.mutated is True
+    assert target.read_text(encoding="utf-8") == after
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    assert custody.control.activation_epoch == 2
+
+
+def test_semantic_edit_refuses_model_namespace_before_changing_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = int(time.time())
+    monkeypatch.setenv(
+        "EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-state")
+    )
+    writer_lease.reset_managers_for_tests()
+    vault = tmp_path / "vault"
+    relative = "Knowledge Base/Notes/private.md"
+    before = "---\ntitle: Private\nstatus: draft\n---\n\nbefore\n"
+    after = before.replace("before", "after")
+    target = vault / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(before, encoding="utf-8")
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_projection_item(
+        vault,
+        path=relative,
+        source=before,
+        now=now,
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    real_evidence = projection_store.namespace_evidence_from_snapshot
+
+    def model_bound(snapshot):
+        evidence = real_evidence(snapshot)
+        return dataclasses.replace(
+            evidence,
+            required_measurement_roots=(object(),),
+        )
+
+    monkeypatch.setattr(
+        projection_store,
+        "namespace_evidence_from_snapshot",
+        model_bound,
+    )
+    preflight = semantic_writes.preflight_existing(
+        vault,
+        path=relative,
+        after_source=after,
+        operation="edit",
+        expected_before_hash=vault_module.content_hash(before),
+    )
+
+    with pytest.raises(semantic_writes.SemanticWriteError) as blocked:
+        semantic_writes.commit_existing(vault, preflight=preflight)
+
+    assert blocked.value.code == "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED"
+    assert target.read_text(encoding="utf-8") == before
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    assert custody.control.activation_epoch == 1
+
+
+def test_abandoned_content_preparation_does_not_poison_next_catalog_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = int(time.time())
+    monkeypatch.setenv(
+        "EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-state")
+    )
+    writer_lease.reset_managers_for_tests()
+    vault = tmp_path / "vault"
+    relative = "Knowledge Base/Notes/private.md"
+    before = "---\ntitle: Private\nstatus: draft\n---\n\nbefore\n"
+    first_candidate = before.replace("before", "abandoned")
+    selected_candidate = before.replace("before", "selected")
+    target = vault / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(before, encoding="utf-8")
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_projection_item(
+        vault,
+        path=relative,
+        source=before,
+        now=now,
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+
+    abandoned = catalog_publication.prepare_markdown_upsert(
+        vault,
+        path=relative,
+        source=first_candidate,
+        expected_before_hash=vault_module.content_hash(before),
+        now=now + 1,
+    )
+    selected = catalog_publication.prepare_markdown_upsert(
+        vault,
+        path=relative,
+        source=selected_candidate,
+        expected_before_hash=vault_module.content_hash(before),
+        now=now + 1,
+    )
+
+    assert abandoned is not None and selected is not None
+    assert abandoned.target_key == selected.target_key
+    assert not projection_store.variant_store_path(
+        vault, selected.target_key
+    ).exists()
+    preflight = semantic_writes.preflight_existing(
+        vault,
+        path=relative,
+        after_source=selected_candidate,
+        operation="edit",
+        expected_before_hash=vault_module.content_hash(before),
+    )
+    committed = semantic_writes.commit_existing(vault, preflight=preflight)
+    assert committed.mutated is True
+    assert target.read_text(encoding="utf-8") == selected_candidate
 
 
 def test_policy_and_catalog_publications_from_one_predecessor_have_one_winner(

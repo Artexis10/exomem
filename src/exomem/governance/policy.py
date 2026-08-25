@@ -378,6 +378,7 @@ class AuthoringSnapshot:
     conflict_set_digest: str
     guard_generation: str
     file_identities: tuple[AuthoringFileIdentity, ...]
+    directory_identities: tuple[tuple[str, held_fs.StableIdentity], ...]
     governance_root_identity: held_fs.StableIdentity | None
 
 
@@ -388,6 +389,41 @@ class ProspectiveCompile:
     snapshot: AuthoringSnapshot
     target_documents: tuple[tuple[str, bytes], ...]
     policy: Policy
+
+
+def observe_authoring_snapshot(vault_root: Path) -> AuthoringSnapshot | None:
+    """Acquire one stable no-follow workspace snapshot without selecting authority.
+
+    This is the mirror/recovery counterpart to ``compile_prospective``.  It does
+    not consult or advance the activation store: callers may compare the
+    mutable authoring workspace with already-reviewed immutable bytes, but may
+    never infer active policy from this observation.
+    """
+
+    before = _probe_authoring_tree(Path(vault_root))
+    read = _probe_authoring_tree(Path(vault_root))
+    after = _probe_authoring_tree(Path(vault_root))
+    if (
+        before is None
+        or read is None
+        or after is None
+        or before != read
+        or read != after
+        or read.conflict_paths
+    ):
+        return None
+    documents = dict(read.documents)
+    return AuthoringSnapshot(
+        documents=read.documents,
+        source_fingerprint=_document_fingerprint(documents),
+        conflict_set_digest=_path_set_digest(
+            b"exomem.governance-conflict-set.v1", read.conflict_paths
+        ),
+        guard_generation="",
+        file_identities=read.file_identities,
+        directory_identities=read.directory_identities,
+        governance_root_identity=read.root_identity,
+    )
 
 
 @dataclass(frozen=True)
@@ -1253,6 +1289,7 @@ def compile_prospective(
         ),
         guard_generation=guard_before,
         file_identities=read.file_identities,
+        directory_identities=read.directory_identities,
         governance_root_identity=read.root_identity,
     )
     target_documents = dict(current_documents)
