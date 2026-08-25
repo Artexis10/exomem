@@ -10,6 +10,7 @@ missed event, or falling back when not live / kill-switched.
 from __future__ import annotations
 
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -87,6 +88,39 @@ def test_registry_seeded_from_walk_equals_walk_triple_both_scopes(vault: Path) -
         ((str(p), freshness.stat_signature(p)) for p in vault_module.walk_vault_md(vault)),
     )
     assert freshness.triple(vault, "vault") == vault_ground_truth
+
+
+def test_invalidate_cancels_inflight_seed_publication(vault: Path) -> None:
+    """A timed-out seed may finish later, but it must not regain authority."""
+    target = next(find_module._walk_md(vault / "Knowledge Base"))
+    enumerated = threading.Event()
+    release_seed = threading.Event()
+    errors: list[BaseException] = []
+
+    def stalled_entries():
+        yield str(target), freshness.stat_signature(target)
+        enumerated.set()
+        assert release_seed.wait(timeout=2.0)
+
+    def run_seed() -> None:
+        try:
+            freshness.seed(vault, "kb", stalled_entries())
+        except BaseException as error:  # noqa: BLE001 - surface worker failures below
+            errors.append(error)
+
+    seed_thread = threading.Thread(target=run_seed, daemon=True)
+    seed_thread.start()
+    try:
+        assert enumerated.wait(timeout=2.0)
+        freshness.invalidate(vault)
+    finally:
+        release_seed.set()
+        seed_thread.join(timeout=2.0)
+
+    assert not seed_thread.is_alive()
+    assert errors == []
+    assert freshness.recall_is_live(vault, "kb") is False
+    assert freshness.triple(vault, "kb") is None
 
 
 # ---------------- FreshnessSnapshot: live vs fallback ----------------

@@ -38,6 +38,11 @@ from .vault import resolve_vault
 
 log = logging.getLogger(__name__)
 
+# The production Windows seed has measured about 49 seconds under pressure.
+# Give it substantial headroom, but never let one blocked watcher prevent the
+# background catalogue warm/repair path from starting indefinitely.
+RECALL_SEED_WAIT_SECONDS = 120.0
+
 
 @dataclass(frozen=True)
 class ServerRuntime:
@@ -122,6 +127,11 @@ class LocalRuntimeActivation:
 
     def _activate(self) -> None:
         self._start_component("file watcher", self._start_file_watcher)
+        if self.file_watcher is None:
+            # A maintained projection is authoritative only while something is
+            # actually maintaining it.  The explicit watcher-off mode and a
+            # watcher startup failure retain the supported walk-backed path.
+            self._downgrade_recall_runtime()
         self._wait_for_recall_seed()
         self._start_component("retrieval", _start_compute_runtime)
         self._wait_for_required_admission()
@@ -144,15 +154,37 @@ class LocalRuntimeActivation:
         if watcher is None or not freshness.event_indexes_enabled():
             return
         try:
-            seeded = watcher.wait_until_seeded()
+            seeded = watcher.wait_until_seeded(timeout=RECALL_SEED_WAIT_SECONDS)
         except Exception:  # noqa: BLE001 - retrieval fallback stays background-only
             log.warning("file watcher seed wait failed", exc_info=True)
+            self._downgrade_recall_runtime()
             return
         if not seeded:
             log.warning(
                 "file watcher did not establish both recall projections; "
-                "background catalog warm-up will rebaseline them"
+                "switching this process to exact walk-backed recall"
             )
+            self._downgrade_recall_runtime()
+
+    def _downgrade_recall_runtime(self) -> None:
+        """Revoke an unavailable watcher generation and retain exact fallback."""
+        from . import freshness, readiness
+
+        watcher = self.file_watcher
+        # Invalidation cancels any replacement walk that is still in flight;
+        # if it eventually returns it cannot re-publish an unmaintained map.
+        freshness.invalidate(self.vault_root)
+        readiness.unmanage_runtime()
+        self.file_watcher = None
+        stop = getattr(watcher, "stop", None)
+        if callable(stop):
+            try:
+                stop()
+            except Exception:  # noqa: BLE001 - fallback is already authoritative
+                log.warning(
+                    "file watcher shutdown after recall downgrade failed",
+                    exc_info=True,
+                )
 
     def _wait_for_required_admission(self) -> None:
         """Keep reconcilers out until retrieval and mutation state are admitted."""

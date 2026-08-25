@@ -61,13 +61,13 @@ def model_preload_allowed(mode_name: str | None = None) -> bool:
 
 def warm_retrieval_catalog(vault_root: Path) -> None:
     """Reconcile and verify both maintained lexical scopes before optional caches."""
-    from . import freshness, lexstore
+    from . import freshness, lexstore, readiness
 
     if not lexstore.maintained_content_index_enabled():
         # Explicit Python mode and SQLite builds without FTS retain the supported
         # reference implementation; there is no maintained content index to gate.
         return
-    if freshness.event_indexes_enabled() and not all(
+    if readiness.runtime_managed() and freshness.event_indexes_enabled() and not all(
         freshness.recall_is_live(vault_root, scope) for scope in freshness.SCOPES
     ):
         # The normal activation path waits for the watcher seed before getting

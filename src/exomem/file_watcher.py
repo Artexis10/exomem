@@ -157,7 +157,8 @@ def _publish_registry_change(
     A self-write's watcher echo is suppressed (redundant re-embed), but the
     write DID change the vault — so the freshness/inbound registries must still
     see it, or `find` would serve stale results for that file until the next
-    reconcile. No-op when the registries aren't live (guards inside)."""
+    reconcile. A live registry is patched immediately; an in-flight replacement
+    seed retains the target state for its final swap (guards inside)."""
     if not freshness.event_indexes_enabled():
         # Kill switch on: don't even pay the resolve() syscalls in _rel_posix.
         return
@@ -560,6 +561,9 @@ class FileWatcher:
         baselines_current = True
         pending_epoch = None if seed else freshness.external_pending_epoch(self._vault_root)
         for scope in freshness.SCOPES:
+            if self._stop.is_set():
+                baselines_current = False
+                break
             try:
                 if seed:
                     freshness.seed(self._vault_root, scope, self._walk_entries(scope))

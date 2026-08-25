@@ -242,7 +242,7 @@ def _set_recall_projection_timing_outcome(
     outcome: str,
 ) -> None:
     if timings is not None:
-        timings.stages.setdefault("recall_projection", {})["outcome"] = outcome
+        timings.profile.setdefault("recall_projection", {})["outcome"] = outcome
 
 
 def _record_filter_eligibility_cache_hit(timings: FindTimings | None) -> None:
@@ -879,9 +879,10 @@ def find(
 
     from . import lexstore, readiness
 
+    managed_runtime = readiness.runtime_managed()
     admission = readiness.retrieval_admission()
-    state = str(admission["state"])
-    require_live_recall = readiness.runtime_managed() and freshness.event_indexes_enabled()
+    state = str(admission["state"]) if managed_runtime else "unverified"
+    require_live_recall = managed_runtime and freshness.event_indexes_enabled()
     catalog_proof: dict[str, freshness.RecallFreshnessCheckpoint] | None = None
     with _span(timings, "recall_projection"):
         if state == "ready" and require_live_recall:
@@ -3049,6 +3050,7 @@ def _find_semantic(
                 root,
                 freshness=freshness,
                 allow_fallback=not snapshot.requires_live_recall,
+                expected_checkpoint=snapshot.recall_checkpoint("vault"),
             ),
             record_degradation=_record_degradation,
             degraded_out=degraded_out,
@@ -4174,6 +4176,7 @@ def recall_resolver_snapshot(
     freshness: tuple | None = None,
     *,
     allow_fallback: bool = True,
+    expected_checkpoint: freshness.RecallFreshnessCheckpoint | None = None,
 ):
     """Resolver for ordinary recall and graph expansion only.
 
@@ -4191,7 +4194,11 @@ def recall_resolver_snapshot(
     # must not pay another broad/event-registry walk just to warm this resolver.
     # The key remains distinct from the broad writer resolver by policy identity.
     freshness_key = (
-        freshness if freshness is not None else FreshnessSnapshot(root).projection_key("vault")
+        freshness
+        if freshness is not None
+        else _recall_checkpoint_identity(expected_checkpoint)
+        if expected_checkpoint is not None
+        else FreshnessSnapshot(root).projection_key("vault")
     )
     policy_version, access_fingerprint = recall_policy.recall_policy_identity(root)
     if (
@@ -4207,7 +4214,13 @@ def recall_resolver_snapshot(
     else:
         identity = (freshness_key, policy_version, access_fingerprint)
     checkpoint: freshness_module.RecallFreshnessCheckpoint | None = None
-    candidate = freshness_module.live_recall_checkpoint(root, "vault")
+    candidate = expected_checkpoint
+    if candidate is not None and not allow_fallback:
+        if not freshness_module.recall_checkpoint_is_current(root, "vault", candidate):
+            lexstore.request_repair(root)
+            raise RetrievalIndexWarming(status="temporarily_unavailable")
+    if candidate is None:
+        candidate = freshness_module.live_recall_checkpoint(root, "vault")
     if candidate is None and allow_fallback:
         candidate = freshness_module.recall_checkpoint(root, "vault")
     if candidate is not None and identity == _recall_checkpoint_identity(candidate):

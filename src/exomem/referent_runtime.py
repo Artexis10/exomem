@@ -119,34 +119,56 @@ def resolve_for_find(
         cue = cue or detect_cue(query, registry=type_registry)
         if cue is None:
             return None
+        managed_runtime = readiness.runtime_managed()
         admission = readiness.retrieval_admission()
-        state = str(admission["state"])
+        state = str(admission["state"]) if managed_runtime else "unverified"
         if state in {"warming", "unavailable"}:
             return None
-        require_live_recall = expected_recall_checkpoints is not None
-        if expected_recall_checkpoints is not None:
-            if set(expected_recall_checkpoints) != set(freshness.SCOPES):
+        managed_proof = expected_recall_checkpoints
+        require_live_recall = managed_proof is not None
+        if managed_proof is not None:
+            if set(managed_proof) != set(freshness.SCOPES):
                 return None
         elif state != "unverified" and freshness.event_indexes_enabled():
             # A managed request without the proof admitted by its primary find
             # cannot safely enrich from a potentially different generation.
             return None
-        freshness_key = FreshnessSnapshot(
+        snapshot = FreshnessSnapshot(
             vault_root,
             require_live_recall=require_live_recall,
             expected_recall_checkpoints=expected_recall_checkpoints,
-        ).projection_key("kb")
+        )
+        freshness_key: tuple
+        if managed_proof is not None:
+            for scope in freshness.SCOPES:
+                snapshot.projection_key(scope)
+            if not all(
+                freshness.recall_checkpoint_is_current(
+                    vault_root,
+                    scope,
+                    managed_proof[scope],
+                )
+                for scope in freshness.SCOPES
+            ):
+                return None
+            freshness_key = managed_proof["kb"]
+            expected_registry_checkpoint = managed_proof["kb"]
+        else:
+            freshness_key = snapshot.projection_key("kb")
+            expected_registry_checkpoint = None
         registry = load_entity_registry(
             vault_root,
             freshness_key=freshness_key,
             type_registry=type_registry,
             allow_build=not require_live_recall,
+            expected_recall_checkpoint=expected_registry_checkpoint,
         )
         if registry is None:
             schedule_entity_registry_warm(
                 vault_root,
                 freshness_key=freshness_key,
                 type_registry=type_registry,
+                expected_recall_checkpoint=expected_registry_checkpoint,
             )
             return None
         hit_facts = _hit_facts(hits)
@@ -190,6 +212,15 @@ def resolve_for_find(
             for item in guarded.get(section, []):
                 if ref := refs.get(str(item.get("path") or "")):
                     item["ref"] = ref
+        if managed_proof is not None and not all(
+            freshness.recall_checkpoint_is_current(
+                vault_root,
+                scope,
+                managed_proof[scope],
+            )
+            for scope in freshness.SCOPES
+        ):
+            return None
         return guarded
     except Exception:  # noqa: BLE001 - the additive stage is contractually fail-open
         log.warning("referent resolution failed; omitting additive block", exc_info=True)

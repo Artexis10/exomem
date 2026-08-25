@@ -946,6 +946,111 @@ def test_dispatch_replays_observed_edit_after_seed_publication(
         dispatch.join(timeout=2.0)
 
 
+@pytest.mark.parametrize("operation", ["upsert", "delete"])
+def test_seed_replays_suppressed_self_write(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    """A server write racing the initial walk must land in the published seed."""
+    target = vault / "Knowledge Base" / "Notes" / "self-write-seed-race.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("# before\n", encoding="utf-8")
+    stale_signature = freshness.stat_signature(target)
+    freshness.invalidate(vault)
+    file_watcher.clear_self_write_registry()
+    enumerated = threading.Event()
+    release_seed = threading.Event()
+
+    def publish_registry_only(root, *, changed=(), deleted=(), **_kwargs):
+        freshness.on_files_changed(
+            root,
+            changed=changed,
+            deleted=[root / Path(value) for value in deleted],
+        )
+        return True
+
+    monkeypatch.setattr(file_watcher.index_sync, "publish_corpus_delta", publish_registry_only)
+    monkeypatch.setattr(vault_module, "on_inbound_files_changed", lambda *_a, **_k: None)
+    monkeypatch.setattr(find_module, "on_resolver_files_changed", lambda *_a, **_k: None)
+
+    def stale_walk():
+        yield str(target), stale_signature
+        enumerated.set()
+        assert release_seed.wait(timeout=2.0)
+
+    seed_thread = threading.Thread(
+        target=lambda: freshness.seed(vault, "kb", stale_walk()),
+        daemon=True,
+    )
+    seed_thread.start()
+    try:
+        assert enumerated.wait(timeout=2.0)
+        watcher = file_watcher.FileWatcher(vault)
+        if operation == "upsert":
+            target.write_text("# after the seed scan\n\nnew bytes\n", encoding="utf-8")
+            expected_signature = freshness.stat_signature(target)
+            assert expected_signature != stale_signature
+            file_watcher.register_self_write(vault, [target])
+            watcher._record(target, deleted=False)
+        else:
+            target.unlink()
+            expected_signature = None
+            rel = target.relative_to(vault).as_posix()
+            file_watcher.register_self_delete(vault, [rel])
+            watcher._record(target, deleted=True)
+        assert watcher._drain() == ([], [], [], 0, False)
+    finally:
+        release_seed.set()
+        seed_thread.join(timeout=2.0)
+
+    assert not seed_thread.is_alive()
+    entries = freshness.live_recall_entries(vault, "kb") or {}
+    assert entries.get(str(target)) == expected_signature
+
+
+def test_stopped_startup_seed_does_not_publish_a_later_scope(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A timeout downgrade cancels the whole remaining startup seed pass."""
+    target = next(find_module._walk_md(vault / "Knowledge Base"))
+    freshness.invalidate(vault)
+    watcher = file_watcher.FileWatcher(vault)
+    enumerated = threading.Event()
+    release_seed = threading.Event()
+    walked: list[str] = []
+    results: list[bool] = []
+
+    def stalled_kb_entries():
+        yield str(target), freshness.stat_signature(target)
+        enumerated.set()
+        assert release_seed.wait(timeout=2.0)
+
+    def walk_entries(scope: str):
+        walked.append(scope)
+        return stalled_kb_entries() if scope == "kb" else ()
+
+    monkeypatch.setattr(watcher, "_walk_entries", walk_entries)
+    seed_thread = threading.Thread(
+        target=lambda: results.append(watcher._reconcile_once(seed=True)),
+        daemon=True,
+    )
+    seed_thread.start()
+    try:
+        assert enumerated.wait(timeout=2.0)
+        freshness.invalidate(vault)
+        watcher._stop.set()
+    finally:
+        release_seed.set()
+        seed_thread.join(timeout=2.0)
+
+    assert not seed_thread.is_alive()
+    assert results == [False]
+    assert walked == ["kb"]
+    assert not any(freshness.recall_is_live(vault, scope) for scope in freshness.SCOPES)
+
+
 def test_start_no_op_when_kb_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # watchdog "available" but no Knowledge Base/ dir → don't watch.
     monkeypatch.setattr(file_watcher, "_import_watchdog", lambda: (object, object))

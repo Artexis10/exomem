@@ -482,6 +482,43 @@ def test_warm_retrieval_catalog_verifies_kb_and_vault_scopes(
     assert calls == ["ensure", "kb", "vault"]
 
 
+def test_unmanaged_retrieval_warm_does_not_publish_one_shot_live_projections(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    from exomem import freshness, lexstore
+
+    calls: list[str] = []
+
+    class Store:
+        def catalog_readiness(self, scope, _freshness, *, allow_delta):
+            assert allow_delta is False
+            calls.append(scope)
+            return lexstore.CatalogReadiness("available", True, "fts5")
+
+    monkeypatch.setattr(lexstore, "maintained_content_index_enabled", lambda: True)
+    monkeypatch.setattr(lexstore, "ensure_fresh", lambda _root: calls.append("ensure"))
+    monkeypatch.setattr(lexstore, "get_store", lambda _root: Store())
+    monkeypatch.setattr(
+        freshness,
+        "rebaseline",
+        lambda _root: (_ for _ in ()).throw(
+            AssertionError("an unmanaged warm must not grant live projection authority")
+        ),
+    )
+    monkeypatch.setattr(
+        freshness,
+        "recall_checkpoint",
+        lambda _root, _scope: SimpleNamespace(triple=(1, 1, "digest")),
+    )
+
+    assert readiness.runtime_managed() is False
+    warmup.warm_retrieval_catalog(tmp_path)
+
+    assert calls == ["ensure", "kb", "vault"]
+
+
 def test_warm_all_quiet_mode_still_reconciles_the_catalog(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

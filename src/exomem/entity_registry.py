@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from types import MappingProxyType
 
-from . import memory_refs, recall_policy
+from . import freshness, memory_refs, recall_policy
 from .entity_types import EntityTypeRegistry, load_entity_types
 from .find_corpus import CACHE
 from .referent_resolution import EntityRecord
@@ -108,6 +108,7 @@ def load_entity_registry(
     freshness_key: tuple,
     type_registry: EntityTypeRegistry | None = None,
     allow_build: bool = True,
+    expected_recall_checkpoint: freshness.RecallFreshnessCheckpoint | None = None,
 ) -> Mapping[str, EntityRecord] | None:
     """Return one immutable registry per vault/checkpoint identity.
 
@@ -121,6 +122,10 @@ def load_entity_registry(
         root,
         (*tuple(freshness_key), type_registry.core_version, type_registry.extension_hash),
     )
+    if expected_recall_checkpoint is not None and not freshness.recall_checkpoint_is_current(
+        root, "kb", expected_recall_checkpoint
+    ):
+        return None
     with _REGISTRY_CACHE_LOCK:
         cached = _REGISTRY_CACHE.get(key)
         if cached is not None:
@@ -129,6 +134,10 @@ def load_entity_registry(
         if not allow_build:
             return None
     built = _build_registry(root, type_registry)
+    if expected_recall_checkpoint is not None and not freshness.recall_checkpoint_is_current(
+        root, "kb", expected_recall_checkpoint
+    ):
+        return None
     with _REGISTRY_CACHE_LOCK:
         existing = _REGISTRY_CACHE.get(key)
         if existing is not None:
@@ -145,6 +154,7 @@ def schedule_entity_registry_warm(
     *,
     freshness_key: tuple,
     type_registry: EntityTypeRegistry | None = None,
+    expected_recall_checkpoint: freshness.RecallFreshnessCheckpoint | None = None,
 ) -> None:
     """Single-flight a cold registry build away from the request thread."""
     root = Path(vault_root).absolute()
@@ -164,6 +174,7 @@ def schedule_entity_registry_warm(
                 root,
                 freshness_key=freshness_key,
                 type_registry=type_registry,
+                expected_recall_checkpoint=expected_recall_checkpoint,
             )
         except Exception:  # noqa: BLE001 - optional enrichment stays soft-failing
             log.warning("entity registry background warm failed", exc_info=True)

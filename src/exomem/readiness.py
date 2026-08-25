@@ -57,6 +57,13 @@ def manage_runtime() -> None:
         _runtime_managed = True
 
 
+def unmanage_runtime() -> None:
+    """Return request admission to the walk-backed offline contract."""
+    global _runtime_managed
+    with _lock:
+        _runtime_managed = False
+
+
 def runtime_managed() -> bool:
     """Whether request admission is owned by the activated server runtime."""
     with _lock:

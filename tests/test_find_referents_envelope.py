@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -194,15 +195,16 @@ def test_resolver_exception_is_logged_and_soft_fails(
 
 
 def test_managed_referent_stage_requires_live_projection(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runtime = _runtime()
     observed: list[bool] = []
     expected_proofs: list[dict[str, object]] = []
+    projected_scopes: list[str] = []
+    proof_scopes: list[str] = []
     build_permissions: list[bool] = []
-    scheduled: list[tuple] = []
-    vault = tmp_path / "vault"
-    vault.mkdir()
+    scheduled: list[dict] = []
+    vault = Path("unused-vault")
 
     class Snapshot:
         def __init__(
@@ -216,7 +218,8 @@ def test_managed_referent_stage_requires_live_projection(
             observed.append(require_live_recall)
             expected_proofs.append(expected_recall_checkpoints or {})
 
-        def projection_key(self, _scope: str):
+        def projection_key(self, scope: str):
+            projected_scopes.append(scope)
             return ("live-projection",)
 
     def cache_only(
@@ -225,6 +228,7 @@ def test_managed_referent_stage_requires_live_projection(
         freshness_key: tuple,
         type_registry,
         allow_build: bool = True,
+        expected_recall_checkpoint=None,
     ):
         build_permissions.append(allow_build)
         return None
@@ -233,9 +237,14 @@ def test_managed_referent_stage_requires_live_projection(
     monkeypatch.setattr(runtime, "load_entity_types", lambda _root: {})
     monkeypatch.setattr(runtime, "load_entity_registry", cache_only)
     monkeypatch.setattr(
+        runtime.freshness,
+        "recall_checkpoint_is_current",
+        lambda _root, scope, _expected: proof_scopes.append(scope) or True,
+    )
+    monkeypatch.setattr(
         runtime,
         "schedule_entity_registry_warm",
-        lambda _root, **kwargs: scheduled.append(tuple(kwargs["freshness_key"])),
+        lambda _root, **kwargs: scheduled.append(kwargs),
         raising=False,
     )
     monkeypatch.setattr(
@@ -269,8 +278,86 @@ def test_managed_referent_stage_requires_live_projection(
     assert result is None
     assert observed == [True]
     assert expected_proofs == [proof]
+    assert projected_scopes == list(runtime.freshness.SCOPES)
+    assert proof_scopes == list(runtime.freshness.SCOPES)
     assert build_permissions == [False]
-    assert scheduled == [("live-projection",)]
+    assert len(scheduled) == 1
+    assert scheduled[0]["freshness_key"] == checkpoint
+    assert scheduled[0]["expected_recall_checkpoint"] == checkpoint
+
+
+def test_managed_referent_stage_omits_block_when_vault_proof_advances(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime()
+    checkpoint = runtime.freshness.RecallFreshnessCheckpoint(
+        "instance",
+        7,
+        (1, 2, "digest"),
+        "policy",
+        "access",
+    )
+    proof = {scope: checkpoint for scope in runtime.freshness.SCOPES}
+    checked: list[str] = []
+    verdicts = iter((True, True, True, False))
+
+    class Snapshot:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def projection_key(self, _scope: str):
+            return ("projection",)
+
+    class References:
+        def __init__(self, _root: Path):
+            pass
+
+        def refs_for_paths(self, _paths):
+            return {}
+
+    block = {
+        "resolved": [],
+        "candidates": [{"path": ENTITY}],
+        "expected_count": 1,
+    }
+    monkeypatch.setattr(runtime, "FreshnessSnapshot", Snapshot)
+    monkeypatch.setattr(runtime, "load_entity_types", lambda _root: {})
+    monkeypatch.setattr(runtime, "load_entity_registry", lambda *_a, **_k: {ENTITY: object()})
+    monkeypatch.setattr(runtime, "_hit_facts", lambda _hits: ())
+    monkeypatch.setattr(runtime, "_edge_facts", lambda *_a, **_k: ())
+    monkeypatch.setattr(
+        runtime,
+        "resolve_referents",
+        lambda **_kwargs: SimpleNamespace(as_dict=lambda: block),
+    )
+    monkeypatch.setattr(runtime.egress, "guard_referents", lambda *_a, **_k: block)
+    monkeypatch.setattr(runtime.memory_refs, "ReferenceIndex", References)
+    monkeypatch.setattr(
+        runtime.freshness,
+        "recall_checkpoint_is_current",
+        lambda _root, scope, _expected: checked.append(scope) or next(verdicts),
+    )
+    monkeypatch.setattr(
+        readiness,
+        "retrieval_admission",
+        lambda _root=None: {"state": "ready", "admitted": True},
+    )
+    monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
+
+    result = runtime.resolve_for_find(
+        Path("unused-vault"),
+        query="my two coastal friends",
+        hits=[],
+        mode="vector",
+        graph=False,
+        release=object(),
+        purpose=None,
+        cue=object(),
+        expected_recall_checkpoints=proof,
+    )
+
+    assert result is None
+    assert checked == ["kb", "vault", "kb", "vault"]
 
 
 def test_commands_pass_find_catalog_proof_to_referents(

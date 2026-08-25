@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -171,6 +172,93 @@ def test_local_runtime_activation_waits_for_liveness_and_starts_once(
 
     try:
         asyncio.run(exercise())
+    finally:
+        readiness.reset()
+
+
+def test_local_runtime_activation_bounds_failed_seed_wait_before_compute(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("EXOMEM_DISABLE_WARMUP", raising=False)
+    calls: list[str] = []
+    observed_timeouts: list[float | None] = []
+    managed_at_compute: list[bool] = []
+
+    class Watcher:
+        def wait_until_seeded(self, timeout=None) -> bool:
+            calls.append("watcher-seed:wait")
+            observed_timeouts.append(timeout)
+            return False
+
+        def finish_startup_recovery(self) -> None:
+            calls.append("watcher-recovery")
+
+        def stop(self) -> None:
+            calls.append("watcher-stop")
+
+    monkeypatch.setattr(
+        server_runtime,
+        "_start_file_watcher",
+        lambda _root: (calls.append("watcher"), Watcher())[1],
+    )
+    monkeypatch.setattr(
+        server_runtime,
+        "_start_compute_runtime",
+        lambda _root: (
+            calls.append("compute"),
+            managed_at_compute.append(readiness.runtime_managed()),
+        ),
+    )
+    monkeypatch.setattr(
+        server_runtime,
+        "_start_graph_drain",
+        lambda _root: calls.append("graph"),
+    )
+    monkeypatch.setattr(
+        server_runtime,
+        "_start_media_worker",
+        lambda _root: calls.append("media"),
+    )
+
+    activation = server_runtime.LocalRuntimeActivation(Path("unused-vault"))
+    try:
+        activation._activate()
+    finally:
+        readiness.reset()
+
+    assert observed_timeouts == [server_runtime.RECALL_SEED_WAIT_SECONDS]
+    assert 0 < server_runtime.RECALL_SEED_WAIT_SECONDS <= 180
+    assert managed_at_compute == [False]
+    assert calls == [
+        "watcher",
+        "watcher-seed:wait",
+        "watcher-stop",
+        "compute",
+        "graph",
+        "media",
+    ]
+
+
+def test_local_runtime_activation_downgrades_when_watcher_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("EXOMEM_DISABLE_WARMUP", raising=False)
+    managed_at_compute: list[bool] = []
+    monkeypatch.setattr(server_runtime, "_start_file_watcher", lambda _root: None)
+    monkeypatch.setattr(
+        server_runtime,
+        "_start_compute_runtime",
+        lambda _root: managed_at_compute.append(readiness.runtime_managed()),
+    )
+    monkeypatch.setattr(server_runtime, "_start_graph_drain", lambda _root: None)
+    monkeypatch.setattr(server_runtime, "_start_media_worker", lambda _root: None)
+
+    activation = server_runtime.LocalRuntimeActivation(Path("unused-vault"))
+    try:
+        assert readiness.runtime_managed() is True
+        activation._activate()
+        assert managed_at_compute == [False]
+        assert readiness.runtime_managed() is False
     finally:
         readiness.reset()
 
