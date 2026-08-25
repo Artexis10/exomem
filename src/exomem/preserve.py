@@ -37,10 +37,12 @@ from typing import BinaryIO
 from . import indexes, memory_refs, privacy_log, temporal
 from .kbdir import kb_prefix
 from .vault import (
+    MISSING_CONTENT_HASH,
     ContentHashMismatchError,
     DeferredGraphCompletion,
     PlannedWrite,
     batch_atomic_write,
+    content_hash,
     escape_wikilinks_for_log,
     kb_root,
     yaml_scalar,
@@ -709,7 +711,16 @@ def ensure_media_sidecar(
         extracted_by="none",  # not pending → the auto OCR scan ignores it; backfill OCRs it
         tree=tree,
     )
-    batch_atomic_write([PlannedWrite(path=sidecar, content=md)], vault_root=vault_root)
+    commit_media_sidecar_writes(
+        vault_root,
+        (
+            PlannedWrite(
+                path=sidecar,
+                content=md,
+                expected_hash=MISSING_CONTENT_HASH,
+            ),
+        ),
+    )
     return sidecar, True
 
 
@@ -761,7 +772,16 @@ def ensure_artifact_page(
         binary_size=size,
         tree=tree,
     )
-    batch_atomic_write([PlannedWrite(path=page, content=markdown)], vault_root=vault_root)
+    commit_media_sidecar_writes(
+        vault_root,
+        (
+            PlannedWrite(
+                path=page,
+                content=markdown,
+                expected_hash=MISSING_CONTENT_HASH,
+            ),
+        ),
+    )
     return page, True
 
 
@@ -790,8 +810,8 @@ def update_sidecar_extraction(
     structurally. Omitted (None/empty) leaves the frontmatter unchanged — every
     existing call site is unaffected.
     """
-    content = sidecar_path.read_text(encoding="utf-8")
-    content = _set_frontmatter_field(content, "extracted_by", engine)
+    before = sidecar_path.read_text(encoding="utf-8")
+    content = _set_frontmatter_field(before, "extracted_by", engine)
     content = _set_frontmatter_field(content, "processing_state", "completed")
     content = _set_frontmatter_field(content, "processing_error", "null")
     content = _set_frontmatter_field(content, "processing_retryable", "false")
@@ -814,12 +834,55 @@ def update_sidecar_extraction(
         if labels:
             content = _set_frontmatter_field(content, "speakers", f"[{', '.join(labels)}]")
     content = _set_extracted_text(content, _cap_extracted_text(text))
-    return batch_atomic_write(
-        [PlannedWrite(path=sidecar_path, content=content)],
-        vault_root=vault_root,
+    return commit_media_sidecar_writes(
+        vault_root,
+        (
+            PlannedWrite(
+                path=sidecar_path,
+                content=content,
+                expected_hash=content_hash(before),
+            ),
+        ),
         post_commit_fanout=not defer_index_fanout,
         defer_graph_completion=defer_graph_completion,
     )
+
+
+def commit_media_sidecar_writes(
+    vault_root: Path,
+    writes: tuple[PlannedWrite, ...],
+    *,
+    post_commit_fanout: bool = True,
+    defer_graph_completion: bool = False,
+) -> list[Path] | DeferredGraphCompletion:
+    """Publish machine-owned Markdown through the active catalog tuple."""
+
+    from .governance import catalog_publication
+
+    try:
+        prepared = catalog_publication.prepare_planned_markdown_batch(
+            vault_root,
+            writes=writes,
+        )
+    except catalog_publication.CatalogPublicationError as error:
+        raise catalog_publication.CatalogCommitError(
+            "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
+            str(error),
+        ) from error
+    written = batch_atomic_write(
+        list(writes),
+        vault_root=vault_root,
+        post_commit_fanout=post_commit_fanout,
+        defer_graph_completion=defer_graph_completion,
+    )
+    try:
+        catalog_publication.publish_markdown_batch(prepared)
+    except catalog_publication.CatalogPublicationError as error:
+        raise catalog_publication.CatalogCommitError(
+            "GOVERNANCE_CATALOG_PUBLICATION_UNCERTAIN",
+            str(error),
+        ) from error
+    return written
 
 
 def update_sidecar_processing_failure(
@@ -835,18 +898,24 @@ def update_sidecar_processing_failure(
     defer_graph_completion: bool = False,
 ) -> list[Path] | DeferredGraphCompletion:
     """Persist actionable worker state without replacing a pending transcript."""
-    content = sidecar_path.read_text(encoding="utf-8")
+    before = sidecar_path.read_text(encoding="utf-8")
     content = render_sidecar_processing_failure(
-        content,
+        before,
         state=state,
         attempts=attempts,
         error=error,
         retryable=retryable,
         next_action=next_action,
     )
-    return batch_atomic_write(
-        [PlannedWrite(path=sidecar_path, content=content)],
-        vault_root=vault_root,
+    return commit_media_sidecar_writes(
+        vault_root,
+        (
+            PlannedWrite(
+                path=sidecar_path,
+                content=content,
+                expected_hash=content_hash(before),
+            ),
+        ),
         post_commit_fanout=not defer_index_fanout,
         defer_graph_completion=defer_graph_completion,
     )
@@ -885,7 +954,8 @@ def update_sidecar_processing_pending(
     expected_hash: str | None = None,
 ) -> bool:
     """Keep changed-in-flight media automatic and actionable until reconciliation."""
-    content = sidecar_path.read_text(encoding="utf-8")
+    before = sidecar_path.read_text(encoding="utf-8")
+    content = before
     fields = (
         ("extracted_by", "pending"),
         ("processing_state", "pending"),
@@ -897,15 +967,15 @@ def update_sidecar_processing_pending(
     for field, value in fields:
         content = _set_frontmatter_field(content, field, value)
     try:
-        batch_atomic_write(
-            [
+        commit_media_sidecar_writes(
+            vault_root,
+            (
                 PlannedWrite(
                     path=sidecar_path,
                     content=content,
-                    expected_hash=expected_hash,
-                )
-            ],
-            vault_root=vault_root,
+                    expected_hash=expected_hash or content_hash(before),
+                ),
+            ),
         )
     except ContentHashMismatchError:
         return False

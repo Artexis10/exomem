@@ -34,7 +34,6 @@ from .vault import (
     MISSING_CONTENT_HASH,
     VAULT_SCAN_SKIP_DIRS,
     PlannedWrite,
-    batch_atomic_write,
     content_hash,
     parse_frontmatter,
     post_commit_batch_fanout,
@@ -305,12 +304,18 @@ def reconcile_media(
     deferred_created: list[Path] = []
 
     def _write_sidecar(write: PlannedWrite) -> None:
-        written = batch_atomic_write(
-            [write],
-            vault_root=vault,
-            post_commit_fanout=commit_guard is None,
-        )
+        from .governance import catalog_publication
+
+        try:
+            written = _preserve_module().commit_media_sidecar_writes(
+                vault,
+                (write,),
+                post_commit_fanout=commit_guard is None,
+            )
+        except catalog_publication.CatalogCommitError as error:
+            raise MediaProcessingError(error.code, error.reason) from error
         if commit_guard is not None:
+            assert isinstance(written, list)
             deferred_fanout.extend(written)
             if write.create_only or write.expected_hash == MISSING_CONTENT_HASH:
                 deferred_created.extend(written)
@@ -1303,17 +1308,19 @@ def mark_processing_unavailable(
                         retryable=True,
                         next_action=next_action,
                     )
-                    written = batch_atomic_write(
-                        [
+                    written_result = preserve.commit_media_sidecar_writes(
+                        vault,
+                        (
                             PlannedWrite(
                                 path=job.sidecar_path,
                                 content=blocked,
                                 expected_hash=content_hash(content),
-                            )
-                        ],
-                        vault_root=vault,
+                            ),
+                        ),
                         post_commit_fanout=commit_guard is None,
                     )
+                    assert isinstance(written_result, list)
+                    written = written_result
                 store.mark(job.id, media_jobs.BLOCKED, reason)
                 changed += 1
         except Exception:  # noqa: BLE001 - one stale job must not abort startup
