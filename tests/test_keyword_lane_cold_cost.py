@@ -312,8 +312,9 @@ def test_transient_large_catalog_query_returns_typed_unavailable_without_a_walk(
     assert walked == 0
 
 
-def test_active_catalog_warm_refuses_before_a_cold_freshness_walk(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("search_mode", ["keyword", "hybrid", "vector"])
+def test_active_catalog_warm_refuses_every_mode_before_a_cold_freshness_walk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, search_mode: str
 ) -> None:
     for index in range(80):
         _write_page(
@@ -331,16 +332,152 @@ def test_active_catalog_warm_refuses_before_a_cold_freshness_walk(
 
     readiness.begin_warm()
     monkeypatch.setattr(find_module, "_walk_md", forbidden_walk)
+    monkeypatch.setattr(
+        freshness,
+        "recall_projection_snapshot",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("admission must run before projection fallback")
+        ),
+    )
 
     with pytest.raises(find_module.RetrievalIndexWarming):
         find_module.find(
             tmp_path,
             query="preseedrace",
-            mode="keyword",
+            mode=search_mode,
             scope="kb",
+            graph=False,
+            temporal=False,
         )
 
     assert walked == 0
+
+
+def test_catalog_proof_cannot_admit_runtime_without_live_projections(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_page(
+        tmp_path,
+        "Knowledge Base/Notes/target.md",
+        "projectionproof payload",
+    )
+    _seed_live(tmp_path)
+    monkeypatch.setattr(
+        lexstore,
+        "get_store",
+        lambda _root: type(
+            "CurrentStore",
+            (),
+            {
+                "catalog_readiness": lambda self, *_args, **_kwargs: (
+                    lexstore.CatalogReadiness("available", True, "fts5")
+                )
+            },
+        )(),
+    )
+    freshness.invalidate(tmp_path)
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(tmp_path.resolve()))
+    readiness.begin_warm()
+    readiness.finish_warm()
+
+    lexstore._mark_runtime_retrieval_ready_if_current(tmp_path)
+
+    assert readiness.retrieval_admission() == {
+        "state": "unavailable",
+        "admitted": False,
+    }
+
+    _seed_live(tmp_path)
+    lexstore._mark_runtime_retrieval_ready_if_current(tmp_path)
+
+    assert readiness.retrieval_admission() == {
+        "state": "ready",
+        "admitted": True,
+    }
+
+
+def test_ready_runtime_losing_projection_demotes_without_walk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_page(
+        tmp_path,
+        "Knowledge Base/Notes/target.md",
+        "projectionloss payload",
+    )
+    _seed_live(tmp_path)
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(tmp_path.resolve()))
+    readiness.begin_warm()
+    readiness.mark_ready("retrieval_catalog")
+    readiness.finish_warm()
+    freshness.invalidate(tmp_path)
+    scheduled: list[Path] = []
+    monkeypatch.setattr(lexstore, "request_repair", lambda root: scheduled.append(root))
+    monkeypatch.setattr(
+        freshness,
+        "recall_projection_snapshot",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("a ready runtime must demote before projection fallback")
+        ),
+    )
+
+    with pytest.raises(find_module.RetrievalIndexWarming):
+        find_module.find(
+            tmp_path,
+            query="projectionloss",
+            mode="vector",
+            scope="kb",
+            graph=False,
+            temporal=False,
+        )
+
+    assert scheduled == [tmp_path]
+    assert readiness.retrieval_admission() == {
+        "state": "unavailable",
+        "admitted": False,
+    }
+
+
+def test_declined_projection_is_named_in_find_timings(tmp_path: Path) -> None:
+    timings = find_module.FindTimings()
+    readiness.begin_warm()
+
+    with pytest.raises(find_module.RetrievalIndexWarming):
+        find_module.find(
+            tmp_path,
+            query="timingprojection",
+            mode="vector",
+            scope="kb",
+            graph=False,
+            temporal=False,
+            timings=timings,
+        )
+
+    stage = timings.as_dict()["stages"]["recall_projection"]
+    assert stage["outcome"] == "warming"
+    assert stage["ms"] >= 0.0
+
+
+def test_managed_runtime_refuses_before_warm_begins_without_projection_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    readiness.manage_runtime()
+    monkeypatch.setattr(
+        freshness,
+        "recall_projection_snapshot",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("managed pre-activation request must not walk")
+        ),
+    )
+
+    with pytest.raises(find_module.RetrievalIndexWarming):
+        find_module.find(
+            tmp_path,
+            query="preactivation",
+            mode="vector",
+            scope="kb",
+            graph=False,
+            temporal=False,
+        )
 
 
 def test_failed_catalog_warm_retries_repair_before_refusing_request(

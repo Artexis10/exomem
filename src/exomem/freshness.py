@@ -118,6 +118,10 @@ class RecallFreshnessCheckpoint(NamedTuple):
     access_policy_fingerprint: str
 
 
+class RecallProjectionUnavailable(RuntimeError):
+    """A caller requiring maintained projection authority found none."""
+
+
 @dataclass(frozen=True, slots=True)
 class RecallPublicationState:
     """Immutable prepared recall identity for bounded sidecar publication."""
@@ -449,8 +453,50 @@ def recall_checkpoint(
     return None
 
 
+def live_recall_checkpoint(
+    vault_root: Path,
+    scope: str,
+) -> RecallFreshnessCheckpoint | None:
+    """Return a current live checkpoint without walking or reprojecting.
+
+    Access-policy reprojection can be O(corpus) and perform Windows path
+    validation for every candidate.  That belongs to watcher/publication work,
+    never a server reader.  A mismatched policy identity therefore returns
+    ``None`` here and lets the caller decline while background repair converges.
+    """
+    from . import recall_policy
+
+    root = Path(vault_root)
+    key = _key(root, scope)
+    identity = recall_policy.recall_policy_identity(root)
+    with _lock:
+        if (
+            not event_indexes_enabled()
+            or key not in _recall_live
+            or _recall_identities.get(key) != identity
+        ):
+            return None
+        triple = _recall_triples.get(key)
+        if triple is None:
+            triple = triple_from_entries(_recall_maps.get(key, {}).items())
+            _recall_triples[key] = triple
+        checkpoint = RecallFreshnessCheckpoint(
+            _instance_id,
+            _recall_generations.get(key, 0),
+            triple,
+            identity[0],
+            identity[1],
+        )
+    if recall_policy.recall_policy_identity(root) != identity:
+        return None
+    return checkpoint
+
+
 def recall_projection_snapshot(
-    vault_root: Path, scope: str
+    vault_root: Path,
+    scope: str,
+    *,
+    allow_fallback: bool = True,
 ) -> tuple[RecallFreshnessCheckpoint, dict[str, FileSignature]]:
     """Return one checkpoint-bound projected path map.
 
@@ -465,6 +511,32 @@ def recall_projection_snapshot(
 
     root = Path(vault_root)
     key = _key(root, scope)
+    if not allow_fallback:
+        for _attempt in range(3):
+            checkpoint = live_recall_checkpoint(root, scope)
+            if checkpoint is None:
+                break
+            with _lock:
+                if not event_indexes_enabled() or key not in _recall_live:
+                    continue
+                identity = _recall_identities.get(key)
+                triple = _recall_triples.get(key)
+                if triple is None:
+                    triple = triple_from_entries(_recall_maps.get(key, {}).items())
+                    _recall_triples[key] = triple
+                current = RecallFreshnessCheckpoint(
+                    _instance_id,
+                    _recall_generations.get(key, 0),
+                    triple,
+                    identity[0] if identity is not None else "",
+                    identity[1] if identity is not None else "",
+                )
+                entries = dict(_recall_maps.get(key, {}))
+            if current == checkpoint:
+                return current, entries
+        raise RecallProjectionUnavailable(
+            f"maintained recall projection is not live for scope={scope!r}"
+        )
     while True:
         with _lock:
             live = event_indexes_enabled() and key in _recall_live

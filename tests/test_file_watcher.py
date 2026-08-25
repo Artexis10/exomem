@@ -192,6 +192,8 @@ def test_reconcile_repairs_a_persisted_graph_read_barrier(
         freshness.clear()
 
     watcher._reconcile_once(seed=restart)
+    if restart:
+        watcher.finish_startup_recovery()
 
     assert graph.available() is True
 
@@ -225,6 +227,7 @@ def test_startup_hash_validation_repairs_a_pre_barrier_crash(
 
     restarted = file_watcher.FileWatcher(vault)
     restarted._reconcile_once(seed=True)
+    restarted.finish_startup_recovery()
 
     assert graph.available() is True
     assert not any(
@@ -1220,9 +1223,37 @@ def test_reconcile_seed_dispatches_nothing(vault, monkeypatch: pytest.MonkeyPatc
     calls = _spy_reconcile_fanout(monkeypatch)
     w = file_watcher.FileWatcher(vault)
 
-    w._reconcile_once(seed=True)
+    seeded = w._reconcile_once(seed=True)
 
+    assert seeded is True
+    assert all(freshness.recall_is_live(vault, scope) for scope in freshness.SCOPES)
     assert calls == {"inbound": [], "resolver": [], "upsert": [], "delete": [], "warm": []}
+
+
+def test_reconcile_seed_completion_is_observable(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+    watcher = file_watcher.FileWatcher(vault)
+    seed_entered = threading.Event()
+    release_seed = threading.Event()
+
+    def reconcile_once(*, seed: bool) -> bool:
+        assert seed is True
+        seed_entered.set()
+        assert release_seed.wait(timeout=1.0)
+        watcher._stop.set()
+        return True
+
+    monkeypatch.setattr(watcher, "_reconcile_once", reconcile_once)
+    thread = threading.Thread(target=watcher._run_reconcile)
+    thread.start()
+    try:
+        assert seed_entered.wait(timeout=1.0)
+        assert watcher.wait_until_seeded(timeout=0.01) is False
+        release_seed.set()
+        assert watcher.wait_until_seeded(timeout=1.0) is True
+    finally:
+        release_seed.set()
+        thread.join(timeout=1.0)
+    assert not thread.is_alive()
 
 
 def test_reconcile_no_drift_dispatches_nothing(vault, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -237,6 +237,14 @@ def _set_catalog_timing_profile(
     timings.profile["catalog"] = lexstore.catalog_timing_profile(readiness, cache_hit=cache_hit)
 
 
+def _set_recall_projection_timing_outcome(
+    timings: FindTimings | None,
+    outcome: str,
+) -> None:
+    if timings is not None:
+        timings.stages.setdefault("recall_projection", {})["outcome"] = outcome
+
+
 def _record_filter_eligibility_cache_hit(timings: FindTimings | None) -> None:
     """Record a measurable exact-catalog hot lane without timing clock noise."""
     if timings is None:
@@ -412,8 +420,16 @@ class FreshnessSnapshot:
     scope (sub-ms, syscall-free); otherwise falls back to a full stat-walk that
     yields a byte-identical triple."""
 
-    def __init__(self, vault_root: Path) -> None:
+    def __init__(
+        self,
+        vault_root: Path,
+        *,
+        require_live_recall: bool = False,
+        timings: FindTimings | None = None,
+    ) -> None:
         self._root = vault_root
+        self._require_live_recall = require_live_recall
+        self._timings = timings
         self._kb: tuple[int, int, str] | None = None
         self._vault: tuple[int, int, str] | None = None
         self._recall: dict[str, freshness.RecallFreshnessCheckpoint] = {}
@@ -481,34 +497,70 @@ class FreshnessSnapshot:
     def _load_recall_projection(self, scope: str) -> None:
         if scope in self._recall and scope in self._recall_paths:
             return
-        root = self._root.absolute()
-        cache_key = (root, scope)
-        checkpoint = freshness.recall_checkpoint(self._root, scope)
-        with _RECALL_PATH_CACHE_LOCK:
-            cached = _RECALL_PATH_CACHE.get(cache_key)
-            if cached is not None and cached[0] == checkpoint:
-                _RECALL_PATH_CACHE.move_to_end(cache_key)
-                self._recall[scope] = checkpoint
-                self._recall_paths[scope] = cached[1]
-                return
-
-        checkpoint, entries = freshness.recall_projection_snapshot(self._root, scope)
-        paths: set[str] = set()
-        for raw_path in entries:
+        with _span(self._timings, "recall_projection"):
             try:
-                paths.add(Path(raw_path).absolute().relative_to(root).as_posix())
-            except (OSError, ValueError):
-                # Registry identities outside the literal vault spelling are
-                # never valid semantic-search parents; fail closed.
-                continue
-        projected = frozenset(paths)
-        self._recall[scope] = checkpoint
-        self._recall_paths[scope] = projected
-        with _RECALL_PATH_CACHE_LOCK:
-            _RECALL_PATH_CACHE[cache_key] = (checkpoint, projected)
-            _RECALL_PATH_CACHE.move_to_end(cache_key)
-            while len(_RECALL_PATH_CACHE) > _RECALL_PATH_CACHE_SIZE:
-                _RECALL_PATH_CACHE.popitem(last=False)
+                root = self._root.absolute()
+                cache_key = (root, scope)
+                checkpoint = (
+                    freshness.live_recall_checkpoint(self._root, scope)
+                    if self._require_live_recall
+                    else freshness.recall_checkpoint(self._root, scope)
+                )
+                if checkpoint is None:
+                    raise freshness.RecallProjectionUnavailable(
+                        f"maintained recall projection is not live for scope={scope!r}"
+                    )
+                with _RECALL_PATH_CACHE_LOCK:
+                    cached = _RECALL_PATH_CACHE.get(cache_key)
+                    if cached is not None and cached[0] == checkpoint:
+                        _RECALL_PATH_CACHE.move_to_end(cache_key)
+                        self._recall[scope] = checkpoint
+                        self._recall_paths[scope] = cached[1]
+                        _set_recall_projection_timing_outcome(
+                            self._timings,
+                            "live_cache" if self._require_live_recall else "cache",
+                        )
+                        return
+
+                if self._require_live_recall:
+                    checkpoint, entries = freshness.recall_projection_snapshot(
+                        self._root,
+                        scope,
+                        allow_fallback=False,
+                    )
+                else:
+                    checkpoint, entries = freshness.recall_projection_snapshot(
+                        self._root,
+                        scope,
+                    )
+                paths: set[str] = set()
+                for raw_path in entries:
+                    try:
+                        paths.add(Path(raw_path).absolute().relative_to(root).as_posix())
+                    except (OSError, ValueError):
+                        # Registry identities outside the literal vault spelling are
+                        # never valid semantic-search parents; fail closed.
+                        continue
+                projected = frozenset(paths)
+                self._recall[scope] = checkpoint
+                self._recall_paths[scope] = projected
+                with _RECALL_PATH_CACHE_LOCK:
+                    _RECALL_PATH_CACHE[cache_key] = (checkpoint, projected)
+                    _RECALL_PATH_CACHE.move_to_end(cache_key)
+                    while len(_RECALL_PATH_CACHE) > _RECALL_PATH_CACHE_SIZE:
+                        _RECALL_PATH_CACHE.popitem(last=False)
+                _set_recall_projection_timing_outcome(
+                    self._timings,
+                    (
+                        "live"
+                        if self._require_live_recall
+                        or freshness.recall_is_live(self._root, scope)
+                        else "offline_fallback"
+                    ),
+                )
+            except freshness.RecallProjectionUnavailable as exc:
+                _set_recall_projection_timing_outcome(self._timings, "unavailable")
+                raise RetrievalIndexWarming(status="temporarily_unavailable") from exc
 
 
 def _freshness_key(
@@ -792,16 +844,16 @@ def find(
         )
     query_norm = (query or "").lower().strip()
 
-    if mode != "vector":
-        from . import lexstore, readiness
+    from . import lexstore, readiness
 
-        admission = readiness.retrieval_admission()
-        state = admission["state"]
-        if state == "unavailable":
-            lexstore.request_repair(vault_root)
-        if state == "unavailable" or (
-            state == "warming" and not readiness.is_ready("lexical")
-        ):
+    admission = readiness.retrieval_admission(vault_root)
+    state = str(admission["state"])
+    require_live_recall = state != "unverified"
+    with _span(timings, "recall_projection"):
+        if state in {"warming", "unavailable"}:
+            if state == "unavailable":
+                lexstore.request_repair(vault_root)
+            _set_recall_projection_timing_outcome(timings, state)
             raise RetrievalIndexWarming(
                 status=(
                     "temporarily_unavailable"
@@ -809,6 +861,10 @@ def find(
                     else "warming"
                 )
             )
+        _set_recall_projection_timing_outcome(
+            timings,
+            "admitted" if require_live_recall else "offline",
+        )
 
     language_registry = None
 
@@ -899,7 +955,11 @@ def find(
     # One freshness snapshot + one parsed-page memo per request: every
     # consumer below (hot cache, BM25, resolver, auto-widen, boost passes)
     # shares them instead of re-walking / re-stat'ing.
-    snapshot = FreshnessSnapshot(vault_root)
+    snapshot = FreshnessSnapshot(
+        vault_root,
+        require_live_recall=require_live_recall,
+        timings=timings,
+    )
     page_memo: dict[str, ParsedPage | None] = {}
 
     def _page_of(rel: str) -> ParsedPage | None:

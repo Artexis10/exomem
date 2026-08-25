@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import threading
 import time
+from pathlib import Path
 
 COMPONENTS = (
     "retrieval_catalog",
@@ -45,7 +46,15 @@ _events: dict[str, threading.Event] = {c: threading.Event() for c in COMPONENTS}
 _deferred: dict[str, list] = {c: [] for c in COMPONENTS}
 _warm_active = False
 _warm_finished = False
+_runtime_managed = False
 _started_at: float | None = None
+
+
+def manage_runtime() -> None:
+    """Declare that this process serves requests through managed activation."""
+    global _runtime_managed
+    with _lock:
+        _runtime_managed = True
 
 
 def begin_warm() -> None:
@@ -116,16 +125,43 @@ def is_warming() -> bool:
         return _warm_active and not _warm_finished
 
 
-def retrieval_admission() -> dict[str, object]:
-    """Content-free admission state for ordinary maintained-catalog recall."""
+def retrieval_admission(vault_root: Path | None = None) -> dict[str, object]:
+    """Admission state for ordinary maintained-catalog recall.
+
+    Supplying the configured runtime vault adds a read-only projection proof.
+    A ready bit cannot outlive either authoritative recall scope; loss or a
+    policy-identity mismatch revokes it before health or a request can claim
+    admission.  The check never walks or reprojects the corpus.
+    """
     with _lock:
         if _events["retrieval_catalog"].is_set():
-            return {"state": "ready", "admitted": True}
+            admission = {"state": "ready", "admitted": True}
+        elif _warm_active and not _warm_finished:
+            admission = {"state": "warming", "admitted": False}
+        elif _warm_finished:
+            admission = {"state": "unavailable", "admitted": False}
+        elif _runtime_managed:
+            admission = {"state": "warming", "admitted": False}
+        else:
+            admission = {"state": "unverified", "admitted": False}
+    if vault_root is None or not admission["admitted"]:
+        return admission
+    from . import freshness
+
+    try:
+        projections_live = all(
+            freshness.live_recall_checkpoint(vault_root, scope) is not None
+            for scope in freshness.SCOPES
+        )
+    except Exception:  # noqa: BLE001 - readiness uncertainty fails closed
+        projections_live = False
+    if projections_live:
+        return admission
+    mark_unready("retrieval_catalog")
+    with _lock:
         if _warm_active and not _warm_finished:
             return {"state": "warming", "admitted": False}
-        if _warm_finished:
-            return {"state": "unavailable", "admitted": False}
-        return {"state": "unverified", "admitted": False}
+        return {"state": "unavailable", "admitted": False}
 
 
 def should_defer(component: str) -> bool:
@@ -178,13 +214,14 @@ def snapshot() -> dict:
 
 def reset() -> None:
     """Test hook: return to the never-warmed state (mirrors find.clear_cache)."""
-    global _warm_active, _warm_finished, _started_at
+    global _runtime_managed, _warm_active, _warm_finished, _started_at
     with _lock:
         for c in COMPONENTS:
             _events[c].clear()
             _deferred[c].clear()
         _warm_active = False
         _warm_finished = False
+        _runtime_managed = False
         _started_at = None
 
 

@@ -331,6 +331,9 @@ class FileWatcher:
         self._thread: threading.Thread | None = None
         self._observer = None
         self._reconcile_thread: threading.Thread | None = None
+        self._seed_complete = threading.Event()
+        self._seed_succeeded = False
+        self._startup_recovery_started = False
 
     def _watcher_policy(self) -> mode.WatcherPolicy:
         return mode.watcher_policy()
@@ -515,7 +518,7 @@ class FileWatcher:
             except OSError:
                 continue
 
-    def _reconcile_once(self, *, seed: bool) -> None:
+    def _reconcile_once(self, *, seed: bool) -> bool:
         """Re-derive the freshness maps from a fresh walk. `seed=True` on the
         first pass installs the maps and marks the scopes live; later passes
         heal any drift from a missed watchdog event AND dispatch that drift
@@ -562,29 +565,10 @@ class FileWatcher:
             except Exception:  # noqa: BLE001 - discovery must never kill the watcher
                 log.exception("file watcher: periodic media reconciliation failed")
         if seed:
-            if baselines_current and self._validate_existing_graph_on_seed():
-                from . import deferred_index
-
-                policy = self._watcher_policy()
-                full_limit = _background_deferred_limit(
-                    policy, policy.max_reconcile_embed_files
-                )
-                full_paths = [
-                    self._vault_root / receipt.rel_path
-                    for receipt in deferred_index.snapshot_full(
-                        self._vault_root, limit=full_limit
-                    )
-                ]
-                if full_paths:
-                    try:
-                        index_sync.drain_deferred_work(
-                            self._vault_root,
-                            paths=full_paths,
-                            limit=full_limit,
-                        )
-                    except Exception:  # noqa: BLE001 - queued work remains retryable
-                        log.exception("file watcher: startup deferred full-index drain failed")
-            return
+            return baselines_current and all(
+                freshness.recall_is_live(self._vault_root, scope)
+                for scope in freshness.SCOPES
+            )
         policy = self._watcher_policy()
         drift_admission = 0
         if drifted:
@@ -612,10 +596,10 @@ class FileWatcher:
         except Exception:  # noqa: BLE001 - queued work remains retryable
             log.exception("file watcher: deferred index drain failed")
         if not drifted:
-            return
+            return baselines_current
         if policy.defer_expensive_indexes:
             log.info("file watcher: quiet reconcile deferred expensive warm-up")
-            return
+            return baselines_current
         from . import bm25
 
         for scope in freshness.SCOPES:
@@ -623,6 +607,44 @@ class FileWatcher:
                 bm25.warm(self._vault_root, scope)
             except Exception:  # noqa: BLE001
                 log.exception("file watcher: reconcile bm25 warm failed (scope=%s)", scope)
+        return baselines_current
+
+    def finish_startup_recovery(self) -> None:
+        """Drain deferred whole-index work after required admission.
+
+        Projection seeding is the startup critical path.  Graph validation and
+        deferred fan-out can be substantial, so runtime activation calls this
+        only after retrieval and semantic state have reached a terminal
+        admission result.  The method is idempotent for liveness/timer races.
+        """
+        with self._lock:
+            if self._startup_recovery_started:
+                return
+            self._startup_recovery_started = True
+        if not self._validate_existing_graph_on_seed():
+            return
+        from . import deferred_index
+
+        policy = self._watcher_policy()
+        full_limit = _background_deferred_limit(
+            policy, policy.max_reconcile_embed_files
+        )
+        full_paths = [
+            self._vault_root / receipt.rel_path
+            for receipt in deferred_index.snapshot_full(
+                self._vault_root, limit=full_limit
+            )
+        ]
+        if not full_paths:
+            return
+        try:
+            index_sync.drain_deferred_work(
+                self._vault_root,
+                paths=full_paths,
+                limit=full_limit,
+            )
+        except Exception:  # noqa: BLE001 - queued work remains retryable
+            log.exception("file watcher: startup deferred full-index drain failed")
 
     def _recover_external_pending(self, pending_epoch: int) -> None:
         """Recover one drained watcher epoch after exact periodic baselines.
@@ -1069,9 +1091,28 @@ class FileWatcher:
     def _run_reconcile(self) -> None:
         # Seed immediately (off the boot path — this is the watcher's own
         # daemon thread), then re-walk every RECONCILE_INTERVAL to bound drift.
-        self._reconcile_once(seed=True)
+        succeeded = False
+        try:
+            succeeded = self._reconcile_once(seed=True)
+        except Exception:  # noqa: BLE001 - completion must unblock activation
+            log.exception("file watcher: startup freshness seed failed")
+        finally:
+            self._seed_succeeded = succeeded
+            self._seed_complete.set()
         while not self._stop.wait(self._reconcile_interval_seconds()):
             self._reconcile_once(seed=False)
+
+    def wait_until_seeded(self, timeout: float | None = None) -> bool:
+        """Wait for the startup seed's terminal result.
+
+        ``False`` means either the wait timed out or at least one recall scope
+        failed to become authoritative.  Callers must then keep retrieval
+        unadmitted; they must never turn the failed seed into reader-thread
+        fallback work.
+        """
+        if not self._seed_complete.wait(timeout):
+            return False
+        return self._seed_succeeded
 
     # ---- lifecycle ----
 
@@ -1099,6 +1140,9 @@ class FileWatcher:
         # recreating the dispatch/observer threads.
         self._stop.clear()
         self._wake.clear()
+        self._seed_complete.clear()
+        self._seed_succeeded = False
+        self._startup_recovery_started = False
 
         watcher = self
 

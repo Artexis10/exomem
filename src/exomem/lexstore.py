@@ -469,23 +469,45 @@ def _is_configured_runtime_vault(vault_root: Path) -> bool:
     )
 
 
-def _mark_runtime_retrieval_ready_if_current(vault_root: Path) -> None:
-    """Admit the configured runtime after a repair proves both scopes current."""
+def _mark_runtime_retrieval_ready_if_current(vault_root: Path) -> bool:
+    """Admit the configured runtime after live projections and catalogs agree.
+
+    This proof is deliberately read-only and never takes freshness's cold walk
+    fallback.  A repair can finish before the watcher seed; catalog bytes alone
+    are not authority to admit server reads in that state.
+    """
     if not _is_configured_runtime_vault(vault_root):
-        return
+        return False
     from . import freshness as freshness_module
     from . import readiness
 
+    checkpoints: dict[str, freshness_module.RecallFreshnessCheckpoint] = {}
+    for scope in ("kb", "vault"):
+        checkpoint = freshness_module.live_recall_checkpoint(vault_root, scope)
+        if checkpoint is None:
+            return False
+        checkpoints[scope] = checkpoint
     store = get_store(vault_root)
-    if all(
+    complete = all(
         store.catalog_readiness(
             scope,
-            freshness_module.recall_checkpoint(vault_root, scope).triple,
+            checkpoints[scope].triple,
             allow_delta=False,
         ).complete
         for scope in ("kb", "vault")
+    )
+    if not complete:
+        return False
+    # Do not bless a catalog proof whose projection advanced while SQLite was
+    # being checked.  The next repair attempt will prove the newer pair.
+    if any(
+        freshness_module.live_recall_checkpoint(vault_root, scope)
+        != checkpoints[scope]
+        for scope in ("kb", "vault")
     ):
-        readiness.mark_ready("retrieval_catalog")
+        return False
+    readiness.mark_ready("retrieval_catalog")
+    return True
 
 
 def _admit_after_bounded_runtime_repair(vault_root: Path, repaired: object) -> None:

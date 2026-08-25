@@ -89,6 +89,9 @@ class LocalRuntimeActivation:
     """Start local background workers after transport liveness is observable."""
 
     def __init__(self, vault_root: Path, *, fallback_seconds: float = 5.0) -> None:
+        from . import readiness
+
+        readiness.manage_runtime()
         self.vault_root = vault_root
         self.fallback_seconds = fallback_seconds
         self._lock = threading.Lock()
@@ -117,15 +120,38 @@ class LocalRuntimeActivation:
         thread.start()
 
     def _activate(self) -> None:
+        self._start_component("file watcher", self._start_file_watcher)
+        self._wait_for_recall_seed()
         self._start_component("retrieval", _start_compute_runtime)
         self._wait_for_required_admission()
+        self._start_component(
+            "file watcher recovery",
+            self._finish_file_watcher_startup,
+        )
         starters = (
-            ("file watcher", self._start_file_watcher),
             ("graph drain", _start_graph_drain),
             ("media", self._start_media_worker),
         )
         for label, starter in starters:
             self._start_component(label, starter)
+
+    def _wait_for_recall_seed(self) -> None:
+        """Order maintained-catalog verification behind watcher authority."""
+        from . import freshness
+
+        watcher = self.file_watcher
+        if watcher is None or not freshness.event_indexes_enabled():
+            return
+        try:
+            seeded = watcher.wait_until_seeded()
+        except Exception:  # noqa: BLE001 - retrieval fallback stays background-only
+            log.warning("file watcher seed wait failed", exc_info=True)
+            return
+        if not seeded:
+            log.warning(
+                "file watcher did not establish both recall projections; "
+                "background catalog warm-up will rebaseline them"
+            )
 
     def _wait_for_required_admission(self) -> None:
         """Keep reconcilers out until retrieval and mutation state are admitted."""
@@ -154,6 +180,12 @@ class LocalRuntimeActivation:
 
     def _start_file_watcher(self, vault_root: Path) -> None:
         self.file_watcher = _start_file_watcher(vault_root)
+
+    def _finish_file_watcher_startup(self, _vault_root: Path) -> None:
+        watcher = self.file_watcher
+        finish = getattr(watcher, "finish_startup_recovery", None)
+        if callable(finish):
+            finish()
 
     def lifespan(self):
         """Arm a fallback for clients that never call the liveness endpoint."""
@@ -566,9 +598,11 @@ def _start_file_watcher(vault_root: Path) -> Any | None:
     if watcher is None:
         return None
     try:
-        watcher.start()
+        if not watcher.start():
+            return None
     except Exception as exc:  # noqa: BLE001 - watcher must not break startup
         log.warning("file watcher start failed: %s", exc)
+        return None
     return watcher
 
 

@@ -67,6 +67,18 @@ def warm_retrieval_catalog(vault_root: Path) -> None:
         # Explicit Python mode and SQLite builds without FTS retain the supported
         # reference implementation; there is no maintained content index to gate.
         return
+    if freshness.event_indexes_enabled() and not all(
+        freshness.recall_is_live(vault_root, scope) for scope in freshness.SCOPES
+    ):
+        # The normal activation path waits for the watcher seed before getting
+        # here.  Watchdog-free or failed-seed deployments still need one
+        # authoritative process projection, but the expensive source walk must
+        # remain on this background warm thread rather than migrate to find().
+        baselines = freshness.rebaseline(vault_root)
+        if not all(baselines.values()):
+            raise RuntimeError(
+                f"maintained recall projection incomplete: {baselines!r}"
+            )
     lexstore.ensure_fresh(vault_root)
     store = lexstore.get_store(vault_root)
     incomplete = [

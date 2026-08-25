@@ -38,6 +38,7 @@ from exomem import (
     commands,
     deferred_index,
     embeddings,
+    freshness,
     readiness,
     server,
     warmup,
@@ -57,6 +58,10 @@ def _reset_readiness(monkeypatch: pytest.MonkeyPatch):
     readiness.reset()
     yield
     readiness.reset()
+
+
+def _seed_runtime_recall(vault: Path) -> None:
+    assert freshness.rebaseline(vault) == {"kb": True, "vault": True}
 
 
 # ============================================================================
@@ -101,6 +106,24 @@ def test_retrieval_admission_distinguishes_unverified_warming_ready_and_failed()
     readiness.begin_warm()
     readiness.finish_warm()
     assert readiness.retrieval_admission() == {
+        "state": "unavailable",
+        "admitted": False,
+    }
+
+
+def test_retrieval_admission_revokes_ready_when_projection_is_lost(tmp_path: Path) -> None:
+    _seed_runtime_recall(tmp_path)
+    readiness.begin_warm()
+    readiness.mark_ready("retrieval_catalog")
+    readiness.finish_warm()
+    assert readiness.retrieval_admission(tmp_path) == {
+        "state": "ready",
+        "admitted": True,
+    }
+
+    freshness.invalidate(tmp_path)
+
+    assert readiness.retrieval_admission(tmp_path) == {
         "state": "unavailable",
         "admitted": False,
     }
@@ -930,6 +953,7 @@ def test_find_defers_vector_lane_mid_warm_without_calling_embed_texts(
 
     monkeypatch.setattr(embeddings, "embed_texts", _guarded)
 
+    _seed_runtime_recall(vault)
     readiness.begin_warm()
     readiness.mark_ready("retrieval_catalog")
     degraded: list[str] = []
@@ -954,6 +978,7 @@ def test_find_degraded_out_stays_empty_after_finish_warm_natural_fallback(
     silent BM25 fallback applies, and degraded_out stays empty (the
     readiness gate never engages)."""
     monkeypatch.setenv("EXOMEM_FIND_CACHE_SIZE", "0")
+    _seed_runtime_recall(vault)
     readiness.begin_warm()
     readiness.mark_ready("retrieval_catalog")
     readiness.finish_warm()
@@ -981,7 +1006,9 @@ def test_find_defers_rerank_mid_warm_without_calling_rerank_pairs(
 
     monkeypatch.setattr(embeddings, "rerank_pairs", _forbidden)
 
+    _seed_runtime_recall(vault)
     readiness.begin_warm()
+    readiness.mark_ready("retrieval_catalog")
     readiness.mark_ready("lexical")
     readiness.mark_ready("embeddings")  # isolate the reranker gate
     degraded: list[str] = []
@@ -1006,6 +1033,7 @@ def test_op_find_warming_envelope_mid_warm_then_bare_list_after_finish(
     deferred mid-warm, and reverts to a bare list once finish_warm() runs."""
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
     monkeypatch.setenv("EXOMEM_FIND_CACHE_SIZE", "0")
+    _seed_runtime_recall(vault)
     readiness.begin_warm()
     readiness.mark_ready("retrieval_catalog")
     out = commands.op_find(vault, query="metabolism", mode="hybrid")
@@ -1445,6 +1473,7 @@ def test_degraded_find_never_cached_even_without_degraded_out(
     be kept OUT of the hot cache, or it would be served after the warm ends."""
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
 
+    _seed_runtime_recall(vault)
     readiness.begin_warm()
     readiness.mark_ready("retrieval_catalog")
     find_module.find(vault, query="metabolism", mode="hybrid")
