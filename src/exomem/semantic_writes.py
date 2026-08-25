@@ -2145,20 +2145,9 @@ def _prepare_markdown_catalog_publication(
 
     from .governance import catalog_publication
 
-    mutations = tuple(
-        mutation
-        for write in writes
-        if (
-            mutation := catalog_publication.mutation_from_planned_write(
-                vault_root,
-                write,
-            )
-        )
-        is not None
-    )
-    return catalog_publication.prepare_markdown_batch(
+    return catalog_publication.prepare_planned_markdown_batch(
         vault_root,
-        mutations=mutations,
+        writes=tuple(writes),
     )
 
 

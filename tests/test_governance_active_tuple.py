@@ -2336,6 +2336,68 @@ def test_semantic_creation_publishes_index_and_log_auxiliaries_in_one_generation
     assert {item.item_identity: item.content_hash for item in items} == expected
 
 
+def test_open_vault_skips_v4_only_auxiliary_predecessor_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-state")
+    )
+    writer_lease.reset_managers_for_tests()
+    vault = tmp_path / "vault"
+    relative = "Knowledge Base/Notes/legacy.md"
+    target = vault / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("legacy\n", encoding="utf-8")
+
+    prepared = catalog_publication.prepare_planned_markdown_batch(
+        vault,
+        writes=(vault_module.PlannedWrite(target, "updated\n"),),
+    )
+
+    assert prepared is None
+
+
+def test_v4_batch_refuses_existing_markdown_without_exact_predecessor_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = int(time.time())
+    monkeypatch.setenv(
+        "EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-state")
+    )
+    writer_lease.reset_managers_for_tests()
+    vault = tmp_path / "vault"
+    relative = "Knowledge Base/Notes/private.md"
+    before = "---\ntitle: Private\nstatus: draft\n---\n\nbefore\n"
+    target = vault / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(before, encoding="utf-8")
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_projection_item(
+        vault,
+        path=relative,
+        source=before,
+        now=now,
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+
+    with pytest.raises(catalog_publication.CatalogPublicationError) as blocked:
+        catalog_publication.prepare_planned_markdown_batch(
+            vault,
+            writes=(vault_module.PlannedWrite(target, before.replace("before", "after")),),
+            now=now + 1,
+        )
+
+    assert "exact predecessor" in str(blocked.value)
+
+
 def test_semantic_edit_publishes_auxiliary_markdown_in_the_same_v4_generation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

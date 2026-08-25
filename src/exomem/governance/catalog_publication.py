@@ -315,21 +315,10 @@ def _replacement_item(
         ) from error
 
 
-def prepare_markdown_batch(
+def _normalize_markdown_mutations(
     vault_root: Path,
-    *,
     mutations: tuple[MarkdownCatalogMutation, ...],
-    now: int | None = None,
-) -> PreparedMarkdownCatalogPublication | None:
-    """Prepare one complete batch successor, or return ``None`` for v3/open.
-
-    The current slice intentionally supports lexical-only active namespaces.
-    Model and graph measurement roots are content-bound, so reusing them after
-    an edit would be unsafe; those deployments refuse before canonical bytes
-    change until their rebuild publisher is connected.
-    """
-
-    root = Path(vault_root)
+) -> tuple[tuple[str, MarkdownCatalogMutation], ...]:
     if type(mutations) is not tuple or not mutations:
         raise CatalogPublicationError(
             "catalog publication requires a finite Markdown mutation batch"
@@ -339,7 +328,7 @@ def prepare_markdown_batch(
     for mutation in mutations:
         if type(mutation) is not MarkdownCatalogMutation or type(mutation.source) is not str:
             raise CatalogPublicationError("catalog publication mutation is invalid")
-        relative = _relative_markdown_path(root, mutation.path)
+        relative = _relative_markdown_path(vault_root, mutation.path)
         if not _is_catalog_markdown_path(relative):
             raise CatalogPublicationError(
                 "catalog publication mutation is not canonical Markdown"
@@ -351,6 +340,27 @@ def prepare_markdown_batch(
             )
         aliases.add(alias)
         normalized.append((relative, mutation))
+    return tuple(normalized)
+
+
+def _prepare_markdown_batch(
+    vault_root: Path,
+    *,
+    normalized: tuple[tuple[str, MarkdownCatalogMutation], ...] | None,
+    planned_writes: tuple[vault.PlannedWrite, ...] | None,
+    now: int | None = None,
+) -> PreparedMarkdownCatalogPublication | None:
+    """Prepare one complete batch successor, or return ``None`` for v3/open.
+
+    The current slice intentionally supports lexical-only active namespaces.
+    Model and graph measurement roots are content-bound, so reusing them after
+    an edit would be unsafe; those deployments refuse before canonical bytes
+    change until their rebuild publisher is connected.
+    """
+
+    root = Path(vault_root)
+    if (normalized is None) == (planned_writes is None):
+        raise CatalogPublicationError("catalog publication batch input is invalid")
     connection: sqlite3.Connection | None = None
     try:
         connection = store.open_active_governance_read_connection(root)
@@ -447,6 +457,19 @@ def prepare_markdown_batch(
     finally:
         connection.close()
 
+    if normalized is None:
+        assert planned_writes is not None
+        if type(planned_writes) is not tuple or not planned_writes:
+            raise CatalogPublicationError(
+                "catalog publication requires a finite planned-write batch"
+            )
+        mutations = tuple(
+            mutation
+            for write in planned_writes
+            if (mutation := mutation_from_planned_write(root, write)) is not None
+        )
+        normalized = _normalize_markdown_mutations(root, mutations)
+
     by_identity = {item.item_identity: item for item in verified.items}
     target_key = projections.ProjectionNamespaceKey(
         policy_fingerprint=snapshot.active.policy_fingerprint,
@@ -490,6 +513,39 @@ def prepare_markdown_batch(
         catalog_descriptor=descriptor,
         activated_at=activated_at,
         mutation_count=len(normalized),
+    )
+
+
+def prepare_markdown_batch(
+    vault_root: Path,
+    *,
+    mutations: tuple[MarkdownCatalogMutation, ...],
+    now: int | None = None,
+) -> PreparedMarkdownCatalogPublication | None:
+    """Prepare an explicit canonical Markdown mutation batch."""
+
+    root = Path(vault_root)
+    return _prepare_markdown_batch(
+        root,
+        normalized=_normalize_markdown_mutations(root, mutations),
+        planned_writes=None,
+        now=now,
+    )
+
+
+def prepare_planned_markdown_batch(
+    vault_root: Path,
+    *,
+    writes: tuple[vault.PlannedWrite, ...],
+    now: int | None = None,
+) -> PreparedMarkdownCatalogPublication | None:
+    """Prepare catalog rows lazily so v3/open planned writes remain unchanged."""
+
+    return _prepare_markdown_batch(
+        vault_root,
+        normalized=None,
+        planned_writes=writes,
+        now=now,
     )
 
 
@@ -645,6 +701,7 @@ __all__ = [
     "PreparedMarkdownCatalogPublication",
     "mutation_from_planned_write",
     "prepare_markdown_batch",
+    "prepare_planned_markdown_batch",
     "prepare_markdown_upsert",
     "publish_markdown_batch",
     "publish_markdown_upsert",
