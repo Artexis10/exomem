@@ -16,6 +16,7 @@ import sqlite3
 import time
 import uuid
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType
@@ -88,6 +89,25 @@ _REVIEW_STATE_TEMP_RE = re.compile(r"^\.\.review-state\.json\.[a-z0-9_]{8}\.tmp$
 _LEXICAL_REBUILD_TEMP_RE = re.compile(
     r"^\.lexical\.sqlite\.rebuild-[0-9a-f]{32}\.tmp(?:-(?:wal|shm|journal))?$"
 )
+_CROCKFORD32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+_ULID_RE = re.compile(r"^[0-9A-HJKMNP-TV-Z]{26}$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_V4_POLICY_PROPOSAL_SCHEMA = "exomem.governance-policy-proposal/v2"
+
+
+@dataclass(frozen=True, slots=True)
+class _DecodedV4PolicyProposal:
+    payload: dict[str, Any]
+    expected: schema_v4.VerifiedActiveGovernanceState
+    policy: schema_v4.PolicyGenerationSeed
+    namespace: schema_v4.ProjectionNamespaceSeed
+    direction: str
+
+
+@dataclass(frozen=True, slots=True)
+class _ValidatedV4PolicyProposal:
+    decoded: _DecodedV4PolicyProposal
+    custody: authorization_custody.AuthorizationCustody
 
 __all__ = [
     "GovernanceCrash",
@@ -124,11 +144,14 @@ def _prospective_policy(
     return prospective.policy
 
 
-def _v4_active_policy_snapshot(
+def _v4_active_authority_snapshot(
     vault_root: Path,
     *,
     now: int,
-) -> schema_v4.ActivePolicySnapshot:
+) -> tuple[
+    authorization_custody.AuthorizationCustody,
+    schema_v4.ActivePolicySnapshot,
+]:
     connection: sqlite3.Connection | None = None
     try:
         custody = authorization_custody.load_authorization_custody(
@@ -153,7 +176,7 @@ def _v4_active_policy_snapshot(
             expected_activation_state_digest=control.activation_state_digest,
         )
         connection.commit()
-        return snapshot
+        return custody, snapshot
     except (
         authorization_custody.AuthorizationCustodyUnavailable,
         schema_v4.SchemaV4Error,
@@ -173,6 +196,14 @@ def _v4_active_policy_snapshot(
     finally:
         if connection is not None:
             connection.close()
+
+
+def _v4_active_policy_snapshot(
+    vault_root: Path,
+    *,
+    now: int,
+) -> schema_v4.ActivePolicySnapshot:
+    return _v4_active_authority_snapshot(vault_root, now=now)[1]
 
 
 def _stable_identity_value(value: Any) -> dict[str, Any] | None:
@@ -226,6 +257,61 @@ def _active_tuple_value(
         "catalog_generation": active.catalog_generation,
         "projection_namespace_id": active.projection_namespace_id,
     }
+
+
+def _policy_publication_identities(
+    *,
+    proposal_id: str,
+    created_at: float,
+    review_digest: str,
+) -> tuple[str, str, str]:
+    """Derive stable reviewed generation/event identities from one proposal."""
+
+    if not re.fullmatch(r"[0-9a-f]{32}", proposal_id):
+        raise GovernanceError(
+            "INVALID_GOVERNANCE_PROPOSAL",
+            "proposal identity is malformed",
+        )
+    if _SHA256_RE.fullmatch(review_digest) is None:
+        raise GovernanceError(
+            "INVALID_GOVERNANCE_PROPOSAL",
+            "reviewed proposal digest is malformed",
+        )
+    milliseconds = int(created_at * 1000)
+    if not 0 <= milliseconds < (1 << 48):
+        raise GovernanceError(
+            "INVALID_GOVERNANCE_PROPOSAL",
+            "proposal creation time is outside the ULID range",
+        )
+    identity = {
+        "proposal_id": proposal_id,
+        "created_at_ms": milliseconds,
+        "review_digest": review_digest,
+    }
+    entropy = hashlib.sha256(
+        b"exomem.governance-policy-generation.v1\0"
+        + _canonical_json(identity).encode("utf-8")
+    ).digest()[:10]
+    value = (milliseconds << 80) | int.from_bytes(entropy, "big")
+    generation_id = "".join(
+        _CROCKFORD32[(value >> shift) & 31] for shift in range(125, -1, -5)
+    )
+    authoring_event_id = receipts.critical_event_id(
+        {
+            "operation": "governance_policy_authoring_review",
+            "generation_id": generation_id,
+            **identity,
+        }
+    )
+    receipt_event_id = receipts.critical_event_id(
+        {
+            "operation": "governance_policy_publication",
+            "authoring_event_id": authoring_event_id,
+            "generation_id": generation_id,
+            **identity,
+        }
+    )
+    return generation_id, authoring_event_id, receipt_event_id
 
 
 def _full_search_fields(
@@ -344,9 +430,12 @@ def _stage_target_projection_namespace(
 def _v4_proposal_authority_binding(
     vault_root: Path,
     *,
+    proposal_id: str,
+    created_at: float,
     active_snapshot: schema_v4.ActivePolicySnapshot,
     prospective: policy_module.ProspectiveCompile,
     membership_manifest: list[dict[str, Any]],
+    transition_direction: str,
     ready_at: int,
 ) -> dict[str, Any]:
     namespace = _stage_target_projection_namespace(
@@ -355,29 +444,44 @@ def _v4_proposal_authority_binding(
         target_policy=prospective.policy,
         ready_at=ready_at,
     )
-    return {
-        "schema": "exomem.governance-policy-proposal/v1",
+    target = {
+        "source_documents": [
+            {
+                "path": relative,
+                "bytes": base64.b64encode(content).decode("ascii"),
+            }
+            for relative, content in prospective.target_documents
+        ],
+        "source_fingerprint": prospective.policy.fingerprint,
+        "policy_fingerprint": prospective.policy.fingerprint,
+        "compiled_policy": base64.b64encode(
+            policy_module.canonical_compiled_bytes(prospective.policy)
+        ).decode("ascii"),
+        "compiler_schema_version": 1,
+        "projection_rows_digest": namespace.pop("projection_rows_digest"),
+        "projection_namespace": namespace,
+    }
+    binding = {
+        "schema": _V4_POLICY_PROPOSAL_SCHEMA,
+        "transition_direction": transition_direction,
         "reviewed_active_tuple": _active_tuple_value(active_snapshot.active),
         "authoring_snapshot": _snapshot_value(prospective.snapshot),
         "membership_manifest": membership_manifest,
-        "target": {
-            "source_documents": [
-                {
-                    "path": relative,
-                    "bytes": base64.b64encode(content).decode("ascii"),
-                }
-                for relative, content in prospective.target_documents
-            ],
-            "source_fingerprint": prospective.policy.fingerprint,
-            "policy_fingerprint": prospective.policy.fingerprint,
-            "compiled_policy": base64.b64encode(
-                policy_module.canonical_compiled_bytes(prospective.policy)
-            ).decode("ascii"),
-            "compiler_schema_version": 1,
-            "projection_rows_digest": namespace.pop("projection_rows_digest"),
-            "projection_namespace": namespace,
-        },
+        "target": target,
     }
+    generation_id, authoring_event_id, receipt_event_id = (
+        _policy_publication_identities(
+            proposal_id=proposal_id,
+            created_at=created_at,
+            review_digest=_digest(binding),
+        )
+    )
+    target.update(
+        generation_id=generation_id,
+        authoring_event_id=authoring_event_id,
+        receipt_event_id=receipt_event_id,
+    )
+    return binding
 
 
 def _require_authorization_session(
@@ -857,9 +961,12 @@ def _proposal(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
             )
         payload["authority_binding"] = _v4_proposal_authority_binding(
             vault_root,
+            proposal_id=proposal_id,
+            created_at=now,
             active_snapshot=active_snapshot,
             prospective=prospective_compile,
             membership_manifest=manifest,
+            transition_direction=direction,
             ready_at=int(now),
         )
     conn = store.open_connection(vault_root)
@@ -2625,13 +2732,64 @@ def _decoded_bound_documents(value: Any) -> tuple[tuple[str, bytes], ...]:
     return ordered
 
 
-def _validate_v4_proposal_binding(
+def _reviewed_active_state(value: object) -> schema_v4.VerifiedActiveGovernanceState:
+    expected_keys = {
+        "logical_vault_id",
+        "activation_store_id",
+        "activation_epoch",
+        "activation_state_digest",
+        "policy_generation_id",
+        "policy_fingerprint",
+        "projector_schema_version",
+        "catalog_generation",
+        "projection_namespace_id",
+    }
+    if not isinstance(value, dict) or set(value) != expected_keys:
+        raise GovernanceError(
+            "INVALID_GOVERNANCE_PROPOSAL",
+            "reviewed active tuple is malformed",
+        )
+    text_fields = (
+        "logical_vault_id",
+        "activation_store_id",
+        "policy_generation_id",
+        "projection_namespace_id",
+    )
+    digest_fields = ("activation_state_digest", "policy_fingerprint")
+    integer_fields = (
+        "activation_epoch",
+        "projector_schema_version",
+        "catalog_generation",
+    )
+    if (
+        any(not isinstance(value[field], str) or not value[field] for field in text_fields)
+        or any(
+            not isinstance(value[field], str)
+            or _SHA256_RE.fullmatch(value[field]) is None
+            for field in digest_fields
+        )
+        or any(
+            isinstance(value[field], bool)
+            or not isinstance(value[field], int)
+            or value[field] <= 0
+            for field in integer_fields
+        )
+    ):
+        raise GovernanceError(
+            "INVALID_GOVERNANCE_PROPOSAL",
+            "reviewed active tuple is malformed",
+        )
+    return schema_v4.VerifiedActiveGovernanceState(**value)
+
+
+def _decode_v4_proposal_binding(
     vault_root: Path,
     *,
+    proposal_id: str,
     proposal_json: str,
     membership_manifest: str,
-    now: int,
-) -> dict[str, Any]:
+    created_at: float,
+) -> _DecodedV4PolicyProposal:
     try:
         payload = json.loads(proposal_json)
     except (TypeError, json.JSONDecodeError):
@@ -2650,12 +2808,13 @@ def _validate_v4_proposal_binding(
         or set(binding)
         != {
             "schema",
+            "transition_direction",
             "reviewed_active_tuple",
             "authoring_snapshot",
             "membership_manifest",
             "target",
         }
-        or binding.get("schema") != "exomem.governance-policy-proposal/v1"
+        or binding.get("schema") != _V4_POLICY_PROPOSAL_SCHEMA
     ):
         raise GovernanceError(
             "INVALID_GOVERNANCE_PROPOSAL",
@@ -2676,45 +2835,20 @@ def _validate_v4_proposal_binding(
             "INVALID_GOVERNANCE_PROPOSAL",
             "stored governance membership does not match its authority binding",
         )
-
-    active_snapshot = _v4_active_policy_snapshot(vault_root, now=now)
-    if binding["reviewed_active_tuple"] != _active_tuple_value(active_snapshot.active):
-        raise GovernanceError(
-            "STALE_GOVERNANCE_POLICY",
-            "the reviewed active policy tuple changed",
-        )
-    documents = payload.get("documents")
-    if not isinstance(documents, dict):
+    expected = _reviewed_active_state(binding["reviewed_active_tuple"])
+    direction = binding["transition_direction"]
+    if direction not in {"narrowing", "widening"}:
         raise GovernanceError(
             "INVALID_GOVERNANCE_PROPOSAL",
-            "stored governance documents are malformed",
-        )
-    prospective = policy_module.compile_prospective(vault_root, documents)
-    if prospective is None:
-        raise GovernanceError(
-            "GOVERNANCE_AUTHORING_UNSTABLE",
-            "the policy workspace changed or could not be acquired safely",
-        )
-    if binding["authoring_snapshot"] != _snapshot_value(prospective.snapshot):
-        raise GovernanceError(
-            "STALE_GOVERNANCE_POLICY",
-            "the reviewed policy workspace changed",
-        )
-    current_manifest = _membership_manifest(
-        vault_root,
-        active_snapshot.policy,
-        prospective.policy,
-        set(documents),
-    )
-    if current_manifest != parsed_manifest:
-        raise GovernanceError(
-            "STALE_GOVERNANCE_POLICY",
-            "the reviewed affected membership changed",
+            "stored governance transition direction is invalid",
         )
 
     target = binding["target"]
     if not isinstance(target, dict) or set(target) != {
         "source_documents",
+        "generation_id",
+        "authoring_event_id",
+        "receipt_event_id",
         "source_fingerprint",
         "policy_fingerprint",
         "compiled_policy",
@@ -2727,11 +2861,6 @@ def _validate_v4_proposal_binding(
             "stored governance target is invalid",
         )
     target_documents = _decoded_bound_documents(target["source_documents"])
-    if target_documents != prospective.target_documents:
-        raise GovernanceError(
-            "STALE_GOVERNANCE_POLICY",
-            "the reviewed immutable policy target changed",
-        )
     compiled = policy_module.compile_documents(dict(target_documents))
     try:
         compiled_bytes = base64.b64decode(target["compiled_policy"], validate=True)
@@ -2751,6 +2880,31 @@ def _validate_v4_proposal_binding(
         raise GovernanceError(
             "INVALID_GOVERNANCE_PROPOSAL",
             "stored compiled policy does not verify",
+        )
+    target_without_identities = {
+        key_name: value
+        for key_name, value in target.items()
+        if key_name not in {"generation_id", "authoring_event_id", "receipt_event_id"}
+    }
+    review_binding = {
+        key_name: (target_without_identities if key_name == "target" else value)
+        for key_name, value in binding.items()
+    }
+    expected_identities = _policy_publication_identities(
+        proposal_id=proposal_id,
+        created_at=created_at,
+        review_digest=_digest(review_binding),
+    )
+    if (
+        (target["generation_id"], target["authoring_event_id"], target["receipt_event_id"])
+        != expected_identities
+        or _ULID_RE.fullmatch(target["generation_id"]) is None
+        or _SHA256_RE.fullmatch(target["authoring_event_id"]) is None
+        or _SHA256_RE.fullmatch(target["receipt_event_id"]) is None
+    ):
+        raise GovernanceError(
+            "INVALID_GOVERNANCE_PROPOSAL",
+            "stored governance publication identities do not verify",
         )
     namespace = target["projection_namespace"]
     if not isinstance(namespace, dict) or set(namespace) != {
@@ -2794,16 +2948,310 @@ def _validate_v4_proposal_binding(
         ) from None
     if (
         namespace["namespace_id"] != key.namespace_id
-        or namespace["catalog_generation"] != active_snapshot.active.catalog_generation
+        or namespace["catalog_generation"] != expected.catalog_generation
         or namespace["projector_schema_version"]
-        != active_snapshot.active.projector_schema_version
+        != expected.projector_schema_version
         or stored_evidence != expected_evidence
     ):
         raise GovernanceError(
             "GOVERNANCE_PROJECTION_REBUILD_REQUIRED",
             "the reviewed target projection namespace does not verify",
         )
-    return payload
+    snapshot = binding["authoring_snapshot"]
+    if (
+        not isinstance(snapshot, dict)
+        or not isinstance(snapshot.get("conflict_set_digest"), str)
+        or _SHA256_RE.fullmatch(snapshot["conflict_set_digest"]) is None
+    ):
+        raise GovernanceError(
+            "INVALID_GOVERNANCE_PROPOSAL",
+            "stored governance authoring snapshot is invalid",
+        )
+    return _DecodedV4PolicyProposal(
+        payload=payload,
+        expected=expected,
+        policy=schema_v4.PolicyGenerationSeed(
+            generation_id=target["generation_id"],
+            source_documents=target_documents,
+            source_fingerprint=target["source_fingerprint"],
+            conflict_digest=snapshot["conflict_set_digest"],
+            compiled_policy=compiled_bytes,
+            policy_fingerprint=target["policy_fingerprint"],
+            compiler_schema_version=target["compiler_schema_version"],
+            projector_schema_version=namespace["projector_schema_version"],
+            predecessor_generation_id=expected.policy_generation_id,
+            authoring_event_id=target["authoring_event_id"],
+            receipt_event_id=target["receipt_event_id"],
+            created_at=int(created_at),
+        ),
+        namespace=schema_v4.ProjectionNamespaceSeed(
+            namespace_id=namespace["namespace_id"],
+            evidence=stored_evidence,
+            ready_at=namespace["ready_at"],
+        ),
+        direction=direction,
+    )
+
+
+def _validate_v4_proposal_binding(
+    vault_root: Path,
+    *,
+    proposal_id: str,
+    proposal_json: str,
+    membership_manifest: str,
+    created_at: float,
+    now: int,
+) -> _ValidatedV4PolicyProposal:
+    decoded = _decode_v4_proposal_binding(
+        vault_root,
+        proposal_id=proposal_id,
+        proposal_json=proposal_json,
+        membership_manifest=membership_manifest,
+        created_at=created_at,
+    )
+    custody, active_snapshot = _v4_active_authority_snapshot(vault_root, now=now)
+    if decoded.expected != active_snapshot.active:
+        raise GovernanceError(
+            "STALE_GOVERNANCE_POLICY",
+            "the reviewed active policy tuple changed",
+        )
+    documents = decoded.payload.get("documents")
+    if not isinstance(documents, dict):
+        raise GovernanceError(
+            "INVALID_GOVERNANCE_PROPOSAL",
+            "stored governance documents are malformed",
+        )
+    prospective = policy_module.compile_prospective(vault_root, documents)
+    if prospective is None:
+        raise GovernanceError(
+            "GOVERNANCE_AUTHORING_UNSTABLE",
+            "the policy workspace changed or could not be acquired safely",
+        )
+    binding = decoded.payload["authority_binding"]
+    if binding["authoring_snapshot"] != _snapshot_value(prospective.snapshot):
+        raise GovernanceError(
+            "STALE_GOVERNANCE_POLICY",
+            "the reviewed policy workspace changed",
+        )
+    if decoded.policy.source_documents != prospective.target_documents:
+        raise GovernanceError(
+            "STALE_GOVERNANCE_POLICY",
+            "the reviewed immutable policy target changed",
+        )
+    current_manifest = _membership_manifest(
+        vault_root,
+        active_snapshot.policy,
+        prospective.policy,
+        set(documents),
+    )
+    if current_manifest != binding["membership_manifest"]:
+        raise GovernanceError(
+            "STALE_GOVERNANCE_POLICY",
+            "the reviewed affected membership changed",
+        )
+    recomputed_direction = _proposal_analysis(
+        vault_root,
+        active_snapshot.policy,
+        prospective.policy,
+        current_manifest,
+    )[2]
+    if recomputed_direction != decoded.direction:
+        raise GovernanceError(
+            "STALE_GOVERNANCE_POLICY",
+            "the reviewed transition direction changed",
+        )
+    return _ValidatedV4PolicyProposal(decoded, custody)
+
+
+def _control_matches_active(
+    control: authorization_custody.AuthorizationControlRecord,
+    active: schema_v4.VerifiedActiveGovernanceState,
+) -> bool:
+    return (
+        control.governance_enrolled
+        and control.logical_vault_id == active.logical_vault_id
+        and control.activation_store_id == active.activation_store_id
+        and control.activation_epoch == active.activation_epoch
+        and control.activation_state_digest == active.activation_state_digest
+    )
+
+
+def _committed_v4_policy_target(
+    connection: sqlite3.Connection,
+    decoded: _DecodedV4PolicyProposal,
+) -> schema_v4.VerifiedActiveGovernanceState | None:
+    row = connection.execute(
+        "SELECT publication_kind, predecessor_activation_state_digest, "
+        "target_activation_state_digest, policy_generation_id, policy_fingerprint, "
+        "projector_schema_version, catalog_generation, activation_epoch, status "
+        "FROM governance_tuple_publications WHERE event_id=?",
+        (decoded.policy.receipt_event_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    target = schema_v4.load_active_tuple_pointer(connection)
+    if (
+        tuple(row)
+        != (
+            "policy",
+            decoded.expected.activation_state_digest,
+            target.activation_state_digest,
+            decoded.policy.generation_id,
+            decoded.policy.policy_fingerprint,
+            decoded.policy.projector_schema_version,
+            decoded.expected.catalog_generation,
+            decoded.expected.activation_epoch + 1,
+            "committed",
+        )
+        or target.logical_vault_id != decoded.expected.logical_vault_id
+        or target.activation_store_id != decoded.expected.activation_store_id
+        or target.activation_epoch != decoded.expected.activation_epoch + 1
+        or target.policy_generation_id != decoded.policy.generation_id
+        or target.policy_fingerprint != decoded.policy.policy_fingerprint
+        or target.projector_schema_version != decoded.policy.projector_schema_version
+        or target.catalog_generation != decoded.expected.catalog_generation
+        or target.projection_namespace_id != decoded.namespace.namespace_id
+    ):
+        raise GovernanceError(
+            "GOVERNANCE_BLOCKED",
+            "committed policy publication does not match the reviewed proposal",
+        )
+    return target
+
+
+def _recover_v4_policy_publication(
+    vault_root: Path,
+    *,
+    connection: sqlite3.Connection,
+    decoded: _DecodedV4PolicyProposal,
+    now: int,
+) -> schema_v4.VerifiedActiveGovernanceState | None:
+    try:
+        target = _committed_v4_policy_target(connection, decoded)
+        if target is None:
+            return None
+        custody = authorization_custody.load_authorization_custody(
+            vault_root,
+            now=now,
+        )
+        if _control_matches_active(custody.control, target):
+            verified = schema_v4.load_active_state(
+                connection,
+                expected_logical_vault_id=target.logical_vault_id,
+                expected_activation_store_id=target.activation_store_id,
+                expected_activation_epoch=target.activation_epoch,
+                expected_activation_state_digest=target.activation_state_digest,
+            )
+            if verified != target:
+                raise schema_v4.SchemaV4Error(
+                    "active tuple changed during policy recovery"
+                )
+            return target
+        if not _control_matches_active(custody.control, decoded.expected):
+            raise GovernanceError(
+                "GOVERNANCE_BLOCKED",
+                "external activation authority names neither reviewed policy state",
+            )
+        recovered = schema_v4.recover_registry_acknowledgement(
+            connection,
+            expected=decoded.expected,
+            acknowledge_registry=lambda active: (
+                authorization_custody.acknowledge_activation_tuple(
+                    vault_root,
+                    expected_control=custody.control,
+                    target=active,
+                    now=now,
+                )
+            ),
+        )
+        if recovered.active != target:
+            raise schema_v4.SchemaV4Error(
+                "registry recovery selected an unexpected policy tuple"
+            )
+        return target
+    except GovernanceError:
+        raise
+    except (
+        authorization_custody.AuthorizationCustodyUnavailable,
+        schema_v4.SchemaV4Error,
+        FileNotFoundError,
+        OSError,
+        sqlite3.Error,
+        RuntimeError,
+        ValueError,
+    ):
+        raise GovernanceError(
+            "GOVERNANCE_BLOCKED",
+            "the committed policy tuple needs exact registry recovery",
+        ) from None
+
+
+def _spend_v4_policy_proposal(
+    vault_root: Path,
+    *,
+    proposal_id: str,
+    proposal_json: str,
+    membership_manifest: str,
+    spent_at: int,
+) -> None:
+    connection = store.open_authorization_session_connection(vault_root)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        updated = connection.execute(
+            "UPDATE governance_proposals SET status='spent', spent_at=?, "
+            "reserved_event_id=NULL, attempt_nonce=NULL "
+            "WHERE proposal_id=? AND proposal_json=? AND membership_manifest=? "
+            "AND status='pending'",
+            (
+                spent_at,
+                proposal_id,
+                proposal_json,
+                membership_manifest,
+            ),
+        )
+        if updated.rowcount != 1:
+            current = connection.execute(
+                "SELECT proposal_json, membership_manifest, status "
+                "FROM governance_proposals WHERE proposal_id=?",
+                (proposal_id,),
+            ).fetchone()
+            if current != (proposal_json, membership_manifest, "spent"):
+                raise GovernanceError(
+                    "GOVERNANCE_BLOCKED",
+                    "committed policy proposal state cannot be finalized exactly",
+                )
+        connection.commit()
+    except GovernanceError:
+        connection.rollback()
+        raise
+    except (OSError, sqlite3.Error, store.UnsupportedGovernanceSchema):
+        connection.rollback()
+        raise GovernanceError(
+            "GOVERNANCE_BLOCKED",
+            "committed policy proposal state cannot be finalized exactly",
+        ) from None
+    except BaseException:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
+def _v4_commit_terminal(
+    *,
+    proposal_id: str,
+    decoded: _DecodedV4PolicyProposal,
+) -> dict[str, Any]:
+    # Publication never treats mutable YAML as authority.  The held-handle
+    # workspace mirror is a separate protocol; until that lands, surface the
+    # divergence explicitly instead of falling back to pathname writes.
+    return {
+        "status": "committed",
+        "event_id": decoded.policy.receipt_event_id,
+        "proposal_id": proposal_id,
+        "direction": decoded.direction,
+        "mirror_status": "pending",
+    }
 
 
 def _commit(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
@@ -2816,27 +3264,110 @@ def _commit(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
         connection = store.open_authorization_session_connection(vault_root)
         try:
             row = connection.execute(
-                "SELECT proposal_json, membership_manifest, status, expires_at "
+                "SELECT proposal_json, membership_manifest, status, expires_at, created_at "
                 "FROM governance_proposals WHERE proposal_id=?",
                 (proposal_id,),
             ).fetchone()
+            if row is None:
+                raise GovernanceError("PROPOSAL_UNKNOWN", "no such proposal")
+            if str(row[2]) == "spent":
+                raise GovernanceError("PROPOSAL_SPENT", "proposal was already activated")
+            if str(row[2]) != "pending":
+                raise GovernanceError("PROPOSAL_EXPIRED", "proposal is not active")
+            proposal_json = str(row[0])
+            manifest_json = str(row[1])
+            created_at = float(row[4])
+            decoded = _decode_v4_proposal_binding(
+                vault_root,
+                proposal_id=proposal_id,
+                proposal_json=proposal_json,
+                membership_manifest=manifest_json,
+                created_at=created_at,
+            )
+            recovered = _recover_v4_policy_publication(
+                vault_root,
+                connection=connection,
+                decoded=decoded,
+                now=int(now),
+            )
         finally:
             connection.close()
-        if row is None:
-            raise GovernanceError("PROPOSAL_UNKNOWN", "no such proposal")
-        if str(row[2]) == "spent":
-            raise GovernanceError("PROPOSAL_SPENT", "proposal was already activated")
-        if str(row[2]) != "pending" or float(row[3]) < now:
+        if recovered is not None:
+            _spend_v4_policy_proposal(
+                vault_root,
+                proposal_id=proposal_id,
+                proposal_json=proposal_json,
+                membership_manifest=manifest_json,
+                spent_at=int(now),
+            )
+            return _v4_commit_terminal(
+                proposal_id=proposal_id,
+                decoded=decoded,
+            )
+        if float(row[3]) < now:
             raise GovernanceError("PROPOSAL_EXPIRED", "proposal is not active")
-        _validate_v4_proposal_binding(
+        validated = _validate_v4_proposal_binding(
             vault_root,
-            proposal_json=str(row[0]),
-            membership_manifest=str(row[1]),
+            proposal_id=proposal_id,
+            proposal_json=proposal_json,
+            membership_manifest=manifest_json,
+            created_at=created_at,
             now=int(now),
         )
-        raise GovernanceError(
-            "GOVERNANCE_POLICY_PUBLICATION_UNAVAILABLE",
-            "the atomic policy publication coordinator is not active yet",
+        connection = store.open_authorization_session_connection(vault_root)
+        try:
+            try:
+                schema_v4.publish_policy_generation(
+                    connection,
+                    expected=validated.decoded.expected,
+                    policy=validated.decoded.policy,
+                    namespace=validated.decoded.namespace,
+                    activated_at=int(now),
+                    acknowledge_registry=lambda active: (
+                        authorization_custody.acknowledge_activation_tuple(
+                            vault_root,
+                            expected_control=validated.custody.control,
+                            target=active,
+                            now=int(now),
+                        )
+                    ),
+                )
+            except schema_v4.ActiveTupleStale:
+                recovered = _recover_v4_policy_publication(
+                    vault_root,
+                    connection=connection,
+                    decoded=validated.decoded,
+                    now=int(now),
+                )
+                if recovered is None:
+                    raise GovernanceError(
+                        "STALE_GOVERNANCE_POLICY",
+                        "the reviewed active policy tuple changed",
+                    ) from None
+            except authorization_custody.AuthorizationCustodyUnavailable:
+                raise GovernanceError(
+                    "GOVERNANCE_BLOCKED",
+                    "the committed policy tuple needs exact registry recovery",
+                ) from None
+            except (schema_v4.SchemaV4Error, OSError, sqlite3.Error):
+                raise GovernanceError(
+                    "GOVERNANCE_BLOCKED",
+                    "the reviewed policy tuple could not be published exactly",
+                ) from None
+        finally:
+            connection.close()
+        if kwargs.get("crash_at") == "v4_after_registry_ack":
+            raise GovernanceCrash("v4_after_registry_ack")
+        _spend_v4_policy_proposal(
+            vault_root,
+            proposal_id=proposal_id,
+            proposal_json=proposal_json,
+            membership_manifest=manifest_json,
+            spent_at=int(now),
+        )
+        return _v4_commit_terminal(
+            proposal_id=proposal_id,
+            decoded=validated.decoded,
         )
     reconcile = reconcile_governance_operations(vault_root)
     if reconcile["blocked"]:
