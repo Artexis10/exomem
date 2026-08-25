@@ -215,7 +215,10 @@ def test_readiness_fingerprint_matches_actual_registered_surface(
 
     response = TestClient(mcp.http_app()).get("/health/ready")
 
-    assert response.status_code == 200
+    # This fixture intentionally selects the legacy Python lexical backend, so
+    # retrieval admission may truthfully remain unavailable.  The readiness
+    # payload must expose the registered tool fingerprint in either state.
+    assert response.status_code in {200, 503}
     assert response.json()["mcp_tool_surface_sha256"] == actual_digest
 
 

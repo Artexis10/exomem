@@ -310,6 +310,7 @@ def build_runtime_readiness(
     session_store: Mapping[str, Any] | None = None,
     observability: Mapping[str, Any] | None = None,
     traffic: Mapping[str, Any] | None = None,
+    retrieval: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the public readiness payload from already-measured coordination state."""
     enabled = bool(coordination.get("enabled"))
@@ -330,6 +331,17 @@ def build_runtime_readiness(
             reasons.append("coordination_role_unknown")
         if replica_id is None:
             reasons.append("replica_identity_missing")
+
+    retrieval_payload: dict[str, object] | None = None
+    retrieval_admitted = True
+    if retrieval is not None:
+        state = str(retrieval.get("state") or "unverified")
+        if state not in {"ready", "warming", "unavailable", "unverified"}:
+            state = "unverified"
+        retrieval_admitted = bool(retrieval.get("admitted")) and state == "ready"
+        retrieval_payload = {"state": state, "admitted": retrieval_admitted}
+        if not retrieval_admitted:
+            reasons.append(f"retrieval_{state}")
 
     takeover_eligible = not reasons
     session_store_state = (
@@ -355,7 +367,7 @@ def build_runtime_readiness(
     if graph_sync is not None:
         coordination_payload["graph_sync"] = graph_sync
     payload = {
-        "status": "ready" if takeover_eligible else "not_ready",
+        "status": "ready" if takeover_eligible and retrieval_admitted else "not_ready",
         "service": "exomem",
         "release": release,
         "mcp_tool_surface_sha256": mcp_tool_surface_sha256,
@@ -372,6 +384,8 @@ def build_runtime_readiness(
         "takeover_eligible": takeover_eligible,
         "reasons": reasons,
     }
+    if retrieval_payload is not None:
+        payload["retrieval"] = retrieval_payload
     if traffic is not None:
         payload["traffic"] = dict(traffic)
     return payload
@@ -487,9 +501,11 @@ def runtime_readiness(
     traffic: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Measure this process's eligibility without exposing vault or credential state."""
+    from . import readiness
     from .session_validation_cache import session_store_readiness
     from .writer_lease import coordination_status
 
+    coordination: Mapping[str, Any]
     try:
         configured_raw = os.environ.get("EXOMEM_VAULT_PATH", "").strip()
         # Only an absolute path names a boundary this process can probe. A
@@ -541,4 +557,5 @@ def runtime_readiness(
             if traffic is not None
             else get_silent_traffic_monitor().snapshot()
         ),
+        retrieval=readiness.retrieval_admission(),
     )

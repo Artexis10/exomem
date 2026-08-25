@@ -31,7 +31,14 @@ from __future__ import annotations
 import threading
 import time
 
-COMPONENTS = ("lexical", "semantic_corpus", "embeddings", "reranker", "clip")
+COMPONENTS = (
+    "retrieval_catalog",
+    "lexical",
+    "semantic_corpus",
+    "embeddings",
+    "reranker",
+    "clip",
+)
 
 _lock = threading.Lock()
 _events: dict[str, threading.Event] = {c: threading.Event() for c in COMPONENTS}
@@ -74,6 +81,13 @@ def mark_ready(component: str) -> list:
         return drained
 
 
+def mark_unready(component: str) -> None:
+    """Revoke a component whose live backing state was later proven unavailable."""
+    _check(component)
+    with _lock:
+        _events[component].clear()
+
+
 def drain_deferred(component: str) -> list:
     """Atomically drain and return `component`'s deferred items WITHOUT marking
     it ready.
@@ -100,6 +114,18 @@ def is_ready(component: str) -> bool:
 def is_warming() -> bool:
     with _lock:
         return _warm_active and not _warm_finished
+
+
+def retrieval_admission() -> dict[str, object]:
+    """Content-free admission state for ordinary maintained-catalog recall."""
+    with _lock:
+        if _events["retrieval_catalog"].is_set():
+            return {"state": "ready", "admitted": True}
+        if _warm_active and not _warm_finished:
+            return {"state": "warming", "admitted": False}
+        if _warm_finished:
+            return {"state": "unavailable", "admitted": False}
+        return {"state": "unverified", "admitted": False}
 
 
 def should_defer(component: str) -> bool:

@@ -14,7 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from exomem import commands, epistemic_graph, public_artifact_privacy
+from exomem import commands, epistemic_graph, lexstore, public_artifact_privacy
 from exomem import find as find_module
 from exomem.entity_types import ENTITY_TYPES_BY_ID
 
@@ -432,6 +432,7 @@ def _arm(vault: Path, case: dict[str, Any], *, graph: bool) -> dict[str, Any]:
 def _run_benchmark(manifest_path: Path, *, work_root: Path) -> dict[str, Any]:
     manifest = load_manifest(manifest_path)
     rendered = render_fixture(manifest, Path(work_root) / "referent-fixture")
+    lexstore.ensure_fresh(rendered.root)
     epistemic_graph.EpistemicGraphIndex(rendered.root).rebuild_all()
     case_results: list[dict[str, Any]] = []
     for raw_case in manifest["cases"]:

@@ -165,6 +165,14 @@ def _initialize_locked_hosted_runtime(
 
     media_worker = None
     file_watcher = None
+    if mutation_ready and startup.phase == "active":
+        # Retrieval catalog warm-up is core service work, not an optional
+        # hosted worker.  A zero optional-worker budget must still converge
+        # truthful retrieval admission for lean cells.
+        if config.has_feature("embeddings") and config.resource_limits.worker_count > 0:
+            _start_compute_runtime(vault_root)
+        else:
+            _start_retrieval_runtime(vault_root)
     if not mutation_ready:
         for feature in ("embeddings", "file-watcher", "media"):
             if config.has_feature(feature):
@@ -212,8 +220,6 @@ def _initialize_locked_hosted_runtime(
                     reason_code="HOSTED_CELL_NOT_ACTIVE",
                 )
     else:
-        if config.has_feature("embeddings"):
-            _start_compute_runtime(vault_root)
         if config.has_feature("media"):
             media_worker = _start_media_worker(vault_root)
             lifecycle.set_worker_status(
@@ -315,16 +321,23 @@ def _start_metrics_persistence() -> None:
         log.warning("metrics persistence unavailable at startup: %s", exc)
 
 
-def _start_compute_runtime(vault_root: Path) -> None:
-    """Start warmup, model unloading, and live compute-mode watching."""
-    from . import mode, warmup
+def _start_retrieval_runtime(vault_root: Path) -> None:
+    """Start core catalog/cache warm-up independently of optional models."""
+    from . import warmup
 
-    log.info("compute policy: %s", mode.resolved())
     if warmup.warmup_enabled():
         if os.environ.get("EXOMEM_EAGER_BOOT"):
             warmup.warm_all(vault_root)
         else:
             warmup.start_background(vault_root)
+
+
+def _start_compute_runtime(vault_root: Path) -> None:
+    """Start retrieval warm-up, model unloading, and live compute-mode watching."""
+    from . import mode
+
+    log.info("compute policy: %s", mode.resolved())
+    _start_retrieval_runtime(vault_root)
 
     if mode.release_when_idle():
         from . import model_reaper

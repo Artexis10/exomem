@@ -59,6 +59,31 @@ def model_preload_allowed(mode_name: str | None = None) -> bool:
     return mode.preload_models(mode_name or "normal")
 
 
+def warm_retrieval_catalog(vault_root: Path) -> None:
+    """Reconcile and verify both maintained lexical scopes before optional caches."""
+    from . import freshness, lexstore
+
+    if not lexstore.maintained_content_index_enabled():
+        # Explicit Python mode and SQLite builds without FTS retain the supported
+        # reference implementation; there is no maintained content index to gate.
+        return
+    lexstore.ensure_fresh(vault_root)
+    store = lexstore.get_store(vault_root)
+    incomplete = [
+        (scope, verdict.status)
+        for scope in ("kb", "vault")
+        if not (
+            verdict := store.catalog_readiness(
+                scope,
+                freshness.recall_checkpoint(vault_root, scope).triple,
+                allow_delta=False,
+            )
+        ).complete
+    ]
+    if incomplete:
+        raise RuntimeError(f"maintained lexical catalog incomplete: {incomplete!r}")
+
+
 def warm_caches(
     vault_root: Path,
     *,
@@ -162,6 +187,17 @@ def warm_all(vault_root: Path) -> dict[str, float]:
     mode_name = mode.resolve_mode()
     preload = model_preload_allowed(mode_name)
     durations: dict[str, float] = {}
+    catalog_started = time.perf_counter()
+    try:
+        warm_retrieval_catalog(vault_root)
+        readiness.mark_ready("retrieval_catalog")
+    except Exception:  # noqa: BLE001 — startup stays live while repair retries
+        log.warning("maintained retrieval catalog warm-up failed", exc_info=True)
+    finally:
+        durations["retrieval_catalog"] = round(
+            (time.perf_counter() - catalog_started) * 1000.0,
+            1,
+        )
     durations.update(
         warm_caches(
             vault_root,

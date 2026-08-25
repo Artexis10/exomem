@@ -63,9 +63,10 @@ import sqlite3
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Generic, TypeVar
 
 from . import call_spans, reserved_paths
 from .kbdir import kb_dirname
@@ -169,8 +170,11 @@ class CatalogReadiness:
     backend: str
 
 
+_CatalogValue = TypeVar("_CatalogValue")
+
+
 @dataclass(frozen=True, slots=True)
-class CatalogQueryResult:
+class CatalogQueryResult(Generic[_CatalogValue]):
     """Typed exact-catalog query result.
 
     `value` may legitimately be an empty list when `readiness.complete` is true.
@@ -178,8 +182,16 @@ class CatalogQueryResult:
     legacy list-or-None wrappers necessarily collapse.
     """
 
-    value: object | None
+    value: _CatalogValue | None
     readiness: CatalogReadiness
+
+
+class CatalogUnavailable(RuntimeError):
+    """Internal signal that a maintained content query cannot answer completely."""
+
+    def __init__(self, readiness: CatalogReadiness) -> None:
+        self.readiness = readiness
+        super().__init__(f"lexical catalog is not ready: {readiness.status}")
 
 
 class _DeltaReplayStale(RuntimeError):
@@ -446,6 +458,76 @@ def get_store(vault_root: Path) -> LexicalStore:
         return store
 
 
+def _is_configured_runtime_vault(vault_root: Path) -> bool:
+    configured_raw = os.environ.get("EXOMEM_VAULT_PATH", "").strip()
+    configured = Path(configured_raw) if configured_raw else None
+    if configured is None:
+        return False
+    return bool(
+        configured.is_absolute()
+        and configured.resolve(strict=False) == vault_root.resolve(strict=False)
+    )
+
+
+def _mark_runtime_retrieval_ready_if_current(vault_root: Path) -> None:
+    """Admit the configured runtime after a repair proves both scopes current."""
+    if not _is_configured_runtime_vault(vault_root):
+        return
+    from . import freshness as freshness_module
+    from . import readiness
+
+    store = get_store(vault_root)
+    if all(
+        store.catalog_readiness(
+            scope,
+            freshness_module.recall_checkpoint(vault_root, scope).triple,
+            allow_delta=False,
+        ).complete
+        for scope in ("kb", "vault")
+    ):
+        readiness.mark_ready("retrieval_catalog")
+
+
+def _admit_after_bounded_runtime_repair(vault_root: Path, repaired: object) -> None:
+    """Converge lazy-mode admission after a successful small-corpus repair."""
+    if repaired is None or not _is_configured_runtime_vault(vault_root):
+        return
+    from . import readiness
+
+    if not readiness.is_ready("retrieval_catalog"):
+        # This re-proves both scopes. A missing sibling scope schedules the
+        # ordinary background repair, whose successful publish marks admission.
+        _mark_runtime_retrieval_ready_if_current(vault_root)
+
+
+def _mark_runtime_retrieval_unavailable_if_current(vault_root: Path) -> None:
+    """Revoke configured-runtime admission before scheduling catalog recovery."""
+    if not _is_configured_runtime_vault(vault_root):
+        return
+    from . import readiness
+
+    readiness.mark_unready("retrieval_catalog")
+
+
+def _schedule_runtime_catalog_repair(
+    vault_root: Path,
+    *,
+    deferred_paths: list[Path] | None = None,
+) -> None:
+    """Order admission revocation before the repair that may restore it."""
+    _mark_runtime_retrieval_unavailable_if_current(vault_root)
+    if deferred_paths is None:
+        _schedule_repair(vault_root)
+    else:
+        _schedule_repair(vault_root, deferred_paths=deferred_paths)
+
+
+def request_repair(vault_root: Path) -> None:
+    """Non-walking retry seam for a request refused by runtime admission."""
+    if maintained_content_index_enabled():
+        _schedule_repair(vault_root)
+
+
 def clear_stores() -> None:
     """Test seam: drop per-process stores (sync memos, failure flags)."""
     with _STORES_LOCK:
@@ -503,7 +585,11 @@ def _schedule_repair(vault_root: Path, *, deferred_paths: list[Path] | None = No
                         _REPAIRS_IN_FLIGHT.discard(key)
                         return
                 if rebuild or not store.retry_deferred_upsert(paths):
-                    store.rebuild_atomic()
+                    repaired = store.rebuild_atomic()
+                else:
+                    repaired = True
+                if repaired:
+                    _mark_runtime_retrieval_ready_if_current(vault_root)
                 rebuild = False
                 paths = []
         except Exception as e:  # noqa: BLE001 - daemon must not escape into stderr
@@ -594,6 +680,11 @@ def _usable() -> bool:
     return backend() != "python" and fts5_available()
 
 
+def maintained_content_index_enabled() -> bool:
+    """Whether ordinary BM25/substring recall is assigned to the sidecar."""
+    return _usable()
+
+
 def _catalog_usable() -> bool:
     """Whether the normal-table semantic catalog may serve/maintain this vault.
 
@@ -630,7 +721,38 @@ def search_bm25(
     if not tokens:
         return []
     store = get_store(vault_root)
-    return store.search_bm25(tokens, k, scope, freshness, allowed_paths, repair)
+    result = store.search_bm25(tokens, k, scope, freshness, allowed_paths, repair)
+    if repair:
+        _admit_after_bounded_runtime_repair(vault_root, result)
+    return result
+
+
+def search_bm25_result(
+    vault_root: Path,
+    query: str,
+    k: int,
+    *,
+    scope: str = "kb",
+    freshness: tuple | None = None,
+    allowed_paths: set[str] | None = None,
+) -> CatalogQueryResult[list[tuple[str, float]]]:
+    """Non-walking maintained-catalog BM25 query with explicit readiness."""
+    if not _usable():
+        return CatalogQueryResult(None, CatalogReadiness("unsupported", False, backend()))
+    if not query.strip():
+        return CatalogQueryResult([], CatalogReadiness("available", True, backend()))
+    from . import bm25 as bm25_module
+
+    tokens = bm25_module.tokenize(query)
+    if not tokens:
+        return CatalogQueryResult([], CatalogReadiness("available", True, backend()))
+    return get_store(vault_root).search_bm25_result(
+        tokens,
+        k,
+        scope,
+        freshness,
+        allowed_paths,
+    )
 
 
 def search_substring(
@@ -654,7 +776,34 @@ def search_substring(
     if not tokens:
         return []
     store = get_store(vault_root)
-    return store.search_substring(tokens, scope, freshness, repair, k)
+    result = store.search_substring(tokens, scope, freshness, repair, k)
+    if repair:
+        _admit_after_bounded_runtime_repair(vault_root, result)
+    return result
+
+
+def search_substring_result(
+    vault_root: Path,
+    query_norm: str,
+    *,
+    scope: str = "kb",
+    freshness: tuple | None = None,
+    k: int | None = None,
+) -> CatalogQueryResult[list[str]]:
+    """Non-walking maintained-catalog substring query with explicit readiness."""
+    if not _usable():
+        return CatalogQueryResult(None, CatalogReadiness("unsupported", False, backend()))
+    if not query_norm:
+        return CatalogQueryResult([], CatalogReadiness("available", True, backend()))
+    tokens = query_norm.split()
+    if not tokens:
+        return CatalogQueryResult([], CatalogReadiness("available", True, backend()))
+    return get_store(vault_root).search_substring_result(
+        tokens,
+        scope,
+        freshness,
+        k,
+    )
 
 
 def search_semantic_units(
@@ -812,7 +961,7 @@ def search_semantic_units_result(
     _repair_stale: bool = False,
     _validate_current: bool = True,
     repair: bool = True,
-) -> CatalogQueryResult:
+) -> CatalogQueryResult[list[SemanticUnitLexicalHit]]:
     """Typed exact-category unit query preserving every catalog outcome."""
     from .semantic_units import canonicalize_category
 
@@ -926,7 +1075,7 @@ def search_semantic_parent_paths_result(
     *,
     scope: str = "kb",
     freshness: tuple | None = None,
-) -> CatalogQueryResult:
+) -> CatalogQueryResult[list[str]]:
     """Typed counterpart to `search_semantic_parent_paths`."""
     if not _catalog_usable():
         return CatalogQueryResult(
@@ -2531,7 +2680,7 @@ class LexicalStore:
         Returns whether the bounded row update committed.
         """
         if self._failed:
-            _schedule_repair(self.vault_root)
+            _schedule_runtime_catalog_repair(self.vault_root)
             return False
         from .vault import VaultLockError
 
@@ -2543,18 +2692,21 @@ class LexicalStore:
             # fine and the store is healthy. Retry exactly these paths in the
             # background instead of rebuilding the corpus for one page (#526).
             log.info("lexical sidecar upsert deferred (%s); retrying these paths", e)
-            _schedule_repair(self.vault_root, deferred_paths=list(paths))
+            _schedule_runtime_catalog_repair(
+                self.vault_root,
+                deferred_paths=list(paths),
+            )
             return False
         except sqlite3.Error as e:
             self._note_query_failure(e, "lexical sidecar upsert deferred (%s)")
-            _schedule_repair(self.vault_root)
+            _schedule_runtime_catalog_repair(self.vault_root)
             return False
         except OSError as e:
             log.info("lexical sidecar upsert source changed during repair (%s)", e)
-            _schedule_repair(self.vault_root)
+            _schedule_runtime_catalog_repair(self.vault_root)
             return False
         if not applied:
-            _schedule_repair(self.vault_root)
+            _schedule_runtime_catalog_repair(self.vault_root)
         return applied
 
     def retry_deferred_upsert(self, paths: list[Path]) -> bool:
@@ -2659,7 +2811,7 @@ class LexicalStore:
     def delete_rel_paths(self, rel_paths: list[str]) -> bool:
         """Bounded inline delete under the barrier (see `upsert_paths`)."""
         if self._failed:
-            _schedule_repair(self.vault_root)
+            _schedule_runtime_catalog_repair(self.vault_root)
             return False
         from .vault import VaultLockError
 
@@ -2668,14 +2820,14 @@ class LexicalStore:
                 applied = self._delete_rel_paths_locked(rel_paths)
         except VaultLockError as e:
             log.info("lexical sidecar delete deferred (%s); heals on next sync", e)
-            _schedule_repair(self.vault_root)
+            _schedule_runtime_catalog_repair(self.vault_root)
             return False
         except sqlite3.Error as e:
             self._note_query_failure(e, "lexical sidecar delete deferred (%s)")
-            _schedule_repair(self.vault_root)
+            _schedule_runtime_catalog_repair(self.vault_root)
             return False
         if not applied:
-            _schedule_repair(self.vault_root)
+            _schedule_runtime_catalog_repair(self.vault_root)
         return applied
 
     def purge_exact_persisted_rows(
@@ -3383,6 +3535,23 @@ class LexicalStore:
             )
             return None
 
+    def search_bm25_result(
+        self,
+        stemmed_tokens: list[str],
+        k: int,
+        scope: str,
+        freshness: tuple | None,
+        allowed_paths: set[str] | None = None,
+    ) -> CatalogQueryResult[list[tuple[str, float]]]:
+        return self._serve_from_ready_catalog_result(
+            scope,
+            freshness,
+            lambda conn: self._bm25_query(
+                conn, stemmed_tokens, k, scope, allowed_paths
+            ),
+            "lexical sidecar BM25 query failed (%s)",
+        )
+
     def _bm25_query(
         self,
         conn: sqlite3.Connection,
@@ -3440,10 +3609,10 @@ class LexicalStore:
             # single failed attempt would strand the store as fatal for the
             # process. `_schedule_repair` is itself single-flight, so this cannot
             # storm.
-            _schedule_repair(self.vault_root)
+            _schedule_runtime_catalog_repair(self.vault_root)
             return CatalogReadiness("fatal_failure", False, backend_name)
         if not self.path.exists():
-            _schedule_repair(self.vault_root)
+            _schedule_runtime_catalog_repair(self.vault_root)
             return CatalogReadiness("stale", False, backend_name)
         try:
             conn = self._connect()
@@ -3451,17 +3620,17 @@ class LexicalStore:
                 if not self._schema_is_current(conn):
                     # Read-only probe: an absent/old-shape (v4) or version-stale
                     # sidecar defers to the atomic rebuild — this seam emits no DDL.
-                    _schedule_repair(self.vault_root)
+                    _schedule_runtime_catalog_repair(self.vault_root)
                     return CatalogReadiness("stale", False, backend_name)
                 checkpoint = self._meta_checkpoint(conn, scope)
                 if checkpoint is None:
-                    _schedule_repair(self.vault_root)
+                    _schedule_runtime_catalog_repair(self.vault_root)
                     return CatalogReadiness("stale", False, backend_name)
                 if _checkpoint_state(checkpoint) == target_state:
                     if self._meta_catalog_identity(conn) != catalog_semantic_identity(
                         self.vault_root
                     ):
-                        _schedule_repair(self.vault_root)
+                        _schedule_runtime_catalog_repair(self.vault_root)
                         return CatalogReadiness("stale", False, backend_name)
                     return CatalogReadiness("available", True, backend_name)
             finally:
@@ -3485,12 +3654,12 @@ class LexicalStore:
                             # from under this delta (no longer bound), so it could
                             # not be applied. Defer to the repair worker rather than
                             # letting the mismatch escape this seam.
-                            _schedule_repair(self.vault_root)
+                            _schedule_runtime_catalog_repair(self.vault_root)
                             return CatalogReadiness("stale", False, backend_name)
                         return self.catalog_readiness(
                             scope, freshness, allow_delta=False
                         )
-            _schedule_repair(self.vault_root)
+            _schedule_runtime_catalog_repair(self.vault_root)
             return CatalogReadiness("stale", False, backend_name)
         except sqlite3.Error as e:
             return self._catalog_readiness_error(e, backend_name)
@@ -3539,7 +3708,13 @@ class LexicalStore:
             self._catalog_readiness_error(error, backend_name)
             return None
 
-    def _serve_from_ready_catalog_result(self, scope, freshness, query_fn, failure_message):
+    def _serve_from_ready_catalog_result(
+        self,
+        scope: str,
+        freshness: tuple | None,
+        query_fn: Callable[[sqlite3.Connection], _CatalogValue],
+        failure_message: str,
+    ) -> CatalogQueryResult[_CatalogValue]:
         """Validate readiness AND run `query_fn(conn)` bound to ONE connection and
         read transaction, so a concurrent publication cannot swap the catalog file
         between the readiness proof and the query (the readiness-query TOCTOU).
@@ -3576,7 +3751,7 @@ class LexicalStore:
                     # publication landed between the verdict and this transaction.
                     # Defer rather than serve an unvalidated (possibly regressed)
                     # generation; the repair worker reconciles it.
-                    _schedule_repair(self.vault_root)
+                    _schedule_runtime_catalog_repair(self.vault_root)
                     return CatalogQueryResult(
                         None, CatalogReadiness("stale", False, readiness.backend)
                     )
@@ -3609,13 +3784,13 @@ class LexicalStore:
         if kind == "fatal":
             # A proven-fatal disposable sidecar recovers only by whole replacement.
             self._failed = True
-            _schedule_repair(self.vault_root)
+            _schedule_runtime_catalog_repair(self.vault_root)
             return CatalogReadiness("fatal_failure", False, backend_name)
         if kind == "transient":
             # A passing lock/interrupt fails only this call; the next request
             # reopens and retries. It must NOT schedule a whole-corpus repair.
             return CatalogReadiness("transient_failure", False, backend_name)
-        _schedule_repair(self.vault_root)
+        _schedule_runtime_catalog_repair(self.vault_root)
         return CatalogReadiness("stale", False, backend_name)
 
     def search_semantic_units(
@@ -3690,7 +3865,7 @@ class LexicalStore:
         literal_tokens: tuple[str, ...] = (),
         *,
         clauses: tuple | None = None,
-    ) -> CatalogQueryResult:
+    ) -> CatalogQueryResult[list[SemanticUnitLexicalHit]]:
         """Typed exact category/kind unit query; never used for content-only lanes."""
         if not (categories or kinds or clauses):
             return CatalogQueryResult(
@@ -3868,7 +4043,7 @@ class LexicalStore:
         clauses: tuple,
         scope: str,
         freshness: tuple | None,
-    ) -> CatalogQueryResult:
+    ) -> CatalogQueryResult[list[str]]:
         """Typed distinct-parent exact catalog query."""
         return self._serve_from_ready_catalog_result(
             scope,
@@ -3933,6 +4108,20 @@ class LexicalStore:
                 "lexical sidecar failed (%s); this process serves the in-process lexical paths",
             )
             return None
+
+    def search_substring_result(
+        self,
+        tokens: list[str],
+        scope: str,
+        freshness: tuple | None,
+        k: int | None = None,
+    ) -> CatalogQueryResult[list[str]]:
+        return self._serve_from_ready_catalog_result(
+            scope,
+            freshness,
+            lambda conn: self._substring_query(conn, tokens, scope, k),
+            "lexical sidecar substring query failed (%s)",
+        )
 
     def _substring_query(
         self, conn: sqlite3.Connection, tokens: list[str], scope: str, k: int | None = None

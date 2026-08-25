@@ -100,6 +100,8 @@ def test_readiness_without_an_absolute_vault_is_unknown_not_free(
 def test_status_failure_is_unknown_and_keeps_readiness_non_raising(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from exomem import readiness as warm_readiness
+
     def explode(vault_or_cell: object = None) -> dict[str, object]:
         raise OpError(
             "MUTATION_LOCK_UNAVAILABLE",
@@ -109,8 +111,12 @@ def test_status_failure_is_unknown_and_keeps_readiness_non_raising(
 
     monkeypatch.delenv("EXOMEM_WRITER_LEASE_URL", raising=False)
     monkeypatch.setattr(writer_lease, "coordination_status", explode)
-
-    snapshot = readiness_module.runtime_readiness(mcp_tool_surface_sha256=_SHA)
+    warm_readiness.reset()
+    warm_readiness.mark_ready("retrieval_catalog")
+    try:
+        snapshot = readiness_module.runtime_readiness(mcp_tool_surface_sha256=_SHA)
+    finally:
+        warm_readiness.reset()
 
     boundary = snapshot["coordination"]["mutation_boundary"]
     assert boundary["state"] == "unknown"
