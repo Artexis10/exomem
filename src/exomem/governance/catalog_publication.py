@@ -58,9 +58,103 @@ class PreparedMarkdownCatalogPublication:
     expected_control: authorization_custody.AuthorizationControlRecord
     target_key: projections.ProjectionNamespaceKey
     target_items: tuple[projection_store.ProjectionItemVariants, ...]
+    target_manifest: projection_store.VariantStoreManifest
+    expected_catalog_descriptor: bytes
     catalog_descriptor: bytes
+    catalog_seed: schema_v4.CatalogGenerationSeed
+    namespace_seed: schema_v4.ProjectionNamespaceSeed
+    target_publication: schema_v4.TuplePublicationResult
     activated_at: int
     mutation_count: int
+
+
+def _catalog_component_value(
+    active: schema_v4.VerifiedActiveGovernanceState,
+    *,
+    catalog_descriptor: bytes,
+) -> dict[str, object]:
+    return {
+        "status": "active",
+        "logical_vault_id": active.logical_vault_id,
+        "activation_store_id": active.activation_store_id,
+        "activation_epoch": active.activation_epoch,
+        "activation_state_digest": active.activation_state_digest,
+        "policy_generation_id": active.policy_generation_id,
+        "policy_fingerprint": active.policy_fingerprint,
+        "projector_schema_version": active.projector_schema_version,
+        "catalog_generation": active.catalog_generation,
+        "projection_namespace_id": active.projection_namespace_id,
+        "catalog_descriptor_sha256": hashlib.sha256(catalog_descriptor).hexdigest(),
+    }
+
+
+def catalog_component_values(
+    prepared: PreparedMarkdownCatalogPublication,
+) -> tuple[dict[str, object], dict[str, object]]:
+    """Return the exact journal values before and after one catalog publication."""
+
+    if not isinstance(prepared, PreparedMarkdownCatalogPublication):
+        raise CatalogPublicationError("catalog publication target is invalid")
+    expected = _catalog_component_value(
+        prepared.expected,
+        catalog_descriptor=prepared.expected_catalog_descriptor,
+    )
+    target = _catalog_component_value(
+        prepared.target_publication.active,
+        catalog_descriptor=prepared.catalog_descriptor,
+    )
+    return expected, target
+
+
+def current_catalog_component_value(
+    vault_root: Path,
+    *,
+    now: int | None = None,
+) -> dict[str, object]:
+    """Load one externally acknowledged active catalog value for recovery."""
+
+    root = Path(vault_root)
+    moment = int(time.time()) if now is None else now
+    connection: sqlite3.Connection | None = None
+    try:
+        custody = authorization_custody.load_authorization_custody(root, now=moment)
+        control = custody.control
+        if (
+            not control.governance_enrolled
+            or control.activation_store_id is None
+            or control.activation_epoch is None
+            or control.activation_state_digest is None
+        ):
+            raise CatalogPublicationError("exact governance enrollment is unavailable")
+        connection = store.open_authorization_session_connection(root)
+        snapshot = schema_v4.load_active_policy(
+            connection,
+            expected_logical_vault_id=control.logical_vault_id,
+            expected_activation_store_id=control.activation_store_id,
+            expected_activation_epoch=control.activation_epoch,
+            expected_activation_state_digest=control.activation_state_digest,
+        )
+        return _catalog_component_value(
+            snapshot.active,
+            catalog_descriptor=snapshot.catalog_descriptor,
+        )
+    except CatalogPublicationError:
+        raise
+    except (
+        authorization_custody.AuthorizationCustodyUnavailable,
+        schema_v4.SchemaV4Error,
+        store.UnsupportedGovernanceSchema,
+        OSError,
+        sqlite3.Error,
+        RuntimeError,
+        ValueError,
+    ):
+        raise CatalogPublicationError(
+            "the active catalog component cannot be verified"
+        ) from None
+    finally:
+        if connection is not None:
+            connection.close()
 
 
 def _custody_configured() -> bool:
@@ -389,13 +483,35 @@ def _normalize_catalog_removals(
     return tuple(normalized)
 
 
+def _validate_catalog_content_paths(content_paths: tuple[str, ...]) -> None:
+    if type(content_paths) is not tuple:
+        raise CatalogPublicationError(
+            "catalog publication requires a finite content-path batch"
+        )
+    aliases: set[str] = set()
+    for path in content_paths:
+        if type(path) is not str:
+            raise CatalogPublicationError("catalog publication content path is invalid")
+        candidate = PurePosixPath(path.replace("\\", "/"))
+        if candidate.suffix.casefold() != ".md":
+            raise CatalogPublicationError(
+                "non-Markdown content publication is not available"
+            )
+        alias = unicodedata.normalize("NFC", candidate.as_posix()).casefold()
+        if alias in aliases:
+            raise CatalogPublicationError("catalog publication content paths collide")
+        aliases.add(alias)
+
+
 def _prepare_markdown_batch(
     vault_root: Path,
     *,
     normalized: tuple[tuple[str, MarkdownCatalogMutation], ...] | None,
     planned_writes: tuple[vault.PlannedWrite, ...] | None,
     removals: tuple[CatalogRemoval, ...] = (),
+    content_paths: tuple[str, ...] = (),
     now: int | None = None,
+    activated_at: int | None = None,
 ) -> PreparedMarkdownCatalogPublication | None:
     """Prepare one complete batch successor, or return ``None`` for v3/open.
 
@@ -436,16 +552,17 @@ def _prepare_markdown_batch(
             "the governance activation store cannot be opened safely"
         ) from None
 
-    activated_at = int(time.time()) if now is None else now
+    moment = int(time.time()) if now is None else now
+    publication_time = moment if activated_at is None else activated_at
     try:
         custody = authorization_custody.load_authorization_custody(
-            root, now=activated_at
+            root, now=moment
         )
         custody = _recover_catalog_acknowledgement(
             root,
             connection,
             custody=custody,
-            now=activated_at,
+            now=moment,
         )
         control = custody.control
         if (
@@ -504,6 +621,7 @@ def _prepare_markdown_batch(
     finally:
         connection.close()
 
+    _validate_catalog_content_paths(content_paths)
     if normalized is None:
         assert planned_writes is not None
         if type(planned_writes) is not tuple:
@@ -570,7 +688,44 @@ def _prepare_markdown_batch(
         descriptor = projection_store.catalog_descriptor_bytes(
             target_key, target_items
         )
-    except projections.ProjectionError:
+        target_manifest = projection_store.preview_variant_store(
+            key=target_key,
+            items=target_items,
+        )
+        namespace_seed = schema_v4.ProjectionNamespaceSeed(
+            namespace_id=target_key.namespace_id,
+            evidence=projection_store.projection_namespace_evidence_bytes(
+                target_manifest
+            ),
+            ready_at=publication_time,
+        )
+        catalog_seed = schema_v4.CatalogGenerationSeed(
+            catalog_generation=target_key.catalog_generation,
+            descriptor=descriptor,
+            artifact_count=len(target_items),
+            created_at=publication_time,
+        )
+        connection = store.open_authorization_session_connection(root)
+        try:
+            target_publication = schema_v4.preview_catalog_generation(
+                connection,
+                expected=snapshot.active,
+                catalog=catalog_seed,
+                namespace=namespace_seed,
+                activated_at=publication_time,
+            )
+        finally:
+            connection.close()
+    except (
+        projection_store.ProjectionStoreError,
+        projections.ProjectionError,
+        schema_v4.SchemaV4Error,
+        store.UnsupportedGovernanceSchema,
+        OSError,
+        sqlite3.Error,
+        RuntimeError,
+        ValueError,
+    ):
         raise CatalogPublicationError(
             "the target governance catalog cannot be prepared"
         ) from None
@@ -580,8 +735,13 @@ def _prepare_markdown_batch(
         expected_control=control,
         target_key=target_key,
         target_items=target_items,
+        target_manifest=target_manifest,
+        expected_catalog_descriptor=snapshot.catalog_descriptor,
         catalog_descriptor=descriptor,
-        activated_at=activated_at,
+        catalog_seed=catalog_seed,
+        namespace_seed=namespace_seed,
+        target_publication=target_publication,
+        activated_at=publication_time,
         mutation_count=len(normalized) + len(normalized_removals),
     )
 
@@ -591,6 +751,7 @@ def prepare_markdown_batch(
     *,
     mutations: tuple[MarkdownCatalogMutation, ...],
     now: int | None = None,
+    activated_at: int | None = None,
 ) -> PreparedMarkdownCatalogPublication | None:
     """Prepare an explicit canonical Markdown mutation batch."""
 
@@ -605,6 +766,7 @@ def prepare_markdown_batch(
         planned_writes=None,
         removals=(),
         now=now,
+        activated_at=activated_at,
     )
 
 
@@ -630,6 +792,7 @@ def prepare_catalog_membership_batch(
     *,
     writes: tuple[vault.PlannedWrite, ...] = (),
     removals: tuple[CatalogRemoval, ...] = (),
+    content_paths: tuple[str, ...] = (),
     now: int | None = None,
 ) -> PreparedMarkdownCatalogPublication | None:
     """Prepare lazy write/removal membership changes for a product mutation.
@@ -644,6 +807,7 @@ def prepare_catalog_membership_batch(
         normalized=None,
         planned_writes=writes,
         removals=removals,
+        content_paths=content_paths,
         now=now,
     )
 
@@ -655,6 +819,7 @@ def prepare_markdown_upsert(
     source: str,
     expected_before_hash: str | None,
     now: int | None = None,
+    activated_at: int | None = None,
 ) -> PreparedMarkdownCatalogPublication | None:
     """Compatibility wrapper for a one-item Markdown catalog batch."""
 
@@ -662,6 +827,7 @@ def prepare_markdown_upsert(
         vault_root,
         mutations=(MarkdownCatalogMutation(path, source, expected_before_hash),),
         now=now,
+        activated_at=activated_at,
     )
 
 
@@ -679,19 +845,10 @@ def publish_markdown_batch(
             key=prepared.target_key,
             items=prepared.target_items,
         )
-        namespace = schema_v4.ProjectionNamespaceSeed(
-            namespace_id=prepared.target_key.namespace_id,
-            evidence=projection_store.projection_namespace_evidence_bytes(
-                target_manifest
-            ),
-            ready_at=prepared.activated_at,
-        )
-        catalog = schema_v4.CatalogGenerationSeed(
-            catalog_generation=prepared.target_key.catalog_generation,
-            descriptor=prepared.catalog_descriptor,
-            artifact_count=len(prepared.target_items),
-            created_at=prepared.activated_at,
-        )
+        if target_manifest != prepared.target_manifest:
+            raise CatalogPublicationError(
+                "the staged governance catalog does not match its reviewed target"
+            )
         receipt_event_id = receipts.critical_event_id(
             {
                 "operation": "governance_catalog_markdown_batch",
@@ -711,11 +868,11 @@ def publish_markdown_batch(
         connection = store.open_authorization_session_connection(
             prepared.vault_root
         )
-        return schema_v4.publish_catalog_generation(
+        result = schema_v4.publish_catalog_generation(
             connection,
             expected=prepared.expected,
-            catalog=catalog,
-            namespace=namespace,
+            catalog=prepared.catalog_seed,
+            namespace=prepared.namespace_seed,
             receipt_event_id=receipt_event_id,
             activated_at=prepared.activated_at,
             acknowledge_registry=lambda target: (
@@ -727,6 +884,11 @@ def publish_markdown_batch(
                 )
             ),
         )
+        if result != prepared.target_publication:
+            raise CatalogPublicationError(
+                "the committed governance catalog does not match its reviewed target"
+            )
+        return result
     except (
         authorization_custody.AuthorizationCustodyUnavailable,
         projection_store.ProjectionStoreError,
@@ -750,24 +912,8 @@ def publish_markdown_batch(
                     now=prepared.activated_at,
                 )
                 target = schema_v4.load_active_tuple_pointer(connection)
-                if (
-                    target.logical_vault_id == prepared.expected.logical_vault_id
-                    and target.activation_store_id
-                    == prepared.expected.activation_store_id
-                    and target.activation_epoch
-                    == prepared.expected.activation_epoch + 1
-                    and target.policy_generation_id
-                    == prepared.expected.policy_generation_id
-                    and target.policy_fingerprint
-                    == prepared.expected.policy_fingerprint
-                    and target.projector_schema_version
-                    == prepared.expected.projector_schema_version
-                    and target.catalog_generation
-                    == prepared.target_key.catalog_generation
-                    and target.projection_namespace_id
-                    == prepared.target_key.namespace_id
-                ):
-                    return None
+                if target == prepared.target_publication.active:
+                    return prepared.target_publication
             except (
                 authorization_custody.AuthorizationCustodyUnavailable,
                 CatalogPublicationError,
@@ -799,6 +945,8 @@ __all__ = [
     "CatalogRemoval",
     "MarkdownCatalogMutation",
     "PreparedMarkdownCatalogPublication",
+    "catalog_component_values",
+    "current_catalog_component_value",
     "mutation_from_planned_write",
     "prepare_markdown_batch",
     "prepare_catalog_membership_batch",

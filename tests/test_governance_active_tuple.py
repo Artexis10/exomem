@@ -34,6 +34,9 @@ from exomem import (
     move_file as move_file_module,
 )
 from exomem import (
+    recover_from_trash as recover_module,
+)
+from exomem import (
     vault as vault_module,
 )
 from exomem.governance import (
@@ -457,6 +460,342 @@ def _migrate_with_projection_items(
         )
     finally:
         connection.close()
+
+
+def _load_active_projection_items(
+    vault: Path,
+    *,
+    activation_epoch: int,
+    activation_state_digest: str,
+) -> tuple[
+    schema_v4.VerifiedActiveGovernanceState,
+    projection_store.VariantStoreManifest,
+    tuple[projection_store.ProjectionItemVariants, ...],
+]:
+    connection = store.open_authorization_session_connection(vault)
+    try:
+        active = schema_v4.load_active_policy(
+            connection,
+            expected_logical_vault_id=LOGICAL_VAULT_ID,
+            expected_activation_store_id=ACTIVATION_STORE_ID,
+            expected_activation_epoch=activation_epoch,
+            expected_activation_state_digest=activation_state_digest,
+        )
+    finally:
+        connection.close()
+    evidence = projection_store.namespace_evidence_from_snapshot(active)
+    manifest, items = projection_store.load_projection_catalog(
+        vault,
+        key=evidence.manifest.namespace_key,
+        expected_rows_digest=evidence.manifest.rows_digest,
+    )
+    return active, manifest, items
+
+
+def _legacy_companion_backfill_input(
+    vault: Path,
+) -> tuple[str, str, str, dict[str, object]]:
+    artifact_path = "Knowledge Base/Notes/private.bin"
+    companion_path = f"{artifact_path}.md"
+    artifact = b"\x00private-bytes\xff"
+    companion = (
+        "---\n"
+        "title: Private binary\n"
+        "type: source\n"
+        "status: draft\n"
+        "---\n\n"
+        "# Private binary\n\n"
+        "Legacy companion.\n"
+    )
+    artifact_target = vault / artifact_path
+    artifact_target.parent.mkdir(parents=True, exist_ok=True)
+    artifact_target.write_bytes(artifact)
+    (vault / companion_path).write_text(companion, encoding="utf-8")
+    payload: dict[str, object] = {
+        "version": 1,
+        "artifact_class": "binary",
+        "artifact_path": artifact_path,
+        "expected_artifact_sha256": hashlib.sha256(artifact).hexdigest(),
+        "expected_artifact_size": len(artifact),
+        "expected_companion_path": companion_path,
+        "expected_companion_sha256": hashlib.sha256(companion.encode()).hexdigest(),
+        "semantics": {
+            "projects": ["private"],
+            "tags": ["confidential"],
+            "types": ["source"],
+            "classes": ["pii"],
+        },
+    }
+    return artifact_path, companion_path, companion, payload
+
+
+def _preview_companion_backfill(
+    vault: Path,
+    payload: dict[str, object],
+    *,
+    now: int,
+) -> dict[str, object]:
+    from exomem.governance.tool import op_govern_memory
+
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        return op_govern_memory(
+            vault,
+            operation="backfill_companion",
+            backfill_action="preview",
+            companion_input=payload,
+            principal=owner_principal(),
+            now=now,
+        )
+
+
+def _commit_companion_backfill(
+    vault: Path,
+    payload: dict[str, object],
+    *,
+    proposal_id: str,
+    now: int,
+    crash_at: str | None = None,
+) -> dict[str, object]:
+    from exomem.governance.tool import op_govern_memory
+
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        return op_govern_memory(
+            vault,
+            operation="backfill_companion",
+            backfill_action="commit",
+            proposal_id=proposal_id,
+            companion_input=payload,
+            principal=owner_principal(),
+            now=now,
+            crash_at=crash_at,
+        )
+
+
+def test_v4_companion_backfill_publishes_catalog_successor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    _artifact_path, companion_path, _companion, payload = (
+        _legacy_companion_backfill_input(vault)
+    )
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_projection_items(
+        vault,
+        items=((companion_path, (vault / companion_path).read_text(encoding="utf-8")),),
+        now=now,
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    preview = _preview_companion_backfill(vault, payload, now=now + 1)
+
+    committed = _commit_companion_backfill(
+        vault,
+        payload,
+        proposal_id=str(preview["proposal_id"]),
+        now=now + 2,
+    )
+
+    assert committed["status"] == "committed"
+    companion_after = (vault / companion_path).read_text(encoding="utf-8")
+    assert "governance_companion:" in companion_after
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 3)
+    assert custody.control.activation_epoch == 2
+    active, manifest, items = _load_active_projection_items(
+        vault,
+        activation_epoch=2,
+        activation_state_digest=custody.control.activation_state_digest or "",
+    )
+    assert active.active.catalog_generation == 2
+    assert manifest.item_count == 1
+    assert {item.item_identity: item.content_hash for item in items} == {
+        companion_path: vault_module.content_hash(companion_after)
+    }
+    connection = store.open_connection(vault)
+    try:
+        component_kinds = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT component_kind FROM governance_operation_components "
+                "WHERE event_id=?",
+                (str(committed["event_id"]),),
+            ).fetchall()
+        }
+        catalog_target = connection.execute(
+            "SELECT value_json FROM governance_operation_components "
+            "WHERE event_id=? AND phase='final' AND component_kind='catalog'",
+            (str(committed["event_id"]),),
+        ).fetchone()
+    finally:
+        connection.close()
+    assert component_kinds == {"catalog", "companion", "proposal"}
+    assert catalog_target is not None
+    assert json.loads(str(catalog_target[0]))["activation_state_digest"] == (
+        custody.control.activation_state_digest
+    )
+
+
+@pytest.mark.parametrize("crash_at", ["after_catalog", "after_terminal"])
+def test_v4_companion_backfill_recovers_after_catalog_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    crash_at: str,
+) -> None:
+    from exomem.governance.recovery import reconcile_governance_operations
+    from exomem.governance.tool import GovernanceCrash
+
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    _artifact_path, companion_path, _companion, payload = (
+        _legacy_companion_backfill_input(vault)
+    )
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_projection_items(
+        vault,
+        items=((companion_path, (vault / companion_path).read_text(encoding="utf-8")),),
+        now=now,
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    preview = _preview_companion_backfill(vault, payload, now=now + 1)
+
+    with pytest.raises(GovernanceCrash, match=crash_at):
+        _commit_companion_backfill(
+            vault,
+            payload,
+            proposal_id=str(preview["proposal_id"]),
+            now=now + 2,
+            crash_at=crash_at,
+        )
+
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 3)
+    assert custody.control.activation_epoch == 2
+    recovered = reconcile_governance_operations(vault)
+    assert recovered["blocked"] is False
+    assert recovered["activated"] == 1
+    replayed = _commit_companion_backfill(
+        vault,
+        payload,
+        proposal_id=str(preview["proposal_id"]),
+        now=now + 4,
+    )
+    assert replayed["status"] == "committed"
+
+
+def test_v4_companion_backfill_recovers_catalog_after_companion_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance.recovery import reconcile_governance_operations
+    from exomem.governance.tool import GovernanceCrash
+
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    _artifact_path, companion_path, _companion, payload = (
+        _legacy_companion_backfill_input(vault)
+    )
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_projection_items(
+        vault,
+        items=((companion_path, (vault / companion_path).read_text(encoding="utf-8")),),
+        now=now,
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    preview = _preview_companion_backfill(vault, payload, now=now + 1)
+
+    with pytest.raises(GovernanceCrash, match="after_publish"):
+        _commit_companion_backfill(
+            vault,
+            payload,
+            proposal_id=str(preview["proposal_id"]),
+            now=now + 2,
+            crash_at="after_publish",
+        )
+
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 3)
+    assert custody.control.activation_epoch == 1
+    assert "governance_companion:" in (vault / companion_path).read_text(encoding="utf-8")
+    recovered = reconcile_governance_operations(vault)
+    assert recovered["blocked"] is False
+    assert recovered["activated"] == 1
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 3)
+    assert custody.control.activation_epoch == 2
+    replayed = _commit_companion_backfill(
+        vault,
+        payload,
+        proposal_id=str(preview["proposal_id"]),
+        now=now + 4,
+    )
+    assert replayed["status"] == "committed"
+
+
+def test_v4_companion_backfill_publication_uncertainty_keeps_pending_journal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance.recovery import reconcile_governance_operations
+    from exomem.governance.tool import GovernanceError
+
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    _artifact_path, companion_path, _companion, payload = (
+        _legacy_companion_backfill_input(vault)
+    )
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_projection_items(
+        vault,
+        items=((companion_path, (vault / companion_path).read_text(encoding="utf-8")),),
+        now=now,
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    preview = _preview_companion_backfill(vault, payload, now=now + 1)
+
+    def lose_catalog_terminal(_prepared) -> None:
+        raise catalog_publication.CatalogPublicationError("lost catalog terminal")
+
+    monkeypatch.setattr(
+        catalog_publication,
+        "publish_markdown_batch",
+        lose_catalog_terminal,
+    )
+    with pytest.raises(GovernanceError) as uncertain:
+        _commit_companion_backfill(
+            vault,
+            payload,
+            proposal_id=str(preview["proposal_id"]),
+            now=now + 2,
+        )
+
+    assert uncertain.value.code == "GOVERNANCE_CATALOG_PUBLICATION_UNCERTAIN"
+    assert "governance_companion:" in (vault / companion_path).read_text(encoding="utf-8")
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 3)
+    assert custody.control.activation_epoch == 1
+    recovered = reconcile_governance_operations(vault)
+    assert recovered["blocked"] is True
+    assert recovered["activated"] == 0
 
 
 def test_govern_memory_v4_proposal_persists_exact_authority_binding(
@@ -2693,6 +3032,313 @@ def test_v4_directory_trash_refuses_tree_drift_before_catalog_preparation(
     assert (vault / added_relative).read_text(encoding="utf-8") == "added concurrently\n"
     custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
     assert custody.control.activation_epoch == 1
+
+
+def test_v4_file_recovery_inserts_row_and_publishes_log_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = int(time.time())
+    monkeypatch.setenv(
+        "EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-state")
+    )
+    writer_lease.reset_managers_for_tests()
+    vault = tmp_path / "vault"
+    relative = "Knowledge Base/Notes/private.md"
+    log_relative = "Knowledge Base/log.md"
+    source = "---\ntitle: Private\nstatus: draft\n---\n\nPrivate.\n"
+    log_before = "# Log\n\n---\n"
+    for path, content in ((relative, source), (log_relative, log_before)):
+        target = vault / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_projection_items(
+        vault,
+        items=((relative, source), (log_relative, log_before)),
+        now=now,
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    trashed = delete_file_module.delete_file(
+        vault,
+        path=relative,
+        confirm=True,
+        today=dt.date(2026, 8, 25),
+        now=dt.datetime.fromtimestamp(now),
+    )
+
+    recovered = recover_module.recover_from_trash(
+        vault,
+        trash_path=trashed.trash_path,
+        today=dt.date(2026, 8, 25),
+    )
+
+    assert recovered.restored_path == relative
+    assert (vault / relative).read_text(encoding="utf-8") == source
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    assert custody.control.activation_epoch == 3
+    active, manifest, items = _load_active_projection_items(
+        vault,
+        activation_epoch=3,
+        activation_state_digest=custody.control.activation_state_digest or "",
+    )
+    expected = {
+        path: vault_module.content_hash((vault / path).read_text(encoding="utf-8"))
+        for path in (relative, log_relative)
+    }
+    assert active.active.catalog_generation == 3
+    assert manifest.item_count == 2
+    assert {item.item_identity: item.content_hash for item in items} == expected
+
+
+def test_v4_directory_recovery_inserts_every_row_in_one_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = int(time.time())
+    monkeypatch.setenv(
+        "EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-state")
+    )
+    writer_lease.reset_managers_for_tests()
+    vault = tmp_path / "vault"
+    directory = "Knowledge Base/Notes/private-tree"
+    first_relative = f"{directory}/first.md"
+    second_relative = f"{directory}/nested/second.md"
+    log_relative = "Knowledge Base/log.md"
+    first = "---\ntitle: First\nstatus: draft\n---\n\nFirst.\n"
+    second = "---\ntitle: Second\nstatus: draft\n---\n\nSecond.\n"
+    log_before = "# Log\n\n---\n"
+    for path, content in (
+        (first_relative, first),
+        (second_relative, second),
+        (log_relative, log_before),
+    ):
+        target = vault / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_projection_items(
+        vault,
+        items=(
+            (first_relative, first),
+            (second_relative, second),
+            (log_relative, log_before),
+        ),
+        now=now,
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    trashed = delete_directory_module.delete_directory(
+        vault,
+        path=directory,
+        confirm=True,
+        recursive=True,
+        today=dt.date(2026, 8, 25),
+        now=dt.datetime.fromtimestamp(now),
+    )
+
+    recovered = recover_module.recover_from_trash(
+        vault,
+        trash_path=trashed.trash_path,
+        today=dt.date(2026, 8, 25),
+    )
+
+    assert recovered.restored_path == directory
+    assert (vault / first_relative).read_text(encoding="utf-8") == first
+    assert (vault / second_relative).read_text(encoding="utf-8") == second
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    assert custody.control.activation_epoch == 3
+    active, manifest, items = _load_active_projection_items(
+        vault,
+        activation_epoch=3,
+        activation_state_digest=custody.control.activation_state_digest or "",
+    )
+    expected = {
+        path: vault_module.content_hash((vault / path).read_text(encoding="utf-8"))
+        for path in (first_relative, second_relative, log_relative)
+    }
+    assert active.active.catalog_generation == 3
+    assert manifest.item_count == 3
+    assert {item.item_identity: item.content_hash for item in items} == expected
+
+
+def test_v4_recovery_refuses_non_markdown_before_moving_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = int(time.time())
+    monkeypatch.setenv(
+        "EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-state")
+    )
+    writer_lease.reset_managers_for_tests()
+    vault = tmp_path / "vault"
+    original = "Knowledge Base/Notes/private.bin"
+    trash_relative = "Knowledge Base/_trash/2026-08-25/120000-private.bin"
+    trash = vault / trash_relative
+    trash.parent.mkdir(parents=True, exist_ok=True)
+    trash.write_bytes(b"private bytes")
+    trash.with_name(f"{trash.name}.meta.json").write_text(
+        json.dumps({"original_path": original}),
+        encoding="utf-8",
+    )
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_empty_projection_catalog(vault, now=now)
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+
+    with pytest.raises(recover_module.RecoverError) as blocked:
+        recover_module.recover_from_trash(
+            vault,
+            trash_path=trash_relative,
+            today=dt.date(2026, 8, 25),
+        )
+
+    assert blocked.value.code == "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED"
+    assert blocked.value.reason == "non-Markdown content publication is not available"
+    assert trash.read_bytes() == b"private bytes"
+    assert not (vault / original).exists()
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    assert custody.control.activation_epoch == 1
+
+
+def test_v4_recovery_does_not_inverse_rename_after_publication_uncertainty(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = int(time.time())
+    monkeypatch.setenv(
+        "EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-state")
+    )
+    writer_lease.reset_managers_for_tests()
+    vault = tmp_path / "vault"
+    relative = "Knowledge Base/Notes/private.md"
+    log_relative = "Knowledge Base/log.md"
+    source = "---\ntitle: Private\nstatus: draft\n---\n\nPrivate.\n"
+    log_before = "# Log\n\n---\n"
+    for path, content in ((relative, source), (log_relative, log_before)):
+        target = vault / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_projection_items(
+        vault,
+        items=((relative, source), (log_relative, log_before)),
+        now=now,
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    trashed = delete_file_module.delete_file(
+        vault,
+        path=relative,
+        confirm=True,
+        today=dt.date(2026, 8, 25),
+        now=dt.datetime.fromtimestamp(now),
+    )
+
+    def lose_publication_terminal(_prepared) -> None:
+        raise catalog_publication.CatalogPublicationError("lost terminal")
+
+    monkeypatch.setattr(
+        catalog_publication,
+        "publish_markdown_batch",
+        lose_publication_terminal,
+    )
+
+    with pytest.raises(recover_module.RecoverError) as uncertain:
+        recover_module.recover_from_trash(
+            vault,
+            trash_path=trashed.trash_path,
+            today=dt.date(2026, 8, 25),
+        )
+
+    assert uncertain.value.code == "GOVERNANCE_CATALOG_PUBLICATION_UNCERTAIN"
+    assert (vault / relative).read_text(encoding="utf-8") == source
+    assert not (vault / trashed.trash_path).exists()
+
+
+def test_v4_directory_recovery_refuses_tree_drift_before_rename(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = int(time.time())
+    monkeypatch.setenv(
+        "EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-state")
+    )
+    writer_lease.reset_managers_for_tests()
+    vault = tmp_path / "vault"
+    directory = "Knowledge Base/Notes/private-tree"
+    relative = f"{directory}/private.md"
+    log_relative = "Knowledge Base/log.md"
+    source = "---\ntitle: Private\nstatus: draft\n---\n\nPrivate.\n"
+    log_before = "# Log\n\n---\n"
+    for path, content in ((relative, source), (log_relative, log_before)):
+        target = vault / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_projection_items(
+        vault,
+        items=((relative, source), (log_relative, log_before)),
+        now=now,
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    trashed = delete_directory_module.delete_directory(
+        vault,
+        path=directory,
+        confirm=True,
+        recursive=True,
+        today=dt.date(2026, 8, 25),
+        now=dt.datetime.fromtimestamp(now),
+    )
+    real_begin = graph_sync.begin_recovery_transition
+    added = vault / trashed.trash_path / "added.md"
+
+    def drift_then_begin(*args, **kwargs):
+        added.write_text("added concurrently\n", encoding="utf-8")
+        return real_begin(*args, **kwargs)
+
+    monkeypatch.setattr(graph_sync, "begin_recovery_transition", drift_then_begin)
+
+    with pytest.raises(recover_module.RecoverError) as blocked:
+        recover_module.recover_from_trash(
+            vault,
+            trash_path=trashed.trash_path,
+            today=dt.date(2026, 8, 25),
+        )
+
+    assert blocked.value.code == "PATH_GUARD_CHANGED"
+    assert not (vault / directory).exists()
+    assert (vault / trashed.trash_path / "private.md").read_text(encoding="utf-8") == source
+    assert added.read_text(encoding="utf-8") == "added concurrently\n"
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    assert custody.control.activation_epoch == 2
 
 
 def test_v4_move_replaces_membership_and_publishes_auxiliaries_once(
