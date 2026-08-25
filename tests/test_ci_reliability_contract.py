@@ -11,6 +11,7 @@ FULL_CI_JOBS = {
     "retrieval-quality",
     "retrieval-latency",
     "governance-projection-wire",
+    "governance-projection-wire-vector-cpu",
     "semantic-write-latency",
     "graph-convergence",
     "docker",
@@ -249,6 +250,49 @@ def test_governance_wire_characterization_runs_every_registered_route() -> None:
     assert job["steps"][-1]["env"]["EXOMEM_DISABLE_CLIP"] == "1"
     assert job["steps"][-1]["env"]["EXOMEM_DISABLE_RANKING"] == "1"
     assert "governance-projection-wire" in workflow["jobs"]["gate"]["needs"]
+
+
+def test_governance_vector_cpu_wire_characterization_is_exact_and_required() -> None:
+    workflow = _workflow()
+    job = workflow["jobs"]["governance-projection-wire-vector-cpu"]
+
+    assert job["runs-on"] == "ubuntu-latest"
+    assert job["timeout-minutes"] == 12
+    assert job["strategy"]["fail-fast"] is False
+    assert set(job["strategy"]["matrix"]["route"]) == {
+        "keyword",
+        "bm25",
+        "vector-live",
+        "rerank-hard-off",
+        "clip-hard-off",
+        "graph",
+        "graph-rerank-hard-off",
+        "max-query",
+        "max-limit",
+        "max-shape",
+        "hidden-index-missing",
+        "pagination",
+    }
+    step = job["steps"][-1]
+    command = step["run"]
+    assert "--extra embeddings" in command
+    assert "--python 3.13" in command
+    assert "tests/test_governance_projection_wire_gate.py" in command
+    assert step["env"] == {
+        "EXOMEM_GOVERNANCE_TIMING_PROFILE": "vectors-cpu-torch-v1",
+        "EXOMEM_GOVERNANCE_TIMING_ROUTE": "${{ matrix.route }}",
+        "EXOMEM_DISABLE_MEDIA_EXTRACTION": "1",
+        "EXOMEM_DISABLE_CLIP": "1",
+        "EXOMEM_DISABLE_RANKING": "1",
+        "EXOMEM_DEVICE": "cpu",
+        "EXOMEM_EMBED_BACKEND": "torch",
+        "OMP_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
+    assert "governance-projection-wire-vector-cpu" in workflow["jobs"]["gate"][
+        "needs"
+    ]
 
 
 def test_expensive_ci_runs_nightly_manually_and_for_release_prs_only() -> None:
