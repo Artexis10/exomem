@@ -73,7 +73,8 @@ Natural routing stays simple:
 - “Create a health-journal collection.” → `create`
 - “Give me a template for logging these sessions.” → `inspect`, then use the ordinary template directly
 
-Use `maintain_memory(mode="reconcile")` for derived-index repair, never as a
+Use remote `maintain_memory(mode="reconcile", dry_run=true)` to preview derived-index
+repair, then have the host operator run `exomem maintain --reconcile`; never use it as a
 way to rewrite or reinterpret a person's canonical history.
 
 ## Human-owned storage

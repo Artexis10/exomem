@@ -33,6 +33,7 @@ from functools import wraps
 from pathlib import Path
 from typing import Any
 
+from . import capabilities as capabilities_module
 from .cli_ops import OpError, leaf_contract_code
 from .mutation_lock import (
     VaultMutationCoordinator,
@@ -63,6 +64,15 @@ _COORDINATOR_USER_AGENT = (
 # 60s was shorter than one abandoned-write investigation; 10 minutes covers a
 # human noticing the timeout, checking state, and retrying.
 _IMPLICIT_RETRY_TTL_SECONDS = 600.0
+
+_REQUEST_BOUND_REMOTE_SURFACES = frozenset(
+    {"mcp", "rest", "hosted", "hosted-agent"}
+)
+_REMOTE_MAINTENANCE_REMEDIATION = (
+    "Run `exomem maintain --fix` or `exomem maintain --reconcile` on the host; "
+    "for ID backfill, run `exomem maintain_memory --mode backfill-ids "
+    "--no-dry-run`. Use audit or dry_run=true remotely."
+)
 
 # Commands whose `invoke()` boundary is narrowed to `writer_authority_guard`
 # (fence-only, no shared vault lock) instead of the full `mutation_guard`.
@@ -3802,6 +3812,21 @@ def invoke_command(
         # future read representation.
         selector_error = error
         read_only = False
+
+    active_surface = capabilities_module.current_active_surface()
+    if (
+        command.name == "maintain_memory"
+        and not read_only
+        and selector_error is None
+        and active_surface is not None
+        and active_surface.surface in _REQUEST_BOUND_REMOTE_SURFACES
+    ):
+        raise OpError(
+            "MAINTENANCE_REQUIRES_CLI",
+            "write-mode maintenance is unavailable through request-bound remote commands",
+            _REMOTE_MAINTENANCE_REMEDIATION,
+            details={"status": "terminal", "committed": False},
+        )
 
     if reserved_hit is not None:
         if read_only:
