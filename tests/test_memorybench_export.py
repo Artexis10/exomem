@@ -589,6 +589,66 @@ def test_preflight_binds_real_setup_provider_checkout_and_dataset_before_first_s
     assert terminal_manifest["preregistration_identity"]["contract_revision"] == payload["contract_revision"]
 
 
+def test_new_output_root_may_have_an_absent_parent(tmp_path: Path) -> None:
+    plan = _plan(tmp_path / "fixture")
+    payload = json.loads(plan.read_text(encoding="utf-8"))
+    output = tmp_path / "runs" / "nested" / "output"
+    payload.update({
+        "output_root": str(output),
+        "guest_work_root": str(output / "guest-work"),
+        "guest_evidence_root": str(output / "guest-evidence"),
+    })
+    plan.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+    plan.chmod(0o600)
+    dependencies = _valid_dependencies(tmp_path)
+    dependencies["cleanup_runner"] = _cleanup(output)
+
+    result = _run(plan, **dependencies)
+
+    assert result.status == "VALID" and result.exit_code == 0
+    assert output.is_dir()
+    assert stat.S_IMODE(output.stat().st_mode) == 0o700
+
+
+def test_exomem_stage_environment_preserves_explicit_model_cache_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from memorybench.export import _stage_environment
+    from protocol.models import MemoryBenchRunPlan
+
+    cache = tmp_path / "hf-cache"
+    hub = cache / "hub"
+    hub.mkdir(parents=True)
+    monkeypatch.setenv("HF_HOME", str(cache))
+    monkeypatch.setenv("HF_HUB_CACHE", str(hub))
+
+    environment = _stage_environment(
+        MemoryBenchRunPlan.model_validate(_plan_payload(tmp_path)),
+        "/controlled",
+    )
+
+    assert environment["HF_HOME"] == str(cache)
+    assert environment["HF_HUB_CACHE"] == str(hub)
+
+
+def test_stage_environment_preserves_explicit_uv_cache_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from memorybench.export import _stage_environment
+    from protocol.models import MemoryBenchRunPlan
+
+    cache = tmp_path / "uv-cache"
+    cache.mkdir()
+    monkeypatch.setenv("UV_CACHE_DIR", str(cache))
+
+    environment = _stage_environment(
+        MemoryBenchRunPlan.model_validate(_plan_payload(tmp_path)),
+        "/controlled",
+    )
+
+    assert environment["UV_CACHE_DIR"] == str(cache)
+
+
 def test_preregistration_plan_digest_is_only_an_assertion_against_derived_identity(
     tmp_path: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -738,6 +798,18 @@ def test_stage_exception_is_failure_even_when_fixture_artifacts_are_complete(tmp
     assert "stage_process_failed" in export["failure_codes"]
 
 
+def test_pinned_upstream_checkpoint_record_and_nested_search_are_accepted(tmp_path: Path) -> None:
+    plan = _plan(tmp_path)
+
+    def stage(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        home = Path(kwargs["cwd"])
+        _materialize_native_runtime(home)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    result = _run(plan, **{**_valid_dependencies(tmp_path), "stage_runner": stage})
+    assert result.status == "VALID" and result.exit_code == 0
+
+
 @pytest.mark.parametrize(
     ("mutation", "failure_code"),
     [
@@ -782,7 +854,9 @@ def test_corrupt_conflicting_or_outside_evidence_is_partial_invalid_without_prec
             (run / "results/extra.json").write_text(json.dumps(extra))
         elif mutation == "inline-mismatch":
             checkpoint = json.loads(checkpoint_path.read_text())
-            checkpoint["questions"][0]["results"] = [{"content": "different", "score": 1.0}]
+            checkpoint["questions"][RAW_QID]["phases"]["search"]["results"] = [
+                {"content": "different", "score": 1.0}
+            ]
             checkpoint_path.write_text(json.dumps(checkpoint))
         elif mutation == "nonfinite":
             result = json.loads(result_path.read_text())
@@ -799,7 +873,7 @@ def test_corrupt_conflicting_or_outside_evidence_is_partial_invalid_without_prec
             result_path.write_text("{")
         elif mutation == "outside-result-file":
             checkpoint = json.loads(checkpoint_path.read_text())
-            checkpoint["questions"][0]["resultFile"] = "../../outside.json"
+            checkpoint["questions"][RAW_QID]["phases"]["search"]["resultFile"] = "../../outside.json"
             checkpoint_path.write_text(json.dumps(checkpoint))
         elif mutation in {"question-mismatch", "type-mismatch", "gold-mismatch", "container-mismatch"}:
             result = json.loads(result_path.read_text())
@@ -813,7 +887,7 @@ def test_corrupt_conflicting_or_outside_evidence_is_partial_invalid_without_prec
             result_path.write_text(json.dumps(result))
         else:
             checkpoint = json.loads(checkpoint_path.read_text())
-            checkpoint["questions"][0]["phases"]["search"] = {
+            checkpoint["questions"][RAW_QID]["phases"]["search"] = {
                 "status": "pending" if mutation == "phase-incomplete" else "failed"
             }
             checkpoint_path.write_text(json.dumps(checkpoint))
@@ -835,7 +909,7 @@ def test_canonical_result_discovery_ignores_benign_checkpoint_path_strings(tmp_p
         _materialize_native_runtime(Path(kwargs["cwd"]))
         checkpoint_path = Path(kwargs["cwd"]) / "data/runs/run-01/checkpoint.json"
         checkpoint = json.loads(checkpoint_path.read_text())
-        checkpoint["questions"][0]["resultFile"] = "legacy/arbitrary-name.json"
+        checkpoint["questions"][RAW_QID]["phases"]["search"]["resultFile"] = "legacy/arbitrary-name.json"
         checkpoint_path.write_text(json.dumps(checkpoint))
         return subprocess.CompletedProcess(argv, 0, "", "")
 
@@ -941,7 +1015,7 @@ def test_cleanup_discovery_unions_nonpending_checkpoint_and_validated_basic_evid
         path.chmod(0o600)
     checkpoint = json.loads(CHECKPOINT.read_text())
     targets = export._cleanup_target_union(
-        plan, {RAW_QID: checkpoint["questions"][0]}
+        plan, checkpoint["questions"]
     )
     by_tag = {target["container_tag"]: target for target in targets}
     assert by_tag[RAW_TAG]["discovery_sources"] == ["checkpoint", "guest_evidence"]
@@ -1066,6 +1140,44 @@ def test_public_projection_keeps_original_hit_order_and_private_gold_is_exactly_
     )
     assert case["checkpoint"]["sha256"] == _sha(tmp_path / "memorybench/data/runs/run-01/checkpoint.json")
     assert case["canonical_result"]["sha256"] == _sha(tmp_path / "memorybench/data/runs/run-01/results/q-01.json")
+
+
+def test_private_gold_preserves_numeric_ground_truth_from_the_canonical_dataset(
+    tmp_path: Path,
+) -> None:
+    plan = _plan(tmp_path)
+    payload = json.loads(plan.read_text(encoding="utf-8"))
+    dataset_path = Path(payload["dataset_path"])
+    dataset = json.loads(dataset_path.read_text(encoding="utf-8"))
+    dataset[0]["answer"] = 2026
+    dataset_path.write_text(json.dumps(dataset) + "\n", encoding="utf-8")
+    payload["dataset"]["sha256"] = _sha(dataset_path)
+    plan.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+    plan.chmod(0o600)
+
+    def stage(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        home = Path(kwargs["cwd"])
+        _materialize_native_runtime(home)
+        checkpoint_path = home / "data/runs/run-01/checkpoint.json"
+        checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        checkpoint["questions"][RAW_QID]["groundTruth"] = 2026
+        checkpoint_path.write_text(json.dumps(checkpoint) + "\n", encoding="utf-8")
+        result_path = home / "data/runs/run-01/results/q-01.json"
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+        result["groundTruth"] = 2026
+        result_path.write_text(json.dumps(result) + "\n", encoding="utf-8")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    result = _run(
+        plan,
+        **{**_valid_dependencies(tmp_path), "stage_runner": stage},
+    )
+
+    assert result.status == "VALID"
+    public = json.loads((tmp_path / "output/memorybench-export.v1.json").read_text())
+    private_path = tmp_path / "output" / public["cases"][0]["private_gold"]["path"]
+    private = json.loads(private_path.read_text())
+    assert private["ground_truth"] == 2026
 
 
 @pytest.mark.parametrize(
@@ -1398,16 +1510,18 @@ def test_selection_flows_through_additive_ingest_without_limit_or_sampling(
         checkpoint_path = Path(kwargs["cwd"]) / "data/runs/run-01/checkpoint.json"
         checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
         if checkpoint_targets is not None:
-            original = checkpoint["questions"][0]
+            original = checkpoint["questions"][RAW_QID]
             second_question = copy.deepcopy(original)
             second_question.update({
                 "questionId": "q-02",
                 "question": "Where is the second receipt?",
                 "groundTruth": "answer-two",
                 "containerTag": raw_tags["q-02"],
-                "resultFile": "results/q-02.json",
             })
-            checkpoint["questions"] = [second_question, original]
+            second_question["phases"]["search"]["resultFile"] = (
+                "data/runs/run-01/results/q-02.json"
+            )
+            checkpoint["questions"] = {"q-02": second_question, RAW_QID: original}
             checkpoint["targetQuestionIds"] = checkpoint_targets
             second_result = json.loads(RESULT.read_text(encoding="utf-8"))
             second_result.update({
@@ -1645,7 +1759,7 @@ def test_runtime_privacy_leak_in_an_otherwise_agreeing_hit_prevents_public_persi
         checkpoint = json.loads(checkpoint_path.read_text())
         canonical = json.loads(result_path.read_text())
         leak = {"content": f"leak:{private_value}", "score": 0.05}
-        checkpoint["questions"][0]["results"].append(leak)
+        checkpoint["questions"][RAW_QID]["phases"]["search"]["results"].append(leak)
         canonical["results"].append(leak)
         checkpoint_path.write_text(json.dumps(checkpoint) + "\n")
         result_path.write_text(json.dumps(canonical) + "\n")
@@ -1729,6 +1843,17 @@ def test_public_privacy_keeps_the_shared_scan_gate(tmp_path: Path) -> None:
             json.dumps({"trace": "/" + "home/private-user/runtime"}).encode(),
             _privacy_plan(tmp_path),
         )
+
+
+def test_public_privacy_does_not_misclassify_json_escaped_relative_backslashes(
+    tmp_path: Path,
+) -> None:
+    from memorybench.export import _validate_public_privacy
+
+    _validate_public_privacy(
+        json.dumps({"trace": r"notation\folder\note\more"}).encode(),
+        _privacy_plan(tmp_path),
+    )
 
 
 def test_cleanup_retains_checkpoint_target_after_late_private_projection_write_failure(
@@ -1883,7 +2008,9 @@ def test_conflicting_result_sources_select_no_result_and_no_hits(
         run = home / "data/runs/run-01"
         if conflict == "inline-mismatch":
             checkpoint = json.loads((run / "checkpoint.json").read_text())
-            checkpoint["questions"][0]["results"] = [{"content": "conflict", "score": 1.0}]
+            checkpoint["questions"][RAW_QID]["phases"]["search"]["results"] = [
+                {"content": "conflict", "score": 1.0}
+            ]
             (run / "checkpoint.json").write_text(json.dumps(checkpoint) + "\n")
         else:
             (run / "results/duplicate.json").write_bytes(RESULT.read_bytes())
@@ -2181,6 +2308,57 @@ def test_feedback3_shard_corruption_persists_partial_export_cleanup_and_final_ma
     assert manifest["finalized_at"] is not None
 
 
+def test_failed_indexing_without_a_result_persists_a_valid_partial_export_and_terminal_manifest(
+    tmp_path: Path,
+) -> None:
+    plan = _fresh_plan(tmp_path)
+    materialized = False
+
+    def stage(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        nonlocal materialized
+        home = Path(kwargs["cwd"])
+        if not materialized:
+            _materialize_native_runtime(home)
+            checkpoint_path = home / "data/runs/run-01/checkpoint.json"
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            phases = checkpoint["questions"][RAW_QID]["phases"]
+            phases["indexing"] = {
+                "status": "failed",
+                "startedAt": "2026-01-02T00:00:01Z",
+                "completedAt": "2026-01-02T00:00:02Z",
+                "error": "doctor failed",
+            }
+            phases["search"] = {
+                "status": "pending",
+                "startedAt": None,
+                "completedAt": None,
+            }
+            checkpoint_path.write_text(json.dumps(checkpoint) + "\n", encoding="utf-8")
+            (home / "data/runs/run-01/results/q-01.json").unlink()
+            materialized = True
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    result = _run(
+        plan,
+        checkout_verifier=lambda **_kwargs: "materialized",
+        provider_checkout_verifier=lambda _identity: None,
+        stage_runner=stage,
+        cleanup_runner=_cleanup(tmp_path / "output"),
+    )
+
+    assert result.status == "INVALID" and result.exit_code == 1
+    public_path = tmp_path / "output/memorybench-export.v1.json"
+    public = json.loads(public_path.read_text())
+    assert public["status"] == "partial"
+    assert "result_missing" in public["failure_codes"]
+    from memorybench.export import validate_export
+
+    validate_export(public, run_plan_path=plan)
+    manifest = json.loads((tmp_path / "output/manifest.json").read_text())
+    assert manifest["status"] == "INVALID"
+    assert manifest["finalized_at"] is not None
+
+
 def test_feedback3_manifest_timestamps_use_the_injected_aware_utc_clock_at_each_write(
     tmp_path: Path,
 ) -> None:
@@ -2401,7 +2579,9 @@ def test_feedback4_every_rejected_or_noncanonical_result_contributes_no_reader_h
             (run / "results/unexpected-question.json").write_text(json.dumps(extra) + "\n")
         elif mutation == "inline-mismatch":
             checkpoint = json.loads(checkpoint_path.read_text())
-            checkpoint["questions"][0]["results"] = [{"content": "different", "score": 1.0}]
+            checkpoint["questions"][RAW_QID]["phases"]["search"]["results"] = [
+                {"content": "different", "score": 1.0}
+            ]
             checkpoint_path.write_text(json.dumps(checkpoint) + "\n")
         elif mutation == "nonfinite":
             result = json.loads(result_path.read_text())
@@ -2416,7 +2596,7 @@ def test_feedback4_every_rejected_or_noncanonical_result_contributes_no_reader_h
             result_path.write_text("{malformed")
         elif mutation == "outside-result-file":
             checkpoint = json.loads(checkpoint_path.read_text())
-            checkpoint["questions"][0]["resultFile"] = "../../outside.json"
+            checkpoint["questions"][RAW_QID]["phases"]["search"]["resultFile"] = "../../outside.json"
             checkpoint_path.write_text(json.dumps(checkpoint) + "\n")
         elif mutation in {
             "question-mismatch", "type-mismatch", "gold-mismatch", "container-mismatch"

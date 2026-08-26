@@ -179,8 +179,13 @@ The Exomem MemoryBench guest transport SHALL cap live owned services across the
 whole staged run at `MEMORYBENCH_EXOMEM_MAX_LIVE_SERVICES`, a positive integer
 defaulting to one.  Admission SHALL be serialized across stage processes.  When
 a new container would exceed the cap, the least-recently-used live service
-SHALL be retired first and its owned process group and secure descriptor SHALL
-be proved absent before a replacement is spawned.  Residency retirement MAY
+SHALL first reconcile its derived state and require `graph_status` to be
+`current|refreshed`, then retire it and prove its owned process group and secure
+descriptor absent before a replacement is spawned.  Only
+`GRAPH_SYNC_STABILIZATION_EXHAUSTED` with `graph_status: unavailable` MAY retry
+the reconcile, with fresh request/idempotency identities and at most three
+total attempts; every other non-current response and exhaustion of that bound
+SHALL fail admission and clear all live services.  Residency retirement MAY
 preserve the owned vault and work root needed by a later stage; terminal
 container cleanup SHALL additionally prove owned guest-process and work-root
 absence.  A completed indexing step SHALL retire its now-idle service, and a
@@ -198,8 +203,14 @@ roots without calling the service-creation path.
 - **WHEN** at least five distinct container tags are admitted sequentially,
   including across separate stage processes
 - **THEN** no observation contains more than one live owned Exomem service and
-  each replacement starts only after the prior process group and descriptor are
-  absent
+each replacement starts only after the prior process group and descriptor are
+absent
+
+#### Scenario: Transient graph stabilization exhaustion is bounded
+- **WHEN** residency reconciliation returns exact
+  `GRAPH_SYNC_STABILIZATION_EXHAUSTED` before a later attempt proves current
+- **THEN** the provider retries with fresh mutation identities up to three total
+  attempts, retires only after proof, and fails closed if the bound is exhausted
 
 #### Scenario: Indexing and search retire as they go
 - **WHEN** indexing completes for a container or search returns or throws
@@ -478,7 +489,7 @@ Each referenced private-gold member SHALL reject unknown fields and contain
 exactly literals `protocol_version: "1.0.0"`, `schema_version: 1`, and
 `artifact_type: "memorybench-private-gold.v1"`; `case_id_hmac_sha256`; raw upstream
 `question_id` and `container_tag`; `question`, `question_type`, and
-`ground_truth`; original-order unique `answer_session_ids` as
+canonical source `ground_truth` as `string|integer`; original-order unique `answer_session_ids` as
 `string[]|null`; the checkpoint and
 canonical-result source pairs as `checkpoint_path`/`checkpoint_sha256` and
 `canonical_result_path`/`canonical_result_sha256`; and sorted-unique private `missing_fields`

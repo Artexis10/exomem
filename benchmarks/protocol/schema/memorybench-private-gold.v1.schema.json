@@ -88,8 +88,15 @@
       "type": "string"
     },
     "ground_truth": {
-      "title": "Ground Truth",
-      "type": "string"
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "integer"
+        }
+      ],
+      "title": "Ground Truth"
     },
     "missing_fields": {
       "items": {

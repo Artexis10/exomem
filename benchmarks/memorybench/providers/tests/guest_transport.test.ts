@@ -448,6 +448,7 @@ describe("guest transport", () => {
       EXOMEM_DISABLE_CORPUS_CACHE: "1",
       EXOMEM_VEC_BACKEND: "numpy",
       EXOMEM_LEXICAL_BACKEND: "python",
+      EXOMEM_ALLOW_CPU_TORCH: "1",
       HF_HUB_OFFLINE: "1",
       TRANSFORMERS_OFFLINE: "1",
     })
@@ -465,6 +466,55 @@ describe("guest transport", () => {
       .toEqual(transport.EXOMEM_LME_ENV)
     expect(environment.EXOMEM_VAULT_PATH).toBe("/owned/vault")
     expect(environment.EXOMEM_REST_API_KEY).toBe("owned-key")
+  })
+
+  test("Exomem doctor preserves a structured nonzero report for fail-closed inspection", async () => {
+    const transport = await import("../_guest_transport") as Record<string, unknown>
+    const parse = transport.parseExomemDoctorProcessResult as undefined |
+      ((result: { status: number | null; stdout: string }) => unknown)
+    expect(typeof parse).toBe("function")
+    const report = {
+      success: false,
+      profile: "hybrid",
+      checks: [{ id: "embeddings.sidecar", status: "fail" }],
+    }
+
+    expect(parse!({ status: 1, stdout: JSON.stringify(report) })).toEqual(report)
+    expect(() => parse!({ status: 1, stdout: JSON.stringify({ success: true }) })).toThrow(
+      "Exomem doctor failed"
+    )
+    expect(() => parse!({ status: 1, stdout: "not-json" })).toThrow("Exomem doctor failed")
+    expect(() => parse!({ status: 0, stdout: "not-json" })).toThrow(
+      "Exomem doctor returned non-JSON output"
+    )
+  })
+
+  test("Exomem writer-lease state is bound inside the owned service root", async () => {
+    const transport = await import("../_guest_transport") as Record<string, unknown>
+    const bind = transport.exomemOwnedStateEnvironment as undefined |
+      ((workRoot: string) => Record<string, string>)
+    expect(typeof bind).toBe("function")
+    const work = join(await root(), "service")
+    expect(bind!(work)).toEqual({
+      EXOMEM_WRITER_LEASE_STATE_DIR: join(work, "writer-lease-state"),
+    })
+
+    const source = await readFile(new URL("../_guest_transport.ts", import.meta.url), "utf8")
+    const expectation = source.slice(
+      source.indexOf("async function exomemDescriptorExpectation"),
+      source.indexOf("const exomemRetirements")
+    )
+    const launch = source.slice(
+      source.indexOf("export async function ensureExomemService"),
+      source.indexOf("export async function runExomemDoctor")
+    )
+    const doctor = source.slice(
+      source.indexOf("export async function runExomemDoctor"),
+      source.indexOf("async function processIsLive")
+    )
+    expect(expectation).toContain("...exomemOwnedStateEnvironment(work)")
+    expect(launch.match(/\.\.\.exomemOwnedStateEnvironment\(roots\.work\)/g)).toHaveLength(2)
+    expect(doctor).toContain("...exomemOwnedStateEnvironment(service.work_root)")
   })
 
   test("Exomem REST transport moves stable mutation identities to authenticated headers", async () => {

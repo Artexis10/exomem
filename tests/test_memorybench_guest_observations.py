@@ -20,6 +20,14 @@ SEARCH_LABELS = {
     "search.normalized_hit_ids",
 }
 INGEST_LABELS = {"ingest.transmitted_payloads"}
+SEMANTIC_CHECKS = [
+    "embeddings.enabled",
+    "dep.sentence-transformers",
+    "dep.torch",
+    "dep.pillow",
+    "models.cache",
+    "embeddings.sidecar",
+]
 
 
 def _write(directory: Path, sequence: int, event: str, data: dict) -> None:
@@ -66,6 +74,18 @@ def test_a_recorded_search_yields_the_transmitted_query_limit_and_hit_order(tmp_
     assert not observed.problems
 
 
+def test_the_expected_service_descriptor_is_not_misclassified_as_operation_evidence(
+    tmp_path: Path,
+) -> None:
+    _search_pair(tmp_path, query="which lantern?", limit=10, paths=["a.md"])
+    (tmp_path / "service.json").write_text("{}\n", encoding="utf-8")
+
+    observed = _project(tmp_path)
+
+    assert observed.search is not None
+    assert not observed.problems
+
+
 def test_a_request_with_no_paired_response_publishes_nothing(tmp_path: Path) -> None:
     _write(tmp_path, 1, "request", {
         "path": "/api/ask_memory",
@@ -106,7 +126,10 @@ def test_ingest_payload_digests_follow_transmission_order(tmp_path: Path) -> Non
 def test_doctor_evidence_becomes_verified_semantic_readiness(tmp_path: Path) -> None:
     _write(tmp_path, 1, "doctor-request", {"profile": "hybrid"})
     _write(tmp_path, 2, "doctor-response", {
-        "response": {"checks": {"models.cache": "pass", "embeddings.sidecar": "pass"}}
+        "response": {"checks": [
+            *({"id": check, "status": "pass"} for check in SEMANTIC_CHECKS),
+            {"id": "torch.cuda", "status": "warn"},
+        ]}
     })
     observed = _project(tmp_path)
 
@@ -121,7 +144,10 @@ def test_doctor_evidence_becomes_verified_semantic_readiness(tmp_path: Path) -> 
 def test_a_failing_doctor_check_is_reported_unverified_not_omitted(tmp_path: Path) -> None:
     _write(tmp_path, 1, "doctor-request", {"profile": "hybrid"})
     _write(tmp_path, 2, "doctor-response", {
-        "response": {"checks": {"models.cache": "pass", "embeddings.sidecar": "fail"}}
+        "response": {"checks": [
+            {"id": check, "status": "fail" if check == "embeddings.sidecar" else "pass"}
+            for check in SEMANTIC_CHECKS
+        ]}
     })
     observed = _project(tmp_path)
 
