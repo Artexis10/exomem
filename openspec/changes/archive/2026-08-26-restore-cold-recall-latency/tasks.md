@@ -26,6 +26,6 @@
 ## 3. Verification and delivery
 
 - [x] 3.1 Run focused tests, lint, and strict OpenSpec validation.
-- [ ] 3.2 Run the proportional lean test suite and latency gates.
-- [ ] 3.3 Build and install the candidate, then run distinct-query Windows acceptance against personal and POLLY cells.
-- [ ] 3.4 Obtain independent adversarial review, resolve findings, synchronize and archive the OpenSpec change, then deliver through the repository release workflow.
+- [x] 3.2 Run the proportional lean test suite and latency gates.
+- [x] 3.3 Build and install the candidate, then run distinct-query Windows acceptance against personal and POLLY cells.
+- [x] 3.4 Obtain independent adversarial review, resolve findings, synchronize and archive the OpenSpec change, then deliver through the repository release workflow.

@@ -21,7 +21,7 @@
 ## 3. Verification and Delivery
 
 - [x] 3.1 Run focused repair/publication tests, lint, privacy validation, and strict OpenSpec validation.
-- [ ] 3.2 Run the proportional lean suite and latency/convergence gates.
-- [ ] 3.3 Obtain independent adversarial review and resolve every attributable finding.
-- [ ] 3.4 Synchronize and archive the completed OpenSpec changes, then commit, push, and open the ready pull request.
-- [ ] 3.5 Merge through required checks, cut the release, deploy personal and POLLY candidates, and accept readiness plus distinct live retrieval queries.
+- [x] 3.2 Run the proportional lean suite and latency/convergence gates.
+- [x] 3.3 Obtain independent adversarial review and resolve every attributable finding.
+- [x] 3.4 Synchronize and archive the completed OpenSpec changes, then commit, push, and open the ready pull request.
+- [x] 3.5 Merge through required checks, cut the release, deploy personal and POLLY candidates, and accept readiness plus distinct live retrieval queries.
