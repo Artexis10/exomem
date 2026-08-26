@@ -743,14 +743,16 @@ that edge payload and emits only the required empty lower-variant rows. A lower-
 policy projection therefore cannot turn an otherwise valid semantic write into a graph
 publication refusal or persist raw graph authority below L6.
 
-The existing-page semantic writer, semantic creation writers, and semantic move writer
+The existing-page semantic writer, semantic creation writers, semantic move writer, and
+semantic trash-recovery writer
 derive their graph replacements from the freshest validated detached before-corpus
 carried into the mutation boundary plus the exact guarded planned-write overlay. A move
-starts from its exact detached after-corpus, then overlays only its guarded auxiliary
-writes. These paths do not reopen the live graph or walk the vault again. The overlay
+or recovery starts from its exact detached after-corpus, then overlays only its guarded
+content and auxiliary writes. These paths do not reopen the live graph or walk the vault
+again. The overlay
 re-resolves title-dependent links and reverse relations, so the replacement set includes
-directly changed, created, or moved paths and otherwise-unchanged logical sources whose
-outgoing edge tuple changes. The provider is invoked lazily only when the active tuple
+directly changed, created, moved, or restored paths and otherwise-unchanged logical
+sources whose outgoing edge tuple changes. The provider is invoked lazily only when the active tuple
 contains a graph family; open and lexical-only writes do no graph-producer work. Other
 live writer families remain blocked until they supply the same target-bound replacement
 contract.

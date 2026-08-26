@@ -3340,6 +3340,106 @@ def test_v4_file_recovery_inserts_row_and_publishes_log_once(
     assert {item.item_identity: item.content_hash for item in items} == expected
 
 
+def test_v4_file_recovery_publishes_resolved_graph_successors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = int(time.time())
+    monkeypatch.setenv(
+        "EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-state")
+    )
+    writer_lease.reset_managers_for_tests()
+    vault = tmp_path / "vault"
+    restored_relative = "Knowledge Base/Notes/private.md"
+    referrer_relative = "Knowledge Base/Notes/referrer.md"
+    log_relative = "Knowledge Base/log.md"
+    trash_relative = "Knowledge Base/_trash/2026-08-25/120000-private.md"
+    restored_source = "---\ntitle: Private\nstatus: draft\n---\n\nRestored.\n"
+    referrer_source = (
+        "---\ntitle: Referrer\nstatus: draft\n---\n\n"
+        "See [[Knowledge Base/Notes/private]].\n"
+    )
+    log_before = "# Log\n\n---\n"
+    for path, source in (
+        (referrer_relative, referrer_source),
+        (log_relative, log_before),
+        (trash_relative, restored_source),
+    ):
+        target = vault / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(source, encoding="utf-8")
+    trash = vault / trash_relative
+    trash.with_name(f"{trash.name}.meta.json").write_text(
+        json.dumps({"original_path": restored_relative}),
+        encoding="utf-8",
+    )
+    _write_workspace(vault, _documents(ceiling=6))
+    migration = _migrate_with_projection_items(
+        vault,
+        items=(
+            (referrer_relative, referrer_source),
+            (log_relative, log_before),
+        ),
+        ceiling=6,
+        graph_edges=(),
+        now=now,
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+
+    recovered = recover_module.recover_from_trash(
+        vault,
+        trash_path=trash_relative,
+        today=dt.date(2026, 8, 25),
+    )
+
+    assert recovered.restored_path == restored_relative
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    active, manifest, items = _load_active_projection_items(
+        vault,
+        activation_epoch=2,
+        activation_state_digest=custody.control.activation_state_digest or "",
+    )
+    evidence = projection_store.namespace_evidence_from_snapshot(active)
+    graph_root = next(
+        root for root in evidence.required_measurement_roots if root.lane == "graph"
+    )
+    family = projection_measurement_store.MeasurementFamilyKey(
+        namespace_key=evidence.manifest.namespace_key,
+        lane=graph_root.lane,
+        extractor_version=graph_root.extractor_version,
+        model_version=graph_root.model_version,
+    )
+    namespace = projection_store.bind_active_projection_namespace(
+        active,
+        manifest=manifest,
+        items=items,
+    )
+    _graph_manifest, graph_rows = projection_measurement_store.load_measurement_store(
+        vault,
+        namespace=namespace,
+        family=family,
+        expected_rows_digest=graph_root.rows_digest,
+    )
+    assert tuple(
+        edge
+        for row in graph_rows
+        for edge in row.edges
+        if edge.source_item_identity == referrer_relative
+    ) == (
+        projected_graph.ProjectionGraphEdge(
+            referrer_relative,
+            restored_relative,
+            "links_to",
+        ),
+    )
+
+
 def test_v4_directory_recovery_inserts_every_row_in_one_generation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
