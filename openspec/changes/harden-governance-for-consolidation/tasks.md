@@ -530,8 +530,10 @@ made before both PRs and their combined verification are complete.
   successors, verify the complete active family, carry only content-identical image/video
   rows, require target-item/content-hash-bound replacements for changed media, exclude
   `parent_media` frame companions from duplicate binary ownership, and publish the target
-  namespace plus complete vector/CLIP roots atomically. Keep graph and any unsupported
-  required family blocked until its own complete successor builder lands.
+  namespace plus complete vector/CLIP roots atomically. Connect live scene sampling and
+  bulk backfill to that successor with the already-computed canonical timestamp/vector
+  tuple, guarded parent-sidecar binding, and no second model pass. Keep graph and any
+  unsupported required family blocked until its own complete successor builder lands.
 - [x] 8.12 Implement BM25 posting intersection before cap, projected-corpus DF/IDF and
   exact top-k; exact filtered projected-vector top-k with visible-lane warming/disable;
   projected-only reranking before final top-k; and L6-only pre-cap CLIP authorization.

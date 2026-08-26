@@ -24,9 +24,10 @@ import os
 import re
 import tempfile
 from pathlib import Path
-from typing import BinaryIO
+from typing import TYPE_CHECKING, BinaryIO
 
 from . import embeddings, index_sync
+from .governance import projected_retrieval
 from .preserve import _render_sidecar
 from .vault import (
     MISSING_CONTENT_HASH,
@@ -34,7 +35,12 @@ from .vault import (
     PlannedWrite,
     PreparedBinaryContent,
     batch_atomic_write,
+    content_hash,
+    read_guarded_text,
 )
+
+if TYPE_CHECKING:
+    from .governance import catalog_publication
 
 log = logging.getLogger(__name__)
 
@@ -69,6 +75,19 @@ def frame_timestamp_ms(ts: float) -> int:
     if not 0 <= value <= _MAX_FRAME_TIMESTAMP_MS:
         raise ValueError("scene-frame timestamp is outside the supported range")
     return value
+
+
+def projection_clip_samples(
+    frames: list[tuple[float, object]],
+) -> tuple[projected_retrieval.ProjectionClipSample, ...]:
+    """Canonicalize one scene embedding result for immutable v4 publication."""
+    return tuple(
+        projected_retrieval.ProjectionClipSample(
+            frame_timestamp_ms(timestamp),
+            tuple(float(value) for value in vector),
+        )
+        for timestamp, vector in frames
+    )
 
 
 def _frame_filename_ms(index: int, milliseconds: int) -> str:
@@ -245,11 +264,14 @@ def write_scene_frames(
     video_path: Path,
     scenes_with_images: list[tuple[embeddings.Scene, object]],
     *,
+    parent_clip_samples: tuple[projected_retrieval.ProjectionClipSample, ...] | None = None,
     today: dt.date | None = None,
 ) -> list[tuple[Path, Path]]:
     """Persist one JPEG + pending sidecar per scene → `[(jpg_path, sidecar_path)]`.
 
     Fresh JPEG bytes and their classified sidecars share one held rollback set.
+    When the caller supplies the scene sampler's canonical parent CLIP samples,
+    exact-v4 binds them to the unchanged parent sidecar in that same successor.
     Open/schema-v3 vaults retain legacy delete-then-insert reprocessing. Exact-v4
     refuses an existing frame set before deletion until removal publication has
     its own atomic successor protocol. Encoding failures remain per-frame soft
@@ -265,6 +287,39 @@ def write_scene_frames(
     except (ValueError, OSError) as e:
         log.warning("scene frames skipped for %s: %s", video_path.name, e)
         return []
+    parent_sidecar_guard: PathGuard | None = None
+    clip_replacements: tuple[catalog_publication.ClipMeasurementReplacement, ...]
+    if parent_clip_samples is None:
+        clip_replacements = ()
+    else:
+        from .governance import catalog_publication
+
+        if type(parent_clip_samples) is not tuple or any(
+            not isinstance(sample, projected_retrieval.ProjectionClipSample)
+            for sample in parent_clip_samples
+        ):
+            raise ValueError("parent CLIP samples must be a finite immutable tuple")
+        expected_timestamps = tuple(
+            frame_timestamp_ms(scene.rep_ts) for scene, _image in scenes_with_images
+        )
+        if (
+            tuple(sample.frame_timestamp_ms for sample in parent_clip_samples)
+            != expected_timestamps
+        ):
+            raise ValueError("parent CLIP samples do not match the scene frame set")
+        parent_sidecar_rel = f"{video_rel}.md"
+        parent_source, parent_sidecar_guard = read_guarded_text(
+            root,
+            root / parent_sidecar_rel,
+        )
+        parent_source = parent_source.replace("\r\n", "\n").replace("\r", "\n")
+        clip_replacements = (
+            catalog_publication.ClipMeasurementReplacement(
+                item_identity=parent_sidecar_rel,
+                content_hash=content_hash(parent_source),
+                samples=parent_clip_samples,
+            ),
+        )
     d = frames_dir_for(canonical_video)
     # Tag context from Knowledge Base/Evidence/<scope>/<category>/… (same derivation
     # as preserve.ensure_media_sidecar).
@@ -342,6 +397,7 @@ def write_scene_frames(
             prepared_catalog = catalog_publication.prepare_planned_markdown_batch(
                 root,
                 writes=tuple(writes),
+                clip_replacements=clip_replacements,
             )
         except catalog_publication.CatalogPublicationError as error:
             raise catalog_publication.CatalogCommitError(
@@ -358,8 +414,14 @@ def write_scene_frames(
         batch_atomic_write(
             writes,
             vault_root=root,
-            required_guards=(parent_identity_guard,),
-            completion_guards=(parent_content_guard,),
+            required_guards=(
+                parent_identity_guard,
+                *((parent_sidecar_guard,) if parent_sidecar_guard is not None else ()),
+            ),
+            completion_guards=(
+                parent_content_guard,
+                *((parent_sidecar_guard,) if parent_sidecar_guard is not None else ()),
+            ),
         )
         try:
             catalog_publication.publish_markdown_batch(prepared_catalog)

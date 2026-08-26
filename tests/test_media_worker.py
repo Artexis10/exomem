@@ -1409,6 +1409,7 @@ def test_scene_artifacts_and_reembed_publish_under_guard(
     worker = media_worker.MediaWorker(vault, execution_mode="inline")
     frames = [(1.0, np.ones(embeddings.CLIP_DIM, dtype=np.float32))]
     pairs = [(object(), object())]
+    published_samples = []
 
     def embed_scenes_outside(_path):
         assert manager.depth == 0
@@ -1422,6 +1423,7 @@ def test_scene_artifacts_and_reembed_publish_under_guard(
     def scene_commit_inside(*_args, **_kwargs):
         assert manager.depth > 0
         manager.events.append("scene-commit")
+        published_samples.extend(_kwargs["parent_clip_samples"])
         return []
 
     def reembed_inside(*_args, **_kwargs):
@@ -1458,6 +1460,9 @@ def test_scene_artifacts_and_reembed_publish_under_guard(
     assert "clip-commit" in manager.events
     assert "scene-commit" in manager.events
     assert "reembed-derived" in manager.events
+    assert len(published_samples) == 1
+    assert published_samples[0].frame_timestamp_ms == 1_000
+    assert published_samples[0].vector == tuple(float(value) for value in frames[0][1])
     assert {
         "operation": "background_media_clip_commit",
         "holder_kind": "background",

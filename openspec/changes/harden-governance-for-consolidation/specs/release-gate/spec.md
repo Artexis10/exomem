@@ -174,6 +174,15 @@ publish atomically; graph or another unsupported required family SHALL remain bl
   excludes the frame companion from binary ownership, and activates its complete vector
   and CLIP roots in the same catalog transaction
 
+#### Scenario: Scene sampling publishes the parent row without a second model pass
+
+- **WHEN** the live media worker or bulk backfill computes video scene vectors and
+  persists the corresponding frame companions
+- **THEN** it canonicalizes those same vectors once to bounded integer milliseconds,
+  binds them to the guarded parent sidecar, and publishes the parent CLIP replacement,
+  companion catalog rows, measurement roots, and active tuple together without
+  re-running CLIP or creating pixel rows for the companions
+
 #### Scenario: Incomplete visual state refuses before bytes
 
 - **WHEN** the active CLIP family is incomplete or a replacement has a stale item,
