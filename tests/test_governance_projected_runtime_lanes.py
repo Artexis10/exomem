@@ -167,7 +167,7 @@ def _runtime(
                 extractor_version=_CLIP_EXTRACTOR,
                 model_version=embeddings.CLIP_MODEL_NAME,
                 measurement_count=len(clips),
-                vector_dimension=len(clips[0].vector),
+                vector_dimension=len(clips[0].samples[0].vector),
             )
         )
     if graphs:
@@ -219,6 +219,24 @@ def _clip(variant, value):
             model_version=embeddings.CLIP_MODEL_NAME,
         ),
         value,
+    )
+
+
+def _video_clip(variant, *samples):
+    return projected_retrieval.ProjectionClipMeasurement(
+        projections.MeasurementKey(
+            projection_variant_id=variant.projection_variant_id,
+            lane="clip",
+            extractor_version=_CLIP_EXTRACTOR,
+            model_version=embeddings.CLIP_MODEL_NAME,
+        ),
+        samples=tuple(
+            projected_retrieval.ProjectionClipSample(
+                frame_timestamp_ms=timestamp_ms,
+                vector=vector,
+            )
+            for timestamp_ms, vector in samples
+        ),
     )
 
 
@@ -308,6 +326,45 @@ def test_hybrid_runtime_fuses_complete_projected_lanes_and_graph(monkeypatch, tm
     assert result.hits[2].graph_in_degree == 2
     assert result.hits[2].graph_hop is False
     assert result.warming_components == ()
+
+
+def test_projected_video_clip_result_exposes_the_best_frame_timestamp(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    video = _variant(
+        "Knowledge Base/video.md",
+        "4" * 64,
+        "video",
+        fields={"media_type": "video"},
+    )
+    runtime = _runtime(
+        (_item(video),),
+        clips=(
+            _video_clip(
+                video,
+                (1_000, (0.0, 1.0)),
+                (8_500, (1.0, 0.0)),
+            ),
+        ),
+    )
+    monkeypatch.setattr(embeddings, "embed_clip_text", lambda query: [1.0, 0.0])
+
+    result = projection_runtime.find_projected_hits(
+        tmp_path,
+        runtime,
+        query="scene",
+        limit=1,
+        mode="hybrid",
+        graph=False,
+        rerank=False,
+        principal=principal.owner_principal(surface="library"),
+        purpose=None,
+    )
+
+    assert len(result.hits) == 1
+    assert result.hits[0].clip_frame_ts == 8.5
+    assert result.hits[0].as_dict()["clip_match_at"] == "0:08"
 
 
 def test_graph_lane_prefers_typed_edges_and_preserves_provenance(tmp_path):

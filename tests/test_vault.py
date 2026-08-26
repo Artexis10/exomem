@@ -284,6 +284,109 @@ def test_batch_write_rolls_back_binary_when_later_publication_fails(
     assert not companion.exists()
 
 
+def test_batch_completion_guard_rolls_back_when_source_changes_after_last_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "Evidence" / "parent.bin"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"reviewed parent")
+    _data, completion_guard = vault.read_bounded_guarded_bytes(
+        tmp_path,
+        "Evidence/parent.bin",
+        limit=len(b"reviewed parent"),
+    )
+    stable_guard = vault.PathGuard.capture(
+        tmp_path,
+        "Evidence/parent.bin",
+        leaf_policy="stable",
+    )
+    binary = tmp_path / "Evidence" / "frame.jpg"
+    companion = tmp_path / "Evidence" / "frame.jpg.md"
+    real_hook = vault._after_batch_destination_published
+
+    def change_source_after_companion(path: Path) -> None:
+        real_hook(path)
+        if path == companion:
+            source.write_bytes(b"changed parent!")
+
+    monkeypatch.setattr(
+        vault,
+        "_after_batch_destination_published",
+        change_source_after_companion,
+    )
+
+    with pytest.raises(vault.PathGuardError) as changed:
+        vault.batch_atomic_write(
+            [
+                vault.PlannedWrite(
+                    binary,
+                    vault.PreparedBinaryContent(
+                        io.BytesIO(b"frame"),
+                        len(b"frame"),
+                        hashlib.sha256(b"frame").hexdigest(),
+                    ),
+                    create_only=True,
+                    expected_hash=vault.MISSING_CONTENT_HASH,
+                ),
+                vault.PlannedWrite(
+                    companion,
+                    "companion",
+                    create_only=True,
+                    expected_hash=vault.MISSING_CONTENT_HASH,
+                ),
+            ],
+            vault_root=tmp_path,
+            required_guards=(stable_guard,),
+            completion_guards=(completion_guard,),
+        )
+
+    assert changed.value.code == "PATH_GUARD_CONTENT"
+    assert not binary.exists()
+    assert not companion.exists()
+
+
+def test_batch_completion_guard_hash_work_is_independent_of_write_count(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "Evidence" / "parent.bin"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"reviewed parent")
+    _data, completion_guard = vault.read_bounded_guarded_bytes(
+        tmp_path,
+        "Evidence/parent.bin",
+        limit=len(b"reviewed parent"),
+    )
+    real_snapshot = vault._read_bounded_guarded_snapshot
+    reads = 0
+
+    def count_snapshot(*args, **kwargs):
+        nonlocal reads
+        target = args[1] if len(args) > 1 else kwargs.get("target")
+        if target == "Evidence/parent.bin":
+            reads += 1
+        return real_snapshot(*args, **kwargs)
+
+    monkeypatch.setattr(vault, "_read_bounded_guarded_snapshot", count_snapshot)
+
+    vault.batch_atomic_write(
+        [
+            vault.PlannedWrite(
+                tmp_path / "Evidence" / f"frame-{index}.md",
+                f"frame {index}",
+                create_only=True,
+                expected_hash=vault.MISSING_CONTENT_HASH,
+            )
+            for index in range(12)
+        ],
+        vault_root=tmp_path,
+        completion_guards=(completion_guard,),
+    )
+
+    assert reads == 2
+
+
 def test_path_guards_share_new_parent_chain_safely(tmp_path: Path) -> None:
     paths = [tmp_path / "new/nested/one.md", tmp_path / "new/nested/two.md"]
     writes = [

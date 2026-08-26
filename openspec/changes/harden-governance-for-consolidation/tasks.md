@@ -485,7 +485,9 @@ made before both PRs and their combined verification are complete.
 - [ ] 8.3 Add red CLIP/non-text pairs where the highest hidden pixel/keyframe match would
   consume the cap. Assert authorization occurs inside CLIP before its cap, L6 visible
   visual top-k is exact, and L1-L5 media participates only through its authorized textual
-  companion projection or is excluded from the binary lane.
+  companion projection or is excluded from the binary lane. Bind each image to one
+  untimestamped sample and each video to one through forty strictly timestamp-ordered
+  samples, returning the parent once with its earliest best `frame_timestamp_ms`.
 - [ ] 8.4 Add red graph pairs where hidden vertices/edges change in-degree, out-degree,
   reachability, shortest paths, relation matches, seed expansion, graph-assisted fusion,
   and pagination; assert the visible graph/order is identical to physical absence.

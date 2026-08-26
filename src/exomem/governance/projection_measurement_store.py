@@ -29,6 +29,7 @@ _STORE_FILENAME = "rows.sqlite"
 _STORE_STATUS = "measurement-rows-ready"
 _ROW_DOMAIN = b"exomem.authorization-projection-measurement-row.v1"
 _STORE_DOMAIN = b"exomem.authorization-projection-measurements.v1"
+_CLIP_PAYLOAD_PREFIX = b"exomem.projection-clip-samples.v1\x00"
 _LANES = frozenset({"vector", "clip", "graph"})
 _HEX = frozenset("0123456789abcdef")
 _TABLES = frozenset({"measurement_meta", "measurement_rows"})
@@ -266,6 +267,26 @@ def _vector_payload(vector: tuple[float, ...]) -> bytes:
     return struct.pack(f">{len(canonical)}d", *canonical)
 
 
+def _clip_payload(
+    measurement: projected_retrieval.ProjectionClipMeasurement,
+) -> bytes:
+    if (
+        len(measurement.samples) == 1
+        and measurement.samples[0].frame_timestamp_ms is None
+    ):
+        return _vector_payload(measurement.samples[0].vector)
+    output = bytearray(_CLIP_PAYLOAD_PREFIX)
+    output.extend(len(measurement.samples).to_bytes(4, "big"))
+    for sample in measurement.samples:
+        if sample.frame_timestamp_ms is None:
+            output.append(0)
+        else:
+            output.append(1)
+            output.extend(sample.frame_timestamp_ms.to_bytes(4, "big"))
+        output.extend(_vector_payload(sample.vector))
+    return bytes(output)
+
+
 def _graph_payload(measurement: projected_graph.ProjectionGraphMeasurement) -> bytes:
     return projections.canonical_jcs(
         {
@@ -282,14 +303,10 @@ def _graph_payload(measurement: projected_graph.ProjectionGraphMeasurement) -> b
 
 
 def _measurement_payload(measurement: ProjectionMeasurement) -> bytes:
-    if isinstance(
-        measurement,
-        (
-            projected_retrieval.ProjectionVectorMeasurement,
-            projected_retrieval.ProjectionClipMeasurement,
-        ),
-    ):
+    if isinstance(measurement, projected_retrieval.ProjectionVectorMeasurement):
         return _vector_payload(measurement.vector)
+    if isinstance(measurement, projected_retrieval.ProjectionClipMeasurement):
+        return _clip_payload(measurement)
     if isinstance(measurement, projected_graph.ProjectionGraphMeasurement):
         return _graph_payload(measurement)
     raise projections.ProjectionCanonicalizationError(
@@ -336,7 +353,11 @@ def _materialize(
                 projected_retrieval.ProjectionClipMeasurement,
             ),
         )
-        vector_dimension = len(first.vector)
+        vector_dimension = (
+            len(first.samples[0].vector)
+            if isinstance(first, projected_retrieval.ProjectionClipMeasurement)
+            else len(first.vector)
+        )
     if family.lane == "graph":
         graph_edge_count = sum(
             len(row.measurement.edges)
@@ -531,6 +552,58 @@ def _decode_vector(
         raise MeasurementStoreMismatch("measurement vector does not verify") from error
 
 
+def _decode_clip_samples(
+    payload: bytes,
+    *,
+    dimension: int,
+) -> tuple[projected_retrieval.ProjectionClipSample, ...]:
+    if len(payload) == dimension * 8:
+        return (
+            projected_retrieval.ProjectionClipSample(
+                frame_timestamp_ms=None,
+                vector=_decode_vector(payload, dimension=dimension),
+            ),
+        )
+    if not payload.startswith(_CLIP_PAYLOAD_PREFIX):
+        raise MeasurementStoreMismatch("CLIP measurement samples do not verify")
+    cursor = len(_CLIP_PAYLOAD_PREFIX)
+    if len(payload) < cursor + 4:
+        raise MeasurementStoreMismatch("CLIP measurement samples do not verify")
+    count = int.from_bytes(payload[cursor : cursor + 4], "big")
+    cursor += 4
+    if not 1 <= count <= projected_retrieval.MAX_PROJECTED_CLIP_SAMPLES_PER_VARIANT:
+        raise MeasurementStoreMismatch("CLIP measurement samples do not verify")
+    vector_bytes = dimension * 8
+    samples: list[projected_retrieval.ProjectionClipSample] = []
+    for _index in range(count):
+        if cursor >= len(payload):
+            raise MeasurementStoreMismatch("CLIP measurement samples do not verify")
+        tag = payload[cursor]
+        cursor += 1
+        if tag == 0:
+            timestamp_ms = None
+        elif tag == 1 and len(payload) >= cursor + 4:
+            timestamp_ms = int.from_bytes(payload[cursor : cursor + 4], "big")
+            cursor += 4
+        else:
+            raise MeasurementStoreMismatch("CLIP measurement samples do not verify")
+        if len(payload) < cursor + vector_bytes:
+            raise MeasurementStoreMismatch("CLIP measurement samples do not verify")
+        samples.append(
+            projected_retrieval.ProjectionClipSample(
+                frame_timestamp_ms=timestamp_ms,
+                vector=_decode_vector(
+                    payload[cursor : cursor + vector_bytes],
+                    dimension=dimension,
+                ),
+            )
+        )
+        cursor += vector_bytes
+    if cursor != len(payload):
+        raise MeasurementStoreMismatch("CLIP measurement samples do not verify")
+    return tuple(samples)
+
+
 def _decode_graph(payload: bytes) -> tuple[projected_graph.ProjectionGraphEdge, ...]:
     try:
         value = json.loads(payload)
@@ -589,7 +662,10 @@ def _decode_measurement(
             assert manifest.vector_dimension is not None
             return projected_retrieval.ProjectionClipMeasurement(
                 measurement_key=key,
-                vector=_decode_vector(payload, dimension=manifest.vector_dimension),
+                samples=_decode_clip_samples(
+                    payload,
+                    dimension=manifest.vector_dimension,
+                ),
             )
         edges = _decode_graph(payload)
         if len(edges) != len(json.loads(payload)["edges"]):

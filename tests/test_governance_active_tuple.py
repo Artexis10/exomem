@@ -31,6 +31,7 @@ from exomem import (
     media_processing,
     preserve,
     reserved_paths,
+    scene_frames,
     semantic_writes,
     writer_lease,
 )
@@ -3866,6 +3867,96 @@ def test_media_reconciliation_publishes_new_sidecar_in_next_v4_catalog(
             vault_module.content_hash(sidecar.read_text(encoding="utf-8")),
         )
     ]
+
+
+def test_scene_frame_bytes_and_companion_publish_one_v4_catalog_successor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Image:
+        size = (1920, 1080)
+
+        def resize(self, _size):
+            return self
+
+        def convert(self, _mode):
+            return self
+
+        def save(self, target, **_kwargs) -> None:
+            target.write(b"\xff\xd8governed-scene")
+
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    video = vault / "Knowledge Base/Evidence/Video/demo.mp4"
+    video.parent.mkdir(parents=True, exist_ok=True)
+    video.write_bytes(b"governed video")
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_empty_projection_catalog(vault, now=now)
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+
+    pairs = scene_frames.write_scene_frames(
+        vault,
+        video,
+        [
+            (
+                embeddings.Scene(
+                    start_ts=8.0,
+                    end_ts=12.0,
+                    rep_ts=10.0,
+                    boundary_score=0.5,
+                ),
+                Image(),
+            )
+        ],
+    )
+
+    assert len(pairs) == 1
+    jpg, sidecar = pairs[0]
+    assert jpg.read_bytes() == b"\xff\xd8governed-scene"
+    companions.classify(vault, jpg.relative_to(vault).as_posix())
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    active, _manifest, items = _load_active_projection_items(
+        vault,
+        activation_epoch=2,
+        activation_state_digest=custody.control.activation_state_digest or "",
+    )
+    assert active.active.catalog_generation == 2
+    assert [(item.item_identity, item.content_hash) for item in items] == [
+        (
+            sidecar.relative_to(vault).as_posix(),
+            vault_module.content_hash(sidecar.read_text(encoding="utf-8")),
+        )
+    ]
+
+    before = {path: path.read_bytes() for path in (jpg, sidecar)}
+    with pytest.raises(catalog_publication.CatalogCommitError) as blocked:
+        scene_frames.write_scene_frames(
+            vault,
+            video,
+            [
+                (
+                    embeddings.Scene(
+                        start_ts=38.0,
+                        end_ts=42.0,
+                        rep_ts=40.0,
+                        boundary_score=0.5,
+                    ),
+                    Image(),
+                )
+            ],
+        )
+
+    assert blocked.value.code == "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED"
+    assert {path: path.read_bytes() for path in (jpg, sidecar)} == before
+    assert not list(jpg.parent.glob("*t40000ms.jpg"))
+    custody_after = authorization_custody.load_authorization_custody(vault, now=now + 2)
+    assert custody_after.control.activation_epoch == 2
 
 
 def test_media_extraction_update_publishes_exact_v4_catalog_successor(

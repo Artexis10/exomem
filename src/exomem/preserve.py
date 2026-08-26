@@ -654,6 +654,9 @@ def _render_sidecar(
     governance_artifact_path: str | None = None,
     governance_artifact_sha256: str | None = None,
     governance_artifact_size: int | None = None,
+    governance_parent_path: str | None = None,
+    governance_parent_sha256: str | None = None,
+    governance_frame_timestamp_ms: int | None = None,
     tree: str = "Evidence",
 ) -> str:
     """Sidecar .md describing a preserved binary artifact.
@@ -695,7 +698,26 @@ def _render_sidecar(
     if governance_artifact_path is not None:
         if governance_artifact_sha256 is None or governance_artifact_size is None:
             raise ValueError("governance companion requires an exact artifact identity")
-        artifact_class = "media" if media_type else "binary"
+        scene_binding = any(
+            value is not None
+            for value in (
+                governance_parent_path,
+                governance_parent_sha256,
+                governance_frame_timestamp_ms,
+            )
+        )
+        if scene_binding and (
+            governance_parent_path is None
+            or governance_parent_sha256 is None
+            or type(governance_frame_timestamp_ms) is not int
+            or not 0 <= governance_frame_timestamp_ms <= 4_294_967_295
+            or parent_media != governance_parent_path
+            or media_type != "image"
+        ):
+            raise ValueError("scene-frame companion requires an exact parent binding")
+        artifact_class = (
+            "scene_frame" if scene_binding else ("media" if media_type else "binary")
+        )
         lines.extend(
             (
                 "governance_companion:",
@@ -707,7 +729,15 @@ def _render_sidecar(
                 f"  artifact_size: {governance_artifact_size}",
             )
         )
-        if media_type:
+        if scene_binding:
+            lines.extend(
+                (
+                    f"  parent_path: {yaml_scalar(governance_parent_path)}",
+                    f"  parent_sha256: {governance_parent_sha256}",
+                    f"  frame_timestamp_ms: {governance_frame_timestamp_ms}",
+                )
+            )
+        elif media_type:
             lines.append(f"  media_type: {media_type}")
             lines.append(f"  original_filename: {yaml_scalar(artifact_name)}")
         lines.extend(

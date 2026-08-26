@@ -151,8 +151,16 @@ class ProjectedLexicalHit:
     score: float
     search_fields: Mapping[str, str]
     snippet: str
+    clip_frame_timestamp_ms: int | None = None
 
     def __post_init__(self) -> None:
+        if self.clip_frame_timestamp_ms is not None and (
+            type(self.clip_frame_timestamp_ms) is not int
+            or not 0 <= self.clip_frame_timestamp_ms <= 4_294_967_295
+        ):
+            raise projections.ProjectionCanonicalizationError(
+                "projected CLIP hit timestamp must be a bounded integer millisecond value"
+            )
         object.__setattr__(self, "search_fields", MappingProxyType(dict(self.search_fields)))
 
 
@@ -189,11 +197,62 @@ class ProjectionVectorMeasurement:
 
 
 @dataclass(frozen=True, slots=True)
+class ProjectionClipSample:
+    """One canonical pixel/keyframe vector within a projected media row."""
+
+    frame_timestamp_ms: int | None
+    vector: tuple[float, ...]
+
+    def __post_init__(self) -> None:
+        if self.frame_timestamp_ms is not None and (
+            type(self.frame_timestamp_ms) is not int
+            or not 0 <= self.frame_timestamp_ms <= 4_294_967_295
+        ):
+            raise projections.ProjectionCanonicalizationError(
+                "CLIP frame timestamp must be a bounded integer millisecond value"
+            )
+        vector = _vector(self.vector, "CLIP projection vector")
+        if math.sqrt(sum(value * value for value in vector)) == 0:
+            raise projections.ProjectionCanonicalizationError(
+                "CLIP projection vector must have non-zero magnitude"
+            )
+        object.__setattr__(self, "vector", vector)
+
+
+MAX_PROJECTED_CLIP_SAMPLES_PER_VARIANT = 40
+
+
+@dataclass(frozen=True, slots=True, init=False)
 class ProjectionClipMeasurement:
-    """One principal-free CLIP measurement beneath an L6 projection row."""
+    """One principal-free image or multi-keyframe video measurement row."""
 
     measurement_key: projections.MeasurementKey
-    vector: tuple[float, ...]
+    samples: tuple[ProjectionClipSample, ...]
+
+    def __init__(
+        self,
+        measurement_key: projections.MeasurementKey,
+        vector: tuple[float, ...] | None = None,
+        *,
+        samples: tuple[ProjectionClipSample, ...] | None = None,
+    ) -> None:
+        if (vector is None) == (samples is None):
+            raise projections.ProjectionCanonicalizationError(
+                "CLIP measurement requires either one image vector or canonical samples"
+            )
+        if vector is not None:
+            normalized = (
+                ProjectionClipSample(frame_timestamp_ms=None, vector=vector),
+            )
+        else:
+            if samples is None:
+                raise projections.ProjectionCanonicalizationError(
+                    "CLIP measurement samples are unavailable"
+                )
+            normalized = samples
+        object.__setattr__(self, "measurement_key", measurement_key)
+        object.__setattr__(self, "samples", normalized)
+        self.__post_init__()
 
     def __post_init__(self) -> None:
         if not isinstance(self.measurement_key, projections.MeasurementKey):
@@ -204,12 +263,44 @@ class ProjectionClipMeasurement:
             raise projections.ProjectionCanonicalizationError(
                 "CLIP measurement key has an invalid lane"
             )
-        vector = _vector(self.vector, "CLIP projection vector")
-        if math.sqrt(sum(value * value for value in vector)) == 0:
+        if not isinstance(self.samples, tuple) or not self.samples:
             raise projections.ProjectionCanonicalizationError(
-                "CLIP projection vector must have non-zero magnitude"
+                "CLIP measurement samples must be a non-empty immutable tuple"
             )
-        object.__setattr__(self, "vector", vector)
+        if len(self.samples) > MAX_PROJECTED_CLIP_SAMPLES_PER_VARIANT:
+            raise projections.ProjectionCapacityExceeded(
+                "projected CLIP samples exceed the fixed per-variant capacity"
+            )
+        if any(not isinstance(sample, ProjectionClipSample) for sample in self.samples):
+            raise projections.ProjectionCanonicalizationError(
+                "CLIP measurement sample has an invalid type"
+            )
+        if len({len(sample.vector) for sample in self.samples}) != 1:
+            raise projections.ProjectionCanonicalizationError(
+                "CLIP measurement samples have inconsistent dimensions"
+            )
+        timestamps = tuple(sample.frame_timestamp_ms for sample in self.samples)
+        if any(timestamp is None for timestamp in timestamps):
+            if timestamps != (None,):
+                raise projections.ProjectionCanonicalizationError(
+                    "CLIP image measurement must be one untimestamped sample"
+                )
+        elif tuple(sorted(timestamps)) != timestamps or len(set(timestamps)) != len(
+            timestamps
+        ):
+            raise projections.ProjectionCanonicalizationError(
+                "CLIP samples must use strict canonical timestamp order"
+            )
+
+    @property
+    def vector(self) -> tuple[float, ...]:
+        """Compatibility view for a legacy singleton image measurement."""
+
+        if len(self.samples) != 1:
+            raise projections.ProjectionCanonicalizationError(
+                "multi-sample CLIP measurements do not have one vector"
+            )
+        return self.samples[0].vector
 
 
 def _vector(value: object, name: str) -> tuple[float, ...]:
@@ -406,6 +497,8 @@ def clip_variant_applicable(variant: projections.ProjectionVariant) -> bool:
 def _projected_hit(
     variant: projections.ProjectionVariant,
     score: float,
+    *,
+    clip_frame_timestamp_ms: int | None = None,
 ) -> ProjectedLexicalHit:
     compact = " ".join(projection_text(variant).split())
     return ProjectedLexicalHit(
@@ -415,6 +508,7 @@ def _projected_hit(
         score=score,
         search_fields=variant.search_fields,
         snippet=compact[:_SNIPPET_CHARS].rstrip(),
+        clip_frame_timestamp_ms=clip_frame_timestamp_ms,
     )
 
 
@@ -734,8 +828,8 @@ class ProjectedClipIndex:
             "CLIP model version",
             maximum=256,
         )
-        clip_variant_ids = {
-            variant.projection_variant_id
+        clip_variants = {
+            variant.projection_variant_id: variant
             for item in self._items.values()
             for variant in item.variants
             if clip_variant_applicable(variant)
@@ -756,7 +850,7 @@ class ProjectedClipIndex:
                 raise projections.ProjectionCanonicalizationError(
                     "CLIP measurement model version does not match index"
                 )
-            if key.projection_variant_id not in clip_variant_ids:
+            if key.projection_variant_id not in clip_variants:
                 raise projections.ProjectionCanonicalizationError(
                     "CLIP measurement variant is not an applicable L6 pixel catalog projection"
                 )
@@ -764,9 +858,26 @@ class ProjectedClipIndex:
                 raise projections.ProjectionCanonicalizationError(
                     "projected CLIP index contains a duplicate variant measurement"
                 )
+            variant = clip_variants[key.projection_variant_id]
+            timestamps = tuple(
+                sample.frame_timestamp_ms for sample in measurement.samples
+            )
+            if variant.search_fields.get("media_type") == "image" and timestamps != (
+                None,
+            ):
+                raise projections.ProjectionCanonicalizationError(
+                    "projected image CLIP measurement must be one untimestamped sample"
+                )
+            if variant.search_fields.get("media_type") == "video" and any(
+                timestamp is None for timestamp in timestamps
+            ):
+                raise projections.ProjectionCanonicalizationError(
+                    "projected video CLIP measurements require frame timestamps"
+                )
+            row_dimension = len(measurement.samples[0].vector)
             if dimension is None:
-                dimension = len(measurement.vector)
-            elif len(measurement.vector) != dimension:
+                dimension = row_dimension
+            elif row_dimension != dimension:
                 raise projections.ProjectionCanonicalizationError(
                     "projected CLIP measurements have inconsistent dimensions"
                 )
@@ -808,21 +919,31 @@ class ProjectedClipIndex:
         if query_magnitude == 0:
             raise ProjectedLaneUnavailable("CLIP query vector has zero magnitude")
 
-        scored: list[tuple[projections.ProjectionVariant, float]] = []
+        scored: list[tuple[projections.ProjectionVariant, float, int | None]] = []
         for variant in selected:
             measurement = self._measurements.get(variant.projection_variant_id)
             if measurement is None:
                 raise ProjectedLaneUnavailable(
                     "selected projection CLIP measurement is unavailable"
                 )
-            measurement_magnitude = math.sqrt(
-                sum(value * value for value in measurement.vector)
+            sample_scores: list[tuple[float, int | None]] = []
+            for sample in measurement.samples:
+                measurement_magnitude = math.sqrt(
+                    sum(value * value for value in sample.vector)
+                )
+                score = sum(
+                    left * right
+                    for left, right in zip(query, sample.vector, strict=True)
+                ) / (query_magnitude * measurement_magnitude)
+                sample_scores.append((score, sample.frame_timestamp_ms))
+            score, timestamp_ms = min(
+                sample_scores,
+                key=lambda item: (
+                    -item[0],
+                    -1 if item[1] is None else item[1],
+                ),
             )
-            score = sum(
-                left * right
-                for left, right in zip(query, measurement.vector, strict=True)
-            ) / (query_magnitude * measurement_magnitude)
-            scored.append((variant, score))
+            scored.append((variant, score, timestamp_ms))
         scored.sort(
             key=lambda item: (
                 -item[1],
@@ -830,7 +951,14 @@ class ProjectedClipIndex:
                 item[0].projection_variant_id,
             )
         )
-        return tuple(_projected_hit(variant, score) for variant, score in scored[:limit])
+        return tuple(
+            _projected_hit(
+                variant,
+                score,
+                clip_frame_timestamp_ms=timestamp_ms,
+            )
+            for variant, score, timestamp_ms in scored[:limit]
+        )
 
 
 class ProjectedReranker:
@@ -978,6 +1106,7 @@ class ProjectedReranker:
 
 __all__ = [
     "AuthorizationProjectionMap",
+    "MAX_PROJECTED_CLIP_SAMPLES_PER_VARIANT",
     "ProjectedClipIndex",
     "ProjectedLaneUnavailable",
     "ProjectedLexicalHit",
@@ -985,6 +1114,7 @@ __all__ = [
     "ProjectedReranker",
     "ProjectedRetrievalUnavailable",
     "ProjectedVectorIndex",
+    "ProjectionClipSample",
     "ProjectionClipMeasurement",
     "ProjectionCatalog",
     "ProjectionVectorMeasurement",

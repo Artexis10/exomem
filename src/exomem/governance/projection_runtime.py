@@ -1059,6 +1059,11 @@ def _wire_hit(
         vector_score=scores.get("vector"),
         clip_rank=ranks.get("clip"),
         clip_score=scores.get("clip"),
+        clip_frame_ts=(
+            None
+            if hit.clip_frame_timestamp_ms is None
+            else hit.clip_frame_timestamp_ms / 1000.0
+        ),
         graph_hop=graph_hop,
         graph_in_degree=graph_in_degree,
         graph_provenance=graph_provenance,
