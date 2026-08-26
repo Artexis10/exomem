@@ -1388,6 +1388,10 @@ def _epoch_writes_with_predecessor(
             or recall_policy.is_structured_only_path(root, relative)
         ):
             continue
+        if not isinstance(write.content, str):
+            raise GraphEpochIncoherent(
+                "graph-relevant batch content is not Markdown text"
+            )
         paths.append((relative, content_hash(write.content)))
         if not write.path.exists():
             created_paths.append(relative)

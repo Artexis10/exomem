@@ -240,6 +240,10 @@ def mutation_from_planned_write(
         ) from None
     if PurePosixPath(relative).suffix.casefold() != ".md":
         return None
+    if not isinstance(write.content, str):
+        raise CatalogPublicationError(
+            "catalog Markdown publication requires textual source"
+        )
     relative = _relative_markdown_path(root, relative)
     if not _is_catalog_markdown_path(relative):
         return None
