@@ -48,20 +48,23 @@ _warm_active = False
 _warm_finished = False
 _runtime_managed = False
 _started_at: float | None = None
+_retrieval_generation = 0
 
 
 def manage_runtime() -> None:
     """Declare that this process serves requests through managed activation."""
-    global _runtime_managed
+    global _retrieval_generation, _runtime_managed
     with _lock:
         _runtime_managed = True
+        _retrieval_generation += 1
 
 
 def unmanage_runtime() -> None:
     """Return request admission to the walk-backed offline contract."""
-    global _runtime_managed
+    global _retrieval_generation, _runtime_managed
     with _lock:
         _runtime_managed = False
+        _retrieval_generation += 1
 
 
 def runtime_managed() -> bool:
@@ -70,9 +73,26 @@ def runtime_managed() -> bool:
         return _runtime_managed
 
 
+def retrieval_proof_generation() -> int:
+    """Return the generation a catalog proof must still match to publish."""
+    with _lock:
+        return _retrieval_generation
+
+
+def admit_retrieval_proof(generation: int) -> bool:
+    """Publish one exact proof only if no newer invalidation raced it."""
+    global _retrieval_generation
+    with _lock:
+        if generation != _retrieval_generation:
+            return False
+        _events["retrieval_catalog"].set()
+        _retrieval_generation += 1
+        return True
+
+
 def begin_warm() -> None:
     """Mark a warm in-flight. Resets per-component events and deferred items."""
-    global _warm_active, _warm_finished, _started_at
+    global _retrieval_generation, _warm_active, _warm_finished, _started_at
     with _lock:
         for c in COMPONENTS:
             _events[c].clear()
@@ -80,6 +100,7 @@ def begin_warm() -> None:
         _warm_active = True
         _warm_finished = False
         _started_at = time.monotonic()
+        _retrieval_generation += 1
 
 
 def finish_warm() -> None:
@@ -88,16 +109,20 @@ def finish_warm() -> None:
     Components whose events are still unset (failed/skipped preloads) stop
     deferring — request paths return to inline lazy-load semantics.
     """
-    global _warm_finished
+    global _retrieval_generation, _warm_finished
     with _lock:
         _warm_finished = True
+        _retrieval_generation += 1
 
 
 def mark_ready(component: str) -> list:
     """Set `component`'s event; atomically drain and return its deferred items."""
+    global _retrieval_generation
     _check(component)
     with _lock:
         _events[component].set()
+        if component == "retrieval_catalog":
+            _retrieval_generation += 1
         drained = _deferred[component]
         _deferred[component] = []
         return drained
@@ -105,9 +130,15 @@ def mark_ready(component: str) -> list:
 
 def mark_unready(component: str) -> None:
     """Revoke a component whose live backing state was later proven unavailable."""
+    global _retrieval_generation
     _check(component)
     with _lock:
         _events[component].clear()
+        if component == "retrieval_catalog":
+            # Every invalidation is authoritative, even when the event was
+            # already clear.  A proof that began before it must not re-admit an
+            # older generation after this call returns.
+            _retrieval_generation += 1
 
 
 def drain_deferred(component: str) -> list:
@@ -150,8 +181,11 @@ def retrieval_admission(vault_root: Path | None = None) -> dict[str, object]:
     Supplying the configured runtime vault adds a read-only projection proof.
     A ready bit cannot outlive either authoritative recall scope; loss or a
     policy-identity mismatch revokes it before health or a request can claim
-    admission.  The check never walks or reprojects the corpus.
+    admission.  After managed warm-up has finished, the same exact proof may
+    restore a late-published catalog whose one background promotion callback
+    lost a race.  The check never walks or reprojects the corpus.
     """
+    global _retrieval_generation
     with _lock:
         if _events["retrieval_catalog"].is_set():
             admission = {"state": "ready", "admitted": True}
@@ -163,7 +197,9 @@ def retrieval_admission(vault_root: Path | None = None) -> dict[str, object]:
             admission = {"state": "warming", "admitted": False}
         else:
             admission = {"state": "unverified", "admitted": False}
-    if vault_root is None or not admission["admitted"]:
+        managed_recovery = _runtime_managed and _warm_finished
+        proof_generation = _retrieval_generation
+    if vault_root is None or not (admission["admitted"] or managed_recovery):
         return admission
     from . import freshness
 
@@ -174,16 +210,42 @@ def retrieval_admission(vault_root: Path | None = None) -> dict[str, object]:
     try:
         from . import lexstore
 
-        proof_current = lexstore.runtime_retrieval_catalog_current(vault_root)
+        proof_current = lexstore.runtime_retrieval_catalog_current(
+            vault_root,
+            schedule_repair=False,
+        )
     except Exception:  # noqa: BLE001 - readiness uncertainty fails closed
         proof_current = False
-    if proof_current:
-        return admission
-    mark_unready("retrieval_catalog")
     with _lock:
-        if _warm_active and not _warm_finished:
-            return {"state": "warming", "admitted": False}
+        if proof_generation != _retrieval_generation:
+            # A watcher, warm transition, or another proof changed admission
+            # after this proof began.  Its newer decision wins.
+            return _retrieval_admission_locked()
+        if proof_current and not admission["admitted"]:
+            if not (_runtime_managed and _warm_finished):
+                return _retrieval_admission_locked()
+            # Retrieval has no deferred payload queue: its event is pure
+            # admission.  Publish the exact proof only if no newer invalidation
+            # raced it (the generation comparison above is the CAS).
+            _events["retrieval_catalog"].set()
+            _retrieval_generation += 1
+        elif not proof_current and admission["admitted"]:
+            _events["retrieval_catalog"].clear()
+            _retrieval_generation += 1
+        return _retrieval_admission_locked()
+
+
+def _retrieval_admission_locked() -> dict[str, object]:
+    """Return the current retrieval state while the caller holds ``_lock``."""
+    if _events["retrieval_catalog"].is_set():
+        return {"state": "ready", "admitted": True}
+    if _warm_active and not _warm_finished:
+        return {"state": "warming", "admitted": False}
+    if _warm_finished:
         return {"state": "unavailable", "admitted": False}
+    if _runtime_managed:
+        return {"state": "warming", "admitted": False}
+    return {"state": "unverified", "admitted": False}
 
 
 def should_defer(component: str) -> bool:
@@ -236,7 +298,7 @@ def snapshot() -> dict:
 
 def reset() -> None:
     """Test hook: return to the never-warmed state (mirrors find.clear_cache)."""
-    global _runtime_managed, _warm_active, _warm_finished, _started_at
+    global _retrieval_generation, _runtime_managed, _warm_active, _warm_finished, _started_at
     with _lock:
         for c in COMPONENTS:
             _events[c].clear()
@@ -245,6 +307,7 @@ def reset() -> None:
         _warm_finished = False
         _runtime_managed = False
         _started_at = None
+        _retrieval_generation += 1
 
 
 def _check(component: str) -> None:

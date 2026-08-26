@@ -132,9 +132,12 @@ def test_retrieval_admission_revokes_ready_when_projection_is_lost(
     monkeypatch.setattr(
         lexstore,
         "runtime_retrieval_catalog_current",
-        lambda root: all(
-            freshness.live_recall_checkpoint(root, scope) is not None
-            for scope in freshness.SCOPES
+        lambda root, *, schedule_repair: (
+            not schedule_repair
+            and all(
+                freshness.live_recall_checkpoint(root, scope) is not None
+                for scope in freshness.SCOPES
+            )
         ),
     )
     readiness.begin_warm()
@@ -151,6 +154,81 @@ def test_retrieval_admission_revokes_ready_when_projection_is_lost(
         "state": "unavailable",
         "admitted": False,
     }
+
+
+def test_managed_retrieval_admission_recovers_exact_catalog_after_warm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A late repair must not depend on its one promotion callback winning.
+
+    A readiness probe or refused recall supplies the configured vault.  Once
+    warm-up has finished, it may cheaply re-prove both live checkpoints; an
+    exact proof restores admission without a walk or another rebuild.
+    """
+    checked: list[Path] = []
+    monkeypatch.setattr(
+        lexstore,
+        "runtime_retrieval_catalog_current",
+        lambda root, *, schedule_repair: (
+            checked.append(root) or not schedule_repair
+        ),
+    )
+    readiness.manage_runtime()
+    readiness.begin_warm()
+    readiness.finish_warm()
+
+    assert readiness.retrieval_admission(tmp_path) == {
+        "state": "ready",
+        "admitted": True,
+    }
+    assert checked == [tmp_path]
+    assert readiness.is_ready("retrieval_catalog") is True
+
+
+def test_retrieval_recovery_cannot_overwrite_a_newer_demotion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A proof from generation N cannot re-admit after N+1 was invalidated."""
+
+    def stale_proof(_root: Path, *, schedule_repair: bool) -> bool:
+        assert schedule_repair is False
+        # Model a watcher demotion after the proof's final read but before its
+        # caller attempts to publish the result.
+        readiness.mark_unready("retrieval_catalog")
+        return True
+
+    monkeypatch.setattr(
+        lexstore,
+        "runtime_retrieval_catalog_current",
+        stale_proof,
+    )
+    readiness.manage_runtime()
+    readiness.begin_warm()
+    readiness.finish_warm()
+
+    assert readiness.retrieval_admission(tmp_path) == {
+        "state": "unavailable",
+        "admitted": False,
+    }
+    assert readiness.is_ready("retrieval_catalog") is False
+
+
+def test_background_promotion_cannot_overwrite_a_newer_demotion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Repair callbacks obey the same proof-generation CAS as health."""
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(tmp_path.resolve()))
+    readiness.manage_runtime()
+    readiness.begin_warm()
+
+    def stale_proof(*_args, **_kwargs) -> dict[str, object]:
+        readiness.mark_unready("retrieval_catalog")
+        return {"kb": object(), "vault": object()}
+
+    monkeypatch.setattr(lexstore, "runtime_retrieval_catalog_proof", stale_proof)
+
+    assert lexstore._mark_runtime_retrieval_ready_if_current(tmp_path) is False
+    assert readiness.is_ready("retrieval_catalog") is False
 
 
 def test_begin_warm_resets_previous_events_and_deferred_items() -> None:
@@ -483,6 +561,17 @@ def test_warm_retrieval_catalog_verifies_kb_and_vault_scopes(
     assert calls == ["ensure", "kb", "vault"]
 
 
+def test_managed_reference_backend_admits_without_a_catalog_proof(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    readiness.manage_runtime()
+    readiness.begin_warm()
+    monkeypatch.setattr(lexstore, "maintained_content_index_enabled", lambda: False)
+
+    assert warmup.warm_retrieval_catalog(tmp_path) is True
+    assert readiness.is_ready("retrieval_catalog") is True
+
+
 def test_managed_retrieval_warm_delegates_stale_catalog_to_one_repair_owner(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -553,6 +642,40 @@ def test_eager_managed_retrieval_warm_waits_for_the_single_repair_owner(
 
     assert warmup.warm_retrieval_catalog(tmp_path) is True
     assert calls == ["proof:True", "repair", "wait", "proof:True"]
+
+
+def test_eager_managed_warm_publishes_the_successful_retry_generation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An earlier stale proof cannot invalidate the later exact retry token."""
+    proofs = iter((False, True))
+    readiness.manage_runtime()
+    readiness.begin_warm()
+    monkeypatch.setenv("EXOMEM_EAGER_BOOT", "1")
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    monkeypatch.setattr(lexstore, "maintained_content_index_enabled", lambda: True)
+    monkeypatch.setattr(freshness, "event_indexes_enabled", lambda: True)
+    monkeypatch.setattr(freshness, "recall_is_live", lambda _root, _scope: True)
+
+    def proof(_root: Path, *, require_live_projection: bool) -> bool:
+        assert require_live_projection is True
+        current = next(proofs)
+        if not current:
+            readiness.mark_unready("retrieval_catalog")
+        return current
+
+    monkeypatch.setattr(lexstore, "runtime_retrieval_catalog_current", proof)
+    monkeypatch.setattr(lexstore, "request_repair", lambda _root: None)
+    monkeypatch.setattr(lexstore, "await_repairs_idle", lambda _root: True)
+    monkeypatch.setattr(
+        "exomem.semantic_contract.build_corpus_context",
+        lambda _root: None,
+    )
+    monkeypatch.setattr(warmup, "warm_caches", lambda *_args, **_kwargs: {})
+
+    warmup.warm_all(tmp_path)
+
+    assert readiness.is_ready("retrieval_catalog") is True
 
 
 def test_warm_all_does_not_admit_catalog_while_background_repair_runs(

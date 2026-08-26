@@ -440,6 +440,95 @@ def test_ready_runtime_losing_projection_demotes_without_walk(
     }
 
 
+def test_unavailable_runtime_reproves_before_requesting_another_rebuild(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real recall request self-recovers after a late catalog publish."""
+    admissions: list[Path | None] = []
+
+    def admission(root: Path | None = None) -> dict[str, object]:
+        admissions.append(root)
+        if root is None:
+            return {"state": "unavailable", "admitted": False}
+        return {"state": "ready", "admitted": True}
+
+    class ProofReached(RuntimeError):
+        pass
+
+    readiness.manage_runtime()
+    monkeypatch.setattr(readiness, "retrieval_admission", admission)
+    monkeypatch.setattr(
+        lexstore,
+        "runtime_retrieval_catalog_proof",
+        lambda _root: (_ for _ in ()).throw(ProofReached),
+    )
+
+    with pytest.raises(ProofReached):
+        find_module.find(
+            tmp_path,
+            query="latepublish",
+            mode="keyword",
+            scope="kb",
+            graph=False,
+            temporal=False,
+        )
+
+    assert admissions == [None, tmp_path]
+
+
+def test_unavailable_runtime_with_exact_catalog_serves_the_refused_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = _write_page(
+        tmp_path,
+        "Knowledge Base/Notes/late-publish.md",
+        "latepublish exact catalog payload",
+    )
+    _materialize_live_catalog(tmp_path, "latepublish")
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(tmp_path.resolve()))
+    repairs: list[Path] = []
+    monkeypatch.setattr(lexstore, "request_repair", lambda root: repairs.append(root))
+    readiness.manage_runtime()
+    readiness.begin_warm()
+    readiness.finish_warm()
+
+    hits = find_module.find(
+        tmp_path,
+        query="latepublish",
+        mode="keyword",
+        scope="kb",
+        graph=False,
+        temporal=False,
+    )
+
+    assert [hit.path for hit in hits] == [target.relative_to(tmp_path).as_posix()]
+    assert readiness.is_ready("retrieval_catalog") is True
+    assert repairs == []
+
+
+def test_read_only_recovery_probe_does_not_schedule_catalog_repair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scheduled: list[Path] = []
+    monkeypatch.setattr(
+        lexstore,
+        "_schedule_runtime_catalog_repair",
+        lambda root: scheduled.append(root),
+    )
+    store = lexstore.get_store(tmp_path)
+
+    for _ in range(3):
+        verdict = store.catalog_readiness(
+            "kb",
+            None,
+            allow_delta=False,
+            schedule_repair=False,
+        )
+        assert verdict.complete is False
+
+    assert scheduled == []
+
+
 def test_ready_runtime_projection_advance_revokes_stale_catalog_proof(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

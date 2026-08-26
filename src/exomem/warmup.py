@@ -80,6 +80,11 @@ def warm_retrieval_catalog(vault_root: Path) -> bool:
     if not lexstore.maintained_content_index_enabled():
         # Explicit Python mode and SQLite builds without FTS retain the supported
         # reference implementation; there is no maintained content index to gate.
+        if readiness.runtime_managed():
+            generation = readiness.retrieval_proof_generation()
+            return readiness.admit_retrieval_proof(
+                generation
+            ) or readiness.is_ready("retrieval_catalog")
         return True
     event_indexes = freshness.event_indexes_enabled()
     if readiness.runtime_managed() and event_indexes and not all(
@@ -95,10 +100,21 @@ def warm_retrieval_catalog(vault_root: Path) -> bool:
                 f"maintained recall projection incomplete: {baselines!r}"
             )
     if readiness.runtime_managed():
-        if lexstore.runtime_retrieval_catalog_current(
-            vault_root,
-            require_live_projection=event_indexes,
-        ):
+        def _prove_and_admit() -> bool:
+            proof_generation = readiness.retrieval_proof_generation()
+            if not lexstore.runtime_retrieval_catalog_current(
+                vault_root,
+                require_live_projection=event_indexes,
+            ):
+                return False
+            # Bind the CAS token to this successful proof, not to the whole
+            # warm operation: an earlier stale proof or completed repair may
+            # legitimately advance admission before an eager retry succeeds.
+            return readiness.admit_retrieval_proof(
+                proof_generation
+            ) or readiness.is_ready("retrieval_catalog")
+
+        if _prove_and_admit():
             return True
         # ``catalog_readiness`` above may already have scheduled this repair.
         # Request it explicitly as well so every incomplete outcome records the
@@ -108,10 +124,7 @@ def warm_retrieval_catalog(vault_root: Path) -> bool:
         if os.environ.get("EXOMEM_EAGER_BOOT"):
             if not lexstore.await_repairs_idle(vault_root):
                 raise RuntimeError("managed retrieval catalog repair timed out")
-            if not lexstore.runtime_retrieval_catalog_current(
-                vault_root,
-                require_live_projection=event_indexes,
-            ):
+            if not _prove_and_admit():
                 raise RuntimeError(
                     "managed retrieval catalog repair did not publish a current catalog"
                 )
@@ -241,9 +254,10 @@ def warm_all(vault_root: Path) -> dict[str, float]:
     durations: dict[str, float] = {}
     catalog_ready = False
     catalog_started = time.perf_counter()
+    managed_catalog = readiness.runtime_managed()
     try:
         catalog_ready = warm_retrieval_catalog(vault_root)
-        if catalog_ready:
+        if catalog_ready and not managed_catalog:
             readiness.mark_ready("retrieval_catalog")
     except Exception:  # noqa: BLE001 — startup stays live while repair retries
         log.warning("maintained retrieval catalog warm-up failed", exc_info=True)

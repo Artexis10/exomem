@@ -881,6 +881,11 @@ def find(
 
     managed_runtime = readiness.runtime_managed()
     admission = readiness.retrieval_admission()
+    if managed_runtime and admission["state"] == "unavailable":
+        # A background repair may have published the exact catalog after its
+        # one promotion callback lost a race.  Re-prove once before scheduling
+        # another whole-corpus rebuild; normal ready requests keep one proof.
+        admission = readiness.retrieval_admission(vault_root)
     state = str(admission["state"]) if managed_runtime else "unverified"
     require_live_recall = managed_runtime and freshness.event_indexes_enabled()
     catalog_proof: dict[str, freshness.RecallFreshnessCheckpoint] | None = None
