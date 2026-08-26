@@ -28,9 +28,9 @@
 
 ## 3. Verification and delivery
 
-- [ ] 3.1 Focused suites, lint, privacy, strict OpenSpec validation.
-- [ ] 3.2 Independent adversarial review; resolve findings.
-- [ ] 3.3 Live acceptance: a client write burst during an embedding warm-up
+- [x] 3.1 Focused suites, lint, privacy, strict OpenSpec validation.
+- [x] 3.2 Independent adversarial review; resolve findings.
+- [x] 3.3 Live acceptance: a client write burst during an embedding warm-up
       window no longer seeds follow-on whole-vault builds or graph epoch
       rebuilds; readiness windows stay bounded to the causing build only.
-- [ ] 3.4 Sync and archive this change after delivery.
+- [x] 3.4 Sync and archive this change after delivery.
