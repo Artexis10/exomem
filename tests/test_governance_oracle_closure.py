@@ -187,7 +187,7 @@ def _runtime_from_items(
     items: tuple[projection_store.ProjectionItemVariants, ...],
     *,
     vector_for_variant: Callable[
-        [projections.ProjectionVariant], tuple[float, ...]
+        [projections.ProjectionVariant], tuple[float, ...] | None
     ]
     | None = None,
     clip_samples_for_variant: Callable[
@@ -197,7 +197,7 @@ def _runtime_from_items(
     | None = None,
     graph_edges_for_variant: Callable[
         [projections.ProjectionVariant],
-        tuple[projected_graph.ProjectionGraphEdge, ...],
+        tuple[projected_graph.ProjectionGraphEdge, ...] | None,
     ]
     | None = None,
 ) -> projection_runtime.ActiveProjectionRuntime:
@@ -239,10 +239,11 @@ def _runtime_from_items(
                     extractor_version=_VECTOR_EXTRACTOR,
                     model_version=embeddings.MODEL_NAME,
                 ),
-                vector_for_variant(variant),
+                vector,
             )
             for item in items
             for variant in item.variants
+            if (vector := vector_for_variant(variant)) is not None
         )
         vector_index = projected_retrieval.ProjectedVectorIndex(
             namespace,
@@ -324,10 +325,11 @@ def _runtime_from_items(
                     extractor_version=_GRAPH_EXTRACTOR,
                     model_version=_GRAPH_MODEL,
                 ),
-                graph_edges_for_variant(variant),
+                edges,
             )
             for item in items
             for variant in item.variants
+            if (edges := graph_edges_for_variant(variant)) is not None
         )
         graph_index = projected_graph.ProjectedGraphIndex(
             namespace,
@@ -1609,3 +1611,115 @@ def test_lower_media_uses_only_its_authorized_textual_companion_projection(
     assert data.get("warming") is None
     assert b"raw companion metadata" not in responses["present"].content
     assert b"oracle-hidden" not in responses["present"].content
+
+
+def _missing_hidden_measurement_runtime(
+    hidden_bodies: tuple[str, ...],
+    *,
+    lane: str,
+) -> projection_runtime.ActiveProjectionRuntime:
+    visible = Scope(id="oracle-visible", source="scopes/oracle-visible.yaml")
+    hidden = Scope(
+        id="oracle-hidden",
+        source="scopes/oracle-hidden.yaml",
+        default_deny=True,
+    )
+    policy = Policy(
+        fingerprint="7" * 64,
+        scopes={visible.id: visible, hidden.id: hidden},
+    )
+    seed = "Knowledge Base/oracle-visible-000.md"
+    target = "Knowledge Base/oracle-visible-001.md"
+    items = [
+        _projected_item(
+            policy,
+            path=path,
+            scope_id=visible.id,
+            body="measurementerrorquartz visible projected result",
+        )
+        for path in (seed, target)
+    ]
+    items.extend(
+        _projected_item(
+            policy,
+            path=f"Knowledge Base/private/oracle-hidden-{index:03d}.md",
+            scope_id=hidden.id,
+            body=body,
+        )
+        for index, body in enumerate(hidden_bodies)
+    )
+
+    def vector_for_variant(
+        variant: projections.ProjectionVariant,
+    ) -> tuple[float, ...] | None:
+        if "/private/" in variant.item_identity:
+            return None
+        return (1.0, 0.0) if variant.item_identity == seed else (0.8, 0.6)
+
+    def graph_edges_for_variant(
+        variant: projections.ProjectionVariant,
+    ) -> tuple[projected_graph.ProjectionGraphEdge, ...] | None:
+        if "/private/" in variant.item_identity:
+            return None
+        if variant.item_identity != seed:
+            return ()
+        return (
+            projected_graph.ProjectionGraphEdge(
+                source_item_identity=seed,
+                target_item_identity=target,
+                relation_type="supports",
+            ),
+        )
+
+    return _runtime_from_items(
+        policy,
+        tuple(items),
+        vector_for_variant=vector_for_variant if lane == "vector" else None,
+        graph_edges_for_variant=(
+            graph_edges_for_variant if lane == "graph" else None
+        ),
+    )
+
+
+@pytest.mark.parametrize("lane", ("vector", "graph"))
+def test_hidden_missing_measurement_is_absence_not_a_public_lane_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    lane: str,
+) -> None:
+    request = _request(
+        query="measurementerrorquartz",
+        limit=2,
+        mode="vector" if lane == "vector" else "hybrid",
+    )
+    request["graph"] = lane == "graph"
+    runtimes, responses = _wire_pair(
+        monkeypatch,
+        tmp_path,
+        hidden_bodies=("measurementerrorquartz hidden missing measurement",),
+        runtime_factory=lambda hidden: _missing_hidden_measurement_runtime(
+            hidden,
+            lane=lane,
+        ),
+        query_vector=(1.0, 0.0) if lane == "vector" else None,
+        request=request,
+    )
+
+    _assert_same_success_envelope(responses)
+    assert responses["present"].json()["data"].get("warming") is None
+    assert b"oracle-hidden" not in responses["present"].content
+
+    present_runtime = runtimes["present"]
+    owner_result = projection_runtime.find_projected_hits(
+        tmp_path / "owner-control",
+        present_runtime,
+        query="measurementerrorquartz",
+        limit=2,
+        scope="vault",
+        mode="vector" if lane == "vector" else "hybrid",
+        graph=lane == "graph",
+        rerank=False,
+        principal=principal.owner_principal(surface="library"),
+        purpose=None,
+    )
+    assert owner_result.warming_components == (lane,)
