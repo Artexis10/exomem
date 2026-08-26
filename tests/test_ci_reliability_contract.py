@@ -599,13 +599,57 @@ def test_expensive_ci_runs_nightly_and_manually_only() -> None:
     assert "head_ref" not in condition
     assert "release-please" not in condition
 
-    # The clause must not survive anywhere in the workflow — not in a job
-    # guard, not in the python matrix, not in the gate's FULL_CI expression.
-    assert "release-please--branches--main" not in _workflow_text()
+    # The clause must not creep back into the expensive tier: its only
+    # permitted appearance in the whole workflow is the release-evidence
+    # job's own guard (pinned exactly in
+    # test_release_evidence_is_enforced_on_the_release_pr) — a seconds-class
+    # API check, not a stampede.
+    assert _workflow_text().count("release-please--branches--main") == 1
 
-    fast_jobs = set(jobs) - FULL_CI_JOBS - {"gate"}
+    fast_jobs = set(jobs) - FULL_CI_JOBS - {"gate", "release-evidence"}
     assert fast_jobs
     assert all("if" not in jobs[name] for name in fast_jobs)
+
+
+def test_release_evidence_is_enforced_on_the_release_pr() -> None:
+    """The docs/release.md evidence step is CI-enforced, not prose.
+
+    Removing the full-CI stampede from the release PR moved release evidence
+    to one green dispatched (or scheduled) full run on main. A documented
+    procedure alone cannot bind a merge, so a seconds-class `release-evidence`
+    job runs on the release PR and fails unless such a run exists at the PR's
+    recorded base revision. Ordinary PRs skip it (the gate accepts skips
+    outside full CI); schedule/dispatch/push contexts run it as a trivial
+    success so the gate's skip-intolerant full-CI arm never sees a skip.
+    """
+    workflow = _workflow()
+    job = workflow["jobs"]["release-evidence"]
+
+    condition = " ".join(str(job["if"]).split())
+    assert condition == (
+        "${{ github.event_name != 'pull_request' || "
+        "github.event.pull_request.head.ref == 'release-please--branches--main' }}"
+    )
+
+    (step,) = job["steps"]
+    assert step["env"]["GH_TOKEN"] == "${{ github.token }}"
+    base = " ".join(str(step["env"]["BASE_SHA"]).split())
+    assert base == "${{ github.event.pull_request.base.sha || '' }}"
+
+    command = step["run"]
+    # Non-release contexts must succeed without querying anything.
+    assert 'test -z "$BASE_SHA"' in command
+    # The evidence query must demand a green full run at the exact base
+    # revision — event-filtered, status-filtered, sha-pinned.
+    assert "actions/workflows/ci.yml/runs" in command
+    assert "workflow_dispatch" in command
+    assert "schedule" in command
+    assert "status=success" in command
+    assert "head_sha" in command
+    # Failure must tell the operator the exact remediation.
+    assert "gh workflow run ci.yml --ref main" in command
+
+    assert "release-evidence" in set(workflow["jobs"]["gate"]["needs"])
 
 
 def test_superseded_pr_runs_cancel_and_one_stable_gate_covers_both_tiers() -> None:
