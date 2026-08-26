@@ -2281,9 +2281,13 @@ def annotate_page(
         if "content" in page and page.get("content") != raw.decode("utf-8"):
             _record_blocked_outcome(who.audience_id)
             return None
-        scope_ids = membership_module.evaluate_snapshot(
-            parsed, policy, content_hash=snapshot_hash
-        )
+        try:
+            scope_ids = membership_module.evaluate_snapshot(
+                parsed, policy, content_hash=snapshot_hash
+            )
+        except membership_module.MembershipUnresolved:
+            _record_blocked_outcome(who.audience_id)
+            return None
         active_grants, _session_identity = _active_grants_for_snapshot(
             vault_root,
             policy=policy,

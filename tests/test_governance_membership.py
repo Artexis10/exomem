@@ -77,6 +77,80 @@ def test_tag_selector_resolves_membership(vault: Path) -> None:
     assert "01ARZ3NDEKTSV4RRFFQ69G5FB1" in membership.evaluate(parsed, pol)
 
 
+def test_malformed_markdown_frontmatter_is_unresolved_for_semantic_scope(
+    vault: Path,
+) -> None:
+    _write_scope(
+        vault,
+        "confidential",
+        'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB1\ntags: ["confidential"]\n',
+    )
+    pol = policy.load(vault)
+    page = _write_page(
+        vault,
+        "Knowledge Base/Notes/malformed.md",
+        "type: insight\ntags: [confidential",
+        body="private body",
+    )
+    parsed = _parse(vault, "Knowledge Base/Notes/malformed.md")
+    assert parsed is not None
+
+    with pytest.raises(membership.MembershipUnresolved):
+        membership.evaluate_snapshot(
+            parsed,
+            pol,
+            content_hash=hashlib.sha256(page.read_bytes()).hexdigest(),
+        )
+
+
+def test_malformed_markdown_frontmatter_keeps_path_only_classification(
+    vault: Path,
+) -> None:
+    scope_id = "01ARZ3NDEKTSV4RRFFQ69G5FB1"
+    _write_scope(
+        vault,
+        "confidential",
+        f'governance_version: 1\nid: {scope_id}\npaths: ["Notes/**"]\n',
+    )
+    pol = policy.load(vault)
+    page = _write_page(
+        vault,
+        "Knowledge Base/Notes/malformed.md",
+        "type: insight\ntags: [confidential",
+    )
+    parsed = _parse(vault, "Knowledge Base/Notes/malformed.md")
+    assert parsed is not None
+
+    assert membership.evaluate_snapshot(
+        parsed,
+        pol,
+        content_hash=hashlib.sha256(page.read_bytes()).hexdigest(),
+    ) == frozenset({scope_id})
+
+
+def test_unterminated_frontmatter_is_unresolved_for_semantic_scope(
+    vault: Path,
+) -> None:
+    _write_scope(
+        vault,
+        "confidential",
+        'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB1\ntags: ["confidential"]\n',
+    )
+    pol = policy.load(vault)
+    page = vault / "Knowledge Base" / "Notes" / "unterminated.md"
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text("---\ntags: [confidential]\nprivate body\n", encoding="utf-8")
+    parsed = _parse(vault, "Knowledge Base/Notes/unterminated.md")
+    assert parsed is not None
+
+    with pytest.raises(membership.MembershipUnresolved):
+        membership.evaluate_snapshot(
+            parsed,
+            pol,
+            content_hash=hashlib.sha256(page.read_bytes()).hexdigest(),
+        )
+
+
 def test_type_selector_resolves_membership(vault: Path) -> None:
     _write_scope(
         vault,

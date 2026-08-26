@@ -113,6 +113,43 @@ def test_include_raw_returns_disk_bytes(vault: Path) -> None:
     assert out["content_hash"] == content_hash(out["content"])
 
 
+def test_malformed_semantic_frontmatter_is_identical_to_physical_absence(
+    vault: Path,
+) -> None:
+    rel = "Knowledge Base/Notes/malformed-private.md"
+    target = vault / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        "---\ntype: insight\ntags: [private\n---\nprivate body\n",
+        encoding="utf-8",
+    )
+    governance = vault / "Knowledge Base" / "_Governance" / "scopes"
+    governance.mkdir(parents=True, exist_ok=True)
+    (governance / "private.yaml").write_text(
+        "governance_version: 1\n"
+        "id: 01ARZ3NDEKTSV4RRFFQ69G5FAV\n"
+        'tags: ["private"]\n'
+        "default_deny: true\n",
+        encoding="utf-8",
+    )
+    policy._CACHE.clear()
+    egress.clear_decision_memo()
+
+    def _error() -> ValueError:
+        with request_scope(_external()):
+            with pytest.raises(ValueError) as excinfo:
+                commands.op_get(vault, path=rel)
+        return excinfo.value
+
+    malformed_present = _error()
+    target.unlink()
+    physically_absent = _error()
+
+    assert type(malformed_present) is type(physically_absent)
+    assert malformed_present.args == physically_absent.args
+    assert "private body" not in str(malformed_present)
+
+
 def test_drift_guard_roundtrip_without_content(vault: Path) -> None:
     """edit(expected_hash=get().content_hash) still works — the hash is
     server-computed over raw bytes; callers never need `content`."""
