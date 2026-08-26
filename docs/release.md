@@ -134,11 +134,30 @@ python scripts/check_pr_title.py "fix(release): preserve parsed squash commits"
 2. Release Please opens or updates a release PR that bumps `pyproject.toml`,
    `.release-please-manifest.json`, and `CHANGELOG.md`.
 3. Confirm CI and the pre-release checks above.
-4. Merge the Release Please PR.
-5. Release Please tags `vX.Y.Z` and creates the GitHub Release.
-6. The release workflow builds `dist/` with `uv build` and uploads the wheel/sdist
+4. **Required: run one full CI pass on `main` and confirm it is green before
+   merging the release PR.** The release PR runs only the normal PR tier —
+   full CI (retrieval quality/latency, governance wire characterization,
+   semantic write latency, graph convergence, docker) runs on the nightly
+   schedule and on explicit dispatch, never per push to the release branch
+   (each release-PR push used to re-trigger a 46-job full run; 61% of a
+   measured day's runner-minutes went to those stampedes while ordinary PRs
+   queued). Dispatch, then watch the run this dispatch created — selecting by
+   `--limit 1` alone can grab a *previous* dispatch run, so filter on runs
+   created after a timestamp captured before dispatching (the retry loop
+   covers the API lag before the new run appears):
+
+   ```bash
+   ts=$(date -u +%Y-%m-%dT%H:%M:%SZ); gh workflow run ci.yml --ref main
+   until run_id=$(gh run list --workflow=ci.yml --branch=main --event=workflow_dispatch --created ">$ts" --limit 1 --json databaseId --jq '.[0].databaseId') && [ -n "$run_id" ]; do sleep 5; done; gh run watch "$run_id" --exit-status
+   ```
+
+   A green nightly run on the same `main` revision serves equally; a red or
+   missing full run blocks the release-PR merge.
+5. Merge the Release Please PR.
+6. Release Please tags `vX.Y.Z` and creates the GitHub Release.
+7. The release workflow builds `dist/` with `uv build` and uploads the wheel/sdist
    to the GitHub Release.
-7. If `PYPI_PUBLISH_ENABLED=true`, the release workflow builds the same package
+8. If `PYPI_PUBLISH_ENABLED=true`, the release workflow builds the same package
    artifacts in the `pypi` environment and publishes them through PyPI trusted
    publishing.
 
