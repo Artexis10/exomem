@@ -40,6 +40,7 @@ def _quiesce(timeout: float = 20.0) -> bool:
                 lexstore._FULL_REBUILD_REQUESTED.clear()
                 lexstore._FULL_REBUILDS_IN_FLIGHT.clear()
                 lexstore._FULL_REBUILD_REOBSERVED.clear()
+                lexstore._PUBLISHED_HANDOFF_PENDING.clear()
                 return not leaked_full_pass and not leaked_reobservation
         time.sleep(0.01)
     return False
@@ -172,6 +173,81 @@ def test_duplicate_full_request_during_full_rebuild_is_coalesced(
     assert _quiesce()
 
     assert store.rebuilds == 1, "an active full rebuild queued a duplicate pass"
+
+
+def test_pending_request_after_published_pass_skips_a_redundant_current_rebuild(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An idle handoff must re-prove before repeating a successful full scan."""
+    store = _FakeStore()
+    _install(monkeypatch, store)
+    key = tmp_path.resolve()
+    with lexstore._REPAIRS_LOCK:
+        lexstore._set_repair_progress(key, "queued")
+        lexstore._set_repair_progress(key, "idle", result="published")
+        lexstore._FULL_REBUILD_REQUESTED.add(key)
+        lexstore._PUBLISHED_HANDOFF_PENDING.add(key)
+
+    lexstore._schedule_repair(tmp_path)
+    assert _quiesce()
+
+    assert store.rebuilds == 0, "a current published catalogue was scanned again"
+
+
+def test_pending_request_after_published_pass_rebuilds_when_proof_is_stale(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cheap handoff proof may only suppress work it proves unnecessary."""
+    store = _FakeStore()
+    _install(monkeypatch, store)
+    monkeypatch.setattr(
+        lexstore,
+        "runtime_retrieval_catalog_proof",
+        lambda _root, **_kwargs: None,
+    )
+    key = tmp_path.resolve()
+    with lexstore._REPAIRS_LOCK:
+        lexstore._set_repair_progress(key, "queued")
+        lexstore._set_repair_progress(key, "idle", result="published")
+        lexstore._FULL_REBUILD_REQUESTED.add(key)
+        lexstore._PUBLISHED_HANDOFF_PENDING.add(key)
+
+    lexstore._schedule_repair(tmp_path)
+    assert _quiesce()
+
+    assert store.rebuilds == 1
+
+
+def test_request_arriving_during_current_handoff_proof_is_not_dropped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cheap proof cannot acknowledge a request that arrives after it starts."""
+    store = _FakeStore()
+    _install(monkeypatch, store)
+    current_proof = lexstore.runtime_retrieval_catalog_proof
+    fired = False
+
+    def prove_then_request(root: Path, **kwargs: object) -> dict[str, object] | None:
+        nonlocal fired
+        proof = current_proof(root, **kwargs)
+        if not fired:
+            fired = True
+            lexstore._schedule_repair(tmp_path)
+        return proof
+
+    monkeypatch.setattr(lexstore, "runtime_retrieval_catalog_proof", prove_then_request)
+    key = tmp_path.resolve()
+    with lexstore._REPAIRS_LOCK:
+        lexstore._set_repair_progress(key, "queued")
+        lexstore._set_repair_progress(key, "idle", result="published")
+        lexstore._FULL_REBUILD_REQUESTED.add(key)
+        lexstore._PUBLISHED_HANDOFF_PENDING.add(key)
+
+    lexstore._schedule_repair(tmp_path)
+    assert _quiesce()
+
+    assert fired
+    assert store.rebuilds == 1
 
 
 def test_full_request_during_declined_rebuild_survives_a_bounded_idle_boundary(

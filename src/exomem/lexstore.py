@@ -133,6 +133,10 @@ _FULL_REBUILDS_IN_FLIGHT: set[Path] = set()
 #: by the explicit event-index rollback, where no live generation exists.
 _UNKNOWN_REPAIR_GENERATION = object()
 _FULL_REBUILD_REOBSERVED: dict[Path, set[object]] = {}
+# A successful publish+promotion may still preserve one uncovered generation at
+# the bounded idle handoff. The next flight may cheaply prove that a foreground
+# delta already covered it. Failed/unpromoted passes never enter this set.
+_PUBLISHED_HANDOFF_PENDING: set[Path] = set()
 #: One worker may scan the whole vault at most once. If that pass cannot cover a
 #: request observed during it, the request stays pending for a later caller to
 #: restart after an idle boundary instead of chaining full scans forever.
@@ -832,6 +836,7 @@ def _schedule_repair(vault_root: Path, *, deferred_paths: list[Path] | None = No
             store = get_store(vault_root)
             while True:
                 with _REPAIRS_LOCK:
+                    published_handoff = False
                     full_requested = key in _FULL_REBUILD_REQUESTED
                     paths = sorted(_DEFERRED_UPSERTS.pop(key, set()))
                     if full_requested and full_passes >= _MAX_FULL_REBUILDS_PER_FLIGHT:
@@ -853,6 +858,8 @@ def _schedule_repair(vault_root: Path, *, deferred_paths: list[Path] | None = No
                         rebuild = full_requested
                         if rebuild:
                             _FULL_REBUILD_REQUESTED.discard(key)
+                            published_handoff = key in _PUBLISHED_HANDOFF_PENDING
+                            _PUBLISHED_HANDOFF_PENDING.discard(key)
                     if not rebuild and not paths:
                         # Nothing left, and nothing can arrive between here and
                         # releasing the flight: a caller that takes this lock
@@ -866,6 +873,35 @@ def _schedule_repair(vault_root: Path, *, deferred_paths: list[Path] | None = No
                             result=outcome or "targeted",
                         )
                         return
+                if rebuild and published_handoff:
+                    # A successful pass may leave one generation-tagged request
+                    # pending at its bounded idle handoff. Foreground delta work
+                    # can make that request current before the next caller starts
+                    # its flight. Re-prove the persisted catalogue before paying
+                    # for another whole-vault scan; a request arriving during the
+                    # proof sets the level-triggered bit again and is not cleared.
+                    from . import freshness as freshness_module
+
+                    if _is_configured_runtime_vault(vault_root):
+                        already_current = _mark_runtime_retrieval_ready_if_current(
+                            vault_root,
+                        )
+                    else:
+                        existing = runtime_retrieval_catalog_proof(
+                            vault_root,
+                            require_live_projection=(
+                                freshness_module.event_indexes_enabled()
+                            ),
+                            schedule_repair=False,
+                        )
+                        already_current = existing is not None
+                    with _REPAIRS_LOCK:
+                        requested_during_proof = key in _FULL_REBUILD_REQUESTED
+                    if already_current and not requested_during_proof:
+                        rebuild = False
+                        outcome = "published"
+                        if not paths:
+                            continue
                 full_pass = rebuild or not store.retry_deferred_upsert(paths)
                 if full_pass:
                     with _REPAIRS_LOCK:
@@ -963,6 +999,12 @@ def _schedule_repair(vault_root: Path, *, deferred_paths: list[Path] | None = No
                                 _DEFERRED_UPSERTS.setdefault(key, set()).update(paths)
                         if uncovered:
                             _FULL_REBUILD_REQUESTED.add(key)
+                            if repaired and promoted:
+                                _PUBLISHED_HANDOFF_PENDING.add(key)
+                        else:
+                            _PUBLISHED_HANDOFF_PENDING.discard(key)
+                        if not (repaired and promoted):
+                            _PUBLISHED_HANDOFF_PENDING.discard(key)
                         _FULL_REBUILDS_IN_FLIGHT.discard(key)
                 rebuild = False
                 full_pass = False
@@ -983,6 +1025,7 @@ def _schedule_repair(vault_root: Path, *, deferred_paths: list[Path] | None = No
                 if _FULL_REBUILD_REOBSERVED.get(key):
                     _FULL_REBUILD_REQUESTED.add(key)
                 _FULL_REBUILD_REOBSERVED.pop(key, None)
+                _PUBLISHED_HANDOFF_PENDING.discard(key)
                 _FULL_REBUILDS_IN_FLIGHT.discard(key)
                 _REPAIRS_IN_FLIGHT.discard(key)
                 _set_repair_progress(key, "idle", result="error")
@@ -1007,6 +1050,7 @@ def _schedule_repair(vault_root: Path, *, deferred_paths: list[Path] | None = No
     except RuntimeError:
         with _REPAIRS_LOCK:
             _FULL_REBUILD_REOBSERVED.pop(key, None)
+            _PUBLISHED_HANDOFF_PENDING.discard(key)
             _FULL_REBUILDS_IN_FLIGHT.discard(key)
             _REPAIRS_IN_FLIGHT.discard(key)
             _set_repair_progress(key, "idle", result="error")

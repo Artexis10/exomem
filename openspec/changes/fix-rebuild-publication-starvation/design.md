@@ -73,6 +73,13 @@ of those paths may invoke an in-place whole-catalogue rebuild. Repeated demand i
 coalesced against the generation already being repaired; one worker does not
 chain whole-vault passes in a single flight.
 
+If a successfully published and promoted pass leaves an uncovered generation at
+its bounded idle handoff, the next flight first re-proves the persisted catalogue.
+A foreground delta may already have made that handoff current; in that case the
+worker acknowledges it without another full scan. Failed or unpromoted passes do
+not receive this shortcut, and a request arriving during the proof remains
+level-triggered and forces the normal repair path.
+
 Offline and deliberately unmanaged callers retain their synchronous correctness
 path because no long-lived repair owner exists there.
 

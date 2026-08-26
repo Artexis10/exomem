@@ -28,6 +28,16 @@ validation.
 - **AND** repeats the independent source proof before retrying publication
 - **AND** limits catch-up retries so sustained live churn cannot monopolize repair
 
+#### Scenario: Published handoff does not repeat a current full scan
+
+- **WHEN** a successfully published and promoted repair leaves one generation
+  request pending at its bounded idle handoff
+- **AND** the next repair flight proves the persisted catalogue already covers
+  the current live projection
+- **THEN** the system acknowledges that handoff without another full-vault scan
+- **AND** a stale proof or a repair request arriving during the proof still
+  follows the normal full-repair path
+
 #### Scenario: SQLite token-only churn does not veto a current replacement
 
 - **WHEN** the live SQLite main, WAL, or SHM token changes during a detached
