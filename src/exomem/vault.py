@@ -1261,6 +1261,10 @@ def _descriptor_hash(descriptor: int, expected: PathIdentity) -> str:
 def _write_all(descriptor: int, content: bytes) -> None:
     os.lseek(descriptor, 0, os.SEEK_SET)
     os.ftruncate(descriptor, 0)
+    _append_all(descriptor, content)
+
+
+def _append_all(descriptor: int, content: bytes) -> None:
     view = memoryview(content)
     written = 0
     while written < len(view):
@@ -2036,6 +2040,8 @@ class _BatchWorkspace:
             self.artifacts[name] = artifact
             digest = hashlib.sha256()
             written = 0
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            os.ftruncate(descriptor, 0)
             while True:
                 chunk = stream.read(1024 * 1024)
                 if not chunk:
@@ -2050,13 +2056,13 @@ class _BatchWorkspace:
                         "PATH_GUARD_CONTENT", "binary batch size changed"
                     )
                 digest.update(chunk)
-                _write_all(descriptor, chunk)
+                _append_all(descriptor, chunk)
             if written != expected_size or digest.hexdigest() != expected_hash:
                 raise PathGuardError(
                     "PATH_GUARD_CONTENT", "binary batch content changed"
                 )
-            artifact.content_bound = True
             artifact.recheck()
+            artifact.content_bound = True
             self.recheck()
             return artifact
         except Exception:

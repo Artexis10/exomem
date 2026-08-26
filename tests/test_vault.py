@@ -154,6 +154,29 @@ def test_batch_write_streams_binary_and_markdown_in_one_rollback_set(
     assert companion.read_text(encoding="utf-8").endswith("Bound companion.\n")
 
 
+def test_batch_write_streams_binary_larger_than_copy_chunk(tmp_path: Path) -> None:
+    payload = b"a" * (1024 * 1024) + b"b" * 17
+    binary = tmp_path / "Evidence" / "large.bin"
+
+    vault.batch_atomic_write(
+        [
+            vault.PlannedWrite(
+                binary,
+                vault.PreparedBinaryContent(
+                    io.BytesIO(payload),
+                    len(payload),
+                    hashlib.sha256(payload).hexdigest(),
+                ),
+                create_only=True,
+                expected_hash=vault.MISSING_CONTENT_HASH,
+            )
+        ],
+        vault_root=tmp_path,
+    )
+
+    assert binary.read_bytes() == payload
+
+
 def test_batch_binary_create_only_refuses_existing_non_utf8_leaf(
     tmp_path: Path,
 ) -> None:
