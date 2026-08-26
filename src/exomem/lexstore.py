@@ -106,6 +106,25 @@ _PROBE_LOCK = threading.Lock()
 _STORES: dict[Path, LexicalStore] = {}
 _STORES_LOCK = threading.Lock()
 _REPAIRS_IN_FLIGHT: set[Path] = set()
+#: Vaults whose single repair worker is already executing a full-corpus pass.
+#:
+#: Full requests are level-triggered ("this catalogue is stale"), not a count of
+#: independently required jobs. Health and request probes can all observe the
+#: same stale generation while a detached rebuild is running; remembering each
+#: observation as a follow-up pass turns steady polling into an endless rebuild
+#: chain. The active set lets the scheduler coalesce those duplicate requests
+#: while still preserving a full request that arrives during a targeted pass.
+_FULL_REBUILDS_IN_FLIGHT: set[Path] = set()
+#: Full-repair observations made while the full pass is active, tagged with the
+#: exact live recall generation pair the caller observed. They are acknowledged
+#: only when the pass's promotion proof covers that pair. The sentinel is used
+#: by the explicit event-index rollback, where no live generation exists.
+_UNKNOWN_REPAIR_GENERATION = object()
+_FULL_REBUILD_REOBSERVED: dict[Path, set[object]] = {}
+#: One worker may scan the whole vault at most once. If that pass cannot cover a
+#: request observed during it, the request stays pending for a later caller to
+#: restart after an idle boundary instead of chaining full scans forever.
+_MAX_FULL_REBUILDS_PER_FLIGHT = 1
 #: Paths a CONTENDED foreground upsert declined, awaiting a targeted retry.
 #:
 #: A governed write's incremental upsert cannot take the publication barrier
@@ -469,27 +488,179 @@ def _is_configured_runtime_vault(vault_root: Path) -> bool:
     )
 
 
-def _mark_runtime_retrieval_ready_if_current(vault_root: Path) -> None:
-    """Admit the configured runtime after a repair proves both scopes current."""
+def runtime_retrieval_catalog_proof(
+    vault_root: Path,
+    *,
+    require_live_projection: bool = True,
+    schedule_repair: bool = True,
+) -> dict[str, object] | None:
+    """Prove both recall projections and maintained catalogs name one state.
+
+    Normal server admission requires live checkpoints and never walks.  The
+    explicit event-index kill switch may call this from background repair with
+    ``require_live_projection=False`` to preserve its legacy polling fallback;
+    request admission never takes that branch.  ``schedule_repair=False`` is
+    the side-effect-free recovery probe used by health and refused reads; the
+    ordinary warm/request owners remain responsible for scheduling work.
+    """
+    from . import freshness as freshness_module
+
+    checkpoints: dict[str, freshness_module.RecallFreshnessCheckpoint] = {}
+    for scope in ("kb", "vault"):
+        checkpoint = (
+            freshness_module.live_recall_checkpoint(vault_root, scope)
+            if require_live_projection
+            else freshness_module.recall_checkpoint(vault_root, scope)
+        )
+        if checkpoint is None:
+            return None
+        checkpoints[scope] = checkpoint
+    if not maintained_content_index_enabled():
+        stable = all(
+            (
+                freshness_module.live_recall_checkpoint(vault_root, scope)
+                if require_live_projection
+                else freshness_module.recall_checkpoint(vault_root, scope)
+            )
+            == checkpoints[scope]
+            for scope in ("kb", "vault")
+        )
+        return checkpoints if stable else None
+    store = get_store(vault_root)
+    readiness_kwargs = {} if schedule_repair else {"schedule_repair": False}
+    complete = all(
+        store.catalog_readiness(
+            scope,
+            checkpoints[scope].triple,
+            allow_delta=False,
+            **readiness_kwargs,
+        ).complete
+        for scope in ("kb", "vault")
+    )
+    if not complete:
+        return None
+    # Do not bless a catalog proof whose projection advanced while SQLite was
+    # being checked.  The next repair attempt will prove the newer pair.
+    if any(
+        (
+            freshness_module.live_recall_checkpoint(vault_root, scope)
+            if require_live_projection
+            else freshness_module.recall_checkpoint(vault_root, scope)
+        )
+        != checkpoints[scope]
+        for scope in ("kb", "vault")
+    ):
+        return None
+    return checkpoints
+
+
+def runtime_retrieval_catalog_current(
+    vault_root: Path,
+    *,
+    require_live_projection: bool = True,
+    schedule_repair: bool = True,
+) -> bool:
+    """Whether :func:`runtime_retrieval_catalog_proof` can bind both scopes."""
+    return (
+        runtime_retrieval_catalog_proof(
+            vault_root,
+            require_live_projection=require_live_projection,
+            schedule_repair=schedule_repair,
+        )
+        is not None
+    )
+
+
+def _live_repair_generation(vault_root: Path) -> tuple[object, ...] | None:
+    """Return the exact live recall generation pair without walking the vault."""
+    from . import freshness as freshness_module
+
+    checkpoints: list[object] = []
+    for scope in freshness_module.SCOPES:
+        checkpoint = freshness_module.live_recall_checkpoint(vault_root, scope)
+        if checkpoint is None:
+            return None
+        checkpoints.append(checkpoint)
+    return tuple(checkpoints)
+
+
+def _repair_generation_from_proof(
+    proof: dict[str, object],
+) -> tuple[object, ...] | None:
+    """Normalize an admitted proof into the scheduler's ordered generation pair."""
+    from . import freshness as freshness_module
+
+    if any(scope not in proof for scope in freshness_module.SCOPES):
+        return None
+    return tuple(proof[scope] for scope in freshness_module.SCOPES)
+
+
+def _repair_generation_covers(
+    covered: tuple[object, ...] | None,
+    observed: object,
+) -> bool:
+    """Whether one exact admitted pair includes an observed repair generation."""
+    if covered is None:
+        return False
+    if observed is _UNKNOWN_REPAIR_GENERATION:
+        # Rollback mode has no event generation to compare. A successful exact
+        # catalogue proof is the strongest available acknowledgement.
+        return True
+    if not isinstance(observed, tuple) or len(covered) != len(observed):
+        return False
+    for admitted, requested in zip(covered, observed, strict=True):
+        if admitted == requested:
+            continue
+        if any(
+            getattr(admitted, field, None) != getattr(requested, field, None)
+            for field in (
+                "instance_id",
+                "policy_version",
+                "access_policy_fingerprint",
+            )
+        ):
+            return False
+        admitted_generation = getattr(admitted, "generation", None)
+        requested_generation = getattr(requested, "generation", None)
+        if (
+            isinstance(admitted_generation, bool)
+            or not isinstance(admitted_generation, int)
+            or isinstance(requested_generation, bool)
+            or not isinstance(requested_generation, int)
+            or admitted_generation <= requested_generation
+        ):
+            # Equal generations with unequal payloads are contradictory, not
+            # ordered. Only a strictly later generation covers a non-equal one.
+            return False
+    return True
+
+
+def _mark_runtime_retrieval_ready_if_current(
+    vault_root: Path,
+    *,
+    proof_out: dict[str, object] | None = None,
+) -> bool:
+    """Admit the configured runtime after projections and catalogs agree."""
     if not _is_configured_runtime_vault(vault_root):
-        return
+        return False
     from . import freshness as freshness_module
     from . import readiness
 
-    store = get_store(vault_root)
-    if all(
-        store.catalog_readiness(
-            scope,
-            freshness_module.recall_checkpoint(vault_root, scope).triple,
-            allow_delta=False,
-        ).complete
-        for scope in ("kb", "vault")
-    ):
-        readiness.mark_ready("retrieval_catalog")
+    proof_generation = readiness.retrieval_proof_generation()
+    proof = runtime_retrieval_catalog_proof(
+        vault_root,
+        require_live_projection=freshness_module.event_indexes_enabled(),
+    )
+    if proof is None:
+        return False
+    if proof_out is not None:
+        proof_out.clear()
+        proof_out.update(proof)
+    return readiness.admit_retrieval_proof(proof_generation)
 
 
 def _admit_after_bounded_runtime_repair(vault_root: Path, repaired: object) -> None:
-    """Converge lazy-mode admission after a successful small-corpus repair."""
+    """Converge managed admission after a successful bounded catalog mutation."""
     if repaired is None or not _is_configured_runtime_vault(vault_root):
         return
     from . import readiness
@@ -554,12 +725,22 @@ def _schedule_repair(vault_root: Path, *, deferred_paths: list[Path] | None = No
     Every other caller passes nothing and still gets the rebuild, so this can
     only ever do LESS work than before, never less repair: a targeted retry that
     fails escalates, and a rebuild request queued while a targeted retry is
-    running is honoured on the worker's next pass.
+    running is honoured on the worker's next pass. Repeated full requests while
+    a full pass is already active are one level-triggered observation and are
+    coalesced into that pass instead of creating an unbounded rebuild chain.
     """
     key = vault_root.resolve()
+    observation: object = _UNKNOWN_REPAIR_GENERATION
+    if not deferred_paths:
+        try:
+            observation = _live_repair_generation(vault_root) or observation
+        except Exception:  # noqa: BLE001 - scheduling must remain best-effort
+            pass
     with _REPAIRS_LOCK:
         if deferred_paths:
             _DEFERRED_UPSERTS.setdefault(key, set()).update(deferred_paths)
+        elif key in _FULL_REBUILDS_IN_FLIGHT:
+            _FULL_REBUILD_REOBSERVED.setdefault(key, set()).add(observation)
         else:
             _FULL_REBUILD_REQUESTED.add(key)
         if key in _REPAIRS_IN_FLIGHT:
@@ -570,27 +751,114 @@ def _schedule_repair(vault_root: Path, *, deferred_paths: list[Path] | None = No
 
     def _run() -> None:
         rebuild = False
+        full_pass = False
+        full_passes = 0
         paths: list[Path] = []
         try:
             store = get_store(vault_root)
             while True:
                 with _REPAIRS_LOCK:
-                    rebuild = key in _FULL_REBUILD_REQUESTED
-                    _FULL_REBUILD_REQUESTED.discard(key)
+                    full_requested = key in _FULL_REBUILD_REQUESTED
                     paths = sorted(_DEFERRED_UPSERTS.pop(key, set()))
+                    if full_requested and full_passes >= _MAX_FULL_REBUILDS_PER_FLIGHT:
+                        if not paths:
+                            # Keep the full request pending, but yield ownership.
+                            # A later caller starts a fresh bounded flight; this
+                            # worker never chains whole-vault scans indefinitely.
+                            _FULL_REBUILDS_IN_FLIGHT.discard(key)
+                            _FULL_REBUILD_REOBSERVED.pop(key, None)
+                            _REPAIRS_IN_FLIGHT.discard(key)
+                            return
+                        rebuild = False
+                    else:
+                        rebuild = full_requested
+                        if rebuild:
+                            _FULL_REBUILD_REQUESTED.discard(key)
                     if not rebuild and not paths:
                         # Nothing left, and nothing can arrive between here and
                         # releasing the flight: a caller that takes this lock
                         # next sees no flight and starts its own worker.
+                        _FULL_REBUILDS_IN_FLIGHT.discard(key)
+                        _FULL_REBUILD_REOBSERVED.pop(key, None)
                         _REPAIRS_IN_FLIGHT.discard(key)
                         return
-                if rebuild or not store.retry_deferred_upsert(paths):
+                full_pass = rebuild or not store.retry_deferred_upsert(paths)
+                if full_pass:
+                    with _REPAIRS_LOCK:
+                        if full_passes >= _MAX_FULL_REBUILDS_PER_FLIGHT:
+                            # A targeted retry after this worker's full pass just
+                            # proved that another full repair is necessary. Keep
+                            # both claims for the next bounded flight.
+                            _FULL_REBUILD_REQUESTED.add(key)
+                            if paths:
+                                _DEFERRED_UPSERTS.setdefault(key, set()).update(paths)
+                            _FULL_REBUILD_REOBSERVED.pop(key, None)
+                            _REPAIRS_IN_FLIGHT.discard(key)
+                            return
+                        full_passes += 1
+                        # A failed targeted retry escalates to the same full pass
+                        # a queued request asked for. Consume that level here so
+                        # it cannot become a redundant pass immediately after.
+                        _FULL_REBUILD_REQUESTED.discard(key)
+                        _FULL_REBUILD_REOBSERVED.pop(key, None)
+                        _FULL_REBUILDS_IN_FLIGHT.add(key)
                     repaired = store.rebuild_atomic()
                 else:
                     repaired = True
+                configured_runtime = _is_configured_runtime_vault(vault_root)
+                promoted = False
+                promotion_proof: dict[str, object] = {}
                 if repaired:
-                    _mark_runtime_retrieval_ready_if_current(vault_root)
+                    if configured_runtime:
+                        promoted = _mark_runtime_retrieval_ready_if_current(
+                            vault_root,
+                            proof_out=promotion_proof,
+                        )
+                    else:
+                        # Offline callers have no runtime event to mark, but the
+                        # scheduler still needs an exact proof before it may
+                        # acknowledge a generation-tagged request. Prefer the
+                        # non-walking live pair when one exists; explicit offline
+                        # mode retains its established walk-backed proof.
+                        live_generation = _live_repair_generation(vault_root)
+                        offline_proof = runtime_retrieval_catalog_proof(
+                            vault_root,
+                            require_live_projection=live_generation is not None,
+                        )
+                        if offline_proof is not None:
+                            promotion_proof.update(offline_proof)
+                            promoted = True
+                if full_pass:
+                    with _REPAIRS_LOCK:
+                        # Keep the pass active through readiness promotion. A
+                        # probe in the publish-to-promotion window still observed
+                        # the generation this pass just repaired.
+                        covered_generation = _repair_generation_from_proof(
+                            promotion_proof
+                        )
+                        reobserved = _FULL_REBUILD_REOBSERVED.pop(key, set())
+                        uncovered = {
+                            generation
+                            for generation in reobserved
+                            if not (
+                                bool(repaired)
+                                and promoted
+                                and (
+                                    _repair_generation_covers(
+                                        covered_generation,
+                                        generation,
+                                    )
+                                )
+                            )
+                        }
+                        if not (repaired and promoted):
+                            if paths:
+                                _DEFERRED_UPSERTS.setdefault(key, set()).update(paths)
+                        if uncovered:
+                            _FULL_REBUILD_REQUESTED.add(key)
+                        _FULL_REBUILDS_IN_FLIGHT.discard(key)
                 rebuild = False
+                full_pass = False
                 paths = []
         except Exception as e:  # noqa: BLE001 - daemon must not escape into stderr
             log.warning("lexical background repair skipped (%s)", e)
@@ -605,6 +873,10 @@ def _schedule_repair(vault_root: Path, *, deferred_paths: list[Path] | None = No
                     _FULL_REBUILD_REQUESTED.add(key)
                 if paths:
                     _DEFERRED_UPSERTS.setdefault(key, set()).update(paths)
+                if _FULL_REBUILD_REOBSERVED.get(key):
+                    _FULL_REBUILD_REQUESTED.add(key)
+                _FULL_REBUILD_REOBSERVED.pop(key, None)
+                _FULL_REBUILDS_IN_FLIGHT.discard(key)
                 _REPAIRS_IN_FLIGHT.discard(key)
 
     # Static name, deliberately — every other exomem thread name is a literal
@@ -626,6 +898,8 @@ def _schedule_repair(vault_root: Path, *, deferred_paths: list[Path] | None = No
         thread.start()
     except RuntimeError:
         with _REPAIRS_LOCK:
+            _FULL_REBUILD_REOBSERVED.pop(key, None)
+            _FULL_REBUILDS_IN_FLIGHT.discard(key)
             _REPAIRS_IN_FLIGHT.discard(key)
         log.warning("lexical background repair could not start for %s", key)
 
@@ -1150,6 +1424,28 @@ def upsert_after_write(vault_root: Path, written_paths: list[Path]) -> bool:
         log.warning("lexical sidecar upsert skipped (%s)", e)
         return False
     return True
+
+
+def apply_watcher_batch(
+    vault_root: Path,
+    written_paths: list[Path],
+    removed_rel_paths: list[str],
+) -> bool:
+    """Apply one already-published watcher generation to the lexical sidecar."""
+    if not _catalog_usable():
+        return True
+    md = [
+        path
+        for path in written_paths
+        if path.suffix.lower() == ".md" and ".sync-conflict-" not in path.name
+    ]
+    if not (md or removed_rel_paths) or not lexical_path(vault_root).exists():
+        return True
+    try:
+        return get_store(vault_root).apply_watcher_batch(md, removed_rel_paths)
+    except Exception as e:  # noqa: BLE001
+        log.warning("lexical watcher batch skipped (%s)", e)
+        return False
 
 
 def delete_after_remove(vault_root: Path, removed_rel_paths: list[str]) -> bool:
@@ -2029,7 +2325,14 @@ class LexicalStore:
             (identity if identity is not None else catalog_semantic_identity(self.vault_root),),
         )
 
-    def _bless(self, conn: sqlite3.Connection, scope: str, checkpoint) -> None:
+    def _bless(
+        self,
+        conn: sqlite3.Connection,
+        scope: str,
+        checkpoint,
+        *,
+        identity: str | None = None,
+    ) -> None:
         """Atomically attest rows to one already-captured recall projection.
 
         The generic file stream deliberately includes raw Records edits; it can
@@ -2048,7 +2351,7 @@ class LexicalStore:
         self._write_checkpoint(conn, scope, checkpoint)
         # Persist the catalog identity with the triple/checkpoint so all three
         # are established together (no extra commit of its own).
-        self._write_catalog_identity(conn)
+        self._write_catalog_identity(conn, identity)
         conn.commit()
         self._synced[scope] = _checkpoint_state(checkpoint)
 
@@ -2707,6 +3010,50 @@ class LexicalStore:
             return False
         if not applied:
             _schedule_runtime_catalog_repair(self.vault_root)
+        else:
+            # A background publish can land just before the watcher finishes
+            # replaying a newer live generation. The publish proof correctly
+            # declines promotion in that case; the successful watcher batch is
+            # then the event that makes both scopes current. Re-prove after the
+            # publication barrier is released so managed retrieval cannot stay
+            # unavailable forever despite an exact-current catalog.
+            _admit_after_bounded_runtime_repair(self.vault_root, applied)
+        return applied
+
+    def apply_watcher_batch(self, paths: list[Path], rel_paths: list[str]) -> bool:
+        """Apply one watcher generation's changed and deleted paths together.
+
+        The freshness registry publishes a watcher batch as one generation. Its
+        lexical consumer must therefore prove the changed/deleted union before
+        advancing persisted catalog checkpoints; proving either half alone can
+        strand exact-current rows behind old metadata and trigger a full repair.
+        """
+        if not paths and not rel_paths:
+            return True
+        if self._failed:
+            _schedule_runtime_catalog_repair(self.vault_root)
+            return False
+        from .vault import VaultLockError
+
+        try:
+            with self._publication_lock(timeout=_PUBLICATION_TIMEOUT_FOREGROUND):
+                applied = self._apply_paths_locked(paths, rel_paths)
+        except VaultLockError as e:
+            log.info("lexical watcher batch deferred (%s); heals on next sync", e)
+            _schedule_runtime_catalog_repair(self.vault_root)
+            return False
+        except sqlite3.Error as e:
+            self._note_query_failure(e, "lexical watcher batch deferred (%s)")
+            _schedule_runtime_catalog_repair(self.vault_root)
+            return False
+        except OSError as e:
+            log.info("lexical watcher source changed during repair (%s)", e)
+            _schedule_runtime_catalog_repair(self.vault_root)
+            return False
+        if not applied:
+            _schedule_runtime_catalog_repair(self.vault_root)
+        else:
+            _admit_after_bounded_runtime_repair(self.vault_root, applied)
         return applied
 
     def retry_deferred_upsert(self, paths: list[Path]) -> bool:
@@ -2738,6 +3085,10 @@ class LexicalStore:
 
     def _upsert_paths_locked(self, paths: list[Path]) -> bool:
         """`upsert_paths` body with the publication barrier already held."""
+        return self._apply_paths_locked(paths, [])
+
+    def _apply_paths_locked(self, paths: list[Path], rel_paths: list[str]) -> bool:
+        """Apply a changed/deleted union with the publication barrier held."""
         from . import freshness as freshness_module
         from . import recall_policy
 
@@ -2746,6 +3097,9 @@ class LexicalStore:
         conn = self._connect()
         try:
             if not self._schema_is_current(conn):
+                return False
+            catalog_identity = catalog_semantic_identity(self.vault_root)
+            if self._meta_catalog_identity(conn) != catalog_identity:
                 return False
             witness_targets = {
                 scope: (
@@ -2760,6 +3114,10 @@ class LexicalStore:
             }
             requested_paths = {
                 key for path in paths if (key := self._live_event_path(path)) is not None
+            } | {
+                key
+                for rel in rel_paths
+                if (key := self._live_event_path(self.vault_root / rel)) is not None
             }
             prepared: list[tuple[Path, str, tuple[int, int, int], bool, bool]] = []
             suppressed: list[str] = []
@@ -2778,6 +3136,12 @@ class LexicalStore:
                 in_kb, in_vault = self._membership(path)
                 prepared.append((path, rel, signature, in_kb, in_vault))
             with conn:
+                for rel in rel_paths:
+                    row = conn.execute("SELECT rowid FROM pages WHERE path = ?", (rel,)).fetchone()
+                    if row is not None:
+                        self._delete_rowid(conn, row[0])
+                    else:
+                        self._delete_semantic_units(conn, rel)
                 for rel in suppressed:
                     row = conn.execute("SELECT rowid FROM pages WHERE path = ?", (rel,)).fetchone()
                     if row is not None:
@@ -2803,7 +3167,12 @@ class LexicalStore:
                         or self._membership(path) != (in_kb, in_vault)
                     ):
                         raise OSError(f"source changed during bounded upsert: {path.name}")
-            self._remember_live_witnesses(witness_targets, requested_paths)
+            self._publish_live_witnesses(
+                conn,
+                witness_targets,
+                requested_paths,
+                catalog_identity,
+            )
             return True
         finally:
             conn.close()
@@ -2828,6 +3197,8 @@ class LexicalStore:
             return False
         if not applied:
             _schedule_runtime_catalog_repair(self.vault_root)
+        else:
+            _admit_after_bounded_runtime_repair(self.vault_root, applied)
         return applied
 
     def purge_exact_persisted_rows(
@@ -2884,47 +3255,13 @@ class LexicalStore:
 
     def _delete_rel_paths_locked(self, rel_paths: list[str]) -> bool:
         """`delete_rel_paths` body with the publication barrier already held."""
-        from . import freshness as freshness_module
-
-        if not self.path.exists():
-            return False
-        conn = self._connect()
-        try:
-            if not self._schema_is_current(conn):
-                return False
-            witness_targets = {
-                scope: (
-                    (
-                        freshness_module.recall_checkpoint(self.vault_root, scope),
-                        self._meta_checkpoint(conn, scope),
-                    )
-                    if freshness_module.recall_is_live(self.vault_root, scope)
-                    else (None, None)
-                )
-                for scope in ("kb", "vault")
-            }
-            requested_paths = {
-                key
-                for rel in rel_paths
-                if (key := self._live_event_path(self.vault_root / rel)) is not None
-            }
-            with conn:
-                for rel in rel_paths:
-                    row = conn.execute("SELECT rowid FROM pages WHERE path = ?", (rel,)).fetchone()
-                    if row is not None:
-                        self._delete_rowid(conn, row[0])
-                    else:
-                        self._delete_semantic_units(conn, rel)
-            self._remember_live_witnesses(witness_targets, requested_paths)
-            return True
-        finally:
-            conn.close()
+        return self._apply_paths_locked([], rel_paths)
 
     def _remember_live_witnesses(
         self,
         targets: dict[str, tuple[object | None, object | None]],
         requested_paths: set[str],
-    ) -> None:
+    ) -> dict[str, object]:
         """Remember only the exact watcher-maintained corpus just applied.
 
         A bounded operation can attest a live checkpoint only when its requested
@@ -2934,6 +3271,7 @@ class LexicalStore:
         """
         from . import freshness as freshness_module
 
+        witnessed: dict[str, object] = {}
         for scope in ("kb", "vault"):
             checkpoint, stored = targets[scope]
             if checkpoint is None or freshness_module.recall_checkpoint(
@@ -2942,6 +3280,7 @@ class LexicalStore:
                 self._witnessed.pop(scope, None)
             elif stored == checkpoint:
                 self._witnessed[scope] = checkpoint
+                witnessed[scope] = checkpoint
             elif stored is None:
                 self._witnessed.pop(scope, None)
             else:
@@ -2954,6 +3293,38 @@ class LexicalStore:
                     self._witnessed.pop(scope, None)
                 else:
                     self._witnessed[scope] = checkpoint
+                    witnessed[scope] = checkpoint
+        return witnessed
+
+    def _publish_live_witnesses(
+        self,
+        conn: sqlite3.Connection,
+        targets: dict[str, tuple[object | None, object | None]],
+        requested_paths: set[str],
+        catalog_identity: str,
+    ) -> None:
+        """Persist exact watcher witnesses while the publication barrier is held."""
+        from . import freshness as freshness_module
+
+        witnessed = self._remember_live_witnesses(targets, requested_paths)
+        for scope, checkpoint in witnessed.items():
+            if (
+                freshness_module.recall_checkpoint(self.vault_root, scope) != checkpoint
+                or catalog_semantic_identity(self.vault_root) != catalog_identity
+            ):
+                self._witnessed.pop(scope, None)
+                continue
+            # The bounded mutation already materialized every path in the
+            # complete projected delta. Persist that exact checkpoint before
+            # releasing the barrier so the post-barrier admission proof can stay
+            # read-only and cannot strand current rows behind old metadata.
+            self._bless(
+                conn,
+                scope,
+                checkpoint,
+                identity=catalog_identity,
+            )
+            self._witnessed.pop(scope, None)
 
     def ensure_fresh(self) -> None:
         """Reconcile both scopes against their walks, PARANOIDLY: verified
@@ -3580,7 +3951,12 @@ class LexicalStore:
         return [(p, float(s)) for p, s in rows]
 
     def catalog_readiness(
-        self, scope: str, freshness: tuple | None, *, allow_delta: bool = True
+        self,
+        scope: str,
+        freshness: tuple | None,
+        *,
+        allow_delta: bool = True,
+        schedule_repair: bool = True,
     ) -> CatalogReadiness:
         """Decide, without ever rebuilding/healing/walking, whether the exact
         category/kind projection can be served for `scope` at `freshness`.
@@ -3589,6 +3965,8 @@ class LexicalStore:
         connection: it inspects the sidecar's schema, catalog identity, and
         stored freshness checkpoint, optionally applies a single bounded
         foreground delta to catch up, and otherwise defers to the repair worker.
+        ``schedule_repair=False`` makes an ``allow_delta=False`` call a pure
+        proof, so repeated health probes cannot create sequential rebuilds.
         Every non-`available` outcome is reported (never raised); raw SQLite is
         classified here and never escapes this seam.
         """
@@ -3609,10 +3987,12 @@ class LexicalStore:
             # single failed attempt would strand the store as fatal for the
             # process. `_schedule_repair` is itself single-flight, so this cannot
             # storm.
-            _schedule_runtime_catalog_repair(self.vault_root)
+            if schedule_repair:
+                _schedule_runtime_catalog_repair(self.vault_root)
             return CatalogReadiness("fatal_failure", False, backend_name)
         if not self.path.exists():
-            _schedule_runtime_catalog_repair(self.vault_root)
+            if schedule_repair:
+                _schedule_runtime_catalog_repair(self.vault_root)
             return CatalogReadiness("stale", False, backend_name)
         try:
             conn = self._connect()
@@ -3620,17 +4000,20 @@ class LexicalStore:
                 if not self._schema_is_current(conn):
                     # Read-only probe: an absent/old-shape (v4) or version-stale
                     # sidecar defers to the atomic rebuild — this seam emits no DDL.
-                    _schedule_runtime_catalog_repair(self.vault_root)
+                    if schedule_repair:
+                        _schedule_runtime_catalog_repair(self.vault_root)
                     return CatalogReadiness("stale", False, backend_name)
                 checkpoint = self._meta_checkpoint(conn, scope)
                 if checkpoint is None:
-                    _schedule_runtime_catalog_repair(self.vault_root)
+                    if schedule_repair:
+                        _schedule_runtime_catalog_repair(self.vault_root)
                     return CatalogReadiness("stale", False, backend_name)
                 if _checkpoint_state(checkpoint) == target_state:
                     if self._meta_catalog_identity(conn) != catalog_semantic_identity(
                         self.vault_root
                     ):
-                        _schedule_runtime_catalog_repair(self.vault_root)
+                        if schedule_repair:
+                            _schedule_runtime_catalog_repair(self.vault_root)
                         return CatalogReadiness("stale", False, backend_name)
                     return CatalogReadiness("available", True, backend_name)
             finally:
@@ -3654,18 +4037,27 @@ class LexicalStore:
                             # from under this delta (no longer bound), so it could
                             # not be applied. Defer to the repair worker rather than
                             # letting the mismatch escape this seam.
-                            _schedule_runtime_catalog_repair(self.vault_root)
+                            if schedule_repair:
+                                _schedule_runtime_catalog_repair(self.vault_root)
                             return CatalogReadiness("stale", False, backend_name)
                         return self.catalog_readiness(
-                            scope, freshness, allow_delta=False
+                            scope,
+                            freshness,
+                            allow_delta=False,
+                            schedule_repair=schedule_repair,
                         )
-            _schedule_runtime_catalog_repair(self.vault_root)
+            if schedule_repair:
+                _schedule_runtime_catalog_repair(self.vault_root)
             return CatalogReadiness("stale", False, backend_name)
         except sqlite3.Error as e:
-            return self._catalog_readiness_error(e, backend_name)
+            return self._catalog_readiness_error(
+                e,
+                backend_name,
+                schedule_repair=schedule_repair,
+            )
 
     def recall_resolver_entries(
-        self, scope: str, freshness: tuple | None
+        self, scope: str, checkpoint: Any | None
     ) -> list[tuple[str, str | None]] | None:
         """Return exact resolver `(path, title)` entries from a current sidecar.
 
@@ -3677,8 +4069,6 @@ class LexicalStore:
         that policy before any row receives its scope flag. The sidecar test
         pins the resulting `in_vault` row set against a fresh full policy walk.
         """
-        from . import freshness as freshness_module
-
         backend_name = backend()
         if backend_name == "python":
             return None
@@ -3690,11 +4080,10 @@ class LexicalStore:
             conn = self._connect()
             try:
                 conn.execute("BEGIN")
-                target = freshness_module.recall_checkpoint(self.vault_root, scope)
                 if (
                     not self._schema_is_current(conn)
                     or _checkpoint_state(self._meta_checkpoint(conn, scope))
-                    != _checkpoint_state(target)
+                    != _checkpoint_state(checkpoint)
                 ):
                     return None
                 col = "in_vault" if scope == "vault" else "in_kb"
@@ -3774,23 +4163,30 @@ class LexicalStore:
         return result.value if result.readiness.complete else None
 
     def _catalog_readiness_error(
-        self, error: sqlite3.Error, backend_name: str
+        self,
+        error: sqlite3.Error,
+        backend_name: str,
+        *,
+        schedule_repair: bool = True,
     ) -> CatalogReadiness:
         """Map a raw SQLite failure onto a readiness verdict, so no SQLite error
         escapes the readiness seam. A fatal or unclassified failure schedules one
-        atomic repair; a transient lock/interrupt does not (the next call retries).
+        atomic repair when requested; a transient lock/interrupt does not (the
+        next call retries). A proof-only caller neither retires nor repairs state.
         """
         kind = classify_sqlite_error(error)
         if kind == "fatal":
             # A proven-fatal disposable sidecar recovers only by whole replacement.
-            self._failed = True
-            _schedule_runtime_catalog_repair(self.vault_root)
+            if schedule_repair:
+                self._failed = True
+                _schedule_runtime_catalog_repair(self.vault_root)
             return CatalogReadiness("fatal_failure", False, backend_name)
         if kind == "transient":
             # A passing lock/interrupt fails only this call; the next request
             # reopens and retries. It must NOT schedule a whole-corpus repair.
             return CatalogReadiness("transient_failure", False, backend_name)
-        _schedule_runtime_catalog_repair(self.vault_root)
+        if schedule_repair:
+            _schedule_runtime_catalog_repair(self.vault_root)
         return CatalogReadiness("stale", False, backend_name)
 
     def search_semantic_units(

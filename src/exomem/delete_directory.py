@@ -16,20 +16,24 @@ directory tree; refuses if any exist unless `force_orphan=true`.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import logging
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import media_types, reserved_paths
-from .governance import lifecycle
+from . import media_types, reserved_paths, semantic_contract
+from .governance import catalog_publication, graph_producer, lifecycle
 from .kbdir import kb_dirname, kb_prefix
 from .vault import (
     VaultPathError,
+    batch_atomic_write,
     find_inbound_wikilinks,
     in_append_only_tree,
     in_curated_tree,
     kb_root,
+    plan_log_entry,
     resolve_under_vault,
     write_log_entry,
 )
@@ -277,6 +281,67 @@ def delete_directory(
         except ValueError:
             continue
 
+    today_iso = today.isoformat()
+    log_body = (
+        f"Trashed directory {rel_path!r} → {trash_rel!r} via exomem Tier 2. "
+        f"files={len(files)}, md_files={len(md_files)}, "
+        f"inbound_links_at_trash={inbound_total}."
+    )
+    if recursive:
+        log_body += " recursive=true."
+    if force_orphan:
+        log_body += " force_orphan=true."
+    if curated and allow_curated:
+        log_body += f" allow_curated=true (target tree: {curated})."
+    log_plan = plan_log_entry(
+        vault_root,
+        date_iso=today_iso,
+        op="delete_directory (trash)",
+        rel_path_no_ext=rel_path,
+        body=log_body,
+    )
+    initial_tree_state = tuple(
+        sorted(
+            (
+                f"{rel_path.rstrip('/')}/{item.relative_path}",
+                hashlib.sha256(item.snapshot.data).hexdigest(),
+            )
+            for item in tree
+        )
+    )
+    catalog_removals = tuple(
+        catalog_publication.CatalogRemoval(
+            path,
+            digest if path.lower().endswith(".md") else None,
+        )
+        for path, digest in initial_tree_state
+    )
+    catalog_target: catalog_publication.PreparedMarkdownCatalogPublication | None = None
+    if log_plan.writes or catalog_removals:
+        def graph_replacement_provider():
+            return graph_producer.replacements_for_removed_markdown(
+                vault_root,
+                before_corpus=semantic_contract.build_corpus_context(vault_root),
+                removed_paths=tuple(md_rels_to_unindex),
+                writes=log_plan.writes,
+            )
+
+        try:
+            catalog_target = catalog_publication.prepare_catalog_membership_batch(
+                vault_root,
+                writes=log_plan.writes,
+                removals=catalog_removals,
+                graph_replacement_provider=(
+                    graph_replacement_provider if md_rels_to_unindex else None
+                ),
+                now=int(time.time()),
+            )
+        except catalog_publication.CatalogPublicationError as error:
+            raise DeleteDirectoryError(
+                code="GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
+                reason=str(error),
+            ) from error
+
     from . import graph_sync
 
     try:
@@ -299,6 +364,28 @@ def delete_directory(
             reason="the staged trash transition could not be restored",
         ) from error
     lifecycle_operation = transition.operation
+    # The catalog successor was prepared from the first held tree. The
+    # lifecycle boundary independently recaptures that tree before staging its
+    # tombstone/graph epoch; require the two exact path/hash sets to agree so a
+    # concurrent child cannot be moved to trash while retaining an active row.
+    transition_tree_state = tuple(
+        sorted(
+            (item.source_path, item.content_hash)
+            for item in lifecycle_operation.manifest
+        )
+    )
+    if transition_tree_state != initial_tree_state:
+        try:
+            transition.abort()
+        except graph_sync.GraphLifecycleRollbackError as rollback_error:
+            raise DeleteDirectoryError(
+                code="GRAPH_SYNC_DELETION_ROLLBACK_FAILED",
+                reason="the changed directory transition could not be restored",
+            ) from rollback_error
+        raise DeleteDirectoryError(
+            code="PATH_GUARD_CHANGED",
+            reason="directory contents changed before the trash transition",
+        )
 
     # A doomed subtree may also contain CLIP-relevant media binaries (image/
     # video — the only kinds with derived-index residue: CLIP rows, and for a
@@ -447,25 +534,29 @@ def delete_directory(
             "content remains tombstoned until reconcile"
         )
 
-    today_iso = today.isoformat()
-    log_body = (
-        f"Trashed directory {rel_path!r} → {trash_rel!r} via exomem Tier 2. "
-        f"files={len(files)}, md_files={len(md_files)}, "
-        f"inbound_links_at_trash={inbound_total}."
-    )
-    if recursive:
-        log_body += " recursive=true."
-    if force_orphan:
-        log_body += " force_orphan=true."
-    if curated and allow_curated:
-        log_body += f" allow_curated=true (target tree: {curated})."
-    log_warning = write_log_entry(
-        vault_root,
-        date_iso=today_iso,
-        op="delete_directory (trash)",
-        rel_path_no_ext=rel_path,
-        body=log_body,
-    )
+    if catalog_target is not None:
+        try:
+            if log_plan.writes:
+                batch_atomic_write(log_plan.writes, vault_root=vault_root)
+            catalog_publication.publish_markdown_batch(catalog_target)
+        except Exception as error:  # noqa: BLE001 - canonical removal already committed
+            raise DeleteDirectoryError(
+                code="GOVERNANCE_CATALOG_PUBLICATION_UNCERTAIN",
+                reason=(
+                    "the directory was trashed but its active catalog publication "
+                    "did not reach a verified terminal"
+                ),
+            ) from error
+
+    log_warning = log_plan.warning
+    if catalog_target is None:
+        log_warning = write_log_entry(
+            vault_root,
+            date_iso=today_iso,
+            op="delete_directory (trash)",
+            rel_path_no_ext=rel_path,
+            body=log_body,
+        )
     if log_warning:
         warnings.append(log_warning)
 

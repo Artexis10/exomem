@@ -485,7 +485,9 @@ made before both PRs and their combined verification are complete.
 - [ ] 8.3 Add red CLIP/non-text pairs where the highest hidden pixel/keyframe match would
   consume the cap. Assert authorization occurs inside CLIP before its cap, L6 visible
   visual top-k is exact, and L1-L5 media participates only through its authorized textual
-  companion projection or is excluded from the binary lane.
+  companion projection or is excluded from the binary lane. Bind each image to one
+  untimestamped sample and each video to one through forty strictly timestamp-ordered
+  samples, returning the parent once with its earliest best `frame_timestamp_ms`.
 - [ ] 8.4 Add red graph pairs where hidden vertices/edges change in-degree, out-degree,
   reachability, shortest paths, relation matches, seed expansion, graph-assisted fusion,
   and pagination; assert the visible graph/order is identical to physical absence.
@@ -518,13 +520,37 @@ made before both PRs and their combined verification are complete.
   capacity/lane reduction, scheduler-tolerance subtraction, post-observation padding,
   and missed fixed deadline. Require both bounds simultaneously within manifest, 25 ms,
   and 10% of physically-absent p95.
-- [ ] 8.11 Implement principal-free canonical fixed projection records and lexical/vector/CLIP/
+- [x] 8.11 Implement principal-free canonical fixed projection records and lexical/vector/CLIP/
   graph measurement rows plus a request-local membership/decision authorization map that
   selects exactly one hashed variant or L0 per catalog artifact. Enumerate/deduplicate
   finite reachable outputs, enforce 256, and keep principal, purpose, session, grant, and
   request decision out of persistent keys/hot caches. Publish policy/projector/catalog
   only through the one active-tuple CAS: policy commits expect catalog; content/companion
-  commits expect policy; readers never sample component pointers separately.
+  commits expect policy; readers never sample component pointers separately. For CLIP
+  successors, verify the complete active family, carry only content-identical image/video
+  rows, require target-item/content-hash-bound replacements for changed media, exclude
+  `parent_media` frame companions from duplicate binary ownership, and publish the target
+  namespace plus complete vector/CLIP roots atomically. Connect live scene sampling and
+  bulk backfill to that successor with the already-computed canonical timestamp/vector
+  tuple, guarded parent-sidecar binding, and no second model pass. For graph successors,
+  verify exactly one active row per variant, emit empty lower-variant rows, carry only
+  content-identical L6 rows, require target-item/content-hash-bound replacements for
+  changed L6 sources, reject stale outside-catalog targets, and publish the complete graph
+  root atomically. Validate conservative producer replacements for affected lower-only
+  items, discard their edge payload, and emit only empty lower-variant rows. For
+  existing-page semantic writes, semantic creations, semantic moves, semantic trash
+  recoveries, and semantic file/directory trash, derive replacements from the freshest
+  validated detached before-corpus
+  carried into the mutation boundary, the move or recovery's exact detached after-corpus
+  when applicable, and the exact guarded planned-write overlay; include indirect
+  path/title-resolution, removed-target, and reverse-relation source changes. Retained-
+  corpus paths never walk the vault again; trash builds one lazy before-corpus only for an
+  active graph family before canonical mutation. No producer reopens the live graph.
+  Apply the same lazy planned-Markdown contract to Evidence preservation, machine-owned
+  media-sidecar updates, and scene-frame companion creation, co-publishing CLIP when
+  applicable and doing no graph work for open or lexical-only tuples.
+  Connect every other live graph producer to those replacements before checking
+  this task; keep any unsupported required family blocked.
 - [x] 8.12 Implement BM25 posting intersection before cap, projected-corpus DF/IDF and
   exact top-k; exact filtered projected-vector top-k with visible-lane warming/disable;
   projected-only reranking before final top-k; and L6-only pre-cap CLIP authorization.

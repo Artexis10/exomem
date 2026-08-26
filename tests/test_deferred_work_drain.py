@@ -886,8 +886,10 @@ def test_single_slot_startup_drains_both_queues_across_restarts(
     )
     monkeypatch.setattr(index_sync, "replay_deferred_embedding", complete_semantic)
 
-    file_watcher.FileWatcher(vault)._reconcile_once(seed=True)
-    file_watcher.FileWatcher(vault)._reconcile_once(seed=True)
+    for _restart in range(2):
+        watcher = file_watcher.FileWatcher(vault)
+        assert watcher._reconcile_once(seed=True) is True
+        watcher.finish_startup_recovery()
 
     assert semantic_attempts == [semantic_rel]
     assert deferred_index.list_paths(vault) == []

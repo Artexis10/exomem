@@ -114,7 +114,12 @@ text embedding rows before its cap; a missing/stale selected embedding SHALL war
 disable that visible lane and MUST NOT fall back to a raw embedding. Reranking SHALL
 receive only selected projected fields and SHALL precede final top-k. CLIP pixels and
 keyframes SHALL participate only for artifacts selected at L6, with the authorization
-map applied inside the lane before its cap. Below L6, image/video recall SHALL use only
+map applied inside the lane before its cap. Each L6 media projection SHALL bind one
+immutable measurement row: exactly one untimestamped vector for an image, or one through
+forty vectors for a video in strict canonical `frame_timestamp_ms` order. The forty-sample
+ceiling SHALL NOT be configurable. The lane SHALL score every authorized sample, return
+the parent media item once at its best score, and bind the earliest best frame timestamp.
+Below L6, image/video recall SHALL use only
 an authorized textual companion projection, or exclude the binary lane when none is
 available. Graph vertices and edges SHALL be admitted before expansion and every graph
 reduction SHALL run over the selected projected graph.
@@ -147,6 +152,105 @@ warming response. Incomplete required lexical rows, duplicate identity, variant-
 mismatch, per-item variant overflow, or namespace overflow SHALL block activation; a raw
 or prior-policy index MUST NOT be used as fallback. Old namespaces MAY be collected only
 after no active request or cursor binds their exact tuple.
+
+When the active tuple requires a CLIP measurement family, a content or companion
+publication SHALL verify the complete active image/video family before canonical bytes
+change. The successor SHALL carry only content-identical image/video rows, require an
+exact target item identity and target content hash for each changed visual-media
+replacement, and bind the complete successor family to the target projection namespace.
+An image SHALL retain exactly one untimestamped sample and a video one through forty
+strictly timestamp-ordered canonical samples. A derived frame companion carrying
+`parent_media` SHALL remain a textual catalog artifact and SHALL NOT become an
+independent CLIP measurement owner. Missing, stale, duplicate, mismatched, or dimension-
+incompatible CLIP state SHALL refuse before canonical bytes change. The successor catalog,
+projection namespace, vector/CLIP measurement roots, receipt, and active tuple SHALL
+publish atomically.
+
+When the active tuple requires a graph measurement family, a content or companion
+publication SHALL verify that the active family contains exactly one row for every active
+projection variant before canonical bytes change. The successor SHALL contain exactly
+one row for every target variant. Variants below L6 SHALL carry an empty outgoing edge
+tuple. A content-identical L6 variant MAY carry its verified active row; every changed L6
+source item SHALL instead provide an immutable replacement bound to its exact target item
+identity and content hash. Every replacement edge SHALL name that source and a target
+identity present in the target catalog. A deletion that leaves an otherwise-carried edge
+outside the target catalog SHALL refuse. Missing, duplicate, source-mismatched, outside-
+catalog, or over-capacity graph state SHALL refuse before canonical bytes change. The
+successor catalog, projection namespace, complete vector/CLIP/graph measurement roots,
+receipt, and active tuple SHALL publish atomically. A live graph producer SHALL supply
+target-bound replacements for every affected changed L6 source; another unsupported
+required family SHALL remain blocked.
+
+#### Scenario: Visual successor publication is complete and atomic
+
+- **WHEN** an exact-v4 catalog edit carries an unchanged image or video, replaces a
+  changed video's canonical samples, or adds a derived frame companion
+- **THEN** the next namespace carries or replaces only exact target-bound CLIP rows,
+  excludes the frame companion from binary ownership, and activates its complete vector
+  and CLIP roots in the same catalog transaction
+
+#### Scenario: Scene sampling publishes the parent row without a second model pass
+
+- **WHEN** the live media worker or bulk backfill computes video scene vectors and
+  persists the corresponding frame companions
+- **THEN** it canonicalizes those same vectors once to bounded integer milliseconds,
+  binds them to the guarded parent sidecar, and publishes the parent CLIP replacement,
+  companion catalog rows, measurement roots, and active tuple together without
+  re-running CLIP or creating pixel rows for the companions
+
+#### Scenario: Incomplete visual state refuses before bytes
+
+- **WHEN** the active CLIP family is incomplete or a replacement has a stale item,
+  content hash, sample shape, timestamp order, or vector dimension
+- **THEN** catalog preparation refuses before canonical content or the active tuple
+  changes and does not fall back to a raw or prior CLIP family
+
+#### Scenario: Graph successor rejects stale or incomplete lineage
+
+- **WHEN** an exact-v4 content change would leave a missing variant row, carry an edge to
+  a removed target, or change an L6 source without an exact target-bound replacement
+- **THEN** publication refuses before canonical bytes change and never relabels the old
+  graph family beneath the new catalog generation
+
+#### Scenario: Complete graph successor publishes with the active tuple
+
+- **WHEN** the complete active graph family verifies, every unchanged row remains bound,
+  every changed L6 source has an exact replacement, and all lower variants have empty rows
+- **THEN** the complete target graph root advances with the target namespace, other
+  required measurement roots, receipt, and active tuple in one catalog publication
+
+#### Scenario: Lower-only changed items retain empty graph rows
+
+- **WHEN** a live producer conservatively returns a target-bound replacement for an
+  affected item whose target namespace contains no L6 variant
+- **THEN** publication validates its exact item/content binding, edge sources, edge
+  targets, uniqueness, and aggregate capacity, discards the edge payload, and emits only
+  empty lower-variant graph rows
+
+#### Scenario: Semantic writes, creations, moves, recoveries, and trash derive graph successors from retained state
+
+- **WHEN** an existing-page semantic write, semantic creation, semantic move, or semantic
+  trash recovery or file/directory trash changes a direct edge, a path/title used by
+  another page's link, or a reverse relation whose logical source is another page
+- **THEN** the existing/edit/create/move/recovery writer derives target-bound replacements
+  from the freshest validated detached before-corpus carried into the mutation boundary,
+  the move or recovery's exact detached after-corpus when applicable, and exact guarded
+  planned bytes; it includes every logical source whose outgoing edge tuple changes and
+  does not reopen the live graph or current Markdown
+- **AND** trash removes the exact held Markdown identity set before applying its guarded
+  log overlay from one lazy detached before-corpus built only for an active graph family
+  before canonical bytes change, so otherwise-unchanged inbound sources lose edges to
+  removed targets
+- **AND** open and lexical-only writes do not invoke the graph producer
+
+#### Scenario: Machine-owned media Markdown uses the same graph successor
+
+- **WHEN** Evidence preservation, a media-sidecar state update, or scene-frame companion
+  creation changes Markdown while the active tuple contains a graph family
+- **THEN** the writer lazily derives replacements from one detached before-corpus and the
+  exact staged Markdown batch, and publishes graph, CLIP when applicable, catalog, and
+  active tuple together before reporting success
+- **AND** open and lexical-only writes do not invoke the graph producer
 
 When the projected source is exhausted, L1-and-above items SHALL still emit the
 projection their policy authorizes while L0 items SHALL produce a silently shorter list,

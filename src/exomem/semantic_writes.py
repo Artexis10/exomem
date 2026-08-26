@@ -1128,6 +1128,9 @@ class RecoveryPreflight:
     destination_root_guard: vault.PathGuard
     trash_census_guards: tuple[vault.DirectoryCensusGuard, ...] = ()
     recovery_sidecar_guard: vault.PathGuard | None = None
+    catalog_auxiliary_writes: tuple[vault.PlannedWrite, ...] = ()
+    catalog_content_paths: tuple[str, ...] = ()
+    catalog_publication_now: int | None = None
     mutated: Literal[False] = False
 
     @property
@@ -1142,6 +1145,7 @@ class RecoveryPreflight:
 class RecoveryCommit:
     preflight: RecoveryPreflight
     lifecycle_states: tuple[tuple[str, str], ...]
+    catalog_published: bool = False
     mutated: Literal[True] = True
 
     def as_dict(self) -> dict[str, Any]:
@@ -2063,10 +2067,24 @@ def _commit_existing_locked(
             guard=preflight.primary_guard,
         )
     )
-    from .governance import catalog_publication
+    from .governance import catalog_publication, graph_producer
+
+    planned_writes = tuple(writes)
+
+    def graph_replacement_provider():
+        return graph_producer.replacements_for_planned_markdown(
+            root,
+            before_corpus=preflight.before_corpus,
+            writes=planned_writes,
+            semantic_states={preflight.path: preflight.after},
+        )
 
     try:
-        catalog_target = _prepare_markdown_catalog_publication(root, writes)
+        catalog_target = _prepare_markdown_catalog_publication(
+            root,
+            planned_writes,
+            graph_replacement_provider=graph_replacement_provider,
+        )
     except catalog_publication.CatalogPublicationError as error:
         raise SemanticWriteError(
             "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
@@ -2140,6 +2158,8 @@ def _revalidate_existing_preflight(
 def _prepare_markdown_catalog_publication(
     vault_root: Path,
     writes: Sequence[vault.PlannedWrite],
+    *,
+    graph_replacement_provider: Callable[[], tuple[Any, ...]] | None = None,
 ):  # noqa: ANN202 - private bridge returns the governance publication token
     """Prepare one exact catalog successor for the canonical Markdown subset."""
 
@@ -2148,6 +2168,7 @@ def _prepare_markdown_catalog_publication(
     return catalog_publication.prepare_planned_markdown_batch(
         vault_root,
         writes=tuple(writes),
+        graph_replacement_provider=graph_replacement_provider,
     )
 
 
@@ -2944,6 +2965,9 @@ def preflight_recovery(
     destination_root_guard: vault.PathGuard | None = None,
     trash_census_guards: tuple[vault.DirectoryCensusGuard, ...] = (),
     recovery_sidecar_guard: vault.PathGuard | None = None,
+    catalog_auxiliary_writes: tuple[vault.PlannedWrite, ...] = (),
+    catalog_content_paths: tuple[str, ...] = (),
+    catalog_publication_now: int | None = None,
     relation_reviews: Mapping[str, Mapping[str, str]] | None = None,
 ) -> RecoveryPreflight:
     """Evaluate exact trashed Markdown bytes at all final restore paths."""
@@ -3195,6 +3219,9 @@ def preflight_recovery(
         root_destination,
         tuple(trash_census_guards),
         recovery_sidecar_guard,
+        tuple(catalog_auxiliary_writes),
+        tuple(catalog_content_paths),
+        catalog_publication_now,
     )
     preflight.as_dict()
     return preflight
@@ -3323,6 +3350,46 @@ def commit_recovery(
                 census_guard.recheck(root)
             if preflight.recovery_sidecar_guard is not None:
                 preflight.recovery_sidecar_guard.recheck(root)
+            from .governance import catalog_publication, graph_producer
+
+            catalog_writes = [*lifecycle_writes, *preflight.catalog_auxiliary_writes]
+            catalog_writes.extend(
+                vault.PlannedWrite(
+                    root / item.restore_path,
+                    item.source,
+                    create_only=True,
+                    guard=destination_guard,
+                )
+                for item, destination_guard in zip(
+                    preflight.entries, destination_guards, strict=True
+                )
+            )
+            semantic_states = {
+                item.after.path: item.after for item in preflight.evaluations
+            }
+
+            def graph_replacement_provider():
+                return graph_producer.replacements_for_semantic_transition(
+                    root,
+                    before_corpus=preflight.before_corpus,
+                    after_corpus=preflight.after_corpus,
+                    writes=tuple(catalog_writes),
+                    semantic_states=semantic_states,
+                )
+
+            try:
+                catalog_target = catalog_publication.prepare_catalog_membership_batch(
+                    root,
+                    writes=tuple(catalog_writes),
+                    content_paths=preflight.catalog_content_paths,
+                    graph_replacement_provider=graph_replacement_provider,
+                    now=preflight.catalog_publication_now,
+                )
+            except catalog_publication.CatalogPublicationError as error:
+                raise SemanticWriteError(
+                    "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
+                    str(error),
+                ) from error
             if lifecycle_writes:
                 vault.batch_atomic_write(
                     lifecycle_writes,
@@ -3333,6 +3400,23 @@ def commit_recovery(
             for destination_guard in destination_guards:
                 destination_guard.recheck(root)
             mutate()
+            if catalog_target is not None:
+                if preflight.catalog_auxiliary_writes:
+                    vault.batch_atomic_write(
+                        preflight.catalog_auxiliary_writes,
+                        vault_root=root,
+                    )
+            from .writer_lease import mark_active_mutation_committed
+
+            mark_active_mutation_committed()
+            if catalog_target is not None:
+                try:
+                    catalog_publication.publish_markdown_batch(catalog_target)
+                except catalog_publication.CatalogPublicationError as error:
+                    raise SemanticWriteError(
+                        "GOVERNANCE_CATALOG_PUBLICATION_UNCERTAIN",
+                        str(error),
+                    ) from error
     except vault.VaultLockTimeout as error:
         raise SemanticWriteError(
             "SEMANTIC_CREATION_LOCK_TIMEOUT",
@@ -3340,7 +3424,11 @@ def commit_recovery(
         ) from error
     except vault.VaultLockError as error:
         raise SemanticWriteError(error.code, error.reason) from error
-    return RecoveryCommit(preflight, lifecycle_states)
+    return RecoveryCommit(
+        preflight,
+        lifecycle_states,
+        catalog_published=catalog_target is not None,
+    )
 
 
 def _evaluate_structural(
@@ -3590,6 +3678,39 @@ def commit_creation(
     return replace(committed, structure_suggestion=suggestion, due_state=due)
 
 
+def _prepare_creation_catalog_publication(
+    vault_root: Path,
+    *,
+    destination: str,
+    before_corpus: semantic_contract.SemanticCorpusContext | None,
+    semantic_state: semantic_contract.SemanticPageState,
+    writes: Sequence[vault.PlannedWrite],
+):  # noqa: ANN202 - private bridge returns the governance publication token
+    """Prepare a creation successor from the retained semantic snapshot."""
+
+    from .governance import graph_producer
+
+    planned_writes = tuple(writes)
+
+    def graph_replacement_provider():
+        if before_corpus is None:
+            raise graph_producer.GraphProducerError(
+                "creation preflight did not retain its semantic corpus"
+            )
+        return graph_producer.replacements_for_planned_markdown(
+            vault_root,
+            before_corpus=before_corpus,
+            writes=planned_writes,
+            semantic_states={destination: semantic_state},
+        )
+
+    return _prepare_markdown_catalog_publication(
+        vault_root,
+        writes=planned_writes,
+        graph_replacement_provider=graph_replacement_provider,
+    )
+
+
 def _commit_creation(
     vault_root: Path,
     *,
@@ -3657,9 +3778,12 @@ def _commit_creation(
                         create_only=True,
                     )
                 )
-                catalog_target = _prepare_markdown_catalog_publication(
+                catalog_target = _prepare_creation_catalog_publication(
                     root,
-                    catalog_writes,
+                    destination=preflight.destination,
+                    before_corpus=prepared.preliminary.before_corpus,
+                    semantic_state=prepared.preliminary.candidate,
+                    writes=catalog_writes,
                 )
             except catalog_publication.CatalogPublicationError as error:
                 raise SemanticWriteError(
@@ -3696,13 +3820,15 @@ def _commit_creation(
         from .writer_lease import read_commit_generation
 
         contract_result = preflight.contract_result
+        catalog_corpus = preflight.corpus
+        catalog_state = preflight.semantic_state
         if not semantic_contract.validity_stamp_current(
             root,
             preflight.census_token,
             commit_generation=read_commit_generation(root),
         ):
             relation_review._record_prevalidated_commit_outcome("revalidated")
-            contract_result, _fresh_state, _fresh_census, _fresh_corpus = _evaluate_structural(
+            contract_result, catalog_state, _fresh_census, catalog_corpus = _evaluate_structural(
                 root,
                 destination=preflight.destination,
                 source=preflight.source,
@@ -3732,14 +3858,20 @@ def _commit_creation(
             )
         )
         try:
-            catalog_target = _prepare_markdown_catalog_publication(root, writes)
+            catalog_target = _prepare_creation_catalog_publication(
+                root,
+                destination=preflight.destination,
+                before_corpus=catalog_corpus,
+                semantic_state=catalog_state,
+                writes=writes,
+            )
         except catalog_publication.CatalogPublicationError as error:
             raise SemanticWriteError(
                 "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
                 str(error),
             ) from error
         token = semantic_index.set_parent_states(
-            {preflight.destination: semantic_index.from_semantic_page_state(preflight.semantic_state)}
+            {preflight.destination: semantic_index.from_semantic_page_state(catalog_state)}
         )
         try:
             written = vault.batch_atomic_write(writes, vault_root=root)

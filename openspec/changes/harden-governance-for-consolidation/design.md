@@ -641,7 +641,12 @@ The search lanes consume that map directly:
    vector disables or warms that visible lane without falling back to a raw embedding;
 3. reranking receives only selected projected text and runs before final visible top-k;
 4. CLIP pixels/keyframes participate only for items selected at L6, with authorization
-   filtering inside the CLIP lane before its cap. At L1-L5 an image/video can match only
+   filtering inside the CLIP lane before its cap. One immutable measurement row binds
+   each media projection: an image has one untimestamped vector, while a video has one
+   through forty strictly timestamp-ordered vectors using the canonical bounded
+   `frame_timestamp_ms`. The fixed forty-sample ceiling is not configurable. Retrieval
+   scores every authorized sample, emits the parent media item once at its best score,
+   and carries the earliest best frame timestamp. At L1-L5 an image/video can match only
    through its authorized textual companion projection; if that record is unavailable,
    the binary CLIP lane is excluded rather than searched raw;
 5. graph vertices and edges are projection-indexed and admitted before expansion, so
@@ -699,7 +704,68 @@ different visible order. Exhausting that bounded ranked window omits the continu
 Projection namespaces are built and validated before a governed compiled-policy
 generation is activated. An item write creates the next catalog generation, reuses only
 content-addressed unchanged rows, and publishes the complete catalog plus required
-projection/index rows atomically; it never mutates the prior namespace in place. A policy
+projection/index rows atomically; it never mutates the prior namespace in place. When
+the active tuple requires CLIP measurements, the successor builder verifies that the
+active image/video family is complete, carries only rows whose projection variant remains
+content-identical, and requires exact target-item/content-hash-bound replacement samples
+for changed visual media. Image rows remain one untimestamped sample; video rows remain
+one through forty canonical timestamped samples. Derived frame companions bind
+`parent_media` and are textual catalog artifacts, not duplicate CLIP measurement owners.
+The complete successor CLIP family binds the target namespace and activates in the same
+catalog publication transaction; missing, stale, mismatched, duplicate, or dimension-
+incompatible rows refuse before canonical bytes change. The live media worker and bulk
+backfill canonicalize each already-computed scene vector exactly once to bounded integer
+milliseconds and pass that same immutable sample tuple into the planned frame-companion
+publication. That transaction binds the samples to the guarded parent video sidecar and
+advances the parent CLIP row, companion catalog rows, vector/CLIP roots, and active tuple
+together; it neither invokes CLIP a second time nor gives a frame companion its own pixel
+row.
+
+When the active tuple requires a graph measurement family, the successor builder first
+verifies exactly one active row for every active projection variant. The target family
+likewise contains exactly one row per target variant: every variant below L6 has an empty
+outgoing edge tuple, a content-identical L6 variant may carry its verified row, and a
+changed L6 source item requires an immutable replacement bound to its exact target item
+identity and content hash. Each replacement edge must name that source and a target
+identity present in the target catalog; deleting a target that an otherwise-carried row
+still names therefore refuses rather than relabeling stale graph state. Duplicate rows,
+duplicate edges, mismatched sources, outside-catalog targets, missing replacements, and
+capacity overflow all refuse before canonical bytes change. The complete successor graph
+family binds the target namespace and publishes with the catalog, other measurement
+roots, receipt, and active tuple. Live graph producers remain responsible for supplying
+the target-bound replacements for every affected changed L6 source; an unknown required
+measurement family remains blocked.
+
+A producer may conservatively return a target-bound replacement for an affected item
+whose target namespace has no L6 variant. The publisher still validates its item,
+content, edge sources, edge targets, uniqueness, and aggregate capacity, then discards
+that edge payload and emits only the required empty lower-variant rows. A lower-only
+policy projection therefore cannot turn an otherwise valid semantic write into a graph
+publication refusal or persist raw graph authority below L6.
+
+The existing-page semantic writer, semantic creation writers, semantic move writer,
+semantic trash-recovery writer, and semantic file/directory trash writers
+derive their graph replacements from the freshest validated detached before-corpus
+carried into the mutation boundary plus the exact guarded planned-write overlay. A move
+or recovery starts from its exact detached after-corpus, while trash removes its exact
+held Markdown identity set; each then overlays only its guarded
+content and auxiliary writes. The retained-corpus paths do not walk the vault again;
+trash builds one lazy detached before-corpus only after an active graph family is verified
+and before canonical bytes change. None of these paths reopens the live graph. The overlay
+re-resolves title-dependent links and reverse relations, so the replacement set includes
+directly changed, created, moved, restored, or removed paths and otherwise-unchanged logical
+sources whose outgoing edge tuple changes. The provider is invoked lazily only when the active tuple
+contains a graph family; open and lexical-only writes do no graph-producer work. Other
+live writer families remain blocked until they supply the same target-bound replacement
+contract.
+
+Machine-owned Evidence preservation, media-sidecar completion/failure updates, and
+scene-frame companion creation use the same lazy planned-Markdown provider. They build
+one detached before-corpus only when the active tuple contains a graph family, overlay the
+exact already-staged Markdown bytes, and publish graph/CLIP/catalog roots together before
+reporting success. Open and lexical-only paths do no graph-producer work.
+
+A policy
 fingerprint or projector-schema change builds a new namespace tuple and never relabels
 an old one. A model/extractor change writes or invalidates only the corresponding
 versioned measurement subkey. Initial migration builds the exact

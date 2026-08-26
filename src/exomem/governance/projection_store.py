@@ -126,6 +126,7 @@ class VariantStoreManifest:
 
 
 _VERIFIED_NAMESPACE_PROOF = object()
+_PREPARED_NAMESPACE_PROOF = object()
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -152,6 +153,31 @@ class VerifiedProjectionNamespace:
             )
         object.__setattr__(self, "namespace_key", namespace_key)
         object.__setattr__(self, "active_state_digest", active_state_digest)
+        object.__setattr__(self, "manifest", manifest)
+        object.__setattr__(self, "items", items)
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class PreparedProjectionNamespace:
+    """One complete immutable namespace prepared for a future tuple activation."""
+
+    namespace_key: projections.ProjectionNamespaceKey
+    manifest: VariantStoreManifest
+    items: tuple[ProjectionItemVariants, ...]
+
+    def __init__(
+        self,
+        namespace_key: projections.ProjectionNamespaceKey,
+        manifest: VariantStoreManifest,
+        items: tuple[ProjectionItemVariants, ...],
+        *,
+        _proof: object,
+    ) -> None:
+        if _proof is not _PREPARED_NAMESPACE_PROOF:
+            raise ProjectionStoreMismatch(
+                "prepared projection namespace requires verified target rows"
+            )
+        object.__setattr__(self, "namespace_key", namespace_key)
         object.__setattr__(self, "manifest", manifest)
         object.__setattr__(self, "items", items)
 
@@ -693,6 +719,36 @@ def bind_active_projection_namespace(
     )
 
 
+def prepare_projection_namespace(
+    *,
+    key: projections.ProjectionNamespaceKey,
+    manifest: VariantStoreManifest,
+    items: Iterable[ProjectionItemVariants],
+) -> PreparedProjectionNamespace:
+    """Verify one complete immutable namespace before its tuple activates."""
+
+    if not isinstance(key, projections.ProjectionNamespaceKey):
+        raise ProjectionStoreMismatch("prepared projection key is unavailable")
+    if not isinstance(manifest, VariantStoreManifest):
+        raise ProjectionStoreMismatch("prepared projection manifest is unavailable")
+    material, recomputed = _materialize(key, items)
+    canonical_items = tuple(entry.item for entry in material)
+    if (
+        manifest.namespace_key != key
+        or manifest.namespace_id != key.namespace_id
+        or recomputed != manifest
+    ):
+        raise ProjectionStoreMismatch(
+            "prepared projection namespace does not match its immutable rows"
+        )
+    return PreparedProjectionNamespace(
+        namespace_key=key,
+        manifest=manifest,
+        items=canonical_items,
+        _proof=_PREPARED_NAMESPACE_PROOF,
+    )
+
+
 def _crash_point(_point: str) -> None:
     """Test-only crash barrier hook."""
 
@@ -986,6 +1042,17 @@ def _connect(
         raise
 
 
+def preview_variant_store(
+    *,
+    key: projections.ProjectionNamespaceKey,
+    items: Iterable[ProjectionItemVariants],
+) -> VariantStoreManifest:
+    """Derive the exact immutable store manifest without publishing files."""
+
+    _material, expected = _materialize(key, items)
+    return expected
+
+
 def stage_variant_store(
     vault_root: Path,
     *,
@@ -1231,6 +1298,7 @@ def load_projection_variant(
 
 
 __all__ = [
+    "PreparedProjectionNamespace",
     "ProjectionItemVariants",
     "ProjectionMeasurementRoot",
     "ProjectionNamespaceEvidence",
@@ -1245,6 +1313,7 @@ __all__ = [
     "namespace_evidence_from_snapshot",
     "projection_measurement_family_id",
     "projection_namespace_evidence_bytes",
+    "prepare_projection_namespace",
     "manifest_from_namespace_evidence",
     "stage_variant_store",
     "variant_store_path",
