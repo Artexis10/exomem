@@ -323,11 +323,20 @@ class ProjectionCatalog:
 
     def __init__(
         self,
-        namespace: projection_store.VerifiedProjectionNamespace,
+        namespace: (
+            projection_store.VerifiedProjectionNamespace
+            | projection_store.PreparedProjectionNamespace
+        ),
     ) -> None:
-        if not isinstance(namespace, projection_store.VerifiedProjectionNamespace):
+        if not isinstance(
+            namespace,
+            (
+                projection_store.VerifiedProjectionNamespace,
+                projection_store.PreparedProjectionNamespace,
+            ),
+        ):
             raise ProjectedRetrievalUnavailable(
-                "projected retrieval requires a verified active namespace"
+                "projected retrieval requires a verified namespace"
             )
         self.namespace = namespace
         self.namespace_key = namespace.namespace_key
@@ -371,7 +380,13 @@ class ProjectionCatalog:
         return variants.get(descriptor)
 
 
-def _variant_text(variant: projections.ProjectionVariant) -> str:
+def projection_text(variant: projections.ProjectionVariant) -> str:
+    """Return the canonical text measured for one immutable projection row."""
+
+    if not isinstance(variant, projections.ProjectionVariant):
+        raise projections.ProjectionCanonicalizationError(
+            "projection text requires one immutable variant"
+        )
     return " ".join(
         variant.search_fields[key]
         for key in sorted(variant.search_fields, key=_sort_key)
@@ -392,7 +407,7 @@ def _projected_hit(
     variant: projections.ProjectionVariant,
     score: float,
 ) -> ProjectedLexicalHit:
-    compact = " ".join(_variant_text(variant).split())
+    compact = " ".join(projection_text(variant).split())
     return ProjectedLexicalHit(
         item_identity=variant.item_identity,
         projection_variant_id=variant.projection_variant_id,
@@ -422,7 +437,7 @@ class ProjectedLexicalIndex:
         postings: dict[str, set[str]] = {}
         for item in self._items.values():
             for variant in item.variants:
-                text = _variant_text(variant)
+                text = projection_text(variant)
                 tokens = tuple(bm25.tokenize(text))
                 document = _SelectedDocument(
                     variant,
@@ -929,7 +944,7 @@ class ProjectedReranker:
                 "rerank candidate is outside the selected projected corpus"
             )
         variants = tuple(selected_by_identity[identity] for identity in candidates)
-        passages = [_variant_text(variant) for variant in variants]
+        passages = [projection_text(variant) for variant in variants]
         try:
             raw_scores = scorer(query, passages)
             scores = tuple(raw_scores)  # type: ignore[arg-type]
@@ -975,4 +990,5 @@ __all__ = [
     "ProjectionVectorMeasurement",
     "ProjectionSelection",
     "clip_variant_applicable",
+    "projection_text",
 ]

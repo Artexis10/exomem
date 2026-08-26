@@ -20,6 +20,8 @@ from .. import find_corpus, reserved_paths, vault
 from . import (
     authorization_custody,
     membership,
+    projected_retrieval,
+    projection_measurement_store,
     projection_store,
     projections,
     receipts,
@@ -59,6 +61,15 @@ class CatalogRemoval:
 
 
 @dataclass(frozen=True, slots=True)
+class PreparedMeasurementPublication:
+    """One validated measurement family held until canonical bytes commit."""
+
+    family: projection_measurement_store.MeasurementFamilyKey
+    measurements: tuple[projection_measurement_store.ProjectionMeasurement, ...]
+    manifest: projection_measurement_store.MeasurementStoreManifest
+
+
+@dataclass(frozen=True, slots=True)
 class PreparedMarkdownCatalogPublication:
     """One complete lexical-only catalog successor awaiting canonical bytes."""
 
@@ -68,6 +79,8 @@ class PreparedMarkdownCatalogPublication:
     target_key: projections.ProjectionNamespaceKey
     target_items: tuple[projection_store.ProjectionItemVariants, ...]
     target_manifest: projection_store.VariantStoreManifest
+    target_namespace: projection_store.PreparedProjectionNamespace
+    target_measurements: tuple[PreparedMeasurementPublication, ...]
     expected_catalog_descriptor: bytes
     catalog_descriptor: bytes
     catalog_seed: schema_v4.CatalogGenerationSeed
@@ -75,6 +88,9 @@ class PreparedMarkdownCatalogPublication:
     target_publication: schema_v4.TuplePublicationResult
     activated_at: int
     mutation_count: int
+
+
+_VECTOR_EXTRACTOR_VERSION = "projected-text-v1"
 
 
 def _catalog_component_value(
@@ -513,6 +529,197 @@ def _validate_catalog_content_paths(content_paths: tuple[str, ...]) -> None:
         aliases.add(alias)
 
 
+def _variant_ids(
+    items: tuple[projection_store.ProjectionItemVariants, ...],
+) -> frozenset[str]:
+    return frozenset(
+        variant.projection_variant_id
+        for item in items
+        for variant in item.variants
+    )
+
+
+def _target_vector_measurements(
+    vault_root: Path,
+    *,
+    active_namespace: projection_store.VerifiedProjectionNamespace,
+    active_root: projection_store.ProjectionMeasurementRoot,
+    target_namespace: projection_store.PreparedProjectionNamespace,
+) -> PreparedMeasurementPublication:
+    """Carry content-addressed vectors forward and rebuild only new variants."""
+
+    from .. import embeddings
+
+    if (
+        active_root.lane != "vector"
+        or active_root.extractor_version != _VECTOR_EXTRACTOR_VERSION
+        or active_root.model_version != embeddings.MODEL_NAME
+    ):
+        raise CatalogPublicationError(
+            "content publication requires a supported vector measurement family"
+        )
+    active_family = projection_measurement_store.MeasurementFamilyKey(
+        namespace_key=active_namespace.namespace_key,
+        lane=active_root.lane,
+        extractor_version=active_root.extractor_version,
+        model_version=active_root.model_version,
+    )
+    try:
+        _active_manifest, active_rows = (
+            projection_measurement_store.load_measurement_store(
+                vault_root,
+                namespace=active_namespace,
+                family=active_family,
+                expected_rows_digest=active_root.rows_digest,
+            )
+        )
+    except projection_measurement_store.MeasurementStoreError as error:
+        raise CatalogPublicationError(
+            "the active vector measurement family cannot be verified"
+        ) from error
+    active_ids = _variant_ids(active_namespace.items)
+    active_by_id: dict[str, projected_retrieval.ProjectionVectorMeasurement] = {}
+    for row in active_rows:
+        if not isinstance(row, projected_retrieval.ProjectionVectorMeasurement):
+            raise CatalogPublicationError(
+                "the active vector measurement family has an invalid row"
+            )
+        active_by_id[row.measurement_key.projection_variant_id] = row
+    if frozenset(active_by_id) != active_ids:
+        raise CatalogPublicationError(
+            "the active vector measurement family is incomplete"
+        )
+
+    target_family = projection_measurement_store.MeasurementFamilyKey(
+        namespace_key=target_namespace.namespace_key,
+        lane=active_root.lane,
+        extractor_version=active_root.extractor_version,
+        model_version=active_root.model_version,
+    )
+    target_variants = tuple(
+        variant
+        for item in target_namespace.items
+        for variant in item.variants
+    )
+    missing = tuple(
+        variant
+        for variant in target_variants
+        if variant.projection_variant_id not in active_by_id
+    )
+    rebuilt: dict[str, tuple[float, ...]] = {}
+    if missing:
+        if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+            raise CatalogPublicationError(
+                "the target vector measurement model is hard-disabled"
+            )
+        try:
+            vectors = tuple(
+                embeddings.embed_texts(
+                    [
+                        projected_retrieval.projection_text(variant)
+                        for variant in missing
+                    ],
+                    is_query=False,
+                )
+            )
+            if len(vectors) != len(missing):
+                raise ValueError("vector count does not match target variants")
+            rebuilt = {
+                variant.projection_variant_id: tuple(
+                    float(component) for component in vector
+                )
+                for variant, vector in zip(missing, vectors, strict=True)
+            }
+        except Exception as error:
+            raise CatalogPublicationError(
+                "the target vector measurements cannot be rebuilt"
+            ) from error
+
+    target_rows = tuple(
+        projected_retrieval.ProjectionVectorMeasurement(
+            measurement_key=projections.MeasurementKey(
+                projection_variant_id=variant.projection_variant_id,
+                lane=target_family.lane,
+                extractor_version=target_family.extractor_version,
+                model_version=target_family.model_version,
+            ),
+            vector=(
+                active_by_id[variant.projection_variant_id].vector
+                if variant.projection_variant_id in active_by_id
+                else rebuilt[variant.projection_variant_id]
+            ),
+        )
+        for variant in target_variants
+    )
+    target_dimensions = {len(row.vector) for row in target_rows}
+    expected_dimension = (
+        active_root.vector_dimension
+        if active_root.vector_dimension is not None
+        else embeddings.VECTOR_DIM
+    )
+    if (
+        len(target_dimensions) > 1
+        or (
+            target_dimensions
+            and target_dimensions != {expected_dimension}
+        )
+    ):
+        raise CatalogPublicationError(
+            "the target vector measurement dimension changed"
+        )
+    try:
+        target_manifest = projection_measurement_store.preview_measurement_store(
+            namespace=target_namespace,
+            family=target_family,
+            measurements=target_rows,
+        )
+    except (
+        projection_measurement_store.MeasurementStoreError,
+        projections.ProjectionError,
+        OSError,
+        sqlite3.Error,
+        RuntimeError,
+        ValueError,
+    ) as error:
+        raise CatalogPublicationError(
+            "the target vector measurement family cannot be prepared"
+        ) from error
+    return PreparedMeasurementPublication(
+        family=target_family,
+        measurements=target_rows,
+        manifest=target_manifest,
+    )
+
+
+def _prepare_target_measurements(
+    vault_root: Path,
+    *,
+    active_namespace: projection_store.VerifiedProjectionNamespace,
+    active_roots: tuple[projection_store.ProjectionMeasurementRoot, ...],
+    target_namespace: projection_store.PreparedProjectionNamespace,
+) -> tuple[PreparedMeasurementPublication, ...]:
+    if not active_roots:
+        return ()
+    if (
+        len(active_roots) != 1
+        or not isinstance(
+            active_roots[0], projection_store.ProjectionMeasurementRoot
+        )
+        or active_roots[0].lane != "vector"
+    ):
+        raise CatalogPublicationError(
+            "content publication requires rebuilt model and graph measurements"
+        )
+    return (
+        _target_vector_measurements(
+            vault_root,
+            active_namespace=active_namespace,
+            active_root=active_roots[0],
+            target_namespace=target_namespace,
+        ),
+    )
+
+
 def _prepare_markdown_batch(
     vault_root: Path,
     *,
@@ -525,10 +732,10 @@ def _prepare_markdown_batch(
 ) -> PreparedMarkdownCatalogPublication | None:
     """Prepare one complete batch successor, or return ``None`` for v3/open.
 
-    The current slice intentionally supports lexical-only active namespaces.
-    Model and graph measurement roots are content-bound, so reusing them after
-    an edit would be unsafe; those deployments refuse before canonical bytes
-    change until their rebuild publisher is connected.
+    Lexical-only namespaces need no measurement work. The certified projected-
+    text vector family reuses content-addressed unchanged rows and rebuilds new
+    variants before canonical bytes change. CLIP, graph, and unknown families
+    remain blocked until their exact publication builders are connected.
     """
 
     root = Path(vault_root)
@@ -594,16 +801,12 @@ def _prepare_markdown_batch(
         )
         connection.commit()
         evidence = projection_store.namespace_evidence_from_snapshot(snapshot)
-        if evidence.required_measurement_roots:
-            raise CatalogPublicationError(
-                "content publication requires rebuilt model and graph measurements"
-            )
         manifest, active_items = projection_store.load_projection_catalog(
             root,
             key=evidence.manifest.namespace_key,
             expected_rows_digest=evidence.manifest.rows_digest,
         )
-        verified = projection_store.bind_active_projection_namespace(
+        active_namespace = projection_store.bind_active_projection_namespace(
             snapshot,
             manifest=manifest,
             items=active_items,
@@ -658,7 +861,7 @@ def _prepare_markdown_batch(
     if not normalized and not normalized_removals:
         return None
 
-    by_identity = {item.item_identity: item for item in verified.items}
+    by_identity = {item.item_identity: item for item in active_namespace.items}
     target_key = projections.ProjectionNamespaceKey(
         policy_fingerprint=snapshot.active.policy_fingerprint,
         projector_schema_version=snapshot.active.projector_schema_version,
@@ -702,10 +905,26 @@ def _prepare_markdown_batch(
             key=target_key,
             items=target_items,
         )
+        target_namespace = projection_store.prepare_projection_namespace(
+            key=target_key,
+            manifest=target_manifest,
+            items=target_items,
+        )
+        target_measurements = _prepare_target_measurements(
+            root,
+            active_namespace=active_namespace,
+            active_roots=evidence.required_measurement_roots,
+            target_namespace=target_namespace,
+        )
+        target_measurement_roots = tuple(
+            projection_measurement_store.measurement_root(target.manifest)
+            for target in target_measurements
+        )
         namespace_seed = schema_v4.ProjectionNamespaceSeed(
             namespace_id=target_key.namespace_id,
             evidence=projection_store.projection_namespace_evidence_bytes(
-                target_manifest
+                target_manifest,
+                required_measurement_roots=target_measurement_roots,
             ),
             ready_at=publication_time,
         )
@@ -746,6 +965,8 @@ def _prepare_markdown_batch(
         target_key=target_key,
         target_items=target_items,
         target_manifest=target_manifest,
+        target_namespace=target_namespace,
+        target_measurements=target_measurements,
         expected_catalog_descriptor=snapshot.catalog_descriptor,
         catalog_descriptor=descriptor,
         catalog_seed=catalog_seed,
@@ -859,6 +1080,23 @@ def publish_markdown_batch(
             raise CatalogPublicationError(
                 "the staged governance catalog does not match its reviewed target"
             )
+        target_measurement_roots: list[
+            projection_store.ProjectionMeasurementRoot
+        ] = []
+        for target_measurement in prepared.target_measurements:
+            staged_measurement = projection_measurement_store.stage_measurement_store(
+                prepared.vault_root,
+                namespace=prepared.target_namespace,
+                family=target_measurement.family,
+                measurements=target_measurement.measurements,
+            )
+            if staged_measurement != target_measurement.manifest:
+                raise CatalogPublicationError(
+                    "the staged governance measurements do not match their reviewed target"
+                )
+            target_measurement_roots.append(
+                projection_measurement_store.measurement_root(staged_measurement)
+            )
         receipt_event_id = receipts.critical_event_id(
             {
                 "operation": "governance_catalog_markdown_batch",
@@ -872,6 +1110,14 @@ def publish_markdown_batch(
                 ).hexdigest(),
                 "namespace_id": prepared.target_key.namespace_id,
                 "projection_rows_digest": target_manifest.rows_digest,
+                "measurement_roots": [
+                    {
+                        "lane": root.lane,
+                        "family_id": root.family_id,
+                        "rows_digest": root.rows_digest,
+                    }
+                    for root in target_measurement_roots
+                ],
                 "mutation_count": prepared.mutation_count,
             }
         )
@@ -901,6 +1147,7 @@ def publish_markdown_batch(
         return result
     except (
         authorization_custody.AuthorizationCustodyUnavailable,
+        projection_measurement_store.MeasurementStoreError,
         projection_store.ProjectionStoreError,
         schema_v4.SchemaV4Error,
         store.UnsupportedGovernanceSchema,
