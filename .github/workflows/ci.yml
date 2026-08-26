@@ -643,11 +643,53 @@ jobs:
           src/exomem/referent_runtime.py
           src/exomem/entity_types.py
 
+  release-evidence:
+    name: release evidence
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Runs on the release PR (where it enforces) and on every non-PR event
+    # (where it is a trivial success, so the gate's skip-intolerant full-CI
+    # arm never sees a skip). Ordinary PRs skip it and the gate accepts the
+    # skip outside full CI. This is the ONLY permitted appearance of the
+    # release branch name in this workflow — a seconds-class API check, not
+    # the full-CI stampede the guard removal eliminated; the contract test
+    # pins the count.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.ref == 'release-please--branches--main' }}
+    steps:
+      - name: Require a green full run on main at the release base
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
+        # Enforces docs/release.md's evidence step in CI instead of prose: a
+        # release PR merges only when a green dispatched (or scheduled) full
+        # run exists on main at the PR's recorded base revision. Known
+        # strictness bound: base.sha is captured at the PR's last synchronize
+        # event, so a main push AFTER the evidence run but WITHOUT a
+        # release-please resync is not caught here; release-please resyncs on
+        # every main push in practice, which re-points BASE_SHA and re-runs
+        # this job.
+        run: |
+          if test -z "$BASE_SHA"; then
+            echo "not a release pull request; nothing to verify"
+            exit 0
+          fi
+          count=$(gh api "repos/${{ github.repository }}/actions/workflows/ci.yml/runs?branch=main&status=success&per_page=100" \
+            --jq "[.workflow_runs[] | select((.event == \"workflow_dispatch\" or .event == \"schedule\") and .head_sha == \"$BASE_SHA\")] | length")
+          if test "$count" -ge 1; then
+            echo "green full run found on main at $BASE_SHA"
+            exit 0
+          fi
+          echo "no green dispatched or scheduled full CI run exists on main at $BASE_SHA" >&2
+          echo "dispatch one and let it finish green first: gh workflow run ci.yml --ref main" >&2
+          echo "then re-run this job (docs/release.md, release flow)" >&2
+          exit 1
+
   gate:
     name: required CI gate
     # Surface dependency failures, but let superseded PR runs release the runner.
     if: ${{ !cancelled() }}
     needs:
+      - release-evidence
       - core-tests
       - harness-tests
       - windows-held-filesystem
