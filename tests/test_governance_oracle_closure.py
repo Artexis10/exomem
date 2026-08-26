@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,7 +24,7 @@ from exomem.governance import (
     projections,
     schema_v4,
 )
-from exomem.governance.policy import Policy, Scope
+from exomem.governance.policy import Policy, Rule, Scope
 from exomem.server_runtime import ServerRuntime
 
 _REST_KEY = "governance-oracle-key"
@@ -168,6 +169,38 @@ _DEFAULT_VISIBLE_BODIES = (
 )
 
 
+def _runtime_from_items(
+    policy: Policy,
+    items: tuple[projection_store.ProjectionItemVariants, ...],
+) -> projection_runtime.ActiveProjectionRuntime:
+    key = projections.ProjectionNamespaceKey(
+        policy_fingerprint=policy.fingerprint,
+        projector_schema_version=projections.PROJECTOR_SCHEMA_VERSION,
+        catalog_generation=len(items),
+    )
+    namespace = verified_namespace(key, items)
+    snapshot = schema_v4.ActivePolicySnapshot(
+        active=schema_v4.VerifiedActiveGovernanceState(
+            logical_vault_id="oracle-vault",
+            activation_store_id="oracle-store",
+            activation_epoch=len(items),
+            activation_state_digest=namespace.active_state_digest,
+            policy_generation_id="oracle-policy",
+            policy_fingerprint=key.policy_fingerprint,
+            projector_schema_version=key.projector_schema_version,
+            catalog_generation=key.catalog_generation,
+            projection_namespace_id=key.namespace_id,
+        ),
+        policy=policy,
+        source_documents=(),
+        catalog_descriptor=projection_store.catalog_descriptor_bytes(key, items),
+        projection_namespace_evidence=(
+            projection_store.projection_namespace_evidence_bytes(namespace.manifest)
+        ),
+    )
+    return projection_runtime.ActiveProjectionRuntime(snapshot, namespace)
+
+
 def _counterfactual_runtime(
     *,
     hidden_bodies: tuple[str, ...],
@@ -201,33 +234,7 @@ def _counterfactual_runtime(
                 body=body,
             )
         )
-    item_tuple = tuple(items)
-    key = projections.ProjectionNamespaceKey(
-        policy_fingerprint=policy.fingerprint,
-        projector_schema_version=projections.PROJECTOR_SCHEMA_VERSION,
-        catalog_generation=len(item_tuple),
-    )
-    namespace = verified_namespace(key, item_tuple)
-    snapshot = schema_v4.ActivePolicySnapshot(
-        active=schema_v4.VerifiedActiveGovernanceState(
-            logical_vault_id="oracle-vault",
-            activation_store_id="oracle-store",
-            activation_epoch=len(item_tuple),
-            activation_state_digest=namespace.active_state_digest,
-            policy_generation_id="oracle-policy",
-            policy_fingerprint=key.policy_fingerprint,
-            projector_schema_version=key.projector_schema_version,
-            catalog_generation=key.catalog_generation,
-            projection_namespace_id=key.namespace_id,
-        ),
-        policy=policy,
-        source_documents=(),
-        catalog_descriptor=projection_store.catalog_descriptor_bytes(key, item_tuple),
-        projection_namespace_evidence=(
-            projection_store.projection_namespace_evidence_bytes(namespace.manifest)
-        ),
-    )
-    return projection_runtime.ActiveProjectionRuntime(snapshot, namespace)
+    return _runtime_from_items(policy, tuple(items))
 
 
 def _client(monkeypatch: pytest.MonkeyPatch, root: Path) -> TestClient:
@@ -248,6 +255,10 @@ def _wire_pair(
     hidden_bodies: tuple[str, ...],
     request: dict[str, object],
     visible_bodies: tuple[str, ...] = _DEFAULT_VISIBLE_BODIES,
+    runtime_factory: Callable[
+        [tuple[str, ...]], projection_runtime.ActiveProjectionRuntime
+    ]
+    | None = None,
 ) -> tuple[
     dict[str, projection_runtime.ActiveProjectionRuntime],
     dict[str, httpx.Response],
@@ -279,15 +290,15 @@ def _wire_pair(
     }
     for root in roots.values():
         (root / "Knowledge Base").mkdir(parents=True)
+    build_runtime = runtime_factory or (
+        lambda hidden: _counterfactual_runtime(
+            hidden_bodies=hidden,
+            visible_bodies=visible_bodies,
+        )
+    )
     runtimes_by_root = {
-        roots["absent"]: _counterfactual_runtime(
-            hidden_bodies=(),
-            visible_bodies=visible_bodies,
-        ),
-        roots["present"]: _counterfactual_runtime(
-            hidden_bodies=hidden_bodies,
-            visible_bodies=visible_bodies,
-        ),
+        roots["absent"]: build_runtime(()),
+        roots["present"]: build_runtime(hidden_bodies),
     }
     monkeypatch.setattr(
         projection_runtime,
@@ -461,3 +472,154 @@ def test_hidden_candidates_beyond_the_visible_top_k_never_consume_the_lane_cap(
 
     _assert_same_success_envelope(responses)
     assert len(responses["present"].json()["data"]["hits"]) == 1
+
+
+def _projection_only_runtime(
+    hidden_bodies: tuple[str, ...],
+) -> projection_runtime.ActiveProjectionRuntime:
+    projected = Scope(id="oracle-projected", source="scopes/oracle-projected.yaml")
+    hidden = Scope(
+        id="oracle-hidden",
+        source="scopes/oracle-hidden.yaml",
+        default_deny=True,
+    )
+    policy = Policy(
+        fingerprint="e" * 64,
+        scopes={projected.id: projected, hidden.id: hidden},
+        rules=(
+            Rule(
+                id="oracle-projected-external",
+                source="rules/oracle-projected-external.yaml",
+                scope_ids=(projected.id,),
+                audience="oracle-external",
+                ceiling=3,
+                options={"abstract": "projectivequartz safe abstract"},
+            ),
+        ),
+    )
+    items = [
+        _projected_item(
+            policy,
+            path=f"Knowledge Base/oracle-visible-{index:03d}.md",
+            scope_id=projected.id,
+            body=f"raw-source-only visible item {index}",
+        )
+        for index in range(2)
+    ]
+    items.extend(
+        _projected_item(
+            policy,
+            path=f"Knowledge Base/private/oracle-hidden-{index:03d}.md",
+            scope_id=hidden.id,
+            body=body,
+        )
+        for index, body in enumerate(hidden_bodies)
+    )
+    return _runtime_from_items(policy, tuple(items))
+
+
+def test_projection_only_term_acquires_visible_rows_without_raw_text_or_l0_influence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runtimes, responses = _wire_pair(
+        monkeypatch,
+        tmp_path,
+        hidden_bodies=("projectivequartz " * 32 + "hidden raw source",),
+        runtime_factory=_projection_only_runtime,
+        request=_request(query="projectivequartz", limit=2),
+    )
+    present_runtime = runtimes["present"]
+    external = projection_authorization.build_authorization_map(
+        present_runtime.namespace,
+        policy=present_runtime.snapshot.policy,
+        audience="oracle-external",
+        purpose=None,
+        verified_session_grants=(),
+        catalog=present_runtime.catalog,
+    )
+    owner = projection_authorization.build_authorization_map(
+        present_runtime.namespace,
+        policy=present_runtime.snapshot.policy,
+        audience=principal.OWNER_AUDIENCE,
+        purpose=None,
+        verified_session_grants=(),
+        catalog=present_runtime.catalog,
+    )
+    external_hits = present_runtime.lexical_index.search_bm25(
+        external,
+        "projectivequartz",
+        k=3,
+    )
+    owner_hits = present_runtime.lexical_index.search_bm25(
+        owner,
+        "projectivequartz",
+        k=3,
+    )
+    assert [hit.decision_level for hit in external_hits] == [3, 3]
+    assert [hit.item_identity for hit in owner_hits] == [
+        "Knowledge Base/private/oracle-hidden-000.md"
+    ]
+
+    _assert_same_success_envelope(responses)
+    content = responses["present"].content
+    assert b"projectivequartz" in content
+    assert b"raw-source-only" not in content
+    assert b"oracle-hidden" not in content
+
+
+def test_hidden_document_frequency_cannot_change_visible_bm25_order(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    visible_bodies = (
+        "idf-common idf-shared visible-a",
+        "idf-rare idf-shared visible-b",
+    )
+    runtimes, responses = _wire_pair(
+        monkeypatch,
+        tmp_path,
+        hidden_bodies=tuple(
+            f"idf-common idf-shared hidden-{index}" for index in range(10)
+        ),
+        visible_bodies=visible_bodies,
+        request=_request(query="idf-common idf-rare idf-shared", limit=2),
+    )
+
+    def owner_visible_order(
+        runtime: projection_runtime.ActiveProjectionRuntime,
+    ) -> list[str]:
+        authorization = projection_authorization.build_authorization_map(
+            runtime.namespace,
+            policy=runtime.snapshot.policy,
+            audience=principal.OWNER_AUDIENCE,
+            purpose=None,
+            verified_session_grants=(),
+            catalog=runtime.catalog,
+        )
+        return [
+            hit.item_identity
+            for hit in runtime.lexical_index.search_bm25(
+                authorization,
+                "idf-common idf-rare idf-shared",
+                k=12,
+            )
+            if "/private/" not in hit.item_identity
+        ]
+
+    assert owner_visible_order(runtimes["absent"]) == [
+        "Knowledge Base/oracle-visible-000.md",
+        "Knowledge Base/oracle-visible-001.md",
+    ]
+    assert owner_visible_order(runtimes["present"]) == [
+        "Knowledge Base/oracle-visible-001.md",
+        "Knowledge Base/oracle-visible-000.md",
+    ]
+
+    _assert_same_success_envelope(responses)
+    assert [
+        hit["path"] for hit in responses["present"].json()["data"]["hits"]
+    ] == [
+        "Knowledge Base/oracle-visible-000.md",
+        "Knowledge Base/oracle-visible-001.md",
+    ]
