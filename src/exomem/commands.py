@@ -1621,6 +1621,7 @@ def op_find(
         retrieval_limit = (
             egress_module.pool_limit(limit) if _release_active else limit
         )
+        catalog_proof: dict[str, Any] = {}
         hits = find_module.find(
             vault_root,
             query=query,
@@ -1655,6 +1656,7 @@ def op_find(
             degraded_out=degraded,
             failed_out=failed,
             retrieval_trace=retrieval_trace,
+            catalog_proof_out=catalog_proof,
         )
         # Release gate, part 2 of 2 (design D2): decisions are computed HERE —
         # strictly after `find()` has returned and deep-copied its candidates into
@@ -1687,8 +1689,9 @@ def op_find(
                         release=release,
                         purpose=purpose,
                         cue=referent_cue,
+                        expected_recall_checkpoints=catalog_proof or None,
                     )
-                except Exception:
+                except Exception:  # noqa: BLE001 - optional enrichment soft-fails
                     referents = None
     pack_obj: dict | None = None
     if pack:

@@ -208,6 +208,7 @@ def test_watcher_raw_record_burst_does_not_consume_semantic_cap(
             {
                 "defer_semantic": False,
                 "publish_corpus_change": False,
+                "watcher_deleted_rel_paths": [],
             },
         )
     ]

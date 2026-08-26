@@ -170,7 +170,7 @@ def test_full_receipt_drain_skips_all_receipts_when_vault_recovery_fails(
     assert deferred_index.snapshot_full(vault) == admitted
 
 
-def test_watcher_seed_recovers_floor_ahead_receipt_before_rebuild_without_extraction(
+def test_watcher_startup_recovery_repairs_floor_ahead_receipt_without_extraction(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Startup recovers a committed transcript's graph handoff before rebuilding it."""
@@ -227,7 +227,9 @@ def test_watcher_seed_recovers_floor_ahead_receipt_before_rebuild_without_extrac
 
     monkeypatch.setattr(deferred_index, "clear_full_receipts", clear_only_after_startup_rebuild)
 
-    file_watcher.FileWatcher(vault)._reconcile_once(seed=True)
+    watcher = file_watcher.FileWatcher(vault)
+    watcher._reconcile_once(seed=True)
+    watcher.finish_startup_recovery()
 
     assert rebuild_epochs == [
         {"state": "recovery_required", "generation": issued_generation + 1}
@@ -243,7 +245,7 @@ def test_watcher_seed_recovers_floor_ahead_receipt_before_rebuild_without_extrac
     assert sidecar.read_bytes() == committed_bytes
 
 
-def test_watcher_seed_routes_configured_receipt_cap_through_fair_drain(
+def test_watcher_startup_recovery_routes_configured_receipt_cap_through_fair_drain(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Startup replay gives its configured cap to the mixed-queue allocator."""
@@ -269,5 +271,6 @@ def test_watcher_seed_routes_configured_receipt_cap_through_fair_drain(
     )
 
     watcher._reconcile_once(seed=True)
+    watcher.finish_startup_recovery()
 
     assert drains == [2]

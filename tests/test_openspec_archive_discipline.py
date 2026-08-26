@@ -151,10 +151,17 @@ def test_missing_empty_malformed_and_archived_tasks_do_not_claim_completion(
 
 def test_ci_validates_all_openspec_records_before_the_archive_debt_gate() -> None:
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-    validation = "npm exec --yes @fission-ai/openspec -- validate --all --strict"
+    tool_versions = (ROOT / "infra" / "tool-versions.env").read_text(encoding="utf-8")
+    validation = (
+        "source infra/tool-versions.env\n"
+        "          npm exec --yes @fission-ai/openspec@${OPENSPEC_VERSION} -- "
+        "validate --all --strict"
+    )
     audit = "python scripts/check_openspec_archive_discipline.py"
 
+    assert "OPENSPEC_VERSION=" in tool_versions
     assert validation in workflow
     assert audit in workflow
     assert workflow.index(validation) < workflow.index(audit)
+    assert "npm exec --yes @fission-ai/openspec --" not in workflow
     assert "validate --specs --strict" not in workflow

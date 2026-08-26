@@ -288,7 +288,11 @@ def test_runtime_readiness_fails_closed_within_a_tight_bound_when_status_blocks(
     monkeypatch.setattr(writer_lease, "coordination_status", blocked_coordination_status)
     monkeypatch.setattr(session_validation_cache, "session_store_readiness", lambda: {})
     monkeypatch.setattr(readiness_module, "_measure_observability", lambda: {})
-    readiness.mark_ready("retrieval_catalog")
+    monkeypatch.setattr(
+        readiness,
+        "retrieval_admission",
+        lambda _vault_root=None: {"state": "ready", "admitted": True},
+    )
 
     assert readiness_module.COORDINATION_STATUS_TIMEOUT_SECONDS < 1.0
     started = time.monotonic()
@@ -341,7 +345,11 @@ def test_runtime_readiness_admits_a_slow_but_bounded_real_vault_snapshot(
     monkeypatch.setattr(writer_lease, "coordination_status", slow_coordination_status)
     monkeypatch.setattr(session_validation_cache, "session_store_readiness", lambda: {})
     monkeypatch.setattr(readiness_module, "_measure_observability", lambda: {})
-    readiness.mark_ready("retrieval_catalog")
+    monkeypatch.setattr(
+        readiness,
+        "retrieval_admission",
+        lambda _vault_root=None: {"state": "ready", "admitted": True},
+    )
 
     started = time.monotonic()
     snapshot = readiness_module.runtime_readiness(

@@ -39,6 +39,12 @@ Local service composition also becomes transport-first. The HTTP server is built
 
 Alternative rejected: only reorder the existing steps while keeping one `lexical` marker. That would either report readiness too late after the catalog is already usable or too early when fallback pages are still cold.
 
+### Keep watcher publication and lexical consumption at the same scope
+
+The file watcher publishes one freshness generation for changed and deleted Markdown across the entire vault. The lexical sidecar serves both KB and vault recall scopes, so its bounded mutation consumes the complete admitted/suppressed/deleted union from that generation under one publication barrier. Only after capturing that full lexical input does the fan-out narrow memory references, graph work, and embeddings back to `Knowledge Base/`. A KB-only lexical handoff cannot prove the vault checkpoint when the same batch contains a `Sources/`, `Evidence/`, or other outside-KB edit, and would strand retrieval admission behind an otherwise current catalog.
+
+Alternative rejected: pass the complete vault batch to every index. That would make outside-KB Markdown enter KB-scoped embedding and graph lanes merely to repair a lexical checkpoint.
+
 ### Extend runtime readiness with content-free retrieval admission
 
 Runtime readiness projects the process-local `retrieval_catalog` component as a content-free `retrieval` block. While startup warm-up is active and the catalog is not ready, or after that phase fails, overall readiness is withheld with a stable reason. The liveness endpoint remains independent. No vault paths, queries, counts, or catalog content enter the response.
@@ -49,7 +55,7 @@ Alternative rejected: leave `/health/ready` coordination-only and add another en
 
 ### Test the invariant, not the incident timing
 
-Regression tests use a production-sized synthetic freshness tuple and instrument the reference walk/page parser. They assert that an incomplete maintained catalog produces the typed warming outcome with zero walk or page reads, that catalog warm precedes optional page warm, and that runtime readiness transitions from 503-equivalent state to ready only after catalog admission.
+Regression tests use a production-sized synthetic freshness tuple and instrument the reference walk/page parser. They assert that an incomplete maintained catalog produces the typed warming outcome with zero walk or page reads, that catalog warm precedes optional page warm, and that runtime readiness transitions from 503-equivalent state to ready only after catalog admission. A mixed KB/outside-KB watcher regression also proves the complete vault generation reaches lexstore while embeddings remain KB-scoped and that both persisted catalog checkpoints can promote runtime admission.
 
 ## Risks / Trade-offs
 

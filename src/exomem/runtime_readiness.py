@@ -506,6 +506,7 @@ def runtime_readiness(
     from .writer_lease import coordination_status
 
     coordination: Mapping[str, Any]
+    configured_vault: Path | None = None
     try:
         configured_raw = os.environ.get("EXOMEM_VAULT_PATH", "").strip()
         # Only an absolute path names a boundary this process can probe. A
@@ -557,5 +558,5 @@ def runtime_readiness(
             if traffic is not None
             else get_silent_traffic_monitor().snapshot()
         ),
-        retrieval=readiness.retrieval_admission(),
+        retrieval=readiness.retrieval_admission(configured_vault),
     )
