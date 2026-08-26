@@ -2169,3 +2169,88 @@ def test_no_marker_means_the_nudge_behaves_exactly_as_before(
     monkeypatch.setenv("EXOMEM_HOOK_HOME", str(tmp_path))
 
     assert capture_hook._restart_pending([]) is False
+
+
+# --- lifecycle writes are KB writes (route-lifecycle-consequences-without-nudges) ---
+
+
+@pytest.mark.parametrize(
+    "tool,payload",
+    [
+        ("mcp__claude_ai_Exomem__record_memory", {"action": "append"}),
+        ("mcp__claude_ai_Exomem__record_memory", {"action": "update"}),
+        ("mcp__claude_ai_Exomem__plan_memory", {"action": "add"}),
+        ("mcp__claude_ai_Exomem__plan_memory", {"action": "triage"}),
+        ("mcp__claude_ai_Exomem__observe_memory", {"operation": "update"}),
+    ],
+)
+def test_capture_silent_after_a_lifecycle_write(
+    tmp_path: Path, tool: str, payload: dict
+) -> None:
+    """A turn that filed the record or moved the plan item did the right thing.
+
+    The detector counted note/entity writes only, so the session that DID route
+    its outcomes to Records was nudged to capture anyway — the nudge firing on
+    exactly the behaviour the contract asks for.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    t = _transcript(
+        tmp_path,
+        "q?",
+        "Three deliverables were produced and logged. " + "x" * 450,
+        assistant_tool=tool,
+        assistant_tool_input=payload,
+    )
+
+    r = _run(
+        CAPTURE_SCRIPT,
+        {"transcript_path": str(t), "session_id": f"lifecycle-{tool}-{sorted(payload.values())[0]}"},
+        home,
+    )
+
+    assert r.stdout.strip() == ""
+
+
+@pytest.mark.parametrize(
+    "tool,payload",
+    [
+        ("mcp__claude_ai_Exomem__record_memory", {"action": "inspect"}),
+        ("mcp__claude_ai_Exomem__record_memory", {"action": "query"}),
+        ("mcp__claude_ai_Exomem__plan_memory", {"action": "inspect"}),
+        ("mcp__claude_ai_Exomem__plan_memory", {"action": "query"}),
+    ],
+)
+def test_capture_still_fires_after_read_only_lifecycle_discovery(
+    tmp_path: Path, tool: str, payload: dict
+) -> None:
+    """Read-only discovery is not a write; the check stays armed."""
+    home = tmp_path / "home"
+    home.mkdir()
+    t = _transcript(
+        tmp_path,
+        "q?",
+        "Looked at what is queued and nothing was written. " + "x" * 450,
+        assistant_tool=tool,
+        assistant_tool_input=payload,
+    )
+
+    r = _run(
+        CAPTURE_SCRIPT,
+        {"transcript_path": str(t), "session_id": f"readonly-{tool}-{sorted(payload.values())[0]}"},
+        home,
+    )
+
+    assert '"decision": "block"' in r.stdout
+
+
+def test_capture_reminder_names_the_lifecycle_classes() -> None:
+    """The reminder that fires must name the classes it wants routed."""
+    from exomem._hooks import exomem_capture_nudge as capture_hook
+
+    reminder = capture_hook.REMINDER.lower()
+
+    assert "stated intent" in reminder
+    assert "plan_memory" in reminder
+    assert "observed outcome" in reminder
+    assert "record_memory" in reminder

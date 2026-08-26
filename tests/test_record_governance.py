@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import uuid
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -2055,37 +2054,42 @@ def test_disclosure_boundary_rejects_a_nested_different_vault(tmp_path: Path) ->
 
 @pytest.mark.parametrize("explicit_key", (True, False))
 def test_governed_append_refuses_an_l0_future_item_before_writing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, explicit_key: bool
+    tmp_path: Path, explicit_key: bool
 ) -> None:
     fixture = copy_vehicle_maintenance_fixture(tmp_path)
     activity = tmp_path / "Knowledge Base" / "log.md"
     activity.write_text("# Activity\n", encoding="utf-8")
     manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
-    key = "ed6854be-c236-4cf6-9c90-18dfb8ac2544"
+    item = {
+        "occurred_on": "2026-07-01",
+        "asset": "[[Assets/Vehicle]]",
+        "odometer": 46000,
+        "provider": "Workshop",
+        "services": ["oil"],
+        "amount": 20,
+        "currency": "GBP",
+        "status": "completed",
+        "next_due_on": None,
+        "next_due_odometer": None,
+    }
+    # An omitted item key is derived from the declared natural key, so the future
+    # path is known to the test the same way the writer knows it.
+    key = (
+        "ed6854be-c236-4cf6-9c90-18dfb8ac2544"
+        if explicit_key
+        else collections.derived_item_key(manifest, item)
+    )
     target = f"Records/vehicle-maintenance/Events/{key}.md"
     _write_l6_rule(tmp_path, ceiling=6, paths="Records/**")
     _write_l0_rule(tmp_path, name="blocked", paths=target)
     before = ((fixture / "_collection.md").read_bytes(), activity.read_bytes())
-    if not explicit_key:
-        monkeypatch.setattr(records.uuid, "uuid4", lambda: uuid.UUID(key))
 
     with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
         with pytest.raises(collections.CollectionError) as raised:
             records.append_record(
                 tmp_path,
                 manifest,
-                item={
-                    "occurred_on": "2026-07-01",
-                    "asset": "[[Assets/Vehicle]]",
-                    "odometer": 46000,
-                    "provider": "Workshop",
-                    "services": ["oil"],
-                    "amount": 20,
-                    "currency": "GBP",
-                    "status": "completed",
-                    "next_due_on": None,
-                    "next_due_odometer": None,
-                },
+                item=item,
                 item_key=key if explicit_key else None,
                 why="future item must be authorized before publication",
             )
@@ -2308,3 +2312,127 @@ def test_receipt_publication_failure_prevents_append_publication(
 
     assert ((fixture / "_collection.md").read_bytes(), activity.read_bytes()) == before
     assert not list((fixture / "Events").glob("*.md"))
+
+
+# --- the authored join on a Planning reference (design D5) ----------------------
+
+
+_JOIN_FIXTURE = """
+links:
+  plans:
+    - reference: exomem://memory/99f6fa8b-5d6e-43f8-8cdf-e30767e8f4d7
+      query: {limit: 12}
+      join:
+        asset: title
+        provider: area
+---
+
+One ordinary"""
+
+
+def _with_manifest_tail(fixture: Path, tail: str) -> Path:
+    manifest_path = fixture / "_collection.md"
+    manifest_path.write_text(
+        manifest_path.read_text(encoding="utf-8").replace("\n---\n\nOne ordinary", tail),
+        encoding="utf-8",
+    )
+    return manifest_path
+
+
+def test_a_plan_link_join_round_trips_through_inspect_without_resolving_planning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The join is an authored declaration, not a lookup.
+
+    Records must be able to say which of its fields correspond to which plan
+    fields without ever reading Planning; the attention surface is the only
+    consumer, and it resolves the reference on its own time.
+    """
+    from exomem import planning
+
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest_path = _with_manifest_tail(fixture, _JOIN_FIXTURE)
+    manifest = collections.load_manifest(tmp_path, manifest_path)
+
+    def unexpected(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("Records must not resolve the Planning side of a join")
+
+    monkeypatch.setattr(memory_refs, "resolve_identifier_read_only", unexpected)
+    monkeypatch.setattr(planning, "inspect", unexpected)
+    monkeypatch.setattr(planning, "query", unexpected)
+
+    assert manifest.links.plans[0].join == {"asset": "title", "provider": "area"}
+
+    inspection = record_governance.inspect_collection(tmp_path, manifest)
+    projected = record_governance.project_manifest(tmp_path, manifest)
+
+    assert inspection["contract"]["plans"] == [
+        {
+            "reference": "exomem://memory/99f6fa8b-5d6e-43f8-8cdf-e30767e8f4d7",
+            "query": {"limit": 12},
+            "join": {"asset": "title", "provider": "area"},
+        }
+    ]
+    assert projected["plans"] == inspection["contract"]["plans"]
+
+
+def test_a_plan_link_without_a_join_projects_exactly_as_before(tmp_path: Path) -> None:
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest_path = _with_manifest_tail(
+        fixture,
+        """
+links:
+  plans:
+    - reference: exomem://memory/99f6fa8b-5d6e-43f8-8cdf-e30767e8f4d7
+      query: {limit: 12}
+---
+
+One ordinary""",
+    )
+    manifest = collections.load_manifest(tmp_path, manifest_path)
+
+    assert manifest.links.plans[0].join is None
+    assert record_governance.project_manifest(tmp_path, manifest)["plans"] == [
+        {"reference": "exomem://memory/99f6fa8b-5d6e-43f8-8cdf-e30767e8f4d7", "query": {"limit": 12}}
+    ]
+
+
+@pytest.mark.parametrize(
+    "join, offending",
+    [
+        ("        nonexistent: title\n", "nonexistent"),
+        ("        asset: title\n        provider: area\n        odometer: a\n"
+         "        status: b\n        currency: c\n", None),
+        ('        asset: ""\n', "asset"),
+        ("        asset: 7\n", "asset"),
+    ],
+    ids=["undeclared-record-field", "five-pairs", "empty-plan-name", "non-text-plan-name"],
+)
+def test_a_malformed_join_refuses_before_acceptance(
+    tmp_path: Path, join: str, offending: str | None
+) -> None:
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest_path = _with_manifest_tail(
+        fixture,
+        "\nlinks:\n  plans:\n"
+        "    - reference: exomem://memory/99f6fa8b-5d6e-43f8-8cdf-e30767e8f4d7\n"
+        "      query: {limit: 12}\n"
+        "      join:\n" + join + "---\n\nOne ordinary",
+    )
+
+    with pytest.raises(collections.CollectionError) as raised:
+        collections.load_manifest(tmp_path, manifest_path)
+
+    assert raised.value.code == "INVALID_COLLECTION_LINKS"
+    if offending is not None:
+        assert offending in str(raised.value.details)
+
+
+def test_describe_documents_the_plan_link_join() -> None:
+    """An authored shape nobody can discover is an undocumented private field."""
+    contract = collections.manifest_authoring_contract()
+
+    join = contract["plan_links"]["join"]
+    assert join["maximum_pairs"] == 4
+    assert "declared" in join["record_side"]
+    assert "not resolve" in contract["plan_links"]["resolution"]

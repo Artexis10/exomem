@@ -53,6 +53,118 @@ def _without_mcp_transport_credential(schema: dict[str, object]) -> dict[str, ob
     return normalized
 
 
+#: Reasons that record a decision not yet taken rather than a technical
+#: obstacle. An exclusion carrying one of these is the drift the registry
+#: exists to prevent, wearing the registry's clothes.
+PLACEHOLDER_REASONS = (
+    "tbd",
+    "todo",
+    "not yet reviewed",
+    "not reviewed",
+    "alpha scope",
+    "out of scope",
+    "for now",
+    "later",
+)
+
+
+def test_hosted_v4_membership_equals_the_product_surface_minus_exclusions() -> None:
+    """Hosted parity is a rule, not a list.
+
+    v1 was an allowlist, so every command added after it was absent from
+    hosted until somebody remembered -- and for `adopt`, `maintain` and
+    `record` nobody did. The literal below stays pinned because a published
+    profile's `command_surface_sha256` must not move under an unchanged
+    identifier; this asserts the literal still equals what the rule derives,
+    so adding a product command without deciding its hosted status fails here.
+    """
+    profile = commands.PRODUCT_SURFACE_PROFILES[commands.HOSTED_ALPHA_AGENT_V4_PROFILE]
+
+    assert profile.command_names == commands.hosted_complete_surface_names()
+
+    excluded = set(commands.HOSTED_SURFACE_EXCLUSIONS)
+    every = {command.name for command in commands.PRODUCT_COMMANDS}
+    assert set(profile.command_names) == every - excluded
+    assert excluded <= every, "an exclusion names a command that does not exist"
+
+
+def test_hosted_exclusions_state_a_reason_and_a_lifting_condition() -> None:
+    assert set(commands.HOSTED_SURFACE_EXCLUSIONS) == {
+        "transfer_artifact",
+        "adopt_vault",
+        "process_media",
+        "read_media",
+    }
+
+    for name, exclusion in commands.HOSTED_SURFACE_EXCLUSIONS.items():
+        assert exclusion.command == name
+        assert len(exclusion.reason) > 60, f"{name}: reason is too thin to be a reason"
+        assert exclusion.lifted_when, f"{name}: no condition would ever lift this"
+        blob = f"{exclusion.reason} {exclusion.lifted_when}".lower()
+        for placeholder in PLACEHOLDER_REASONS:
+            assert placeholder not in blob, f"{name}: placeholder reason {placeholder!r}"
+
+
+def test_hosted_v4_carries_tier_two_and_resolves_on_every_surface() -> None:
+    """Tier 2 was withheld by a blanket rule in the resolver, not by a decision.
+
+    Every tier-2 command operates inside the calling tenant's own vault, which
+    is the blast radius a local operator already has, so the exposure is the
+    default and the resolver's refusal is now per-profile rather than absolute.
+    """
+    tier2 = {command.name for command in commands.PRODUCT_COMMANDS if command.tier == 2}
+    v4 = set(
+        commands.PRODUCT_SURFACE_PROFILES[
+            commands.HOSTED_ALPHA_AGENT_V4_PROFILE
+        ].command_names
+    )
+    assert tier2 - set(commands.HOSTED_SURFACE_EXCLUSIONS) <= v4
+
+    for surface in ("mcp", "rest", "cli"):
+        selected = commands.product_commands_for_profile(
+            commands.HOSTED_ALPHA_AGENT_V4_PROFILE, surface
+        )
+        assert len(selected) == len(v4)
+
+    # Fail-closed is preserved: a profile that did not opt in still refuses.
+    assert not commands.PRODUCT_SURFACE_PROFILES[ALPHA_PROFILE].expose_tier2
+
+
+def test_hosted_v4_leaves_only_adopt_degraded_and_says_why() -> None:
+    """Under v1 three actions were unavailable and the catalog said nothing useful."""
+    v4 = commands.PRODUCT_SURFACE_PROFILES[
+        commands.HOSTED_ALPHA_AGENT_V4_PROFILE
+    ].command_names
+    catalog = commands.simple_action_catalog(available_tools=frozenset(v4))
+
+    degraded = {
+        action: entry
+        for action, entry in catalog.items()
+        if entry.get("available") is False
+    }
+    assert set(degraded) == {"adopt"}
+
+    entry = degraded["adopt"]
+    assert entry["unavailable_command"] == "adopt_vault"
+    reason = entry["unavailable_reason"]
+    assert "adopt_vault" in reason
+    assert "HOSTED_IMPORT_INTERCEPT_REQUIRED" in reason
+    assert "Lifted when" in reason
+
+
+def test_published_hosted_profiles_are_not_mutated_by_v4() -> None:
+    pinned = {
+        "hosted-alpha-agent-v1": 13,
+        "hosted-alpha-agent-v2": 14,
+        "hosted-alpha-agent-v3": 17,
+    }
+    for name, count in pinned.items():
+        profile = commands.PRODUCT_SURFACE_PROFILES[name]
+        assert len(profile.command_names) == count
+        assert profile.command_names[:13] == ALPHA_COMMANDS
+        assert not profile.expose_tier2
+
+
 def test_hosted_alpha_agent_profile_is_exact_and_fail_closed() -> None:
     resolver = getattr(commands, "product_commands_for_profile", None)
     assert resolver is not None, "missing canonical product surface-profile resolver"

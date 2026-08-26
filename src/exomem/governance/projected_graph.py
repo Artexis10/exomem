@@ -296,7 +296,7 @@ class ProjectedGraphIndex:
             for variant in item.variants
         }
         identities = frozenset(self.catalog.items)
-        by_variant: dict[str, ProjectionGraphMeasurement] = {}
+        by_variant: dict[str, tuple[tuple[str, str], ...]] = {}
         graph_edge_count = 0
         for measurement in measurements:
             if not isinstance(measurement, ProjectionGraphMeasurement):
@@ -336,7 +336,16 @@ class ProjectedGraphIndex:
                     raise projections.ProjectionCanonicalizationError(
                         "graph edge target is outside the projection catalog"
                     )
-            by_variant[key.projection_variant_id] = measurement
+            # Retain only atomic edge facts.  The typed ingest objects are
+            # useful for validation but keeping hundreds of thousands of them
+            # in the active runtime makes every full cyclic-GC traversal scale
+            # with hidden graph size.  Tuples of strings become untracked after
+            # the startup stabilization collection; admitted typed edges are
+            # reconstructed only for the caller-visible projection.
+            by_variant[key.projection_variant_id] = tuple(
+                (edge.target_item_identity, edge.relation_type)
+                for edge in measurement.edges
+            )
         self._measurements = MappingProxyType(by_variant)
 
     def authorize(
@@ -349,15 +358,19 @@ class ProjectedGraphIndex:
         selected_identities = frozenset(variant.item_identity for variant in selected)
         admitted_edges: list[ProjectionGraphEdge] = []
         for variant in selected:
-            measurement = self._measurements.get(variant.projection_variant_id)
-            if measurement is None:
+            variant_id = variant.projection_variant_id
+            if variant_id not in self._measurements:
                 raise projected_retrieval.ProjectedLaneUnavailable(
                     "selected projection graph measurement is unavailable"
                 )
             admitted_edges.extend(
-                edge
-                for edge in measurement.edges
-                if edge.target_item_identity in selected_identities
+                ProjectionGraphEdge(
+                    source_item_identity=variant.item_identity,
+                    target_item_identity=target,
+                    relation_type=relation,
+                )
+                for target, relation in self._measurements[variant_id]
+                if target in selected_identities
             )
         vertices = tuple(sorted(selected_identities, key=_sort_key))
         selected_variants = tuple(

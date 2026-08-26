@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import socket
 from dataclasses import dataclass
 from pathlib import Path
@@ -370,6 +371,111 @@ def test_maintenance_diagnostics_accepts_raw_noop_or_committed_full_result(
         result,
         operation="maintain_memory",
     ) == expected
+
+
+def test_remote_write_maintenance_refusal_matches_operator_contract() -> None:
+    error = {
+        "code": "MAINTENANCE_REQUIRES_CLI",
+        "status": "terminal",
+        "committed": False,
+        "remediation": "Run exomem maintain --reconcile on the host.",
+    }
+
+    assert e2e_product_loop._remote_maintenance_refusal(
+        {"success": False, "error": error}
+    ) == error
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        {"success": True, "data": {}},
+        {"success": False, "error": {"code": "MUTATION_BUSY"}},
+        {
+            "success": False,
+            "error": {
+                "code": "MAINTENANCE_REQUIRES_CLI",
+                "status": "terminal",
+                "committed": True,
+            },
+        },
+    ],
+)
+def test_remote_write_maintenance_refusal_rejects_other_outcomes(
+    result: dict[str, object],
+) -> None:
+    with pytest.raises(RuntimeError, match="operator-only refusal"):
+        e2e_product_loop._remote_maintenance_refusal(result)
+
+
+def test_operator_reconcile_output_unwraps_the_shared_cli_envelope() -> None:
+    data = {
+        "dry_run": False,
+        "graph_sync": "completed",
+        "graph_status": "refreshed",
+        "graph_refreshed": 1,
+        "references_status": "refreshed",
+        "references_refreshed": 1,
+    }
+
+    assert e2e_product_loop._operator_reconcile_data(
+        "diagnostic line\n" + json.dumps({"success": True, "data": data}) + "\n"
+    ) == data
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        "",
+        "not json\n",
+        json.dumps([]),
+        json.dumps({"success": False, "error": {"code": "FAILED"}}),
+        json.dumps({"success": True, "data": []}),
+        json.dumps({"success": True, "data": {}}),
+        json.dumps(
+            {
+                "success": True,
+                "data": {
+                    "dry_run": True,
+                    "graph_sync": "completed",
+                    "graph_status": "refreshed",
+                    "graph_refreshed": 1,
+                    "references_status": "refreshed",
+                    "references_refreshed": 1,
+                },
+            }
+        ),
+        json.dumps(
+            {
+                "success": True,
+                "data": {
+                    "dry_run": False,
+                    "graph_sync": "pending",
+                    "graph_status": "refreshed",
+                    "graph_refreshed": 1,
+                    "references_status": "refreshed",
+                    "references_refreshed": 1,
+                },
+            }
+        ),
+        json.dumps(
+            {
+                "success": True,
+                "data": {
+                    "dry_run": False,
+                    "graph_sync": "completed",
+                    "graph_status": "current",
+                    "graph_refreshed": 0,
+                    "references_status": "current",
+                    "references_refreshed": 0,
+                },
+            }
+        ),
+    ],
+)
+def test_operator_reconcile_output_rejects_non_success(stdout: str) -> None:
+    with pytest.raises(RuntimeError, match="operator reconcile"):
+        e2e_product_loop._operator_reconcile_data(stdout)
 
 
 @pytest.mark.parametrize(

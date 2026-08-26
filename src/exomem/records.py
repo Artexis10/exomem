@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import logging
 import os
 import re
 import stat
@@ -18,6 +19,8 @@ from typing import Any
 from . import record_formats, record_governance, vault, writer_lease
 from . import structured_collections as collections
 from .collection_profiles import profile_for
+
+log = logging.getLogger(__name__)
 
 _MAX_WHY_BYTES = 512
 _MAX_VALUE_BYTES = 32 * 1024
@@ -150,7 +153,7 @@ def append_record(
     supplied_manifest = record_governance.resolve_collection_for_mutation(root, collection)
     if supplied_manifest.storage.strategy == "dataset":
         record_formats.load_adapter(root, supplied_manifest).refuse_mutation("append")
-    key = _validate_item_key(item_key or str(uuid.uuid4()))
+    key = _validate_item_key(item_key) if item_key else None
     values = _validate_values(supplied_manifest, item)
     _validate_body(body)
     if body and supplied_manifest.storage.strategy == "markdown-log":
@@ -160,6 +163,12 @@ def append_record(
     with writer_lease.active_manager().mutation_guard(root, operation="record_append"):
         manifest, manifest_text, manifest_guard = _load_guarded_manifest(root, collection)
         values = _validate_values(manifest, item)
+        if key is None:
+            # An omitted identity is derived from the declared natural key, so a
+            # re-stated observation replays instead of arriving as a second item.
+            key = _validate_item_key(
+                collections.derived_item_key(manifest, values) or str(uuid.uuid4())
+            )
         record_governance.require_mutation_visibility(root, manifest)
         adapter = record_formats.load_adapter(root, manifest)
         if not adapter.mutable:
@@ -183,6 +192,13 @@ def append_record(
         if expected_container_hash is not None:
             _expect_hash(expected_container_hash, current_hash, "container")
         existing = [record for record in snapshot.records if record.identity.key == key]
+        twins = _natural_key_twins(manifest, snapshot, key, values)
+        if twins:
+            raise collections.CollectionError(
+                "RECORD_NATURAL_KEY_CONFLICT",
+                "an existing item already holds this natural key under another identity",
+                {"item_keys": twins},
+            )
         payload_hash = _payload_hash(manifest, key, values, body)
         if validate_snapshot is not None:
             validate_snapshot(manifest, snapshot, key, values)
@@ -308,7 +324,8 @@ def append_record(
             raise
         except (vault.PathGuardError, vault.CreateOnlyConflict, OSError, ValueError) as error:
             raise _publication_error(error) from error
-        return _result(
+        committed_path = canonical_path.relative_to(root).as_posix()
+        committed = _result(
             operation="append",
             manifest=manifest,
             key=key,
@@ -316,11 +333,16 @@ def append_record(
             after_item_hash=item_hash,
             before_container_hash=current_hash,
             after_container_hash=after_hash,
-            affected_paths=[canonical_path.relative_to(root).as_posix()],
+            affected_paths=[committed_path],
             payload_hash=payload_hash,
             outcome="committed",
             audit_correlation=audit_correlation,
         )
+    # Outside the guard on purpose -- see `_due_state_carrier`.
+    advisory = _due_state_carrier(
+        root, manifest, path=committed_path, key=key, values=values
+    )
+    return {"due_state": advisory, **committed} if advisory else committed
 
 
 def update_record(
@@ -410,6 +432,14 @@ def update_record(
             merged.pop(name, None)
         merged.update(changes)
         values = _validate_values(manifest, merged)
+        if _natural_key_moved(manifest, record.values, values):
+            twins = _natural_key_twins(manifest, snapshot, item_key, values)
+            if twins:
+                raise collections.CollectionError(
+                    "RECORD_NATURAL_KEY_CONFLICT",
+                    "an existing item already holds this natural key under another identity",
+                    {"item_keys": twins},
+                )
         if refresh_presentation and not changes and not delete_fields and body is None:
             if record_formats.splice_record_presentation(source_text, manifest, values) == source_text:
                 raise collections.CollectionError(
@@ -505,7 +535,7 @@ def update_record(
             raise
         except (vault.PathGuardError, vault.CreateOnlyConflict, OSError, ValueError) as error:
             raise _publication_error(error) from error
-        return _result(
+        committed = _result(
             operation=operation,
             manifest=manifest,
             key=item_key,
@@ -518,6 +548,18 @@ def update_record(
             outcome="committed",
             audit_correlation=audit_correlation,
         )
+        committed_path = record.source.path
+        before_values = dict(record.values)
+    # Outside the guard on purpose -- see `_due_state_carrier`.
+    advisory = _due_state_carrier(
+        root,
+        manifest,
+        path=committed_path,
+        key=item_key,
+        values=values,
+        previous=before_values,
+    )
+    return {"due_state": advisory, **committed} if advisory else committed
 
 
 def create_collection(
@@ -2087,6 +2129,65 @@ def _validate_item_key(key: str) -> str:
     return normalized
 
 
+def _natural_key_twins(
+    manifest: collections.CollectionManifest,
+    snapshot: record_formats.AdapterSnapshot,
+    key: str,
+    values: Mapping[str, Any],
+) -> list[str]:
+    """Existing items holding this natural key under a different identity.
+
+    The replay rules compare identities, so nothing in them can see an item that
+    a pre-derivation `uuid4` key is hiding; without this the collection would
+    hold one observation twice under two identities and neither would be wrong.
+    The scan runs over the snapshot the append has already loaded.
+    """
+    try:
+        serialized = collections.manifest_natural_key(manifest, values)
+    except ValueError:
+        return []
+    twins = {
+        record.identity.key
+        for record in snapshot.records
+        if record.identity.key != key and _same_natural_key(manifest, record.values, serialized)
+    }
+    return sorted(twins)
+
+
+def _natural_key_moved(
+    manifest: collections.CollectionManifest,
+    before: Mapping[str, Any],
+    after: Mapping[str, Any],
+) -> bool:
+    """Whether this update changes the item's own declared natural key.
+
+    Only a write that MOVES an item onto a key is capable of creating a twin, so
+    only that write is refused. An update that leaves the key alone is judged by
+    nothing here -- otherwise a vault that already holds twins from before the
+    check existed could not be edited at all, including by the very edit the
+    refusal's remediation asks for.
+    """
+    try:
+        return collections.manifest_natural_key(
+            manifest, before
+        ) != collections.manifest_natural_key(manifest, after)
+    except ValueError:
+        # One side carries no natural key at all. It cannot collide, and it
+        # cannot be moved onto a key it does not have.
+        return False
+
+
+def _same_natural_key(
+    manifest: collections.CollectionManifest, values: Mapping[str, Any], serialized: str
+) -> bool:
+    try:
+        return collections.manifest_natural_key(manifest, values) == serialized
+    except ValueError:
+        # A stored item missing a declared natural-key field carries no natural
+        # key at all, so it cannot collide with one.
+        return False
+
+
 def _expect_hash(expected: str | None, actual: str, kind: str) -> None:
     if type(expected) is not str or expected != actual:
         raise collections.CollectionError("STALE_RECORD", f"{kind} version is stale")
@@ -2432,6 +2533,48 @@ def _item_snapshot_guards(
         for version in snapshot.source_versions[1:]
         if version.path != exclude_path
     )
+
+
+def _due_state_carrier(
+    root: Path,
+    manifest: collections.CollectionManifest,
+    *,
+    path: str,
+    key: str,
+    values: Mapping[str, Any],
+    previous: Mapping[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """The advisory block this structured write may carry (design D7).
+
+    The same two helpers the page-write seam uses, for the same reason: the write
+    that opens a gap is the one response that can report it, inside the same turn
+    and on every client. Emission is decided at the mutation terminal, which is
+    also where a page write's block is decided, so a multi-write command still
+    emits at most once.
+
+    Called AFTER the mutation guard is released, exactly where
+    `semantic_writes.commit_existing` calls its own. The bytes are committed and
+    the receipt is composed; the projection is derived state that no other writer
+    is waiting on, and holding the writer lease across it made 31-40% of the lock
+    hold time an advisory nobody had asked for.
+
+    A failure here is never allowed to fail the commit: the bytes are already
+    written, and an advisory count is not worth a receipt.
+    """
+    try:
+        from . import due_state
+
+        block = due_state.block_for_structured_write(
+            root, manifest, path=path, key=key, values=values, previous=previous
+        )
+        if not block:
+            return None
+        # Server-internal: the terminal reads the vault for the emission key and
+        # never puts it on the wire.
+        return {**block, "_vault": str(root)}
+    except Exception:  # noqa: BLE001 -- a due-state count never breaks a commit
+        log.debug("structured due-state projection failed (non-fatal)", exc_info=True)
+        return None
 
 
 def _result(

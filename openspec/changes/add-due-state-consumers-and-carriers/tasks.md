@@ -24,6 +24,10 @@
       `scripts/semantic_write_latency.py` against synthetic samples; it does not measure this
       implementation. Real measurement means running that benchmark, which this lane's brief
       forbids. Operator: run `scripts/semantic_write_latency.py` on a quiesced machine and tick.
+- [x] 3.3 Keep missing or unreadable projection recovery off interactive reads: return the
+      advisory silent, start exactly one process-local background rebuild, and serve it only
+      after the persisted or in-process projection is ready. Pin non-blocking and single-flight
+      behavior with a blocked-reconcile regression.
 
 ## 4. Carriers
 

@@ -1,3 +1,21 @@
+## Progress Accounting
+
+This checklist is an end-state acceptance ledger, not a percentage-complete meter. A
+checkbox is complete only when its whole obligation is evidenced; several broad open
+tasks therefore contain substantial merged foundations. The implementation baseline for
+this reconciliation is `origin/main` at `1a7f30e1` (merged PR #778).
+
+| Area | Merged implementation evidence | Remaining end-state obligation |
+| --- | --- | --- |
+| Per-scope disclosure | Conservative lattice, option meet, unconditional scrubber, and session-bound scope enforcement are merged. | Exact v3 grant migration/recovery closure in 1.7/1.10. |
+| Non-Markdown membership | Descriptor binding, owner backfill, fail-closed propagation, and structured-read preflight are merged in #723, #724, and #727. | Final combined evidence run in 2.11. |
+| Policy authority | Prospective snapshots and the immutable active policy/catalog tuple substrate are merged in #729 and #740. | Product writer/mirror integration, migration, recovery, and concurrency closure in 3.3-3.7 and 3.10-3.13. |
+| Reserved state | Held filesystem substrate and the closed reserved-path monopoly are merged and complete. | Final whole-change review/verification only. |
+| Authorization sessions | Credential verification, external custody, schema-v4 authority, transport binding, standalone attachment, and serving-membership verification are merged in #728, #732, #734, #737, #741, #772, #775, and #778. | Hosted membership publisher, complete move/restore and v3 migration/downmigration, hygiene, and combined lifecycle evidence in the remaining section 5 tasks. |
+| Direct reads | Markdown projection and structured direct-read gates are merged in #730 and #731. | Complete the remaining L0-L6/never-enrolled matrix and combined regression evidence in 7.1/7.6. |
+| Projected retrieval | Projection/measurement stores, preactivation, request-local authorization, lane reduction, and timing/release foundations are merged in #748-#753 and #771. | #774 deliberately reclosed serving until genuine hidden-state error, real pagination, exact-capacity, and active-model evidence satisfy 8.1-8.6, 8.9, 8.11, and 8.14-8.16. |
+| Closeout | No consolidation workflow is exposed. | Sections 9-11: integration/migration gates, independent security recheck, independent verification, canonical sync, and archive. |
+
 ## 0. Evidence-Gated Prerequisite Bookkeeping
 
 - [x] 0.1 Record the durable Wave 0 closeout evidence before bookkeeping: independent
@@ -82,7 +100,7 @@
   and out-of-range `frame_ts`; filename/index/parent agreement and disagreement; and
   canonical `int(round(binary64(frame_ts) * 1000))` ties-to-even conversion. Require
   exact bounded `frame_timestamp_ms` in `0..4_294_967_295` or atomic refusal.
-- [ ] 2.6 Add red integration coverage in `tests/test_governance_egress.py`,
+- [x] 2.6 Add red integration coverage in `tests/test_governance_egress.py`,
   `tests/test_record_governance.py`, and media/dataset tests proving unresolved artifacts
   are L0/missing before counts, frames, rows, proposals, or grant-drift checks.
 - [x] 2.7 Implement the closed companion locator/descriptor registry: sibling binary/media
@@ -157,7 +175,7 @@
   activation epoch/digest, and ready namespace. Make policy commits CAS expected catalog,
   content/companion writers CAS expected policy, and readers pin one tuple; remove direct
   workspace loading and independent policy/catalog pointer linearization.
-- [ ] 3.11 Implement the separate cooperatively fenced, handle-relative no-follow
+- [x] 3.11 Implement the separate cooperatively fenced, handle-relative no-follow
   workspace mirror with held-parent/descriptor-identity checks. Refuse observable drift,
   record exact mirror result and pending divergence, and allow an already-exact tuple
   transaction to stand; direct OS-owner mutation is outside the filesystem guarantee.
@@ -318,7 +336,7 @@ made before both PRs and their combined verification are complete.
   path does not self-refuse. Restore the v3 snapshot and test offline v4→v3 closure/
   expiry/schema plus exact pointed-source workspace parity before booting v3. Do not
   permit or claim mixed v3/v4 service.
-- [ ] 5.8 Add red authoritative serving-membership-epoch tests with two+ replicas:
+- [x] 5.8 Add red authoritative serving-membership-epoch tests with two+ replicas:
   authenticated current/stale attestations, active/accepted intersections, unreachable
   member blocking, old/new key overlap, issuance switch, max-TTL+skew/live-row drain,
   explicit `SERVING -> DRAINING`, no-in-flight acknowledgement, epoch advance/removal,
@@ -362,7 +380,7 @@ made before both PRs and their combined verification are complete.
 
 ## 6. Real MCP REST Hosted And CLI Principal Binding
 
-- [ ] 6.1 Add red MCP tests proving stateless HTTP cannot gain session authority from
+- [x] 6.1 Add red MCP tests proving stateless HTTP cannot gain session authority from
   repeated/changed `Mcp-Session-Id`, `Context.session_id`, request UUID, connection, or
   arbitrary session id; stable stdio/SSE context is supplementary only. Assert the only
   public MCP bearer placeholder is `authorization_session_credential`.
@@ -373,7 +391,7 @@ made before both PRs and their combined verification are complete.
   For every route compare valid bearer, absent bearer, transport-session-only, invalid,
   cross-principal, and same-principal-cross-session credentials and scan all wire/server
   copies for the raw bearer.
-- [ ] 6.3 Add installed-FastMCP actual-wire red tests that send valid/invalid/duplicate/
+- [x] 6.3 Add installed-FastMCP actual-wire red tests that send valid/invalid/duplicate/
   non-string bearer values at exact raw JSON-RPC
   `params.arguments.authorization_session_credential` alongside malformed ordinary
   arguments. Require credential refusal before FastMCP logging/`FunctionTool`/Pydantic,
@@ -381,38 +399,38 @@ made before both PRs and their combined verification are complete.
   retry/trace/debug logs. Add JSON-RPC batch matrices containing any `tools/call` with
   A+absent, A+B, invalid+valid, duplicate carrier key/value, notifications/non-tool calls,
   and reorderings; require one atomic batch refusal and zero executed elements/effects.
-- [ ] 6.4 Add red REST/Hosted tests for sensitive
+- [x] 6.4 Add red REST/Hosted tests for sensitive
   `X-Exomem-Authorization-Session`, distinct from service `Authorization`, after trusted
   access/gateway principal resolution. Reject body/query bearer carriers and caller
   principal/audience/issuer/cell/internal-session fields; scan raw ASGI/log/error copies.
-- [ ] 6.5 Add red CLI/in-process tests proving the trusted local-owner adapter binds
+- [x] 6.5 Add red CLI/in-process tests proving the trusted local-owner adapter binds
   explicitly and only `--authorization-session-fd <fd|->` reads one bounded bearer from
   a protected descriptor/stdin. Reject environment and literal argv bearers, clear
   buffers, prevent principal selection, and fail an unbound library path closed.
-- [ ] 6.6 Add registry-fidelity red tests enumerating every command, legacy leaf, finite
+- [x] 6.6 Add registry-fidelity red tests enumerating every command, legacy leaf, finite
   selector, retrieve/inject hook, and content-bearing writer result into exactly one
   credential row: open-forbidden; lifecycle/session-authoring-required; self/content-
   optional; owner/standing-not-authorizing. New/unclassified routes must fail startup.
-- [ ] 6.7 Add order-of-operations red tests that submit an invalid credential with
+- [x] 6.7 Add order-of-operations red tests that submit an invalid credential with
   malformed/cacheable/idempotent inputs on every surface and assert credential refusal
   happens before coercion/validation detail, cache key/lookup, idempotency lookup,
   membership/decision, receipt allocation, or leaf effect.
-- [ ] 6.8 Introduce one immutable verified authorization context at the shared dispatcher;
+- [x] 6.8 Introduce one immutable verified authorization context at the shared dispatcher;
   implement bounded raw pre-framework extraction/redaction for exact carriers, resolve
   trusted per-surface principal/issuer and external cell, then verify capability before
   all ordinary request work.
-- [ ] 6.9 Implement MCP raw JSON-RPC/ASGI (plus stdio/SSE) interception that consumes and
+- [x] 6.9 Implement MCP raw JSON-RPC/ASGI (plus stdio/SSE) interception that consumes and
   removes the placeholder before FastMCP logging, `FunctionTool`, or Pydantic; pass only
   trusted context and sanitized arguments to generated wrappers/leaves. Bounded-parse and
   sanitize batches at this boundary, then reject the entire batch before dispatch whenever
   any element is `tools/call`; never share request context across elements.
-- [ ] 6.10 Wire REST/Hosted sensitive-header middleware and CLI protected-fd reader, then
+- [x] 6.10 Wire REST/Hosted sensitive-header middleware and CLI protected-fd reader, then
   MCP, retrieve/inject hooks, hand-registered residuals,
   and writer read/mutation paths through that resolver; reject caller identity fields at
   admission and never downgrade a presented-invalid optional credential to standing-only.
-- [ ] 6.11 Redact protected session credentials before logging, validation rendering,
+- [x] 6.11 Redact protected session credentials before logging, validation rendering,
   tracing, retry/idempotency material, and exception envelopes on every surface.
-- [ ] 6.12 Regenerate MCP/OpenAPI/CLI/capability artifacts intentionally and update
+- [x] 6.12 Regenerate MCP/OpenAPI/CLI/capability artifacts intentionally and update
   schema-fidelity tests for the consumed MCP placeholder, REST/Hosted protected header,
   CLI descriptor option, and session lifecycle; assert no bearer body/query/env/literal-
   argv or public authoritative principal/session parameter appears.
@@ -441,7 +459,7 @@ made before both PRs and their combined verification are complete.
 - [x] 7.4 Add red paired tests proving a valid bound companion may be discovered/read at its
   lower Markdown projection through recall/get while direct dataset/Records/media/frame
   routes stay missing and never silently substitute the companion.
-- [ ] 7.5 Refactor direct get to decide and project one immutable file snapshot before
+- [x] 7.5 Refactor direct get to decide and project one immutable file snapshot before
   optional raw assembly; add `content` only on the L6 branch, keep internal hash use
   separate from public hash projection, run the shared terminal parser before emission,
   omit/refuse secret-bearing raw deterministically, and enforce L6-or-missing for every
@@ -467,7 +485,9 @@ made before both PRs and their combined verification are complete.
 - [ ] 8.3 Add red CLIP/non-text pairs where the highest hidden pixel/keyframe match would
   consume the cap. Assert authorization occurs inside CLIP before its cap, L6 visible
   visual top-k is exact, and L1-L5 media participates only through its authorized textual
-  companion projection or is excluded from the binary lane.
+  companion projection or is excluded from the binary lane. Bind each image to one
+  untimestamped sample and each video to one through forty strictly timestamp-ordered
+  samples, returning the parent once with its earliest best `frame_timestamp_ms`.
 - [ ] 8.4 Add red graph pairs where hidden vertices/edges change in-degree, out-degree,
   reachability, shortest paths, relation matches, seed expansion, graph-assisted fusion,
   and pagination; assert the visible graph/order is identical to physical absence.
@@ -482,12 +502,12 @@ made before both PRs and their combined verification are complete.
   projector rebuild, policy-vs-create/edit/delete/companion CAS races, reader single-tuple
   snapshot, stale-projection refusal, model-lane invalidation, duplicate/id mismatch/
   incomplete refusal, cursor pinning, exact-tuple GC, and no raw/old-policy fallback.
-- [ ] 8.7 Add red finite-variant fixtures enumerating unique outputs reachable from
+- [x] 8.7 Add red finite-variant fixtures enumerating unique outputs reachable from
   compiled audience/purpose/scope/grant-level domains. Verify RFC 8785 JCS/domain-hashed
   variant ids, L0 absence, fixed L1 notice/L2 constraint/L3 abstract/L4 bridge abstraction/
   L5 post-strip `_excerpt_of`/L6 permitted-full rows, deduplication, and hard per-item cap
   256 with activation refusal at 257 rather than drop/lazy/query generation.
-- [ ] 8.8 Add red L5 lexical/vector/rerank/snippet tests for whitespace-normalized,
+- [x] 8.8 Add red L5 lexical/vector/rerank/snippet tests for whitespace-normalized,
   bounded first-600-code-point whole-token `_excerpt_of`: one variant/model vector,
   query independence, no acquisition by later hidden terms, no query-centered hidden
   snippet, and correct projection-only top-k.
@@ -496,7 +516,7 @@ made before both PRs and their combined verification are complete.
   `262_144`; make the release manifest lower-only. Add a red actual-wire harness with at
   least 200 predeclared randomized/interleaved samples at zero/one/exact capacity across
   every lane and 99% bootstrap upper bounds for absolute median/p95 differences.
-- [ ] 8.10 Add red anti-waiver tests: reject manifest/env/operator ceiling increases,
+- [x] 8.10 Add red anti-waiver tests: reject manifest/env/operator ceiling increases,
   capacity/lane reduction, scheduler-tolerance subtraction, post-observation padding,
   and missed fixed deadline. Require both bounds simultaneously within manifest, 25 ms,
   and 10% of physically-absent p95.
@@ -506,23 +526,60 @@ made before both PRs and their combined verification are complete.
   finite reachable outputs, enforce 256, and keep principal, purpose, session, grant, and
   request decision out of persistent keys/hot caches. Publish policy/projector/catalog
   only through the one active-tuple CAS: policy commits expect catalog; content/companion
-  commits expect policy; readers never sample component pointers separately.
-- [ ] 8.12 Implement BM25 posting intersection before cap, projected-corpus DF/IDF and
+  commits expect policy; readers never sample component pointers separately. For CLIP
+  successors, verify the complete active family, carry only content-identical image/video
+  rows, require target-item/content-hash-bound replacements for changed media, exclude
+  `parent_media` frame companions from duplicate binary ownership, and publish the target
+  namespace plus complete vector/CLIP roots atomically. Connect live scene sampling and
+  bulk backfill to that successor with the already-computed canonical timestamp/vector
+  tuple, guarded parent-sidecar binding, and no second model pass. For graph successors,
+  verify exactly one active row per variant, emit empty lower-variant rows, carry only
+  content-identical L6 rows, require target-item/content-hash-bound replacements for
+  changed L6 sources, reject stale outside-catalog targets, and publish the complete graph
+  root atomically. Validate conservative producer replacements for affected lower-only
+  items, discard their edge payload, and emit only empty lower-variant rows. For
+  existing-page semantic writes, semantic creations, semantic moves, semantic trash
+  recoveries, and semantic file/directory trash, derive replacements from the freshest
+  validated detached before-corpus
+  carried into the mutation boundary, the move or recovery's exact detached after-corpus
+  when applicable, and the exact guarded planned-write overlay; include indirect
+  path/title-resolution, removed-target, and reverse-relation source changes. Retained-
+  corpus paths never walk the vault again; trash builds one lazy before-corpus only for an
+  active graph family before canonical mutation. No producer reopens the live graph.
+  Apply the same lazy planned-Markdown contract to Evidence preservation, machine-owned
+  media-sidecar updates, and scene-frame companion creation, co-publishing CLIP when
+  applicable and doing no graph work for open or lexical-only tuples.
+  Connect every other live graph producer to those replacements before checking
+  this task; keep any unsupported required family blocked.
+- [x] 8.12 Implement BM25 posting intersection before cap, projected-corpus DF/IDF and
   exact top-k; exact filtered projected-vector top-k with visible-lane warming/disable;
   projected-only reranking before final top-k; and L6-only pre-cap CLIP authorization.
-- [ ] 8.13 Authorize graph vertices and edges before expansion and recompute all public
+- [x] 8.13 Authorize graph vertices and edges before expansion and recompute all public
   graph reductions over the projected graph; absorb errors belonging only to L0 state as
   absence.
 - [ ] 8.14 Move fusion, final sort/top-k, pagination/cursor creation, counts/facets,
   ambiguity, diagnostics, and error reduction after complete projected lane acquisition;
   add cross-principal hot-cache reuse tests proving decisions/order stay request-local.
+  Governed find continuation SHALL use the exact bounded `pc1` visible-snapshot digest
+  and retained-runtime registry specified in `release-gate`; add red first/next/exhausted,
+  hidden-only catalog drift, authority drift, expiry/cap/restart, replay, cross-binding,
+  and generated-surface parity tests before enabling the release fence.
 - [ ] 8.15 Implement stable payload timing suppression and fixed repository-registered
   public-request deadline/padding classes; fail if either bound exceeds any ceiling or
   maximum capacity cannot complete. Do not claim cryptographic constant time or pass by
   deleting timing fields; keep server-only aggregates content- and bearer-free.
+- [x] 8.15a Register the exact `vectors-cpu-torch-v1` model/device/hard-off tuple and its
+  distinct single-threaded 1,000/1,500 ms completion class; bind serving to the exact
+  active vector
+  measurement family, refuse mixed/override configurations, and cap only vector-model
+  query input with the fixed 600-code-point whole-token projection.
 - [ ] 8.16 Run the full no-model counterfactual and exact-capacity actual-wire suites, then optional live
   embedding/reranker and CLIP lanes behind their existing soft-fail/marker gates; no
   optional-model absence may skip keyword/graph or the declared timing security oracle.
+- [ ] 8.16a Check in and pass the separate `vectors-cpu-torch-v1` 12-route actual-wire
+  manifest/matrix with 200 hidden-present and 200 physically-absent REST observations per
+  route at zero/one/exact capacity. Keep reranker, CLIP, GPU, ONNX, and mixed profiles
+  closed pending their own evidence.
 
 ## 9. Integration Migration And Regression Gates
 

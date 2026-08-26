@@ -61,7 +61,7 @@ routes.
 | `review` | "what needs review?", "show stale/disconnected knowledge", "what is unprocessed?" | `review_memory`; `triage_memory` for explicit dismiss/snooze/reopen |
 | `connect` | "what should this link to?", "suggest relations", "show related ideas" | `connect_memory`; entity writes stay explicit through its write-capable mode |
 | `adopt` | "import/adopt this existing vault safely" | `adopt_vault(mode="scan-only")`; explicit modes for manifest/copy/compile planning |
-| `maintain` | "check/fix vault health" | `maintain_memory(mode="audit")`; `fix`/`reconcile` modes only when explicitly requested |
+| `maintain` | "check/fix vault health" | Remote tools may audit or dry-run; actual `fix`/`reconcile` writes require the host operator CLI |
 
 Do not make the user choose `Sources`, `Evidence`, `Notes`, `Entities`, pack
 metadata, graph sidecars, or schema terms unless the distinction changes the

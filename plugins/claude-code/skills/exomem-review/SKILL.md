@@ -22,8 +22,18 @@ or inspect stale, contradictory, disconnected, or unprocessed material.
    semantic proximity alone.
 5. For stale or contradictory compiled notes, read the relevant pages with `read_memory` and decide keep, `edit_memory`, `replace_memory`, `maintain_memory`, or leave alone.
 6. For recurring unregistered relation labels, propose promotion with `schema_memory(subject="relations")` rather than rewriting the notes that use them.
-7. Use `triage_memory` only after an explicit decision to dismiss, snooze, or reopen an Inbox item.
-7. Propose risky actions before mutating.
+7. Use `triage_memory` only after an explicit decision to dismiss, snooze, or
+   reopen an Inbox item, and lead its `why` with a review reason code —
+   `intentional:`, `false_positive:`, `handled:`, `deferred:`, or
+   `too_frequent:` — so the decision is still legible months later.
+8. When the user wants to stop hearing about a whole KIND of signal, quiet that
+   family rather than lowering prominence, which silences everything:
+   `triage_memory(ref="exomem://review/family/<family>", action="quiet")` with a
+   reason code in `why`. `off` additionally hides it from explicit category
+   review; `normal` restores it. A quiet family is silent, not clean — it stays
+   listed by `review_memory(mode="dispositions")` and the audit still measures
+   it, so a queue without it is not proof it has nothing due.
+9. Propose risky actions before mutating.
 
 ## Output contract
 Return a prioritized review list, recommended safe actions, and any completed saves or edits.

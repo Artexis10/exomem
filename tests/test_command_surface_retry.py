@@ -18,7 +18,7 @@ from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware.middleware import MiddlewareContext
 from mcp.types import CallToolRequest, CallToolRequestParams
 
-from exomem import command_surface, writer_lease
+from exomem import capabilities, command_surface, writer_lease
 from exomem import server as server_module
 from exomem import vault as vault_module
 from exomem.cli_ops import OpError
@@ -850,6 +850,196 @@ def test_maintain_audit_is_read_only_for_common_invocation_boundary() -> None:
     assert invocation_is_read_only(
         command, {"mode": "reconcile", "dry_run": True}
     ) is True
+
+
+@pytest.mark.parametrize("surface", ["mcp", "rest", "hosted"])
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"mode": "reconcile"},
+        {"mode": "fix", "dry_run": False},
+        {"mode": "backfill-ids", "dry_run": False},
+    ],
+)
+def test_remote_write_maintenance_is_refused_before_manager_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    surface: str,
+    kwargs: dict[str, object],
+) -> None:
+    from exomem.commands import product_commands_for
+
+    command = next(
+        item for item in product_commands_for("mcp") if item.name == "maintain_memory"
+    )
+    descriptor = capabilities.ActiveSurfaceDescriptor(
+        surface=surface,
+        profile="test",
+        tier2_enabled=True,
+        product_commands=("maintain_memory",),
+    )
+    monkeypatch.setattr(
+        writer_lease,
+        "get_manager",
+        lambda: pytest.fail("remote write maintenance reached manager dispatch"),
+    )
+
+    with capabilities.active_surface(descriptor), pytest.raises(OpError) as raised:
+        writer_lease.invoke_command(command, tmp_path, **kwargs)
+
+    assert raised.value.code == "MAINTENANCE_REQUIRES_CLI"
+    assert raised.value.details == {"status": "terminal", "committed": False}
+    assert raised.value.remediation is not None
+    assert "exomem maintain" in raised.value.remediation
+
+
+def test_hosted_agent_write_maintenance_uses_production_descriptor_and_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import hosted_gateway
+    from exomem.commands import product_commands_for
+
+    command = next(
+        item for item in product_commands_for("mcp") if item.name == "maintain_memory"
+    )
+    descriptor = hosted_gateway.hosted_agent_surface_descriptor(
+        "hosted-alpha-agent-v4"
+    )
+    assert descriptor.surface == "hosted-agent"
+    assert "maintain_memory" in descriptor.product_commands
+    monkeypatch.setattr(
+        writer_lease,
+        "get_manager",
+        lambda: pytest.fail("hosted-agent maintenance reached manager dispatch"),
+    )
+
+    with capabilities.active_surface(descriptor), pytest.raises(OpError) as raised:
+        writer_lease.invoke_command(command, tmp_path, mode="reconcile")
+
+    assert raised.value.code == "MAINTENANCE_REQUIRES_CLI"
+
+
+def test_remote_unknown_maintenance_selector_preserves_coverage_refusal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.commands import product_commands_for
+
+    command = next(
+        item for item in product_commands_for("mcp") if item.name == "maintain_memory"
+    )
+    descriptor = capabilities.ActiveSurfaceDescriptor(
+        surface="mcp",
+        profile="test",
+        tier2_enabled=True,
+        product_commands=("maintain_memory",),
+    )
+    calls: list[str] = []
+
+    class DispatchingManager:
+        def invoke(self, dispatched, _injected, _kwargs, **_options):  # noqa: ANN001, ANN003
+            calls.append(dispatched.name)
+            return dispatched.leaf()
+
+    monkeypatch.setattr(writer_lease, "get_manager", DispatchingManager)
+
+    with capabilities.active_surface(descriptor), pytest.raises(OpError) as raised:
+        writer_lease.invoke_command(command, tmp_path, mode="future-mode")
+
+    assert raised.value.code == "RECEIPT_OUTCOME_MISSING"
+    assert calls == ["maintain_memory"]
+
+
+def test_mcp_write_maintenance_returns_terminal_operator_refusal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.commands import product_commands_for
+
+    command = next(
+        item for item in product_commands_for("mcp") if item.name == "maintain_memory"
+    )
+    descriptor = capabilities.ActiveSurfaceDescriptor(
+        surface="mcp",
+        profile="test",
+        tier2_enabled=True,
+        product_commands=("maintain_memory",),
+    )
+    bound = command_surface.bind_vault(
+        command.leaf,
+        tmp_path,
+        command=command,
+        surface_descriptor=descriptor,
+    )
+    monkeypatch.setattr(
+        writer_lease,
+        "get_manager",
+        lambda: pytest.fail("MCP write maintenance reached manager dispatch"),
+    )
+
+    result = bound(mode="reconcile")
+
+    assert result["success"] is False
+    assert result["error"]["code"] == "MAINTENANCE_REQUIRES_CLI"
+    assert result["error"]["status"] == "terminal"
+    assert result["error"]["committed"] is False
+    assert "exomem maintain --reconcile" in result["error"]["remediation"]
+
+
+@pytest.mark.parametrize(
+    ("surface", "kwargs"),
+    [
+        ("mcp", {}),
+        ("rest", {"mode": "fix"}),
+        ("hosted", {"mode": "reconcile", "dry_run": True}),
+        ("mcp", {"mode": "backfill-ids"}),
+        ("cli", {"mode": "reconcile"}),
+        (None, {"mode": "reconcile"}),
+    ],
+)
+def test_remote_maintenance_reads_and_local_writes_reach_manager_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    surface: str | None,
+    kwargs: dict[str, object],
+) -> None:
+    from contextlib import nullcontext
+
+    from exomem.commands import product_commands_for
+
+    command = next(
+        item for item in product_commands_for("mcp") if item.name == "maintain_memory"
+    )
+    calls: list[dict[str, object]] = []
+
+    class RecordingManager:
+        def invoke(self, _command, _injected, call_kwargs, **options):  # noqa: ANN001, ANN003
+            calls.append({"kwargs": call_kwargs, "read_only": options["read_only"]})
+            return {"admitted": True}
+
+    monkeypatch.setattr(writer_lease, "get_manager", RecordingManager)
+    context = (
+        nullcontext()
+        if surface is None
+        else capabilities.active_surface(
+            capabilities.ActiveSurfaceDescriptor(
+                surface=surface,
+                profile="test",
+                tier2_enabled=True,
+                product_commands=("maintain_memory",),
+            )
+        )
+    )
+
+    with context:
+        result = writer_lease.invoke_command(command, tmp_path, **kwargs)
+
+    assert result == {"admitted": True}
+    assert len(calls) == 1
+    assert calls[0]["read_only"] is not (
+        kwargs.get("mode") == "reconcile" and kwargs.get("dry_run") is not True
+    )
 
 
 def test_all_public_audit_routes_are_classified_read_only() -> None:

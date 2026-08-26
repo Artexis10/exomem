@@ -17,13 +17,17 @@ Use when the user asks to continue, resume, pick up a project, recover prior sta
 2. Use `ask_memory(deep=true)` when several hits matter or the state needs synthesis.
 3. Read only the top relevant pages with `read_memory` when excerpts are not enough.
 4. Prefer recent active compiled notes, then linked sources/evidence when provenance is needed.
-5. Summarize current state, decisions already made, blockers, and likely next actions.
+5. Read the Planning inventory with `plan_memory(action="inspect")` (no collection) when the topic has one, and read the due-state block any response already carried rather than re-deriving it. Both are read-only and create nothing.
+6. Summarize current state, decisions already made, blockers, and likely next actions.
 
 ## Output contract
 Return a compact continuation brief with cited Exomem pages and a short next-action list. Say when the search missed or was thin.
 
 ## Save rules
 Save only if the resumed work produces a new durable decision, solved problem, failure, pattern, or research finding. Use `remember`, `edit_memory`, or `replace_memory` as appropriate.
+
+## Lifecycle
+Resuming reads Planning; it never moves it. A work item's state changes only when the user states an intent or reports an outcome in this session — then route the intent to `plan_memory` and the outcome to `record_memory`, and when one landing does both, do them together and report it once in the user's own words. Elapsed time since the last session is not an outcome, and nothing in the runtime transitions an item on your behalf.
 
 ## Mistakes to avoid
 Do not invent prior context from memory. Do not treat a scoped miss as absence. Do not dump long note bodies when a state brief is enough.

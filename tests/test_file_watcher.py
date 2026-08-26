@@ -192,6 +192,8 @@ def test_reconcile_repairs_a_persisted_graph_read_barrier(
         freshness.clear()
 
     watcher._reconcile_once(seed=restart)
+    if restart:
+        watcher.finish_startup_recovery()
 
     assert graph.available() is True
 
@@ -225,6 +227,7 @@ def test_startup_hash_validation_repairs_a_pre_barrier_crash(
 
     restarted = file_watcher.FileWatcher(vault)
     restarted._reconcile_once(seed=True)
+    restarted.finish_startup_recovery()
 
     assert graph.available() is True
     assert not any(
@@ -703,6 +706,121 @@ def test_modify_then_delete_only_deletes(vault, monkeypatch: pytest.MonkeyPatch)
     assert dels == [["Knowledge Base/Notes/x.md"]]
 
 
+def test_mixed_vault_batch_uses_one_complete_lexical_handoff(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    upsert_calls: list[tuple[list[Path], dict]] = []
+    delete_calls: list[tuple[list[str], dict]] = []
+
+    def complete_upsert(root: Path, paths: list[Path], **kwargs):  # noqa: ANN001
+        upsert_calls.append((list(paths), dict(kwargs)))
+        rels = tuple(path.relative_to(root).as_posix() for path in paths)
+        return file_watcher.index_sync.IndexSyncReport(
+            "upsert",
+            rels,
+            rels,
+            (
+                file_watcher.index_sync.IndexComponentOutcome(
+                    "lexstore",
+                    "completed",
+                    "dispatch_completed",
+                ),
+            ),
+        )
+
+    def complete_delete(_root: Path, rels: list[str], **kwargs):  # noqa: ANN001
+        delete_calls.append((list(rels), dict(kwargs)))
+
+    monkeypatch.setattr(file_watcher.index_sync, "upsert_after_write", complete_upsert)
+    monkeypatch.setattr(file_watcher.index_sync, "delete_after_remove", complete_delete)
+    changed = vault / "Knowledge Base" / "Notes" / "changed.md"
+    changed.parent.mkdir(parents=True, exist_ok=True)
+    changed.write_text("# Changed\n", encoding="utf-8")
+    removed = vault / "Knowledge Base" / "Notes" / "removed.md"
+    outside_changed = vault / "Sources" / "changed.md"
+    outside_changed.parent.mkdir(parents=True, exist_ok=True)
+    outside_changed.write_text("# Outside changed\n", encoding="utf-8")
+    outside_removed = vault / "Sources" / "removed.md"
+    watcher = file_watcher.FileWatcher(vault)
+
+    watcher._record(changed, deleted=False)
+    watcher._record(removed, deleted=True)
+    watcher._record(outside_changed, deleted=False)
+    watcher._record(outside_removed, deleted=True)
+    watcher._flush()
+
+    removed_rel = removed.relative_to(vault).as_posix()
+    outside_removed_rel = outside_removed.relative_to(vault).as_posix()
+    assert upsert_calls == [
+        (
+            [changed, outside_changed],
+            {
+                "defer_semantic": False,
+                "publish_corpus_change": False,
+                "watcher_deleted_rel_paths": [removed_rel, outside_removed_rel],
+            },
+        )
+    ]
+    assert delete_calls == [
+        (
+            [removed_rel],
+            {
+                "publish_corpus_change": False,
+                "dispatch_lexstore": False,
+            },
+        )
+    ]
+
+
+def test_outside_kb_delete_only_uses_lexical_handoff(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    upsert_calls: list[tuple[list[Path], dict]] = []
+    delete_calls: list[tuple[list[str], dict]] = []
+
+    def complete_upsert(_root: Path, paths: list[Path], **kwargs):  # noqa: ANN001
+        upsert_calls.append((list(paths), dict(kwargs)))
+        return file_watcher.index_sync.IndexSyncReport(
+            "upsert",
+            (),
+            (),
+            (
+                file_watcher.index_sync.IndexComponentOutcome(
+                    "lexstore",
+                    "completed",
+                    "dispatch_completed",
+                ),
+            ),
+        )
+
+    def observe_delete(_root: Path, rels: list[str], **kwargs):  # noqa: ANN001
+        delete_calls.append((list(rels), dict(kwargs)))
+
+    monkeypatch.setattr(file_watcher.index_sync, "upsert_after_write", complete_upsert)
+    monkeypatch.setattr(file_watcher.index_sync, "delete_after_remove", observe_delete)
+    removed = vault / "Sources" / "removed.md"
+    watcher = file_watcher.FileWatcher(vault)
+
+    watcher._record(removed, deleted=True)
+    watcher._flush()
+
+    assert upsert_calls == [
+        (
+            [],
+            {
+                "defer_semantic": False,
+                "publish_corpus_change": False,
+                "watcher_deleted_rel_paths": [
+                    removed.relative_to(vault).as_posix()
+                ],
+            },
+        )
+    ]
+    assert delete_calls == []
+
+
 def test_delete_then_recreate_only_upserts(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     ups, dels = _stub_embeddings(monkeypatch)
     w = file_watcher.FileWatcher(vault)
@@ -799,6 +917,7 @@ def test_live_import_burst_defers_semantic_indexing(
     assert calls[0][1] == {
         "defer_semantic": True,
         "publish_corpus_change": False,
+        "watcher_deleted_rel_paths": [],
     }
     assert "live import/sync burst" in caplog.text
 
@@ -849,14 +968,203 @@ def test_dispatch_thread_uses_quiet_policy_for_burst_coalescing(
         t.join(timeout=2)
 
 
-def test_start_soft_fails_when_watchdog_missing(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_start_without_watchdog_runs_reconcile_only_polling(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     def _boom():
         raise ImportError("No module named 'watchdog'")
 
     monkeypatch.setattr(file_watcher, "_import_watchdog", _boom)
+    monkeypatch.setattr(file_watcher.index_sync, "drain_deferred_work", lambda *_a, **_k: None)
+    freshness.invalidate(vault)
     w = file_watcher.FileWatcher(vault)
-    assert w.start() is False  # no-op, server keeps running
-    assert w._thread is None and w._observer is None
+    monkeypatch.setattr(w, "_reconcile_interval_seconds", lambda: 0.01)
+    monkeypatch.setattr(w, "_dispatch_reconcile_delta", lambda *_a, **_k: 0)
+    monkeypatch.setattr(w, "_recover_external_pending", lambda *_a, **_k: None)
+    monkeypatch.setattr(w, "_recover_suspended_graph", lambda: None)
+    started = w.start()
+    try:
+        assert started is True
+        assert w._thread is None and w._observer is None
+        assert w.wait_until_seeded(timeout=2.0)
+        created = vault / "Knowledge Base" / "Notes" / "poll-only.md"
+        created.parent.mkdir(parents=True, exist_ok=True)
+        created.write_text("# polling fallback\n", encoding="utf-8")
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            entries = freshness.live_recall_entries(vault, "kb") or {}
+            if str(created) in entries:
+                break
+            time.sleep(0.02)
+        assert str(created) in (freshness.live_recall_entries(vault, "kb") or {})
+    finally:
+        w.stop()
+
+
+def test_dispatch_replays_observed_edit_after_seed_publication(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = vault / "Knowledge Base" / "Notes" / "seed-race.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("# before\n", encoding="utf-8")
+    stale_signature = freshness.stat_signature(target)
+    freshness.invalidate(vault)
+    watcher = file_watcher.FileWatcher(vault, debounce_seconds=0.01)
+    watcher._dispatch_waits_for_seed = True
+    replay_started = threading.Event()
+    release_replay = threading.Event()
+
+    def publish_only(ups, _up_rels, del_rels, **_kwargs):  # noqa: ANN001
+        replay_started.set()
+        assert release_replay.wait(timeout=2.0)
+        freshness.on_files_changed(
+            vault,
+            changed=ups,
+            deleted=[vault / rel for rel in del_rels],
+        )
+
+    monkeypatch.setattr(watcher, "_dispatch_batch", publish_only)
+    dispatch = threading.Thread(target=watcher._run_dispatch, daemon=True)
+    dispatch.start()
+    try:
+        target.write_text("# after seed scan\n", encoding="utf-8")
+        current_signature = freshness.stat_signature(target)
+        assert current_signature != stale_signature
+        watcher._record(target, deleted=False)
+        time.sleep(0.05)
+
+        for scope in freshness.SCOPES:
+            freshness.seed(vault, scope, [(str(target), stale_signature)])
+        watcher._seed_succeeded = True
+        watcher._seed_published.set()
+
+        assert replay_started.wait(timeout=2.0)
+        assert not watcher.wait_until_seeded(timeout=0.05)
+        assert (freshness.live_recall_entries(vault, "kb") or {})[str(target)] == (
+            stale_signature
+        )
+        release_replay.set()
+        assert watcher.wait_until_seeded(timeout=2.0)
+
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            published = (freshness.live_recall_entries(vault, "kb") or {}).get(str(target))
+            if published == current_signature:
+                break
+            time.sleep(0.02)
+        assert (freshness.live_recall_entries(vault, "kb") or {})[str(target)] == (
+            current_signature
+        )
+    finally:
+        release_replay.set()
+        watcher._stop.set()
+        watcher._wake.set()
+        dispatch.join(timeout=2.0)
+
+
+@pytest.mark.parametrize("operation", ["upsert", "delete"])
+def test_seed_replays_suppressed_self_write(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    """A server write racing the initial walk must land in the published seed."""
+    target = vault / "Knowledge Base" / "Notes" / "self-write-seed-race.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("# before\n", encoding="utf-8")
+    stale_signature = freshness.stat_signature(target)
+    freshness.invalidate(vault)
+    file_watcher.clear_self_write_registry()
+    enumerated = threading.Event()
+    release_seed = threading.Event()
+
+    def publish_registry_only(root, *, changed=(), deleted=(), **_kwargs):
+        freshness.on_files_changed(
+            root,
+            changed=changed,
+            deleted=[root / Path(value) for value in deleted],
+        )
+        return True
+
+    monkeypatch.setattr(file_watcher.index_sync, "publish_corpus_delta", publish_registry_only)
+    monkeypatch.setattr(vault_module, "on_inbound_files_changed", lambda *_a, **_k: None)
+    monkeypatch.setattr(find_module, "on_resolver_files_changed", lambda *_a, **_k: None)
+
+    def stale_walk():
+        yield str(target), stale_signature
+        enumerated.set()
+        assert release_seed.wait(timeout=2.0)
+
+    seed_thread = threading.Thread(
+        target=lambda: freshness.seed(vault, "kb", stale_walk()),
+        daemon=True,
+    )
+    seed_thread.start()
+    try:
+        assert enumerated.wait(timeout=2.0)
+        watcher = file_watcher.FileWatcher(vault)
+        if operation == "upsert":
+            target.write_text("# after the seed scan\n\nnew bytes\n", encoding="utf-8")
+            expected_signature = freshness.stat_signature(target)
+            assert expected_signature != stale_signature
+            file_watcher.register_self_write(vault, [target])
+            watcher._record(target, deleted=False)
+        else:
+            target.unlink()
+            expected_signature = None
+            rel = target.relative_to(vault).as_posix()
+            file_watcher.register_self_delete(vault, [rel])
+            watcher._record(target, deleted=True)
+        assert watcher._drain() == ([], [], [], 0, False)
+    finally:
+        release_seed.set()
+        seed_thread.join(timeout=2.0)
+
+    assert not seed_thread.is_alive()
+    entries = freshness.live_recall_entries(vault, "kb") or {}
+    assert entries.get(str(target)) == expected_signature
+
+
+def test_stopped_startup_seed_does_not_publish_a_later_scope(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A timeout downgrade cancels the whole remaining startup seed pass."""
+    target = next(find_module._walk_md(vault / "Knowledge Base"))
+    freshness.invalidate(vault)
+    watcher = file_watcher.FileWatcher(vault)
+    enumerated = threading.Event()
+    release_seed = threading.Event()
+    walked: list[str] = []
+    results: list[bool] = []
+
+    def stalled_kb_entries():
+        yield str(target), freshness.stat_signature(target)
+        enumerated.set()
+        assert release_seed.wait(timeout=2.0)
+
+    def walk_entries(scope: str):
+        walked.append(scope)
+        return stalled_kb_entries() if scope == "kb" else ()
+
+    monkeypatch.setattr(watcher, "_walk_entries", walk_entries)
+    seed_thread = threading.Thread(
+        target=lambda: results.append(watcher._reconcile_once(seed=True)),
+        daemon=True,
+    )
+    seed_thread.start()
+    try:
+        assert enumerated.wait(timeout=2.0)
+        freshness.invalidate(vault)
+        watcher._stop.set()
+    finally:
+        release_seed.set()
+        seed_thread.join(timeout=2.0)
+
+    assert not seed_thread.is_alive()
+    assert results == [False]
+    assert walked == ["kb"]
+    assert not any(freshness.recall_is_live(vault, scope) for scope in freshness.SCOPES)
 
 
 def test_start_no_op_when_kb_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1001,7 +1309,16 @@ def test_external_batch_retries_the_complete_vault_delta_before_fanout(
 
     assert len(calls) == 2
     assert all(sorted(changed) == sorted([source, kb_note]) for changed, _ in calls)
-    assert upserts == [([kb_note], {"defer_semantic": False, "publish_corpus_change": False})]
+    assert upserts == [
+        (
+            [kb_note, source],
+            {
+                "defer_semantic": False,
+                "publish_corpus_change": False,
+                "watcher_deleted_rel_paths": [],
+            },
+        )
+    ]
     resolver = find_module.writer_resolver_snapshot(vault)
     resolved, warning = vault_module.normalize_wikilink(
         "New target", vault, resolver=resolver, strict=False
@@ -1220,9 +1537,37 @@ def test_reconcile_seed_dispatches_nothing(vault, monkeypatch: pytest.MonkeyPatc
     calls = _spy_reconcile_fanout(monkeypatch)
     w = file_watcher.FileWatcher(vault)
 
-    w._reconcile_once(seed=True)
+    seeded = w._reconcile_once(seed=True)
 
+    assert seeded is True
+    assert all(freshness.recall_is_live(vault, scope) for scope in freshness.SCOPES)
     assert calls == {"inbound": [], "resolver": [], "upsert": [], "delete": [], "warm": []}
+
+
+def test_reconcile_seed_completion_is_observable(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+    watcher = file_watcher.FileWatcher(vault)
+    seed_entered = threading.Event()
+    release_seed = threading.Event()
+
+    def reconcile_once(*, seed: bool) -> bool:
+        assert seed is True
+        seed_entered.set()
+        assert release_seed.wait(timeout=1.0)
+        watcher._stop.set()
+        return True
+
+    monkeypatch.setattr(watcher, "_reconcile_once", reconcile_once)
+    thread = threading.Thread(target=watcher._run_reconcile)
+    thread.start()
+    try:
+        assert seed_entered.wait(timeout=1.0)
+        assert watcher.wait_until_seeded(timeout=0.01) is False
+        release_seed.set()
+        assert watcher.wait_until_seeded(timeout=1.0) is True
+    finally:
+        release_seed.set()
+        thread.join(timeout=1.0)
+    assert not thread.is_alive()
 
 
 def test_reconcile_no_drift_dispatches_nothing(vault, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1311,7 +1656,7 @@ def test_missing_baseline_and_post_reconcile_watcher_do_not_phantom_fanout(
     target.unlink()
     watcher._reconcile_once(seed=False)
 
-    assert calls["upsert"] == []
+    assert calls["upsert"] == [[]]
     assert calls["delete"] == [[rel]]
     assert calls["inbound"] == [([], [rel])]
     assert calls["resolver"] == [([], [rel])]
@@ -1468,7 +1813,7 @@ def test_reconcile_delete_routes_to_delete_after_remove(
     w._reconcile_once(seed=False)
 
     assert calls["delete"] == [[rel]]
-    assert calls["upsert"] == []
+    assert calls["upsert"] == [[]]
     assert calls["resolver"] == [([], [rel])]
     assert calls["inbound"] == [([], [rel])]
 

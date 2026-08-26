@@ -250,7 +250,8 @@ def _identity_coordination_scope(
     vault_root: Path,
     *,
     descriptor_ids: Iterable[str] | None = None,
-) -> Iterator[None]:
+    identity_may_change: bool = True,
+) -> Iterator[str | None]:
     """Serialize private identity publication with generic held-leaf acquisition."""
 
     key = _vault_identity_key(vault_root)
@@ -265,7 +266,7 @@ def _identity_coordination_scope(
         for domain in active_set
     )
     if domains <= held_domains:
-        yield
+        yield None
         return
     if held_domains:
         raise RuntimeError("private identity coordination cannot widen while held")
@@ -276,12 +277,13 @@ def _identity_coordination_scope(
         vault_root,
         domains=domains,
         exclusive=exclusive,
+        advance_generation=identity_may_change,
         operation="reserved_identity",
         holder_kind="reserved-state",
-    ):
+    ) as generation:
         token = _ACTIVE_IDENTITY_COORDINATION.set((*active, (key, domains)))
         try:
-            yield
+            yield generation
         finally:
             _ACTIVE_IDENTITY_COORDINATION.reset(token)
 
@@ -1731,15 +1733,36 @@ def _baseline_identity_catalogue(vault_root: Path) -> IdentityCatalogue:
     if cached is not None:
         return cached
 
+    # Walking the whole KB can take tens of seconds on a mature vault. Take two
+    # short all-domain snapshots around the unlocked walk instead of holding
+    # every owner stopped for that duration. Exact owners advance the shared
+    # token before their domain is released from the gate, so equal snapshots
+    # prove that no cooperative private identity publication crossed the walk.
+    # A busy startup gets two optimistic attempts, then the old locked scan as a
+    # bounded fail-safe: safety and eventual progress both survive contention.
+    for _attempt in range(2):
+        with _identity_coordination_scope(vault_root) as before:
+            pass
+        candidate = IdentityCatalogue.from_vault(vault_root)
+        with _identity_coordination_scope(vault_root) as after:
+            with _PUBLISHED_IDENTITY_LOCK:
+                cached = _BASELINE_IDENTITY_CATALOGUES.get(vault_key)
+            if cached is not None:
+                return cached
+            if before == after:
+                with _PUBLISHED_IDENTITY_LOCK:
+                    _BASELINE_IDENTITY_CATALOGUES[vault_key] = candidate
+                return candidate
+
     with _identity_coordination_scope(vault_root):
         with _PUBLISHED_IDENTITY_LOCK:
             cached = _BASELINE_IDENTITY_CATALOGUES.get(vault_key)
         if cached is not None:
             return cached
-        catalogue = IdentityCatalogue.from_vault(vault_root)
+        candidate = IdentityCatalogue.from_vault(vault_root)
         with _PUBLISHED_IDENTITY_LOCK:
-            _BASELINE_IDENTITY_CATALOGUES[vault_key] = catalogue
-        return catalogue
+            _BASELINE_IDENTITY_CATALOGUES[vault_key] = candidate
+        return candidate
 
 
 def _publish_owner_identities(
@@ -2089,7 +2112,10 @@ def _publish_owner_bytes(
     except OSError as error:
         raise RuntimeError("private byte publication cannot create the vault") from error
 
-    with _identity_coordination_scope(root, descriptor_ids=(descriptor_id,)):
+    with _identity_coordination_scope(
+        root,
+        descriptor_ids=(descriptor_id,),
+    ):
         acquired = held_fs.acquire(root)
         if not acquired.ok:
             raise RuntimeError("private byte publication cannot acquire the vault")
@@ -2170,7 +2196,11 @@ def _read_owner_bytes(
     except OSError as error:
         raise OSError("private byte read cannot inspect the vault") from error
 
-    with _identity_coordination_scope(root, descriptor_ids=(descriptor_id,)):
+    with _identity_coordination_scope(
+        root,
+        descriptor_ids=(descriptor_id,),
+        identity_may_change=False,
+    ):
         acquired = held_fs.acquire(root)
         if not acquired.ok:
             raise OSError("private byte read cannot acquire the vault")

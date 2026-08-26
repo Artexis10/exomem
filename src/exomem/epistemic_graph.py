@@ -335,6 +335,7 @@ def _connect_existing_owner_target(
         with reserved_paths._identity_coordination_scope(
             root,
             descriptor_ids=(descriptor_id,),
+            identity_may_change=not readonly,
         ):
             with reserved_paths._sqlite_owner_target_scope(
                 root,
@@ -613,6 +614,8 @@ def is_publication_failure(error: BaseException) -> bool:
     registry-loss signals keep the pre-contract behaviour rather than being
     silently downgraded.
     """
+    if isinstance(error, graph_sync.GraphRebuildInProgress):
+        return False
     if isinstance(error, _PUBLICATION_FAILURE_TYPES):
         return True
     if isinstance(error, OpError):
@@ -633,7 +636,10 @@ def may_mark_external_pending(error: BaseException) -> bool:
     registry-loss signal keeps its pre-contract behaviour instead of being
     silently downgraded.
     """
-    return not (isinstance(error, GraphProjectionMoved) or is_publication_failure(error))
+    return not (
+        isinstance(error, (GraphProjectionMoved, graph_sync.GraphRebuildInProgress))
+        or is_publication_failure(error)
+    )
 
 
 # --- Class B recovery state and its bounded, single-flight retry (R2) ------
@@ -787,6 +793,12 @@ def recover_suspended_graph(vault_root: Path) -> bool:
             raise GraphPublicationUnavailable(
                 "recovered graph did not publish an available marker"
             )
+    except graph_sync.GraphRebuildInProgress:
+        # The kernel-backed owner is still responsible for the barrier and the
+        # publication.  Re-suspending here can race after that owner publishes
+        # and turn its fresh sidecar unavailable again.
+        log.info("persisted graph barrier recovery joined an active external owner")
+        return False
     except Exception:  # noqa: BLE001 - persisted barrier remains a retry signal
         try:
             graph.suspend_reads()
@@ -1970,23 +1982,13 @@ class EpistemicGraphIndex:
                     state_root=self._mutation_coordinator.state_root,
                 )
                 if not owner_claimed:
-                    if required is None and self._wait_for_legacy_rebuild():
-                        return {
-                            "indexed_files": 0,
-                            "nodes": 0,
-                            "edges": 0,
-                            "joined": 1,
-                        }
-                    if graph_sync.wait_for_current(
-                        self.vault_root, required, availability=self.available
-                    ):
-                        return {"indexed_files": 0, "nodes": 0, "edges": 0, "joined": 1}
-                    # Losing the rebuild owner is Class B by name in the
-                    # contract: the registry is intact, this projection simply
-                    # could not publish. Type it so callers can classify.
-                    raise GraphPublicationUnavailable(
-                        "another graph rebuild owner did not publish a current sidecar"
-                    )
+                    # A refused claim is already a kernel-backed proof that a
+                    # rebuild owner is live now.  Waiting 30 seconds and then
+                    # accusing that owner of non-publication is both false and
+                    # long enough to consume a request's edge budget.  Return a
+                    # typed warming state immediately; callers retain their
+                    # durable pending work and can retry after the owner exits.
+                    raise graph_sync.GraphRebuildInProgress()
                 temporary_index = EpistemicGraphIndex(
                     self.vault_root, mutation_coordinator=self._mutation_coordinator
                 )
@@ -2393,15 +2395,6 @@ class EpistemicGraphIndex:
         if not _reader_cycling_enabled():
             return None
         return _acquire_publication_hold(live)
-
-    def _wait_for_legacy_rebuild(self) -> bool:
-        """Wait for a competing legacy builder without requiring an epoch."""
-        deadline = time.monotonic() + 30.0
-        while time.monotonic() < deadline:
-            if self.available():
-                return True
-            time.sleep(0.025)
-        return False
 
     def _rebuild_all_locked(self) -> dict[str, int]:
         pass_started = False
@@ -3195,7 +3188,39 @@ class EpistemicGraphIndex:
                 graph_checkpoint=graph_checkpoint,
             )
         if report.pop("_rebuild_after_release", False):
-            return self._rebuild_all_off_boundary(accept_stabilized_build=True)
+            durable_before_rebuild = bool(report.pop("_durable_before_rebuild", False))
+            try:
+                return self._rebuild_all_off_boundary(accept_stabilized_build=True)
+            except graph_sync.GraphRebuildInProgress:
+                # A defer-disposition fallback has already persisted these exact
+                # paths. A rebuild-disposition fallback knows only that the
+                # affected scope is wider, so append whole-vault debt now. The
+                # active owner cannot cover a mutation that landed after its
+                # snapshot; only durable debt makes coalescing truthful.
+                if not durable_before_rebuild:
+                    graph_generation = int(
+                        graph_sync.status(self.vault_root).get("generation") or 0
+                    )
+                    checkpoint_generation = (
+                        int(graph_checkpoint.generation)
+                        if graph_checkpoint is not None
+                        else 0
+                    )
+                    deferred_index.advance_graph_full_rebuild(
+                        self.vault_root,
+                        after_generation=max(
+                            graph_generation,
+                            checkpoint_generation,
+                        ),
+                    )
+                return {
+                    "indexed_files": 0,
+                    "nodes": 0,
+                    "edges": 0,
+                    "deferred": 1,
+                    "queued": 1,
+                    "coalesced": 1,
+                }
         # Standalone callers have already left the graph mutation hold. Command
         # callers retain their exact registration for writer_lease to start and
         # join only after canonical authority releases.
@@ -3241,7 +3266,32 @@ class EpistemicGraphIndex:
             nothing.
             """
             try:
-                deferred_index.add_graph(self.vault_root, sorted(deferred_scope))
+                receipts = deferred_index.add_graph_receipts(
+                    self.vault_root, sorted(deferred_scope)
+                )
+                queued_scope = {receipt.rel_path for receipt in receipts}
+                if queued_scope != deferred_scope:
+                    # The path queue admits only canonical Knowledge Base
+                    # Markdown. A vault-wide resolver change can include a
+                    # supported recall path outside that root, and silently
+                    # dropping it would make a later coalesced response false.
+                    # Escalate incomplete path coverage to monotonic whole-vault
+                    # debt that an already-running drain cannot clear.
+                    graph_generation = int(
+                        graph_sync.status(self.vault_root).get("generation") or 0
+                    )
+                    checkpoint_generation = (
+                        int(graph_checkpoint.generation)
+                        if graph_checkpoint is not None
+                        else 0
+                    )
+                    deferred_index.advance_graph_full_rebuild(
+                        self.vault_root,
+                        after_generation=max(
+                            graph_generation,
+                            checkpoint_generation,
+                        ),
+                    )
             except Exception:  # noqa: BLE001 - a queue failure must not lose the rebuild
                 log.warning(
                     "graph deferral enqueue failed reason=%s; falling back to rebuild",
@@ -3250,7 +3300,13 @@ class EpistemicGraphIndex:
                 )
                 return None
             if graph_checkpoint is None:
-                return None
+                return {
+                    "indexed_files": 0,
+                    "nodes": 0,
+                    "edges": 0,
+                    "_rebuild_after_release": 1,
+                    "_durable_before_rebuild": 1,
+                }
             self._mark_unavailable()
             # `queued` is what separates this from `fallback()`'s own deferral
             # below, which registers a whole-vault rebuild and reports
@@ -5074,6 +5130,8 @@ def _join_registered_standalone(
             vault_root, state_root=mutation_coordinator.state_root
         )
     except graph_sync.GraphRebuildRegistrationError as error:
+        if isinstance(error, graph_sync.GraphRebuildInProgress):
+            return GraphDispatchResult("deferred", error.code, result.checkpoint)
         return GraphDispatchResult("failed", error.code, result.checkpoint)
     except Exception:  # noqa: BLE001 - canonical bytes remain durable
         log.warning("standalone graph rebuild failed", exc_info=True)
@@ -5098,6 +5156,8 @@ def _handle_graph_dispatch_failure(
     has already been marked exactly once by the proof that detected it. Only an
     exception this module cannot classify keeps the pre-contract marking.
     """
+    if isinstance(error, graph_sync.GraphRebuildInProgress):
+        return
     if may_mark_external_pending(error):
         freshness.mark_external_pending(vault_root)
         return
@@ -5140,6 +5200,11 @@ def schedule_background_rebuild(
             EpistemicGraphIndex(
                 vault_root, mutation_coordinator=mutation_coordinator
             ).rebuild_all()
+        except graph_sync.GraphRebuildInProgress:
+            # Another process owns the kernel-backed rebuild claim.  That is a
+            # healthy coalescing state, not a failed publication requiring a
+            # recovery memo or a warning traceback.
+            log.info("background graph rebuild joined an active external owner")
         except Exception as error:  # noqa: BLE001 - request path remains non-blocking
             _handle_graph_dispatch_failure(
                 vault_root, error, mutation_coordinator=mutation_coordinator

@@ -119,6 +119,38 @@ terminal scrubber after response-schema and just-minted-value validation.
 - **THEN** the terminal scrubber removes it and malformed issuance refuses rather than
   weakening global bearer redaction
 
+### Requirement: Governed Find Continuations Are Surface-Equivalent
+
+The generated `ask_memory` and legacy `find` signatures SHALL expose the same optional
+bounded string `continuation` across MCP, REST, Hosted, CLI, OpenAPI, and in-process
+dispatch. The field SHALL be absent by default and SHALL NOT change never-governed
+response bytes. A supplied continuation on a route without an active governed projected
+runtime, or any malformed/unknown/expired/cross-binding continuation, SHALL return the
+same `INVALID_CONTINUATION` application refusal. No adapter may decode the token into
+caller-selectable offset, principal, session, purpose, policy, catalog, or runtime
+authority.
+
+Governed projected success SHALL use the existing envelope and MAY include exactly one
+`continuation` string when another authorized page exists. Exhaustion SHALL omit the
+field. The generated schemas SHALL declare that optional field without changing
+ungoverned default payloads. MCP, REST, Hosted, CLI, and in-process calls with the same
+trusted principal and request SHALL return the same page and continuation bytes, modulo
+the already registered outer transport framing exclusions.
+
+#### Scenario: Cross-surface continuation parity
+
+- **WHEN** the same trusted principal requests consecutive governed pages through MCP,
+  REST, Hosted, CLI, and in-process dispatch
+- **THEN** each surface accepts the same bounded continuation contract and returns the
+  same canonical page membership, order, exhaustion, and continuation bytes
+
+#### Scenario: Caller cannot choose a page offset
+
+- **WHEN** a caller edits, fabricates, replays after expiry, or moves a continuation
+  across vault/principal/session/purpose/request bindings
+- **THEN** the dispatcher returns `INVALID_CONTINUATION` and no decoded token field or
+  registry detail reaches validation, logs, errors, or the leaf
+
 ### Requirement: Reserved Path Classification Is Registry-Total
 
 The command registry SHALL identify every path/ref-bearing argument for every operation

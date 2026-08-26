@@ -1388,6 +1388,10 @@ def _epoch_writes_with_predecessor(
             or recall_policy.is_structured_only_path(root, relative)
         ):
             continue
+        if not isinstance(write.content, str):
+            raise GraphEpochIncoherent(
+                "graph-relevant batch content is not Markdown text"
+            )
         paths.append((relative, content_hash(write.content)))
         if not write.path.exists():
             created_paths.append(relative)
@@ -1794,6 +1798,16 @@ class GraphRebuildStopped(GraphRebuildRegistrationError):
         super().__init__(
             "GRAPH_SYNC_REBUILD_STOPPED",
             remediation,
+        )
+
+
+class GraphRebuildInProgress(GraphRebuildRegistrationError):
+    """A verified rebuild owner is live, so this caller should retry later."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "GRAPH_SYNC_REBUILD_IN_PROGRESS",
+            "Retry after the active graph rebuild owner publishes or releases its claim.",
         )
 
 
@@ -2507,6 +2521,18 @@ class GraphRebuildCoordinator:
             try:
                 outcome = builder(required)
             except BaseException as error:  # noqa: BLE001 - integration path
+                if isinstance(error, GraphRebuildInProgress):
+                    logger.info(
+                        "graph rebuild coalesced with active external owner "
+                        "checkpoint_sha256=%s generation=%s",
+                        required.checkpoint_sha256,
+                        required.generation,
+                    )
+                    with self._condition:
+                        self._error = error
+                        self._running = False
+                        self._condition.notify_all()
+                    return
                 if isinstance(error, GraphRebuildRegistrationError):
                     projection = self._advice_for(error)
                 else:

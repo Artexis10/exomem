@@ -134,6 +134,7 @@ def test_generic_client_can_discover_validate_create_inspect_and_append_from_emp
             "semantic_profile": "records",
             "lifecycle": "active",
             "storage_strategy": "markdown-items",
+            "natural_key": ["occurred_on", "label"],
         }
     ]
     assert inventory["legacy_trackers"] == []

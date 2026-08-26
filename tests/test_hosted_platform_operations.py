@@ -1355,11 +1355,21 @@ def test_active_secret_selection_is_complete_and_the_signer_publishes_a_verified
         if destination.get("kind") == "sops_k8s_secret" and destination.get("slot") == "active"
     }
     assert len(expected) == 34
-    assert selection == {"schema_version": 1, "destinations": {name: "v1" for name in expected}}
+    assert selection["schema_version"] == 1
+    assert set(selection["destinations"]) == expected
     assert all(
-        (ROOT / destination["target"].format(version="v1")).is_file()
+        re.fullmatch(r"v[1-9][0-9]*", version)
+        for version in selection["destinations"].values()
+    )
+    assert all(
+        (
+            ROOT
+            / destination["target"].format(
+                version=selection["destinations"][destination_id]
+            )
+        ).is_file()
         for secret in matrix["secrets"].values()
-        for destination in secret["destinations"].values()
+        for destination_id, destination in secret["destinations"].items()
         if destination.get("kind") == "sops_k8s_secret" and destination.get("slot") == "active"
     )
 

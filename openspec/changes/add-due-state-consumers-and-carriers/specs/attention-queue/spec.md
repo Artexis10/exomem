@@ -99,5 +99,9 @@ surface, and the absence SHALL be indistinguishable from the item not existing.
 #### Scenario: Damaged projection state recovers by recomputation
 
 - **WHEN** the persisted projection is missing or unreadable at serve time
-- **THEN** the projection is recomputed from canonical state
+- **THEN** the current response remains silent for the advisory and returns without waiting
+  for a vault-wide scan
+- **AND** exactly one process-local background rebuild recomputes the projection from
+  canonical state and persists it when possible
+- **AND** a later response may serve the rebuilt projection after it is ready
 - **AND** no mutation fails or is delayed beyond the write-latency gates

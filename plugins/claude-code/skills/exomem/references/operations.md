@@ -18,7 +18,7 @@ commands.
 | `review` | Review stale, contradictory, or unprocessed knowledge | `review_memory` |
 | `connect` | Suggest links or return graph, evidence, provenance, and history context | `connect_memory`; use `operation="context"` for the unified read-only view |
 | `adopt` | Assess or import an existing vault safely | `adopt_vault(mode="scan-only")` first; explicit modes for manifest/copy/compile planning |
-| `maintain` | Check or repair vault health | `maintain_memory(mode="audit")`; explicit `fix`/`reconcile` modes only with fix intent |
+| `maintain` | Check or repair vault health | Remote tools may audit or dry-run. Actual repair is host-operator work via `exomem maintain --fix` / `--reconcile` |
 | `schema` | Govern recurring structure, relation vocabulary, or graph lenses | `schema_memory`; inference is proposal-only and saving is explicit |
 
 Do not ask users to choose internal folders, graph sidecars, or page types unless
@@ -46,7 +46,9 @@ bounded current view; `create` explicitly creates a reviewed collection contract
 `append` adds a new event; `update` changes one item with current stale-write
 guards and a concise reason; `revise` changes a validated manifest under its
 current guards; and `rebaseline` explicitly records a valid direct-edit audit
-gap. Generic derived-index repair remains `maintain_memory(mode="reconcile")`.
+gap. Remote callers may preview generic derived-index repair with
+`maintain_memory(mode="reconcile", dry_run=true)`; actual repair remains the
+host-operator command `exomem maintain --reconcile`.
 
 Route durable observed events or current state here without waiting for a magic
 verb. When exactly one compatible existing collection accepts a sufficiently

@@ -230,7 +230,9 @@ def test_index_sync_reports_a_failed_semantic_purge_for_reconcile(
             "completed", "embedding_upsert_completed", 1
         ),
     )
-    monkeypatch.setattr(index_sync, "purge_semantic_only", lambda *_args: False)
+    monkeypatch.setattr(
+        index_sync, "purge_semantic_only", lambda *_args, **_kwargs: False
+    )
 
     report = index_sync.upsert_after_write(tmp_path, [page])
 

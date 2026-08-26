@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-import inspect
 import math
+import os
 import random
 import statistics
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
+from hashlib import sha256
 from types import MappingProxyType
 
 from . import projections
@@ -28,6 +29,8 @@ class PublicRequestClass:
     name: str
     padding_ms: int
     deadline_ms: int
+    max_query_chars: int
+    max_limit: int
     max_hidden_delta_ms: int
     max_hidden_delta_ratio: float
 
@@ -39,6 +42,8 @@ class PublicRequestClass:
             or type(self.deadline_ms) is not int
             or self.padding_ms <= 0
             or self.deadline_ms < self.padding_ms
+            or self.max_query_chars != 4_096
+            or self.max_limit != 100
             or self.max_hidden_delta_ms
             != projections.MAX_HIDDEN_CORPUS_WIRE_DELTA_MS
             or self.max_hidden_delta_ratio
@@ -49,16 +54,30 @@ class PublicRequestClass:
             )
 
 
-_PROJECTED_FIND_KEYWORD_V1 = PublicRequestClass(
-    name="projected-find-keyword-v1",
+_PROJECTED_FIND_V1 = PublicRequestClass(
+    name="projected-find-v1",
     padding_ms=250,
     deadline_ms=300,
+    max_query_chars=4_096,
+    max_limit=100,
+    max_hidden_delta_ms=projections.MAX_HIDDEN_CORPUS_WIRE_DELTA_MS,
+    max_hidden_delta_ratio=projections.MAX_HIDDEN_CORPUS_WIRE_DELTA_RATIO,
+)
+_PROJECTED_FIND_VECTOR_CPU_V1 = PublicRequestClass(
+    name="projected-find-vector-cpu-v1",
+    padding_ms=1_000,
+    deadline_ms=1_500,
+    max_query_chars=4_096,
+    max_limit=100,
     max_hidden_delta_ms=projections.MAX_HIDDEN_CORPUS_WIRE_DELTA_MS,
     max_hidden_delta_ratio=projections.MAX_HIDDEN_CORPUS_WIRE_DELTA_RATIO,
 )
 
 PUBLIC_REQUEST_CLASSES: Mapping[str, PublicRequestClass] = MappingProxyType(
-    {_PROJECTED_FIND_KEYWORD_V1.name: _PROJECTED_FIND_KEYWORD_V1}
+    {
+        _PROJECTED_FIND_V1.name: _PROJECTED_FIND_V1,
+        _PROJECTED_FIND_VECTOR_CPU_V1.name: _PROJECTED_FIND_VECTOR_CPU_V1,
+    }
 )
 
 _RELEASE_MANIFEST_SCHEMA = "exomem.governed-projection-timing-release/v1"
@@ -70,6 +89,7 @@ _RELEASE_MANIFEST_KEYS = frozenset(
         "bootstrap_resamples",
         "bootstrap_seed",
         "hardware_runtime_profile",
+        "model_runtime_profile",
         "request_classes",
         "routes",
         "capacity",
@@ -77,14 +97,60 @@ _RELEASE_MANIFEST_KEYS = frozenset(
         "padding_selected_before_sampling",
     }
 )
-_REQUEST_CLASS_KEYS = frozenset({"name", "padding_ms", "deadline_ms"})
+_REQUEST_CLASS_KEYS = frozenset(
+    {"name", "padding_ms", "deadline_ms", "max_query_chars", "max_limit"}
+)
 _CAPACITY_KEYS = frozenset(
     {"catalog_items", "searchable_bytes_per_item", "graph_edges"}
 )
-_REQUIRED_ROUTES = frozenset(
-    {"keyword", "bm25", "vector", "rerank", "clip", "graph", "error", "pagination"}
+_HARD_OFF_REQUIRED_ROUTES = frozenset(
+    {
+        "keyword",
+        "bm25",
+        "vector-hard-off",
+        "rerank-hard-off",
+        "clip-hard-off",
+        "graph",
+        "graph-rerank-hard-off",
+        "max-query",
+        "max-limit",
+        "max-shape",
+        "hidden-index-missing",
+        "pagination",
+    }
 )
+_VECTOR_CPU_REQUIRED_ROUTES = frozenset(
+    {
+        "keyword",
+        "bm25",
+        "vector-live",
+        "rerank-hard-off",
+        "clip-hard-off",
+        "graph",
+        "graph-rerank-hard-off",
+        "max-query",
+        "max-limit",
+        "max-shape",
+        "hidden-index-missing",
+        "pagination",
+    }
+)
+_ALL_REQUIRED_ROUTES = _HARD_OFF_REQUIRED_ROUTES | _VECTOR_CPU_REQUIRED_ROUTES
 _HARDWARE_RUNTIME_PROFILE = "github-hosted-ubuntu-latest-x64-python3.13"
+MODEL_RUNTIME_PROFILE = "models-hard-off-v1"
+VECTOR_CPU_MODEL_RUNTIME_PROFILE = "vectors-cpu-torch-v1"
+_PROFILE_REQUEST_CLASSES: Mapping[str, tuple[str, ...]] = MappingProxyType(
+    {
+        MODEL_RUNTIME_PROFILE: (_PROJECTED_FIND_V1.name,),
+        VECTOR_CPU_MODEL_RUNTIME_PROFILE: (_PROJECTED_FIND_VECTOR_CPU_V1.name,),
+    }
+)
+_PROFILE_REQUIRED_ROUTES: Mapping[str, frozenset[str]] = MappingProxyType(
+    {
+        MODEL_RUNTIME_PROFILE: _HARD_OFF_REQUIRED_ROUTES,
+        VECTOR_CPU_MODEL_RUNTIME_PROFILE: _VECTOR_CPU_REQUIRED_ROUTES,
+    }
+)
 _MIN_SAMPLE_COUNT_PER_CONDITION = 200
 _MIN_BOOTSTRAP_RESAMPLES = 2_000
 _TIMING_RELEASE_MANIFEST_PROOF = object()
@@ -99,6 +165,7 @@ class TimingReleaseManifest:
     bootstrap_resamples: int
     bootstrap_seed: int
     hardware_runtime_profile: str
+    model_runtime_profile: str
     request_class_names: tuple[str, ...]
     routes: frozenset[str]
     catalog_items: int
@@ -113,6 +180,7 @@ class TimingReleaseManifest:
         bootstrap_resamples: int,
         bootstrap_seed: int,
         hardware_runtime_profile: str,
+        model_runtime_profile: str,
         request_class_names: tuple[str, ...],
         routes: frozenset[str],
         catalog_items: int,
@@ -130,6 +198,7 @@ class TimingReleaseManifest:
             "bootstrap_resamples": bootstrap_resamples,
             "bootstrap_seed": bootstrap_seed,
             "hardware_runtime_profile": hardware_runtime_profile,
+            "model_runtime_profile": model_runtime_profile,
             "request_class_names": request_class_names,
             "routes": routes,
             "catalog_items": catalog_items,
@@ -154,6 +223,71 @@ class WireDifferentialReport:
     p95_delta_upper_99_ms: float
     effective_delta_ceiling_ms: float
     deadline_misses: int
+    passed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class WireSample:
+    """One predeclared member of a hidden-present/absent wire pair.
+
+    ``capacity`` is the actual hidden-corpus condition: absent samples are
+    always ``zero``; present samples alternate between ``one`` and ``maximum``.
+    """
+
+    pair_id: int
+    route: str
+    capacity: str
+    hidden_present: bool
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.pair_id) is not int
+            or self.pair_id < 0
+            or self.route not in _ALL_REQUIRED_ROUTES
+            or self.capacity not in {"zero", "one", "maximum"}
+            or type(self.hidden_present) is not bool
+        ):
+            raise ProjectedRequestTimingUnavailable(
+                "governed projected request timing is unavailable"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class WireObservation:
+    """Actual completion and canonical-envelope digest for one sample."""
+
+    sample: WireSample
+    elapsed_ms: float
+    canonical_envelope_sha256: str
+
+    def __post_init__(self) -> None:
+        try:
+            digest = bytes.fromhex(self.canonical_envelope_sha256)
+        except (TypeError, ValueError) as error:
+            raise ProjectedRequestTimingUnavailable(
+                "governed projected request timing is unavailable"
+            ) from error
+        if (
+            not isinstance(self.sample, WireSample)
+            or isinstance(self.elapsed_ms, bool)
+            or not isinstance(self.elapsed_ms, (int, float))
+            or not math.isfinite(float(self.elapsed_ms))
+            or float(self.elapsed_ms) < 0
+            or len(digest) != 32
+            or self.canonical_envelope_sha256 != digest.hex()
+        ):
+            raise ProjectedRequestTimingUnavailable(
+                "governed projected request timing is unavailable"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class WireRouteReport:
+    """Content and timing verdict for one mandatory actual-wire route."""
+
+    route: str
+    envelope_pairs_equal: bool
+    timing: WireDifferentialReport
     passed: bool
 
 
@@ -209,6 +343,17 @@ def validate_release_manifest(value: object) -> TimingReleaseManifest:
         raise ProjectedRequestTimingUnavailable(
             "governed projected request timing is unavailable"
         )
+    model_runtime_profile = manifest["model_runtime_profile"]
+    if not isinstance(model_runtime_profile, str):
+        raise ProjectedRequestTimingUnavailable(
+            "governed projected request timing is unavailable"
+        )
+    expected_class_names = _PROFILE_REQUEST_CLASSES.get(model_runtime_profile)
+    expected_routes = _PROFILE_REQUIRED_ROUTES.get(model_runtime_profile)
+    if expected_class_names is None or expected_routes is None:
+        raise ProjectedRequestTimingUnavailable(
+            "governed projected request timing is unavailable"
+        )
     if manifest["scheduler_tolerance_subtracted"] is not False or manifest[
         "padding_selected_before_sampling"
     ] is not True:
@@ -234,12 +379,16 @@ def validate_release_manifest(value: object) -> TimingReleaseManifest:
             or declared["padding_ms"] != registered.padding_ms
             or type(declared["deadline_ms"]) is not int
             or declared["deadline_ms"] != registered.deadline_ms
+            or type(declared["max_query_chars"]) is not int
+            or declared["max_query_chars"] != registered.max_query_chars
+            or type(declared["max_limit"]) is not int
+            or declared["max_limit"] != registered.max_limit
         ):
             raise ProjectedRequestTimingUnavailable(
                 "governed projected request timing is unavailable"
             )
         names.append(name)
-    if len(names) != len(set(names)) or set(names) != set(PUBLIC_REQUEST_CLASSES):
+    if len(names) != len(set(names)) or tuple(names) != expected_class_names:
         raise ProjectedRequestTimingUnavailable(
             "governed projected request timing is unavailable"
         )
@@ -252,7 +401,7 @@ def validate_release_manifest(value: object) -> TimingReleaseManifest:
     if (
         any(not isinstance(route, str) for route in routes)
         or len(routes) != len(set(routes))
-        or frozenset(routes) != _REQUIRED_ROUTES
+        or frozenset(routes) != expected_routes
     ):
         raise ProjectedRequestTimingUnavailable(
             "governed projected request timing is unavailable"
@@ -278,6 +427,7 @@ def validate_release_manifest(value: object) -> TimingReleaseManifest:
         bootstrap_resamples=bootstrap_resamples,
         bootstrap_seed=bootstrap_seed,
         hardware_runtime_profile=_HARDWARE_RUNTIME_PROFILE,
+        model_runtime_profile=model_runtime_profile,
         request_class_names=tuple(names),
         routes=frozenset(routes),
         catalog_items=expected_capacity["catalog_items"],
@@ -386,6 +536,93 @@ def evaluate_wire_differential(
     )
 
 
+def release_sample_schedule(
+    manifest: TimingReleaseManifest,
+    *,
+    route: str,
+) -> tuple[WireSample, ...]:
+    """Return the immutable pre-observation paired schedule for one route."""
+
+    if (
+        not isinstance(manifest, TimingReleaseManifest)
+        or route not in manifest.routes
+        or route not in _ALL_REQUIRED_ROUTES
+    ):
+        raise ProjectedRequestTimingUnavailable(
+            "governed projected request timing is unavailable"
+        )
+    seed_material = f"{manifest.bootstrap_seed}\0{route}".encode("ascii")
+    rng = random.Random(int.from_bytes(sha256(seed_material).digest()[:8], "big"))
+    present_capacities = [
+        ("one", "maximum")[index % 2]
+        for index in range(manifest.sample_count_per_condition)
+    ]
+    rng.shuffle(present_capacities)
+    schedule: list[WireSample] = []
+    for pair_id, present_capacity in enumerate(present_capacities):
+        first_present = bool(rng.getrandbits(1))
+        for hidden_present in (first_present, not first_present):
+            schedule.append(
+                WireSample(
+                    pair_id=pair_id,
+                    route=route,
+                    capacity=present_capacity if hidden_present else "zero",
+                    hidden_present=hidden_present,
+                )
+            )
+    return tuple(schedule)
+
+
+def evaluate_wire_route(
+    manifest: TimingReleaseManifest,
+    *,
+    route: str,
+    observations: tuple[WireObservation, ...],
+) -> WireRouteReport:
+    """Evaluate one route only when it follows the predeclared paired schedule."""
+
+    if not isinstance(observations, tuple):
+        raise ProjectedRequestTimingUnavailable(
+            "governed projected request timing is unavailable"
+        )
+    schedule = release_sample_schedule(manifest, route=route)
+    if len(observations) != len(schedule) or any(
+        not isinstance(observation, WireObservation)
+        or observation.sample != expected
+        for observation, expected in zip(observations, schedule, strict=True)
+    ):
+        raise ProjectedRequestTimingUnavailable(
+            "governed projected request timing is unavailable"
+        )
+    present: list[float] = []
+    absent: list[float] = []
+    envelope_pairs_equal = True
+    for offset in range(0, len(observations), 2):
+        left, right = observations[offset : offset + 2]
+        envelope_pairs_equal = envelope_pairs_equal and (
+            left.canonical_envelope_sha256 == right.canonical_envelope_sha256
+        )
+    for observation in observations:
+        target = present if observation.sample.hidden_present else absent
+        target.append(float(observation.elapsed_ms))
+    if len(manifest.request_class_names) != 1:
+        raise ProjectedRequestTimingUnavailable(
+            "governed projected request timing is unavailable"
+        )
+    timing = evaluate_wire_differential(
+        manifest,
+        request_class_name=manifest.request_class_names[0],
+        hidden_present_ms=present,
+        physically_absent_ms=absent,
+    )
+    return WireRouteReport(
+        route=route,
+        envelope_pairs_equal=envelope_pairs_equal,
+        timing=timing,
+        passed=envelope_pairs_equal and timing.passed,
+    )
+
+
 def request_class_for_find(
     *,
     mode: str,
@@ -393,18 +630,48 @@ def request_class_for_find(
     graph: bool,
     rerank: bool | None,
 ) -> PublicRequestClass:
-    """Select only the one currently implemented public projected shape."""
+    """Select the fixed class shared by every implemented projected find lane."""
 
     if (
-        mode != "keyword"
-        or scope != "vault"
-        or graph is not False
-        or rerank is not False
+        mode not in {"keyword", "hybrid", "vector"}
+        or scope not in {"kb", "vault"}
+        or type(graph) is not bool
+        or rerank not in {None, False, True}
+        or (mode == "keyword" and graph)
     ):
         raise ProjectedRequestTimingUnavailable(
             "governed projected request timing is unavailable"
         )
-    return _PROJECTED_FIND_KEYWORD_V1
+    if model_runtime_profile_from_environment() == VECTOR_CPU_MODEL_RUNTIME_PROFILE:
+        return _PROJECTED_FIND_VECTOR_CPU_V1
+    return _PROJECTED_FIND_V1
+
+
+def model_runtime_profile_from_environment() -> str | None:
+    """Resolve only repository-certified, exact model execution profiles."""
+
+    if all(
+        os.environ.get(name) == "1"
+        for name in (
+            "EXOMEM_DISABLE_EMBEDDINGS",
+            "EXOMEM_DISABLE_CLIP",
+            "EXOMEM_DISABLE_RANKING",
+        )
+    ):
+        return MODEL_RUNTIME_PROFILE
+    if (
+        "EXOMEM_DISABLE_EMBEDDINGS" not in os.environ
+        and os.environ.get("EXOMEM_DISABLE_CLIP") == "1"
+        and os.environ.get("EXOMEM_DISABLE_RANKING") == "1"
+        and os.environ.get("EXOMEM_DEVICE") == "cpu"
+        and os.environ.get("EXOMEM_EMBED_BACKEND") == "torch"
+        and os.environ.get("OMP_NUM_THREADS") == "1"
+        and os.environ.get("MKL_NUM_THREADS") == "1"
+        and "EXOMEM_EMBED_DEVICE" not in os.environ
+        and "EXOMEM_TORCH_DEVICE" not in os.environ
+    ):
+        return VECTOR_CPU_MODEL_RUNTIME_PROFILE
+    return None
 
 
 def request_class_for_command(
@@ -412,8 +679,9 @@ def request_class_for_command(
     injected: tuple[object, ...],
     kwargs: Mapping[str, object],
 ) -> PublicRequestClass | None:
-    """Resolve the fixed class from one shared-dispatch command invocation."""
+    """Resolve the class before semantic validation so errors are padded too."""
 
+    del injected, kwargs
     if getattr(command, "name", None) not in {"ask_memory", "find"}:
         return None
     leaf = getattr(command, "leaf", None)
@@ -421,19 +689,12 @@ def request_class_for_command(
         raise ProjectedRequestTimingUnavailable(
             "governed projected request timing is unavailable"
         )
-    try:
-        bound = inspect.signature(leaf).bind_partial(*injected, **kwargs)
-        bound.apply_defaults()
-        return request_class_for_find(
-            mode=bound.arguments["mode"],
-            scope=bound.arguments["scope"],
-            graph=bound.arguments["graph"],
-            rerank=bound.arguments["rerank"],
-        )
-    except (KeyError, TypeError, ValueError) as error:
-        raise ProjectedRequestTimingUnavailable(
-            "governed projected request timing is unavailable"
-        ) from error
+    # The one class covers every registered shape up to its declared maxima,
+    # plus normalized refusals. Shape-specific actual-wire routes enforce that
+    # breadth; callers cannot select another padding or deadline.
+    if model_runtime_profile_from_environment() == VECTOR_CPU_MODEL_RUNTIME_PROFILE:
+        return _PROJECTED_FIND_VECTOR_CPU_V1
+    return _PROJECTED_FIND_V1
 
 
 def complete_public_request(
@@ -450,53 +711,52 @@ def complete_public_request(
         raise ProjectedRequestTimingUnavailable(
             "governed projected request timing is unavailable"
         )
-    finished_at = clock()
     if (
         isinstance(started_at, bool)
         or not isinstance(started_at, (int, float))
         or not math.isfinite(float(started_at))
-        or not math.isfinite(float(finished_at))
-        or finished_at < started_at
     ):
         raise ProjectedRequestTimingUnavailable(
             "governed projected request timing is unavailable"
         )
-    elapsed_ms = (finished_at - float(started_at)) * 1000.0
-    if elapsed_ms > request_class.deadline_ms:
-        raise ProjectedRequestDeadlineExceeded(
-            "governed projected request deadline was exceeded"
-        )
-    remaining = max(0.0, (request_class.padding_ms - elapsed_ms) / 1000.0)
-    if remaining:
-        sleeper(remaining)
-    completed_at = clock()
-    if (
-        isinstance(completed_at, bool)
-        or not isinstance(completed_at, (int, float))
-        or not math.isfinite(float(completed_at))
-        or completed_at < finished_at
-        or (
-        completed_at - float(started_at)
-        )
-        * 1000.0
-        > request_class.deadline_ms
-    ):
-        raise ProjectedRequestDeadlineExceeded(
-            "governed projected request deadline was exceeded"
-        )
+    started = float(started_at)
+    previous = started
+    while True:
+        reading = clock()
+        if (
+            isinstance(reading, bool)
+            or not isinstance(reading, (int, float))
+            or not math.isfinite(float(reading))
+            or float(reading) < previous
+        ):
+            raise ProjectedRequestTimingUnavailable(
+                "governed projected request timing is unavailable"
+            )
+        completed = float(reading)
+        elapsed_ms = (completed - started) * 1000.0
+        if elapsed_ms > request_class.deadline_ms:
+            raise ProjectedRequestDeadlineExceeded(
+                "governed projected request deadline was exceeded"
+            )
+        if elapsed_ms >= request_class.padding_ms:
+            return
+        sleeper((request_class.padding_ms - elapsed_ms) / 1000.0)
+        previous = completed
 
 
 @contextmanager
 def fixed_public_completion(
     request_class: PublicRequestClass,
+    *,
+    started_at: float | None = None,
 ) -> Iterator[None]:
     """Apply one class to success and error completion paths alike."""
 
-    started_at = time.perf_counter()
+    started = time.perf_counter() if started_at is None else started_at
     try:
         yield
     finally:
-        complete_public_request(request_class, started_at=started_at)
+        complete_public_request(request_class, started_at=started)
 
 
 __all__ = [
@@ -505,11 +765,18 @@ __all__ = [
     "ProjectedRequestTimingUnavailable",
     "PublicRequestClass",
     "TimingReleaseManifest",
+    "WireObservation",
     "WireDifferentialReport",
+    "WireRouteReport",
+    "WireSample",
     "complete_public_request",
     "evaluate_wire_differential",
+    "evaluate_wire_route",
     "fixed_public_completion",
+    "model_runtime_profile_from_environment",
     "request_class_for_command",
     "request_class_for_find",
+    "release_sample_schedule",
     "validate_release_manifest",
+    "VECTOR_CPU_MODEL_RUNTIME_PROFILE",
 ]

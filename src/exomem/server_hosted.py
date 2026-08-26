@@ -45,7 +45,11 @@ from .hosted_runtime import (
     HostedLifecycleError,
 )
 from .vault import VaultPathError, resolve_under_vault
-from .writer_lease import IdempotencyStore
+from .writer_lease import (
+    REMOTE_MAINTENANCE_MESSAGE,
+    REMOTE_MAINTENANCE_REMEDIATION,
+    IdempotencyStore,
+)
 
 log = logging.getLogger(__name__)
 _call_log = logging.getLogger("exomem.calls")
@@ -65,6 +69,7 @@ _HOSTED_MUTATION_DETAIL_FIELDS = (
     "idempotency_key",
 )
 _HOSTED_MUTATION_ERROR_SHAPES = {
+    "MAINTENANCE_REQUIRES_CLI": ("terminal", False),
     "MUTATION_BUSY": ("retryable", False),
     "MUTATION_WARMING": ("retryable", False),
     "MUTATION_ACKNOWLEDGEMENT_PENDING": ("uncertain", None),
@@ -178,6 +183,10 @@ def _hosted_refusal_guidance() -> dict[str, tuple[str, str]]:
         "settled conclusion."
     )
     return {
+        "MAINTENANCE_REQUIRES_CLI": (
+            REMOTE_MAINTENANCE_MESSAGE,
+            REMOTE_MAINTENANCE_REMEDIATION,
+        ),
         "missing_semantic_unit": (
             "the memory has no semantic unit to record",
             f"{unit['compact_remediation']} {unit['rich_remediation']}",
@@ -1010,6 +1019,7 @@ def register_hosted_routes(
         except gateway.HostedGatewayError as exc:
             return _error_response(exc.code, config=config, operation="ready", started=started)
         readiness = lifecycle.readiness()
+        control_plane = lifecycle.control_plane_readiness()
         if private_authenticator is not None:
             assert config.vault_id is not None
             assert config.worker_policy_digest is not None
@@ -1023,14 +1033,15 @@ def register_hosted_routes(
                 "authenticated_credential_version": (context.authenticated_credential_version),
                 "security_revision": context.security_revision,
                 "service_authenticated": True,
-                "mutation_authority": lifecycle.control_plane_readiness()["mutationAuthority"],
+                "mutation_authority": control_plane["mutationAuthority"],
+                "authorization_session": control_plane["authorizationSession"],
                 "admission_phase": readiness.phase,
                 "read_admission": readiness.read_admitted,
                 "write_admission": readiness.write_admitted,
                 "worker_policy_digest": config.worker_policy_digest,
             }
         else:
-            data = {**readiness.as_dict(), **lifecycle.control_plane_readiness()}
+            data = {**readiness.as_dict(), **control_plane}
         return _success_response(
             data,
             config=config,

@@ -1,6 +1,6 @@
 [project]
 name = "exomem"
-version = "0.58.0" # x-release-please-version
+version = "0.62.0" # x-release-please-version
 description = "Local knowledge substrate for owned markdown/Obsidian vaults, exposed through MCP, REST, and CLI with multimodal OCR/ASR/CLIP search"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -219,6 +219,7 @@ markers = [
     # and the HF model cache). Excluded from the lean matrix; run in the dedicated
     # `retrieval-eval` CI job via `pytest -m embeddings`.
     "embeddings: loads live vector models; run only in the retrieval-eval job",
+    "governance_timing_release: exact-capacity actual-wire governance timing characterization",
 ]
 
 # Blackwell (RTX 50-series, sm_120 / compute capability 12.0) needs CUDA wheels.

@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 from collections import OrderedDict
 from collections.abc import Mapping
 from pathlib import Path
 from types import MappingProxyType
 
-from . import memory_refs, recall_policy
+from . import freshness, memory_refs, recall_policy
 from .entity_types import EntityTypeRegistry, load_entity_types
 from .find_corpus import CACHE
 from .referent_resolution import EntityRecord
@@ -19,6 +20,9 @@ _REGISTRY_CACHE: OrderedDict[
     tuple[Path, tuple], Mapping[str, EntityRecord]
 ] = OrderedDict()
 _REGISTRY_CACHE_LOCK = threading.Lock()
+_REGISTRY_WARMS: set[tuple[Path, tuple]] = set()
+
+log = logging.getLogger(__name__)
 
 
 def _strings(value: object) -> tuple[str, ...]:
@@ -103,20 +107,37 @@ def load_entity_registry(
     *,
     freshness_key: tuple,
     type_registry: EntityTypeRegistry | None = None,
-) -> Mapping[str, EntityRecord]:
-    """Return one immutable registry per vault/checkpoint identity."""
+    allow_build: bool = True,
+    expected_recall_checkpoint: freshness.RecallFreshnessCheckpoint | None = None,
+) -> Mapping[str, EntityRecord] | None:
+    """Return one immutable registry per vault/checkpoint identity.
+
+    Managed request threads use ``allow_build=False`` so a cold additive
+    referent cache can never turn into a directory scan.  The caller schedules
+    the same key for background warming and simply omits the optional block.
+    """
     root = Path(vault_root).absolute()
     type_registry = type_registry or load_entity_types(root)
     key = (
         root,
         (*tuple(freshness_key), type_registry.core_version, type_registry.extension_hash),
     )
+    if expected_recall_checkpoint is not None and not freshness.recall_checkpoint_is_current(
+        root, "kb", expected_recall_checkpoint
+    ):
+        return None
     with _REGISTRY_CACHE_LOCK:
         cached = _REGISTRY_CACHE.get(key)
         if cached is not None:
             _REGISTRY_CACHE.move_to_end(key)
             return cached
+        if not allow_build:
+            return None
     built = _build_registry(root, type_registry)
+    if expected_recall_checkpoint is not None and not freshness.recall_checkpoint_is_current(
+        root, "kb", expected_recall_checkpoint
+    ):
+        return None
     with _REGISTRY_CACHE_LOCK:
         existing = _REGISTRY_CACHE.get(key)
         if existing is not None:
@@ -126,6 +147,52 @@ def load_entity_registry(
         while len(_REGISTRY_CACHE) > _CACHE_SIZE:
             _REGISTRY_CACHE.popitem(last=False)
     return built
+
+
+def schedule_entity_registry_warm(
+    vault_root: Path,
+    *,
+    freshness_key: tuple,
+    type_registry: EntityTypeRegistry | None = None,
+    expected_recall_checkpoint: freshness.RecallFreshnessCheckpoint | None = None,
+) -> None:
+    """Single-flight a cold registry build away from the request thread."""
+    root = Path(vault_root).absolute()
+    type_registry = type_registry or load_entity_types(root)
+    key = (
+        root,
+        (*tuple(freshness_key), type_registry.core_version, type_registry.extension_hash),
+    )
+    with _REGISTRY_CACHE_LOCK:
+        if key in _REGISTRY_CACHE or key in _REGISTRY_WARMS:
+            return
+        _REGISTRY_WARMS.add(key)
+
+    def _warm() -> None:
+        try:
+            load_entity_registry(
+                root,
+                freshness_key=freshness_key,
+                type_registry=type_registry,
+                expected_recall_checkpoint=expected_recall_checkpoint,
+            )
+        except Exception:  # noqa: BLE001 - optional enrichment stays soft-failing
+            log.warning("entity registry background warm failed", exc_info=True)
+        finally:
+            with _REGISTRY_CACHE_LOCK:
+                _REGISTRY_WARMS.discard(key)
+
+    thread = threading.Thread(
+        target=_warm,
+        name="exomem-entity-registry-warm",
+        daemon=True,
+    )
+    try:
+        thread.start()
+    except Exception:  # noqa: BLE001 - a thread-start failure cannot fail recall
+        with _REGISTRY_CACHE_LOCK:
+            _REGISTRY_WARMS.discard(key)
+        log.warning("entity registry background warm could not start", exc_info=True)
 
 
 def clear_entity_registry_cache() -> None:
