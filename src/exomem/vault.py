@@ -4397,6 +4397,7 @@ def batch_atomic_write(
     *,
     vault_root: Path | None = None,
     required_guards: Iterable[PathGuard | DirectoryCensusGuard] = (),
+    completion_guards: Iterable[PathGuard] = (),
     index_reports: list[Any] | None = None,
     semantic_states: Mapping[str, Any] | None = None,
     post_commit_fanout: bool = True,
@@ -4408,7 +4409,9 @@ def batch_atomic_write(
     A process-shared lock closes the gap between validating any ``expected_hash``
     guards and replacing destinations. The locked implementation uses private
     descriptor-owned staging, exact rollback snapshots, and one post-commit
-    index fan-out.
+    index fan-out. ``completion_guards`` bind large read-only inputs once before
+    publication and once at the rollback-capable completion point, avoiding a
+    full content rehash before every destination flip.
     """
     with _BATCH_COMMIT_LOCK:
         if defer_graph_completion and (post_commit_fanout or vault_root is None):
@@ -4419,6 +4422,7 @@ def batch_atomic_write(
             writes,
             vault_root=vault_root,
             required_guards=required_guards,
+            completion_guards=completion_guards,
             index_reports=index_reports,
             semantic_states=semantic_states,
             post_commit_fanout=post_commit_fanout,
@@ -4432,6 +4436,7 @@ def _batch_atomic_write_locked(
     *,
     vault_root: Path | None = None,
     required_guards: Iterable[PathGuard | DirectoryCensusGuard] = (),
+    completion_guards: Iterable[PathGuard] = (),
     index_reports: list[Any] | None = None,
     semantic_states: Mapping[str, Any] | None = None,
     post_commit_fanout: bool = True,
@@ -4540,6 +4545,14 @@ def _batch_atomic_write_locked(
     directory_guards = tuple(
         guard for guard in all_required_guards if isinstance(guard, DirectoryCensusGuard)
     )
+    all_completion_guards = tuple(completion_guards)
+    if any(
+        not isinstance(guard, PathGuard) or guard.leaf_policy != "content"
+        for guard in all_completion_guards
+    ):
+        raise PathGuardError(
+            "PATH_GUARD_INVALID", "completion guards must bind exact content"
+        )
     # Access-tier backstop: check before staging and again immediately before
     # every destination replace so a live `_access.yaml` change cannot race a
     # long staging interval.
@@ -4547,7 +4560,10 @@ def _batch_atomic_write_locked(
         _validate_batch_write_access(Path(vault_root), writes)
     target_summary = _summarize_batch_targets(writes, vault_root)
     if (
-        read_only_guards or directory_guards or any(write.guard is not None for write in writes)
+        read_only_guards
+        or directory_guards
+        or all_completion_guards
+        or any(write.guard is not None for write in writes)
     ) and vault_root is None:
         raise PathGuardError("PATH_GUARD_ROOT", "guarded writes require vault_root")
     created_dirs: list[Path | _CreatedDirectory] = []
@@ -4579,6 +4595,7 @@ def _batch_atomic_write_locked(
             for guard in (
                 *read_only_guards,
                 *(item for item in bound_guards if item is not None),
+                *all_completion_guards,
             ):
                 guard.recheck(root)
             for guard in directory_guards:
@@ -4780,6 +4797,8 @@ def _batch_atomic_write_locked(
             _after_batch_destination_published(final)
             workspace.recheck()
         for guard in read_only_guards:
+            guard.recheck(Path(vault_root))
+        for guard in all_completion_guards:
             guard.recheck(Path(vault_root))
         for workspace in workspace_by_parent.values():
             workspace.recheck()
