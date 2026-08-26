@@ -13,6 +13,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 from pathlib import Path
 from unittest import mock
 
@@ -35,6 +36,44 @@ def _validator(name: str, version: int = 1) -> Draft202012Validator:
 
 def _rows(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+
+
+def _dataset_identity(source: str):
+    from protocol.models import DatasetIdentity
+
+    return DatasetIdentity(
+        id="longmemeval",
+        variant="cleaned",
+        source=source,
+        revision="fixture-pin",
+        sha256="4" * 64,
+        case_count=1,
+    )
+
+
+@pytest.mark.parametrize("source", [
+    "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned",
+    "xiaowu0162/longmemeval-cleaned",
+])
+def test_dataset_identity_accepts_public_https_and_registry_sources(source: str) -> None:
+    assert _dataset_identity(source).source == source
+
+
+@pytest.mark.parametrize("source", [
+    "/abs", "./x", "../x", "a//b", "a/./b", "a/../b", r"a\b",
+])
+def test_dataset_identity_rejects_non_public_source_forms(source: str) -> None:
+    with pytest.raises(PydanticValidationError, match="source"):
+        _dataset_identity(source)
+
+
+def test_cleanup_and_protocol_publish_the_same_public_source_pattern() -> None:
+    from protocol.models import _PUBLIC_SOURCE_PATTERN
+
+    cleanup = Path("benchmarks/memorybench/cleanup.ts").read_text(encoding="utf-8")
+    match = re.search(r"const PUBLIC_SOURCE = /(.+)/", cleanup)
+    assert match is not None
+    assert match.group(1).replace(r"\/", "/") == _PUBLIC_SOURCE_PATTERN
 
 
 @pytest.fixture(scope="module")
@@ -448,6 +487,21 @@ def test_memorybench_full_payloads_validate_under_strict_model_and_committed_sch
     # validates as an absolute *host* path -- true on Linux, not on Windows.
     require_posix_host_paths()
     _accepts_both(model_name, _memorybench_payloads()[model_name])
+
+
+def test_run_plan_model_and_schema_admit_the_frozen_registry_source() -> None:
+    payload = _memorybench_payloads()["MemoryBenchRunPlan"]
+    payload["dataset"]["source"] = "xiaowu0162/longmemeval-cleaned"
+    _accepts_both("MemoryBenchRunPlan", payload)
+
+
+def test_run_plan_model_rejects_file_dataset_sources() -> None:
+    import protocol.models as models
+
+    payload = _memorybench_payloads()["MemoryBenchRunPlan"]
+    payload["dataset"]["source"] = "file:x"
+    with pytest.raises(PydanticValidationError, match="dataset source"):
+        models.MemoryBenchRunPlan.model_validate(payload)
 
 
 @pytest.mark.parametrize("model_name", list(SCHEMA_BY_MODEL))

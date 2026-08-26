@@ -180,7 +180,7 @@ const FAILURE_CODES = new Set<CleanupFailureCode>([
   "cleanup_proof_write_failed",
 ])
 const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/
-const PUBLIC_SOURCE = /^(?:https:\/\/[^\\\s]+|[A-Za-z0-9][A-Za-z0-9._+-]*(?::[A-Za-z0-9][A-Za-z0-9._/@+-]*)?)$/
+const PUBLIC_SOURCE = /^(?:https:\/\/[^\\\s]+|[A-Za-z0-9][A-Za-z0-9._+-]*(?::[A-Za-z0-9][A-Za-z0-9._/@+-]*)?|[A-Za-z0-9][A-Za-z0-9._+-]*(?:\/[A-Za-z0-9][A-Za-z0-9._+-]*)+)$/
 const HARNESS = {
   repository: "https://github.com/supermemoryai/memorybench",
   commit: "118209a746d97d0d85e5a7234267f0b6962857e9",
@@ -348,7 +348,7 @@ function validateRunPlan(raw: Record<string, unknown>): RunPlan {
   const dataset = record(raw.dataset)
   exactKeys(dataset, ["id", "variant", "source", "revision", "sha256", "case_count"])
   if ([dataset.id, dataset.variant, dataset.revision].some((value) => typeof value !== "string") ||
-      typeof dataset.source !== "string" || !PUBLIC_SOURCE.test(dataset.source) ||
+      typeof dataset.source !== "string" || !PUBLIC_SOURCE.test(dataset.source) || dataset.source.startsWith("file:") ||
       dataset.source.split("/").some((part) => part === "." || part === "..") ||
       !isHex64(dataset.sha256) || !Number.isSafeInteger(dataset.case_count) ||
       Number(dataset.case_count) < 0) throw new Error("run plan dataset identity is invalid")
@@ -1219,7 +1219,8 @@ export async function main(
 if (import.meta.main) {
   try {
     process.exitCode = await main()
-  } catch {
+  } catch (error) {
+    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`)
     process.exitCode = 3
   }
 }
