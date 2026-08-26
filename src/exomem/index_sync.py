@@ -466,7 +466,12 @@ def _record_deferred_semantic_upserts(
     return len(rels), deferred_index.add(vault_root, rels)
 
 
-def purge_semantic_only(vault_root: Path, rel_paths: list[str]) -> bool:
+def purge_semantic_only(
+    vault_root: Path,
+    rel_paths: list[str],
+    *,
+    include_lexstore: bool = True,
+) -> bool:
     """Drop structured-only paths from semantic sidecars without touching identity.
 
     This is intentionally model-free: cleanup must work while model features are
@@ -500,7 +505,7 @@ def purge_semantic_only(vault_root: Path, rel_paths: list[str]) -> bool:
             return False
 
     succeeded = True
-    if lexstore.lexical_path(vault_root).exists():
+    if include_lexstore and lexstore.lexical_path(vault_root).exists():
         succeeded &= _purge(
             "lexstore", lambda: lexstore.get_store(vault_root).delete_rel_paths(rels)
         )
@@ -1021,6 +1026,7 @@ def _dispatch_upsert_components(
     *,
     defer_semantic: bool,
     created_semantic_paths: list[Path],
+    watcher_deleted_rels: list[str] | None = None,
 ) -> list[IndexComponentOutcome]:
     from . import epistemic_graph, find, lexstore, memory_refs, mode
 
@@ -1039,7 +1045,11 @@ def _dispatch_upsert_components(
     # Publish all raw-Record removals before any semantic insertion/defer. The
     # identity fan-out above remains intentionally broad and has no recall body
     # egress; a purge failure is isolated and cannot stop other sidecars.
-    purge_succeeded = purge_semantic_only(vault_root, suppressed_rels)
+    purge_succeeded = purge_semantic_only(
+        vault_root,
+        suppressed_rels,
+        include_lexstore=watcher_deleted_rels is None,
+    )
     components.append(
         IndexComponentOutcome(
             "semantic_purge",
@@ -1047,11 +1057,22 @@ def _dispatch_upsert_components(
             "purge_completed" if purge_succeeded else "purge_failed",
         )
     )
-    components.append(
-        _legacy_component(
-            "lexstore", lambda: lexstore.upsert_after_write(vault_root, semantic_paths)
-        )
-    )
+    if watcher_deleted_rels is None:
+        def lexical_dispatch():
+            return lexstore.upsert_after_write(vault_root, semantic_paths)
+
+    else:
+        lexical_deletes = list(dict.fromkeys((*suppressed_rels, *watcher_deleted_rels)))
+
+        def lexical_dispatch():
+            return lexstore.apply_watcher_batch(
+                vault_root,
+                semantic_paths,
+                lexical_deletes,
+            )
+
+    components.append(_legacy_component("lexstore", lexical_dispatch))
+
     def graph_upsert():
         if created_semantic_paths:
             return epistemic_graph.upsert_after_write(
@@ -1117,6 +1138,7 @@ def upsert_after_write(
     semantic_states: Mapping[str, semantic_index.SemanticParentIndexState] | None = None,
     publish_corpus_change: bool = True,
     created_paths: Iterable[Path] = (),
+    watcher_deleted_rel_paths: Iterable[str] | None = None,
 ) -> IndexSyncReport:
     """Fan a writer's markdown change out to every index sidecar.
 
@@ -1127,6 +1149,20 @@ def upsert_after_write(
     """
     from .vault import in_excluded_scan_dir
 
+    if watcher_deleted_rel_paths is not None and publish_corpus_change:
+        raise ValueError("watcher batch requires an already-published corpus generation")
+    watcher_deleted_rels = (
+        None
+        if watcher_deleted_rel_paths is None
+        else list(
+            dict.fromkeys(
+                normalized
+                for item in watcher_deleted_rel_paths
+                if (normalized := _safe_relative_path(str(item))) is not None
+                and normalized.lower().endswith(".md")
+            )
+        )
+    )
     vr = vault_root.resolve()
 
     def _rel(p: Path) -> str | None:
@@ -1183,6 +1219,7 @@ def upsert_after_write(
             [],
             defer_semantic=defer_semantic,
             created_semantic_paths=[],
+            watcher_deleted_rels=watcher_deleted_rels,
         )
         return IndexSyncReport(
             "upsert",
@@ -1254,6 +1291,7 @@ def upsert_after_write(
             suppressed_rels,
             defer_semantic=defer_semantic,
             created_semantic_paths=created_semantic_paths,
+            watcher_deleted_rels=watcher_deleted_rels,
         )
     finally:
         semantic_index.reset_parent_states(token)
@@ -1280,6 +1318,7 @@ def delete_after_remove(
     removed_rel_paths: list[str],
     *,
     publish_corpus_change: bool = True,
+    dispatch_lexstore: bool = True,
 ) -> IndexSyncReport:
     """Fan a removal out to every index sidecar."""
     from . import (
@@ -1293,6 +1332,8 @@ def delete_after_remove(
         scene_frames,
     )
 
+    if not dispatch_lexstore and publish_corpus_change:
+        raise ValueError("lexstore may be skipped only after an already-published watcher batch")
     safe_paths = [
         normalized
         for item in removed_rel_paths
@@ -1314,8 +1355,13 @@ def delete_after_remove(
             requested_report,
             paths_truncated=paths_truncated,
         )
+    lexical_component = (
+        _legacy_component("lexstore", lambda: lexstore.delete_after_remove(vault_root, safe_paths))
+        if dispatch_lexstore
+        else IndexComponentOutcome("lexstore", "not_required", "watcher_batch_completed")
+    )
     components = [
-        _legacy_component("lexstore", lambda: lexstore.delete_after_remove(vault_root, safe_paths)),
+        lexical_component,
         _legacy_component(
             "memory_refs",
             lambda: memory_refs.delete_after_remove(vault_root, safe_paths),

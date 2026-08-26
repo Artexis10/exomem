@@ -653,7 +653,7 @@ def _mark_runtime_retrieval_ready_if_current(
 
 
 def _admit_after_bounded_runtime_repair(vault_root: Path, repaired: object) -> None:
-    """Converge lazy-mode admission after a successful small-corpus repair."""
+    """Converge managed admission after a successful bounded catalog mutation."""
     if repaired is None or not _is_configured_runtime_vault(vault_root):
         return
     from . import readiness
@@ -1417,6 +1417,28 @@ def upsert_after_write(vault_root: Path, written_paths: list[Path]) -> bool:
         log.warning("lexical sidecar upsert skipped (%s)", e)
         return False
     return True
+
+
+def apply_watcher_batch(
+    vault_root: Path,
+    written_paths: list[Path],
+    removed_rel_paths: list[str],
+) -> bool:
+    """Apply one already-published watcher generation to the lexical sidecar."""
+    if not _catalog_usable():
+        return True
+    md = [
+        path
+        for path in written_paths
+        if path.suffix.lower() == ".md" and ".sync-conflict-" not in path.name
+    ]
+    if not (md or removed_rel_paths) or not lexical_path(vault_root).exists():
+        return True
+    try:
+        return get_store(vault_root).apply_watcher_batch(md, removed_rel_paths)
+    except Exception as e:  # noqa: BLE001
+        log.warning("lexical watcher batch skipped (%s)", e)
+        return False
 
 
 def delete_after_remove(vault_root: Path, removed_rel_paths: list[str]) -> bool:
@@ -2296,7 +2318,14 @@ class LexicalStore:
             (identity if identity is not None else catalog_semantic_identity(self.vault_root),),
         )
 
-    def _bless(self, conn: sqlite3.Connection, scope: str, checkpoint) -> None:
+    def _bless(
+        self,
+        conn: sqlite3.Connection,
+        scope: str,
+        checkpoint,
+        *,
+        identity: str | None = None,
+    ) -> None:
         """Atomically attest rows to one already-captured recall projection.
 
         The generic file stream deliberately includes raw Records edits; it can
@@ -2315,7 +2344,7 @@ class LexicalStore:
         self._write_checkpoint(conn, scope, checkpoint)
         # Persist the catalog identity with the triple/checkpoint so all three
         # are established together (no extra commit of its own).
-        self._write_catalog_identity(conn)
+        self._write_catalog_identity(conn, identity)
         conn.commit()
         self._synced[scope] = _checkpoint_state(checkpoint)
 
@@ -2974,6 +3003,50 @@ class LexicalStore:
             return False
         if not applied:
             _schedule_runtime_catalog_repair(self.vault_root)
+        else:
+            # A background publish can land just before the watcher finishes
+            # replaying a newer live generation. The publish proof correctly
+            # declines promotion in that case; the successful watcher batch is
+            # then the event that makes both scopes current. Re-prove after the
+            # publication barrier is released so managed retrieval cannot stay
+            # unavailable forever despite an exact-current catalog.
+            _admit_after_bounded_runtime_repair(self.vault_root, applied)
+        return applied
+
+    def apply_watcher_batch(self, paths: list[Path], rel_paths: list[str]) -> bool:
+        """Apply one watcher generation's changed and deleted paths together.
+
+        The freshness registry publishes a watcher batch as one generation. Its
+        lexical consumer must therefore prove the changed/deleted union before
+        advancing persisted catalog checkpoints; proving either half alone can
+        strand exact-current rows behind old metadata and trigger a full repair.
+        """
+        if not paths and not rel_paths:
+            return True
+        if self._failed:
+            _schedule_runtime_catalog_repair(self.vault_root)
+            return False
+        from .vault import VaultLockError
+
+        try:
+            with self._publication_lock(timeout=_PUBLICATION_TIMEOUT_FOREGROUND):
+                applied = self._apply_paths_locked(paths, rel_paths)
+        except VaultLockError as e:
+            log.info("lexical watcher batch deferred (%s); heals on next sync", e)
+            _schedule_runtime_catalog_repair(self.vault_root)
+            return False
+        except sqlite3.Error as e:
+            self._note_query_failure(e, "lexical watcher batch deferred (%s)")
+            _schedule_runtime_catalog_repair(self.vault_root)
+            return False
+        except OSError as e:
+            log.info("lexical watcher source changed during repair (%s)", e)
+            _schedule_runtime_catalog_repair(self.vault_root)
+            return False
+        if not applied:
+            _schedule_runtime_catalog_repair(self.vault_root)
+        else:
+            _admit_after_bounded_runtime_repair(self.vault_root, applied)
         return applied
 
     def retry_deferred_upsert(self, paths: list[Path]) -> bool:
@@ -3005,6 +3078,10 @@ class LexicalStore:
 
     def _upsert_paths_locked(self, paths: list[Path]) -> bool:
         """`upsert_paths` body with the publication barrier already held."""
+        return self._apply_paths_locked(paths, [])
+
+    def _apply_paths_locked(self, paths: list[Path], rel_paths: list[str]) -> bool:
+        """Apply a changed/deleted union with the publication barrier held."""
         from . import freshness as freshness_module
         from . import recall_policy
 
@@ -3013,6 +3090,9 @@ class LexicalStore:
         conn = self._connect()
         try:
             if not self._schema_is_current(conn):
+                return False
+            catalog_identity = catalog_semantic_identity(self.vault_root)
+            if self._meta_catalog_identity(conn) != catalog_identity:
                 return False
             witness_targets = {
                 scope: (
@@ -3027,6 +3107,10 @@ class LexicalStore:
             }
             requested_paths = {
                 key for path in paths if (key := self._live_event_path(path)) is not None
+            } | {
+                key
+                for rel in rel_paths
+                if (key := self._live_event_path(self.vault_root / rel)) is not None
             }
             prepared: list[tuple[Path, str, tuple[int, int, int], bool, bool]] = []
             suppressed: list[str] = []
@@ -3045,6 +3129,12 @@ class LexicalStore:
                 in_kb, in_vault = self._membership(path)
                 prepared.append((path, rel, signature, in_kb, in_vault))
             with conn:
+                for rel in rel_paths:
+                    row = conn.execute("SELECT rowid FROM pages WHERE path = ?", (rel,)).fetchone()
+                    if row is not None:
+                        self._delete_rowid(conn, row[0])
+                    else:
+                        self._delete_semantic_units(conn, rel)
                 for rel in suppressed:
                     row = conn.execute("SELECT rowid FROM pages WHERE path = ?", (rel,)).fetchone()
                     if row is not None:
@@ -3070,7 +3160,12 @@ class LexicalStore:
                         or self._membership(path) != (in_kb, in_vault)
                     ):
                         raise OSError(f"source changed during bounded upsert: {path.name}")
-            self._remember_live_witnesses(witness_targets, requested_paths)
+            self._publish_live_witnesses(
+                conn,
+                witness_targets,
+                requested_paths,
+                catalog_identity,
+            )
             return True
         finally:
             conn.close()
@@ -3095,6 +3190,8 @@ class LexicalStore:
             return False
         if not applied:
             _schedule_runtime_catalog_repair(self.vault_root)
+        else:
+            _admit_after_bounded_runtime_repair(self.vault_root, applied)
         return applied
 
     def purge_exact_persisted_rows(
@@ -3151,47 +3248,13 @@ class LexicalStore:
 
     def _delete_rel_paths_locked(self, rel_paths: list[str]) -> bool:
         """`delete_rel_paths` body with the publication barrier already held."""
-        from . import freshness as freshness_module
-
-        if not self.path.exists():
-            return False
-        conn = self._connect()
-        try:
-            if not self._schema_is_current(conn):
-                return False
-            witness_targets = {
-                scope: (
-                    (
-                        freshness_module.recall_checkpoint(self.vault_root, scope),
-                        self._meta_checkpoint(conn, scope),
-                    )
-                    if freshness_module.recall_is_live(self.vault_root, scope)
-                    else (None, None)
-                )
-                for scope in ("kb", "vault")
-            }
-            requested_paths = {
-                key
-                for rel in rel_paths
-                if (key := self._live_event_path(self.vault_root / rel)) is not None
-            }
-            with conn:
-                for rel in rel_paths:
-                    row = conn.execute("SELECT rowid FROM pages WHERE path = ?", (rel,)).fetchone()
-                    if row is not None:
-                        self._delete_rowid(conn, row[0])
-                    else:
-                        self._delete_semantic_units(conn, rel)
-            self._remember_live_witnesses(witness_targets, requested_paths)
-            return True
-        finally:
-            conn.close()
+        return self._apply_paths_locked([], rel_paths)
 
     def _remember_live_witnesses(
         self,
         targets: dict[str, tuple[object | None, object | None]],
         requested_paths: set[str],
-    ) -> None:
+    ) -> dict[str, object]:
         """Remember only the exact watcher-maintained corpus just applied.
 
         A bounded operation can attest a live checkpoint only when its requested
@@ -3201,6 +3264,7 @@ class LexicalStore:
         """
         from . import freshness as freshness_module
 
+        witnessed: dict[str, object] = {}
         for scope in ("kb", "vault"):
             checkpoint, stored = targets[scope]
             if checkpoint is None or freshness_module.recall_checkpoint(
@@ -3209,6 +3273,7 @@ class LexicalStore:
                 self._witnessed.pop(scope, None)
             elif stored == checkpoint:
                 self._witnessed[scope] = checkpoint
+                witnessed[scope] = checkpoint
             elif stored is None:
                 self._witnessed.pop(scope, None)
             else:
@@ -3221,6 +3286,38 @@ class LexicalStore:
                     self._witnessed.pop(scope, None)
                 else:
                     self._witnessed[scope] = checkpoint
+                    witnessed[scope] = checkpoint
+        return witnessed
+
+    def _publish_live_witnesses(
+        self,
+        conn: sqlite3.Connection,
+        targets: dict[str, tuple[object | None, object | None]],
+        requested_paths: set[str],
+        catalog_identity: str,
+    ) -> None:
+        """Persist exact watcher witnesses while the publication barrier is held."""
+        from . import freshness as freshness_module
+
+        witnessed = self._remember_live_witnesses(targets, requested_paths)
+        for scope, checkpoint in witnessed.items():
+            if (
+                freshness_module.recall_checkpoint(self.vault_root, scope) != checkpoint
+                or catalog_semantic_identity(self.vault_root) != catalog_identity
+            ):
+                self._witnessed.pop(scope, None)
+                continue
+            # The bounded mutation already materialized every path in the
+            # complete projected delta. Persist that exact checkpoint before
+            # releasing the barrier so the post-barrier admission proof can stay
+            # read-only and cannot strand current rows behind old metadata.
+            self._bless(
+                conn,
+                scope,
+                checkpoint,
+                identity=catalog_identity,
+            )
+            self._witnessed.pop(scope, None)
 
     def ensure_fresh(self) -> None:
         """Reconcile both scopes against their walks, PARANOIDLY: verified

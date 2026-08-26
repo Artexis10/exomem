@@ -1032,22 +1032,30 @@ class FileWatcher:
             )
             defer_semantic = True
             admitted_semantic = 0
+        lexical_batch_complete = False
         if kb_ups:
             try:
-                index_sync.upsert_after_write(
+                report = index_sync.upsert_after_write(
                     self._vault_root,
                     kb_ups,
                     defer_semantic=defer_semantic,
                     publish_corpus_change=False,
+                    watcher_deleted_rel_paths=kb_del_rels,
                 )
             except Exception:  # noqa: BLE001
                 log.exception("file watcher: upsert_after_write failed for %d file(s)", len(kb_ups))
+            else:
+                lexical_batch_complete = any(
+                    component.component == "lexstore" and component.outcome == "completed"
+                    for component in getattr(report, "components", ())
+                )
         if kb_del_rels:
             try:
                 index_sync.delete_after_remove(
                     self._vault_root,
                     kb_del_rels,
                     publish_corpus_change=False,
+                    dispatch_lexstore=not lexical_batch_complete,
                 )
             except Exception:  # noqa: BLE001
                 log.exception(

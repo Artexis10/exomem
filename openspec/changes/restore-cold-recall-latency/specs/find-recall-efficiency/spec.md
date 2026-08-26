@@ -78,6 +78,16 @@ Managed server startup SHALL either prove the maintained catalogue current or de
 - **THEN** the generation-tagged N+1 repair request remains pending
 - **AND** generation N's proof does not acknowledge or discard it
 
+#### Scenario: Watcher catch-up after publication retries admission
+
+- **WHEN** a full repair publishes but the live projection advances before that publication can promote retrieval
+- **AND** the watcher successfully applies the newer generation through one bounded catalogue batch, including any changed and deleted paths together
+- **THEN** the watcher persists only the exact checkpoint whose complete delta and path coverage it proved while the publication barrier remains held
+- **AND** neither half of a mixed changed/deleted generation is admitted separately
+- **AND** the watcher path re-proves both scopes read-only after releasing the publication barrier
+- **AND** it promotes retrieval only when the catalogue exactly matches both live projections
+- **AND** it does not require another whole-corpus rebuild to clear stale process admission
+
 ## ADDED Requirements
 
 ### Requirement: Recall Projection Timing Is Attributed

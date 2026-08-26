@@ -8,6 +8,7 @@
 - [x] 1.6 Add scheduler coverage proving repeated stale probes cannot chain duplicate full-corpus rebuilds.
 - [x] 1.7 Add failed/superseded publication coverage proving uncovered repair work survives a bounded idle handoff.
 - [x] 1.8 Add post-proof race coverage proving an older publication cannot acknowledge a newer generation's repair request.
+- [x] 1.9 Add real N-to-N+1 watcher catch-up coverage proving successful upsert, delete, and mixed changed/deleted batches persist their validated checkpoint and retry exact runtime admission after publication loses the promotion race.
 
 ## 2. Runtime fix
 
@@ -20,6 +21,7 @@
 - [x] 2.7 Coalesce full-rebuild requests observed during an already-active full repair while preserving escalation from targeted repair.
 - [x] 2.8 Skip catalogue-dependent optional cache warming while managed repair owns recovery and preserve uncovered full requests without chaining scans.
 - [x] 2.9 Bind full-repair coalescing to the exact recall-generation pair proven by publication so a post-proof generation survives.
+- [x] 2.10 Apply each watcher generation's changed/deleted union under one publication barrier, persist only its exact validated checkpoint, then re-prove managed retrieval read-only so a current catalogue cannot remain process-unavailable.
 
 ## 3. Verification and delivery
 

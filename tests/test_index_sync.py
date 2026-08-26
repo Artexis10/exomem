@@ -246,6 +246,34 @@ def test_upsert_report_marks_synchronous_legacy_callbacks_completed(
     assert all(item.code != "accepted_unverified" for item in report.components)
 
 
+def test_watcher_upsert_combines_lexical_changes_and_deletes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import lexstore
+
+    target = tmp_path / "Knowledge Base" / "Notes" / "item.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("# Item\n", encoding="utf-8")
+    removed_rel = "Knowledge Base/Notes/removed.md"
+    calls: list[tuple[list[Path], list[str]]] = []
+    monkeypatch.setattr(
+        lexstore,
+        "apply_watcher_batch",
+        lambda _root, paths, rels: calls.append((list(paths), list(rels))) or True,
+    )
+
+    report = index_sync.upsert_after_write(
+        tmp_path,
+        [target],
+        publish_corpus_change=False,
+        watcher_deleted_rel_paths=[removed_rel],
+    )
+
+    assert calls == [([target], [removed_rel])]
+    assert _outcome(report, "lexstore").outcome == "completed"
+
+
 def test_delete_report_marks_known_synchronous_callbacks_completed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -272,6 +300,32 @@ def test_delete_report_marks_known_synchronous_callbacks_completed(
         "code": "clip_disabled",
     }
     assert all(item.code != "accepted_unverified" for item in report.components)
+
+
+def test_watcher_delete_skips_lexstore_after_combined_batch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import lexstore
+
+    monkeypatch.setattr(
+        lexstore,
+        "delete_after_remove",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("lexstore dispatched twice")),
+    )
+
+    report = index_sync.delete_after_remove(
+        tmp_path,
+        ["Knowledge Base/Notes/removed.md"],
+        publish_corpus_change=False,
+        dispatch_lexstore=False,
+    )
+
+    assert _outcome(report, "lexstore").as_dict() == {
+        "component": "lexstore",
+        "outcome": "not_required",
+        "code": "watcher_batch_completed",
+    }
 
 
 def test_legacy_callback_internal_failures_report_incomplete(

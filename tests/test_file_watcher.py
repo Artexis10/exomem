@@ -706,6 +706,66 @@ def test_modify_then_delete_only_deletes(vault, monkeypatch: pytest.MonkeyPatch)
     assert dels == [["Knowledge Base/Notes/x.md"]]
 
 
+def test_mixed_batch_uses_one_combined_lexical_handoff(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    upsert_calls: list[tuple[list[Path], dict]] = []
+    delete_calls: list[tuple[list[str], dict]] = []
+
+    def complete_upsert(root: Path, paths: list[Path], **kwargs):  # noqa: ANN001
+        upsert_calls.append((list(paths), dict(kwargs)))
+        rels = tuple(path.relative_to(root).as_posix() for path in paths)
+        return file_watcher.index_sync.IndexSyncReport(
+            "upsert",
+            rels,
+            rels,
+            (
+                file_watcher.index_sync.IndexComponentOutcome(
+                    "lexstore",
+                    "completed",
+                    "dispatch_completed",
+                ),
+            ),
+        )
+
+    def complete_delete(_root: Path, rels: list[str], **kwargs):  # noqa: ANN001
+        delete_calls.append((list(rels), dict(kwargs)))
+
+    monkeypatch.setattr(file_watcher.index_sync, "upsert_after_write", complete_upsert)
+    monkeypatch.setattr(file_watcher.index_sync, "delete_after_remove", complete_delete)
+    changed = vault / "Knowledge Base" / "Notes" / "changed.md"
+    changed.parent.mkdir(parents=True, exist_ok=True)
+    changed.write_text("# Changed\n", encoding="utf-8")
+    removed = vault / "Knowledge Base" / "Notes" / "removed.md"
+    watcher = file_watcher.FileWatcher(vault)
+
+    watcher._record(changed, deleted=False)
+    watcher._record(removed, deleted=True)
+    watcher._flush()
+
+    removed_rel = removed.relative_to(vault).as_posix()
+    assert upsert_calls == [
+        (
+            [changed],
+            {
+                "defer_semantic": False,
+                "publish_corpus_change": False,
+                "watcher_deleted_rel_paths": [removed_rel],
+            },
+        )
+    ]
+    assert delete_calls == [
+        (
+            [removed_rel],
+            {
+                "publish_corpus_change": False,
+                "dispatch_lexstore": False,
+            },
+        )
+    ]
+
+
 def test_delete_then_recreate_only_upserts(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     ups, dels = _stub_embeddings(monkeypatch)
     w = file_watcher.FileWatcher(vault)
@@ -802,6 +862,7 @@ def test_live_import_burst_defers_semantic_indexing(
     assert calls[0][1] == {
         "defer_semantic": True,
         "publish_corpus_change": False,
+        "watcher_deleted_rel_paths": [],
     }
     assert "live import/sync burst" in caplog.text
 
@@ -1193,7 +1254,16 @@ def test_external_batch_retries_the_complete_vault_delta_before_fanout(
 
     assert len(calls) == 2
     assert all(sorted(changed) == sorted([source, kb_note]) for changed, _ in calls)
-    assert upserts == [([kb_note], {"defer_semantic": False, "publish_corpus_change": False})]
+    assert upserts == [
+        (
+            [kb_note],
+            {
+                "defer_semantic": False,
+                "publish_corpus_change": False,
+                "watcher_deleted_rel_paths": [],
+            },
+        )
+    ]
     resolver = find_module.writer_resolver_snapshot(vault)
     resolved, warning = vault_module.normalize_wikilink(
         "New target", vault, resolver=resolver, strict=False

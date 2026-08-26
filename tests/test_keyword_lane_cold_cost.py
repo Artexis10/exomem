@@ -817,6 +817,89 @@ def test_successful_background_repair_marks_configured_catalog_ready(
     }
 
 
+@pytest.mark.parametrize("operation", ["upsert", "delete", "mixed"])
+def test_successful_watcher_catalog_mutation_retries_runtime_admission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    """A published catalog must not stay unavailable after watcher catch-up."""
+    target = _write_page(
+        tmp_path,
+        "Knowledge Base/Notes/target.md",
+        "watchercatchup oldpayload",
+    )
+    removed = _write_page(
+        tmp_path,
+        "Knowledge Base/Notes/removed.md",
+        "watchercatchup removedpayload",
+    )
+    _materialize_live_catalog(tmp_path, "watchercatchup")
+    store = lexstore.get_store(tmp_path)
+    before = {scope: store.catalog_checkpoint(scope) for scope in freshness.SCOPES}
+    assert before == {
+        scope: freshness.live_recall_checkpoint(tmp_path, scope)
+        for scope in freshness.SCOPES
+    }
+
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(tmp_path.resolve()))
+    scheduled: list[Path] = []
+    monkeypatch.setattr(
+        lexstore,
+        "_schedule_repair",
+        lambda root, **_kwargs: scheduled.append(root),
+    )
+    readiness.manage_runtime()
+    readiness.begin_warm()
+    readiness.finish_warm()
+    assert readiness.retrieval_admission() == {
+        "state": "unavailable",
+        "admitted": False,
+    }
+
+    if operation in {"upsert", "mixed"}:
+        _write_page(
+            tmp_path,
+            "Knowledge Base/Notes/target.md",
+            "watchercatchup newpayload",
+            updated="2026-08-26",
+        )
+        if operation == "mixed":
+            removed.unlink()
+            freshness.on_files_changed(
+                tmp_path,
+                changed=[target],
+                deleted=[removed],
+            )
+            applied = store.apply_watcher_batch(
+                [target],
+                [removed.relative_to(tmp_path).as_posix()],
+            )
+        else:
+            freshness.on_files_changed(tmp_path, changed=[target])
+            applied = store.upsert_paths([target])
+    else:
+        target.unlink()
+        freshness.on_files_changed(tmp_path, deleted=[target])
+        applied = store.delete_rel_paths([target.relative_to(tmp_path).as_posix()])
+
+    after = {
+        scope: freshness.live_recall_checkpoint(tmp_path, scope)
+        for scope in freshness.SCOPES
+    }
+    assert after != before
+    assert applied is True
+    assert {
+        scope: store.catalog_checkpoint(scope) for scope in freshness.SCOPES
+    } == after
+    assert lexstore.runtime_retrieval_catalog_proof(tmp_path) == after
+    assert readiness.retrieval_admission() == {
+        "state": "ready",
+        "admitted": True,
+    }
+    assert scheduled == []
+
+
 def test_small_lazy_repair_eventually_admits_configured_runtime(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
