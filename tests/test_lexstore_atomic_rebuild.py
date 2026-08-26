@@ -227,7 +227,7 @@ def test_final_publish_wait_catches_up_after_a_large_foreground_batch(
                 )
                 freshness.on_files_changed(tmp_path, changed=changed)
                 writer_started.set()
-                assert release_writer.wait(timeout=2)
+                assert release_writer.wait(timeout=_HOLD_SECONDS)
                 # Keep ownership long enough for the publisher to enter its wait.
                 time.sleep(0.05)
         except Exception as exc:  # noqa: BLE001 - relayed to the parent test thread
@@ -241,7 +241,7 @@ def test_final_publish_wait_catches_up_after_a_large_foreground_batch(
         if walk_calls == 2:
             writer_thread = threading.Thread(target=blocking_writer_burst)
             writer_thread.start()
-            assert writer_started.wait(timeout=2)
+            assert writer_started.wait(timeout=_OBSERVE_SECONDS)
             assert not writer_errors
         return result
 
@@ -260,7 +260,7 @@ def test_final_publish_wait_catches_up_after_a_large_foreground_batch(
     finally:
         release_writer.set()
         if writer_thread is not None:
-            writer_thread.join(timeout=2)
+            writer_thread.join(timeout=_OBSERVE_SECONDS)
 
     assert writer_thread is not None and not writer_thread.is_alive()
     assert not writer_errors
@@ -1229,7 +1229,7 @@ def test_repair_progress_reports_bounded_phase_duration_and_result(
     def rebuild() -> bool:
         store._last_rebuild_result = "published"
         entered.set()
-        assert release.wait(5)
+        assert release.wait(_HOLD_SECONDS)
         return True
 
     monkeypatch.setattr(store, "rebuild_atomic", rebuild)
@@ -1239,7 +1239,7 @@ def test_repair_progress_reports_bounded_phase_duration_and_result(
         lambda *_args, **_kwargs: {"kb": object(), "vault": object()},
     )
     lexstore._schedule_repair(tmp_path)
-    assert entered.wait(5)
+    assert entered.wait(_OBSERVE_SECONDS)
 
     active = lexstore.repair_progress(tmp_path)
     assert active is not None
