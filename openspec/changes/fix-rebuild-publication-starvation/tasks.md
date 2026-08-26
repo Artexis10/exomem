@@ -5,6 +5,7 @@
 - [x] 1.3 Add coverage proving one oversized final suffix catches up off-barrier while incomplete, sustained-oversized, identity-shifted, and source-drifted catch-up preserves the live catalogue and pending repair demand.
 - [x] 1.4 Add managed-owner coverage proving startup, writers, watchers, and refused reads cannot start or chain a competing in-place full rebuild, and a current published idle handoff does not launch a redundant scan.
 - [x] 1.5 Add privacy-safe repair progress and stable abort-reason telemetry coverage.
+- [x] 1.6 Add a restart regression proving a missed event discovered by the periodic reconcile persists the exact lexical checkpoint after replay.
 
 ## 2. Convergent Repair
 
@@ -13,6 +14,7 @@
 - [x] 2.3 Route every managed full-rebuild request through the existing detached single-flight owner, preserve uncovered demand across an idle handoff, and re-prove a successful published handoff before repeating the scan.
 - [x] 2.4 Promote readiness only from the exact published checkpoint proof and retain later generations for bounded catch-up.
 - [x] 2.5 Emit privacy-safe repair phase, duration, and result-reason telemetry.
+- [x] 2.6 Preserve same-policy reconcile map diffs as bridgeable recall history so bounded replay remains durable across process restart.
 
 ## 3. Verification and Delivery
 

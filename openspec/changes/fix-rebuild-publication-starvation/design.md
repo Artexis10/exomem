@@ -90,6 +90,12 @@ current live projection may promote retrieval. If the projection advances after
 publication but before promotion, the work remains pending and the next bounded
 delta catches up; readiness is never manufactured from a stale generation.
 
+The periodic safety-net walk is also an exact transition when it holds complete
+before and after recall maps. A missed filesystem event discovered there is
+retained as a bridgeable recall delta. Once its changed/deleted set is replayed,
+the lexical writer persists the resulting checkpoint so a process restart does
+not forget an exact-current catalogue and launch another full repair.
+
 ### 5. Report bounded, privacy-safe repair progress
 
 Repair telemetry will report phase, attempt age/duration, and a stable abort
@@ -102,6 +108,9 @@ reason such as `source_changed`, `delta_unavailable`, `identity_changed`, or
   exact published checkpoints again; a later generation stays pending.
 - **A retained delta can be incomplete.** Publication fails closed and preserves
   the current sidecar rather than guessing.
+- **A policy transition changes proof authority.** Reconcile history remains
+  discontinuous across policy identity changes; only same-policy complete map
+  diffs become bridgeable missed-event deltas.
 - **Replaying too much work can lengthen the publication barrier.** Final replay
   stays capped. A transient oversized suffix is caught up off-barrier and retried;
   repeated oversized suffixes exhaust the bounded retries, decline publication,

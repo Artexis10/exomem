@@ -2753,6 +2753,7 @@ class LexicalStore:
         delta = freshness_module.recall_delta_since(self.vault_root, scope, stored)
         if (
             not delta.complete
+            or getattr(delta, "requires_source_proof", False)
             or delta.from_ != stored
             or delta.to != checkpoint
             or len({*delta.changed, *delta.deleted}) > CATALOG_FOREGROUND_DELTA_CAP
@@ -3212,7 +3213,11 @@ class LexicalStore:
 
         try:
             with self._publication_lock(timeout=_PUBLICATION_TIMEOUT_FOREGROUND):
-                applied = self._apply_paths_locked(paths, rel_paths)
+                applied = self._apply_paths_locked(
+                    paths,
+                    rel_paths,
+                    allow_reconciled_source_proof=True,
+                )
         except VaultLockError as e:
             log.info("lexical watcher batch deferred (%s); heals on next sync", e)
             _schedule_runtime_catalog_repair(self.vault_root)
@@ -3262,7 +3267,13 @@ class LexicalStore:
         """`upsert_paths` body with the publication barrier already held."""
         return self._apply_paths_locked(paths, [])
 
-    def _apply_paths_locked(self, paths: list[Path], rel_paths: list[str]) -> bool:
+    def _apply_paths_locked(
+        self,
+        paths: list[Path],
+        rel_paths: list[str],
+        *,
+        allow_reconciled_source_proof: bool = False,
+    ) -> bool:
         """Apply a changed/deleted union with the publication barrier held."""
         from . import freshness as freshness_module
         from . import recall_policy
@@ -3347,6 +3358,7 @@ class LexicalStore:
                 witness_targets,
                 requested_paths,
                 catalog_identity,
+                allow_reconciled_source_proof=allow_reconciled_source_proof,
             )
             return True
         finally:
@@ -3436,7 +3448,7 @@ class LexicalStore:
         self,
         targets: dict[str, tuple[object | None, object | None]],
         requested_paths: set[str],
-    ) -> dict[str, object]:
+    ) -> dict[str, tuple[object, bool]]:
         """Remember only the exact watcher-maintained corpus just applied.
 
         A bounded operation can attest a live checkpoint only when its requested
@@ -3446,7 +3458,7 @@ class LexicalStore:
         """
         from . import freshness as freshness_module
 
-        witnessed: dict[str, object] = {}
+        witnessed: dict[str, tuple[object, bool]] = {}
         for scope in ("kb", "vault"):
             checkpoint, stored = targets[scope]
             if checkpoint is None or freshness_module.recall_checkpoint(
@@ -3455,7 +3467,7 @@ class LexicalStore:
                 self._witnessed.pop(scope, None)
             elif stored == checkpoint:
                 self._witnessed[scope] = checkpoint
-                witnessed[scope] = checkpoint
+                witnessed[scope] = (checkpoint, False)
             elif stored is None:
                 self._witnessed.pop(scope, None)
             else:
@@ -3468,8 +3480,27 @@ class LexicalStore:
                     self._witnessed.pop(scope, None)
                 else:
                     self._witnessed[scope] = checkpoint
-                    witnessed[scope] = checkpoint
+                    witnessed[scope] = (
+                        checkpoint,
+                        bool(getattr(delta, "requires_source_proof", False)),
+                    )
         return witnessed
+
+    def _source_matches_recall_targets(self, targets: dict[str, object]) -> bool:
+        """Independently prove selected recall checkpoints against one full walk."""
+        from . import freshness as freshness_module
+
+        members, signatures = self._walk_entries()
+        for scope, checkpoint in targets.items():
+            idx = 1 if scope == "vault" else 0
+            entries = [
+                (str(path), signatures[path])
+                for path, flags in members.items()
+                if flags[idx]
+            ]
+            if freshness_module.triple_from_entries(entries) != checkpoint.triple:
+                return False
+        return True
 
     def _publish_live_witnesses(
         self,
@@ -3477,12 +3508,26 @@ class LexicalStore:
         targets: dict[str, tuple[object | None, object | None]],
         requested_paths: set[str],
         catalog_identity: str,
+        *,
+        allow_reconciled_source_proof: bool,
     ) -> None:
         """Persist exact watcher witnesses while the publication barrier is held."""
         from . import freshness as freshness_module
 
         witnessed = self._remember_live_witnesses(targets, requested_paths)
-        for scope, checkpoint in witnessed.items():
+        proof_targets = {
+            scope: checkpoint
+            for scope, (checkpoint, requires_source_proof) in witnessed.items()
+            if requires_source_proof
+        }
+        if proof_targets and (
+            not allow_reconciled_source_proof
+            or not self._source_matches_recall_targets(proof_targets)
+        ):
+            for scope in witnessed:
+                self._witnessed.pop(scope, None)
+            return
+        for scope, (checkpoint, _requires_source_proof) in witnessed.items():
             if (
                 freshness_module.recall_checkpoint(self.vault_root, scope) != checkpoint
                 or catalog_semantic_identity(self.vault_root) != catalog_identity
@@ -3921,6 +3966,10 @@ class LexicalStore:
             )
             if (
                 not delta.complete
+                or (
+                    getattr(delta, "requires_source_proof", False)
+                    and max_paths is not None
+                )
                 or delta.from_ != checkpoint
                 or (
                     delta.to.policy_version,
@@ -4027,6 +4076,8 @@ class LexicalStore:
             return
         if not getattr(delta, "complete", False):
             raise ValueError("apply_catalog_delta requires a complete delta")
+        if getattr(delta, "requires_source_proof", False):
+            raise ValueError("apply_catalog_delta requires an observed-event delta")
         if len({*delta.deleted, *delta.changed}) > CATALOG_FOREGROUND_DELTA_CAP:
             raise ValueError(
                 "apply_catalog_delta exceeds the foreground delta cap "
@@ -4384,6 +4435,7 @@ class LexicalStore:
                     )
                     if (
                         getattr(delta, "complete", False)
+                        and not getattr(delta, "requires_source_proof", False)
                         and len({*delta.changed, *delta.deleted})
                         <= CATALOG_FOREGROUND_DELTA_CAP
                     ):

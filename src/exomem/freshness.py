@@ -149,6 +149,7 @@ class RecallDelta(NamedTuple):
     changed: frozenset[str]
     deleted: frozenset[str]
     target_signatures: tuple[tuple[str, FileSignature], ...] = ()
+    requires_source_proof: bool = False
 
 
 class ConsumerDelta(NamedTuple):
@@ -208,7 +209,9 @@ _recall_triples: dict[tuple[str, str], tuple[int, int, str] | None] = {}
 _recall_generations: dict[tuple[str, str], int] = {}
 _recall_identities: dict[tuple[str, str], tuple[str, str]] = {}
 _recall_live: set[tuple[str, str]] = set()
-_recall_history: dict[tuple[str, str], list[tuple[int, int, frozenset[str]]]] = {}
+_recall_history: dict[
+    tuple[str, str], list[tuple[int, int, frozenset[str], bool]]
+] = {}
 _recall_publications: dict[tuple[str, str], RecallPublicationState] = {}
 RECALL_PUBLICATION_PREPARE_ATTEMPTS = 4
 # Full replacement walks run without the registry lock.  While one is active,
@@ -256,12 +259,17 @@ def _record_event(key: tuple[str, str], paths: set[str]) -> None:
         del hist[:overflow]
 
 
-def _record_recall_event(key: tuple[str, str], paths: set[str]) -> None:
+def _record_recall_event(
+    key: tuple[str, str],
+    paths: set[str],
+    *,
+    requires_source_proof: bool = False,
+) -> None:
     previous = _recall_generations.get(key, 0)
     current = _next_gen()
     _recall_generations[key] = current
     history = _recall_history.setdefault(key, [])
-    history.append((previous, current, frozenset(paths)))
+    history.append((previous, current, frozenset(paths), requires_source_proof))
     overflow = len(history) - DELTA_HISTORY_LIMIT
     if overflow > 0:
         del history[:overflow]
@@ -948,9 +956,11 @@ def recall_delta_since(
             return RecallDelta(checkpoint, current, False, frozenset(), frozenset())
         changed: set[str] = set()
         deleted: set[str] = set()
-        for _before, _after, paths in history:
+        requires_source_proof = False
+        for _before, _after, paths, event_requires_source_proof in history:
             if _after <= checkpoint.generation:
                 continue
+            requires_source_proof |= event_requires_source_proof
             for path in paths:
                 if path in _recall_maps.get(key, {}):
                     changed.add(path)
@@ -966,6 +976,7 @@ def recall_delta_since(
             frozenset(changed),
             frozenset(deleted),
             tuple(sorted((path, signatures[path]) for path in changed if path in signatures)),
+            requires_source_proof,
         )
 
 
@@ -1108,9 +1119,34 @@ def reconcile(
             _recall_triples[key] = None
             _recall_identities[key] = recall_identity
             _recall_publications.pop(key, None)
-            if old_recall != recall_fresh or old_identity != recall_identity:
+            if old_recall is None or old_identity != recall_identity:
+                # Initialization and policy transitions change the proof
+                # authority.  No checkpoint from the prior projection may be
+                # resumed through the new one.
                 _recall_generations[key] = _next_gen()
                 _recall_history[key] = []
+            elif old_recall != recall_fresh:
+                # The safety-net walk has both complete maps, so a missed
+                # filesystem event is still an exact, bridgeable recall delta.
+                # Retain it just like an observed watcher event.  Clearing the
+                # history here used to make the lexical watcher replay update
+                # every changed row but refuse to persist its checkpoint; the
+                # next process then launched a whole-vault rebuild despite an
+                # exact-current catalog.
+                recall_touched = {
+                    path
+                    for path in set(old_recall) | set(recall_fresh)
+                    if old_recall.get(path) != recall_fresh.get(path)
+                }
+                # Unlike a watcher event, one off-lock walk is not an atomic
+                # source snapshot. Consumers may replay this exact old/new map
+                # diff only after independently proving its target against the
+                # complete current source.
+                _record_recall_event(
+                    key,
+                    recall_touched,
+                    requires_source_proof=True,
+                )
             _recall_live.add(key)
             if old is None:
                 # First initialization of this scope from a walk. Like `seed`, this is

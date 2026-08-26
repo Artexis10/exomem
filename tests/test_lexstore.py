@@ -378,6 +378,149 @@ def test_bounded_delete_witness_rejects_prior_uncovered_live_event(tmp_path):
         freshness.clear()
 
 
+def test_reconciled_missed_event_persists_catalog_proof_across_restart(
+    tmp_path, monkeypatch
+):
+    """A periodic-walk repair is an exact delta, not a reason to forget proof.
+
+    The watcher can miss a filesystem event and discover it in its safety-net
+    reconcile.  Once that exact changed/deleted set has been replayed into the
+    lexical catalog, a fresh process must be able to trust the persisted
+    checkpoint instead of launching a whole-vault rebuild.
+    """
+    from exomem import freshness
+    from exomem import vault as vault_module
+
+    freshness.clear()
+    monkeypatch.setattr(lexstore, "_admit_after_bounded_runtime_repair", lambda *_: None)
+    monkeypatch.setattr(lexstore, "_schedule_runtime_catalog_repair", lambda *_a, **_k: None)
+    try:
+        page = _write_page(tmp_path, "Knowledge Base/a.md", "beforemissedevent")
+        kb_dir = tmp_path / "Knowledge Base"
+
+        def _seed() -> None:
+            freshness.seed(
+                tmp_path,
+                "kb",
+                (
+                    (str(path), freshness.stat_signature(path))
+                    for path in find_module._walk_md(kb_dir)
+                ),
+            )
+            freshness.seed(
+                tmp_path,
+                "vault",
+                (
+                    (str(path), freshness.stat_signature(path))
+                    for path in vault_module.walk_vault_md(tmp_path)
+                ),
+            )
+
+        _seed()
+        assert lexstore.search_bm25(tmp_path, "beforemissedevent", k=3, scope="kb")
+
+        _write_page(tmp_path, "Knowledge Base/a.md", "aftermissedevent")
+        kb_drift = freshness.reconcile(
+            tmp_path,
+            "kb",
+            (
+                (str(path), freshness.stat_signature(path))
+                for path in find_module._walk_md(kb_dir)
+            ),
+        )
+        vault_drift = freshness.reconcile(
+            tmp_path,
+            "vault",
+            (
+                (str(path), freshness.stat_signature(path))
+                for path in vault_module.walk_vault_md(tmp_path)
+            ),
+        )
+        assert kb_drift.changed == [str(page)]
+        assert vault_drift.changed == [str(page)]
+
+        assert lexstore.get_store(tmp_path).apply_watcher_batch([page], [])
+
+        # Simulate a process restart: discard every in-memory witness and mint
+        # a fresh registry instance from disk.  Read-only admission must still
+        # accept the persisted catalog without scheduling or performing repair.
+        lexstore.clear_stores()
+        freshness.clear()
+        _seed()
+        assert (
+            lexstore.runtime_retrieval_catalog_proof(
+                tmp_path,
+                schedule_repair=False,
+            )
+            is not None
+        )
+        assert lexstore.search_bm25(tmp_path, "aftermissedevent", k=3, scope="kb")
+        assert lexstore.search_bm25(tmp_path, "beforemissedevent", k=3, scope="kb") == []
+    finally:
+        freshness.clear()
+
+
+def test_reconciled_mixed_walk_cannot_bless_stale_catalog(
+    tmp_path, monkeypatch
+):
+    """A reconcile delta needs a second source proof before it is authoritative."""
+    from exomem import freshness
+    from exomem import vault as vault_module
+
+    freshness.clear()
+    monkeypatch.setattr(lexstore, "_admit_after_bounded_runtime_repair", lambda *_: None)
+    monkeypatch.setattr(lexstore, "_schedule_runtime_catalog_repair", lambda *_a, **_k: None)
+    try:
+        a = _write_page(tmp_path, "Knowledge Base/a.md", "stalewalkalpha")
+        b = _write_page(tmp_path, "Knowledge Base/b.md", "stalewalkbeta")
+        kb_dir = tmp_path / "Knowledge Base"
+        freshness.seed(
+            tmp_path,
+            "kb",
+            (
+                (str(path), freshness.stat_signature(path))
+                for path in find_module._walk_md(kb_dir)
+            ),
+        )
+        freshness.seed(
+            tmp_path,
+            "vault",
+            (
+                (str(path), freshness.stat_signature(path))
+                for path in vault_module.walk_vault_md(tmp_path)
+            ),
+        )
+        assert lexstore.search_bm25(tmp_path, "stalewalkalpha", k=3, scope="kb")
+        store = lexstore.get_store(tmp_path)
+
+        # Model an off-lock walk that already statted A, then sees B's missed
+        # change, while a second missed change lands on A after its stat.
+        a_old = freshness.stat_signature(a)
+        _write_page(tmp_path, "Knowledge Base/b.md", "freshwalkbeta")
+        mixed = [
+            (str(a), a_old),
+            (str(b), freshness.stat_signature(b)),
+        ]
+        _write_page(tmp_path, "Knowledge Base/a.md", "freshwalkalpha")
+        assert freshness.reconcile(tmp_path, "kb", mixed).changed == [str(b)]
+        assert freshness.reconcile(tmp_path, "vault", mixed).changed == [str(b)]
+
+        assert store.apply_watcher_batch([b], [])
+
+        # The registry target itself is a mixed, superseded walk. Replaying B
+        # cannot make it an admissible catalogue: a fresh source proof sees A's
+        # later change and refuses the checkpoint.
+        assert (
+            lexstore.runtime_retrieval_catalog_proof(
+                tmp_path,
+                schedule_repair=False,
+            )
+            is None
+        )
+    finally:
+        freshness.clear()
+
+
 def test_restart_with_no_changes_skips_the_walk_verify(tmp_path):
     """Steady state across restarts: the meta-blessed triple lets a fresh
     store trust the sidecar without an exact verify (no rebuild)."""

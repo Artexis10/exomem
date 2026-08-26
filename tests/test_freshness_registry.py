@@ -275,6 +275,7 @@ def test_scope_boundary_schema_dir_updates_neither(vault: Path) -> None:
 def test_reconcile_detects_and_heals_a_missed_event(vault: Path) -> None:
     _seed_both_scopes(vault)
     stale_triple = freshness.triple(vault, "kb")
+    recall_before = freshness.recall_checkpoint(vault, "kb")
 
     target = next(find_module._walk_md(vault / "Knowledge Base"))
     future = time.time() + 10_000
@@ -294,6 +295,11 @@ def test_reconcile_detects_and_heals_a_missed_event(vault: Path) -> None:
     assert delta.changed == [str(target)]
     assert delta.deleted == []
     assert freshness.triple(vault, "kb") == fresh_truth
+    recall_delta = freshness.recall_delta_since(vault, "kb", recall_before)
+    assert recall_delta.complete is True
+    assert recall_delta.changed == frozenset({str(target)})
+    assert recall_delta.deleted == frozenset()
+    assert recall_delta.requires_source_proof is True
 
 
 def test_reconcile_with_no_drift_returns_false(vault: Path) -> None:

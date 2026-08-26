@@ -38,6 +38,17 @@ validation.
 - **AND** a stale proof or a repair request arriving during the proof still
   follows the normal full-repair path
 
+#### Scenario: Safety-net reconcile proof survives restart
+
+- **WHEN** the periodic safety-net walk discovers a filesystem event the live
+  watcher missed
+- **AND** it holds complete before and after recall maps under one unchanged
+  policy identity
+- **THEN** the system retains their exact changed/deleted set as a bridgeable
+  recall delta
+- **AND** the lexical replay persists the resulting current checkpoint
+- **AND** a fresh process admits the current catalogue without a full rebuild
+
 #### Scenario: SQLite token-only churn does not veto a current replacement
 
 - **WHEN** the live SQLite main, WAL, or SHM token changes during a detached
