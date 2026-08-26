@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from exomem import (
     relation_registry,
     semantic_contract,
@@ -259,3 +261,91 @@ def test_catalog_bridge_forwards_lazy_graph_replacement_provider(
         == "prepared"
     )
     assert captured["graph_replacement_provider"] is provider
+
+
+def test_creation_catalog_bridge_builds_provider_from_retained_preflight(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import semantic_writes
+
+    source_path = "Knowledge Base/Notes/Insights/source.md"
+    created_path = "Knowledge Base/Notes/Insights/created.md"
+    source = _source(
+        "Source",
+        "00000000-0000-0000-0000-000000000001",
+        body=(
+            "## Observations\n\n"
+            "- [decision] Resolve the future title.\n\n"
+            "[[Created]]\n"
+        ),
+    )
+    created = _source(
+        "Created",
+        "00000000-0000-0000-0000-000000000002",
+    )
+    created_state = _state(tmp_path, created_path, created)
+    preflight = semantic_writes.CreationPreflight(
+        applicability="full",
+        destination=created_path,
+        source=created,
+        draft_id="draft-1",
+        draft_token="token-1",
+        mutated=False,
+        contract_result=None,
+        creation_validation=None,
+        semantic_state=created_state,
+        corpus=_corpus(tmp_path, _state(tmp_path, source_path, source)),
+    )
+    writes = (
+        vault.PlannedWrite(
+            tmp_path / created_path,
+            created,
+            create_only=True,
+        ),
+    )
+    captured: dict[str, object] = {}
+
+    def fake_prepare(
+        vault_root,
+        *,
+        writes,
+        graph_replacement_provider,
+    ):
+        captured.update(
+            vault_root=vault_root,
+            writes=writes,
+            graph_replacement_provider=graph_replacement_provider,
+        )
+        return "prepared"
+
+    monkeypatch.setattr(
+        semantic_writes,
+        "_prepare_markdown_catalog_publication",
+        fake_prepare,
+    )
+
+    assert (
+        semantic_writes._prepare_creation_catalog_publication(
+            tmp_path,
+            destination=preflight.destination,
+            before_corpus=preflight.corpus,
+            semantic_state=preflight.semantic_state,
+            writes=writes,
+        )
+        == "prepared"
+    )
+    provider = captured["graph_replacement_provider"]
+    assert callable(provider)
+    assert provider() == (
+        catalog_publication.GraphMeasurementReplacement(
+            created_path,
+            vault.content_hash(created),
+            (),
+        ),
+        catalog_publication.GraphMeasurementReplacement(
+            source_path,
+            vault.content_hash(source),
+            (_edge(source_path, created_path),),
+        ),
+    )

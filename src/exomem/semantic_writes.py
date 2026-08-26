@@ -3664,6 +3664,39 @@ def commit_creation(
     return replace(committed, structure_suggestion=suggestion, due_state=due)
 
 
+def _prepare_creation_catalog_publication(
+    vault_root: Path,
+    *,
+    destination: str,
+    before_corpus: semantic_contract.SemanticCorpusContext | None,
+    semantic_state: semantic_contract.SemanticPageState,
+    writes: Sequence[vault.PlannedWrite],
+):  # noqa: ANN202 - private bridge returns the governance publication token
+    """Prepare a creation successor from the retained semantic snapshot."""
+
+    from .governance import graph_producer
+
+    planned_writes = tuple(writes)
+
+    def graph_replacement_provider():
+        if before_corpus is None:
+            raise graph_producer.GraphProducerError(
+                "creation preflight did not retain its semantic corpus"
+            )
+        return graph_producer.replacements_for_planned_markdown(
+            vault_root,
+            before_corpus=before_corpus,
+            writes=planned_writes,
+            semantic_states={destination: semantic_state},
+        )
+
+    return _prepare_markdown_catalog_publication(
+        vault_root,
+        writes=planned_writes,
+        graph_replacement_provider=graph_replacement_provider,
+    )
+
+
 def _commit_creation(
     vault_root: Path,
     *,
@@ -3731,9 +3764,12 @@ def _commit_creation(
                         create_only=True,
                     )
                 )
-                catalog_target = _prepare_markdown_catalog_publication(
+                catalog_target = _prepare_creation_catalog_publication(
                     root,
-                    catalog_writes,
+                    destination=preflight.destination,
+                    before_corpus=prepared.preliminary.before_corpus,
+                    semantic_state=prepared.preliminary.candidate,
+                    writes=catalog_writes,
                 )
             except catalog_publication.CatalogPublicationError as error:
                 raise SemanticWriteError(
@@ -3770,13 +3806,15 @@ def _commit_creation(
         from .writer_lease import read_commit_generation
 
         contract_result = preflight.contract_result
+        catalog_corpus = preflight.corpus
+        catalog_state = preflight.semantic_state
         if not semantic_contract.validity_stamp_current(
             root,
             preflight.census_token,
             commit_generation=read_commit_generation(root),
         ):
             relation_review._record_prevalidated_commit_outcome("revalidated")
-            contract_result, _fresh_state, _fresh_census, _fresh_corpus = _evaluate_structural(
+            contract_result, catalog_state, _fresh_census, catalog_corpus = _evaluate_structural(
                 root,
                 destination=preflight.destination,
                 source=preflight.source,
@@ -3806,14 +3844,20 @@ def _commit_creation(
             )
         )
         try:
-            catalog_target = _prepare_markdown_catalog_publication(root, writes)
+            catalog_target = _prepare_creation_catalog_publication(
+                root,
+                destination=preflight.destination,
+                before_corpus=catalog_corpus,
+                semantic_state=catalog_state,
+                writes=writes,
+            )
         except catalog_publication.CatalogPublicationError as error:
             raise SemanticWriteError(
                 "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
                 str(error),
             ) from error
         token = semantic_index.set_parent_states(
-            {preflight.destination: semantic_index.from_semantic_page_state(preflight.semantic_state)}
+            {preflight.destination: semantic_index.from_semantic_page_state(catalog_state)}
         )
         try:
             written = vault.batch_atomic_write(writes, vault_root=root)

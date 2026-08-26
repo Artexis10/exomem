@@ -227,13 +227,15 @@ required family SHALL remain blocked.
   targets, uniqueness, and aggregate capacity, discards the edge payload, and emits only
   empty lower-variant graph rows
 
-#### Scenario: Semantic writes derive graph successors from retained preflight state
+#### Scenario: Semantic writes and creations derive graph successors from retained state
 
-- **WHEN** an existing-page semantic write changes a direct edge, a title used by
-  another page's link, or a reverse relation whose logical source is another page
-- **THEN** the writer derives target-bound replacements from the retained detached
-  before-corpus and exact guarded planned bytes, includes every logical source whose
-  outgoing edge tuple changes, and does not reopen the live graph or current Markdown
+- **WHEN** an existing-page semantic write or semantic creation changes a direct edge, a
+  title used by another page's link, or a reverse relation whose logical source is
+  another page
+- **THEN** the writer derives target-bound replacements from the freshest validated
+  detached before-corpus carried into the mutation boundary and exact guarded planned
+  bytes, includes every logical source whose outgoing edge tuple changes, and does not
+  reopen the live graph or current Markdown
 - **AND** open and lexical-only writes do not invoke the graph producer
 
 When the projected source is exhausted, L1-and-above items SHALL still emit the
