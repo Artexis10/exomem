@@ -243,6 +243,15 @@ required family SHALL remain blocked.
   removed targets
 - **AND** open and lexical-only writes do not invoke the graph producer
 
+#### Scenario: Machine-owned media Markdown uses the same graph successor
+
+- **WHEN** Evidence preservation, a media-sidecar state update, or scene-frame companion
+  creation changes Markdown while the active tuple contains a graph family
+- **THEN** the writer lazily derives replacements from one detached before-corpus and the
+  exact staged Markdown batch, and publishes graph, CLIP when applicable, catalog, and
+  active tuple together before reporting success
+- **AND** open and lexical-only writes do not invoke the graph producer
+
 When the projected source is exhausted, L1-and-above items SHALL still emit the
 projection their policy authorizes while L0 items SHALL produce a silently shorter list,
 identical to physical absence. The canonical governed envelope for the same input SHALL

@@ -759,6 +759,12 @@ contains a graph family; open and lexical-only writes do no graph-producer work.
 live writer families remain blocked until they supply the same target-bound replacement
 contract.
 
+Machine-owned Evidence preservation, media-sidecar completion/failure updates, and
+scene-frame companion creation use the same lazy planned-Markdown provider. They build
+one detached before-corpus only when the active tuple contains a graph family, overlay the
+exact already-staged Markdown bytes, and publish graph/CLIP/catalog roots together before
+reporting success. Open and lexical-only paths do no graph-producer work.
+
 A policy
 fingerprint or projector-schema change builds a new namespace tuple and never relabels
 an old one. A model/extractor change writes or invalidates only the corresponding

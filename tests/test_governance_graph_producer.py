@@ -263,6 +263,35 @@ def test_catalog_bridge_forwards_lazy_graph_replacement_provider(
     assert captured["graph_replacement_provider"] is provider
 
 
+def test_media_sidecar_writer_forwards_lazy_graph_replacement_provider(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import preserve
+
+    sidecar = tmp_path / "Knowledge Base/Evidence/private.bin.md"
+    write = vault.PlannedWrite(sidecar, "---\ntitle: Private\n---\n")
+    captured: dict[str, object] = {}
+
+    def fake_prepare(vault_root, *, writes, graph_replacement_provider):
+        captured.update(
+            vault_root=vault_root,
+            writes=writes,
+            graph_replacement_provider=graph_replacement_provider,
+        )
+        return None
+
+    monkeypatch.setattr(catalog_publication, "prepare_planned_markdown_batch", fake_prepare)
+
+    assert preserve.commit_media_sidecar_writes(
+        tmp_path,
+        (write,),
+        batch_writer=lambda *_args, **_kwargs: [sidecar],
+    ) == [sidecar]
+    assert captured["writes"] == (write,)
+    assert callable(captured["graph_replacement_provider"])
+
+
 def test_creation_catalog_bridge_builds_provider_from_retained_preflight(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

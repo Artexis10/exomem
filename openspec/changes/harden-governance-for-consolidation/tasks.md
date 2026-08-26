@@ -546,6 +546,9 @@ made before both PRs and their combined verification are complete.
   path/title-resolution, removed-target, and reverse-relation source changes. Retained-
   corpus paths never walk the vault again; trash builds one lazy before-corpus only for an
   active graph family before canonical mutation. No producer reopens the live graph.
+  Apply the same lazy planned-Markdown contract to Evidence preservation, machine-owned
+  media-sidecar updates, and scene-frame companion creation, co-publishing CLIP when
+  applicable and doing no graph work for open or lexical-only tuples.
   Connect every other live graph producer to those replacements before checking
   this task; keep any unsupported required family blocked.
 - [x] 8.12 Implement BM25 posting intersection before cap, projected-corpus DF/IDF and

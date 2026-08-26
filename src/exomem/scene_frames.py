@@ -26,7 +26,7 @@ import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, BinaryIO
 
-from . import embeddings, index_sync
+from . import embeddings, index_sync, semantic_contract
 from .governance import projected_retrieval
 from .preserve import _render_sidecar
 from .vault import (
@@ -390,7 +390,14 @@ def write_scene_frames(
         out.append((jpg, sidecar))
     if not writes:
         return []
-    from .governance import catalog_publication
+    from .governance import catalog_publication, graph_producer
+
+    def graph_replacement_provider():
+        return graph_producer.replacements_for_planned_markdown(
+            root,
+            before_corpus=semantic_contract.build_corpus_context(root),
+            writes=tuple(writes),
+        )
 
     try:
         try:
@@ -398,6 +405,7 @@ def write_scene_frames(
                 root,
                 writes=tuple(writes),
                 clip_replacements=clip_replacements,
+                graph_replacement_provider=graph_replacement_provider,
             )
         except catalog_publication.CatalogPublicationError as error:
             raise catalog_publication.CatalogCommitError(
