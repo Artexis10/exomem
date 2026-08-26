@@ -4004,6 +4004,119 @@ def test_scene_frame_bytes_and_companion_publish_one_v4_catalog_successor(
     assert custody_after.control.activation_epoch == 2
 
 
+def test_scene_frame_batch_replaces_parent_clip_samples_in_same_v4_successor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Image:
+        size = (1920, 1080)
+
+        def resize(self, _size):
+            return self
+
+        def convert(self, _mode):
+            return self
+
+        def save(self, target, **_kwargs) -> None:
+            target.write(b"\xff\xd8governed-scene")
+
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    video = vault / "Knowledge Base/Evidence/Video/demo.mp4"
+    video_path = "Knowledge Base/Evidence/Video/demo.mp4.md"
+    video_source = (
+        "---\ntitle: Demo video\ntype: source\nstatus: active\n"
+        "media_type: video\n---\n\nVideo evidence.\n"
+    )
+    video.parent.mkdir(parents=True, exist_ok=True)
+    video.write_bytes(b"governed video")
+    (vault / video_path).write_text(video_source, encoding="utf-8")
+    _write_workspace(vault, _documents(ceiling=2))
+    old_samples = (
+        projected_retrieval.ProjectionClipSample(1_000, (1.0, 0.0)),
+    )
+    new_samples = (
+        projected_retrieval.ProjectionClipSample(10_000, (0.0, 1.0)),
+    )
+    migration, _prior_vectors = _migrate_with_vector_projection_items(
+        vault,
+        items=((video_path, video_source),),
+        clip_samples_by_path={video_path: old_samples},
+        now=now,
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setattr(
+        embeddings,
+        "embed_texts",
+        lambda texts, *, is_query: [(9.0, 1.0) for _text in texts],
+    )
+
+    pairs = scene_frames.write_scene_frames(
+        vault,
+        video,
+        [
+            (
+                embeddings.Scene(
+                    start_ts=8.0,
+                    end_ts=12.0,
+                    rep_ts=10.0,
+                    boundary_score=0.5,
+                ),
+                Image(),
+            )
+        ],
+        parent_clip_samples=new_samples,
+    )
+
+    assert len(pairs) == 1
+    _jpg, frame_sidecar = pairs[0]
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    active, manifest, items = _load_active_projection_items(
+        vault,
+        activation_epoch=2,
+        activation_state_digest=custody.control.activation_state_digest or "",
+    )
+    assert {item.item_identity for item in items} == {
+        video_path,
+        frame_sidecar.relative_to(vault).as_posix(),
+    }
+    evidence = projection_store.namespace_evidence_from_snapshot(active)
+    assert tuple(root.lane for root in evidence.required_measurement_roots) == (
+        "vector",
+        "clip",
+    )
+    namespace = projection_store.bind_active_projection_namespace(
+        active,
+        manifest=manifest,
+        items=items,
+    )
+    clip_root = next(
+        root for root in evidence.required_measurement_roots if root.lane == "clip"
+    )
+    family = projection_measurement_store.MeasurementFamilyKey(
+        namespace_key=namespace.namespace_key,
+        lane=clip_root.lane,
+        extractor_version=clip_root.extractor_version,
+        model_version=clip_root.model_version,
+    )
+    _clip_manifest, rows = projection_measurement_store.load_measurement_store(
+        vault,
+        namespace=namespace,
+        family=family,
+        expected_rows_digest=clip_root.rows_digest,
+    )
+    assert len(rows) == 1
+    assert isinstance(rows[0], projected_retrieval.ProjectionClipMeasurement)
+    assert rows[0].samples == new_samples
+
+
 def test_media_extraction_update_publishes_exact_v4_catalog_successor(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

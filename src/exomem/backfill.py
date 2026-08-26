@@ -440,6 +440,7 @@ def backfill_media(
                 mtime = f.stat().st_mtime
                 if media_type == "video" and need_scenes:
                     vectors, pairs = embeddings.embed_video_scenes(f)
+                    parent_clip_samples = scene_frames.projection_clip_samples(vectors)
                     if not _is_automatic_media_candidate(vault_root, f):
                         _purge_suppressed_clip(clip_store, vault_root, f)
                         continue
@@ -449,7 +450,12 @@ def backfill_media(
                         continue
                     if need_clip:
                         stats.clip_indexed += 1
-                    written = scene_frames.write_scene_frames(vault_root, f, pairs)
+                    written = scene_frames.write_scene_frames(
+                        vault_root,
+                        f,
+                        pairs,
+                        parent_clip_samples=parent_clip_samples,
+                    )
                     stats.scene_frames_written += len(written)
                     if do_ocr and written:
                         do_ocr = _ocr_new_scene_frames(vault_root, written, stats, log_fn)

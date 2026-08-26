@@ -11,7 +11,7 @@ import pytest
 from exomem import scene_frames
 from exomem import vault as vault_module
 from exomem.embeddings import Scene
-from exomem.governance import catalog_publication, companions
+from exomem.governance import catalog_publication, companions, projected_retrieval
 
 
 class _FakeImg:
@@ -71,6 +71,46 @@ def test_frame_timestamp_ms_is_derived_once_with_bounded_ties_to_even() -> None:
     ):
         with pytest.raises(ValueError, match="timestamp"):
             scene_frames.frame_timestamp_ms(invalid)
+
+
+def test_parent_clip_samples_must_match_the_exact_scene_set(vault: Path) -> None:
+    video = _video(vault)
+    samples = (projected_retrieval.ProjectionClipSample(9_000, (1.0, 0.0)),)
+
+    with pytest.raises(ValueError, match="do not match"):
+        scene_frames.write_scene_frames(
+            vault,
+            video,
+            [(_scene(10.0), _FakeImg())],
+            parent_clip_samples=samples,
+        )
+
+    assert not scene_frames.frames_dir_for(video).exists()
+
+
+def test_parent_sidecar_drift_rolls_back_scene_and_clip_publication(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    video = _video(vault)
+    sidecar = video.with_name(f"{video.name}.md")
+    sidecar.write_text("---\nmedia_type: video\n---\n\nbefore\n", encoding="utf-8")
+    samples = (projected_retrieval.ProjectionClipSample(10_000, (1.0, 0.0)),)
+    real_batch = scene_frames.batch_atomic_write
+
+    def drift_then_write(*args, **kwargs):
+        sidecar.write_text("---\nmedia_type: video\n---\n\nafter\n", encoding="utf-8")
+        return real_batch(*args, **kwargs)
+
+    monkeypatch.setattr(scene_frames, "batch_atomic_write", drift_then_write)
+
+    assert scene_frames.write_scene_frames(
+        vault,
+        video,
+        [(_scene(10.0), _FakeImg())],
+        parent_clip_samples=samples,
+    ) == []
+    assert not scene_frames.frames_dir_for(video).exists()
 
 
 def test_write_creates_jpeg_and_sidecar(vault: Path) -> None:

@@ -41,6 +41,7 @@ from . import (
 )
 from .backfill import iter_kb_files
 from .cli_ops import OpError
+from .governance import projected_retrieval
 from .kbdir import kb_dirname
 from .media_jobs import (
     BLOCKED,
@@ -684,6 +685,7 @@ class MediaWorker:
             return
         is_video = job.media_type == "video"
         scene_pairs: list | None = None
+        parent_clip_samples: tuple[projected_retrieval.ProjectionClipSample, ...] | None = None
         expected_binary = _binary_identity(job.binary_path)
         if expected_binary is None:
             log.warning("CLIP skip %s: media identity unavailable", job.binary_path.name)
@@ -693,6 +695,7 @@ class MediaWorker:
                 # One decode pass yields both the per-scene vectors AND the full-res
                 # representative images to persist (EXOMEM_VIDEO_SCENE_FRAMES).
                 frames, scene_pairs = embeddings.embed_video_scenes(job.binary_path)
+                parent_clip_samples = scene_frames.projection_clip_samples(frames)
             elif is_video:
                 frames = embeddings.embed_video_frames(job.binary_path)
             else:
@@ -726,7 +729,13 @@ class MediaWorker:
                 self._clip_index.upsert_frames(rel, frames, mtime)
                 log.info("CLIP-indexed %s (%d keyframes)", job.binary_path.name, len(frames))
                 if scene_pairs:
-                    self._persist_scene_frames(job, scene_pairs, expected_binary=expected_binary)
+                    assert parent_clip_samples is not None
+                    self._persist_scene_frames(
+                        job,
+                        scene_pairs,
+                        parent_clip_samples=parent_clip_samples,
+                        expected_binary=expected_binary,
+                    )
             else:
                 self._clip_index.upsert(rel, vec, mtime)
                 log.info("CLIP-indexed %s", job.binary_path.name)
@@ -736,6 +745,7 @@ class MediaWorker:
         job: _Job,
         pairs: list,
         *,
+        parent_clip_samples: tuple[projected_retrieval.ProjectionClipSample, ...],
         expected_binary: tuple[tuple[int, int, int, int, int], str | None] | None = None,
     ) -> None:
         """Write scene JPEGs + pending sidecars, then queue each frame for OCR only.
@@ -759,7 +769,12 @@ class MediaWorker:
                 )
                 return
             try:
-                written = scene_frames.write_scene_frames(self._vault_root, job.binary_path, pairs)
+                written = scene_frames.write_scene_frames(
+                    self._vault_root,
+                    job.binary_path,
+                    pairs,
+                    parent_clip_samples=parent_clip_samples,
+                )
             except Exception:  # noqa: BLE001 — persistence is strictly additive
                 log.exception("scene frame persistence failed for %s", job.binary_path.name)
                 return

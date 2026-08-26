@@ -713,7 +713,13 @@ one through forty canonical timestamped samples. Derived frame companions bind
 `parent_media` and are textual catalog artifacts, not duplicate CLIP measurement owners.
 The complete successor CLIP family binds the target namespace and activates in the same
 catalog publication transaction; missing, stale, mismatched, duplicate, or dimension-
-incompatible rows refuse before canonical bytes change. A policy
+incompatible rows refuse before canonical bytes change. The live media worker and bulk
+backfill canonicalize each already-computed scene vector exactly once to bounded integer
+milliseconds and pass that same immutable sample tuple into the planned frame-companion
+publication. That transaction binds the samples to the guarded parent video sidecar and
+advances the parent CLIP row, companion catalog rows, vector/CLIP roots, and active tuple
+together; it neither invokes CLIP a second time nor gives a frame companion its own pixel
+row. A policy
 fingerprint or projector-schema change builds a new namespace tuple and never relabels
 an old one. A model/extractor change writes or invalidates only the corresponding
 versioned measurement subkey. Initial migration builds the exact
