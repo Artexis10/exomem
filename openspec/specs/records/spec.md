@@ -142,7 +142,7 @@ A Record collection manifest MAY store one or more opaque Planning references pa
 - **THEN** Records may preserve the observed outcome and Planning may preserve intent, while repository/OpenSpec artifacts remain execution truth
 
 ### Requirement: Neutral observed-state query views
-Records query views SHALL display bounded observed values and provenance. Domain-specific interpretation SHALL require an explicit analysis or protocol layer and SHALL NOT be embedded in generic Records machinery. Planned-versus-recorded comparison is outside this delivery.
+Records query views SHALL display bounded observed values and provenance. Domain-specific interpretation SHALL require an explicit analysis or protocol layer and SHALL NOT be embedded in generic Records machinery. Planned-versus-recorded comparison SHALL live in the read-only plan-progress review rather than in Records machinery: a Records view SHALL remain the same neutral observed-state rendering whether it is read directly or read as bound Planning evidence, and Records SHALL NOT gain a comparison, progress, completion, or success semantic of its own.
 
 #### Scenario: Three-month X3 view remains neutral
 - **WHEN** a user asks for X3 progression over three months
@@ -151,6 +151,11 @@ Records query views SHALL display bounded observed values and provenance. Domain
 #### Scenario: Vehicle latest-state view cites events
 - **WHEN** a user asks for current mileage or next due maintenance
 - **THEN** the result identifies the governing collection/query and the record item from which the latest value was derived
+
+#### Scenario: A view read as plan evidence is the same view
+- **WHEN** the same saved view is read directly through the Records command and read again as a Planning item's bound progress evidence
+- **THEN** both reads run the same declared view over the same canonical snapshot and produce the same observed numbers
+- **AND** the Records view definition, response shape, and neutrality are unchanged by having been used as evidence
 
 ### Requirement: Records authoring is self-describing and safely preflightable
 The Records product command SHALL expose content-free `describe` and `validate` actions in addition to collection inspection and mutation. `describe` SHALL return the complete supported manifest contract, all closed enum values, exact open constraints, and generic minimal and nested-measurement examples. `validate` SHALL run the binding parser, Records-profile rule, safe-path rules, create-only checks, and scaffold checks without requiring a mutation reason, acquiring writer authority, writing an audit event, or changing the vault.
@@ -180,3 +185,121 @@ Calling `record_memory(action="inspect")` without a collection SHALL return a bo
 #### Scenario: Denied inventory candidate stays absent
 - **WHEN** governance withholds a first-class manifest or legacy tracker
 - **THEN** inventory does not reveal its path, title, identity, type, or existence
+
+### Requirement: Installed-artifact Records release journey
+The release gate SHALL build and install the Exomem wheel in a clean environment, initialize a temporary human-owned vault, discover `record_memory` through a real MCP transport, and complete one bounded chronological-log Records journey without importing product code from the source checkout. The journey SHALL preserve ordinary template/manual entry, perform a guarded append and targeted guarded update, return a structured query and ephemeral derived view, round-trip an opaque Planning evidence descriptor, survive a server restart, observe a direct canonical-file edit, report its positive audit gap without silently repairing it, and keep row-only content out of ordinary semantic recall. Detailed domain, governance-reduction, mutation-crash, ambiguity, dataset, and scale cases MAY remain focused release-blocking tests rather than duplicate black-box scenarios.
+
+#### Scenario: Manual and guarded Records state survives restart
+- **WHEN** the installed product queries a manually inserted template block, appends and updates an identified item through `record_memory`, stops, receives a direct canonical-log edit, and restarts
+- **THEN** the next MCP query returns the manual entry, guarded mutation, and direct edit from the same canonical Markdown file, and inspection reports an audit gap without migration, silent repair, or a competing source of truth
+
+#### Scenario: Installed collection retains Planning and recall boundaries
+- **WHEN** the installed product inspects the collection and asks ordinary memory for content that exists only in a raw record row
+- **THEN** the opaque Planning reference/query descriptor round-trips unchanged and ordinary semantic recall does not return the raw canonical log
+
+#### Scenario: Public inspection exposes only governed opaque Planning descriptors
+- **WHEN** `record_memory(action="inspect")` reads a released collection containing a bounded Planning reference/query descriptor
+- **THEN** `inspect.contract.plans` strictly reconstructs and returns that descriptor through the existing governance projection, without invoking an internal-only API, resolving or target-authorizing the opaque Planning reference, or revealing a withheld link-typed query value
+
+#### Scenario: Inspection Planning projection remains default-deny
+- **WHEN** a projected inspection contains an extra, malformed, over-limit, noncanonical, or untyped nested Planning descriptor value
+- **THEN** the inspection egress validator refuses the invalid payload instead of passing the nested value through
+
+#### Scenario: Unresolved remote Records access fails closed
+- **WHEN** an auth-required installed HTTP MCP surface receives a protocol-valid unauthenticated raw `POST /mcp` JSON-RPC `tools/call` request naming `record_memory`
+- **THEN** authenticated ingress returns exactly 401 with a Bearer challenge naming the local protected-resource metadata URL, reveals no collection, rows, Planning references, paths, or aggregates in the raw response, and leaves the separate no-auth local HTTP harness in explicit owner mode
+
+### Requirement: Records presentation remains neutral observed state
+
+Managed presentation SHALL display only selected canonical observed fields. It SHALL preserve nulls, inequalities, units, ranges, cancellation/status, precision, qualifiers, and provenance without inventing bounds, certainty, diagnoses, interpretation, ranking, or domain meaning. Unrenderable values SHALL refuse rather than coerce arbitrarily.
+
+#### Scenario: Laboratory panel is readable without interpretation
+- **WHEN** panel declares summary, measurements table, notes, and collapsed provenance
+- **THEN** body shows exact observations with no diagnosis, judgment, reconstructed range, or advice
+
+#### Scenario: Source qualifiers survive rendering
+- **WHEN** children include less-than, cancellation, null, or specimen qualifier
+- **THEN** table preserves each distinction
+
+### Requirement: Records queries safely project and expand one child field
+
+Before filtering, sorting, aggregation, pagination, rendering, or returning any query, every child array named by `record_presentation` SHALL be replaced in the governed snapshot with its type-valid declared columns and audience-specific link projection. Undeclared or withheld nested values SHALL never enter expanded or unexpanded query machinery. Type mismatch SHALL refuse rather than fall back to raw objects.
+
+`expand_child` SHALL name a table field in `record_presentation`. Each child becomes one bounded row containing parent values except selected container; parent identity/system fields; `parent_record_id`, `child_field`, `child_index`; and only the safe child projection. A hard total child cap SHALL precede materialization.
+
+`expand_children: true` SHALL resolve only one Markdown-log container or exactly one Records Markdown-item table. Open object arrays and datasets are ineligible. No/multiple eligible fields or both selectors SHALL refuse actionably. False/omitted expansion SHALL preserve parent rows containing only the safe nested projection under the response cap.
+
+#### Scenario: Markdown-item measurements expand instead of disappearing
+- **WHEN** seven panels have `measurements` and caller uses `expand_child: measurements`
+- **THEN** exact child columns paginate with parent correlation/snapshot rather than return zero
+
+#### Scenario: Boolean resolves one table
+- **WHEN** Records presentation has exactly one table and client sends `expand_children: true`
+- **THEN** it behaves exactly like explicit selection
+
+#### Scenario: Multiple tables require selection
+- **WHEN** two tables exist and only boolean true is sent
+- **THEN** query refuses with releasable selectors and no partial rows
+
+#### Scenario: Child pagination avoids parent-array overflow
+- **WHEN** parent array exceeds non-expanded cap but child rows fit
+- **THEN** expansion omits the container and provides bounded continuation pages without duplicate/skip
+
+#### Scenario: Unauthorized parent produces no child facts
+- **WHEN** governance withholds a parent
+- **THEN** expansion does not parse, count, render, or return its children
+
+#### Scenario: Expanded and unexpanded egress match
+- **WHEN** child objects have extra keys or a declared link resolves to a withheld target
+- **THEN** both query modes exclude undeclared/withheld nested values before any observable query operation
+
+#### Scenario: Policy changes query but not file
+- **WHEN** link policy changes with identical canonical bytes
+- **THEN** query follows current authorization while managed bytes/hash remain unchanged
+
+### Requirement: Agents infer Records participation from observed state
+
+The agent-facing Records contract SHALL route durable observed events and state to `record_memory` from semantic fit rather than requiring the user to say “save”, “log”, “record”, or “Records”. Covered observations SHALL include measurements, sessions, symptoms, transactions, maintenance events, inventory changes, status history, and other attributable facts. The routing contract SHALL preserve the existing boundary: future intent belongs to Planning, received raw material to Sources, proof-bearing artifacts to Evidence, and conclusions to Notes.
+
+When exactly one existing collection is compatible and the observation is sufficiently identified for that schema, an agent operating under a proactive engagement policy MAY append or update it and SHALL report the mutation. Ambiguous collections, missing required identity/date/provenance, or uncertain ownership SHALL produce one focused clarification. When no compatible collection exists, the agent SHALL propose a collection and SHALL NOT silently create a long-lived schema.
+
+#### Scenario: Measurement is inferred without a magic verb
+- **WHEN** a user states a new dated measurement in context without asking to save, log, record, or use Records and exactly one existing collection accepts it
+- **THEN** the agent routes the observation through `record_memory`, preserves the observed value without interpretation, and reports the committed mutation
+
+#### Scenario: No collection produces a proposal
+- **WHEN** a durable observed event fits Records but no compatible collection exists
+- **THEN** the agent uses Records discovery and authoring guidance to propose a collection and does not write the event into a Note, Source, Evidence artifact, or silently invented collection
+
+#### Scenario: Competing collections require one clarification
+- **WHEN** two releasable Records collections are equally compatible with the observed event
+- **THEN** the agent asks one focused collection-selection question and performs no guessed mutation
+
+#### Scenario: Interpretation remains outside Records
+- **WHEN** a Records query supplies values that support a possible conclusion
+- **THEN** the Records response remains neutral observed state and any durable conclusion is compiled explicitly into a linked Note
+
+### Requirement: Records serves cross-profile review as an ordinary governed reader
+
+A planned-versus-recorded reviewer SHALL reach Records only through the existing governed read path: resolution of a fully released manifest, authorization of the named saved view, authorization of the canonical source before it is parsed, and the default-deny query envelope. Records SHALL NOT gain a review-specific query surface, filter operator, saved-view feature, bulk export, or relaxed authorization path, and SHALL NOT resolve Planning, compare intent with observation, copy plan state, or mutate either side.
+
+A reviewer SHALL take only bounded provenance and counts from the envelope — the matched count, the returned count, the truncation flag, and the collection and snapshot identifiers — and SHALL NOT receive record rows, bodies, item identities, record values, or a view's declared aggregate through the review. A withheld envelope SHALL yield no numbers at all rather than partial ones.
+
+#### Scenario: Review cannot widen Records authorization
+- **WHEN** governance withholds a Records collection, its canonical source, or the named saved view
+- **THEN** the cross-profile review receives the same refusal an ordinary Records reader receives and obtains no rows, counts, snapshot, or existence signal
+
+#### Scenario: Review reads counts, not records
+- **WHEN** a bound saved view matches many records
+- **THEN** the review reports the exact matched and returned counts, the truncation flag, and the snapshot identifier
+- **AND** no record row, body, or item identity appears in the review response
+
+#### Scenario: An aggregating view discloses no more than a plain one
+- **WHEN** a bound view declares an aggregate that would return a full record row, distinct record values, grouped values, or a mean
+- **THEN** the review discloses exactly the same fields it discloses for a view with no aggregate
+- **AND** the aggregate's row, values, and statistic are withheld entirely rather than partially projected
+
+#### Scenario: Records keeps no review state
+- **WHEN** a plan-progress review executes bound Records views repeatedly
+- **THEN** no Records manifest, canonical source, audit head, mutation receipt, or query cache is written, and the collection's next ordinary query is unaffected
+

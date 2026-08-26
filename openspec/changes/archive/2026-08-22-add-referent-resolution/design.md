@@ -1,0 +1,108 @@
+# Design: add-referent-resolution
+
+## Context
+
+The recall cache stores principal-free `Hit` objects. Per-audience release
+decisions are attached later in `commands.op_find`, so the resolver must consume
+released hits without entering the cache or changing rank.
+
+## Alternatives considered and rejected
+
+- Data maintenance alone improves specific entities but still gives agents no
+  count, candidate, or abstention semantics.
+- Scoring graph degree or adding a referent intent would reorder every query and
+  require ranking-contract migration before a benchmark exists.
+- New social/geographic predicates duplicate information already authored in
+  person attributes, tags, prose, and `about_entity`/`relates_to` edges.
+- A model-backed coreference pass violates the measure-and-surface boundary and
+  introduces latency and nondeterminism.
+
+## The predicate
+
+`detect_cue` recognizes a closed set of person nouns, supplementary natural
+nouns for non-person types, and aliases from the existing entity-type registry.
+Count words or integers apply only within the three tokens preceding the cue
+noun. The runtime is eligible only for hybrid or vector recall and is skipped
+under `EXOMEM_DISABLE_REFERENTS`.
+
+Active entities produce categorical evidence:
+
+- `exact_name`: normalized title/alias occurs contiguously in the query;
+- `fuzzy_name`: bounded Levenshtein over prefiltered identity/query tokens;
+- `retrieval`: the entity itself occurs in a released hit lane;
+- `graph`: a one-hop typed or `links_to` edge joins the entity to one of the
+  top ten released hits, provided that hit is not superseded;
+- `attribute`: cue descriptors match tags, relationship, affiliation, or any
+  type-specific optional frontmatter field declared by the entity registry by
+  stem equality or a four-character-or-longer prefix; URL-shaped values (a
+  repository link, a homepage) are identifiers shared across many pages and
+  never become attribute evidence.
+
+Exact name resolves alone. Otherwise the entity type must match the cue and at
+least two distinct evidence kinds are required. One kind remains a candidate.
+Inactive entities and type mismatches are dropped and counted. Every tie sorts
+by path. The serialized `resolved` and `candidates` lists each keep at most the
+first 25 paths and report the total remainder as `omitted_candidate_count`.
+Evidence and output contain no confidence floats.
+
+Expected count N yields `resolved` at exactly N, `partial` plus
+`unresolved_count` below N, and `ambiguous` above N. Without a count, zero
+resolved entities is `unresolved` and any nonzero set is `resolved`.
+
+## Runtime and cache boundary
+
+The new stage runs after `egress.annotate_hits` and before serialization inside
+the optional `referents` timing span. The entity registry is immutable and
+cached by `FreshnessSnapshot.projection_key("kb")`. Graph evidence performs one
+bounded `neighbors_for(anchors[:10])` call only when the sidecar is available.
+The resulting block is never placed on `Hit` and never cached. Any exception
+omits the block and preserves the response.
+
+## Governance
+
+`guard_referents` applies the active audience/purpose decision to entity paths,
+drops evidence naming withheld anchor seeds, and returns no block for a blocked
+audience. It independently sweeps candidate and evidence paths for lifecycle
+tombstones before the empty-policy fast path, then combines those paths with
+the release result's withheld paths. This is required because registry/name/
+graph candidates may not have passed through `annotate_hits` as hits.
+When the release gate is active, the guard removes registry-wide reason and
+omission counters unconditionally. Key presence follows gate state rather than
+whether this query withheld a match, preventing the counters from becoming an
+existence oracle for governed or tombstoned entities.
+
+## Generality
+
+The supported type set comes from the entity registry, supplementary natural-language nouns live only in the resolver, and the benchmark covers person, organization, library, decision, and concept cues.
+
+## Validation against the real case
+
+For the synthetic equivalent of the product sentence, the travel topic is a
+released anchor. Its inbound `relates_to` edge supplies graph evidence for the
+represented person; `relationship: friend` and the location tag supply one
+attribute evidence kind. With an expected count of two, exactly one represented
+person produces `partial` and `unresolved_count: 1`. A noise person retrieved by
+wording alone remains in candidates, so the agent names the represented person
+and states that one identity remains unresolved.
+
+### Validation against the real case — live measurement (2026-08-22)
+
+On the production service running the released code without this change, data maintenance added aliases to the friend's entity page and authored an `about_entity` edge from the travel note to that entity. The query "my two Japanese friends" still returned the entity page outside the top eight with an unrelated person at rank six, and the misspelled first name still ranked the entity sixth behind video noise. Data maintenance alone therefore does not produce resolution; the referents stage is what turns the authored edge and aliases into a resolved or partial answer. The post-release measurement with this change deployed will be recorded when it exists; this design does not invent it.
+
+## Performance
+
+Non-cues and keyword mode open no stage. Cue queries reuse the entity registry
+until the KB checkpoint changes, scan at most the bounded hit prefix for graph
+anchors, and do no write-path work. The scale gate holds the warm stage below
+1000 ms, checks the first post-checkpoint registry walk separately, bounds the
+serialized block, and prevents linear 2k-to-8k growth beyond the existing ratio
+shape. The non-cue proof uses a resolver-call counter rather than comparing
+graph/BM25 timings; timing equality would be load-sensitive, while the counter
+directly proves that the optional stage was not invoked.
+
+## Bootstrap budget
+
+Compact bootstrap measured 57,964 bytes before this correction. Keeping the
+full-profile explanation while reducing compact guidance to `partial ambiguous
+unresolved; never guess` measures 57,930 bytes after the correction, leaving 70
+bytes under the unchanged 58,000-byte ceiling.

@@ -114,7 +114,12 @@ text embedding rows before its cap; a missing/stale selected embedding SHALL war
 disable that visible lane and MUST NOT fall back to a raw embedding. Reranking SHALL
 receive only selected projected fields and SHALL precede final top-k. CLIP pixels and
 keyframes SHALL participate only for artifacts selected at L6, with the authorization
-map applied inside the lane before its cap. Below L6, image/video recall SHALL use only
+map applied inside the lane before its cap. Each L6 media projection SHALL bind one
+immutable measurement row: exactly one untimestamped vector for an image, or one through
+forty vectors for a video in strict canonical `frame_timestamp_ms` order. The forty-sample
+ceiling SHALL NOT be configurable. The lane SHALL score every authorized sample, return
+the parent media item once at its best score, and bind the earliest best frame timestamp.
+Below L6, image/video recall SHALL use only
 an authorized textual companion projection, or exclude the binary lane when none is
 available. Graph vertices and edges SHALL be admitted before expansion and every graph
 reduction SHALL run over the selected projected graph.
@@ -148,6 +153,105 @@ mismatch, per-item variant overflow, or namespace overflow SHALL block activatio
 or prior-policy index MUST NOT be used as fallback. Old namespaces MAY be collected only
 after no active request or cursor binds their exact tuple.
 
+When the active tuple requires a CLIP measurement family, a content or companion
+publication SHALL verify the complete active image/video family before canonical bytes
+change. The successor SHALL carry only content-identical image/video rows, require an
+exact target item identity and target content hash for each changed visual-media
+replacement, and bind the complete successor family to the target projection namespace.
+An image SHALL retain exactly one untimestamped sample and a video one through forty
+strictly timestamp-ordered canonical samples. A derived frame companion carrying
+`parent_media` SHALL remain a textual catalog artifact and SHALL NOT become an
+independent CLIP measurement owner. Missing, stale, duplicate, mismatched, or dimension-
+incompatible CLIP state SHALL refuse before canonical bytes change. The successor catalog,
+projection namespace, vector/CLIP measurement roots, receipt, and active tuple SHALL
+publish atomically.
+
+When the active tuple requires a graph measurement family, a content or companion
+publication SHALL verify that the active family contains exactly one row for every active
+projection variant before canonical bytes change. The successor SHALL contain exactly
+one row for every target variant. Variants below L6 SHALL carry an empty outgoing edge
+tuple. A content-identical L6 variant MAY carry its verified active row; every changed L6
+source item SHALL instead provide an immutable replacement bound to its exact target item
+identity and content hash. Every replacement edge SHALL name that source and a target
+identity present in the target catalog. A deletion that leaves an otherwise-carried edge
+outside the target catalog SHALL refuse. Missing, duplicate, source-mismatched, outside-
+catalog, or over-capacity graph state SHALL refuse before canonical bytes change. The
+successor catalog, projection namespace, complete vector/CLIP/graph measurement roots,
+receipt, and active tuple SHALL publish atomically. A live graph producer SHALL supply
+target-bound replacements for every affected changed L6 source; another unsupported
+required family SHALL remain blocked.
+
+#### Scenario: Visual successor publication is complete and atomic
+
+- **WHEN** an exact-v4 catalog edit carries an unchanged image or video, replaces a
+  changed video's canonical samples, or adds a derived frame companion
+- **THEN** the next namespace carries or replaces only exact target-bound CLIP rows,
+  excludes the frame companion from binary ownership, and activates its complete vector
+  and CLIP roots in the same catalog transaction
+
+#### Scenario: Scene sampling publishes the parent row without a second model pass
+
+- **WHEN** the live media worker or bulk backfill computes video scene vectors and
+  persists the corresponding frame companions
+- **THEN** it canonicalizes those same vectors once to bounded integer milliseconds,
+  binds them to the guarded parent sidecar, and publishes the parent CLIP replacement,
+  companion catalog rows, measurement roots, and active tuple together without
+  re-running CLIP or creating pixel rows for the companions
+
+#### Scenario: Incomplete visual state refuses before bytes
+
+- **WHEN** the active CLIP family is incomplete or a replacement has a stale item,
+  content hash, sample shape, timestamp order, or vector dimension
+- **THEN** catalog preparation refuses before canonical content or the active tuple
+  changes and does not fall back to a raw or prior CLIP family
+
+#### Scenario: Graph successor rejects stale or incomplete lineage
+
+- **WHEN** an exact-v4 content change would leave a missing variant row, carry an edge to
+  a removed target, or change an L6 source without an exact target-bound replacement
+- **THEN** publication refuses before canonical bytes change and never relabels the old
+  graph family beneath the new catalog generation
+
+#### Scenario: Complete graph successor publishes with the active tuple
+
+- **WHEN** the complete active graph family verifies, every unchanged row remains bound,
+  every changed L6 source has an exact replacement, and all lower variants have empty rows
+- **THEN** the complete target graph root advances with the target namespace, other
+  required measurement roots, receipt, and active tuple in one catalog publication
+
+#### Scenario: Lower-only changed items retain empty graph rows
+
+- **WHEN** a live producer conservatively returns a target-bound replacement for an
+  affected item whose target namespace contains no L6 variant
+- **THEN** publication validates its exact item/content binding, edge sources, edge
+  targets, uniqueness, and aggregate capacity, discards the edge payload, and emits only
+  empty lower-variant graph rows
+
+#### Scenario: Semantic writes, creations, moves, recoveries, and trash derive graph successors from retained state
+
+- **WHEN** an existing-page semantic write, semantic creation, semantic move, or semantic
+  trash recovery or file/directory trash changes a direct edge, a path/title used by
+  another page's link, or a reverse relation whose logical source is another page
+- **THEN** the existing/edit/create/move/recovery writer derives target-bound replacements
+  from the freshest validated detached before-corpus carried into the mutation boundary,
+  the move or recovery's exact detached after-corpus when applicable, and exact guarded
+  planned bytes; it includes every logical source whose outgoing edge tuple changes and
+  does not reopen the live graph or current Markdown
+- **AND** trash removes the exact held Markdown identity set before applying its guarded
+  log overlay from one lazy detached before-corpus built only for an active graph family
+  before canonical bytes change, so otherwise-unchanged inbound sources lose edges to
+  removed targets
+- **AND** open and lexical-only writes do not invoke the graph producer
+
+#### Scenario: Machine-owned media Markdown uses the same graph successor
+
+- **WHEN** Evidence preservation, a media-sidecar state update, or scene-frame companion
+  creation changes Markdown while the active tuple contains a graph family
+- **THEN** the writer lazily derives replacements from one detached before-corpus and the
+  exact staged Markdown batch, and publishes graph, CLIP when applicable, catalog, and
+  active tuple together before reporting success
+- **AND** open and lexical-only writes do not invoke the graph producer
+
 When the projected source is exhausted, L1-and-above items SHALL still emit the
 projection their policy authorizes while L0 items SHALL produce a silently shorter list,
 identical to physical absence. The canonical governed envelope for the same input SHALL
@@ -160,6 +264,46 @@ registered transport normalization MAY exclude only framing created outside that
 envelope: an echoed JSON-RPC request id, HTTP `Date`/outer trace headers, TLS/chunk/
 compression framing, and physical network arrival time. It MUST NOT delete arbitrary
 application fields to obtain equality.
+
+Governed find SHALL expose one optional input/output `continuation` with exact grammar
+`pc1.` followed by 64 lowercase hexadecimal SHA-256 characters. The token SHALL be the
+SHA-256 digest of NUL-terminated ASCII domain
+`exomem.projected-find-continuation.v1\0` followed by RFC 8785 JCS containing only
+canonical principal id, verified authorization-session id or null, declared purpose or
+null, the SHA-256 request digest, next visible offset, and one caller-visible snapshot
+digest. The request digest SHALL be SHA-256 over RFC 8785 JCS of the closed typed object
+`{auto_rerank, graph, limit, mode, prefer_active, prefer_compiled, query, rerank,
+scope}` after public defaults are applied. The
+snapshot digest SHALL stream the ordered item/variant-id pairs under NUL-terminated ASCII
+domain `exomem.projected-visible-snapshot.v1\0`, followed by a big-endian u32 pair count and, for
+each UTF-8 field, a big-endian u32 byte length plus its bytes. It SHALL exclude
+vault/root identity, L0 identities, catalog count/generation, issuance
+time, randomness, and server-only authorization facts. A bounded process-local record
+SHALL retain the exact immutable runtime, authorization-map/selected-projection/request/
+principal/visible-snapshot digests, next offset, and the first page's repository-derived
+candidate depth for 15 monotonic minutes, with a hard 4,096-record process cap and
+expired-record collection before admission. The token is a lookup key, not authority.
+
+Every continuation SHALL be exact-vault/principal/session/purpose/request-bound. The
+server SHALL require current policy fingerprint and projector schema parity, re-run
+current authorization against the retained namespace, compare the current namespace's
+selected-projection digest while excluding L0 rows, and compare the complete
+authorization-map and visible-snapshot digests before returning the next slice. Policy,
+projector, session, grant, revocation, or visible-result drift SHALL return the same
+content-free `INVALID_CONTINUATION` refusal; hidden-only catalog change SHALL continue
+over the retained namespace. Invalid, malformed, expired, evicted, restart-lost, cross-
+binding, and registry-capacity outcomes SHALL share that refusal under the fixed public
+completion class. Retry SHALL be deterministic, read-only, non-consuming, and SHALL NOT
+extend expiry. Old runtimes SHALL remain strongly referenced only by live continuation
+records and become collectible when the last record expires or is removed.
+A separately issued first page MAY refresh a byte-identical token to the current
+verified runtime and fixed expiry; a continuation replay MUST NOT replace that newer
+record with prior state.
+
+Later pages SHALL reuse the first page's retained candidate depth exactly. Advancing an
+offset MUST NOT widen a primary vector/BM25 prefix, reclassify a graph-only hit, or
+recompute a different ordered window; exhaustion of that bounded window SHALL omit the
+continuation.
 
 Serialized timing suppression alone SHALL NOT satisfy timing non-interference. Governed
 non-owner payloads SHALL use one stable `timings_suppressed` shape chosen from public
@@ -184,6 +328,21 @@ replicas for zero, one, and the exact maximum capacity across lexical, vector, r
 CLIP, graph, error, and pagination routes. Scheduler tolerance MAY be reported but MUST
 NOT be subtracted from observations or added to a ceiling.
 
+Each model execution profile SHALL have a closed literal identity, exact device/backend/
+hard-off configuration, exact required measurement families, exact route set, and exactly
+one repository-owned completion class. Evidence or a manifest for one profile MUST NOT
+activate another profile. `vectors-cpu-torch-v1` SHALL mean text embeddings enabled,
+`EXOMEM_DEVICE=cpu`, `EXOMEM_EMBED_BACKEND=torch`, absent per-model and legacy device
+overrides for the embedding lane, `OMP_NUM_THREADS=1`, `MKL_NUM_THREADS=1`, CLIP
+hard-off, and reranking hard-off. It SHALL require the exact active
+`projected-text-v1`/`BAAI/bge-base-en-v1.5` vector family and SHALL use only
+`projected-find-vector-cpu-v1` with 1,000 ms padding and a 1,500 ms deadline. Its vector
+model input SHALL normalize whitespace with `" ".join(query.split())`, retain at most
+the first 600 Unicode code points, and, when truncated and a U+0020 exists, retreat to
+the preceding complete token. This model-only transform MUST NOT alter lexical input or
+the full-query request/continuation binding. Every unregistered, mixed, override-bearing,
+GPU, ONNX, reranker-active, or CLIP-active profile SHALL remain non-serving.
+
 For every route/public request class, the 99% bootstrap upper confidence bounds for
 absolute median and p95 completion-time differences SHALL each be no greater than the
 manifest differential, 25 ms, and 10% of the physically-absent p95. Both conditions
@@ -201,6 +360,19 @@ identity or authorization bearers.
   absent
 - **THEN** the serialized top-k permitted results, their order, ranks, and shown count
   are byte-identical
+
+#### Scenario: Vector evidence cannot be borrowed by another runtime
+
+- **WHEN** an operator relabels hard-off evidence, supplies a device override, omits the
+  exact vector family, or enables reranking or CLIP under the vector CPU profile
+- **THEN** projected serving refuses before model invocation or content disclosure
+
+#### Scenario: Maximum public query has a fixed vector cost
+
+- **WHEN** a valid 4,096-code-point query reaches `vectors-cpu-torch-v1`
+- **THEN** lexical lanes and request binding use that complete query while the vector
+  model receives only the fixed canonical at-most-600-code-point projection used by the
+  release gate
 
 #### Scenario: Projection-only lexical match is acquired
 
@@ -255,6 +427,20 @@ identity or authorization bearers.
 - **WHEN** L0 items sort before, between, or after permitted items across multiple pages
 - **THEN** page membership, cursor/continuation, total, ordering, and exhaustion are
   identical to a corpus where the L0 items do not exist
+
+#### Scenario: Hidden-only change preserves a live continuation
+
+- **WHEN** a caller obtains a continuation and only L0 catalog items change before the
+  next page
+- **THEN** the retained projected snapshot returns the identical next page and token
+  behavior while current authorization is revalidated
+
+#### Scenario: Authority drift invalidates rather than broadens a cursor
+
+- **WHEN** policy, projector, principal, verified session, grant, revocation, purpose,
+  request shape, or any caller-visible selected variant differs from the cursor record
+- **THEN** the request returns the same content-free `INVALID_CONTINUATION` refusal and
+  emits no stale page, count, path, or drift detail
 
 #### Scenario: Ranking uses only projected fields
 
@@ -331,6 +517,13 @@ identity or authorization bearers.
 - **WHEN** a policy permits an item at L1 or above
 - **THEN** that projected item may participate in public count and order using only its
   authorized fields, while an L0 item remains counterfactually absent
+
+#### Scenario: Withholding does not change the visible count
+
+- **WHEN** a query would return N permitted items and some candidates are withheld
+  while the over-fetch pool can still fill N
+- **THEN** exactly N items are returned and the count does not reveal that any
+  were withheld
 
 ### Requirement: Terminal secret scrubber at the shared dispatcher
 
@@ -423,6 +616,13 @@ and malformed issuance SHALL refuse.
 - **AND** any otherwise-authorized `content_hash` and every stale-edit comparison remain
   computed over the complete unmodified raw file bytes
 
+#### Scenario: Every surface is covered
+
+- **WHEN** the same restricted query is issued over MCP, REST, and CLI (including
+  the retrieve-inject hook path)
+- **THEN** all three responses carry field-identical projections with no
+  sub-notice paths or excerpts
+
 ### Requirement: Empty-policy fast path
 
 The release plane MAY short-circuit to OPEN only when a fresh authenticated protected
@@ -467,6 +667,12 @@ OPEN.
   running
 - **THEN** warm and restart requests both receive the BLOCKED floor and no cached OPEN or
   last-good policy is served
+
+#### Scenario: Ungoverned recall is baseline
+
+- **WHEN** a query runs on a vault with no `_Governance/` directory
+- **THEN** results match baseline except that credential-shaped strings are
+  blocked, and the latency gate is unchanged
 
 ### Requirement: Canonical audience resolution, threaded and fail-closed
 
@@ -533,6 +739,11 @@ verified session.
 - **THEN** the whole request receives the common credential refusal before validation,
   cache, idempotency, membership, decision, or content work
 
+#### Scenario: Same principal across surfaces
+
+- **WHEN** the same human queries via MCP and via REST
+- **THEN** a grant authored for that principal applies on both
+
 ### Requirement: Error Payloads Cross The Same Terminal Boundary
 
 The terminal filter at the shared dispatcher is the last thing between a command result
@@ -579,6 +790,25 @@ that applies a disclosure decision.
 - **THEN** the error text is unchanged apart from the always-on secret scrubbing that
   already applies
 
+#### Scenario: an identity collision does not name the colliding pages
+
+- **WHEN** a caller resolves an identifier that matches more than one stored item
+- **THEN** the error carries the ambiguity code and the number of matches
+- **AND** the error carries no vault path, title, or reference of any match
+
+#### Scenario: a raised error is filtered like a returned result
+
+- **WHEN** a governed content-returning command raises an error whose payload names a vault
+  item withheld from the caller
+- **THEN** the reference is removed before the error crosses the dispatcher boundary
+- **AND** the caller cannot distinguish the withheld item from one that does not exist
+
+#### Scenario: an ungoverned vault keeps its error text
+
+- **WHEN** a vault has no governance configured and a command raises
+- **THEN** the error text is unchanged apart from the always-on secret scrubbing that
+  already applies
+
 ### Requirement: Reverse Provenance Is Stripped Below Full Release
 
 Provenance runs in both directions: a compiled item records what it cites, and a cited
@@ -611,6 +841,26 @@ second unprojected representation; at L0, the entire read remains identical to m
   projection
 - **THEN** no raw `content` field or exact provenance is returned and the response is the
   same level projection as if raw had not been requested
+
+#### Scenario: a released source does not enumerate the compiled items that cited it
+
+- **WHEN** a source item is released to an audience below full level and a compiled item
+  withheld from that audience cites it
+- **THEN** the reverse citation field is absent from the released representation
+- **AND** the withheld compiled item's path, title and reference do not appear anywhere in
+  the response
+
+#### Scenario: full release to a permitted audience is unchanged
+
+- **WHEN** the same source item is released at full level to a permitted audience
+- **THEN** the reverse citation field is present and complete
+
+#### Scenario: the guarantee is stated over the projected representation
+
+- **WHEN** a caller requests the raw stored bytes of a page alongside its projection
+- **THEN** the projected representation still omits the reverse citation field
+- **AND** the raw-bytes surface is out of scope for this requirement and is governed
+  separately
 
 ### Requirement: Operational Run State Is Not Released As Knowledge
 
@@ -662,5 +912,25 @@ governed owning command.
 
 - **WHEN** the owner requests the status of a run through the command that owns it
 - **THEN** the full per-item detail is returned without exposing an authorization bearer
+- **AND** the response is subject to the same disclosure decision as any other governed
+  content-returning result
+
+#### Scenario: run state does not appear in recall
+
+- **WHEN** a run has recorded state naming items in the vault and a caller issues a recall
+  query whose terms match that state
+- **THEN** no run-state item is returned
+- **AND** the result counts are the same as for a vault with no run present
+
+#### Scenario: a released run summary carries no per-item detail
+
+- **WHEN** a run records a summary into a released page
+- **THEN** the summary carries counts and the run reference
+- **AND** it carries no source path, target path, or content hash of any individual item
+
+#### Scenario: the owner still reads full run detail through the governed command
+
+- **WHEN** the owner requests the status of a run through the command that owns it
+- **THEN** the full per-item detail is returned
 - **AND** the response is subject to the same disclosure decision as any other governed
   content-returning result

@@ -13,7 +13,11 @@ import shutil
 from pathlib import Path
 
 from . import indexes
-from .entity_types import ENTITY_TYPE_REGISTRY
+from .entity_types import (
+    ENTITY_TYPE_REGISTRY,
+    extension_registry_path,
+    load_entity_types,
+)
 from .kbdir import kb_dirname
 from .vault import render_wikilinks_for_vault, shipped_schema_target
 
@@ -146,12 +150,21 @@ def init_vault(vault_root: Path, *, force: bool = False) -> dict:
     for folder in _FOLDERS:
         (kb / folder).mkdir(parents=True, exist_ok=True)
 
+    entity_registry = load_entity_types(vault_root)
+    if extension_registry_path(vault_root).is_file():
+        for definition in entity_registry.extensions.values():
+            if definition.status == "active":
+                (kb / "Entities" / definition.folder).mkdir(parents=True, exist_ok=True)
+
     entity_index = kb / "Entities" / "index.md"
     if entity_index.is_file():
         current = entity_index.read_text(encoding="utf-8")
         refreshed = indexes._refresh_entities_subindex_text(
             current,
-            counts_by_type=indexes._count_entities(kb / "Entities"),
+            counts_by_type=indexes._count_entities(
+                kb / "Entities", registry=entity_registry
+            ),
+            registry=entity_registry,
         )
         refreshed = render_wikilinks_for_vault(refreshed, vault_root)
         if refreshed != current:

@@ -6,14 +6,17 @@ import unicodedata
 from pathlib import Path
 
 from . import memory_refs
-from .entity_types import ENTITY_TYPE_REGISTRY, resolve_entity_type
+from .entity_types import load_entity_types
 from .kbdir import kb_prefix
 from .vault import kb_root, parse_frontmatter, read_guarded_text
 
 
-def _identity_key(value: object) -> str:
+def identity_key(value: object) -> str:
     normalized = unicodedata.normalize("NFKC", str(value or ""))
     return " ".join(normalized.casefold().split())
+
+
+_identity_key = identity_key
 
 
 def _aliases(value: object) -> tuple[str, ...]:
@@ -32,19 +35,23 @@ def resolve_entity_candidate(
     limit: int = 8,
 ) -> dict[str, object]:
     """Return an exact active title/alias match, no match, or bounded ambiguity."""
-    needle = _identity_key(name)
+    needle = identity_key(name)
     if not needle:
         return {"status": "no_match", "candidates": [], "omitted_candidate_count": 0}
+    registry = load_entity_types(vault_root)
     kind_filter = None
     if entity_type is not None:
-        kind = resolve_entity_type(entity_type)
+        kind = registry.resolve(entity_type)
         if kind is None:
-            raise ValueError(f"INVALID_LINK: unregistered entity_type {entity_type!r}")
+            raise ValueError(
+                f"ENTITY_TYPE_UNKNOWN: entity_type {entity_type!r} is not active. "
+                f"Active ids: {list(registry.active_ids)}"
+            )
         kind_filter = kind.id
 
     matches: list[dict[str, str]] = []
     entities_root = kb_root(vault_root) / "Entities"
-    for definition in ENTITY_TYPE_REGISTRY:
+    for definition in registry.active_definitions:
         folder = entities_root / definition.folder
         if not folder.is_dir():
             continue
@@ -62,14 +69,14 @@ def resolve_entity_candidate(
                 or str(frontmatter.get("status") or "").casefold() != "active"
             ):
                 continue
-            registered = resolve_entity_type(str(frontmatter.get("entity_type") or ""))
+            registered = registry.resolve(str(frontmatter.get("entity_type") or ""))
             if registered is None or (
                 kind_filter is not None and registered.id != kind_filter
             ):
                 continue
             title = str(frontmatter.get("title") or path.stem).strip()
-            title_matches = needle == _identity_key(title)
-            alias_matches = any(needle == _identity_key(alias) for alias in _aliases(frontmatter.get("aliases")))
+            title_matches = needle == identity_key(title)
+            alias_matches = any(needle == identity_key(alias) for alias in _aliases(frontmatter.get("aliases")))
             if not title_matches and not alias_matches:
                 continue
             candidate = {

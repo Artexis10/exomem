@@ -15,6 +15,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, NamedTuple
 
 from fastmcp.tools import FunctionTool
+from fastmcp.utilities import json_schema
 
 from . import __version__, capabilities
 from . import commands as commands_module
@@ -145,11 +146,22 @@ def _mcp_tool_contract(
             idempotent=command.read_only,
         ),
     )
-    return {
+    contract = {
         key: value
         for key, value in tool.to_mcp_tool().model_dump(mode="json", by_alias=True).items()
         if value is not None
     }
+    # Inline `$defs` so this contract and the personal MCP surface describe the
+    # same command identically. The server-side registration path compresses
+    # schemas; building a `FunctionTool` directly does not, so a parameter typed
+    # with a structured model rendered as a `$ref` here and inline there. No
+    # hosted command carried one until now, which is why the two generators
+    # could disagree unnoticed — and a shipped test compares them, so the
+    # disagreement is a defect rather than a tolerated difference.
+    schema = contract.get("inputSchema")
+    if isinstance(schema, dict) and "$defs" in schema:
+        contract["inputSchema"] = json_schema.compress_schema(schema, dereference=True)
+    return contract
 
 
 #: Vault subtrees a hosted tenant's own agent may read but never rewrite.
@@ -250,6 +262,29 @@ PROTECTED_TREE_PATH_ARGUMENTS: dict[str, ProtectedTargets] = {
     "edit_memory": ProtectedTargets("page", ("path",)),
     "replace_memory": ProtectedTargets("page", ("old_path",)),
     "plan_memory": ProtectedTargets("collection", ("collection", "manifest_path")),
+    # The v4 widening adds one command that names a caller-chosen write
+    # destination. `commands.Command.path_roles` already states which is which,
+    # so membership is read off the declared roles rather than re-judged by
+    # parameter name: a `destination`, `source-destination` or
+    # `recovery-destination` role is a caller-chosen write target, while
+    # `source`, `*-selector` and `external-*` roles name what to read, select or
+    # ingest. `manage_memory_file` is the only one of the six with a
+    # destination role, and it carries five of them.
+    #
+    # `kind` is "collection" because this leaf opens the path as given -- it
+    # manages files and directories, and unlike the page leaves it appends no
+    # Markdown suffix. Mirroring the page normalisation here is what made
+    # `edit_memory path=".../_Schema"` refuse while its `.md` spelling passed.
+    #
+    # Guarding it does not remove the capability the tree holds: a schema write
+    # still happens through `schema_memory`, which owns its placement. That is
+    # the doctrine already stated above -- a fixed-path update is reachable only
+    # through the command that owns it, never by naming the same file as a
+    # general file operation's target.
+    "manage_memory_file": ProtectedTargets(
+        "collection",
+        ("path", "old_path", "new_path", "trash_path", "restore_path"),
+    ),
 }
 
 #: Mutating commands that do not need the guard because their own leaf refuses a
@@ -287,6 +322,33 @@ PROTECTED_TREE_PATH_ARGUMENTS: dict[str, ProtectedTargets] = {
 #: in one list or the other, so a later widening cannot reopen this hole by
 #: silence -- but that only proves every command is *named*, not that the claim
 #: about it is true. The behavioural sweep proves the claim per member.
+#: The v4 widening adds five more, and the same declared-role reading applies.
+#: None of them takes an argument whose role is a write destination:
+#:
+#: - `maintain_memory` declares no path role at all -- its arguments are a mode,
+#:   a category list and booleans. There is nothing for a caller to aim.
+#: - `schema_memory` likewise declares none. Placement comes from `subject`,
+#:   `name`, `project` and `page_type`, which the leaf resolves under `_Schema`.
+#:   It is not guarded *because* the tree is its subject: this is the command
+#:   that owns those fixed-path writes, and guarding it would refuse the
+#:   capability rather than constrain it.
+#: - `preserve_artifacts` composes its placement from `scope` and `category`,
+#:   the same shape as `preserve_evidence` above, and its `files` role is
+#:   `external-artifacts` -- uploaded bytes, not a vault path.
+#: - `adoption_studio`'s path roles are all `external-source` or
+#:   `external-selector`: they name material outside the vault to scan or
+#:   filter. On hosted that material arrives pre-staged under
+#:   `_Staging/adoption/<run_id>/` through the transfer grant, so the argument
+#:   never chooses a vault write target.
+#: - `govern_memory` declares `selector_paths` as `policy-selector` and
+#:   `path`/`paths` as `source`. A selector says which documents a policy
+#:   covers and a source says what to read; the policy documents it writes are
+#:   fixed-placement.
+#:
+#: These are claims about five leaves, and the comment above records what
+#: happened the last time such claims were made by inspection alone. Every one
+#: is put through `test_target_constrained_mutations_are_actually_constrained`,
+#: which probes each string argument of each member rather than a chosen few.
 TARGET_CONSTRAINED_MUTATIONS: frozenset[str] = frozenset(
     {
         "remember",
@@ -296,6 +358,11 @@ TARGET_CONSTRAINED_MUTATIONS: frozenset[str] = frozenset(
         "triage_memory",
         "connect_memory",
         "record_memory",
+        "maintain_memory",
+        "schema_memory",
+        "preserve_artifacts",
+        "adoption_studio",
+        "govern_memory",
     }
 )
 
@@ -585,7 +652,11 @@ def hosted_agent_surface_descriptor(
     return capabilities.ActiveSurfaceDescriptor(
         surface="hosted-agent",
         profile=profile,
-        tier2_enabled=False,
+        # Read from the profile rather than pinned false. It was false because
+        # no profile carried a tier-2 command; asserting it for a profile that
+        # does would make the descriptor contradict the surface it describes,
+        # and the descriptor is what the action catalog resolves against.
+        tier2_enabled=commands_module.PRODUCT_SURFACE_PROFILES[profile].expose_tier2,
         product_commands=tuple(command.name for command in registry),
     )
 

@@ -143,6 +143,13 @@ source snapshot; mutable `_Governance` alone is insufficient.
 - **THEN** recovery keeps that immutable target active, completes its receipt once, and
   retries the mirror only if expected workspace bytes still match
 
+#### Scenario: Final proposal validation is the concurrency cut
+
+- **WHEN** an uncoordinated filesystem writer changes an affected item strictly
+  after the final live proposal-guard comparison succeeds
+- **THEN** the commit may complete and the change is governed as later dynamic
+  content rather than being attributed to the reviewed proposal snapshot
+
 ### Requirement: Suspend, resume, undo with coherent dependents
 
 `govern_memory` SHALL support suspending and resuming a whole rule set and undoing the
@@ -238,6 +245,12 @@ repair, without changing the active tuple.
   retains that target once, completes evidence/mirror idempotently, and never replays the
   semantic suspend/resume/undo request
 
+#### Scenario: Undo restores and reconciles
+
+- **WHEN** the last policy change is undone
+- **THEN** the prior policy version is restored and any grant whose resolved
+  members changed is expired or flagged for review
+
 ### Requirement: Pending YAML mutation blocks hybrid activation
 
 Mutable `_Governance` YAML SHALL be a reviewable authoring workspace and pending source,
@@ -278,6 +291,12 @@ held-parent operation; observed drift refuses it, and it MUST NOT define activat
 - **WHEN** a policy operation and a content/companion writer race from one expected tuple
 - **THEN** only one complete policy/projector/catalog tuple commits and the stale event
   cannot activate its prepared generation or mirror as an independent authority
+
+#### Scenario: Crash during multi-file policy commit does not activate a hybrid
+
+- **WHEN** a crash occurs after only some target policy documents were replaced
+- **THEN** the pending marker prevents those files from becoming active and the
+  last-good policy or cold-start BLOCKED floor remains in effect
 
 ### Requirement: Restart reconciliation never replays or guesses
 
@@ -327,6 +346,32 @@ filesystem guarantee against direct OS-owner workspace mutation.
 - **THEN** authoring and enrolled content remain blocked and recovery does not choose a
   last-good, historical, mutable-YAML, or OPEN fallback
 
+#### Scenario: Crash in exact prepared state completes safely
+
+- **WHEN** current state exactly matches the prepared composite but one or more
+  terminal receipts were not appended before the crash
+- **THEN** restart reconciliation appends the missing terminals, performs only
+  the activation transition, and does not replay the semantic mutation
+
+#### Scenario: Crash after terminal but before activation completes safely
+
+- **WHEN** a committed receipt exists but a crash left the marker or session row
+  pending
+- **THEN** restart reconciliation activates the exact target once and does not
+  append a duplicate terminal or reapply the mutation
+
+#### Scenario: Committed terminal contradicting exact prior blocks
+
+- **WHEN** one or more required committed terminals exist but current components
+  match exact prior rather than prepared or final
+- **THEN** reconciliation remains blocked and does not append a conflicting
+  aborted terminal or mutate authorization state
+
+#### Scenario: Final-active without evidence is invalid
+
+- **WHEN** components match final-active but any required terminal is absent
+- **THEN** reconciliation blocks rather than inventing evidence after activation
+
 ### Requirement: Pending recovery state is pinned against TTL and GC
 
 Every TTL or garbage-collection path SHALL exclude proposal, token, grant, purpose,
@@ -357,6 +402,20 @@ cursor, receipt, backup, and rollback pins.
   component differs from the recorded target composite
 - **THEN** reconciliation treats the operation as partial and keeps target activation
   blocked; mirrored YAML alone has no authority
+
+#### Scenario: Expiry after activation does not reopen history
+
+- **WHEN** activation closes its journal and a later sweep deletes an expired
+  grant/token/purpose row
+- **THEN** subsequent governance authoring ignores the historical closed
+  composite and does not block
+
+#### Scenario: Undo cannot activate over a stale dependent grant
+
+- **WHEN** target policy YAML is present but any dependent-grant row does not
+  match the target composite digest
+- **THEN** reconciliation treats the operation as partial and keeps authoring and
+  target activation blocked
 
 ### Requirement: Governance-tools migration is monotonic
 
@@ -410,6 +469,13 @@ v3 relies on the deployment fence rather than the v4 OPEN path.
 - **WHEN** the offline v4→v3 path completes and the actual v3 binary starts
 - **THEN** v4 session authority is closed, exact v3 schema/source parity is proven, and
   the external registry still records monotonic prior governance enrollment
+
+#### Scenario: Existing opener cannot downgrade tools state
+
+- **WHEN** any token, receipt, policy, or governance-tools path opens a v3
+  sidecar
+- **THEN** the schema remains v3 and migrations do not rerun
+
 
 ## ADDED Requirements
 

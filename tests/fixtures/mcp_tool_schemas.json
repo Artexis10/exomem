@@ -579,6 +579,18 @@
           "description": "Max hits. Default 15.",
           "type": "integer"
         },
+        "continuation": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Opaque continuation returned by a prior governed recall page."
+        },
         "scope": {
           "default": "kb",
           "description": "kb, vault, or kb-only.",
@@ -779,16 +791,17 @@
     }
   },
   "capture_source": {
-    "description": "Capture raw source material and optionally return compile guidance.\n\nThe raw source is preserved first. If `compile_guidance=true`, Exomem then\nreturns a proposal for a future compiled note, without silently converting\nraw provenance into a conclusion.\n\nClassification is optional and never a precondition for preserving material,\nbut it is what makes a source findable and coherently filed. Two independent\naxes describe it: what the artifact IS (`source_kind`) and what it is ABOUT\n(`domain`). Both are open vocabularies.",
+    "description": "Capture raw source material and optionally return compile guidance.\n\nTakes `content` for text or `files` for attached file handles, stored\nlosslessly under `Sources/`. This command is for raw material; proof-bearing\nartifacts go to `preserve_evidence`/`preserve_artifacts`. Choose by what the\nartifact is for, not by what the client can carry.\n\nThe raw source is preserved first. If `compile_guidance=true`, Exomem then\nreturns a proposal for a future compiled note, without silently converting\nraw provenance into a conclusion.\n\nClassification is optional and never a precondition for preserving material,\nbut it is what makes a source findable and coherently filed. Two independent\naxes describe it: what the artifact IS (`source_kind`) and what it is ABOUT\n(`domain`). Both are open vocabularies.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
-        "content": {
-          "description": "Raw source text.",
-          "type": "string"
-        },
         "title": {
           "description": "Source title.",
+          "type": "string"
+        },
+        "content": {
+          "default": "",
+          "description": "Raw source text. Supply this or `files`, not both.",
           "type": "string"
         },
         "slug": {
@@ -910,6 +923,37 @@
           "default": null,
           "description": "Project keys this source serves. Never affects where it is stored; one source may serve several projects."
         },
+        "files": {
+          "default": [],
+          "description": "Up to eight temporary client file handles, captured losslessly as Sources instead of `content` — an attached transcript, article, screenshot, or recording that is raw material. Each requires `download_url` and `file_id`; `mime_type` and `file_name` are optional. Exomem retrieves each handle server-side, so no bytes pass through model-visible arguments. Proof-bearing artifacts go to `preserve_artifacts` instead — the lane is chosen by what the artifact is for, never by which transport is available.",
+          "items": {
+            "description": "Client-neutral temporary remote file handle.\n\nUsed by ``capture_source`` for raw material and ``preserve_artifacts`` for\nproof-bearing artifacts. The handle carries no destination: the lane is the\ncommand's, never the transport's.",
+            "properties": {
+              "download_url": {
+                "type": "string"
+              },
+              "file_id": {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              "mime_type": {
+                "maxLength": 255,
+                "type": "string"
+              },
+              "file_name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "download_url",
+              "file_id"
+            ],
+            "type": "object"
+          },
+          "maxItems": 8,
+          "type": "array"
+        },
         "response_detail": {
           "default": "compact",
           "description": "Successful committed mutation detail: compact (default), full diagnostics, or legacy raw leaf result.",
@@ -934,7 +978,6 @@
         }
       },
       "required": [
-        "content",
         "title"
       ],
       "type": "object"
@@ -1175,13 +1218,6 @@
         "entity_type": {
           "anyOf": [
             {
-              "enum": [
-                "person",
-                "organization",
-                "concept",
-                "library",
-                "decision"
-              ],
               "type": "string"
             },
             {
@@ -1189,7 +1225,7 @@
             }
           ],
           "default": null,
-          "description": "Entity type for create-entity."
+          "description": "stable ID from the active entity registry — core: person, organization, concept, library, decision — plus any vault-defined type in `_Schema/entity-types.yaml`."
         },
         "name": {
           "anyOf": [
@@ -2500,7 +2536,7 @@
     }
   },
   "maintain_memory": {
-    "description": "Maintain vault health with explicit write-capable modes.\n\nDefault mode is read-only audit. `mode=\"fix\"` and `mode=\"backfill-ids\"`\nrewrite content (wikilinks, frontmatter, stable IDs) and default to\ndry-run here as a safety net. `mode=\"reconcile\"` only heals index-count\nand sidecar drift from out-of-band edits — the same canonical default as\n`op_reconcile` itself (idempotent, non-destructive) — so it defaults to\nwriting; pass `dry_run=true` to preview instead.\n\n`mode=\"fix\"` also collapses media sidecars that accumulated nested copies of\nthemselves (audit category `duplicated_sidecar`, reportable on its own via\n`mode=\"audit\", categories=[\"duplicated_sidecar\"]`). It keeps the longest\nsurviving `## Extracted text` — for a sidecar whose top-level block was\nblanked by a re-render, that is the one buried in a nested copy — and refuses\nany rewrite that would leave less transcript than it found. Frontmatter is\nuntouched, so a still-`pending` sidecar is re-extracted normally and the\nrecovered text is only the fallback.",
+    "description": "Maintain vault health with explicit write-capable modes.\n\nDefault mode is read-only audit. `mode=\"fix\"` and `mode=\"backfill-ids\"`\nrewrite content (wikilinks, frontmatter, stable IDs) and default to\ndry-run here as a safety net. `mode=\"reconcile\"` only heals index-count\nand sidecar drift from out-of-band edits — the same canonical default as\n`op_reconcile` itself (idempotent, non-destructive) — so it defaults to\nwriting; pass `dry_run=true` to preview instead.\n\nMCP, REST, and hosted callers may audit or preview with `dry_run=true`, but\nwrite-mode maintenance is operator-only: run `exomem maintain --fix` or\n`exomem maintain --reconcile` on the host. Remote write attempts return\n`MAINTENANCE_REQUIRES_CLI` before acquiring the mutation boundary.\n\n`mode=\"fix\"` also collapses media sidecars that accumulated nested copies of\nthemselves (audit category `duplicated_sidecar`, reportable on its own via\n`mode=\"audit\", categories=[\"duplicated_sidecar\"]`). It keeps the longest\nsurviving `## Extracted text` — for a sidecar whose top-level block was\nblanked by a re-render, that is the one buried in a nested copy — and refuses\nany rewrite that would leave less transcript than it found. Frontmatter is\nuntouched, so a still-`pending` sidecar is re-extracted normally and the\nrecovered text is only the fallback.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -3152,7 +3188,7 @@
     }
   },
   "plan_memory": {
-    "description": "Inspect, create, query, add, update, or triage one Planning collection.",
+    "description": "Inspect, create, query, add, update, or triage one Planning collection.\n\n`inspect` with no collection lists the Planning collections instead, so a\nsession can find the one it needs before naming a selector.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -3556,7 +3592,7 @@
         "files": {
           "description": "One to eight temporary client file handles.",
           "items": {
-            "description": "Client-neutral temporary remote file handle used by ``preserve_artifacts``.",
+            "description": "Client-neutral temporary remote file handle.\n\nUsed by ``capture_source`` for raw material and ``preserve_artifacts`` for\nproof-bearing artifacts. The handle carries no destination: the lane is the\ncommand's, never the transport's.",
             "properties": {
               "download_url": {
                 "type": "string"
@@ -4423,7 +4459,7 @@
     }
   },
   "remember": {
-    "description": "Remember a durable conclusion as compiled governed knowledge.\n\nThis is for distilled thinking, decisions, findings, failures, patterns,\nexperiments, and production logs. Raw material belongs in `capture_source`;\nproof artifacts belong in `preserve_evidence`.\n\nFor each `sources:` wikilink, this appends the new note's wikilink to that\nsource's `ingested_into:` frontmatter, maintaining the source-to-note graph\nand taking the source out of the unprocessed backlog.\n\nSemantic authoring [exomem.semantic-authoring:v4 sha256:837b03b15c3d83f6c6eeb50771f4eaa04e4beaaae0f7d54be249be40ce7685f7]: Every new, replaced, or activated active compiled note needs at least one valid, non-empty semantic unit. Either compact or rich form satisfies the minimum; compact is preferred, and a valid rich unit does not need a duplicate compact restatement. Check new active creates, replacements, and inactive-to-active transitions; inactive drafts may remain unit-free until activation. A post-activation compliant page cannot lose its final valid semantic unit. Under `## Observations`, write `- [category] content #tags (context) ^anchor` with an open-vocabulary category: the unit's one primary open-vocabulary subject or domain label. Category: One primary open-vocabulary label describes what a unit is about; rich category defaults to its governed kind unless explicitly overridden. Tag: Zero or more optional secondary retrieval labels refine lookup and never replace category or determine kind. Kind: The governed semantic form: compact units always use `observation`; rich units use their recognized heading kind. Rich form uses `## <Governed Kind>`. After optional leading metadata, add a blank line and a substantive Markdown body. A heading at level N owns content until the next non-fenced heading at level N or shallower; deeper headings remain in its body. Portable categories: Choose exactly one primary category: prefer a meaningful epistemic or operational role and put the domain in tags, but if the role would only be a generic fact, finding, or observation and the domain is the durable lens, use a domain category instead. The category vocabulary is open: these core keys are a shared starting point, not a closed list. When no core key is a good primary fit, author a new meaningful category rather than forcing an ill-fitting one. Role example: - [decision] Relocate to a coastal city next spring #life ^relocation For the complete core keys, aliases, and rich example, call bootstrap(profile=\"full\"). `missing_semantic_unit` means an applicable active compiled result has no valid non-empty unit. Compact remediation: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. Rich remediation: Alternatively add `## Decision`, a blank line, and a substantive body. `empty_rich_unit` means a recognized rich heading has no substantive body. Add substantive body content or remove the empty recognized heading.",
+    "description": "Remember a durable conclusion as compiled governed knowledge.\n\nThis is for distilled thinking, decisions, findings, failures, patterns,\nexperiments, and production logs. Raw material belongs in `capture_source`,\nwhich takes attached file handles as well as text; proof-bearing artifacts\nbelong in `preserve_evidence` or `preserve_artifacts`.\n\nFor each `sources:` wikilink, this appends the new note's wikilink to that\nsource's `ingested_into:` frontmatter, maintaining the source-to-note graph\nand taking the source out of the unprocessed backlog.\n\nSemantic authoring [exomem.semantic-authoring:v4 sha256:837b03b15c3d83f6c6eeb50771f4eaa04e4beaaae0f7d54be249be40ce7685f7]: Every new, replaced, or activated active compiled note needs at least one valid, non-empty semantic unit. Either compact or rich form satisfies the minimum; compact is preferred, and a valid rich unit does not need a duplicate compact restatement. Check new active creates, replacements, and inactive-to-active transitions; inactive drafts may remain unit-free until activation. A post-activation compliant page cannot lose its final valid semantic unit. Under `## Observations`, write `- [category] content #tags (context) ^anchor` with an open-vocabulary category: the unit's one primary open-vocabulary subject or domain label. Category: One primary open-vocabulary label describes what a unit is about; rich category defaults to its governed kind unless explicitly overridden. Tag: Zero or more optional secondary retrieval labels refine lookup and never replace category or determine kind. Kind: The governed semantic form: compact units always use `observation`; rich units use their recognized heading kind. Rich form uses `## <Governed Kind>`. After optional leading metadata, add a blank line and a substantive Markdown body. A heading at level N owns content until the next non-fenced heading at level N or shallower; deeper headings remain in its body. Portable categories: Choose exactly one primary category: prefer a meaningful epistemic or operational role and put the domain in tags, but if the role would only be a generic fact, finding, or observation and the domain is the durable lens, use a domain category instead. The category vocabulary is open: these core keys are a shared starting point, not a closed list. When no core key is a good primary fit, author a new meaningful category rather than forcing an ill-fitting one. Role example: - [decision] Relocate to a coastal city next spring #life ^relocation For the complete core keys, aliases, and rich example, call bootstrap(profile=\"full\"). `missing_semantic_unit` means an applicable active compiled result has no valid non-empty unit. Compact remediation: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`. Rich remediation: Alternatively add `## Decision`, a blank line, and a substantive body. `empty_rich_unit` means a recognized rich heading has no substantive body. Add substantive body content or remove the empty recognized heading.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -5347,7 +5383,7 @@
       "properties": {
         "mode": {
           "default": "attention",
-          "description": "attention, activation, item, audit, provenance, evolution, compilation, stale, contradiction, unprocessed-sources, relation-debt, relation-queue, or adoption. `relation-queue` returns the read-only, batched relation-acceptance queue (deterministic suggestion candidates grouped by source page, with signal fingerprints and coverage counters); accept a candidate via `connect_memory(operation=\"accept-relation\")` or reject via `triage_memory`. `adoption` returns the read-only Adoption Studio proposal queue grouped per run (structured agent proposals with signal fingerprints); approve a proposal via `adoption_studio(action=\"apply-proposal\")` or dismiss via `triage_memory`.",
+          "description": "attention, activation, item, audit, dispositions, provenance, evolution, compilation, stale, contradiction, unprocessed-sources, relation-debt, relation-queue, adoption, or plan-progress. `plan-progress` reports, for each committed Planning item declaring `progress_evidence`, the counts its bound Records views return; it is derived and read-only, and it scores nothing. `dispositions` lists every signal family a user has set to `quiet` or `off` through `triage_memory`, with its reason code, why, timestamp, origin, and per-family manual dismissal count; a quiet family is silent on the carriers, not clean. `relation-queue` returns the read-only, batched relation-acceptance queue (deterministic suggestion candidates grouped by source page, with signal fingerprints and coverage counters); accept a candidate via `connect_memory(operation=\"accept-relation\")` or reject via `triage_memory`. `adoption` returns the read-only Adoption Studio proposal queue grouped per run (structured agent proposals with signal fingerprints); approve a proposal via `adoption_studio(action=\"apply-proposal\")` or dismiss via `triage_memory`.",
           "type": "string"
         },
         "categories": {
@@ -5505,7 +5541,7 @@
       "additionalProperties": false,
       "properties": {
         "operation": {
-          "description": "infer, validate, or diff.",
+          "description": "infer, validate, diff, or save-entity-types.",
           "type": "string"
         },
         "name": {
@@ -5596,6 +5632,18 @@
           "default": null,
           "description": "Reviewed semantic-language, relation, or traversal-profile proposal."
         },
+        "why": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Required audit reason for save-entity-types."
+        },
         "include_model_suggestions": {
           "default": false,
           "description": "Request response-only optional relation suggestions.",
@@ -5631,13 +5679,18 @@
     }
   },
   "transfer_artifact": {
-    "description": "Prepare out-of-band binary artifact transfer.\n\nCompatibility transport for clients that cannot supply file handles to\n`preserve_artifacts`. Returns a short-lived token and URL for uploading\nevidence binaries or downloading a vault file into a sandbox. Minting an\nupload token does not mean bytes were stored.",
+    "description": "Prepare out-of-band binary artifact transfer.\n\nCompatibility transport for clients that cannot supply file handles to\n`capture_source` or `preserve_artifacts`. Returns a short-lived token and URL\nfor uploading a binary or downloading a vault file into a sandbox. Minting an\nupload token does not mean bytes were stored.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
         "operation": {
           "default": "upload",
           "description": "upload or download.",
+          "type": "string"
+        },
+        "lane": {
+          "default": "evidence",
+          "description": "where an upload lands — `source` for raw material, `evidence` for proof-bearing artifacts. Bound into the token when it is minted, so the destination cannot be chosen by whoever posts the bytes. Ignored for downloads.",
           "type": "string"
         },
         "response_detail": {
@@ -5672,11 +5725,11 @@
       "additionalProperties": false,
       "properties": {
         "ref": {
-          "description": "Stable `exomem://review/<id>` reference from review_memory. An `exomem://review/adoption/<id>` ref triages an Adoption Studio proposal instead, keyed the same way (`review_id:fingerprint`).",
+          "description": "Stable `exomem://review/<id>` reference from review_memory. An `exomem://review/adoption/<id>` ref triages an Adoption Studio proposal instead, keyed the same way (`review_id:fingerprint`). An `exomem://review/family/<family>` ref addresses a whole signal FAMILY instead of one item.",
           "type": "string"
         },
         "action": {
-          "description": "dismiss, snooze, or reopen.",
+          "description": "dismiss, snooze, or reopen for an item; quiet, off, or normal for a family. `quiet` drops that family from the default review union, every due-state carrier and the write-path advisories while it stays reachable on explicit request; `off` additionally drops it from explicit category review; `normal` restores it. Audit measurement is never affected: a quiet family is silent, not clean.",
           "type": "string"
         },
         "until": {
@@ -5701,7 +5754,7 @@
             }
           ],
           "default": null,
-          "description": "Optional short rationale stored with the review decision."
+          "description": "Optional short rationale stored with the review decision. Lead it with a reason code and a colon — `intentional:`, `false_positive:`, `handled:`, `deferred:`, or `too_frequent:` — to record why the decision was made; `quiet` and `off` require one."
         },
         "expected_fingerprint": {
           "anyOf": [

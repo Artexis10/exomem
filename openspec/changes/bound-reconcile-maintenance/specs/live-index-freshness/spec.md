@@ -47,3 +47,9 @@ The system SHALL bound how stale the event-maintained freshness registry can bec
 - **WHEN** one freshness scope has a prior baseline and another scope does not
 - **THEN** the missing scope initializes without drift
 - **AND** real drift in the existing scope is still reported and dispatched
+
+#### Scenario: A user-invoked reconcile invalidates the registries
+
+- **WHEN** a user-invoked reconcile operation completes
+- **THEN** the freshness, matrix-sharing, and inbound-link registries are invalidated as part of
+  that operation's cleanup, independent of the periodic reconciliation timer

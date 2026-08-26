@@ -309,3 +309,82 @@ def test_projector_meta_publishes_code_line_count_docstrings_included(snapshot) 
     meta = snapshot.projector
     assert meta.loc_code == module_code_line_count(VaultProjector)
     assert 0 < meta.loc_code < meta.loc
+
+
+def test_stored_triage_verbs_project_as_standing_review_states() -> None:
+    """Every verb the store can hold maps to a state the schema calls closed.
+
+    `reopen` is absent on purpose: reopening clears the records under an item
+    id, so no stored decision ever carries it. `competing` maps to a CLOSED
+    state because a competing-alternatives stance is a decision somebody made,
+    not outstanding work — the bench's `conflict` is an open state and reading
+    a recorded stance as open is what this row exists to prevent.
+    """
+
+    from epistemic.assertions import CLOSED_REVIEW_STATES
+    from epistemic.projectors.exomem_vault import (
+        ACTION_TO_REVIEW_STATE,
+        _review_state_of,
+    )
+    from exomem.review_state import _RECORDING_ACTIONS
+
+    assert set(ACTION_TO_REVIEW_STATE) == set(_RECORDING_ACTIONS)
+    assert "reopen" not in ACTION_TO_REVIEW_STATE
+    for verb, state in ACTION_TO_REVIEW_STATE.items():
+        assert state in CLOSED_REVIEW_STATES, (verb, state)
+        assert _review_state_of({"action": verb}) == state
+
+
+# --- structured collections in the snapshot (design D10) ------------------------
+
+
+def test_a_vault_without_collections_keeps_every_pre_existing_field_byte_identical(
+    snapshot,
+) -> None:
+    """Additive means additive: the collection-free projection must not move.
+
+    The section is a default-empty tuple, so a vault that holds no collection
+    serialises exactly the bytes it serialised before — the acceptance corpora
+    and every stored comparison stay valid without being regenerated.
+    """
+    assert snapshot.collections == ()
+    assert "collections" not in snapshot.model_dump_json(exclude_defaults=True)
+
+
+def test_a_seeded_planning_and_records_pair_appears_in_the_snapshot(tmp_path: Path) -> None:
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from lifecycle_fixtures import queue_item, report_event, seed_vault
+
+    seed_vault(tmp_path)
+    queue_item(tmp_path, "Batch 1")
+    report_event(tmp_path, "Batch 1")
+
+    projected = VaultProjector(tmp_path).project(phase="p1", taken_at="2026-01-01T00:00:00Z")
+
+    by_profile = {section.profile: section for section in projected.collections}
+    assert set(by_profile) == {"planning", "records"}
+    planning = by_profile["planning"]
+    assert planning.manifest == "Knowledge Base/Planning/Delivery/_collection.md"
+    assert planning.natural_key == ("title",)
+    assert planning.schema_version == 1
+    item = next(entry for entry in planning.items if entry.natural_key["title"] == "Batch 1")
+    assert item.lifecycle == "active"
+    assert item.status == "planned"
+    assert item.key
+    records_section = by_profile["records"]
+    assert records_section.natural_key == ("occurred_on", "title", "event_type")
+    assert [entry.natural_key["title"] for entry in records_section.items] == ["Batch 1"]
+    # A Records item declares no lifecycle or status, and the projector invents
+    # neither: an absent field is absent, never defaulted to a plausible value.
+    assert records_section.items[0].lifecycle is None
+    assert records_section.items[0].status is None
+
+
+def test_the_collections_section_is_versioned(tmp_path: Path) -> None:
+    """0.3.0 adds `CollectionProjection.storage_source`; the output schema moved."""
+
+    projected = VaultProjector(tmp_path).project(phase="p1", taken_at="2026-01-01T00:00:00Z")
+
+    assert projected.projector.version == "0.3.0"

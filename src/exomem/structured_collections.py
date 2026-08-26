@@ -54,6 +54,7 @@ _MAX_PATH_BYTES = 1024
 _MAX_ITEM_KEY_BYTES = 512
 _MAX_MANIFEST_BYTES = 512 * 1024
 _MAX_SAVED_VIEWS = 32
+_MAX_PLAN_JOIN_PAIRS = 4
 _MAX_SAVED_VIEW_NAME_BYTES = 128
 _MAX_SAVED_VIEW_FILTERS = 128
 _MAX_RECORD_PRESENTATION_FIELDS = 32
@@ -269,6 +270,24 @@ def manifest_authoring_contract() -> dict[str, Any]:
             "sections": ["summary", "tables", "notes", "details"],
             "query": "use expand_child for one declared table; expand_children works only when unambiguous",
             "repair": "direct frontmatter edits are canonical; use guarded update refresh_presentation=true after rebaseline",
+        },
+        "plan_links": {
+            "reference": "opaque Planning reference stored under links.plans[].reference",
+            "query": "bounded Records query descriptor: filters and limit",
+            "resolution": (
+                "Records stores, validates and returns these descriptors and does not "
+                "resolve Planning, compare intent with observations, or infer progress"
+            ),
+            "join": {
+                "shape": "map a declared record field to a plan field name",
+                "minimum_pairs": 1,
+                "maximum_pairs": _MAX_PLAN_JOIN_PAIRS,
+                "record_side": "must be a declared item_schema field",
+                "plan_side": (
+                    "bounded non-empty text; Records does not check it against the target"
+                ),
+                "consumer": "the attention surface's unreflected_outcomes family",
+            },
         },
         "views": {
             "definition_keys": ["query", "sort", "source_snapshot"],
@@ -605,6 +624,7 @@ class TemplateSpec:
 class PlanLink:
     reference: str
     query: Mapping[str, Any]
+    join: Mapping[str, str] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -998,6 +1018,34 @@ def inferred_item_key(collection_id: str, serialized_natural_key: str) -> str:
     return str(uuid.uuid5(uuid.UUID(normalized), serialized_natural_key))
 
 
+def manifest_natural_key(manifest: CollectionManifest, values: Mapping[str, Any]) -> str:
+    """Serialise `values` under the manifest's own declared natural key.
+
+    The read and write paths must agree on identity to the byte, so the
+    schema-version / field-order / field-type triple is assembled here once
+    instead of at each call site.
+    """
+    return natural_key_serialization(
+        manifest.schema.version,
+        manifest.schema.natural_key,
+        values,
+        field_types={name: spec.type for name, spec in manifest.schema.fields.items()},
+    )
+
+
+def derived_item_key(manifest: CollectionManifest, values: Mapping[str, Any]) -> str | None:
+    """The identity a complete natural key implies, or `None` when one is absent.
+
+    A partial natural key cannot be serialised, so it cannot carry identity; the
+    caller falls back to a random key rather than deriving one from a hole.
+    """
+    try:
+        serialized = manifest_natural_key(manifest, values)
+    except ValueError:
+        return None
+    return inferred_item_key(manifest.collection_id, serialized)
+
+
 def source_version(path: Path | str) -> SourceVersion:
     file_path = Path(path)
     try:
@@ -1153,7 +1201,7 @@ def _manifest_from_frontmatter(
     views, normalized_views, view_diagnostics = _parse_saved_views(
         frontmatter.get("views", {}), schema, storage, profile, presentation
     )
-    links = _parse_links(frontmatter.get("links", {}))
+    links = _parse_links(frontmatter.get("links", {}), schema)
     return CollectionManifest(
         collection_id=collection_id,
         title=title,
@@ -1901,7 +1949,7 @@ def _parse_templates(root: Path, manifest_rel: str, value: object) -> tuple[Temp
     return tuple(templates)
 
 
-def _parse_links(value: object) -> CollectionLinks:
+def _parse_links(value: object, schema: ItemSchema) -> CollectionLinks:
     links = _mapping(value, "links")
     plans = links.get("plans", [])
     if plans is None:
@@ -1909,12 +1957,53 @@ def _parse_links(value: object) -> CollectionLinks:
     if not isinstance(plans, list) or len(plans) > 32:
         raise CollectionError("INVALID_COLLECTION_LINKS", "plans must be a bounded list")
     result: list[PlanLink] = []
-    for raw in plans:
+    for index, raw in enumerate(plans):
         link = _mapping(raw, "plan link")
         reference = _nonempty_string(link.get("reference"), "plan link reference")
         query = _freeze_mapping(link.get("query"), "plan link query")
-        result.append(PlanLink(reference, query))
+        result.append(PlanLink(reference, query, _parse_plan_join(link.get("join"), schema, index)))
     return CollectionLinks(tuple(result))
+
+
+def _parse_plan_join(
+    value: object, schema: ItemSchema, index: int
+) -> Mapping[str, str] | None:
+    """Validate the authored record-field → plan-field pairs, or return `None`.
+
+    The record side is checked against this manifest's own schema because a pair
+    naming a field that does not exist can never match anything. The plan side is
+    deliberately unchecked text: resolving it here would make Records read
+    Planning, which is exactly what the opaque-reference contract forbids.
+    """
+    if value is None:
+        return None
+    field = f"links.plans[{index}].join"
+    if not isinstance(value, Mapping) or not 1 <= len(value) <= _MAX_PLAN_JOIN_PAIRS:
+        raise CollectionError(
+            "INVALID_COLLECTION_LINKS",
+            "plan link join must hold one to four pairs",
+            {"field": field, "maximum_pairs": _MAX_PLAN_JOIN_PAIRS},
+        )
+    join: dict[str, str] = {}
+    for record_field, plan_field in value.items():
+        if type(record_field) is not str or record_field not in schema.fields:
+            raise CollectionError(
+                "INVALID_COLLECTION_LINKS",
+                "plan link join names a record field the schema does not declare",
+                {"field": field, "record_field": record_field},
+            )
+        if (
+            type(plan_field) is not str
+            or not plan_field.strip()
+            or len(plan_field.encode("utf-8")) > 128
+        ):
+            raise CollectionError(
+                "INVALID_COLLECTION_LINKS",
+                "plan link join plan-side name must be bounded non-empty text",
+                {"field": field, "record_field": record_field},
+            )
+        join[record_field] = plan_field
+    return MappingProxyType(join)
 
 
 def _validate_field_value(name: str, value: Any, spec: FieldSpec) -> None:

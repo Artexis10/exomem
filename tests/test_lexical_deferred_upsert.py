@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import lexstore
+from exomem import freshness, lexstore
 
 
 @pytest.fixture(autouse=True)
@@ -34,8 +34,24 @@ def _quiesce(timeout: float = 20.0) -> bool:
     while time.monotonic() < deadline:
         with lexstore._REPAIRS_LOCK:
             if not lexstore._REPAIRS_IN_FLIGHT:
+                leaked_full_pass = bool(lexstore._FULL_REBUILDS_IN_FLIGHT)
+                leaked_reobservation = bool(lexstore._FULL_REBUILD_REOBSERVED)
                 lexstore._DEFERRED_UPSERTS.clear()
                 lexstore._FULL_REBUILD_REQUESTED.clear()
+                lexstore._FULL_REBUILDS_IN_FLIGHT.clear()
+                lexstore._FULL_REBUILD_REOBSERVED.clear()
+                return not leaked_full_pass and not leaked_reobservation
+        time.sleep(0.01)
+    return False
+
+
+def _wait_for_flight_end(root: Path, timeout: float = 20.0) -> bool:
+    """Wait without clearing pending work, so a test can inspect handoff state."""
+    key = root.resolve()
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with lexstore._REPAIRS_LOCK:
+            if key not in lexstore._REPAIRS_IN_FLIGHT:
                 return True
         time.sleep(0.01)
     return False
@@ -53,12 +69,27 @@ class _FakeStore:
         self.retried.append(list(paths))
         return self.retry_applies
 
-    def rebuild_atomic(self) -> None:
+    def rebuild_atomic(self) -> bool:
         self.rebuilds += 1
+        return True
 
 
 def _install(monkeypatch: pytest.MonkeyPatch, store: _FakeStore) -> None:
     monkeypatch.setattr(lexstore, "get_store", lambda _root: store)
+    checkpoint = freshness.RecallFreshnessCheckpoint(
+        "test-instance",
+        1,
+        (0, 0, "test-digest"),
+        "test-policy",
+        "test-access",
+    )
+    monkeypatch.setattr(
+        lexstore,
+        "runtime_retrieval_catalog_proof",
+        lambda _root, **_kwargs: {
+            scope: checkpoint for scope in freshness.SCOPES
+        },
+    )
 
 
 def test_a_contended_page_is_retried_not_rebuilt_around(
@@ -111,6 +142,174 @@ def test_every_other_caller_still_gets_the_full_rebuild(
     assert _quiesce()
 
     assert store.retried == []
+    assert store.rebuilds == 1
+
+
+def test_duplicate_full_request_during_full_rebuild_is_coalesced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Readiness polling must not turn one full rebuild into an endless chain.
+
+    A stale managed catalogue can be observed by several health and request
+    probes while its detached rebuild is still running. Those observations all
+    describe the same stale generation, so another full request arriving during
+    that full pass is already covered by the active work. It must not queue a
+    second whole-corpus pass behind it.
+    """
+
+    class _RequestingStore(_FakeStore):
+        def rebuild_atomic(self) -> bool:
+            self.rebuilds += 1
+            if self.rebuilds == 1:
+                # Arrives while this vault's full repair pass is active.
+                lexstore._schedule_repair(tmp_path)
+            return True
+
+    store = _RequestingStore()
+    _install(monkeypatch, store)
+
+    lexstore._schedule_repair(tmp_path)
+    assert _quiesce()
+
+    assert store.rebuilds == 1, "an active full rebuild queued a duplicate pass"
+
+
+def test_full_request_during_declined_rebuild_survives_a_bounded_idle_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A declined pass covers nothing, but must not spin into the next pass."""
+
+    class _DecliningOnceStore(_FakeStore):
+        def rebuild_atomic(self) -> bool:
+            self.rebuilds += 1
+            if self.rebuilds == 1:
+                lexstore._schedule_repair(tmp_path)
+                return False
+            return True
+
+    store = _DecliningOnceStore()
+    _install(monkeypatch, store)
+    key = tmp_path.resolve()
+
+    lexstore._schedule_repair(tmp_path)
+    assert _wait_for_flight_end(tmp_path)
+
+    with lexstore._REPAIRS_LOCK:
+        assert key in lexstore._FULL_REBUILD_REQUESTED
+        assert key not in lexstore._FULL_REBUILDS_IN_FLIGHT
+    assert store.rebuilds == 1, "a declined pass chained another whole-vault scan"
+
+    # A later caller crosses the idle boundary and drains the preserved request.
+    lexstore._schedule_repair(tmp_path)
+    assert _quiesce()
+    assert store.rebuilds == 2
+
+
+def test_newer_generation_observed_during_promotion_survives_for_next_flight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A publish that cannot prove current must not acknowledge a newer request."""
+    store = _FakeStore()
+    _install(monkeypatch, store)
+    key = tmp_path.resolve()
+    promotions = 0
+
+    monkeypatch.setattr(lexstore, "_is_configured_runtime_vault", lambda _root: True)
+
+    def promote(
+        _root: Path,
+        *,
+        proof_out: dict[str, object] | None = None,
+    ) -> bool:
+        nonlocal promotions
+        promotions += 1
+        if promotions == 1:
+            # The proof sees a newer projection while the published pass is
+            # still active and requests repair for that uncovered generation.
+            lexstore._schedule_repair(tmp_path)
+            return False
+        if proof_out is not None:
+            proof_out.update(
+                {
+                    scope: freshness.RecallFreshnessCheckpoint(
+                        "test-instance",
+                        promotions,
+                        (0, 0, f"digest-{promotions}"),
+                        "test-policy",
+                        "test-access",
+                    )
+                    for scope in freshness.SCOPES
+                }
+            )
+        return True
+
+    monkeypatch.setattr(lexstore, "_mark_runtime_retrieval_ready_if_current", promote)
+
+    lexstore._schedule_repair(tmp_path)
+    assert _wait_for_flight_end(tmp_path)
+
+    with lexstore._REPAIRS_LOCK:
+        assert key in lexstore._FULL_REBUILD_REQUESTED
+        assert key not in lexstore._FULL_REBUILDS_IN_FLIGHT
+    assert store.rebuilds == 1
+
+    lexstore._schedule_repair(tmp_path)
+    assert _quiesce()
+    assert store.rebuilds == 2
+    assert promotions == 2
+
+
+def test_post_promotion_new_generation_is_not_acknowledged_by_older_proof(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Close the proof-to-active-marker race with generation-tagged requests."""
+    store = _FakeStore()
+    _install(monkeypatch, store)
+    key = tmp_path.resolve()
+
+    def generation(number: int) -> tuple[object, ...]:
+        return tuple(
+            freshness.RecallFreshnessCheckpoint(
+                "test-instance",
+                number,
+                (number, number, f"digest-{number}"),
+                "test-policy",
+                "test-access",
+            )
+            for _scope in freshness.SCOPES
+        )
+
+    proved = generation(1)
+    newer = generation(2)
+    observed = [proved]
+    monkeypatch.setattr(lexstore, "_is_configured_runtime_vault", lambda _root: True)
+    monkeypatch.setattr(
+        lexstore,
+        "_live_repair_generation",
+        lambda _root: observed[0],
+    )
+
+    def promote(
+        _root: Path,
+        *,
+        proof_out: dict[str, object] | None = None,
+    ) -> bool:
+        assert proof_out is not None
+        proof_out.update(dict(zip(freshness.SCOPES, proved, strict=True)))
+        # Generation 2 lands after generation 1 was proved but before the
+        # worker clears its active marker.
+        observed[0] = newer
+        lexstore._schedule_repair(tmp_path)
+        return True
+
+    monkeypatch.setattr(lexstore, "_mark_runtime_retrieval_ready_if_current", promote)
+
+    lexstore._schedule_repair(tmp_path)
+    assert _wait_for_flight_end(tmp_path)
+
+    with lexstore._REPAIRS_LOCK:
+        assert key in lexstore._FULL_REBUILD_REQUESTED
+        assert key not in lexstore._FULL_REBUILDS_IN_FLIGHT
     assert store.rebuilds == 1
 
 

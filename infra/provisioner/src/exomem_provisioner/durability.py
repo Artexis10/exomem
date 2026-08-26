@@ -25,7 +25,7 @@ from .durability_repository import (
     RunKind,
     RunSnapshot,
 )
-from .durability_store import ProviderObjectHead
+from .durability_store import ProviderObjectHead, provider_retention_covers
 from .models import DurabilityRunState
 from .provider_recovery import (
     ProviderIdentityAuthenticator,
@@ -527,19 +527,11 @@ class ExportBackupWorkflow:
         metadata: dict[str, str],
         lock_until: datetime | None,
     ) -> None:
-        retained_until = receipt.retain_until
-        if retained_until is not None and retained_until.tzinfo is None:
-            retained_until = retained_until.replace(tzinfo=UTC)
-        retention_differs = (
-            retained_until is not None
-            if lock_until is None
-            else retained_until is None or retained_until < lock_until
-        )
         if (
             receipt.key != key
             or receipt.size != expected_size
             or receipt.metadata != metadata
-            or retention_differs
+            or not provider_retention_covers(receipt.retain_until, lock_until)
         ):
             raise DurabilityVerificationError("remote provider proof differs from upload")
 

@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import base64
 import datetime as dt
+import io
 from pathlib import Path
 
 import pytest
 
 from exomem import preserve as preserve_module
+from exomem import vault as vault_module
+from exomem.governance import companions
 
 TODAY = dt.date(2026, 5, 25)
 
@@ -18,6 +21,15 @@ def _read(p: Path) -> str:
 
 
 def test_preserve_text_artifact_writes_file(vault: Path) -> None:
+    """The artifact, and the page that makes it addressable.
+
+    This used to assert `sidecar_path is None` when no description was
+    supplied. That was true and it was the defect: an artifact with no page has
+    no identifier, no `ingested_into`, and no corpus presence, because only
+    `.md` is indexed — so citing it reported the source as missing. The
+    property worth pinning is that the page describes the artifact rather than
+    being an empty stub.
+    """
     result = preserve_module.preserve(
         vault,
         scope="Yolo",
@@ -29,7 +41,42 @@ def test_preserve_text_artifact_writes_file(vault: Path) -> None:
     written = vault / result.path
     assert written.exists()
     assert "cease and desist" in _read(written)
-    assert result.sidecar_path is None  # no description supplied
+
+    assert result.sidecar_path == (
+        "Knowledge Base/Evidence/Yolo/letters/2026-05-25-warning-letter.txt.md"
+    )
+    page = _read(vault / result.sidecar_path)
+    assert "type: source" in page
+    assert "ingested_into: []" in page
+    assert "original_filename: 2026-05-25-warning-letter.txt" in page
+    assert f"binary_sha256: {result.hash}" in page
+    assert f"binary_size: {result.size}" in page
+    # Not an empty page: `schema.validate_source` treats an empty body as an
+    # invalid source, and a page that says nothing about the artifact is worse
+    # than useless next to it.
+    assert "## Artifact" in page
+    # The artifact's own bytes are pointed at, never copied into the page.
+    assert "cease and desist" not in page
+    descriptor = vault_module.parse_frontmatter(page, strict=True)[0][
+        "governance_companion"
+    ]
+    assert descriptor == {
+        "version": 1,
+        "state": "classified",
+        "artifact_class": "media",
+        "artifact_path": result.path,
+        "artifact_sha256": result.hash,
+        "artifact_size": result.size,
+        "media_type": "text",
+        "original_filename": "2026-05-25-warning-letter.txt",
+        "semantics": {
+            "projects": [],
+            "tags": [],
+            "types": [],
+            "classes": [],
+        },
+    }
+    assert companions.classify(vault, result.path).projects == ()
 
 
 def test_cap_extracted_text_passthrough_under_limit() -> None:
@@ -52,11 +99,17 @@ def test_capped_sidecar_keeps_corpus_small(vault: Path, monkeypatch: pytest.Monk
         vault, scope="Test", category="docs", filename="huge.docx", data=b"BINARY"
     )
     sidecar = vault / res.sidecar_path
+    descriptor_before = vault_module.parse_frontmatter(
+        sidecar.read_text(encoding="utf-8"), strict=True
+    )[0]["governance_companion"]
     preserve_module.update_sidecar_extraction(vault, sidecar, text="Z" * 20000, engine="markitdown")
     body = _read(sidecar)
     assert "truncated" in body
     assert body.count("Z") < 20000           # capped, not the full 20k chars
     assert len(body.encode("utf-8")) < 5000  # sidecar stays small → corpus protected
+    assert vault_module.parse_frontmatter(body, strict=True)[0][
+        "governance_companion"
+    ] == descriptor_before
 
 
 def test_preserve_binary_artifact_decodes_base64(vault: Path) -> None:
@@ -72,6 +125,22 @@ def test_preserve_binary_artifact_decodes_base64(vault: Path) -> None:
     written = vault / result.path
     assert written.exists()
     assert written.read_bytes() == payload
+    sidecar = vault / (result.sidecar_path or "")
+    descriptor = vault_module.parse_frontmatter(
+        sidecar.read_text(encoding="utf-8"), strict=True
+    )[0]["governance_companion"]
+    assert descriptor["artifact_class"] == "media"
+    assert descriptor["media_type"] == "image"
+    assert descriptor["original_filename"] == "2026-04-15-mri.png"
+    assert descriptor["artifact_path"] == result.path
+    assert descriptor["artifact_sha256"] == result.hash
+    assert descriptor["artifact_size"] == result.size
+    assert descriptor["semantics"] == {
+        "projects": [],
+        "tags": [],
+        "types": [],
+        "classes": [],
+    }
 
 
 def test_preserve_with_description_writes_sidecar(vault: Path) -> None:
@@ -193,6 +262,27 @@ def test_preserve_refuses_oversized_base64(vault: Path) -> None:
     assert exc.value.code == "TOO_LARGE"
 
 
+def test_preserve_refuses_oversized_stream_without_canonical_residue(
+    vault: Path,
+) -> None:
+    folder = vault / "Knowledge Base" / "Evidence" / "Private" / "files"
+
+    with pytest.raises(preserve_module.PreserveError) as exc:
+        preserve_module.preserve_stream(
+            vault,
+            scope="Private",
+            category="files",
+            filename="too-large.bin",
+            stream=io.BytesIO(b"five!"),
+            max_bytes=4,
+            today=TODAY,
+        )
+
+    assert exc.value.code == "TOO_LARGE"
+    assert not (folder / "too-large.bin").exists()
+    assert not (folder / "too-large.bin.md").exists()
+
+
 def test_preserve_auto_creates_scope_and_category_dirs(vault: Path) -> None:
     """Evidence/<scope>/<category>/ folders materialize on first write."""
     folder = vault / "Knowledge Base" / "Evidence" / "NewScope" / "NewCat"
@@ -206,6 +296,29 @@ def test_preserve_auto_creates_scope_and_category_dirs(vault: Path) -> None:
         today=TODAY,
     )
     assert folder.is_dir()
+
+
+def test_preserve_refuses_preexisting_companion_without_writing_artifact(
+    vault: Path,
+) -> None:
+    folder = vault / "Knowledge Base" / "Evidence" / "Private" / "files"
+    folder.mkdir(parents=True)
+    companion = folder / "collision.bin.md"
+    companion.write_text("existing companion", encoding="utf-8")
+
+    with pytest.raises(preserve_module.PreserveError) as exc:
+        preserve_module.preserve_bytes(
+            vault,
+            scope="Private",
+            category="files",
+            filename="collision.bin",
+            data=b"new artifact",
+            today=TODAY,
+        )
+
+    assert exc.value.code == "COMPANION_EXISTS"
+    assert not (folder / "collision.bin").exists()
+    assert companion.read_text(encoding="utf-8") == "existing companion"
 
 
 def test_preserve_with_text_writes_searchable_sidecar(vault: Path) -> None:

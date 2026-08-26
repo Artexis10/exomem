@@ -50,6 +50,12 @@ All MCP mutations, including hosted mutations, SHALL preserve caller-supplied id
 - **THEN** the pending receipt is removed or records a retryable precommit outcome
 - **AND** the retry can acquire the boundary and execute normally
 
+#### Scenario: First attempt fails
+
+- **WHEN** a mutation raises before successful completion and the caller retries it
+- **THEN** the failure is not replayed as a completed result
+- **AND** the retry can acquire the boundary and execute normally
+
 ### Requirement: Crash And Cancellation Release Mutation Authority Safely
 
 The process-safe boundary SHALL not leave a vault permanently unwritable after process termination, request cancellation, or an exception. Authority MUST be released automatically when the owning process exits and in a `finally`-equivalent path for handled cancellation or failure. Transport cancellation MUST NOT erase or misclassify the terminal state of underlying synchronous work that continues in a worker thread. A successor MUST still pass normal readiness and transactional integrity checks before writing.

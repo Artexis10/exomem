@@ -86,6 +86,7 @@ from . import readiness as readiness_module
 from . import reconcile as reconcile_module
 from . import record_memory as record_memory_module
 from . import recover_from_trash as recover_from_trash_module
+from . import referent_runtime as referent_runtime_module
 from . import relation_queue as relation_queue_module
 from . import relation_registry as relation_registry_module
 from . import replace as replace_module
@@ -123,6 +124,7 @@ from .governance import egress as egress_module
 from .governance import operations as governance_operations
 from .governance import policy as governance_policy_module
 from .governance import principal as principal_module
+from .governance import projection_runtime as projection_runtime_module
 from .governance import tool as governance_tool_module
 from .kbdir import kb_dirname
 from .vault import (
@@ -191,7 +193,12 @@ class SearchResult(TypedDict):
 
 
 class ClientArtifactFile(TypedDict):
-    """Client-neutral temporary remote file handle used by ``preserve_artifacts``."""
+    """Client-neutral temporary remote file handle.
+
+    Used by ``capture_source`` for raw material and ``preserve_artifacts`` for
+    proof-bearing artifacts. The handle carries no destination: the lane is the
+    command's, never the transport's.
+    """
 
     download_url: str
     file_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=256)]
@@ -205,6 +212,27 @@ _ClientArtifactFiles = Annotated[
         min_length=1,
         max_length=8,
         description="One to eight temporary client file handles.",
+    ),
+]
+#: The same handles where the parameter is optional. Deliberately not
+#: `_ClientArtifactFiles | None`: a union renders as an `anyOf`, which makes the
+#: JSON-schema generator hoist `ClientArtifactFile` into `$defs` on one surface
+#: and inline it on another, so the personal and hosted tool schemas stop
+#: agreeing. An empty list already means "no files supplied".
+_OptionalClientArtifactFiles = Annotated[
+    list[ClientArtifactFile],
+    Field(
+        max_length=8,
+        description=(
+            "Up to eight temporary client file handles, captured losslessly as "
+            "Sources instead of `content` — an attached transcript, article, "
+            "screenshot, or recording that is raw material. Each requires "
+            "`download_url` and `file_id`; `mime_type` and `file_name` are "
+            "optional. Exomem retrieves each handle server-side, so no bytes "
+            "pass through model-visible arguments. Proof-bearing artifacts go "
+            "to `preserve_artifacts` instead — the lane is chosen by what the "
+            "artifact is for, never by which transport is available."
+        ),
     ),
 ]
 
@@ -365,6 +393,7 @@ def op_bootstrap(
     active_product_names = frozenset(active_descriptor.product_commands)
     requested_workflow = workflow.strip() if workflow and workflow.strip() else "general"
     selected_packs = knowledge_packs_module.selected_pack_state(vault_root)
+    entity_type_registry = entity_types_module.load_entity_types(vault_root)
     source_taxonomy_projection = _source_taxonomy_projection(vault_root, profile=profile)
     simple_actions = simple_action_catalog(
         selected_packs, available_tools=active_product_names
@@ -444,12 +473,30 @@ def op_bootstrap(
                     "a checkable claim about a future observation, which is neither "
                     "observed state nor intent to act; see epistemic_contract"
                 ),
+                # The two lifecycle classes. Every other key here names a KIND of
+                # durable content; these two name a kind of UTTERANCE and where it
+                # goes, because the evidence for them exists only in the
+                # conversation and a hookless client reads nothing else.
+                "stated_intent": (
+                    "work the user commits to, sequences or reorders; "
+                    "route: plan_memory"
+                ),
+                "observed_outcome": (
+                    "reported as happened: produced, delivered, approved, "
+                    "published, failed; route: record_memory"
+                ),
+                "pairing_rule": (
+                    "an outcome on an open committed Planning item is one landing, "
+                    "two consequences: record then transition, once. A tentative "
+                    "claim is not an event, elapsed time not an outcome"
+                ),
             },
             "capture_examples": (
                 "Route durable measurements, completed sessions, transactions, maintenance "
                 "events, and current state here without waiting for a magic save or log verb. "
                 "Resolve one compatible collection before append or update; if none fits, "
-                "describe and propose a concise collection before validate and explicit create."
+                "describe and propose a concise collection before validate and explicit create. "
+                "Paired: one append then one plan triage, once."
             ),
             "review_rule": (
                 "Review may compare planned intent with recorded reality; it must not make "
@@ -507,6 +554,11 @@ def op_bootstrap(
         "intent_first_routing": (
             "Route goals, priorities, commitments, candidate work, and future-state intent to "
             "plan_memory before treating them as observed Records."
+        ),
+        "inventory": (
+            "inspect without a collection lists Planning collections and creates "
+            "nothing; resolve one item with query on title or a natural-key field "
+            "plus lifecycle and status."
         ),
         "evidence_execution_boundary": (
             "Progress evidence is an opaque Records pointer and execution is a thin opaque pointer; "
@@ -698,12 +750,14 @@ def op_bootstrap(
                     "aliases": list(definition.aliases),
                     "capture_guidance": definition.capture_guidance,
                 }
-                for definition in entity_types_module.ENTITY_TYPE_REGISTRY
+                for definition in entity_type_registry.active_definitions
             ],
             "capture_rule": (
                 "After durable work, run one bounded exact-match-first entity pass. "
                 "Create only stable, recurring identities; update an existing entity only "
-                "with new durable facts or relations; skip incidental mentions."
+                "with new durable facts or relations; skip incidental mentions. Unknown "
+                "types are registered through schema_memory(operation='save-entity-types') "
+                "with a why, never by editing frontmatter around the registry rule."
             ),
             "candidate_route": "connect_memory(operation='resolve-entity')",
         },
@@ -796,6 +850,9 @@ def op_bootstrap(
                 "due_state": "bounded advisory counts of what this vault currently owes, arriving unasked on the ordinary results you already receive — the default committed write response, recall, and this payload — as a total, per-category counts, and up to five item references with the date each came due. Categories: predictions past an authored check date, experiments past their declared window with no result, long-unanswered questions, and broken supersession chains. Absent when nothing is due",
                 "due_state_handling": "read the counts as they arrive rather than going looking; a nonzero count is an invitation to consult the review surface when it suits the user, never an instruction to interrupt. Consult a surfaced item's fingerprint state before raising it again, so something already dismissed or snoozed stays quiet until its authored content changes. Use the user's own language, not this system's; do not repeat one inside a single interaction; a moderate signal is your judgement, and silence beats bureaucracy",
                 "due_state_authority": "advisory only; the counts measure authored state, and the runtime never judges, resolves, closes, archives, or writes on their behalf, and never changes retrieval ordering",
+                "review_reason": "every review decision records WHY as a closed code: lead the `why` with intentional:, false_positive:, handled:, deferred:, or too_frequent: followed by the free text. Anything else records unspecified",
+                "family_disposition": "when the user asks to stop hearing about a KIND of signal, quiet that family rather than lowering prominence, which silences everything: triage_memory(ref='exomem://review/family/<family>', action='quiet'|'off'|'normal', why='<code>: ...'). quiet drops it from the default review union and every carrier; off also drops it from explicit category review; normal restores it",
+                "family_disposition_reading": "a quiet family is silent, not clean. It stays reviewable on request, review_memory(mode='dispositions') lists what is quiet and why, and the audit still measures it — so a due-state block that omits a family is never evidence that family has nothing due",
             },
             "note_type_recipes": {
                 "research-note": "Project-scoped finding with Question, Findings, and typed Relations.",
@@ -997,6 +1054,11 @@ def op_bootstrap(
                     "set explain=true only when ranking interpretation is useful; it adds "
                     "a bounded retrieval profile and per-hit evidence without changing recall"
                 ),
+                "referents": (
+                    "partial ambiguous unresolved; never guess"
+                    if profile == "compact"
+                    else "resolved names; partial N unresolved; ambiguous ask; unresolved never guess"
+                ),
                 "score_interpretation": {
                     "bm25": "backend relevance value; interpret using the returned direction and range",
                     "cosine": "vector similarity measurement, not probability",
@@ -1115,6 +1177,76 @@ def op_bootstrap(
     return _filter_bootstrap_payload(payload, active_descriptor)
 
 
+def _require_supported_projected_find_request(
+    *,
+    query: str,
+    mode: str,
+    graph: bool,
+    rerank: bool | None,
+    types: list[str] | None,
+    projects: list[str] | None,
+    tags: list[str] | None,
+    speakers: list[str] | None,
+    file_types: list[str] | None,
+    exclude_file_types: list[str] | None,
+    categories: list[str] | None,
+    kinds: list[str] | None,
+    source_kinds: list[str] | None,
+    domains: list[str] | None,
+    relations: list[str] | None,
+    relation_of: str | None,
+    relation_direction: str,
+    filters: dict[str, Any] | None,
+    result_level: str,
+    scope: str,
+    rerank_max_candidates: _RerankCandidateLimit | None,
+    prefer_compiled: bool,
+    prefer_active: bool,
+    prefer_used: bool,
+    pack: bool,
+    graph_enrich: bool,
+    include_timings: bool,
+    explain: bool,
+) -> None:
+    """Refuse v4 features that do not yet have a projected implementation."""
+
+    del include_timings
+    collections = (
+        types,
+        projects,
+        tags,
+        speakers,
+        file_types,
+        exclude_file_types,
+        categories,
+        kinds,
+        source_kinds,
+        domains,
+        relations,
+    )
+    if (
+        any(value for value in collections)
+        or relation_of is not None
+        or relation_direction != "any"
+        or filters
+        or result_level != "auto"
+        or not query
+        or mode not in {"keyword", "hybrid", "vector"}
+        or (graph and mode == "keyword")
+        or scope not in {"kb", "vault"}
+        or rerank_max_candidates is not None
+        or not prefer_compiled
+        or not prefer_active
+        or prefer_used
+        or pack
+        or graph_enrich
+        or explain
+    ):
+        raise projection_runtime_module.ProjectionRuntimeUnavailable(
+            "governed projected retrieval is unavailable"
+        )
+
+
 def op_find(
     vault_root: Path,
     query: str = "",
@@ -1134,6 +1266,7 @@ def op_find(
     filters: dict[str, Any] | None = None,
     result_level: str = "auto",
     limit: int = 15,
+    continuation: str | None = None,
     scope: str = "kb",
     mode: str = "hybrid",
     graph: bool = True,
@@ -1149,7 +1282,7 @@ def op_find(
     explain: bool = False,
     purpose: str | None = None,
 ) -> list[RetrievalHit] | FindEnvelope:
-    """Search / find / look up / query / retrieve / recall pages in the Knowledge Base (KB vault): notes, sources, insights, failures, patterns, experiments, entities. Hybrid semantic + keyword search, read-only. Filters are AND'd; tag/project lists are OR'd within.
+    """Search / find / look up / query / retrieve / recall pages in the Knowledge Base (KB vault): notes, sources, insights, failures, patterns, experiments, entities. Hybrid semantic + keyword search, read-only. Deterministic entity cues may add an abstention-aware `referents` envelope block without changing hits. Filters are AND'd; tag/project lists are OR'd within.
 
     Args:
         query: Free-text search string. In "hybrid"/"vector" mode it's
@@ -1189,6 +1322,9 @@ def op_find(
         result_level: auto, page, unit, or mixed. Auto preserves page recall
             unless semantic-unit filters request independently ranked units.
         limit: Max hits to return. Default 15, hard cap 100.
+        continuation: Opaque governed-projection continuation returned by a prior page.
+            It is bound to the same principal, authorization session, purpose, request,
+            and retained projected snapshot. Omit for the first page.
         scope: "kb" (default) searches Knowledge Base/ first and
             AUTO-WIDENS to the whole vault when the KB doesn't fill
             `limit` — so content in sibling folders (Tracking/,
@@ -1332,13 +1468,52 @@ def op_find(
         Right after a server start, while models are still warming in the
         background, semantic lanes are skipped rather than blocked on — the
         result is then the envelope {"hits": [...], "warming": {"components":
-        [...], "since_s": N}} and the hits are lexical-only ranking. If
+        [...]}} and the hits are lexical-only ranking. Legacy retrieval also
+        includes process age, while governed projection suppresses it. If
         recall quality matters for the query, retry once "warming" stops
         appearing (typically well under a minute).
     """
     if detail not in ("full", "compact"):
         raise ValueError(
             f"find: detail must be 'full' or 'compact', got {detail!r}"
+        )
+    projection_runtime = projection_runtime_module.load_active_projection_runtime(
+        vault_root
+    )
+    if continuation is not None and projection_runtime is None:
+        raise projection_runtime_module.ProjectedContinuationUnavailable(
+            "INVALID_CONTINUATION: continuation is invalid or expired"
+        )
+    if projection_runtime is not None:
+        _require_supported_projected_find_request(
+            query=query,
+            mode=mode,
+            graph=graph,
+            rerank=rerank,
+            types=types,
+            projects=projects,
+            tags=tags,
+            speakers=speakers,
+            file_types=file_types,
+            exclude_file_types=exclude_file_types,
+            categories=categories,
+            kinds=kinds,
+            source_kinds=source_kinds,
+            domains=domains,
+            relations=relations,
+            relation_of=relation_of,
+            relation_direction=relation_direction,
+            filters=filters,
+            result_level=result_level,
+            scope=scope,
+            rerank_max_candidates=rerank_max_candidates,
+            prefer_compiled=prefer_compiled,
+            prefer_active=prefer_active,
+            prefer_used=prefer_used,
+            pack=pack,
+            graph_enrich=graph_enrich,
+            include_timings=include_timings,
+            explain=explain,
         )
     auto_rerank = rerank is None and find_module.auto_rerank_allowed_by_policy()
     compute_profile: dict[str, str | bool] = {}
@@ -1368,7 +1543,20 @@ def op_find(
         if explain
         else None
     )
-    timings = find_module.FindTimings() if include_timings else None
+    timings = (
+        find_module.FindTimings()
+        if include_timings and projection_runtime is None
+        else None
+    )
+    timings_suppressed = (
+        {"status": "governed_projection"}
+        if projection_runtime is not None
+        else None
+    )
+    # Deliberately not declared in retrieval_models.FindEnvelope: its schema
+    # permits additive properties, while declaring this optional marker would
+    # rewrite the byte-frozen Hosted v1/v2 contracts. This is the same
+    # compatibility boundary used by the advisory due-state carrier below.
     if timings is not None:
         from . import mode as mode_module
 
@@ -1392,57 +1580,119 @@ def op_find(
         )
     degraded: list[str] = []
     failed: list[str] = []
-    # Release gate, part 1 of 2 (design D4): decide the over-fetch pool BEFORE
-    # retrieval, from the request alone. `gate_state` costs one `is_dir()` on
-    # an ungoverned vault, so the empty-policy fast path keeps `limit` exactly
-    # as the caller asked and the latency profile is unchanged.
-    _release_policy, _release_active = egress_module.gate_state(vault_root)
-    retrieval_limit = egress_module.pool_limit(limit) if _release_active else limit
-    hits = find_module.find(
-        vault_root,
-        query=query,
-        types=types,
-        projects=projects,
-        tags=tags,
-        speakers=speakers,
-        file_types=file_types,
-        exclude_file_types=exclude_file_types,
-        categories=categories,
-        kinds=kinds,
-        source_kinds=source_kinds,
-        domains=domains,
-        relations=relations,
-        relation_of=relation_of,
-        relation_direction=relation_direction,
-        filters=filters,
-        result_level=result_level,
-        limit=retrieval_limit,
-        scope=scope,
-        mode=mode,
-        graph=graph,
-        rerank=rerank,
-        rerank_max_candidates=rerank_max_candidates,
-        # rerank=None uses the mode/device-gated auto policy. Explicit
-        # true/false from the caller always wins over auto.
-        auto_rerank=auto_rerank,
-        prefer_compiled=prefer_compiled,
-        prefer_active=prefer_active,
-        prefer_used=prefer_used,
-        timings=timings,
-        degraded_out=degraded,
-        failed_out=failed,
-        retrieval_trace=retrieval_trace,
-    )
-    # Release gate, part 2 of 2 (design D2): decisions are computed HERE —
-    # strictly after `find()` has returned and deep-copied its candidates into
-    # the shared `_FIND_CACHE`, and before `assemble_pack` and serialization.
-    # Nothing principal-dependent may run any earlier than this line, or one
-    # principal's decisions would be cached for the next.
-    with find_module._span(timings, "release_gate"):
-        release = egress_module.annotate_hits(
-            vault_root, hits, limit=limit, purpose=purpose
+    projected_continuation: str | None = None
+    if projection_runtime is not None:
+        who = principal_module.effective_principal()
+        projected = projection_runtime_module.find_projected_hits(
+            Path(vault_root),
+            projection_runtime,
+            query=query,
+            limit=limit,
+            scope=scope,
+            mode=mode,
+            graph=graph,
+            rerank=rerank,
+            auto_rerank=auto_rerank,
+            prefer_compiled=prefer_compiled,
+            prefer_active=prefer_active,
+            rank_config=find_module._active_ranking(),
+            principal=who,
+            purpose=purpose,
+            continuation=continuation,
+        )
+        projected_continuation = projected.continuation
+        projected_hits = list(projected.hits)
+        degraded.extend(projected.warming_components)
+        release = egress_module.annotate_projected_hits(
+            Path(vault_root),
+            projected_hits,
+            policy=projection_runtime.snapshot.policy,
+            principal=who,
+            purpose=projected.declared_purpose,
+            withheld_paths=projected.withheld_paths,
         )
         hits = release.hits
+    else:
+        # Release gate, part 1 of 2 (design D4): decide the over-fetch pool BEFORE
+        # retrieval, from the request alone. `gate_state` costs one `is_dir()` on
+        # an ungoverned vault, so the empty-policy fast path keeps `limit` exactly
+        # as the caller asked and the latency profile is unchanged.
+        _release_policy, _release_active = egress_module.gate_state(vault_root)
+        retrieval_limit = (
+            egress_module.pool_limit(limit) if _release_active else limit
+        )
+        catalog_proof: dict[str, Any] = {}
+        hits = find_module.find(
+            vault_root,
+            query=query,
+            types=types,
+            projects=projects,
+            tags=tags,
+            speakers=speakers,
+            file_types=file_types,
+            exclude_file_types=exclude_file_types,
+            categories=categories,
+            kinds=kinds,
+            source_kinds=source_kinds,
+            domains=domains,
+            relations=relations,
+            relation_of=relation_of,
+            relation_direction=relation_direction,
+            filters=filters,
+            result_level=result_level,
+            limit=retrieval_limit,
+            scope=scope,
+            mode=mode,
+            graph=graph,
+            rerank=rerank,
+            rerank_max_candidates=rerank_max_candidates,
+            # rerank=None uses the mode/device-gated auto policy. Explicit
+            # true/false from the caller always wins over auto.
+            auto_rerank=auto_rerank,
+            prefer_compiled=prefer_compiled,
+            prefer_active=prefer_active,
+            prefer_used=prefer_used,
+            timings=timings,
+            degraded_out=degraded,
+            failed_out=failed,
+            retrieval_trace=retrieval_trace,
+            catalog_proof_out=catalog_proof,
+        )
+        # Release gate, part 2 of 2 (design D2): decisions are computed HERE —
+        # strictly after `find()` has returned and deep-copied its candidates into
+        # the shared `_FIND_CACHE`, and before `assemble_pack` and serialization.
+        # Nothing principal-dependent may run any earlier than this line, or one
+        # principal's decisions would be cached for the next.
+        with find_module._span(timings, "release_gate"):
+            release = egress_module.annotate_hits(
+                vault_root, hits, limit=limit, purpose=purpose
+            )
+            hits = release.hits
+    referents: dict[str, Any] | None = None
+    if projection_runtime is None:
+        # Referents compose over the released vault hits; the projected (hosted
+        # runtime) path has no vault registry or graph sidecar to resolve against.
+        referent_cue = referent_runtime_module.cue_for_find(
+            vault_root=vault_root,
+            query=query,
+            mode=mode,
+        )
+        if referent_cue is not None:
+            with find_module._span(timings, "referents"):
+                try:
+                    referents = referent_runtime_module.resolve_for_find(
+                        vault_root,
+                        query=query,
+                        hits=hits,
+                        mode=mode,
+                        graph=graph,
+                        release=release,
+                        purpose=purpose,
+                        cue=referent_cue,
+                        expected_recall_checkpoints=catalog_proof or None,
+                    )
+                except Exception:  # noqa: BLE001 - optional enrichment soft-fails
+                    referents = None
     pack_obj: dict | None = None
     if pack:
         with find_module._span(timings, "pack"):
@@ -1461,14 +1711,15 @@ def op_find(
             compact=(detail == "compact"),
             withheld_paths=release.withheld_paths,
         )
-        ref_index = memory_refs_module.ReferenceIndex(vault_root)
-        refs = ref_index.refs_for_paths(
-            [str(hit.get("path") or "") for hit in hit_dicts]
-        )
-        for hit in hit_dicts:
-            ref = refs.get(str(hit.get("path") or ""))
-            if ref:
-                hit["ref"] = ref
+        if projection_runtime is None:
+            ref_index = memory_refs_module.ReferenceIndex(vault_root)
+            refs = ref_index.refs_for_paths(
+                [str(hit.get("path") or "") for hit in hit_dicts]
+            )
+            for hit in hit_dicts:
+                ref = refs.get(str(hit.get("path") or ""))
+                if ref:
+                    hit["ref"] = ref
         if retrieval_trace is not None:
             retrieval_explain_module.attach_hit_explanations(retrieval_trace, hit_dicts)
         # Notices occupy only the slots the over-fetch pool could not backfill.
@@ -1476,25 +1727,25 @@ def op_find(
     timings_dict = timings.as_dict() if timings is not None else None
     # Durable structured log → feeds the offline retrieval feedback loop.
     # Best-effort; never affects the returned result.
-    query_log.log_find_call(
-        query=query, mode=mode, scope=scope,
-        types=types, projects=projects, tags=tags,
-        limit=limit, rerank=rerank, prefer_compiled=prefer_compiled,
-        prefer_used=prefer_used,
-        graph=graph, hits=hits,
-        timing_summary=_timing_log_summary(timings_dict),
-    )
+    if projection_runtime is None:
+        query_log.log_find_call(
+            query=query, mode=mode, scope=scope,
+            types=types, projects=projects, tags=tags,
+            limit=limit, rerank=rerank, prefer_compiled=prefer_compiled,
+            prefer_used=prefer_used,
+            graph=graph, hits=hits,
+            timing_summary=_timing_log_summary(timings_dict),
+        )
     # Warming marker: the server just started and the background warm-up is
     # still loading models, so one or more semantic lanes were skipped —
     # these hits are lexical-only ranking. Present only during that window
     # (~30s per process start; minutes on a first-ever model download).
     warming: dict | None = None
     if degraded:
-        info = readiness_module.warming_info() or {}
-        warming = {
-            "components": sorted(set(degraded)),
-            "since_s": info.get("since_s", 0.0),
-        }
+        warming = {"components": sorted(set(degraded))}
+        if projection_runtime is None:
+            info = readiness_module.warming_info() or {}
+            warming["since_s"] = info.get("since_s", 0.0)
     # Degraded marker: a semantic lane FAILED post-warm (not merely deferred) so
     # the hits are a silently weaker ranking — vector→BM25, or every-lane-empty→
     # keyword. Distinct from `warming`: warming is the transient, expected boot
@@ -1503,24 +1754,37 @@ def op_find(
     degraded_marker: list[str] | None = sorted(set(failed)) if failed else None
     if (
         timings_dict is None
+        and timings_suppressed is None
         and warming is None
         and degraded_marker is None
         and retrieval_trace is None
+        and projected_continuation is None
     ):
-        if not pack:
+        if not pack and referents is None:
             return hit_dicts
-        return {"hits": hit_dicts, "pack": pack_obj}
+        out = {"hits": hit_dicts}
+        if pack:
+            out["pack"] = pack_obj
+        if referents is not None:
+            out["referents"] = referents
+        return out
     out: dict = {"hits": hit_dicts}
     if pack:
         out["pack"] = pack_obj
     if timings_dict is not None:
         out["timings"] = timings_dict
+    if timings_suppressed is not None:
+        out["timings_suppressed"] = timings_suppressed
+    if projected_continuation is not None:
+        out["continuation"] = projected_continuation
     if warming is not None:
         out["warming"] = warming
     if degraded_marker is not None:
         out["degraded"] = degraded_marker
     if retrieval_trace is not None:
         out["retrieval_profile"] = retrieval_trace.profile()
+    if referents is not None:
+        out["referents"] = referents
     return out
 
 
@@ -2413,6 +2677,34 @@ def op_reconcile(
             due_state_module.reconcile(vault_root)
         except Exception:  # noqa: BLE001 — healing a projection never fails reconcile
             log.debug("could not heal the due-state projection", exc_info=True)
+        # The review-state store's own healer, and the only place compaction is
+        # guaranteed to run on a vault that writes decisions rarely. Reported
+        # rather than silent: a purge nobody can see is the failure mode this
+        # repository has already paid for once.
+        # Read at the ELEVATED limit. Every ordinary read of this store fails
+        # closed past `_STATE_READ_LIMIT`, which is right — but compaction is
+        # the only way back under it and has to read the file to do its work,
+        # so without a higher ceiling here the refusal would be a permanent
+        # lockout. This is the operator-invoked healer and the one path allowed
+        # past.
+        # A failure here is REPORTED, not swallowed. Since the decision read
+        # started failing closed, this is the only road back from a store the
+        # runtime refuses — so an operator who runs the healer and is told
+        # nothing has no way to learn that the healer could not run either.
+        try:
+            result["review_state_compaction"] = review_state_module.ReviewStateStore(
+                vault_root
+            ).compact(read_limit=review_state_module.recovery_read_limit())
+        except Exception as error:  # noqa: BLE001 — compaction never fails reconcile
+            # The code, not the message: the message carries the store's
+            # absolute path, and this value lands in a tool result. Matched
+            # against the store's own closed vocabulary rather than split on a
+            # colon, because an `OSError("cannot read /abs/path: boom")` has one
+            # too and that spelling leaked the path.
+            code = review_state_module.error_code(error)
+            result["review_state_compaction"] = {"error": code}
+            log.warning("review-state compaction failed during reconcile: %s", code)
+            log.debug("could not compact the review state", exc_info=True)
     if active_mutation_request_id() is None:
         return reconcile_module.finalize_graph_rebuild_handoff(vault_root, result)
     return result
@@ -3124,7 +3416,9 @@ def op_link(
     reconcile via desk audit.
 
     Args:
-        entity_type: Stable ID returned by bootstrap.entity_registry.
+        entity_type: stable ID from the active entity registry — core: person,
+            organization, concept, library, decision — plus any vault-defined type in
+            `_Schema/entity-types.yaml`.
         name: Unicode display name stored in frontmatter and the H1.
         slug: Optional lowercase ASCII kebab-case filename component.
         summary: One-paragraph description for the `## Summary` section.
@@ -3140,7 +3434,8 @@ def op_link(
         {path, warnings}.
 
     Errors:
-        INVALID_LINK (bad entity_type, decision_status, missing required);
+        ENTITY_TYPE_UNKNOWN (entity_type not in the active registry);
+        INVALID_LINK (bad decision_status, missing required);
         ENTITY_EXISTS (update/link the returned active entity instead);
         ENTITY_AMBIGUOUS (reconcile the returned bounded candidates first).
     """
@@ -4250,6 +4545,7 @@ def op_ask_memory(
     filters: dict[str, Any] | None = None,
     result_level: str = "auto",
     limit: int = 15,
+    continuation: str | None = None,
     scope: str = "kb",
     mode: str = "hybrid",
     detail: str = "compact",
@@ -4298,6 +4594,7 @@ def op_ask_memory(
         filters: Structured page/unit metadata filters.
         result_level: auto, page, unit, or mixed.
         limit: Max hits. Default 15.
+        continuation: Opaque continuation returned by a prior governed recall page.
         scope: kb, vault, or kb-only.
         mode: hybrid, keyword, or vector.
         detail: compact or full hit detail.
@@ -4337,6 +4634,7 @@ def op_ask_memory(
         filters=filters,
         result_level=result_level,
         limit=limit,
+        continuation=continuation,
         scope=scope,
         mode=mode,
         graph=graph,
@@ -4386,6 +4684,8 @@ def _with_due_state(
     for `warming`, `degraded`, `timings` and `explain`, and both shapes are already
     in the declared return union.
     """
+    if projection_runtime_module.requires_projected_read_boundary(vault_root):
+        return result
     try:
         from . import due_state as due_state_module
 
@@ -4564,8 +4864,9 @@ def op_remember(
     """Remember a durable conclusion as compiled governed knowledge.
 
     This is for distilled thinking, decisions, findings, failures, patterns,
-    experiments, and production logs. Raw material belongs in `capture_source`;
-    proof artifacts belong in `preserve_evidence`.
+    experiments, and production logs. Raw material belongs in `capture_source`,
+    which takes attached file handles as well as text; proof-bearing artifacts
+    belong in `preserve_evidence` or `preserve_artifacts`.
 
     For each `sources:` wikilink, this appends the new note's wikilink to that
     source's `ingested_into:` frontmatter, maintaining the source-to-note graph
@@ -4969,8 +5270,8 @@ def op_replace_memory(
 def op_capture_source(
     vault_root: Path,
     source_schema: object,
-    content: str,
     title: str,
+    content: str = "",
     slug: str | None = None,
     source_type: str | None = None,
     url: str | None = None,
@@ -4981,8 +5282,14 @@ def op_capture_source(
     source_kind: str | None = None,
     domain: str | None = None,
     projects: list[str] | None = None,
+    files: _OptionalClientArtifactFiles = (),  # noqa: B006 - read-only
 ) -> dict:
     """Capture raw source material and optionally return compile guidance.
+
+    Takes `content` for text or `files` for attached file handles, stored
+    losslessly under `Sources/`. This command is for raw material; proof-bearing
+    artifacts go to `preserve_evidence`/`preserve_artifacts`. Choose by what the
+    artifact is for, not by what the client can carry.
 
     The raw source is preserved first. If `compile_guidance=true`, Exomem then
     returns a proposal for a future compiled note, without silently converting
@@ -4994,8 +5301,8 @@ def op_capture_source(
     (`domain`). Both are open vocabularies.
 
     Args:
-        content: Raw source text.
         title: Source title.
+        content: Raw source text. Supply this or `files`, not both.
         slug: Optional lowercase ASCII kebab-case filename component.
         source_type: What the artifact IS. Same axis as source_kind; supply
             either one. Open vocabulary, not a closed set.
@@ -5014,7 +5321,25 @@ def op_capture_source(
             source_kind and equally extensible.
         projects: Project keys this source serves. Never affects where it is
             stored; one source may serve several projects.
+        files: Temporary client file handles, captured losslessly as Sources
+            instead of `content`. See the parameter schema for the shape.
     """
+    if files:
+        from . import client_artifacts
+
+        return client_artifacts.capture_source_artifacts(
+            vault_root,
+            source_schema=source_schema,
+            title=title,
+            files=files,
+            slug=slug,
+            source_type=source_type or source_kind,
+            url=url,
+            tags=tags,
+            why_captured=why_captured,
+            domain=domain,
+            projects=projects,
+        )
     source = op_add(
         vault_root,
         source_schema,
@@ -5113,26 +5438,40 @@ def op_preserve_artifacts(
             and `file_id`; `mime_type` and `file_name` are optional.
     """
     from . import client_artifacts
+    from . import due_state as due_state_module
 
-    return client_artifacts.preserve_artifacts(
-        vault_root, scope=scope, category=category, files=files
-    )
+    # One invocation preserves N artifacts. The batch scope is what keeps that
+    # one counters block rather than N: see `due_state.batch_scope`.
+    with due_state_module.batch_scope(vault_root):
+        return client_artifacts.preserve_artifacts(
+            vault_root, scope=scope, category=category, files=files
+        )
 
 
-def op_transfer_artifact(vault_root: Path, operation: str = "upload") -> dict:
+def op_transfer_artifact(
+    vault_root: Path, operation: str = "upload", lane: str = "evidence"
+) -> dict:
     """Prepare out-of-band binary artifact transfer.
 
     Compatibility transport for clients that cannot supply file handles to
-    `preserve_artifacts`. Returns a short-lived token and URL for uploading
-    evidence binaries or downloading a vault file into a sandbox. Minting an
+    `capture_source` or `preserve_artifacts`. Returns a short-lived token and URL
+    for uploading a binary or downloading a vault file into a sandbox. Minting an
     upload token does not mean bytes were stored.
 
     Args:
         operation: upload or download.
+        lane: where an upload lands — `source` for raw material, `evidence` for
+            proof-bearing artifacts. Bound into the token when it is minted, so
+            the destination cannot be chosen by whoever posts the bytes. Ignored
+            for downloads.
     """
     _ = vault_root
     if operation not in ("upload", "download"):
         raise ValueError("INVALID_MODE: transfer_artifact operation must be 'upload' or 'download'")
+    if lane not in upload_tokens.UPLOAD_LANES:
+        raise ValueError(
+            f"INVALID_MODE: transfer_artifact lane must be one of {upload_tokens.UPLOAD_LANES}"
+        )
     secret = os.environ.get("EXOMEM_UPLOAD_TOKEN", "").strip() or None
     base_url = os.environ.get("EXOMEM_BASE_URL", "").strip().rstrip("/")
     large_base_url = os.environ.get("EXOMEM_LARGE_UPLOAD_BASE_URL", "").strip().rstrip("/") or None
@@ -5141,6 +5480,7 @@ def op_transfer_artifact(vault_root: Path, operation: str = "upload") -> dict:
         base_url,
         scope=operation,
         large_base_url=large_base_url if operation == "upload" else None,
+        lane=lane if operation == "upload" else None,
     )
 
 
@@ -5160,11 +5500,27 @@ def op_process_media(
         path: Optional governed Knowledge Base media path. Omit for bounded all-media work.
         operation: process, status, or retry.
     """
+    from . import due_state as due_state_module
+
+    validate_process_media_operation(operation)
+    if operation == "status":
+        # Reads only, so there is no batch to scope.
+        return _process_media(vault_root, path=path, operation=operation)
+    # Bounded all-media work writes one transcript per artifact, so the no-path
+    # form is a batch and must not deliver one counters block per artifact.
+    with due_state_module.batch_scope(vault_root):
+        return _process_media(vault_root, path=path, operation=operation)
+
+
+def _process_media(
+    vault_root: Path,
+    *,
+    path: str | None,
+    operation: str,
+) -> dict:
     from . import index_sync, media_jobs
     from .cli_ops import OpError
     from .writer_lease import active_manager, active_mutation_request_id
-
-    validate_process_media_operation(operation)
 
     vault_root = Path(vault_root).resolve()
     manager = active_manager()
@@ -5344,9 +5700,16 @@ def op_review_memory(
     `maintain_memory`, not here.
 
     Args:
-        mode: attention, activation, item, audit, provenance, evolution,
-            compilation, stale, contradiction, unprocessed-sources, relation-debt,
-            relation-queue, or adoption. `relation-queue` returns the read-only,
+        mode: attention, activation, item, audit, dispositions, provenance,
+            evolution, compilation, stale, contradiction, unprocessed-sources,
+            relation-debt, relation-queue, adoption, or plan-progress.
+            `plan-progress` reports, for each committed Planning item declaring
+            `progress_evidence`, the counts its bound Records views return; it is
+            derived and read-only, and it scores nothing. `dispositions` lists every
+            signal family a user has set to `quiet` or `off` through
+            `triage_memory`, with its reason code, why, timestamp, origin, and
+            per-family manual dismissal count; a quiet family is silent on the
+            carriers, not clean. `relation-queue` returns the read-only,
             batched relation-acceptance queue (deterministic suggestion candidates
             grouped by source page, with signal fingerprints and coverage
             counters); accept a candidate via
@@ -5403,6 +5766,8 @@ def op_review_memory(
         if not ref:
             raise ValueError("INVALID_REVIEW: item mode requires `ref`")
         return attention_module.item_by_ref(vault_root, ref).as_dict()
+    if mode == "dispositions":
+        return _dispositions_view(vault_root)
     if mode == "audit":
         return op_audit(
             vault_root,
@@ -5453,7 +5818,7 @@ def op_review_memory(
         return op_propose_compilation(vault_root, sources=sources, suggested_title=suggested_title)
     raise ValueError(
         "INVALID_MODE: review_memory mode must be attention, activation, item, audit, "
-        "provenance, evolution, compilation, stale, contradiction, "
+        "dispositions, provenance, evolution, compilation, stale, contradiction, "
         "unprocessed-sources, relation-debt, relation-queue, adoption, or plan-progress"
     )
 
@@ -5527,6 +5892,193 @@ def _refuse_pairless_stance(ref: str, action: str) -> None:
     )
 
 
+def _adoption_run_paths(result: Any) -> list[str]:
+    """Governed pages one Adoption Studio apply just wrote, from its outcomes."""
+    if not isinstance(result, dict):
+        return []
+    outcomes = result.get("outcomes")
+    rows = outcomes.get("items") if isinstance(outcomes, dict) else outcomes
+    out: list[str] = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        written = row.get("source_path") or row.get("destination") or row.get("path")
+        if written:
+            out.append(str(written))
+    return list(dict.fromkeys(out))
+
+
+def _adopted_paths(result: Any) -> list[str]:
+    """Governed pages one adoption invocation just wrote, from its own outcomes.
+
+    Read out of the command's reported result rather than intercepted inside the
+    writer: adoption copies and compiles through the vault writer, not the
+    semantic-write seam the per-write projection delta hangs on, so the honest
+    place to learn what it wrote is what it says it wrote.
+    """
+    if not isinstance(result, dict):
+        return []
+    out: list[str] = []
+    copy = result.get("copy")
+    if isinstance(copy, dict):
+        for row in copy.get("copied_sources") or []:
+            if isinstance(row, dict) and row.get("source_path"):
+                out.append(str(row["source_path"]))
+    compiled = result.get("compile")
+    if isinstance(compiled, dict):
+        for row in compiled.get("compiled_notes") or []:
+            if isinstance(row, dict) and row.get("path"):
+                out.append(str(row["path"]))
+    return list(dict.fromkeys(out))
+
+
+def _apply_batch_deltas(vault_root: Path, rel_paths: list[str]) -> None:
+    """Bring the due-state projection up to date for a batch's governed writes.
+
+    Bounded per page — one parse, four page-local predicates, one small JSON
+    replace — and best effort, exactly like the per-write delta it stands in
+    for. Without it a bulk adoption leaves the projection describing the vault
+    as it was before the batch, and the emission ledger's write count, which is
+    the denominator every "more automatic" claim is measured against, silently
+    under-reports the writes that actually happened.
+    """
+    if not rel_paths:
+        return
+    from . import due_state as due_state_module
+
+    for rel_path in rel_paths:
+        try:
+            due_state_module.apply_write_delta(vault_root, rel_path)
+        except Exception:  # noqa: BLE001 — a projection delta never breaks a write
+            log.debug("due-state delta failed for %s", rel_path, exc_info=True)
+
+
+def _set_family_disposition(
+    vault_root: Path,
+    *,
+    ref: str,
+    action: str,
+    until: str | None,
+    why: str | None,
+) -> dict:
+    """Record or clear one signal family's disposition through the triage surface.
+
+    Why the triage surface and not a new tool or parameter: the architecture
+    forbids a new front door, `ref` and `action` are free strings in the pinned
+    input schema, and the write-advisory namespace already set the precedent of
+    a namespaced ref plus a new action on this same command.
+    """
+    family = review_state_module.parse_family_ref(ref)
+    if action not in review_state_module.DISPOSITION_ACTIONS:
+        raise ValueError(
+            "INVALID_REVIEW_ACTION: a family reference accepts quiet, off, or normal; "
+            "item actions address one item's reference"
+        )
+    if until:
+        raise ValueError(
+            "INVALID_REVIEW_ACTION: `until` is valid only for snooze, which is an "
+            "item action"
+        )
+    store = review_state_module.ReviewStateStore(vault_root)
+    recorded = store.set_disposition(family, action, why=why)
+    return {"ref": review_state_module.family_ref(family), **recorded}
+
+
+def _dispositions_view(vault_root: Path) -> dict:
+    """Every family with a non-default disposition, and what it has cost.
+
+    The manual dismissal count rides along because a disposition without one is
+    half the story: "you quieted this family, and you had put down N of its
+    items by hand before you did" is what makes the decision legible later.
+    """
+    store = review_state_module.ReviewStateStore(vault_root)
+    payload = store.load()
+    dispositions = payload.get("dispositions") or {}
+    keys_by_family = _review_keys_by_family(vault_root)
+    counts = review_state_module.manual_dismissals_by_family(payload, keys_by_family)
+    rows = []
+    for family in sorted(dispositions):
+        record = dispositions[family]
+        if not isinstance(record, dict):
+            continue
+        rows.append(
+            {
+                "family": family,
+                "ref": review_state_module.family_ref(family),
+                "disposition": record.get("disposition"),
+                "reason": record.get("reason"),
+                "why": record.get("why"),
+                "updated_at": record.get("updated_at"),
+                "origin": record.get("origin"),
+                "manual_dismissals": counts.get(family, 0),
+            }
+        )
+    return {
+        "dispositions": rows,
+        "registered_families": sorted(review_state_module.registered_families()),
+        "reason_codes": list(review_state_module.REASON_CODES),
+        "note": (
+            "A quiet family is silent on the daily surface and on every carrier, and "
+            "still reviewable by naming its category. It is not evidence the family "
+            "is clean."
+        ),
+    }
+
+
+def _review_keys_by_family(vault_root: Path) -> dict[str, list[str]]:
+    """``family -> the record keys its current signals occupy``.
+
+    Composed from the live surface rather than stored, because the store keys on
+    `review_id:fingerprint` and deliberately knows nothing about which queue
+    produced a signal. Read over the all-states view of the triageable
+    categories, so a dismissed item still counts — it is precisely the thing
+    being counted.
+
+    `record_surfacing=False`: this is a COUNT, not a surface. It runs the whole
+    fusion to read one number out of it and shows nobody anything, so stamping
+    the ledger here would record a first surfacing for every item in the vault
+    every time somebody asked which families are quiet.
+
+    Attribution is by COMPONENT fingerprint, not by the item's fused one. A page
+    flagged by two families carries one fused key that `apply_for_item` records
+    against, and counting that key under both families would report one
+    dismissal twice. The component fingerprint is the per-finding identity
+    `apply_for_item` also records, so each family is charged for its own signal
+    and for nothing else.
+    """
+    out: dict[str, list[str]] = {}
+    try:
+        report = attention_module.attention(
+            vault_root,
+            categories=list(attention_module._TRIAGEABLE_CATEGORIES),
+            limit=0,
+            state="all",
+            record_surfacing=False,
+        )
+    except Exception:  # noqa: BLE001 — a count never breaks the view
+        log.debug("dispositions view could not read the review surface", exc_info=True)
+        return out
+    items = [item for item in report.items if item.item_id]
+    # ONE ref resolution for the whole view. `refs_for_paths` opens a database
+    # connection, and asking it per item made a 103-item vault open 103 of them
+    # to answer a question about four families.
+    paths: list[str] = []
+    for item in items:
+        paths.extend(review_state_module.component_paths(item))
+    refs = review_state_module.refs_for_paths(vault_root, paths) if paths else {}
+    for item in items:
+        for category, value in review_state_module.component_fingerprints(
+            vault_root, item, with_category=True, refs=refs
+        ):
+            if not category:
+                continue
+            key = f"{item.item_id}:{value}"
+            keys = out.setdefault(category, [])
+            if key not in keys:
+                keys.append(key)
+    return out
+
+
 def op_triage_memory(
     vault_root: Path,
     ref: str,
@@ -5544,13 +6096,41 @@ def op_triage_memory(
     Args:
         ref: Stable `exomem://review/<id>` reference from review_memory. An
             `exomem://review/adoption/<id>` ref triages an Adoption Studio
-            proposal instead, keyed the same way (`review_id:fingerprint`).
-        action: dismiss, snooze, or reopen.
+            proposal instead, keyed the same way (`review_id:fingerprint`). An
+            `exomem://review/family/<family>` ref addresses a whole signal
+            FAMILY instead of one item.
+        action: dismiss, snooze, or reopen for an item; quiet, off, or normal
+            for a family. `quiet` drops that family from the default review
+            union, every due-state carrier and the write-path advisories while
+            it stays reachable on explicit request; `off` additionally drops it
+            from explicit category review; `normal` restores it. Audit
+            measurement is never affected: a quiet family is silent, not clean.
         until: Snooze-through date as YYYY-MM-DD; required only for snooze.
-        why: Optional short rationale stored with the review decision.
+        why: Optional short rationale stored with the review decision. Lead it
+            with a reason code and a colon — `intentional:`, `false_positive:`,
+            `handled:`, `deferred:`, or `too_frequent:` — to record why the
+            decision was made; `quiet` and `off` require one.
         expected_fingerprint: Optional reviewed fingerprint; a mismatch refuses
             the write and asks the caller to refresh.
     """
+    normalized_action = str(action or "").strip().lower()
+    if review_state_module.is_family_ref(ref):
+        # BEFORE every other namespace: a family reference names a KIND of
+        # signal, so none of the item-shaped branches below can resolve it, and
+        # letting one try produces a reference error about an item nobody asked
+        # about.
+        return _set_family_disposition(
+            vault_root,
+            ref=ref,
+            action=normalized_action,
+            until=until,
+            why=why,
+        )
+    if normalized_action in review_state_module.DISPOSITION_ACTIONS:
+        raise ValueError(
+            "INVALID_REVIEW_ACTION: quiet, off, and normal address a signal FAMILY; "
+            f"use {review_state_module.FAMILY_PREFIX}<family>"
+        )
     if corpus_aware_module.is_write_advisory_ref(ref):
         return corpus_aware_module.triage_write_advisory(
             vault_root,
@@ -5646,6 +6226,13 @@ def op_triage_memory(
             "categories": item.categories,
         }
     )
+    state_resolved_only = [
+        category
+        for category in item.categories
+        if category == "entity_type_unregistered"
+    ]
+    if state_resolved_only:
+        result["state_resolved_only_categories"] = state_resolved_only
     return result
 
 
@@ -5720,7 +6307,9 @@ def op_connect_memory(
         max_edges: Graph edge cap.
         traversal_profile: Deterministic graph lens; omission preserves `all`.
         max_body_chars: Per-document stored-body cap for context.
-        entity_type: Entity type for create-entity.
+        entity_type: stable ID from the active entity registry — core: person,
+            organization, concept, library, decision — plus any vault-defined type in
+            `_Schema/entity-types.yaml`.
         name: Entity name for create-entity.
         slug: Optional lowercase ASCII kebab-case entity filename component.
         summary: Entity summary for create-entity.
@@ -5895,20 +6484,29 @@ def op_adopt_vault(
         semantic_max_bytes: Maximum total Markdown bytes read by the semantic census.
         semantic_example_limit: Maximum bounded semantic examples per grouping.
     """
-    return op_adopt(
-        vault_root,
-        path=path,
-        mode=mode,
-        max_depth=max_depth,
-        include_hidden=include_hidden,
-        samples=samples,
-        pack_limit=pack_limit,
-        manifest_path=manifest_path,
-        selected_paths=selected_paths,
-        semantic_max_files=semantic_max_files,
-        semantic_max_bytes=semantic_max_bytes,
-        semantic_example_limit=semantic_example_limit,
-    )
+    from . import due_state as due_state_module
+
+    # Copy and compile modes commit one governed write per selected file, so one
+    # invocation can be a dozen writes. Inside the scope the per-write deltas
+    # still apply and the governor stays quiet; the command's terminal decides
+    # once, after it exits.
+    with due_state_module.batch_scope(vault_root):
+        result = op_adopt(
+            vault_root,
+            path=path,
+            mode=mode,
+            max_depth=max_depth,
+            include_hidden=include_hidden,
+            samples=samples,
+            pack_limit=pack_limit,
+            manifest_path=manifest_path,
+            selected_paths=selected_paths,
+            semantic_max_files=semantic_max_files,
+            semantic_max_bytes=semantic_max_bytes,
+            semantic_example_limit=semantic_example_limit,
+        )
+        _apply_batch_deltas(vault_root, _adopted_paths(result))
+    return result
 
 
 _ADOPTION_STUDIO_ACTIONS = (
@@ -6040,13 +6638,20 @@ def op_adoption_studio(
         if action == "plan":
             return adoption_run_module.plan(vault_root, run_id=run_id)
         if action == "apply":
-            return adoption_run_module.apply(
-                vault_root,
-                run_id=run_id,
-                plan_id=plan_id,
-                retry_failed=retry_failed,
-                only_paths=only_paths,
-            )
+            from . import due_state as due_state_module
+
+            # One apply commits the whole selected plan, so it is a batch by
+            # definition: one counters block at its terminal, not one per page.
+            with due_state_module.batch_scope(vault_root):
+                applied = adoption_run_module.apply(
+                    vault_root,
+                    run_id=run_id,
+                    plan_id=plan_id,
+                    retry_failed=retry_failed,
+                    only_paths=only_paths,
+                )
+                _apply_batch_deltas(vault_root, _adoption_run_paths(applied))
+            return applied
         if action == "cancel":
             return adoption_run_module.cancel(vault_root, run_id=run_id, why=why)
         if action == "finish":
@@ -6101,6 +6706,11 @@ def op_maintain_memory(
     `op_reconcile` itself (idempotent, non-destructive) — so it defaults to
     writing; pass `dry_run=true` to preview instead.
 
+    MCP, REST, and hosted callers may audit or preview with `dry_run=true`, but
+    write-mode maintenance is operator-only: run `exomem maintain --fix` or
+    `exomem maintain --reconcile` on the host. Remote write attempts return
+    `MAINTENANCE_REQUIRES_CLI` before acquiring the mutation boundary.
+
     `mode="fix"` also collapses media sidecars that accumulated nested copies of
     themselves (audit category `duplicated_sidecar`, reportable on its own via
     `mode="audit", categories=["duplicated_sidecar"]`). It keeps the longest
@@ -6131,22 +6741,30 @@ def op_maintain_memory(
             detail=detail,
             legacy_sample_limit=legacy_sample_limit,
         )
+    from . import due_state as due_state_module
+
     if mode == "fix":
-        return op_audit_fix(
-            vault_root,
-            dry_run=True if dry_run is None else dry_run,
-            rebuild_embeddings=rebuild_embeddings,
-        )
+        # A fix pass rewrites every page it can repair, and reconcile rebuilds
+        # the whole projection: both are batches, and neither should be able to
+        # deliver one counters block per file it touched.
+        with due_state_module.batch_scope(vault_root):
+            return op_audit_fix(
+                vault_root,
+                dry_run=True if dry_run is None else dry_run,
+                rebuild_embeddings=rebuild_embeddings,
+            )
     if mode == "reconcile":
-        return op_reconcile(
-            vault_root,
-            dry_run=False if dry_run is None else dry_run,
-            rebuild_graph=rebuild_graph,
-        )
+        with due_state_module.batch_scope(vault_root):
+            return op_reconcile(
+                vault_root,
+                dry_run=False if dry_run is None else dry_run,
+                rebuild_graph=rebuild_graph,
+            )
     if mode == "backfill-ids":
-        return memory_refs_module.backfill_ids(
-            vault_root, dry_run=True if dry_run is None else dry_run
-        )
+        with due_state_module.batch_scope(vault_root):
+            return memory_refs_module.backfill_ids(
+                vault_root, dry_run=True if dry_run is None else dry_run
+            )
     raise ValueError(
         "INVALID_MODE: maintain_memory mode must be audit, fix, reconcile, or backfill-ids"
     )
@@ -6164,6 +6782,7 @@ def op_schema_memory(
     strict: bool = False,
     compare_to: str | None = None,
     proposal: dict | None = None,
+    why: str | None = None,
     include_model_suggestions: bool = False,
 ) -> dict:
     """Infer, validate, diff, or save governed memory schemas.
@@ -6174,7 +6793,7 @@ def op_schema_memory(
     current content hash.
 
     Args:
-        operation: infer, validate, or diff.
+        operation: infer, validate, diff, or save-entity-types.
         name: Lowercase contract slug; required only for `subject="contract"`.
         subject: `contract`, `categories`, `relations`, or `traversal-profiles`.
         project: Optional project scope for inference.
@@ -6184,6 +6803,7 @@ def op_schema_memory(
         strict: In validate mode, signal a failing CLI/CI outcome on findings.
         compare_to: In diff mode, compare to this saved contract instead of corpus reality.
         proposal: Reviewed semantic-language, relation, or traversal-profile proposal.
+        why: Required audit reason for save-entity-types.
         include_model_suggestions: Request response-only optional relation suggestions.
 
     Returns:
@@ -6191,6 +6811,34 @@ def op_schema_memory(
     """
     operation = operation.strip().lower()
     subject = subject.strip().lower()
+    if operation == "save-entity-types":
+        if proposal is None or not isinstance(proposal, dict):
+            raise ValueError(
+                "INCOMPLETE_ENTITY_TYPE_PROPOSAL: save requires a reviewed proposal"
+            )
+        if not why or not why.strip():
+            raise ValueError("WHY_REQUIRED: save-entity-types requires why")
+        findings = entity_types_module.validate_proposal(proposal)
+        if findings:
+            return {
+                "subject": "entity-types",
+                "valid": False,
+                "findings": findings,
+                "saved": None,
+            }
+        saved = entity_types_module.save_registry(
+            vault_root,
+            proposal,
+            expected_hash=expected_hash,
+            observed_ids=entity_types_module.observed_extension_ids(vault_root),
+        )
+        return {
+            "subject": "entity-types",
+            "valid": True,
+            "findings": [],
+            "why": why.strip(),
+            "saved": saved,
+        }
     if subject == "categories":
         if operation == "infer":
             result = memory_schema_module.infer_category_registry(
@@ -7096,6 +7744,7 @@ _SIMPLE_ACTIONS: tuple[str, ...] = (
     "adopt",
     "maintain",
     "record",
+    "plan",
 )
 _SIMPLE_ACTION_PACK_ALIASES: dict[str, tuple[str, ...]] = {
     "ask": ("ask",),
@@ -7106,6 +7755,7 @@ _SIMPLE_ACTION_PACK_ALIASES: dict[str, tuple[str, ...]] = {
     "adopt": ("adopt",),
     "maintain": ("review", "update"),
     "record": ("record",),
+    "plan": ("save", "update"),
 }
 _SIMPLE_ACTION_DEFS: dict[str, dict] = {
     "ask": {
@@ -7116,18 +7766,13 @@ _SIMPLE_ACTION_DEFS: dict[str, dict] = {
             "args": {"detail": "compact", "rerank": False, "deep": True},
         },
         "safety": "read-only; deep mode assembles context and graph enrichment stays explicit",
-        "advanced": ["read_memory", "connect_memory", "review_memory"],
+        "advanced": ["read_memory", "query_dataset", "read_media"],
     },
     "remember": {
         "intent": "Save a durable conclusion as compiled governed knowledge.",
         "route": {"tool": "remember", "args": {"note_type": "insight"}},
         "safety": "additive write; uses note validation and does not preserve raw provenance unless sources are provided",
-        "advanced": [
-            "replace_memory",
-            "edit_memory",
-            "observe_memory",
-            "connect_memory",
-        ],
+        "advanced": ["replace_memory", "edit_memory", "observe_memory"],
     },
     "capture": {
         "intent": (
@@ -7140,7 +7785,12 @@ _SIMPLE_ACTION_DEFS: dict[str, dict] = {
         "route": {"tool": "capture_source", "args": {}},
         "evidence_route": {"tool": "preserve_evidence", "args": {}},
         "safety": "additive write; Sources and Evidence preserve originals/provenance",
-        "advanced": ["transfer_artifact", "compile_source"],
+        "advanced": [
+            "transfer_artifact",
+            "compile_source",
+            "preserve_artifacts",
+            "process_media",
+        ],
     },
     "review": {
         "intent": "Review stale, contradictory, disconnected, or unprocessed knowledge before acting.",
@@ -7148,10 +7798,10 @@ _SIMPLE_ACTION_DEFS: dict[str, dict] = {
         "audit_route": {"tool": "review_memory", "args": {"mode": "audit"}},
         "safety": "read-only by default; triage state changes are explicit through triage_memory",
         "advanced": [
-            "review_memory",
             "review_item_context",
             "triage_memory",
             "compile_source",
+            "coordination_status",
         ],
     },
     "connect": {
@@ -7165,7 +7815,7 @@ _SIMPLE_ACTION_DEFS: dict[str, dict] = {
         "intent": "Assess or import an existing vault safely.",
         "route": {"tool": "adopt_vault", "args": {"mode": "scan-only"}},
         "safety": "scan-only by default; copy/compile modes require explicit options and preserve originals",
-        "advanced": ["browse_memory", "compile_source"],
+        "advanced": ["browse_memory", "compile_source", "adoption_studio"],
     },
     "maintain": {
         "intent": "Check vault health and repair drift only when explicitly requested.",
@@ -7173,13 +7823,24 @@ _SIMPLE_ACTION_DEFS: dict[str, dict] = {
         "fix_route": {"tool": "maintain_memory", "args": {"mode": "fix", "dry_run": False}},
         "reconcile_route": {"tool": "maintain_memory", "args": {"mode": "reconcile", "dry_run": False}},
         "safety": "read-only by default; write-capable fixes require explicit flags",
-        "advanced": ["maintain_memory", "doctor"],
+        "advanced": [
+            "doctor",
+            "govern_memory",
+            "schema_memory",
+            "manage_memory_file",
+        ],
     },
     "record": {
         "intent": "Capture, inspect, query, or correct durable observed events and current state.",
         "route": {"tool": "record_memory", "args": {"action": "inspect"}},
         "safety": "resolve one compatible collection before a mutation; propose rather than silently create a schema",
         "advanced": ["record_memory"],
+    },
+    "plan": {
+        "intent": "File or re-prioritise work.",
+        "route": {"tool": "plan_memory", "args": {"action": "inspect"}},
+        "safety": "read-only by default; mutations explicit",
+        "advanced": ["plan_memory"],
     },
 }
 _PRODUCT_METADATA: dict[str, dict] = {
@@ -7790,6 +8451,99 @@ HAND_REGISTERED_EXCEPTIONS: frozenset[str] = frozenset()
 HOSTED_ALPHA_AGENT_PROFILE = "hosted-alpha-agent-v1"
 HOSTED_ALPHA_AGENT_V2_PROFILE = "hosted-alpha-agent-v2"
 HOSTED_ALPHA_AGENT_V3_PROFILE = "hosted-alpha-agent-v3"
+HOSTED_ALPHA_AGENT_V4_PROFILE = "hosted-alpha-agent-v4"
+
+
+@dataclass(frozen=True, slots=True)
+class HostedSurfaceExclusion:
+    """One product command withheld from hosted, and what would lift it.
+
+    v1's membership was a hand-maintained allowlist, which drifts by default:
+    every command added since is absent from hosted until somebody remembers.
+    Inverting it -- hosted *is* the product surface, absence is the exception --
+    makes the default correct and forces each exception to say why.
+
+    `reason` states what is technically broken, not what has not been reviewed.
+    `lifted_when` names the condition that ends the exclusion, so an entry
+    cannot quietly become permanent.
+    """
+
+    command: str
+    reason: str
+    lifted_when: str
+
+
+HOSTED_SURFACE_EXCLUSIONS = MappingProxyType(
+    {
+        exclusion.command: exclusion
+        for exclusion in (
+            HostedSurfaceExclusion(
+                command="transfer_artifact",
+                reason=(
+                    "The hosted runtime intercepts this leaf with "
+                    "HOSTED_TRANSFER_INTERCEPT_REQUIRED; publishing it as a tool would "
+                    "hand an agent a call that returns an interception error instead of "
+                    "moving an artifact. The capability itself is reachable through the "
+                    "gateway transfer flow."
+                ),
+                lifted_when="the tool call is bridged to the gateway transfer flow",
+            ),
+            HostedSurfaceExclusion(
+                command="adopt_vault",
+                reason=(
+                    "The hosted runtime intercepts this leaf with "
+                    "HOSTED_IMPORT_INTERCEPT_REQUIRED. Adoption on hosted is "
+                    "upload-then-adopt: bytes are staged under _Staging/adoption/<run_id>/ "
+                    "by the verified transfer grant and never land under Knowledge Base/ "
+                    "unadopted. The capability is reachable through the gateway lifecycle "
+                    "flow."
+                ),
+                lifted_when="the tool call is bridged to the gateway lifecycle flow",
+            ),
+            HostedSurfaceExclusion(
+                command="process_media",
+                reason=(
+                    "The hosted image is built from the `hosted` Dockerfile stage, which "
+                    "installs only the `embeddings-onnx` extra and gates the build on "
+                    "torch being absent. Media extraction is additionally gated per cell "
+                    "by the `media` feature grant, which no alpha cell carries, so the "
+                    "tool would refuse on every cell it was published to."
+                ),
+                lifted_when=(
+                    "a media-capable hosted image ships and the cell carries the `media` "
+                    "feature grant"
+                ),
+            ),
+            HostedSurfaceExclusion(
+                command="read_media",
+                reason=(
+                    "Sampling video frames needs the same decoding dependencies the "
+                    "hosted image omits, under the same `media` feature grant."
+                ),
+                lifted_when=(
+                    "a media-capable hosted image ships and the cell carries the `media` "
+                    "feature grant"
+                ),
+            ),
+        )
+    }
+)
+
+
+def hosted_complete_surface_names() -> tuple[str, ...]:
+    """The product command surface minus the recorded hosted exclusions.
+
+    Derived rather than restated so that adding a product command without
+    deciding its hosted status is a test failure rather than a silent subset.
+    Published profile membership stays pinned as a literal -- a profile whose
+    membership moved with the registry would change its own
+    `command_surface_sha256` under an unchanged identifier.
+    """
+    return tuple(
+        command.name
+        for command in PRODUCT_COMMANDS
+        if command.name not in HOSTED_SURFACE_EXCLUSIONS
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -7798,6 +8552,11 @@ class ProductSurfaceProfile:
 
     name: str
     command_names: tuple[str, ...]
+    #: Whether this profile may expose tier-2 commands. Default closed: the
+    #: resolver refuses a tier-2 member unless the profile opted in, so a
+    #: command promoted to tier 2 later cannot leak onto a profile that never
+    #: decided to carry it. v1-v3 are tier-1 only and unaffected.
+    expose_tier2: bool = False
 
     def __post_init__(self) -> None:
         names = tuple(self.command_names)
@@ -7877,6 +8636,50 @@ PRODUCT_SURFACE_PROFILES = MappingProxyType(
                 "edit_memory",
             ),
         ),
+        # v4 is the first hosted profile that is not an allowlist. Its membership
+        # is the product command surface minus HOSTED_SURFACE_EXCLUSIONS, in
+        # canonical registry order, and `hosted_complete_surface_names()` returns
+        # exactly this tuple -- asserted by a gate, so a command added to the
+        # registry without a hosted decision fails the build.
+        #
+        # It does not extend v3 as a prefix, unlike v2 -> v3. Registry order is
+        # what the rule can state and keep true; a hand-ordered extension would
+        # need re-deciding on every addition, which is the property being removed.
+        #
+        # Tier 2 is included. Every tier-2 command operates inside the calling
+        # tenant's own vault -- the blast radius a local operator already has --
+        # so withholding it bought no safety, only a smaller product.
+        HOSTED_ALPHA_AGENT_V4_PROFILE: ProductSurfaceProfile(
+            name=HOSTED_ALPHA_AGENT_V4_PROFILE,
+            command_names=(
+                "coordination_status",
+                "bootstrap",
+                "ask_memory",
+                "read_memory",
+                "browse_memory",
+                "remember",
+                "edit_memory",
+                "observe_memory",
+                "replace_memory",
+                "capture_source",
+                "compile_source",
+                "preserve_evidence",
+                "preserve_artifacts",
+                "review_memory",
+                "review_item_context",
+                "triage_memory",
+                "connect_memory",
+                "adoption_studio",
+                "maintain_memory",
+                "schema_memory",
+                "govern_memory",
+                "manage_memory_file",
+                "record_memory",
+                "plan_memory",
+                "query_dataset",
+            ),
+            expose_tier2=True,
+        ),
     }
 )
 
@@ -7915,7 +8718,9 @@ def product_commands_for_profile(
             raise RuntimeError(
                 f"product surface profile {profile!r} references missing command {name!r}"
             )
-        if command.tier != 1 or surface not in command.surfaces:
+        if (command.tier != 1 and not definition.expose_tier2) or (
+            surface not in command.surfaces
+        ):
             raise RuntimeError(
                 f"product surface profile {profile!r} cannot expose {name!r} on {surface!r}"
             )
@@ -8126,6 +8931,24 @@ def _catalog_route_tools(entry: dict) -> set[str]:
     return tools
 
 
+def _unavailable_route_reason(tool: str) -> str:
+    """Say which command is missing and why, not merely that one is.
+
+    An agent told only "no route is exported" learns that the action failed,
+    not whether the capability exists by another path. Where the surface
+    withholds the command under a recorded exclusion, the recorded reason and
+    its lifting condition are the useful answer -- `adopt` on hosted is not
+    absent, it runs through the gateway lifecycle flow.
+    """
+    exclusion = HOSTED_SURFACE_EXCLUSIONS.get(tool)
+    if exclusion is None:
+        return "No route for this action is exported by the active surface."
+    return (
+        f"The active surface withholds `{tool}`. {exclusion.reason} "
+        f"Lifted when {exclusion.lifted_when}."
+    )
+
+
 def simple_action_names() -> tuple[str, ...]:
     """The stable, beginner-facing action vocabulary."""
     return _SIMPLE_ACTIONS
@@ -8160,9 +8983,10 @@ def simple_action_catalog(
             out[action]["route"] = primary_route
         else:
             out[action]["available"] = False
-            out[action]["unavailable_reason"] = (
-                "No route for this action is exported by the active surface."
+            out[action]["unavailable_reason"] = _unavailable_route_reason(
+                primary_route["tool"]
             )
+            out[action]["unavailable_command"] = primary_route["tool"]
         for key in (
             "deep_route",
             "evidence_route",

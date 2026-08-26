@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Literal, Never
 
-from . import planning
+from . import planning, record_governance
 from .cli_ops import OpError
 from .structured_collections import CollectionError
 
@@ -59,7 +59,9 @@ _ACTION_FIELDS = {
     ),
 }
 _REQUIRED_FIELDS = {
-    "inspect": frozenset({"collection"}),
+    # `inspect` is the only action that answers a question no selector is needed
+    # for: with no collection it returns the Planning inventory.
+    "inspect": frozenset(),
     "create": frozenset({"manifest_path", "manifest_text", "why"}),
     "query": frozenset({"collection"}),
     "add": frozenset({"collection", "item", "why"}),
@@ -118,14 +120,21 @@ def plan_memory(
     transition: dict[str, Any] | None = None,
     expected_item_version: str | None = None,
 ) -> dict[str, Any]:
-    """Inspect, create, query, add, update, or triage one Planning collection."""
+    """Inspect, create, query, add, update, or triage one Planning collection.
+
+    `inspect` with no collection lists the Planning collections instead, so a
+    session can find the one it needs before naming a selector.
+    """
     values = locals().copy()
     values.pop("vault_root")
     values.pop("action")
     _validate_arguments(action, values)
     try:
         if action == "inspect":
-            assert collection is not None
+            if collection is None:
+                return record_governance.inventory_collections(
+                    vault_root, semantic_profile="planning"
+                )
             return planning.inspect(vault_root, collection)
         if action == "create":
             assert manifest_path is not None and manifest_text is not None and why is not None

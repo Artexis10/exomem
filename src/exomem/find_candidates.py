@@ -157,11 +157,12 @@ def collect_candidates(
     degraded_out: list[str] | None,
     failed_out: list[str] | None,
     recall_paths: AbstractSet[str],
+    lexical_repair: bool = True,
     eligible_paths: set[str] | None = None,
     capture_trace: bool = False,
 ) -> CandidateBundle:
     """Collect vector/BM25/keyword/CLIP/graph/temporal lanes and fuse them."""
-    from . import bm25, embeddings, epistemic_graph, fusion, readiness
+    from . import bm25, embeddings, epistemic_graph, fusion, lexstore, readiness
 
     usage_map: dict[str, float] = {}
     if prefer_used:
@@ -389,16 +390,8 @@ def collect_candidates(
     else:
         try:
             with _span(timings, "bm25"):
-                bm25_hits = (
-                    bm25.search(
-                        vault_root,
-                        query,
-                        k=candidate_k,
-                        scope=scope,
-                        freshness=snapshot.for_scope(scope),
-                    )
-                    if eligible_paths is None
-                    else bm25.search(
+                if not lexical_repair and lexstore.maintained_content_index_enabled():
+                    catalog_result = lexstore.search_bm25_result(
                         vault_root,
                         query,
                         k=candidate_k,
@@ -406,11 +399,21 @@ def collect_candidates(
                         freshness=snapshot.for_scope(scope),
                         allowed_paths=eligible_paths,
                     )
-                )
+                    if not catalog_result.readiness.complete:
+                        raise lexstore.CatalogUnavailable(catalog_result.readiness)
+                    bm25_hits = list(catalog_result.value or [])
+                else:
+                    bm25_hits = bm25.search(
+                        vault_root,
+                        query,
+                        k=candidate_k,
+                        scope=scope,
+                        freshness=snapshot.for_scope(scope),
+                        allowed_paths=eligible_paths,
+                        repair=lexical_repair,
+                    )
                 bm25_ranking = [p for p, _ in bm25_hits]
                 bm25_score_by_path = {p: float(score) for p, score in bm25_hits}
-                from . import lexstore
-
                 if capture_trace:
                     lane_statuses["bm25"] = {
                         "status": "participated" if bm25_ranking else "available_nonmatching",
@@ -423,6 +426,8 @@ def collect_candidates(
                             "caveat": "diagnostic; not comparable across backends or corpora",
                         },
                     }
+        except lexstore.CatalogUnavailable:
+            raise
         except ImportError as e:
             if capture_trace:
                 lane_statuses["bm25"] = {
@@ -462,6 +467,7 @@ def collect_candidates(
                 query_norm,
                 scope,
                 freshness=snapshot.for_scope(scope),
+                repair=lexical_repair,
                 k=candidate_k * 3,
             )
         keyword_ranking = collapse_frame_children(

@@ -289,6 +289,16 @@ def test_default_attention_union_is_pinned() -> None:
     (`add-prediction-window-review` and this branch's own history), and a third
     would collide at archive-sync — which is the exact failure that change's
     task 0 exists to prevent. The normative record is present either way.
+
+    Widened a second time for `unreflected_outcomes`
+    (`route-lifecycle-consequences-without-nudges`), which states the same
+    position in the ADDED requirement of its own `attention-queue` delta. Its
+    argument is `prediction_window`'s: it fires only on a binding a person wrote
+    into a manifest, so a vault that declares none never sees it and there is no
+    grandfathered population to drop onto the daily surface. It sits LAST rather
+    than beside the dated queues because what it reports is not yet due — it is
+    an item the vault still holds open while events about it have already landed,
+    which is a discrepancy to read, not an obligation that has expired.
     """
     assert attention_module.DEFAULT_ATTENTION_CATEGORIES == (
         "bridge_review",
@@ -298,6 +308,8 @@ def test_default_attention_union_is_pinned() -> None:
         "stale_review",
         "unprocessed_source",
         "relation_debt",
+        "entity_type_unregistered",
+        "unreflected_outcomes",
     )
 
 

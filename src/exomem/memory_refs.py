@@ -6,6 +6,7 @@ import re
 import sqlite3
 import threading
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -75,6 +76,15 @@ def ref_from_markdown(markdown: str) -> str | None:
 
 def sidecar_path(vault_root: Path) -> Path:
     return Path(vault_root) / kb_dirname() / ".refs.sqlite"
+
+
+#: How many paths one identity lookup binds at a time. SQLite's compiled-in
+#: `SQLITE_MAX_VARIABLE_NUMBER` is the hard ceiling — measured on this build at
+#: 32,766 fine and 32,767 raising `OperationalError: too many SQL variables` —
+#: and a caller that derives its path list from the vault can cross it. 500 is
+#: far below the ceiling and far above any realistic single batch, so the loop
+#: costs one extra query only on inputs that would otherwise have failed.
+REFS_QUERY_CHUNK = 500
 
 
 class ReferenceIndex:
@@ -163,6 +173,7 @@ class ReferenceIndex:
             with reserved_paths._identity_coordination_scope(
                 self.vault_root,
                 descriptor_ids=("refs-store",),
+                identity_may_change=False,
             ):
                 with reserved_paths._sqlite_owner_target_scope(
                     self.vault_root,
@@ -323,16 +334,31 @@ class ReferenceIndex:
         return self.refs_for_paths([clean]).get(clean)
 
     def refs_for_paths(self, paths: list[str]) -> dict[str, str | None]:
-        """Resolve many paths with one sidecar query or one Markdown scan.
+        """Resolve many paths with one sidecar query per chunk, or one scan.
 
         The returned dict is keyed by the caller's own cleaned spelling; callers
         index it by the string they passed in.
+
+        Chunked because the lookup below binds one SQL variable per path, and
+        SQLite refuses past `SQLITE_MAX_VARIABLE_NUMBER` — measured on this
+        build as fine at 32,766 paths and `OperationalError: too many SQL
+        variables` at 32,767. Chunking HERE rather than at a caller is the
+        point: every caller of this method inherits the bound, including the
+        ones that hand it a list whose length is a function of the vault.
         """
         clean = [str(path or "").replace("\\", "/").lstrip("/") for path in paths]
         wanted = list(dict.fromkeys(path for path in clean if path))
         if not wanted:
             return {}
+        if len(wanted) > REFS_QUERY_CHUNK:
+            out: dict[str, str | None] = {}
+            for start in range(0, len(wanted), REFS_QUERY_CHUNK):
+                out.update(self._refs_for_paths_batch(wanted[start : start + REFS_QUERY_CHUNK]))
+            return out
+        return self._refs_for_paths_batch(wanted)
 
+    def _refs_for_paths_batch(self, wanted: list[str]) -> dict[str, str | None]:
+        """One bounded batch: at most `REFS_QUERY_CHUNK` paths, already cleaned."""
         conn = self._current_readonly_connection()
         if conn is None:
             # Schema upgrades and first use rebuild once. The lock prevents a
@@ -463,6 +489,64 @@ class ReferenceIndex:
             for value, path in malformed
         )
         return sorted(issues, key=lambda item: (item["kind"], item["value"], item["path"]))
+
+
+def paths_for_ids_read_only(
+    vault_root: Path, ids: Iterable[Any]
+) -> dict[str, tuple[str, ...]]:
+    """Resolve many memory ids to every page holding each, writing nothing.
+
+    The reverse direction of `refs_for_paths`, and read-only in the strict
+    sense that separates it from every other resolver here: it never creates,
+    rebuilds, or refreshes the sidecar, so a caller that must leave the vault
+    byte-identical can use it. `.refs.sqlite` is registered internal state and
+    a canonical byte census skips it, which is exactly why an accidental
+    rebuild inside a read has to be impossible rather than merely unlikely.
+
+    Every path holding an id is returned, so a duplicated identity reads as a
+    tuple of length two. This function never raises `AMBIGUOUS_REFERENCE`: that
+    message states in how many pages the id appears, and a caller may hold no
+    release decision over those pages, so a caller forbidden to disclose the
+    count cannot afford to catch the exception and must see the shape instead.
+
+    Cost is one whole-corpus scan for the entire batch — never one per id, and
+    never a scan chosen by what any faster source already answered. That last
+    point is a disclosure property rather than an optimisation, and it is why
+    there is no sidecar fast path here: work that varies with which ids exist
+    lets a caller infer, from the work performed, that some page carries an id
+    it is not allowed to see. The scan is the same fallback
+    `ReferenceIndex.resolve` takes when the sidecar is absent or incompatible.
+    """
+    wanted: list[str] = []
+    seen: set[str] = set()
+    for value in ids:
+        normalized = normalize_id(value)
+        if normalized is not None and normalized not in seen:
+            seen.add(normalized)
+            wanted.append(normalized)
+    if not wanted:
+        return {}
+
+    # One walk, unconditionally, for the whole batch.
+    #
+    # A sidecar fast path was tried and removed. Consulting it and scanning
+    # only for the ids it could not answer made the corpus walk conditional on
+    # whether ANY page — released or not — carried the cited identity: the
+    # response stayed byte-identical while a caller who timed the call learned
+    # whether a hidden page held the id, needing no authoring prerequisite at
+    # all. Scanning only when no sidecar exists closes that channel but reads a
+    # page written outside a governed write as absent, which is most of an
+    # ordinary vault.
+    #
+    # So the work is a function of the batch alone: how many well-formed ids
+    # were asked for, never which of them exist or who may see them. The cost
+    # is one walk per call for a deliberate, on-demand read.
+    by_id: dict[str, set[str]] = {}
+    for path, exomem_id, _raw, _hash, status in _scan_pages(vault_root):
+        if status == "valid" and exomem_id is not None:
+            by_id.setdefault(exomem_id, set()).add(path)
+
+    return {identifier: tuple(sorted(by_id.get(identifier, ()))) for identifier in wanted}
 
 
 def resolve_identifier(vault_root: Path, value: str) -> str:

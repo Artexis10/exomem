@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import ast
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -203,6 +204,49 @@ def test_a_full_scope_batch_enqueues_a_marker_rather_than_a_path_list(vault: Pat
 
     assert deferred_index.list_graph_paths(vault) == []
     assert deferred_index.graph_full_rebuild_pending(vault) == 7
+
+
+def test_direct_full_rebuild_debt_advances_atomically(vault: Path) -> None:
+    """A drain between direct writers must not clear the later writer's debt."""
+    deferred_index.clear_graph_full_rebuild(vault)
+    deferred_index.mark_graph_full_rebuild(vault, generation=7)
+    assert deferred_index.clear_graph_full_rebuild(vault, generation=7) is True
+    assert deferred_index.advance_graph_full_rebuild(vault) == 8
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        generations = list(
+            pool.map(
+                lambda _item: deferred_index.advance_graph_full_rebuild(vault),
+                range(3),
+            )
+        )
+
+    assert sorted(generations) == [9, 10, 11]
+    assert deferred_index.clear_graph_full_rebuild(vault, generation=7) is False
+    assert deferred_index.graph_full_rebuild_pending(vault) == 11
+
+
+def test_legacy_marker_clear_seeds_the_durable_generation_sequence(vault: Path) -> None:
+    """The first post-upgrade drain cannot reset generation history to zero."""
+    deferred_index.mark_graph_full_rebuild(vault, generation=1)
+    conn = sqlite3.connect(deferred_index.store_path(vault))
+    try:
+        with conn:
+            conn.execute(
+                "DELETE FROM maintenance_state WHERE key IN (?, ?)",
+                ("graph_full_rebuild_generation", "graph_full_rebuild_sequence"),
+            )
+            conn.execute(
+                "INSERT INTO maintenance_state(key, value) VALUES (?, ?)",
+                ("graph_full_rebuild_generation", "7"),
+            )
+    finally:
+        conn.close()
+
+    assert deferred_index.clear_graph_full_rebuild(vault, generation=7) is True
+    assert deferred_index.advance_graph_full_rebuild(vault) == 8
+    assert deferred_index.clear_graph_full_rebuild(vault, generation=7) is False
+    assert deferred_index.graph_full_rebuild_pending(vault) == 8
 
 
 def test_a_poisoned_path_is_rotated_behind_the_rest_of_the_queue(vault: Path) -> None:

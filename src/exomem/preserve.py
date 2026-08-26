@@ -30,17 +30,22 @@ import logging
 import mimetypes
 import os
 import re
+import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO
+from typing import IO, BinaryIO
 
-from . import indexes, memory_refs, privacy_log, temporal
+from . import indexes, memory_refs, privacy_log, semantic_contract, temporal
 from .kbdir import kb_prefix
 from .vault import (
+    MISSING_CONTENT_HASH,
     ContentHashMismatchError,
     DeferredGraphCompletion,
     PlannedWrite,
+    PreparedBinaryContent,
     batch_atomic_write,
+    content_hash,
     escape_wikilinks_for_log,
     kb_root,
     yaml_scalar,
@@ -210,16 +215,14 @@ def preserve(
         artifact_bytes = decoded
         artifact_text = None
     elif content_stream is not None:
-        # Large binary: streamed straight to disk in the write block below, so the
-        # file never materializes fully in RAM. Size is enforced during the copy.
+        # Large binary: copied into a bounded private spool below, so no canonical
+        # path becomes visible before governance preflight and held publication.
         artifact_bytes = None
         artifact_text = None
     else:
         # content is UTF-8 text; write as-is.
         artifact_bytes = None
         artifact_text = content
-
-    folder.mkdir(parents=True, exist_ok=True)
 
     warnings: list[str] = []
     written_artifact = False
@@ -233,30 +236,47 @@ def preserve(
         else mimetypes.guess_type(filename_safe)[0]
     )
 
+    artifact_stage = tempfile.SpooledTemporaryFile(
+        max_size=min(max(max_decoded_bytes, 1), 8 * 1024 * 1024),
+        mode="w+b",
+    )
     try:
         if content_stream is not None:
-            # Stream the upload to disk in chunks — peak memory is one chunk, not
-            # the whole file. Enforces the byte cap mid-copy (defense in depth; the
-            # HTTP layer's max_part_size already bounds the part during parsing).
-            artifact_size, artifact_hash = _copy_stream_to_file(
-                content_stream, artifact_path, limit=max_stream_bytes
+            # Stream into a process-private spool first. It spills to disk above
+            # 8 MiB, so large uploads stay bounded in RAM while no canonical path
+            # becomes visible before governance preflight succeeds.
+            artifact_size, artifact_hash = _copy_stream(
+                content_stream, artifact_stage, limit=max_stream_bytes
             )
-            written_artifact = True
         elif artifact_bytes is not None:
-            # Binary: write directly, no atomic batch (batch_atomic_write is text-only).
-            artifact_path.write_bytes(artifact_bytes)
+            artifact_stage.write(artifact_bytes)
             artifact_size = len(artifact_bytes)
             artifact_hash = hashlib.sha256(artifact_bytes).hexdigest()
-            written_artifact = True
         else:
             artifact_text_bytes = (artifact_text or "").encode("utf-8")
-            artifact_path.write_text(artifact_text or "", encoding="utf-8", newline="\n")
+            artifact_stage.write(artifact_text_bytes)
             artifact_size = len(artifact_text_bytes)
             artifact_hash = hashlib.sha256(artifact_text_bytes).hexdigest()
-            written_artifact = True
+        artifact_stage.seek(0)
 
-        writes: list[PlannedWrite] = []
         rel_artifact = artifact_path.relative_to(vault_root).as_posix()
+        staged_content: str | PreparedBinaryContent
+        if artifact_text is not None and filename_safe.lower().endswith(".md"):
+            staged_content = artifact_text
+        else:
+            staged_content = PreparedBinaryContent(
+                artifact_stage,
+                artifact_size,
+                artifact_hash,
+            )
+        writes: list[PlannedWrite] = [
+            PlannedWrite(
+                path=artifact_path,
+                content=staged_content,
+                create_only=True,
+                expected_hash=MISSING_CONTENT_HASH,
+            )
+        ]
 
         # Optional sidecar. Written when there's a short `description` caption
         # and/or full extracted `text` (the OCR companion that makes a binary
@@ -274,37 +294,64 @@ def preserve(
         extract = _extract_module()
         media_type = extract.media_type_for(filename_safe)
         want_stub = media_type is not None and artifact_text is None and not text_clean
-        if desc_clean or text_clean or want_stub:
-            if filename_safe.lower().endswith(".md"):
-                stem = filename_safe[:-3]
-                sidecar_path = folder / f"{stem}-notes.md"
+        # Unconditional, because an artifact with no page is not addressable at
+        # all: no `exomem_id`, no `ingested_into`, and no corpus presence, since
+        # only `.md` is indexed. A preserved transcript used to land exactly
+        # that way, which is why citing it reported the source as missing.
+        if filename_safe.lower().endswith(".md"):
+            stem = filename_safe[:-3]
+            sidecar_path = folder / f"{stem}-notes.md"
+        else:
+            sidecar_path = folder / f"{filename_safe}.md"
+        if sidecar_path.exists():
+            return _raise(
+                "COMPANION_EXISTS",
+                ["filename"],
+                (
+                    f"{sidecar_path.relative_to(vault_root).as_posix()!r} already "
+                    "exists. Evidence capture cannot adopt or overwrite a companion."
+                ),
+            )
+        else:
+            if text_clean:
+                extracted_by = "upload"   # the uploader/sandbox supplied the text
+            elif want_stub:
+                extracted_by = "pending"  # the worker will fill it
             else:
-                sidecar_path = folder / f"{filename_safe}.md"
-            if sidecar_path.exists():
-                warnings.append(
-                    f"sidecar {sidecar_path.name!r} already exists; skipped."
+                extracted_by = None
+            # Artifact provenance is carried everywhere except a pending
+            # media stub. Reconciliation owns those: it re-renders them with
+            # the same fields computed from the binary itself, and writing
+            # them here first would change when its convergence check
+            # decides a stub is already current.
+            describes_artifact = not want_stub
+            sidecar_md = _render_sidecar(
+                artifact_name=filename_safe,
+                scope=scope_safe,
+                category=category_safe,
+                date_iso=stamp_iso,
+                description=desc_clean,
+                text=text_clean,
+                media_type=media_type,
+                evidence_file=rel_artifact if media_type else None,
+                extracted_by=extracted_by,
+                binary_sha256=artifact_hash if describes_artifact else None,
+                binary_size=artifact_size if describes_artifact else None,
+                governance_artifact_path=rel_artifact,
+                governance_artifact_sha256=artifact_hash,
+                governance_artifact_size=artifact_size,
+                tree="Evidence",
+            )
+            sidecar_ref = memory_refs.ref_from_markdown(sidecar_md)
+            writes.append(
+                PlannedWrite(
+                    path=sidecar_path,
+                    content=sidecar_md,
+                    create_only=True,
+                    expected_hash=MISSING_CONTENT_HASH,
                 )
-            else:
-                if text_clean:
-                    extracted_by = "upload"   # the uploader/sandbox supplied the text
-                elif want_stub:
-                    extracted_by = "pending"  # the worker will fill it
-                else:
-                    extracted_by = None
-                sidecar_md = _render_sidecar(
-                    artifact_name=filename_safe,
-                    scope=scope_safe,
-                    category=category_safe,
-                    date_iso=stamp_iso,
-                    description=desc_clean,
-                    text=text_clean,
-                    media_type=media_type,
-                    evidence_file=rel_artifact if media_type else None,
-                    extracted_by=extracted_by,
-                )
-                sidecar_ref = memory_refs.ref_from_markdown(sidecar_md)
-                writes.append(PlannedWrite(path=sidecar_path, content=sidecar_md))
-                sidecar_rel = sidecar_path.relative_to(vault_root).as_posix()
+            )
+            sidecar_rel = sidecar_path.relative_to(vault_root).as_posix()
 
         # Index + log updates.
         rel_artifact_for_summary = rel_artifact.replace(kb_prefix(), "")
@@ -324,8 +371,9 @@ def preserve(
 
         top_index = kb / "index.md"
         if top_index.exists():
+            current_top = top_index.read_text(encoding="utf-8")
             new_top, _trim_note = indexes._prepend_recent_activity(
-                top_index.read_text(encoding="utf-8"),
+                current_top,
                 date_iso=date_iso,
                 summary=activity_summary,
             )
@@ -338,28 +386,69 @@ def preserve(
             if new_top_with_counts is not None:
                 new_top = new_top_with_counts
             # Cap-50 trim is recorded in log.md; no per-write warning needed.
-            writes.append(PlannedWrite(path=top_index, content=new_top))
+            writes.append(
+                PlannedWrite(
+                    path=top_index,
+                    content=new_top,
+                    expected_hash=content_hash(current_top),
+                )
+            )
             writes.extend(sub_writes)
         else:
             warnings.append(f"{kb_prefix()}index.md missing; skipped Recent activity bump")
 
         log_file = kb / "log.md"
         if log_file.exists():
+            current_log = log_file.read_text(encoding="utf-8")
             new_log = _prepend_log_entry(
-                log_file.read_text(encoding="utf-8"),
+                current_log,
                 date_iso=stamp_iso,
                 rel_path=rel_artifact,
                 body=log_body,
             )
-            writes.append(PlannedWrite(path=log_file, content=new_log))
+            writes.append(
+                PlannedWrite(
+                    path=log_file,
+                    content=new_log,
+                    expected_hash=content_hash(current_log),
+                )
+            )
         else:
             warnings.append(f"{kb_prefix()}log.md missing; skipped log entry")
 
-        if writes:
-            # Pass vault_root so the sidecar (a real `.md`) is embedded on write
-            # — that's what makes the binary's extracted text immediately
-            # findable. index.md / log.md in the batch are skipped by name.
-            batch_atomic_write(writes, vault_root=vault_root)
+        from .governance import catalog_publication, graph_producer
+
+        def graph_replacement_provider():
+            return graph_producer.replacements_for_planned_markdown(
+                vault_root,
+                before_corpus=semantic_contract.build_corpus_context(vault_root),
+                writes=tuple(writes),
+            )
+
+        try:
+            prepared_catalog = catalog_publication.prepare_planned_markdown_batch(
+                vault_root,
+                writes=tuple(writes),
+                graph_replacement_provider=graph_replacement_provider,
+            )
+        except catalog_publication.CatalogPublicationError as error:
+            raise catalog_publication.CatalogCommitError(
+                "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
+                str(error),
+            ) from error
+
+        # The held batch owns the artifact, companion, index, and log as one
+        # caught-failure rollback set. The binary stage is copied without ever
+        # materializing a large upload fully in memory.
+        batch_atomic_write(writes, vault_root=vault_root)
+        written_artifact = True
+        try:
+            catalog_publication.publish_markdown_batch(prepared_catalog)
+        except catalog_publication.CatalogPublicationError as error:
+            raise catalog_publication.CatalogCommitError(
+                "GOVERNANCE_CATALOG_PUBLICATION_UNCERTAIN",
+                str(error),
+            ) from error
 
     except Exception as e:
         if privacy_log.content_private_logging_enabled():
@@ -371,6 +460,8 @@ def preserve(
             log.exception("preserve() failed mid-write; artifact_written=%s", written_artifact)
         warnings.append(f"partial write — reconcile on desktop: {e}")
         raise
+    finally:
+        artifact_stage.close()
 
     return PreserveResult(
         path=artifact_path.relative_to(vault_root).as_posix(),
@@ -462,33 +553,29 @@ def preserve_bytes(
 _STREAM_CHUNK = 1024 * 1024  # 1 MiB copy buffer
 
 
-def _copy_stream_to_file(stream: BinaryIO, dest: Path, *, limit: int) -> tuple[int, str]:
-    """Copy a binary file-like to `dest` in chunks, enforcing `limit` bytes.
+def _copy_stream(
+    stream: BinaryIO,
+    destination: IO[bytes],
+    *,
+    limit: int,
+) -> tuple[int, str]:
+    """Copy a binary stream into a private destination under an exact cap."""
 
-    Peak memory is one chunk regardless of file size. On overflow the partial
-    file is removed and TOO_LARGE is raised. Returns bytes written and SHA-256.
-    """
     try:
         stream.seek(0)
     except (OSError, AttributeError, ValueError):
         pass  # non-seekable stream: copy from the current position
     written = 0
     digest = hashlib.sha256()
-    overflow = False
-    with dest.open("wb") as out:
-        while True:
-            buf = stream.read(_STREAM_CHUNK)
-            if not buf:
-                break
-            written += len(buf)
-            if written > limit:
-                overflow = True
-                break
-            digest.update(buf)
-            out.write(buf)
-    if overflow:
-        dest.unlink(missing_ok=True)
-        _raise("TOO_LARGE", ["file"], f"upload exceeds the {limit:,}-byte limit")
+    while True:
+        buf = stream.read(_STREAM_CHUNK)
+        if not buf:
+            break
+        written += len(buf)
+        if written > limit:
+            _raise("TOO_LARGE", ["file"], f"upload exceeds the {limit:,}-byte limit")
+        digest.update(buf)
+        destination.write(buf)
     return written, digest.hexdigest()
 
 
@@ -519,6 +606,44 @@ def _sanitize_filename(s: str | None) -> str:
     return cleaned
 
 
+#: The append-only trees an artifact can live in, each mapped to the singular
+#: label its page uses in a title and a lead tag. A map rather than string
+#: surgery, so "Sources" -> "Source" is stated once and cannot be re-derived
+#: differently by the next caller.
+_ARTIFACT_TREE_LABELS = {"Evidence": "Evidence", "Sources": "Source"}
+_ARTIFACT_TREES = tuple(_ARTIFACT_TREE_LABELS)
+
+
+def artifact_location(relative_path: str) -> tuple[str, str, str]:
+    """Return `(tree, scope, category)` for a vault-relative artifact path.
+
+    Scope and category are simply the folders below the top-level tree, so they
+    are read positionally from wherever that tree is rather than from one
+    tree's name. Two callers used to search for a literal `evidence` segment and
+    default when there was none, which meant an artifact under `Sources/`
+    produced `evidence`/`uncategorized` — a locator line and a tag set naming a
+    folder that does not exist.
+
+    The fallback for a path in neither tree is unchanged, because there is no
+    better answer and a caller that reaches it has already lost the labels.
+    """
+    parts = Path(relative_path).parts
+    index = next(
+        (i for i, part in enumerate(parts) if part.casefold() in
+         {tree.casefold() for tree in _ARTIFACT_TREES}),
+        None,
+    )
+    if index is None:
+        return "Evidence", "evidence", "uncategorized"
+    tree = next(
+        name for name in _ARTIFACT_TREES if name.casefold() == parts[index].casefold()
+    )
+    folders = parts[index + 1 : -1]
+    scope = folders[0] if folders else tree.lower()
+    category = folders[1] if len(folders) > 1 else "uncategorized"
+    return tree, scope, category
+
+
 def _render_sidecar(
     *,
     artifact_name: str,
@@ -532,6 +657,15 @@ def _render_sidecar(
     extracted_by: str | None = None,
     parent_media: str | None = None,
     frame_ts: float | None = None,
+    binary_sha256: str | None = None,
+    binary_size: int | None = None,
+    governance_artifact_path: str | None = None,
+    governance_artifact_sha256: str | None = None,
+    governance_artifact_size: int | None = None,
+    governance_parent_path: str | None = None,
+    governance_parent_sha256: str | None = None,
+    governance_frame_timestamp_ms: int | None = None,
+    tree: str = "Evidence",
 ) -> str:
     """Sidecar .md describing a preserved binary artifact.
 
@@ -558,7 +692,8 @@ def _render_sidecar(
     lines = ["---"]
     lines.append("type: source")
     lines.append(f"exomem_id: {memory_refs.new_id()}")
-    display_title = f"Evidence: {artifact_name}"
+    label = _ARTIFACT_TREE_LABELS.get(tree, "Evidence")
+    display_title = f"{label}: {artifact_name}"
     lines.append(f"title: {yaml_scalar(display_title)}")
     lines.append("source_type: other")
     lines.append(f"captured: {date_iso}")
@@ -568,13 +703,76 @@ def _render_sidecar(
         lines.append(f"evidence_file: {evidence_file}")
     if extracted_by:
         lines.append(f"extracted_by: {extracted_by}")
+    if governance_artifact_path is not None:
+        if governance_artifact_sha256 is None or governance_artifact_size is None:
+            raise ValueError("governance companion requires an exact artifact identity")
+        scene_binding = any(
+            value is not None
+            for value in (
+                governance_parent_path,
+                governance_parent_sha256,
+                governance_frame_timestamp_ms,
+            )
+        )
+        if scene_binding and (
+            governance_parent_path is None
+            or governance_parent_sha256 is None
+            or type(governance_frame_timestamp_ms) is not int
+            or not 0 <= governance_frame_timestamp_ms <= 4_294_967_295
+            or parent_media != governance_parent_path
+            or media_type != "image"
+        ):
+            raise ValueError("scene-frame companion requires an exact parent binding")
+        artifact_class = (
+            "scene_frame" if scene_binding else ("media" if media_type else "binary")
+        )
+        lines.extend(
+            (
+                "governance_companion:",
+                "  version: 1",
+                "  state: classified",
+                f"  artifact_class: {artifact_class}",
+                f"  artifact_path: {yaml_scalar(governance_artifact_path)}",
+                f"  artifact_sha256: {governance_artifact_sha256}",
+                f"  artifact_size: {governance_artifact_size}",
+            )
+        )
+        if scene_binding:
+            lines.extend(
+                (
+                    f"  parent_path: {yaml_scalar(governance_parent_path)}",
+                    f"  parent_sha256: {governance_parent_sha256}",
+                    f"  frame_timestamp_ms: {governance_frame_timestamp_ms}",
+                )
+            )
+        elif media_type:
+            lines.append(f"  media_type: {media_type}")
+            lines.append(f"  original_filename: {yaml_scalar(artifact_name)}")
+        lines.extend(
+            (
+                "  semantics:",
+                "    projects: []",
+                "    tags: []",
+                "    types: []",
+                "    classes: []",
+            )
+        )
+    # Same field names the media pipeline already writes and checks, so a page
+    # written here and one re-rendered by reconciliation describe an artifact
+    # in one vocabulary rather than two.
+    if binary_sha256:
+        lines.append(f"original_filename: {yaml_scalar(artifact_name)}")
+        lines.append(f"binary_sha256: {binary_sha256}")
+        if binary_size is not None:
+            lines.append(f"binary_size: {binary_size}")
     if parent_media:
         lines.append(f"parent_media: {parent_media}")
     if frame_ts is not None:
         lines.append(f"frame_ts: {frame_ts}")
     extra_tag = ", scene-frame" if parent_media else ""
     lines.append(
-        f"tags: [evidence, {scope.lower().replace(' ', '-')}, "
+        f"tags: [{label.lower()}, "
+        f"{scope.lower().replace(' ', '-')}, "
         f"{category.lower().replace(' ', '-')}{extra_tag}]"
     )
     lines.append("ingested_into: []")
@@ -582,7 +780,7 @@ def _render_sidecar(
     lines.append("")
     lines.append(f"# {display_title}")
     lines.append("")
-    lines.append(f"Preserved under `Evidence/{scope}/{category}/`.")
+    lines.append(f"Preserved under `{tree}/{scope}/{category}/`.")
     lines.append("")
     if description:
         lines.append("## Description")
@@ -597,6 +795,18 @@ def _render_sidecar(
         if text:
             lines.append(_cap_extracted_text(text))
             lines.append("")
+    # A page with no caption, no extracted text, and no media stub would
+    # otherwise have an empty body, which `schema.validate_source` treats as an
+    # invalid source. Describing the artifact is also the only thing this page
+    # can honestly say about bytes it does not inline.
+    if not description and not text and binary_sha256:
+        lines.append("## Artifact")
+        lines.append("")
+        lines.append(f"- Original filename: `{artifact_name}`")
+        lines.append(f"- SHA-256: `{binary_sha256}`")
+        if binary_size is not None:
+            lines.append(f"- Bytes: {binary_size}")
+        lines.append("")
     return "\n".join(lines)
 
 
@@ -623,10 +833,7 @@ def ensure_media_sidecar(
     if sidecar.exists():
         return sidecar, False
     rel = binary_path.resolve().relative_to(vault_root.resolve()).as_posix()
-    # Derive scope/category from Knowledge Base/Evidence/<scope>/<category>/… for the tags.
-    parts = rel.split("/")
-    scope = parts[2] if len(parts) > 2 else "evidence"
-    category = parts[3] if len(parts) > 3 else "uncategorized"
+    tree, scope, category = artifact_location(rel)
     md = _render_sidecar(
         artifact_name=name,
         scope=scope,
@@ -635,9 +842,80 @@ def ensure_media_sidecar(
         media_type=media_type,
         evidence_file=rel,
         extracted_by="none",  # not pending → the auto OCR scan ignores it; backfill OCRs it
+        tree=tree,
     )
-    batch_atomic_write([PlannedWrite(path=sidecar, content=md)], vault_root=vault_root)
+    commit_media_sidecar_writes(
+        vault_root,
+        (
+            PlannedWrite(
+                path=sidecar,
+                content=md,
+                expected_hash=MISSING_CONTENT_HASH,
+            ),
+        ),
+    )
     return sidecar, True
+
+
+def ensure_artifact_page(
+    vault_root: Path, binary_path: Path, *, today: dt.date | None = None
+) -> tuple[Path, bool]:
+    """Ensure any stored artifact has the page that makes it addressable.
+
+    The general form of `ensure_media_sidecar`, and the back-fill for artifacts
+    that predate the page being unconditional. Whether a page was written used
+    to depend on whether the extension was extractable, so a `.csv`, `.eml`, or
+    `.json` preserved earlier has bytes and nothing else — no `exomem_id`, no
+    `ingested_into`, and no corpus presence, because only `.md` is indexed.
+
+    Media still goes through `ensure_media_sidecar`: those pages are
+    reconciliation's to own, and describing one here would put the capture path
+    back inside a contract it does not hold. Everything else gets its identity
+    written directly, since nothing else will ever write it.
+
+    Idempotent: returns `(existing_page, False)` when one is already there.
+    """
+    extract = _extract_module()
+    if extract.media_type_for(binary_path) is not None:
+        return ensure_media_sidecar(vault_root, binary_path, today=today)
+
+    name = binary_path.name
+    if name.lower().endswith(".md"):
+        page = binary_path.with_name(f"{name[:-3]}-notes.md")
+    else:
+        page = binary_path.with_name(f"{name}.md")
+    if page.exists():
+        return page, False
+
+    rel = binary_path.resolve().relative_to(vault_root.resolve()).as_posix()
+    tree, scope, category = artifact_location(rel)
+    digest = hashlib.sha256()
+    size = 0
+    with binary_path.open("rb") as stream:
+        while chunk := stream.read(_STREAM_CHUNK):
+            digest.update(chunk)
+            size += len(chunk)
+    markdown = _render_sidecar(
+        artifact_name=name,
+        scope=scope,
+        category=category,
+        date_iso=temporal.stamp(today or temporal.now()),
+        evidence_file=rel,
+        binary_sha256=digest.hexdigest(),
+        binary_size=size,
+        tree=tree,
+    )
+    commit_media_sidecar_writes(
+        vault_root,
+        (
+            PlannedWrite(
+                path=page,
+                content=markdown,
+                expected_hash=MISSING_CONTENT_HASH,
+            ),
+        ),
+    )
+    return page, True
 
 
 _EXTRACTED_HEADING = "## Extracted text"
@@ -665,8 +943,8 @@ def update_sidecar_extraction(
     structurally. Omitted (None/empty) leaves the frontmatter unchanged — every
     existing call site is unaffected.
     """
-    content = sidecar_path.read_text(encoding="utf-8")
-    content = _set_frontmatter_field(content, "extracted_by", engine)
+    before = sidecar_path.read_text(encoding="utf-8")
+    content = _set_frontmatter_field(before, "extracted_by", engine)
     content = _set_frontmatter_field(content, "processing_state", "completed")
     content = _set_frontmatter_field(content, "processing_error", "null")
     content = _set_frontmatter_field(content, "processing_retryable", "false")
@@ -689,12 +967,65 @@ def update_sidecar_extraction(
         if labels:
             content = _set_frontmatter_field(content, "speakers", f"[{', '.join(labels)}]")
     content = _set_extracted_text(content, _cap_extracted_text(text))
-    return batch_atomic_write(
-        [PlannedWrite(path=sidecar_path, content=content)],
-        vault_root=vault_root,
+    return commit_media_sidecar_writes(
+        vault_root,
+        (
+            PlannedWrite(
+                path=sidecar_path,
+                content=content,
+                expected_hash=content_hash(before),
+            ),
+        ),
         post_commit_fanout=not defer_index_fanout,
         defer_graph_completion=defer_graph_completion,
     )
+
+
+def commit_media_sidecar_writes(
+    vault_root: Path,
+    writes: tuple[PlannedWrite, ...],
+    *,
+    post_commit_fanout: bool = True,
+    defer_graph_completion: bool = False,
+    batch_writer: Callable[..., list[Path] | DeferredGraphCompletion] | None = None,
+) -> list[Path] | DeferredGraphCompletion:
+    """Publish machine-owned Markdown through the active catalog tuple."""
+
+    from .governance import catalog_publication, graph_producer
+
+    def graph_replacement_provider():
+        return graph_producer.replacements_for_planned_markdown(
+            vault_root,
+            before_corpus=semantic_contract.build_corpus_context(vault_root),
+            writes=writes,
+        )
+
+    try:
+        prepared = catalog_publication.prepare_planned_markdown_batch(
+            vault_root,
+            writes=writes,
+            graph_replacement_provider=graph_replacement_provider,
+        )
+    except catalog_publication.CatalogPublicationError as error:
+        raise catalog_publication.CatalogCommitError(
+            "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
+            str(error),
+        ) from error
+    writer = batch_atomic_write if batch_writer is None else batch_writer
+    written = writer(
+        list(writes),
+        vault_root=vault_root,
+        post_commit_fanout=post_commit_fanout,
+        defer_graph_completion=defer_graph_completion,
+    )
+    try:
+        catalog_publication.publish_markdown_batch(prepared)
+    except catalog_publication.CatalogPublicationError as error:
+        raise catalog_publication.CatalogCommitError(
+            "GOVERNANCE_CATALOG_PUBLICATION_UNCERTAIN",
+            str(error),
+        ) from error
+    return written
 
 
 def update_sidecar_processing_failure(
@@ -710,18 +1041,24 @@ def update_sidecar_processing_failure(
     defer_graph_completion: bool = False,
 ) -> list[Path] | DeferredGraphCompletion:
     """Persist actionable worker state without replacing a pending transcript."""
-    content = sidecar_path.read_text(encoding="utf-8")
+    before = sidecar_path.read_text(encoding="utf-8")
     content = render_sidecar_processing_failure(
-        content,
+        before,
         state=state,
         attempts=attempts,
         error=error,
         retryable=retryable,
         next_action=next_action,
     )
-    return batch_atomic_write(
-        [PlannedWrite(path=sidecar_path, content=content)],
-        vault_root=vault_root,
+    return commit_media_sidecar_writes(
+        vault_root,
+        (
+            PlannedWrite(
+                path=sidecar_path,
+                content=content,
+                expected_hash=content_hash(before),
+            ),
+        ),
         post_commit_fanout=not defer_index_fanout,
         defer_graph_completion=defer_graph_completion,
     )
@@ -760,7 +1097,8 @@ def update_sidecar_processing_pending(
     expected_hash: str | None = None,
 ) -> bool:
     """Keep changed-in-flight media automatic and actionable until reconciliation."""
-    content = sidecar_path.read_text(encoding="utf-8")
+    before = sidecar_path.read_text(encoding="utf-8")
+    content = before
     fields = (
         ("extracted_by", "pending"),
         ("processing_state", "pending"),
@@ -772,15 +1110,15 @@ def update_sidecar_processing_pending(
     for field, value in fields:
         content = _set_frontmatter_field(content, field, value)
     try:
-        batch_atomic_write(
-            [
+        commit_media_sidecar_writes(
+            vault_root,
+            (
                 PlannedWrite(
                     path=sidecar_path,
                     content=content,
-                    expected_hash=expected_hash,
-                )
-            ],
-            vault_root=vault_root,
+                    expected_hash=expected_hash or content_hash(before),
+                ),
+            ),
         )
     except ContentHashMismatchError:
         return False

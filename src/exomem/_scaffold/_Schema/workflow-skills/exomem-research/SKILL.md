@@ -14,7 +14,7 @@ Use when the user asks to research a topic, compare options, investigate a claim
 
 ## Workflow
 1. Search Exomem first with `ask_memory` for prior conclusions and related sources.
-2. Gather external sources only as needed; preserve important raw sources with `capture_source`, `preserve_evidence`, `preserve_artifacts` for file handles, or fallback `transfer_artifact`.
+2. Gather external sources only as needed; preserve important raw sources with `capture_source`, passing `files` when the client can hand over an attachment. `preserve_evidence`, `preserve_artifacts`, and the `transfer_artifact` fallback are for proof-bearing artifacts, not for raw material.
 3. Attribute findings to sources and distinguish evidence from interpretation.
 4. Compile the result with `remember` as a `research-note` unless another type clearly fits, listing every source preserved in step 2 in `sources:`.
 5. Use `connect_memory(operation="suggest-links")` and connect related prior notes.

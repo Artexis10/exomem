@@ -641,7 +641,12 @@ The search lanes consume that map directly:
    vector disables or warms that visible lane without falling back to a raw embedding;
 3. reranking receives only selected projected text and runs before final visible top-k;
 4. CLIP pixels/keyframes participate only for items selected at L6, with authorization
-   filtering inside the CLIP lane before its cap. At L1-L5 an image/video can match only
+   filtering inside the CLIP lane before its cap. One immutable measurement row binds
+   each media projection: an image has one untimestamped vector, while a video has one
+   through forty strictly timestamp-ordered vectors using the canonical bounded
+   `frame_timestamp_ms`. The fixed forty-sample ceiling is not configurable. Retrieval
+   scores every authorized sample, emits the parent media item once at its best score,
+   and carries the earliest best frame timestamp. At L1-L5 an image/video can match only
    through its authorized textual companion projection; if that record is unavailable,
    the binary CLIP lane is excluded rather than searched raw;
 5. graph vertices and edges are projection-indexed and admitted before expansion, so
@@ -651,10 +656,116 @@ The search lanes consume that map directly:
    pagination, and error reduction operate only on complete lane outputs from this
    projected view. Public limits count projected candidates only.
 
+Governed find pagination uses one opaque `pc1.<64-lowercase-hex>` continuation. The
+token is the SHA-256 digest of NUL-terminated ASCII domain
+`exomem.projected-find-continuation.v1\0` followed by RFC 8785 JCS containing only the
+canonical principal id, verified authorization-session id or `null`, declared purpose
+or `null`, the SHA-256 request digest, the next visible offset, and a
+caller-visible snapshot digest. That snapshot digest is streamed over the ordered
+`(item_identity, projection_variant_id)` pairs using the NUL-terminated ASCII domain
+`exomem.projected-visible-snapshot.v1\0`, a big-endian u32 pair count, then for each UTF-8
+field a big-endian u32 byte length followed by its bytes. It excludes
+the vault root, hidden/L0 identities, catalog size/generation, issuance time, random
+bytes, and every server-only authorization fact, so an L0 item present versus absent
+produces the same continuation bytes. The token grants no authority and is useful only
+as a key into a bounded process-local record created by the first page.
+
+The request digest is SHA-256 over RFC 8785 JCS of the closed object
+`{auto_rerank, graph, limit, mode, prefer_active, prefer_compiled, query, rerank,
+scope}` with booleans, bounded integer `limit`, strings, and `rerank` boolean or `null`
+encoded at their JSON types. No omitted default, presentation-only field, or server-only
+ranking configuration enters that object.
+
+That record retains the exact immutable runtime, authorization-map digest, selected-
+projection digest, request and principal bindings, visible-snapshot digest, next offset,
+the first page's repository-derived candidate depth, and a fixed repository-owned
+15-minute monotonic expiry. At most 4,096 records may exist per process; expired records
+are removed before admission and capacity exhaustion returns the same content-free
+continuation refusal. A continuation request resolves the record for the exact vault,
+requires the current policy fingerprint and projector schema to match, re-runs current
+session/grant authorization against the retained namespace, compares the selected-
+projection digest against the current namespace while excluding L0 rows, and requires
+the resulting authorization-map and visible-snapshot digests to match before slicing the
+next page.
+Thus a policy/session/grant/revocation or visible-item change refuses rather than serving
+stale authority or skipping rows, while a hidden-only catalog change continues over the
+retained projected snapshot without changing page membership or revealing the change.
+Unknown, malformed, expired, evicted, restart-lost, cross-vault, cross-principal,
+cross-session, cross-purpose, or request-mismatched cursors all return the one bounded
+`INVALID_CONTINUATION` application refusal under the fixed completion class. Replays are
+read-only and deterministic; they do not consume or extend the record. A separately
+issued first page may refresh a byte-identical token to the current verified runtime and
+fixed expiry; a continuation replay may not replace that newer record with prior state.
+
+Later pages reuse the first page's retained candidate depth exactly: offset growth never
+widens a primary vector/BM25 prefix, changes graph-only classification, or recomputes a
+different visible order. Exhausting that bounded ranked window omits the continuation.
+
 Projection namespaces are built and validated before a governed compiled-policy
 generation is activated. An item write creates the next catalog generation, reuses only
 content-addressed unchanged rows, and publishes the complete catalog plus required
-projection/index rows atomically; it never mutates the prior namespace in place. A policy
+projection/index rows atomically; it never mutates the prior namespace in place. When
+the active tuple requires CLIP measurements, the successor builder verifies that the
+active image/video family is complete, carries only rows whose projection variant remains
+content-identical, and requires exact target-item/content-hash-bound replacement samples
+for changed visual media. Image rows remain one untimestamped sample; video rows remain
+one through forty canonical timestamped samples. Derived frame companions bind
+`parent_media` and are textual catalog artifacts, not duplicate CLIP measurement owners.
+The complete successor CLIP family binds the target namespace and activates in the same
+catalog publication transaction; missing, stale, mismatched, duplicate, or dimension-
+incompatible rows refuse before canonical bytes change. The live media worker and bulk
+backfill canonicalize each already-computed scene vector exactly once to bounded integer
+milliseconds and pass that same immutable sample tuple into the planned frame-companion
+publication. That transaction binds the samples to the guarded parent video sidecar and
+advances the parent CLIP row, companion catalog rows, vector/CLIP roots, and active tuple
+together; it neither invokes CLIP a second time nor gives a frame companion its own pixel
+row.
+
+When the active tuple requires a graph measurement family, the successor builder first
+verifies exactly one active row for every active projection variant. The target family
+likewise contains exactly one row per target variant: every variant below L6 has an empty
+outgoing edge tuple, a content-identical L6 variant may carry its verified row, and a
+changed L6 source item requires an immutable replacement bound to its exact target item
+identity and content hash. Each replacement edge must name that source and a target
+identity present in the target catalog; deleting a target that an otherwise-carried row
+still names therefore refuses rather than relabeling stale graph state. Duplicate rows,
+duplicate edges, mismatched sources, outside-catalog targets, missing replacements, and
+capacity overflow all refuse before canonical bytes change. The complete successor graph
+family binds the target namespace and publishes with the catalog, other measurement
+roots, receipt, and active tuple. Live graph producers remain responsible for supplying
+the target-bound replacements for every affected changed L6 source; an unknown required
+measurement family remains blocked.
+
+A producer may conservatively return a target-bound replacement for an affected item
+whose target namespace has no L6 variant. The publisher still validates its item,
+content, edge sources, edge targets, uniqueness, and aggregate capacity, then discards
+that edge payload and emits only the required empty lower-variant rows. A lower-only
+policy projection therefore cannot turn an otherwise valid semantic write into a graph
+publication refusal or persist raw graph authority below L6.
+
+The existing-page semantic writer, semantic creation writers, semantic move writer,
+semantic trash-recovery writer, and semantic file/directory trash writers
+derive their graph replacements from the freshest validated detached before-corpus
+carried into the mutation boundary plus the exact guarded planned-write overlay. A move
+or recovery starts from its exact detached after-corpus, while trash removes its exact
+held Markdown identity set; each then overlays only its guarded
+content and auxiliary writes. The retained-corpus paths do not walk the vault again;
+trash builds one lazy detached before-corpus only after an active graph family is verified
+and before canonical bytes change. None of these paths reopens the live graph. The overlay
+re-resolves title-dependent links and reverse relations, so the replacement set includes
+directly changed, created, moved, restored, or removed paths and otherwise-unchanged logical
+sources whose outgoing edge tuple changes. The provider is invoked lazily only when the active tuple
+contains a graph family; open and lexical-only writes do no graph-producer work. Other
+live writer families remain blocked until they supply the same target-bound replacement
+contract.
+
+Machine-owned Evidence preservation, media-sidecar completion/failure updates, and
+scene-frame companion creation use the same lazy planned-Markdown provider. They build
+one detached before-corpus only when the active tuple contains a graph family, overlay the
+exact already-staged Markdown bytes, and publish graph/CLIP/catalog roots together before
+reporting success. Open and lexical-only paths do no graph-producer work.
+
+A policy
 fingerprint or projector-schema change builds a new namespace tuple and never relabels
 an old one. A model/extractor change writes or invalidates only the corresponding
 versioned measurement subkey. Initial migration builds the exact
@@ -707,6 +818,22 @@ added to a ceiling. The gate randomizes/interleaves hidden-present and physicall
 replicas, covers zero, one, and the exact maximum supported capacity across lexical,
 vector, rerank, CLIP, graph, error, and pagination paths, and computes 99% bootstrap
 upper confidence bounds for absolute median and p95 completion-time differences.
+
+Model execution is released as a closed profile, not one ambient "models enabled"
+switch. A manifest, route set, completion class, exact device/backend/hard-off tuple, and
+required measurement families belong to exactly one profile and cannot certify another.
+The first live-model profile is `vectors-cpu-torch-v1`: text embeddings are enabled with
+`EXOMEM_DEVICE=cpu` and `EXOMEM_EMBED_BACKEND=torch`, the embedding and legacy device
+overrides are absent, `OMP_NUM_THREADS=1` and `MKL_NUM_THREADS=1`, and CLIP plus
+reranking remain hard-off. It requires an exact
+`projected-text-v1`/`BAAI/bge-base-en-v1.5` vector family before serving and uses the
+repository class `projected-find-vector-cpu-v1` (1,000 ms padding, 1,500 ms deadline).
+Only the vector-model input uses `" ".join(query.split())`, capped to the first 600
+Unicode code points and retreated to the preceding complete U+0020-delimited token when
+truncated. Lexical acquisition and the request/continuation digest retain the full
+validated public query. This bound is fixed before characterization and cannot be
+caller-, manifest-, or observation-selected. Reranker-, CLIP-, GPU-, ONNX-, mixed-, and
+override-bearing configurations remain non-serving until separately characterized.
 
 For each route and public request class, both upper bounds must be no greater than all
 three applicable ceilings: the manifest differential, 25 ms absolute, and 10% of the
@@ -793,6 +920,24 @@ acknowledgement, and a committed epoch advance before the replica is excluded fr
 intersection. A stopped or unreachable member remains included and blocks issuance.
 A rejoin must attest the current epoch and accepted intersection before becoming
 `SERVING`; a stale-epoch process cannot issue or resume credentials.
+
+The version-1 wire record is a closed, canonical UTF-8 JSON object bounded to 64 KiB and
+64 admitted replicas. It carries `{version, epoch, cell_id, logical_vault_id,
+previous_epoch_digest, issued_at, expires_at, replicas, signing_key_id, mac}`; each
+replica entry carries `{version, epoch, replica_id, state, software_version,
+schema_version, cell_id, active_key_id, accepted_key_ids, control_digest,
+keyring_digest, attested_at, expires_at, issuance_stopped, no_in_flight,
+signing_key_id, mac}`. Identifiers are bounded opaque ASCII, keys and replicas are
+sorted/unique, numbers are bounded integers, duplicate/extra keys and noncanonical bytes
+are rejected, and epoch/attestation freshness is bounded to the maximum session TTL plus
+30 seconds of skew. The membership digest is SHA-256 over the complete canonical signed
+record. To avoid a circular commitment, replica `control_digest` is domain-separated over
+the immutable control identity/attachment basis only; the signed control record separately
+binds the complete membership digest and the mutable enrollment/activation tuple on every
+request. An epoch successor binds the exact predecessor digest. Removal is legal only from
+an already committed `DRAINING` predecessor with issuance stopped and no in-flight work;
+the current runtime additionally refuses any accepted-key intersection that omits a key
+named by a live unexpired session row.
 
 Startup/readiness fails session capability service when either external key/control file
 is missing/unsafe, identity binding differs, an admitted attestation is missing/stale, an

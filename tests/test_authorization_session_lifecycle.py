@@ -7,6 +7,7 @@ import sys
 import textwrap
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -14,6 +15,7 @@ import pytest
 
 from exomem.governance import (
     authorization_custody,
+    authorization_serving_membership,
     authorization_session_lifecycle,
     authorization_sessions,
     policy,
@@ -100,7 +102,11 @@ def _resume_in_fresh_process(
         from dataclasses import asdict
         from pathlib import Path
 
-        from exomem.governance import authorization_custody, authorization_session_lifecycle
+        from exomem.governance import (
+            authorization_custody,
+            authorization_session_lifecycle,
+            authorization_serving_membership,
+        )
 
         value = json.loads(sys.stdin.read())
         key = authorization_custody.AuthorizationVerifierKey(
@@ -109,34 +115,66 @@ def _resume_in_fresh_process(
             not_before=value["now"] - 60,
             not_after=value["now"] + 86_400,
         )
+        keyring = authorization_custody.AuthorizationKeyring(
+            version=1,
+            keyring_id="keyring-7",
+            cell_id="cell-7",
+            logical_vault_id="logical-vault-7",
+            active_key_id=key.key_id,
+            accepted_keys=(key,),
+        )
+        control = authorization_custody.AuthorizationControlRecord(
+            version=1,
+            keyring_id="keyring-7",
+            cell_id="cell-7",
+            logical_vault_id="logical-vault-7",
+            registry_attachment_id="attachment-7",
+            attachment_epoch=1,
+            governance_enrolled=True,
+            activation_store_id="activation-store-7",
+            activation_epoch=1,
+            activation_state_digest=value["activation_state_digest"],
+            serving_membership_epoch=1,
+            serving_membership_digest="a" * 64,
+            issued_at=value["now"] - 60,
+            expires_at=value["now"] + 86_400,
+            signing_key_id=key.key_id,
+        )
+        attestation = authorization_serving_membership.ReplicaReadinessAttestation(
+            version=1,
+            epoch=1,
+            replica_id="replica-7",
+            state="SERVING",
+            software_version=authorization_custody.runtime_software_version(),
+            schema_version=4,
+            cell_id="cell-7",
+            active_key_id=key.key_id,
+            accepted_key_ids=(key.key_id,),
+            control_digest=authorization_custody.control_attestation_digest(control),
+            keyring_digest=authorization_custody.keyring_attestation_digest(keyring),
+            attested_at=value["now"] - 1,
+            expires_at=value["now"] + 299,
+            issuance_stopped=False,
+            no_in_flight=False,
+            signing_key_id=key.key_id,
+        )
         custody = authorization_custody.AuthorizationCustody(
             keyring_path=Path("/external/keyring.json"),
             control_path=Path("/external/control.json"),
-            keyring=authorization_custody.AuthorizationKeyring(
+            keyring=keyring,
+            control=control,
+            serving_membership=authorization_serving_membership.ServingMembershipEpoch(
                 version=1,
-                keyring_id="keyring-7",
+                epoch=1,
                 cell_id="cell-7",
                 logical_vault_id="logical-vault-7",
-                active_key_id=key.key_id,
-                accepted_keys=(key,),
-            ),
-            control=authorization_custody.AuthorizationControlRecord(
-                version=1,
-                keyring_id="keyring-7",
-                cell_id="cell-7",
-                logical_vault_id="logical-vault-7",
-                registry_attachment_id="attachment-7",
-                attachment_epoch=1,
-                governance_enrolled=True,
-                activation_store_id="activation-store-7",
-                activation_epoch=1,
-                activation_state_digest=value["activation_state_digest"],
-                serving_membership_epoch=1,
-                serving_membership_digest="a" * 64,
-                issued_at=value["now"] - 60,
-                expires_at=value["now"] + 86_400,
+                previous_epoch_digest=None,
+                issued_at=value["now"] - 1,
+                expires_at=value["now"] + 299,
+                replicas=(attestation,),
                 signing_key_id=key.key_id,
             ),
+            local_replica_id="replica-7",
         )
         with sqlite3.connect(value["database_path"]) as connection:
             context = authorization_session_lifecycle.resume_session(
@@ -188,6 +226,7 @@ def _custody(
     *,
     active_key_id: str = "auth-key-old",
     keys: tuple[authorization_custody.AuthorizationVerifierKey, ...] | None = None,
+    membership_expires_at: int = NOW + 299,
 ) -> authorization_custody.AuthorizationCustody:
     accepted = keys or (_key("auth-key-old", b"o" * 32),)
     keyring = authorization_custody.AuthorizationKeyring(
@@ -215,11 +254,44 @@ def _custody(
         expires_at=NOW + 86_400,
         signing_key_id=active_key_id,
     )
+    key_ids = tuple(sorted(key.key_id for key in accepted))
+    serving_membership = authorization_serving_membership.ServingMembershipEpoch(
+        version=1,
+        epoch=control.serving_membership_epoch,
+        cell_id=control.cell_id,
+        logical_vault_id=control.logical_vault_id,
+        previous_epoch_digest=None,
+        issued_at=NOW - 1,
+        expires_at=membership_expires_at,
+        replicas=(
+            authorization_serving_membership.ReplicaReadinessAttestation(
+                version=1,
+                epoch=control.serving_membership_epoch,
+                replica_id="replica-7",
+                state="SERVING",
+                software_version=authorization_custody.runtime_software_version(),
+                schema_version=4,
+                cell_id=control.cell_id,
+                active_key_id=active_key_id,
+                accepted_key_ids=key_ids,
+                control_digest=authorization_custody.control_attestation_digest(control),
+                keyring_digest=authorization_custody.keyring_attestation_digest(keyring),
+                attested_at=NOW - 1,
+                expires_at=membership_expires_at,
+                issuance_stopped=False,
+                no_in_flight=False,
+                signing_key_id=active_key_id,
+            ),
+        ),
+        signing_key_id=active_key_id,
+    )
     return authorization_custody.AuthorizationCustody(
         keyring_path=Path("/external/keyring.json"),
         control_path=Path("/external/control.json"),
         keyring=keyring,
         control=control,
+        serving_membership=serving_membership,
+        local_replica_id="replica-7",
     )
 
 
@@ -266,6 +338,69 @@ def test_open_persists_only_a_bound_verifier_and_resume_returns_context() -> Non
     )
     assert issued.bearer not in "\n".join(connection.iterdump())
     assert issued.bearer not in repr(issued)
+
+
+@pytest.mark.parametrize("missing", [True, False])
+def test_open_fails_closed_before_writing_when_membership_is_missing_or_stale(
+    missing: bool,
+) -> None:
+    connection, migration = _connection()
+    custody = _custody(
+        migration.activation_state_digest,
+        membership_expires_at=NOW if not missing else NOW + 299,
+    )
+    if missing:
+        custody = replace(custody, serving_membership=None)
+
+    with pytest.raises(
+        authorization_session_lifecycle.AuthorizationSessionUnavailable
+    ) as raised:
+        authorization_session_lifecycle.open_session(
+            connection,
+            custody=custody,
+            principal_id="principal:owner:1000",
+            issuer_family="cli-local-owner",
+            now=NOW,
+            ttl_seconds=600,
+        )
+
+    assert raised.value.code == "AUTHORIZATION_SESSION_UNAVAILABLE"
+    assert connection.execute(
+        "SELECT COUNT(*) FROM governance_authorization_sessions"
+    ).fetchone() == (0,)
+
+
+def test_resume_fails_when_a_live_row_key_drops_from_the_serving_intersection() -> None:
+    connection, migration = _connection()
+    old_key = _key("auth-key-old", b"o" * 32)
+    new_key = _key("auth-key-new", b"n" * 32)
+    initial = _custody(
+        migration.activation_state_digest,
+        keys=(old_key, new_key),
+    )
+    issued = authorization_session_lifecycle.open_session(
+        connection,
+        custody=initial,
+        principal_id="principal:owner:1000",
+        issuer_family="cli-local-owner",
+        now=NOW,
+        ttl_seconds=600,
+    )
+    switched = _custody(
+        migration.activation_state_digest,
+        active_key_id="auth-key-new",
+        keys=(new_key,),
+    )
+
+    with pytest.raises(authorization_session_lifecycle.AuthorizationSessionUnavailable):
+        authorization_session_lifecycle.resume_session(
+            connection,
+            custody=switched,
+            bearer=issued.bearer,
+            principal_id="principal:owner:1000",
+            issuer_family="cli-local-owner",
+            now=NOW + 1,
+        )
 
 
 def test_open_builds_the_exact_typed_issuance_terminal() -> None:

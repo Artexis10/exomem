@@ -18,7 +18,7 @@ Use when the user asks to save or the session lands on durable reusable knowledg
    two open axes when you can: `source_kind` (what it is) and `domain` (what it
    is about), plus `projects` for the work it serves. Use `other` only when the
    kind genuinely cannot be determined, never because no familiar label matches.
-3. Use `preserve_evidence` for factual text, `preserve_artifacts` when file handles are available, and `transfer_artifact` only as the binary-upload fallback.
+3. Pick the lane before the transport. Raw material stays with `capture_source`, which takes `files` for attachments as well as `content` for text. Proof-bearing material takes `preserve_evidence` for factual text, `preserve_artifacts` when file handles are available, and `transfer_artifact` only as the binary-upload fallback.
 4. Use `remember` for distilled conclusions: `research-note`, `insight`, `failure`, or `pattern`. Pass any path captured in steps 2-3 as `sources:` so the conclusion links to its provenance and the source leaves the unprocessed queue.
 5. Run `connect_memory(operation="suggest-links")` before writing compiled notes;
    prefer `edit_memory` or `replace_memory` for near-duplicates.
@@ -29,8 +29,11 @@ Use when the user asks to save or the session lands on durable reusable knowledg
 8. Only when no entity matches and the identity is stable, recurring, central,
    and useful beyond this source, use `connect_memory(operation="create-entity")`.
 
+## Lifecycle
+Two more classes land here. A **stated intent or commitment** — what the user will do, a batch or workstream they commit to, work they sequence or re-prioritise — routes to Planning with `plan_memory(action="add")`, or `triage`/`update` on an item that already exists. An **observed outcome or event** — something happened, was produced, measured, delivered, approved, published or failed — routes to Records with `record_memory(action="append")` into the one compatible collection; when collections compete ask one focused question, and when none fits propose one rather than creating it silently. An outcome that lands on an open committed Planning item is one landing with two consequences: append the record, then transition the item, together, reported once. A tentative claim is never written as an event, and elapsed time is never an outcome.
+
 ## Output contract
-After writing, report exactly `Saved -> <path>` plus one short phrase if needed. If nothing durable was saved, say why.
+After writing, report exactly `Saved -> <path>` plus one short phrase if needed. If nothing durable was saved, say why. Report a lifecycle consequence in the user's own vocabulary and cite the collection the way recall cites a page; the words Planning, Records, collection, schema and natural key never lead the report.
 
 ## Save rules
 Keep raw source verbatim when it matters. Keep compiled notes concise, attributed, linked, and written as conclusions, not transcripts.

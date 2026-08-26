@@ -7,6 +7,21 @@ import yaml
 
 ROOT = Path(__file__).parents[1]
 
+FULL_CI_JOBS = {
+    "retrieval-quality",
+    "retrieval-latency",
+    "governance-projection-wire",
+    "governance-projection-wire-vector-cpu",
+    "semantic-write-latency",
+    "graph-convergence",
+    "docker",
+}
+
+
+def _triggers(workflow: dict) -> dict:
+    # PyYAML 1.1 parses the unquoted workflow key `on` as boolean true.
+    return workflow.get("on") or workflow[True]
+
 
 def _workflow() -> dict:
     return yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
@@ -48,7 +63,14 @@ def test_lean_python_lanes_use_four_duration_balanced_isolated_shards() -> None:
     job = workflow["jobs"]["test"]
     matrix = job["strategy"]["matrix"]
 
-    assert matrix["python-version"] == ["3.11", "3.13"]
+    versions = " ".join(str(matrix["python-version"]).split())
+    assert "github.event_name == 'schedule'" in versions
+    assert "github.event_name == 'workflow_dispatch'" in versions
+    assert "github.event.pull_request.head.repo.full_name == github.repository" in versions
+    assert "github.head_ref == 'release-please--branches--main'" in versions
+    assert "startsWith(github.head_ref" not in versions
+    assert '["3.11", "3.13"]' in versions
+    assert '["3.13"]' in versions
     assert matrix["shard"] == [1, 2, 3, 4]
     assert job["name"] == "tests (py${{ matrix.python-version }}, shard ${{ matrix.shard }}/4)"
 
@@ -197,11 +219,118 @@ def test_retrieval_gates_run_as_three_independent_jobs() -> None:
     assert "scripts/semantic_write_latency.py --check" in semantic_command
 
 
-def test_superseded_pr_runs_cancel_and_one_stable_gate_requires_every_ci_job() -> None:
+def test_governance_wire_characterization_runs_every_registered_route() -> None:
+    workflow = _workflow()
+    job = workflow["jobs"]["governance-projection-wire"]
+
+    assert job["runs-on"] == "ubuntu-latest"
+    assert job["timeout-minutes"] == 8
+    assert job["strategy"]["fail-fast"] is False
+    assert set(job["strategy"]["matrix"]["route"]) == {
+        "keyword",
+        "bm25",
+        "vector-hard-off",
+        "rerank-hard-off",
+        "clip-hard-off",
+        "graph",
+        "graph-rerank-hard-off",
+        "max-query",
+        "max-limit",
+        "max-shape",
+        "hidden-index-missing",
+        "pagination",
+    }
+    command = job["steps"][-1]["run"]
+    assert "--python 3.13" in command
+    assert "tests/test_governance_projection_wire_gate.py" in command
+    assert job["steps"][-1]["env"]["EXOMEM_GOVERNANCE_TIMING_ROUTE"] == (
+        "${{ matrix.route }}"
+    )
+    assert job["steps"][-1]["env"]["EXOMEM_DISABLE_EMBEDDINGS"] == "1"
+    assert job["steps"][-1]["env"]["EXOMEM_DISABLE_CLIP"] == "1"
+    assert job["steps"][-1]["env"]["EXOMEM_DISABLE_RANKING"] == "1"
+    assert "governance-projection-wire" in workflow["jobs"]["gate"]["needs"]
+
+
+def test_governance_vector_cpu_wire_characterization_is_exact_and_required() -> None:
+    workflow = _workflow()
+    job = workflow["jobs"]["governance-projection-wire-vector-cpu"]
+
+    assert job["runs-on"] == "ubuntu-latest"
+    assert job["timeout-minutes"] == 12
+    assert job["strategy"]["fail-fast"] is False
+    assert set(job["strategy"]["matrix"]["route"]) == {
+        "keyword",
+        "bm25",
+        "vector-live",
+        "rerank-hard-off",
+        "clip-hard-off",
+        "graph",
+        "graph-rerank-hard-off",
+        "max-query",
+        "max-limit",
+        "max-shape",
+        "hidden-index-missing",
+        "pagination",
+    }
+    step = job["steps"][-1]
+    command = step["run"]
+    assert "--extra embeddings" in command
+    assert "--python 3.13" in command
+    assert "tests/test_governance_projection_wire_gate.py" in command
+    assert step["env"] == {
+        "EXOMEM_GOVERNANCE_TIMING_PROFILE": "vectors-cpu-torch-v1",
+        "EXOMEM_GOVERNANCE_TIMING_ROUTE": "${{ matrix.route }}",
+        "EXOMEM_DISABLE_MEDIA_EXTRACTION": "1",
+        "EXOMEM_DISABLE_CLIP": "1",
+        "EXOMEM_DISABLE_RANKING": "1",
+        "EXOMEM_DEVICE": "cpu",
+        "EXOMEM_EMBED_BACKEND": "torch",
+        "OMP_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
+    assert "governance-projection-wire-vector-cpu" in workflow["jobs"]["gate"][
+        "needs"
+    ]
+
+
+def test_expensive_ci_runs_nightly_manually_and_for_release_prs_only() -> None:
+    workflow = _workflow()
+    triggers = _triggers(workflow)
+
+    assert triggers["schedule"] == [{"cron": "17 2 * * *"}]
+    assert "workflow_dispatch" in triggers
+
+    jobs = workflow["jobs"]
+    assert FULL_CI_JOBS < set(jobs)
+    conditions = {
+        " ".join(str(jobs[name].get("if", "")).split()) for name in FULL_CI_JOBS
+    }
+    assert len(conditions) == 1
+    condition = conditions.pop()
+    assert "github.event_name == 'schedule'" in condition
+    assert "github.event_name == 'workflow_dispatch'" in condition
+    assert "github.event_name == 'pull_request'" in condition
+    assert "github.event.pull_request.head.repo.full_name == github.repository" in condition
+    assert "github.head_ref == 'release-please--branches--main'" in condition
+    assert "startsWith(github.head_ref" not in condition
+
+    fast_jobs = set(jobs) - FULL_CI_JOBS - {"gate"}
+    assert fast_jobs
+    assert all("if" not in jobs[name] for name in fast_jobs)
+
+
+def test_superseded_pr_runs_cancel_and_one_stable_gate_covers_both_tiers() -> None:
     workflow = _workflow()
 
     assert workflow["concurrency"] == {
-        "group": "ci-${{ github.event.pull_request.number || github.ref }}",
+        "group": (
+            "ci-${{ (github.event_name == 'schedule' || "
+            "github.event_name == 'workflow_dispatch') && "
+            "format('full-{0}', github.ref) || "
+            "github.event.pull_request.number || github.ref }}"
+        ),
         "cancel-in-progress": "${{ github.event_name == 'pull_request' }}",
     }
 
@@ -210,6 +339,11 @@ def test_superseded_pr_runs_cancel_and_one_stable_gate_requires_every_ci_job() -
     assert gate["if"] == "${{ !cancelled() }}"
     assert set(gate["needs"]) == set(workflow["jobs"]) - {"gate"}
     assert gate["steps"][0]["env"]["RESULTS"] == "${{ join(needs.*.result, ' ') }}"
+    assert "FULL_CI" in gate["steps"][0]["env"]
+    command = gate["steps"][0]["run"]
+    assert 'test "$result" = success' in command
+    assert 'test "$result" = skipped' in command
+    assert 'test "$FULL_CI" != true' in command
 
 
 def test_native_held_filesystem_has_a_required_ntfs_gate() -> None:
@@ -256,44 +390,26 @@ def test_the_cross_platform_split_count_matches_its_shard_matrix() -> None:
     assert job["name"].endswith(f"shard ${{{{ matrix.shard }}}}/{len(shards)})")
 
 
-def test_the_release_bot_branch_does_not_launch_the_cross_platform_matrix() -> None:
-    """Its diff is a version string; `main` runs this lane on push regardless.
+def test_cross_platform_matrix_runs_nightly_and_manually_only() -> None:
+    workflow = _cross_platform_workflow()
+    triggers = _triggers(workflow)
 
-    The bot force-pushes that branch on every merge to main, and each push
-    relaunched the whole matrix into a queue real PRs were waiting in. macOS
-    runners cap at five concurrent jobs for a public repo on the free tier, so
-    those launches were not spare capacity -- they were the queue.
-    """
-    condition = " ".join(_cross_platform_workflow()["jobs"]["suite"]["if"].split())
+    assert "push" not in triggers
+    assert triggers["schedule"] == [{"cron": "41 2 * * *"}]
+    assert "workflow_dispatch" in triggers
+    assert "pull_request" in triggers
 
-    assert "release-please--branches--" in condition
-    # Skipped for that branch's PR, never for a push to main.
-    assert "github.event_name != 'pull_request'" in condition
-
-
-def test_the_capped_runner_is_paid_on_merge_not_on_every_pull_request() -> None:
-    """macOS caps at five concurrent jobs; a four-shard matrix cannot fit twice.
-
-    Two open PRs want eight macOS jobs against that cap, so the second run's
-    shards queue -- and a run's jobs are scheduled together, so the whole second
-    run stalls behind the first. That is a throughput cliff with no visible
-    symptom: every run still goes green, just later and later, and the obvious
-    reading is "CI is slow" rather than "these runs cannot overlap".
-
-    Asserted rather than reviewed because the tempting edit -- putting macOS
-    back on the pull_request arm "for parity" -- reintroduces the cliff while
-    looking like strictly more coverage.
-    """
-    matrix = _cross_platform_workflow()["jobs"]["suite"]["strategy"]["matrix"]
-    expression = " ".join(str(matrix["os"]).split())
-    pull_request_arm, _, push_arm = expression.partition("||")
-
-    assert "github.event_name == 'pull_request'" in pull_request_arm
-    assert "windows-latest" in pull_request_arm
-    assert "macos-latest" not in pull_request_arm, (
-        "the capped runner is back on every PR; two concurrent PRs will serialise"
-    )
-    # A push to main still runs both, so no commit stops reaching macOS -- it
-    # reaches it one merge later, on a lane that is advisory by design.
-    assert "macos-latest" in push_arm
-    assert "windows-latest" in push_arm
+    job = workflow["jobs"]["suite"]
+    condition = " ".join(job["if"].split())
+    assert "github.event_name == 'schedule'" in condition
+    assert "github.event_name == 'workflow_dispatch'" in condition
+    assert "github.event_name == 'pull_request'" not in condition
+    assert "release-please--branches--main" not in condition
+    assert workflow["concurrency"] == {
+        "group": "cross-platform-${{ github.event.pull_request.number || github.ref }}",
+        "cancel-in-progress": "${{ github.event_name == 'pull_request' }}",
+    }
+    assert job["strategy"]["matrix"]["os"] == [
+        "windows-latest",
+        "macos-latest",
+    ]

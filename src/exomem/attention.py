@@ -1,9 +1,10 @@
 """The `attention` review surface — one ranked "what needs your review today" list.
 
-Composes the seven default measurement-only queues that `audit` already produces —
+Composes the eight default measurement-only queues that `audit` already produces —
 `bridge_review`, `prediction_window`, `supersession_integrity`,
 `corpus_contradictions`, `stale_review`,
-`unprocessed_source`, and `relation_debt` — into a single ranked list while retaining
+`unprocessed_source`, `relation_debt`, and `entity_type_unregistered` — into a
+single ranked list while retaining
 opt-in registered semantic and epistemic-lifecycle categories. The composition is pure
 measurement: each queue already emits its findings
 in intra-queue rank order, and this module fuses those ranks with Reciprocal Rank Fusion
@@ -18,6 +19,7 @@ sort). Cross-item synthesis/judgment would be the brain's job and is deliberatel
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -27,6 +29,8 @@ from . import contradiction_stance as contradiction_stance_module
 from . import fusion
 from . import review_state as review_state_module
 from .audit import AuditFinding
+
+log = logging.getLogger(__name__)
 
 # The default queues in deterministic tiebreak-preference order (highest first).
 #
@@ -57,6 +61,12 @@ DEFAULT_ATTENTION_CATEGORIES: tuple[str, ...] = (
     "stale_review",
     "unprocessed_source",
     "relation_debt",
+    "entity_type_unregistered",
+    # Last, and deliberately not mid-list: this queue fires on a binding a person
+    # authored in a manifest, which is the `prediction_window` argument for being
+    # in the default union at all, but it is the newest and the least-evidenced of
+    # them. A vault that declares no binding never sees it.
+    "unreflected_outcomes",
 )
 # Registered — selectable via `categories` — but deliberately NOT default,
 # because these read old fields that a long-lived vault can already hold a large
@@ -107,6 +117,13 @@ class AttentionItem:
     # only by `item_by_ref`, never projected onto the wire (`as_dict`), and used
     # solely so a triage decision quiets everything the ref actually names.
     triage_components: list[str] | None = None
+    # The family disposition that put this item on an EXPLICITLY requested
+    # surface it would otherwise have left. Present only where it explains the
+    # item's presence, so an absence never has to be read as "normal".
+    disposition: str | None = None
+    # When this signal first reached a served surface, from the first-surfaced
+    # ledger. Absent until the ledger holds a record — it is never backfilled.
+    first_surfaced_at: str | None = None
 
     def as_dict(self) -> dict:
         out = {
@@ -117,6 +134,10 @@ class AttentionItem:
             "reasons": self.reasons,
             "proposed_fix": self.proposed_fix,
         }
+        if self.disposition is not None:
+            out["disposition"] = self.disposition
+        if self.first_surfaced_at is not None:
+            out["first_surfaced_at"] = self.first_surfaced_at
         if self.item_id is not None:
             out.update(
                 {
@@ -349,8 +370,15 @@ def attention(
     limit: int = 25,
     today=None,
     state: str = "open",
+    record_surfacing: bool = True,
 ) -> AttentionReport:
     """Compose the selected epistemic queues into one ranked review surface. Read-only.
+
+    `record_surfacing=False` is for callers that list in order to LOOK SOMETHING
+    UP rather than to show a review surface — `item_by_ref` resolves one
+    reference by scanning every queue at `state="all"`, and stamping that scan
+    would record a first surfacing for every item in the vault on a request that
+    shows exactly one. The first-surfaced ledger measures what reached a person.
 
     Runs a single `audit` pass over the selected categories, then ranks/dedups via
     `_rank`. `today` is threaded through for deterministic ACT-R dormancy in tests.
@@ -370,15 +398,77 @@ def attention(
             f"INVALID_REVIEW_STATE: state must be one of "
             f"{sorted(review_state_module.VALID_VIEWS)}"
         )
+    state_payload = _review_state_payload(vault_root)
+    excluded, annotations = _excluded_families(
+        state_payload,
+        requested=(set(categories) if categories else None),
+        state=state,
+    )
     report = audit_module.audit(vault_root, categories=sorted(resolved), today=today)
-    ranked = _rank(report.findings, categories=resolved, limit=0)
+    # BEFORE fusion, deliberately. Dropping an excluded family's reasons at the
+    # report edge would leave its RRF votes in the scores, so an item flagged
+    # only by a quiet family would still occupy a row with no reason on it, and
+    # a doubly-flagged item would keep a rank it earned from a signal the user
+    # asked not to hear about.
+    findings = [f for f in report.findings if f.category not in excluded]
+    ranked = _rank(findings, categories=resolved, limit=0)
     return _apply_review_state(
         vault_root,
         ranked,
         state=state,
         limit=limit,
         today=today,
+        payload=state_payload,
+        annotations=annotations,
+        record_surfacing=record_surfacing,
     )
+
+
+def _review_state_payload(vault_root: Path) -> dict:
+    """The review state. Raises `REVIEW_STATE_INVALID` rather than answering empty.
+
+    Loaded once per request so the disposition filter, the state view and the
+    ledger annotation all read the same snapshot. It deliberately does NOT
+    swallow the failure: this payload is what tells attention which items were
+    dismissed, and an unreadable store answered as an empty one reports every
+    standing dismissal in the vault as open — the precise regression this slice
+    exists to prevent, delivered silently. The LEDGER write is best-effort
+    (losing a measurement is cheap); the DECISION read is not, and never was.
+    """
+    return review_state_module.ReviewStateStore(vault_root).load()
+
+
+def _excluded_families(
+    payload: dict,
+    *,
+    requested: set[str] | None,
+    state: str,
+) -> tuple[frozenset[str], dict[str, str]]:
+    """``(families to drop, family -> disposition to annotate)`` for one request.
+
+    Named and separate so it is a mechanism a test can remove: patching it to
+    return nothing must put every quieted family straight back on the surface,
+    which is what makes the filter's presence provable rather than asserted.
+
+    The asymmetry between the default union and an explicit request is the whole
+    point of `quiet` versus prominence `off`. The daily surface honours the
+    decision without argument; asking for the category by name is asking anyway,
+    and the answer says so with an annotation rather than pretending the family
+    is clean.
+    """
+    dispositions = review_state_module.disposition_map(payload)
+    if not dispositions:
+        return frozenset(), {}
+    explicit = requested is not None
+    excluded: set[str] = set()
+    annotated: dict[str, str] = {}
+    for family, disposition in dispositions.items():
+        if explicit and family in requested:
+            if disposition == "quiet" or state == "all":
+                annotated[family] = disposition
+                continue
+        excluded.add(family)
+    return frozenset(excluded), annotated
 
 
 def activation(
@@ -388,6 +478,7 @@ def activation(
     limit: int = 25,
     today=None,
     state: str = "open",
+    record_surfacing: bool = True,
 ) -> AttentionReport:
     """Rank deterministic existing-corpus activation measurements. Read-only."""
     resolved = (
@@ -407,9 +498,24 @@ def activation(
             f"INVALID_REVIEW_STATE: state must be one of "
             f"{sorted(review_state_module.VALID_VIEWS)}"
         )
+    # Activation is a SERVED review surface, not an internal measurement: it
+    # ranks, it is reachable through `review_memory`, and it shares
+    # `_apply_review_state` — so it also shares the ledger write. A disposition
+    # therefore binds it exactly as it binds attention, and for the same two
+    # reasons: a silenced family must not come back on another surface, and the
+    # ledger must not record a first surfacing for a signal nobody was shown.
+    # Filtering before `_rank` for the same reason attention does: an excluded
+    # family's votes would otherwise still move a wanted item's position.
+    state_payload = _review_state_payload(vault_root)
+    excluded, annotations = _excluded_families(
+        state_payload,
+        requested=(set(categories) if categories else None),
+        state=state,
+    )
     scan = activation_module.scan(vault_root)
+    findings = [f for f in scan.findings if f.category not in excluded]
     ranked = _rank(
-        scan.findings,
+        findings,
         categories=resolved,
         limit=0,
         category_order=activation_module.ACTIVATION_CATEGORIES,
@@ -423,6 +529,9 @@ def activation(
         limit=limit,
         today=today,
         identity_namespace="activation",
+        payload=state_payload,
+        annotations=annotations,
+        record_surfacing=record_surfacing,
     )
 
 
@@ -468,6 +577,8 @@ def _item_by_ref_fallback(
         limit=0,
         state="all",
         today=today,
+        # A lookup, not a served surface: nothing here is shown to anybody.
+        record_surfacing=False,
     )
     for item in report.items:
         if item.item_id == wanted:
@@ -495,7 +606,11 @@ def item_by_ref(
     wanted = review_state_module.parse_review_ref(reference)
     found: AttentionItem | None = None
     for resolver in (attention, activation):
-        report = resolver(vault_root, limit=0, state="all", today=today)
+        # A scan to resolve ONE reference. Stamping it would record a first
+        # surfacing for every item in the vault on a request that shows one.
+        report = resolver(
+            vault_root, limit=0, state="all", today=today, record_surfacing=False
+        )
         for item in report.items:
             if item.item_id == wanted:
                 found = item
@@ -527,6 +642,77 @@ def item_by_ref(
     return found
 
 
+def _stamp_first_surfaced(
+    vault_root: Path, items: list[AttentionItem], *, known: dict | None = None
+) -> None:
+    """Record, and then annotate, the first time each RETURNED item was shown.
+
+    Only the items this report actually returns: an item the state view filtered
+    out, or one an excluded family removed before fusion, was never composed
+    onto a served surface, and a ledger that recorded it would be measuring the
+    runtime's internals rather than what a person saw.
+
+    Egress is consulted first, and separately from the report. Attention itself
+    is not the disclosure boundary — the governance plane projects this payload
+    after it is returned — so without this the ledger would record a page the
+    requesting audience is about to be told nothing about. It fails CLOSED:
+    a release plane that cannot decide records nothing, because a ledger entry
+    is cheap to miss and impossible to unsee.
+    """
+    if not items:
+        return
+    entries = _recordable(vault_root, items)
+    if not entries:
+        return
+    stamps = review_state_module.record_surfaced(
+        vault_root, entries, surface="review", known=known
+    )
+    for item in items:
+        value = stamps.get(f"{item.item_id}:{item.fingerprint}")
+        if value:
+            item.first_surfaced_at = value
+
+
+def _recordable(vault_root: Path, items: list[AttentionItem]) -> list[tuple[str, str]]:
+    """The `(item_id, fingerprint)` pairs this audience may have a ledger row for.
+
+    The egress consult runs inside its OWN disclosure boundary, mirroring
+    `due_state.block_for_write` and for the same reason: `release_walk_filter`
+    records one decision per page it judges, and judging them inside an
+    enclosing collector would attach N pages the caller never touched to that
+    caller's governance receipt. A write's receipt would then list every item
+    on the review surface. Those decisions are real and are collected; they
+    belong to this ledger write rather than to whatever ran around it.
+    """
+    from .governance import egress as egress_module
+
+    with egress_module.disclosure_boundary(Path(vault_root), "review_ledger"):
+        keep = _egress_keep(vault_root)
+        return [
+            (item.item_id, item.fingerprint)
+            for item in items
+            if item.item_id
+            and item.fingerprint
+            and (keep is None or keep(item.path))
+        ]
+
+
+def _egress_keep(vault_root: Path):
+    """The release filter for this audience, or `None` when nothing to record.
+
+    `None` means "record nothing", which is the fail-closed direction. An
+    unconfigured vault takes the release plane's own empty-policy fast path and
+    returns a filter that keeps everything, so the ordinary case costs one call.
+    """
+    try:
+        from .governance import egress as egress_module
+
+        return egress_module.release_walk_filter(Path(vault_root))
+    except Exception:  # noqa: BLE001 — an undecidable release plane records nothing
+        log.debug("release filter unavailable; not recording first-surfaced", exc_info=True)
+        return lambda _path: False
+
+
 def _apply_review_state(
     vault_root: Path,
     report: AttentionReport,
@@ -535,6 +721,9 @@ def _apply_review_state(
     limit: int,
     today=None,
     identity_namespace: str | None = None,
+    payload: dict | None = None,
+    annotations: dict[str, str] | None = None,
+    record_surfacing: bool = True,
 ) -> AttentionReport:
     all_paths: list[str] = []
     for item in report.items:
@@ -543,7 +732,8 @@ def _apply_review_state(
             all_paths.extend(reason.get("related_paths") or [])
     refs = review_state_module.refs_for_paths(vault_root, all_paths)
     store = review_state_module.ReviewStateStore(vault_root)
-    state_payload = store.load()
+    state_payload = payload if payload is not None else store.load()
+    annotations = annotations or {}
     state_summary = {state: 0 for state in review_state_module.VALID_STATES}
 
     for item in report.items:
@@ -582,6 +772,7 @@ def _apply_review_state(
             today=today,
             payload=state_payload,
         )
+        state_resolved_only = "entity_type_unregistered" in item.categories
         if effective == "open":
             # No item-level decision APPLIES (none recorded, or a snooze that has
             # since lapsed), so a competing-alternatives stance recorded on the
@@ -604,6 +795,14 @@ def _apply_review_state(
             if stances and all(stance is not None for stance in stances.values()):
                 effective = "competing"
                 decision = stances[min(stances)]
+        if state_resolved_only:
+            effective = "open"
+        for reason in item.reasons:
+            if reason.get("category") == "entity_type_unregistered":
+                reason["state_resolved_only"] = True
+                reason["decision"] = None
+            else:
+                reason["decision"] = decision.action if decision is not None else None
         item.item_id = review_id
         item.ref = review_state_module.review_ref(review_id)
         item.target_ref = target_ref
@@ -611,6 +810,10 @@ def _apply_review_state(
         item.fingerprint = signal_fingerprint
         item.state = effective
         item.state_detail = decision.as_dict() if decision is not None else None
+        for category in item.categories:
+            if category in annotations:
+                item.disposition = annotations[category]
+                break
         state_summary[effective] += 1
 
     if state == "all":
@@ -618,6 +821,8 @@ def _apply_review_state(
     else:
         eligible = [item for item in report.items if item.state == state]
     shown_items = eligible[:limit] if limit > 0 else eligible
+    if record_surfacing:
+        _stamp_first_surfaced(vault_root, shown_items, known=payload)
     total = len(eligible)
     truncated = total - len(shown_items)
     note = _build_note(

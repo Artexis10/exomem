@@ -23,10 +23,10 @@ Design notes, each of which is a bug this script exists to prevent:
   matching `Host` or it returns CSRF_REJECTED.
 * The token exchange accepts EXACTLY six form fields and an exact `resource`.
   Any extra or missing field is `invalid_request`, not `invalid_grant`.
-* The internal-canary credential is joined to the bootstrap's OWN outcome
-  assignment, and that assignment expires while the cell provisions (~15 min).
-  So `run` issues both sibling credentials IMMEDIATELY after the authority is
-  consumed, in parallel with provisioning. It never waits for CELL_READY.
+* The staged release owns the reviewer window. `run` retains the redeemed setup
+  session and OAuth token, waits for `CELL_READY` with a reserve, seeds and
+  exactly verifies the checked fixture through Hosted MCP, and only then issues
+  the two sibling credentials whose creation seals temporary setup access.
 * Creating the authority is the irreversible step: it spends the invite whether
   it later succeeds, expires or is revoked. `prepare` therefore stops short of
   it, so the invite keeps its full 7-day life while a human fetches the token.
@@ -55,13 +55,18 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+
+from exomem.hosted_plugins import seed_marketplace_review_fixture
 
 CANDIDATE_PROFILE = "hosted-alpha-agent-v1"
 #: `exomem_oauth_client_partition_available` in migration 0048. Operator clients
@@ -71,6 +76,11 @@ LOOPBACK_REDIRECT = "http://localhost:47831/callback"
 CLAUDE_CIMD_CLIENT_ID = "https://claude.ai/oauth/mcp-oauth-client-metadata"
 CLAUDE_CIMD_REDIRECT = "https://claude.ai/api/mcp/auth_callback"
 SCOPES = "exomem.read exomem.write offline_access"
+REVIEWER_STAGE_RESERVE = timedelta(minutes=10)
+OWNER_STATUS_POLL_SECONDS = 5.0
+MCP_TIMEOUT_SECONDS = 60.0
+MCP_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+MCP_MAX_SSE_EVENTS = 16
 
 #: ChatGPT identifies each connector with its own client-metadata document, so
 #: unlike claude.ai there is no single stable client id to hardcode. The redirect
@@ -103,6 +113,16 @@ def utc_now() -> datetime:
 
 def stamp(delta: timedelta) -> str:
     return (utc_now() + delta).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+def parse_stamp(value: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (AttributeError, ValueError) as error:
+        raise SystemExit("bootstrap context has an invalid staged-release expiry") from error
+    if parsed.tzinfo is None:
+        raise SystemExit("bootstrap context staged-release expiry must include a timezone")
+    return parsed.astimezone(UTC)
 
 
 def client_config_sha256(
@@ -262,15 +282,14 @@ def attach_openai_locks(cp: ControlPlane, candidate_id: str, locks: dict) -> Non
     if attached.get("attached") is True:
         print("  openai locks attached")
         return
-    # The guard also requires `openai_package_lock IS NULL`, so a false here means
-    # the candidate already carries locks. Preflight has just proved its state and
-    # all three digests, which leaves nothing else the predicate could have
-    # rejected -- but locks attached from a different repo checkout would still
-    # break the sibling stage, and that cannot be read back through any endpoint.
-    print(
-        "  openai locks were already attached by an earlier prepare.\n"
-        "        If that run used a different checkout, `run` will fail at the\n"
-        "        OpenAI sibling stage and the candidate must be replaced."
+    # `attached: false` is deliberately not treated as idempotent success. The
+    # endpoint does not expose the stored lock bytes, so this process cannot prove
+    # that an earlier attachment used this exact release checkout. Continuing
+    # would defer the mismatch until after reviewer authority is spent.
+    raise SystemExit(
+        "attach-openai-locks returned attached=false; the harness could not prove "
+        "that the candidate carries these exact OpenAI locks. Refusing before "
+        "reviewer authority is created; verify or replace the pending candidate."
     )
 
 
@@ -280,6 +299,52 @@ def pkce_pair() -> tuple[str, str]:
         base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
     )
     return verifier, challenge
+
+
+def _write_protected_json(path: Path, value: Mapping[str, object]) -> None:
+    path.write_text(json.dumps(dict(value), indent=2, sort_keys=True))
+    path.chmod(0o600)
+
+
+def wait_for_reviewer_cell(cp: ControlPlane, context: Mapping[str, object]) -> None:
+    """Wait for the owner view while preserving a reserve before stage expiry."""
+    raw_expiry = context.get("stageExpiresAt")
+    if not isinstance(raw_expiry, str):
+        raise SystemExit("bootstrap context is missing the staged-release expiry")
+    deadline = parse_stamp(raw_expiry) - REVIEWER_STAGE_RESERVE
+    poll_count = 0
+    while True:
+        remaining = (deadline - utc_now()).total_seconds()
+        if remaining <= 0:
+            raise SystemExit("owner status did not reach CELL_READY before the seeding reserve")
+        status_code, response = cp.call(
+            "GET",
+            "/api/exomem/status",
+            label="run-owner-status",
+            admin=False,
+            send_cookies=True,
+        )
+        poll_count += 1
+        if status_code != 200 or response.get("success") is not True:
+            raise SystemExit(f"owner status failed before fixture seeding: HTTP {status_code}")
+        status = response.get("status")
+        if not isinstance(status, Mapping):
+            raise SystemExit("owner status response was malformed")
+        state = status.get("state")
+        code = status.get("code")
+        progress = {
+            "poll_count": poll_count,
+            "state": state if isinstance(state, str) else "invalid",
+            "code": code if isinstance(code, str) else "invalid",
+            "ready": state == "ready" and code == "CELL_READY",
+        }
+        _write_protected_json(cp.state_dir / "reviewer-cell-readiness.json", progress)
+        if progress["ready"]:
+            print(f"  reviewer cell ready after {poll_count} owner-status poll(s)")
+            return
+        if state not in {"pending", "preparing", "provisioning"}:
+            raise SystemExit("owner status reached a non-ready terminal state")
+        time.sleep(min(OWNER_STATUS_POLL_SECONDS, remaining))
 
 
 class ControlPlane:
@@ -357,6 +422,158 @@ class ControlPlane:
             parsed = {**parsed, "_location": location}
         self._record(f"{label}.response", {"status": status, **parsed})
         return status, parsed
+
+
+class HostedMCPToolCaller:
+    """Authenticated Hosted MCP caller that keeps request and result bodies in memory."""
+
+    def __init__(self, base_url: str, bearer_token: str) -> None:
+        if not base_url.startswith("https://") and not base_url.startswith("http://localhost"):
+            raise SystemExit("Hosted MCP endpoint must use HTTPS")
+        if not bearer_token:
+            raise SystemExit("Hosted MCP bearer token is missing")
+        self._endpoint = f"{base_url.rstrip('/')}/api/exomem/mcp/v1"
+        self._bearer_token = bearer_token
+        self._request_count = 0
+
+    def __call__(self, name: str, arguments: Mapping[str, object]) -> Mapping[str, object]:
+        self._request_count += 1
+        request_id = f"reviewer-fixture-{self._request_count}"
+        payload = {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "tools/call",
+            "params": {"name": name, "arguments": dict(arguments)},
+        }
+        request = urllib.request.Request(
+            self._endpoint,
+            data=canonical_json(payload).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {self._bearer_token}",
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream",
+            },
+            method="POST",
+        )
+        try:
+            with _OPENER.open(request, timeout=MCP_TIMEOUT_SECONDS) as response:
+                body = response.read(MCP_MAX_RESPONSE_BYTES + 1)
+                content_type = _mcp_content_type(response)
+        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as error:
+            raise SystemExit(
+                f"fixture MCP {name} transport failed: {type(error).__name__}"
+            ) from error
+        if len(body) > MCP_MAX_RESPONSE_BYTES:
+            raise SystemExit(f"fixture MCP {name} response exceeded the size limit")
+        envelope = _decode_mcp_http_response(body, content_type, request_id, name)
+        result = envelope.get("result")
+        if not isinstance(result, Mapping):
+            raise SystemExit(f"fixture MCP {name} response omitted its result")
+        if result.get("isError") is True:
+            return {
+                "success": False,
+                "error": {"code": _mcp_tool_error_code(result)},
+            }
+        structured = result.get("structuredContent")
+        if isinstance(structured, Mapping):
+            return _unwrap_mcp_domain_result(structured)
+        content = result.get("content")
+        if not isinstance(content, list) or len(content) != 1 or not isinstance(content[0], Mapping):
+            raise SystemExit(f"fixture MCP {name} response omitted its domain result")
+        item = content[0]
+        if item.get("type") != "text" or not isinstance(item.get("text"), str):
+            raise SystemExit(f"fixture MCP {name} response omitted its JSON domain result")
+        try:
+            decoded = json.loads(item["text"])
+        except json.JSONDecodeError as error:
+            raise SystemExit(f"fixture MCP {name} domain result was invalid JSON") from error
+        if not isinstance(decoded, Mapping):
+            raise SystemExit(f"fixture MCP {name} domain result was not an object")
+        return _unwrap_mcp_domain_result(decoded)
+
+
+def _unwrap_mcp_domain_result(value: Mapping[str, object]) -> Mapping[str, object]:
+    nested = value.get("result")
+    if set(value) == {"result"} and isinstance(nested, Mapping):
+        return nested
+    return value
+
+
+def _mcp_tool_error_code(result: Mapping[str, object]) -> str:
+    content = result.get("content")
+    if isinstance(content, list):
+        for item in content:
+            if not isinstance(item, Mapping) or not isinstance(item.get("text"), str):
+                continue
+            match = re.search(r"\b([A-Z][A-Z0-9_]{2,})\b", item["text"])
+            if match:
+                return match.group(1).lower()
+    return "tool_error"
+
+
+def _mcp_content_type(response: object) -> str:
+    headers = getattr(response, "headers", None)
+    if headers is None:
+        raise SystemExit("fixture MCP response omitted Content-Type")
+    value = (
+        headers.get_content_type()
+        if hasattr(headers, "get_content_type")
+        else headers.get("Content-Type")
+    )
+    if not isinstance(value, str):
+        raise SystemExit("fixture MCP response omitted Content-Type")
+    return value.split(";", 1)[0].strip().lower()
+
+
+def _decode_mcp_http_response(
+    body: bytes, content_type: str, request_id: str, tool_name: str
+) -> Mapping[str, object]:
+    if content_type == "application/json":
+        return _decode_mcp_envelope(body, request_id, tool_name)
+    if content_type != "text/event-stream":
+        raise SystemExit(f"fixture MCP {tool_name} response used an unsupported Content-Type")
+    try:
+        text = body.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise SystemExit(f"fixture MCP {tool_name} SSE response was not UTF-8") from error
+    if not (text.endswith("\n\n") or text.endswith("\r\n\r\n")):
+        raise SystemExit(f"fixture MCP {tool_name} SSE response was truncated")
+    events = re.split(r"\r?\n\r?\n", text)[:-1]
+    if len(events) > MCP_MAX_SSE_EVENTS:
+        raise SystemExit(f"fixture MCP {tool_name} SSE response exceeded the event limit")
+    envelopes: list[Mapping[str, object]] = []
+    for event in events:
+        data: list[str] = []
+        for line in event.splitlines():
+            if line.startswith("data:"):
+                data.append(line[5:].lstrip(" "))
+            elif line.startswith(("event:", "id:", "retry:", ":")):
+                continue
+            else:
+                raise SystemExit(f"fixture MCP {tool_name} SSE framing was malformed")
+        if data:
+            envelopes.append(
+                _decode_mcp_envelope("\n".join(data).encode("utf-8"), request_id, tool_name)
+            )
+    if len(envelopes) != 1:
+        raise SystemExit(f"fixture MCP {tool_name} SSE response was ambiguous")
+    return envelopes[0]
+
+
+def _decode_mcp_envelope(
+    body: bytes, request_id: str, tool_name: str
+) -> Mapping[str, object]:
+    try:
+        decoded = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise SystemExit(f"fixture MCP {tool_name} response was not JSON") from error
+    if not isinstance(decoded, Mapping):
+        raise SystemExit(f"fixture MCP {tool_name} response was not an object")
+    if decoded.get("jsonrpc") != "2.0" or decoded.get("id") != request_id:
+        raise SystemExit(f"fixture MCP {tool_name} response did not match its request")
+    if "error" in decoded:
+        raise SystemExit(f"fixture MCP {tool_name} returned a protocol error")
+    return decoded
 
 
 def reusable_client_record(cp: ControlPlane, client_id: str) -> str:
@@ -550,6 +767,7 @@ def prepare(
         client_id=client_id,
         redirect_uris=[LOOPBACK_REDIRECT],
     )
+    stage_expires_at = stamp(timedelta(minutes=55))
 
     status, stage = cp.call(
         "POST",
@@ -559,7 +777,7 @@ def prepare(
             "action": "create-stage",
             "candidateId": candidate_id,
             "platform": "claude",
-            "expiresAt": stamp(timedelta(minutes=55)),
+            "expiresAt": stage_expires_at,
             "packageSha256": locks["claude_package"],
             "archiveSha256": locks["claude_archive"],
             "compatibilitySha256": locks["compatibility"],
@@ -615,6 +833,7 @@ def prepare(
     context = {
         "candidateId": candidate_id,
         "stageId": stage_id,
+        "stageExpiresAt": stage_expires_at,
         "oauthClientId": client["id"],
         "clientId": client_id,
         "inviteId": invite["inviteId"],
@@ -637,7 +856,7 @@ def run(
     openai_connector: str,
     openai_redirect_override: list[str] | None = None,
 ) -> None:
-    """Authority through both canary credentials, with no waiting in between."""
+    """Prepare and verify the reviewer fixture before sealing provider credentials."""
     resource = f"{cp.base_url}/api/exomem/mcp/v1"
 
     # Resolve the connector BEFORE the authority exists. This reads a document
@@ -718,10 +937,18 @@ def run(
             "resource": resource,
         },
     )
-    print(
-        "  token exchange: "
-        + ("ok" if status == 200 else f"{status} {tokens.get('error')} (non-fatal)")
-    )
+    access_token = tokens.get("access_token")
+    refresh_token = tokens.get("refresh_token")
+    if (
+        status != 200
+        or tokens.get("token_type") != "Bearer"
+        or not isinstance(access_token, str)
+        or not access_token
+        or not isinstance(refresh_token, str)
+        or not refresh_token
+    ):
+        raise SystemExit(f"token exchange failed: HTTP {status}")
+    print("  token exchange: ok")
 
     status, clients = cp.call(
         "GET", "/api/exomem/admin/oauth-clients", label="run-authority-outcome"
@@ -749,16 +976,37 @@ def run(
     # `outcomeAssignmentId` and `outcomeAssignmentGeneration` out of the raw admin
     # response. Writing it here is the handoff the two scripts always assumed.
     outcome_path = cp.state_dir / "bootstrap-outcome-final.json"
-    outcome_path.write_text(
-        json.dumps(
-            {"tenantId": tenant_id, "assignmentId": assignment_id, "generation": generation},
-            indent=2,
-        )
+    _write_protected_json(
+        outcome_path,
+        {"tenantId": tenant_id, "assignmentId": assignment_id, "generation": generation},
     )
-    outcome_path.chmod(0o600)
     print(f"  outcome written to {outcome_path.name}")
 
-    # The assignment expires while the cell provisions. Issue credentials NOW.
+    wait_for_reviewer_cell(cp, context)
+    fixture = locks.get("fixture")
+    if not isinstance(fixture, Mapping):
+        raise SystemExit("release locks omitted the marketplace reviewer fixture")
+    try:
+        seeded = seed_marketplace_review_fixture(
+            fixture,
+            HostedMCPToolCaller(cp.base_url, access_token),
+        )
+    except ValueError as error:
+        raise SystemExit(f"reviewer fixture seeding failed: {error}") from error
+    expected_seed = {
+        "fixture_version": locks["fixture_version"],
+        "payload_sha256": locks["fixture_digest"],
+        "note_count": len(fixture["payload"]["notes"]),
+        "verified": True,
+    }
+    if seeded != expected_seed:
+        raise SystemExit("reviewer fixture seed receipt did not match the release locks")
+    seed_path = cp.state_dir / "reviewer-fixture-seed.json"
+    _write_protected_json(seed_path, seeded)
+    print(f"  reviewer fixture {seeded['fixture_version']} seeded and exactly verified")
+
+    # The staged release owns the evidence lifetime. Only now, after exact
+    # fixture readback, may either provider credential seal setup access.
     # Both platforms in this one pass: promote-cohort needs a claudeArtifactId AND
     # an openaiArtifactId, and each canary credential is welded to this bootstrap's
     # own assignment/generation, so a second pass later cannot supply the other one.
@@ -870,8 +1118,8 @@ def run(
         )
         sibling_stage_ids[platform] = stage["stage"]["id"]
 
-    print("\n  Bootstrap complete. The cell provisions in the background; poll the")
-    print("  owner status view for CELL_READY before the clean-client evidence run.")
+    print("\n  Bootstrap complete. The cell is ready, the exact fixture is verified,")
+    print("  and both clean-client evidence runs can start.")
 
     # The evidence must be signed against these sibling stages, never the bootstrap
     # stage in bootstrap-context.json. The two look alike, and passing the wrong one
@@ -899,8 +1147,20 @@ def load_locks(repo: Path) -> dict:
     openai = json.loads((generated / "openai.lock.json").read_text())
     openai_zip = json.loads((generated / "openai.zip.lock.json").read_text())
     fixture = json.loads(
-        (repo / "plugins" / "hosted" / "marketplace-review-fixture-v1.json").read_text()
+        (repo / "plugins" / "hosted" / "marketplace-review-fixture-v2.json").read_text()
     )
+    contract_fields = (
+        "command_surface_sha256",
+        "schema_contract_sha256",
+        "compatibility_sha256",
+    )
+    drift = [field for field in contract_fields if claude.get(field) != openai.get(field)]
+    if drift:
+        raise SystemExit(
+            "Claude and OpenAI release locks disagree on "
+            f"{', '.join(drift)}; regenerate the OpenAI bundle from this exact "
+            "release before promotion."
+        )
     return {
         "claude_package": claude["artifact_sha256"],
         "claude_archive": claude_zip["archive_sha256"],
@@ -913,6 +1173,7 @@ def load_locks(repo: Path) -> dict:
         "plugin_version": claude["plugin_version"],
         "fixture_version": fixture["fixture_version"],
         "fixture_digest": fixture["payload_sha256"],
+        "fixture": fixture,
         # `attach-openai-locks` stores these documents verbatim and re-validates
         # every key, so they are passed through rather than reduced to digests.
         "openai_package_lock": openai,

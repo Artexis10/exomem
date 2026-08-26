@@ -191,13 +191,7 @@ class _BaseAdapter:
     def _identity(self, values: dict[str, Any], marker: str | None) -> collections.ItemIdentity:
         if marker is not None:
             return collections.ItemIdentity(self.manifest.collection_id, marker)
-        field_types = {name: spec.type for name, spec in self.manifest.schema.fields.items()}
-        serialized = collections.natural_key_serialization(
-            self.manifest.schema.version,
-            self.manifest.schema.natural_key,
-            values,
-            field_types=field_types,
-        )
+        serialized = collections.manifest_natural_key(self.manifest, values)
         return collections.ItemIdentity(
             self.manifest.collection_id,
             collections.inferred_item_key(self.manifest.collection_id, serialized),

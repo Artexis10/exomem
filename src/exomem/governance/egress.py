@@ -27,6 +27,7 @@ resolved and did not must not reach the open path.
 from __future__ import annotations
 
 import ast
+import copy
 import functools
 import hashlib
 import inspect
@@ -196,6 +197,7 @@ def _outcome_for_decision(
     content_hash: str | None = None,
     size: int | None = None,
     ref: str | None = None,
+    purpose_is_bound: bool = False,
 ) -> None:
     """Project a decision into the receipt union without carrying a path/title."""
     value: dict[str, Any] = {"decision": outcome}
@@ -206,7 +208,11 @@ def _outcome_for_decision(
     if collector is not None:
         value["command"] = collector.command_name
     who = effective_principal()
-    declared_purpose = _declared_purpose(vault_root, who, purpose)
+    declared_purpose = (
+        purpose
+        if purpose_is_bound
+        else _declared_purpose(vault_root, who, purpose)
+    )
     if declared_purpose and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}", declared_purpose):
         value["purpose"] = declared_purpose
     if decision is not None:
@@ -1139,6 +1145,7 @@ def _mint_escalation_quietly(
     decision: Decision,
     requested_level: int,
     org_ceiling: int,
+    expected_content_hash: str | None = None,
 ) -> str | None:
     context = who.verified_authorization_session
     if not isinstance(
@@ -1165,7 +1172,14 @@ def _mint_escalation_quietly(
         ):
             return None
         connection = store.open_authorization_session_connection(vault_root)
-        fingerprint = hashlib.sha256((vault_root / rel_path).read_bytes()).hexdigest()
+        if expected_content_hash is None:
+            fingerprint = hashlib.sha256(
+                (vault_root / rel_path).read_bytes()
+            ).hexdigest()
+        elif re.fullmatch(r"[0-9a-f]{64}", expected_content_hash):
+            fingerprint = expected_content_hash
+        else:
+            return None
         expires_at = min(
             context.expires_at,
             now + tokens.DEFAULT_TTL_SECONDS,
@@ -1198,6 +1212,70 @@ def _mint_escalation_quietly(
     finally:
         if connection is not None:
             connection.close()
+
+
+def _active_grants_for_snapshot(
+    vault_root: Path,
+    *,
+    policy: Policy,
+    audience: str,
+    purpose: str | None,
+    rel_path: str,
+    content_hash: str | None,
+    scope_ids: Iterable[str],
+    authorization_context: authorization_session_lifecycle.AuthorizationSessionContext
+    | None,
+) -> tuple[list[policy_module.StandingGrant], str]:
+    """Resolve request-local grants against one exact content/membership snapshot."""
+
+    active_grants = list(policy.grants)
+    session_identity = (
+        "v3-session-grants-unscoped"
+        if authorization_context is None
+        else "no-session-grants"
+    )
+    if authorization_context is None or content_hash is None:
+        return active_grants, session_identity
+
+    connection: sqlite3.Connection | None = None
+    try:
+        connection = store.open_authorization_session_connection(vault_root)
+        session_grants, session_identity = (
+            authorization_session_authority.active_session_grants(
+                connection=connection,
+                context=authorization_context,
+                audience=audience,
+                purpose=purpose,
+                path=rel_path,
+                fingerprint=content_hash,
+                scope_ids=tuple(sorted(scope_ids)),
+                policy_fingerprint=policy.fingerprint,
+                now=int(__import__("time").time()),
+            )
+        )
+    except (
+        authorization_session_lifecycle.AuthorizationSessionUnavailable,
+        FileNotFoundError,
+        OSError,
+        sqlite3.Error,
+        store.UnsupportedGovernanceSchema,
+    ):
+        session_grants = ()
+        session_identity = "session-authority-unavailable"
+    finally:
+        if connection is not None:
+            connection.close()
+    active_grants.extend(
+        policy_module.StandingGrant(
+            id=grant.grant_id,
+            source="authorization-session",
+            scope_ids=grant.scope_ids,
+            audience=grant.audience,
+            ceiling=grant.ceiling,
+        )
+        for grant in session_grants
+    )
+    return active_grants, session_identity
 
 
 def _decide_path(
@@ -1292,51 +1370,16 @@ def _decide_path(
         except OSError:
             return None
 
-    active_grants = list(policy.grants)
-    session_identity = (
-        "v3-session-grants-unscoped"
-        if authorization_context is None
-        else "no-session-grants"
+    active_grants, session_identity = _active_grants_for_snapshot(
+        vault_root,
+        policy=policy,
+        audience=audience,
+        purpose=purpose,
+        rel_path=rel_path,
+        content_hash=live_content_hash,
+        scope_ids=scope_ids,
+        authorization_context=authorization_context,
     )
-    if authorization_context is not None and live_content_hash is not None:
-        connection: sqlite3.Connection | None = None
-        try:
-            connection = store.open_authorization_session_connection(vault_root)
-            session_grants, session_identity = (
-                authorization_session_authority.active_session_grants(
-                    connection=connection,
-                    context=authorization_context,
-                    audience=audience,
-                    purpose=purpose,
-                    path=rel_path,
-                    fingerprint=live_content_hash,
-                    scope_ids=tuple(sorted(scope_ids)),
-                    policy_fingerprint=policy.fingerprint,
-                    now=int(__import__("time").time()),
-                )
-            )
-        except (
-            authorization_session_lifecycle.AuthorizationSessionUnavailable,
-            FileNotFoundError,
-            OSError,
-            sqlite3.Error,
-            store.UnsupportedGovernanceSchema,
-        ):
-            session_grants = ()
-            session_identity = "session-authority-unavailable"
-        finally:
-            if connection is not None:
-                connection.close()
-        active_grants.extend(
-            policy_module.StandingGrant(
-                id=grant.grant_id,
-                source="authorization-session",
-                scope_ids=grant.scope_ids,
-                audience=grant.audience,
-                ceiling=grant.ceiling,
-            )
-            for grant in session_grants
-        )
 
     key = (
         str(vault_root),
@@ -1431,6 +1474,104 @@ class AnnotatedHits:
     #: Whether the deciding audience is the vault owner. Gates owner-facing
     #: diagnostics (the policy fingerprint) out of third-party responses.
     audience_is_owner: bool = False
+
+
+def annotate_projected_hits(
+    vault_root: Path,
+    hits: list[Any],
+    *,
+    policy: Policy,
+    principal: RequestPrincipal,
+    purpose: str | None,
+    withheld_paths: frozenset[str],
+) -> AnnotatedHits:
+    """Finalize already-selected projection hits without reopening source bytes."""
+
+    released: list[Any] = []
+    notices: list[dict[str, Any]] = []
+    for hit in hits:
+        decision = getattr(hit, "decision", None)
+        content_hash = getattr(hit, "snapshot_hash", None)
+        if not isinstance(decision, Decision) or not (
+            isinstance(content_hash, str)
+            and re.fullmatch(r"[0-9a-f]{64}", content_hash)
+        ):
+            raise ValueError("projected release snapshot is invalid")
+        rel_path = _hit_path(hit)
+        if not rel_path:
+            raise ValueError("projected release snapshot is invalid")
+        if decision.level >= RELEASE_FLOOR:
+            released.append(hit)
+            _outcome_for_decision(
+                vault_root,
+                rel_path,
+                decision=decision,
+                policy=policy,
+                audience=principal.audience_id,
+                outcome="released",
+                purpose=purpose,
+                content_hash=content_hash,
+                purpose_is_bound=True,
+            )
+            continue
+        notice = _notice(
+            decision.level,
+            rule_ids=decision.rule_ids,
+            scope_label=_scope_label(policy, decision),
+            options=decision.options,
+            bridge_abstraction=decision.bridge_abstraction,
+        )
+        requested_level = (
+            RELEASE_FLOOR
+            if (
+                principal.verified_authorization_session is not None
+                or principal.authorization_session_id is not None
+            )
+            else decision.level
+        )
+        token = (
+            _mint_escalation_quietly(
+                Path(vault_root),
+                rel_path=rel_path,
+                who=principal,
+                purpose=purpose,
+                decision=decision,
+                requested_level=requested_level,
+                org_ceiling=_applicable_org_ceiling(policy, decision),
+                expected_content_hash=content_hash,
+            )
+            if isinstance(
+                principal.verified_authorization_session,
+                authorization_session_lifecycle.AuthorizationSessionContext,
+            )
+            else None
+        )
+        if isinstance(token, str):
+            notice["escalation_token"] = token
+        notices.append(notice)
+        _outcome_for_decision(
+            vault_root,
+            rel_path,
+            decision=decision,
+            policy=policy,
+            audience=principal.audience_id,
+            outcome="withheld",
+            purpose=purpose,
+            content_hash=content_hash,
+            purpose_is_bound=True,
+        )
+    if withheld_paths:
+        _record_outcome({"decision": "withheld", "count": len(withheld_paths)})
+    return AnnotatedHits(
+        hits=released,
+        notices=notices,
+        withheld_paths=withheld_paths,
+        active=True,
+        fingerprint=policy.fingerprint,
+        audience_is_owner=(
+            principal.resolved and principal.audience_id == OWNER_AUDIENCE
+        ),
+    )
 
 
 #: Pre-committed over-fetch: the pool size is a function of the REQUEST alone
@@ -1792,6 +1933,133 @@ def guard_graph_context(
     return payload
 
 
+def guard_referents(
+    vault_root: Path,
+    payload: dict[str, Any],
+    release: AnnotatedHits,
+    *,
+    principal: RequestPrincipal | None = None,
+    purpose: str | None = None,
+) -> dict[str, Any] | None:
+    """Apply release decisions to entity candidates and their evidence paths."""
+    if release.blocked:
+        return None
+    vault_root = Path(vault_root)
+    guarded = copy.deepcopy(payload)
+    policy, release_gate_active = gate_state(vault_root)
+    who = principal if principal is not None else effective_principal()
+    if policy.blocked or (not policy.empty and not who.resolved):
+        _record_blocked_outcome(who.audience_id)
+        return None
+    if release_gate_active:
+        guarded.pop("reasons", None)
+        guarded.pop("omitted_candidate_count", None)
+
+    tombstoned: set[str] = set()
+    for section in ("resolved", "candidates"):
+        for item in guarded.get(section, []):
+            if not isinstance(item, Mapping):
+                continue
+            path = str(item.get("path") or "")
+            if path and lifecycle.is_tombstoned(vault_root, path):
+                tombstoned.add(path)
+            for evidence in item.get("evidence") or []:
+                if not isinstance(evidence, Mapping):
+                    continue
+                for field_name in ("seed", "anchor", "path"):
+                    evidence_path = evidence.get(field_name)
+                    if isinstance(evidence_path, str) and lifecycle.is_tombstoned(
+                        vault_root, evidence_path
+                    ):
+                        tombstoned.add(evidence_path)
+
+    withheld = set(release.withheld_paths) | tombstoned
+    decisions: dict[str, Decision | None] = {}
+    if not policy.empty:
+        grants_hash = _grants_hash(policy)
+        declared_purpose = _declared_purpose(vault_root, who, purpose)
+        candidate_paths = {
+            str(item.get("path") or "")
+            for section in ("resolved", "candidates")
+            for item in guarded.get(section, [])
+            if isinstance(item, Mapping) and item.get("path")
+        }
+        for rel_path in sorted(candidate_paths):
+            decision = _decide_path(
+                vault_root,
+                rel_path,
+                policy=policy,
+                audience=who.audience_id,
+                purpose=declared_purpose,
+                grants_hash=grants_hash,
+                authorization_session=who.authorization_session_id,
+            )
+            decisions[rel_path] = decision
+            if decision is None or decision.level < RELEASE_FLOOR:
+                withheld.add(rel_path)
+            _outcome_for_decision(
+                vault_root,
+                rel_path,
+                decision=decision,
+                policy=policy,
+                audience=who.audience_id,
+                outcome="withheld" if rel_path in withheld else "released",
+                purpose=declared_purpose,
+            )
+
+    frozen_withheld = frozenset(withheld)
+    for section in ("resolved", "candidates"):
+        kept: list[dict[str, Any]] = []
+        for raw_item in guarded.get(section, []):
+            if not isinstance(raw_item, Mapping):
+                continue
+            item = dict(raw_item)
+            if _names_withheld(item.get("path"), frozen_withheld):
+                continue
+            evidence = item.get("evidence")
+            if isinstance(evidence, list):
+                item["evidence"] = [
+                    value
+                    for value in evidence
+                    if not _names_withheld(value, frozen_withheld, reference_field=True)
+                ]
+            decision = decisions.get(str(item.get("path") or ""))
+            if decision is not None and decision.release_strip:
+                protected = {
+                    key: item[key]
+                    for key in ("path", "title", "entity_type")
+                    if key in item
+                }
+                detail = {
+                    key: value
+                    for key, value in item.items()
+                    if key not in protected
+                }
+                stripped = bridges.strip_provenance(detail, decision.release_strip)
+                item = dict(protected)
+                if isinstance(stripped, Mapping):
+                    item.update(stripped)
+            kept.append(item)
+        guarded[section] = kept
+
+    expected = guarded.get("expected_count")
+    resolved_count = len(guarded.get("resolved") or [])
+    if isinstance(expected, int):
+        if resolved_count > expected:
+            guarded["status"] = "ambiguous"
+            guarded.pop("unresolved_count", None)
+        elif resolved_count == expected:
+            guarded["status"] = "resolved"
+            guarded.pop("unresolved_count", None)
+        else:
+            guarded["status"] = "partial" if resolved_count else "unresolved"
+            guarded["unresolved_count"] = expected - resolved_count
+    else:
+        guarded["status"] = "resolved" if resolved_count else "unresolved"
+        guarded.pop("unresolved_count", None)
+    return guarded
+
+
 # ---------------------------------------------------------------------------
 # Direct reads (get / read_memory) — D3 applied to a whole page
 # ---------------------------------------------------------------------------
@@ -1943,12 +2211,22 @@ def annotate_page(
         scope_ids = membership_module.evaluate_snapshot(
             parsed, policy, content_hash=snapshot_hash
         )
+        active_grants, _session_identity = _active_grants_for_snapshot(
+            vault_root,
+            policy=policy,
+            audience=who.audience_id,
+            purpose=declared_purpose,
+            rel_path=rel_path,
+            content_hash=snapshot_hash,
+            scope_ids=scope_ids,
+            authorization_context=who.verified_authorization_session,
+        )
         decision = decide(
             scope_ids,
             audience=who.audience_id,
             purpose=declared_purpose,
             policy=policy,
-            active_grants=policy.grants,
+            active_grants=active_grants,
         )
         admission = bridges.admit(
             vault_root,
@@ -2325,6 +2603,7 @@ def postfilter(command_name: str, result: Any, vault_root: Path) -> Any:
     """
     if result is None:
         return None
+    issuance_context = scrubber._issuance_projection_context(result)
     vault_root = Path(vault_root)
     result = _withheld_cross_check(vault_root, result)
     # Free text and nested resource/prompt strings have no structural entry
@@ -2342,7 +2621,13 @@ def postfilter(command_name: str, result: Any, vault_root: Path) -> Any:
         if blocked:
             _record_credential_block()
         return cleaned
-    cleaned, blocked = scrubber.scrub_value(result)
+    if issuance_context is not None:
+        cleaned, blocked = scrubber._scrub_issuance_projection(
+            result,
+            issuance_context,
+        )
+    else:
+        cleaned, blocked = scrubber.scrub_value(result)
     if blocked:
         _record_credential_block()
     return cleaned
@@ -3121,16 +3406,25 @@ def release_level_for_path_only(
     principal: RequestPrincipal | None = None,
     purpose: str | None = None,
     receipt_decision: str | None = None,
+    policy: Any | None = None,
 ) -> int:
     """Decide an opaque candidate without parsing its bytes.
 
     A structured Record must be authorized before parsing. Scopes that need
     the candidate's frontmatter therefore withhold it conservatively.
+
+    `policy` lets a caller that classifies MANY paths under one pass load the
+    policy once and hand it in, exactly as `release_walk_filter` already does
+    for a walk. The plane does not move while one pass runs, and re-probing the
+    authoring guard per path cost 8.9 s of a 33 s structured write — the guard
+    probe stats the governance root on every `policy_module.load`. Omitting it
+    keeps the original per-call load, so every existing caller is unchanged.
     """
     vault_root = Path(vault_root)
     if lifecycle.is_tombstoned(vault_root, rel_path):
         return DISCLOSURE_MIN
-    policy = policy_module.load(vault_root)
+    if policy is None:
+        policy = policy_module.load(vault_root)
     if policy.empty:
         return DISCLOSURE_MAX
     who = principal if principal is not None else effective_principal()
@@ -3152,11 +3446,39 @@ def release_level_for_path_only(
                 purpose=purpose,
             )
         return DISCLOSURE_MIN
+    declared_purpose = _declared_purpose(vault_root, who, purpose)
+    content_hash: str | None = None
+    if who.verified_authorization_session is not None:
+        try:
+            content_hash = hashlib.sha256((vault_root / rel_path).read_bytes()).hexdigest()
+        except OSError:
+            if receipt_decision is not None:
+                _outcome_for_decision(
+                    vault_root,
+                    rel_path,
+                    decision=None,
+                    policy=policy,
+                    audience=who.audience_id,
+                    outcome="withheld",
+                    purpose=declared_purpose,
+                )
+            return DISCLOSURE_MIN
+    active_grants, _session_identity = _active_grants_for_snapshot(
+        vault_root,
+        policy=policy,
+        audience=who.audience_id,
+        purpose=declared_purpose,
+        rel_path=rel_path,
+        content_hash=content_hash,
+        scope_ids=scope_ids,
+        authorization_context=who.verified_authorization_session,
+    )
     decision = decide(
         scope_ids,
         audience=who.audience_id,
-        purpose=_declared_purpose(vault_root, who, purpose),
+        purpose=declared_purpose,
         policy=policy,
+        active_grants=active_grants,
     )
     if receipt_decision is not None:
         _outcome_for_decision(
@@ -3166,7 +3488,7 @@ def release_level_for_path_only(
             policy=policy,
             audience=who.audience_id,
             outcome=receipt_decision if decision.level >= LEVEL_FULL else "withheld",
-            purpose=purpose,
+            purpose=declared_purpose,
         )
     return decision.level
 

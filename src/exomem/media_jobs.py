@@ -334,6 +334,7 @@ class MediaJobStore:
             with reserved_paths._identity_coordination_scope(
                 self.vault_root,
                 descriptor_ids=("media-jobs-store",),
+                identity_may_change=not readonly,
             ):
                 return self._connect_owned(readonly=readonly)
 
@@ -1019,6 +1020,7 @@ def _diagnostic_snapshot_rows(
         with reserved_paths._identity_coordination_scope(
             vault_root,
             descriptor_ids=("media-jobs-store",),
+            identity_may_change=False,
         ):
             with reserved_paths._sqlite_owner_target_scope(
                 vault_root,

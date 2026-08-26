@@ -594,6 +594,70 @@ def test_owner_identity_domains_are_independent_but_generic_scope_covers_all(
     assert not worker.is_alive()
 
 
+def test_baseline_identity_scan_does_not_hold_every_owner_domain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault_root = tmp_path / "vault"
+    (vault_root / "Knowledge Base/Notes").mkdir(parents=True)
+    (vault_root / "Knowledge Base/Notes/note.md").write_text(
+        "# Note\n", encoding="utf-8"
+    )
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=tmp_path / "state"),
+        mutation_timeout_seconds=0.05,
+    )
+    monkeypatch.setattr(writer_lease, "active_manager", lambda: manager)
+    scan_entered = threading.Event()
+    release_scan = threading.Event()
+    scan_errors: list[BaseException] = []
+    scan_count = 0
+    original_from_vault = reserved_paths.IdentityCatalogue.from_vault.__func__
+
+    def blocked_from_vault(
+        cls: type[reserved_paths.IdentityCatalogue], root: Path
+    ) -> reserved_paths.IdentityCatalogue:
+        nonlocal scan_count
+        scan_count += 1
+        scan_entered.set()
+        assert release_scan.wait(5)
+        return original_from_vault(cls, root)
+
+    monkeypatch.setattr(
+        reserved_paths.IdentityCatalogue,
+        "from_vault",
+        classmethod(blocked_from_vault),
+    )
+
+    def build_baseline() -> None:
+        try:
+            reserved_paths._baseline_identity_catalogue(vault_root)
+        except BaseException as error:  # noqa: BLE001 - preserve worker failure
+            scan_errors.append(error)
+
+    worker = threading.Thread(target=build_baseline, daemon=True)
+    worker.start()
+    assert scan_entered.wait(2)
+
+    try:
+        with reserved_paths._subsystem_authority_scope("epistemic_graph"):
+            with reserved_paths._identity_coordination_scope(
+                vault_root,
+                descriptor_ids=("graph-store",),
+            ):
+                assert reserved_paths._identity_coordination_active(
+                    vault_root,
+                    "graph-store",
+                )
+    finally:
+        release_scan.set()
+        worker.join(5)
+
+    assert not worker.is_alive()
+    assert scan_errors == []
+    assert scan_count == 2
+
+
 def test_one_owner_coordinates_only_the_exact_descriptor_it_is_opening(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2233,10 +2297,13 @@ def test_named_subsystem_authority_is_exact_and_nonserializable() -> None:
         "consolidation.future",
         "references.legacy",
         "freshness.legacy",
-        "governance.projections",
     ):
         with reserved_paths._subsystem_authority_scope(inactive_owner):
             assert reserved_paths._active_owner_authority() is None
+
+    with reserved_paths._subsystem_authority_scope("governance.projections"):
+        assert reserved_paths.owner_authorized("authorization-projections")
+        assert not reserved_paths.owner_authorized("governance-store")
 
 
 def test_owner_byte_publication_requires_exact_named_authority(

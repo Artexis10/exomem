@@ -50,6 +50,10 @@ from epistemic.schema import ScenarioLoadError, load_scenario, load_scenario_tex
 ROOT = Path(__file__).resolve().parents[1]
 SEQUENCE2 = ROOT / "benchmarks" / "epistemic" / "fixtures" / "sequence2"
 SEQUENCE_TWO_FAMILIES = ("f20", "f21", "f22", "f23", "f24", "f25", "f26")
+#: Families a *later* unacknowledged amendment introduced. The withhold gate is
+#: repo-wide, so a test that pinned its answer to sequence 2 alone would fail the
+#: day another amendment filed — which is drift in the test, not in the gate.
+LATER_WITHHELD_FAMILIES = ("f27",)
 
 
 @pytest.fixture
@@ -91,7 +95,9 @@ def test_the_withhold_gate_refuses_every_sequence_two_family() -> None:
     from protocol.contracts import AmendmentAcknowledgmentPendingError
 
     amendments.reset_cache()
-    assert amendments.withheld_family_ids(ROOT) == frozenset(SEQUENCE_TWO_FAMILIES)
+    assert amendments.withheld_family_ids(ROOT) == frozenset(
+        SEQUENCE_TWO_FAMILIES + LATER_WITHHELD_FAMILIES
+    )
     for family_id in SEQUENCE_TWO_FAMILIES:
         assert amendments.amendment_sequence_for(family_id) == 2
         with pytest.raises(AmendmentAcknowledgmentPendingError):
@@ -115,13 +121,18 @@ def test_the_amendment_receipt_is_pending_and_binds_the_working_document() -> No
     )
 
     receipts = working_amendment_receipts(ROOT)
-    assert [receipt.sequence for receipt in receipts] == [1, 2]
+    assert [receipt.sequence for receipt in receipts] == [1, 2, 3]
     sequence_two = receipts[1]
     assert sequence_two.acknowledgment_status == "pending"
     assert sequence_two.ratifier is None
     assert sequence_two.catastrophic_set_decision is None
     assert sequence_two.parent_contract_sha256 == receipts[0].contract_sha256
-    assert validate_working_preregistration(ROOT) == sequence_two.contract_sha256
+    # Sequence 2's digest binds the document *as it stood at sequence 2*, which
+    # stopped being the working bytes the moment sequence 3 amended it. What
+    # still has to hold is the chain link, and that the fold culminates in the
+    # last receipt's document rather than in this one's.
+    assert receipts[2].parent_contract_sha256 == sequence_two.contract_sha256
+    assert validate_working_preregistration(ROOT) == receipts[-1].contract_sha256
 
 
 # --------------------------------------------------------------------------
@@ -1061,3 +1072,314 @@ def test_the_new_operations_are_accepted_and_existing_families_are_unaffected(
         ROOT / "benchmarks" / "epistemic" / "fixtures" / "scenario-minimal.yaml"
     )
     assert minimal.family_id == "f01"
+
+
+# --------------------------------------------------------------------------
+# The f23 dismissal journey driver.
+#
+# f23's two claims are about a runtime, not a corpus: a dismissal is respected
+# only if the surfaces were consulted afterwards and stayed quiet, and counter
+# repetition is governed only if a real bulk batch produced one emission rather
+# than N. These run the episode against the installed CLI.
+# --------------------------------------------------------------------------
+
+
+def _f23_check_by() -> str:
+    """A check date already past, computed by the caller and not by the driver."""
+
+    import datetime as dt
+
+    return (dt.date.today() - dt.timedelta(days=30)).isoformat()
+
+
+def _lane_envelope(monkeypatch):
+    """The envelope belonging to the interpreter running this test.
+
+    Discovery is still the driver's, and still refuses rather than importing
+    in-process. What this adds is a guard the hard way round: an `exomem` from
+    an older install earlier on PATH answered every step and reported the
+    journey red for a CLI that is not the code under test. The interpreter's
+    own script directory goes first, and an envelope resolved from anywhere
+    else skips loudly instead of being measured.
+    """
+
+    import os
+    import sys
+
+    from epistemic.journeys import f23_dismissal
+
+    # Resolve the DIRECTORY, not the interpreter. A venv reached through a
+    # symlink (or a `bin` that is one) makes the literal paths differ while
+    # naming the same directory, and the comparison below would then skip the
+    # journey on the box where it is most worth running. Resolving
+    # `sys.executable` itself is the wrong fix and was tried: in a uv venv the
+    # interpreter is a symlink to the shared CPython, so its resolved parent is
+    # the toolchain's `bin` and the console scripts are not there at all.
+    scripts = Path(sys.executable).parent.resolve()
+    monkeypatch.setenv("PATH", f"{scripts}{os.pathsep}{os.environ.get('PATH', '')}")
+    try:
+        envelope = f23_dismissal.discover_envelope()
+    except f23_dismissal.EnvelopeNotDiscovered as error:
+        pytest.skip(f"no installed CLI envelope: {error}")
+    if envelope.executable.resolve().parent != scripts:
+        pytest.skip(
+            f"the discovered envelope is {envelope.executable}, which is outside this "
+            f"interpreter's {scripts}; the journey would measure another install"
+        )
+    return envelope
+
+
+def test_the_f23_journey_refuses_without_an_installed_envelope(monkeypatch) -> None:
+    """No envelope is a refusal, never a fall back to an in-process import."""
+
+    from epistemic.journeys import f23_dismissal, f26_carrier
+
+    monkeypatch.setattr(f26_carrier.shutil, "which", lambda _name: None)
+    with pytest.raises(f23_dismissal.EnvelopeNotDiscovered, match="must not fall back"):
+        f23_dismissal.discover_envelope()
+
+
+@pytest.mark.timeout(900)
+def test_the_f23_journey_runs_against_the_installed_envelope(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Track D for f23: both assertions, scored on what this runtime produced.
+
+    Every step is a separate process against the discovered CLI, on a throwaway
+    copy of the product's own sample vault, so the maintenance passes are also
+    genuine engine restarts. If no envelope is installed the test says so and
+    skips; an in-process run would measure the library rather than the runtime.
+
+    **The two halves get different verdicts, and that is the point.** The
+    dismissal half must pass. The counter half must report `unsupported`: no
+    product leaf reaches `due_state.block_for_write` (measured — see
+    `.task/measurements/leaf_carrier_counts.py`), so the bulk batch delivers no
+    block, its emission delta across the snapshot pair is 0, and a `pass` here
+    would be the assertion agreeing that twelve writes produced no repeat when
+    nothing was ever produced to repeat. Asserting `unsupported` pins the honest
+    verdict AND fails the day a leaf starts carrying, which is when the family
+    becomes decidable and someone must revisit this.
+    """
+
+    from epistemic.journeys import f23_dismissal
+
+    envelope = _lane_envelope(monkeypatch)
+    vault = f23_dismissal.seed_journey_vault(tmp_path / "vault", repo_root=ROOT)
+    run = f23_dismissal.run_journey(
+        envelope,
+        vault=vault,
+        check_by=_f23_check_by(),
+        taken_at="2026-08-16T00:00:00Z",
+    )
+
+    assert run.passes == f23_dismissal.DEFAULT_PASSES + len(
+        f23_dismissal.PROMINENCE_LEVELS
+    )
+    ledger = run.later.item("surface-due_state_counters")
+    assert ledger is not None and ledger.raw["projection"] == "complete"
+    assert int(ledger.raw["writes"]) == f23_dismissal.BULK_DOCUMENTS
+    # The measured zero, recorded rather than smoothed: nothing was delivered,
+    # so the served denominator is 0 and no emission happened.
+    assert int(ledger.raw["emissions"]) == 0
+    # Informational, and 0 here only because this vault never delivered at all.
+    assert int(ledger.raw["due_total"]) == 0
+
+    context = AssertionContext(
+        snapshot=run.later, prior=run.prior, subject=run.subject, family="f23"
+    )
+    dismissal = resolve("dismissal_respected_across_passes")(context)
+    assert dismissal.outcome == "pass", dismissal.evidence
+
+    counters = resolve("counter_emission_not_repeated_per_write")(context)
+    assert counters.outcome == "unsupported", counters.evidence
+    # The evidence must name WHY it could not decide, or an `unsupported` is
+    # indistinguishable from a projector that simply did not look. The reason
+    # is the zero emission DELTA across the batch, not the persisted
+    # `due_total`, which says nothing about this batch either way.
+    assert "delivered 0 block(s)" in counters.evidence, counters.evidence
+    assert str(f23_dismissal.BULK_DOCUMENTS) in counters.evidence, counters.evidence
+
+
+def _f23_carrier_pages(vault: Path, count: int) -> list[str]:
+    """`count` governed pages that each add one overdue prediction.
+
+    Each one moves the projection, so each write carrier that runs over them
+    produces a block a caller would receive.
+    """
+
+    import datetime as dt
+
+    written: list[str] = []
+    for index in range(count):
+        relative = f"Knowledge Base/Notes/Insights/f23-carrier-{index:02d}.md"
+        due = (dt.date.today() - dt.timedelta(days=index + 1)).isoformat()
+        (vault / relative).parent.mkdir(parents=True, exist_ok=True)
+        (vault / relative).write_text(
+            "---\n"
+            f"title: f23 carrier {index:02d}\n"
+            "type: insight\nstatus: active\n"
+            "created: 2026-01-01\nupdated: 2026-01-01\n---\n\n"
+            "## Prediction\n\n"
+            f"- id: f23-carrier-{index:02d}\n"
+            f"- check_by: {due}\n\n"
+            f"Claim number {index}.\n",
+            encoding="utf-8",
+        )
+        written.append(relative)
+    return written
+
+
+@pytest.mark.timeout(600)
+@pytest.mark.parametrize("scoped", [True, False])
+def test_the_batch_scope_is_what_keeps_the_counter_assertion_green(
+    tmp_path: Path, scoped: bool
+) -> None:
+    """The mechanism-removal pair, at the level the mechanism operates on.
+
+    The scope governs the emission carriers a batch runs, so that is what this
+    drives: twelve governed writes, each producing the block a caller would
+    receive, and then ONE delivery at the terminal after the scope exits — which
+    is what D9's response terminal does for a real command. Inside the scope the
+    ledger records twelve writes and one emission and the counters assertion
+    passes; without it, one block per write and the same assertion fails.
+
+    The terminal delivery is not decoration. Stopping at scope exit records zero
+    emissions and a zero denominator, which the assertion now correctly reports
+    as `unsupported` rather than `pass` — a batch that ends up telling the caller
+    nothing is a different outcome from one that tells them once, and only the
+    second is the behaviour being claimed.
+
+    It is deliberately not driven through the bulk CLI command the journey uses.
+    A product command delivers exactly one response, and the emission decision
+    lives at that response's terminal (D9), so a bulk command emits at most one
+    block whether the scope exists or not — removing the scope there moves the
+    count from one to zero and could never turn this assertion red. The
+    twelve-per-batch failure this assertion exists to catch is a property of the
+    carriers, and the scope is what stops them.
+    """
+
+    import contextlib
+
+    from epistemic.journeys import f23_dismissal
+
+    from exomem import commands, due_state
+
+    vault = f23_dismissal.seed_journey_vault(tmp_path / "vault", repo_root=ROOT)
+    commands.op_remember(
+        vault,
+        title=f23_dismissal.OPEN_TITLE,
+        content=f23_dismissal.seed_content(
+            marker="A signal nobody has decided about",
+            check_by=_f23_check_by(),
+            anchor="f23-open",
+        ),
+    )
+    due_state.reconcile(vault)
+    due_state.reset_emission_state()
+
+    pages = _f23_carrier_pages(vault, 12)
+    scope = due_state.batch_scope(vault) if scoped else contextlib.nullcontext()
+    with scope:
+        for page in pages:
+            block = due_state.block_for_write(vault, page)
+            due_state.should_emit(block, vault_root=vault)
+    if scoped:
+        due_state.should_emit(due_state.served(vault), vault_root=vault)
+
+    snapshot = f23_dismissal.project_run(
+        vault,
+        captured={},
+        subject="dismissal-none",
+        dismissed_key="none:none",
+        passes=0,
+        phase="f23-p2",
+        taken_at="2026-08-16T00:00:00Z",
+    )
+    ledger = snapshot.item("surface-due_state_counters")
+    assert ledger is not None
+    assert int(ledger.raw["writes"]) == len(pages)
+
+    result = resolve("counter_emission_not_repeated_per_write")(
+        AssertionContext(snapshot=snapshot, family="f23")
+    )
+    if scoped:
+        assert int(ledger.raw["emissions"]) == 1
+        # Non-vacuous: the one delivered block genuinely had something in it.
+        assert int(ledger.raw["due_total"]) >= len(pages)
+        assert result.outcome == "pass", result.evidence
+        return
+    assert int(ledger.raw["emissions"]) >= len(pages)
+    assert result.outcome == "fail", result.evidence
+    assert "one identical block per write" in result.evidence
+
+
+def test_an_earlier_delivery_cannot_carry_a_later_batch_that_delivered_nothing(
+    tmp_path: Path,
+) -> None:
+    """The probe that used to score `pass` on somebody else's block.
+
+    A real vault, in order: one delivery (so the ledger holds `emissions=1` and
+    a positive `due_total`), a snapshot, then a twelve-write batch that delivers
+    nothing, then a second snapshot. Scored on the totals in the later snapshot
+    alone this reads "1 block for 13 writes" and passes cleanly — a verdict
+    about the batch, awarded for a block emitted before the batch began, with
+    the `due_total` gate satisfied by the same stale block.
+
+    Scored on the delta it is `unsupported`: twelve writes, zero deliveries,
+    nothing that could have repeated.
+    """
+
+    from epistemic.journeys import f23_dismissal
+
+    from exomem import commands, due_state
+
+    vault = f23_dismissal.seed_journey_vault(tmp_path / "vault", repo_root=ROOT)
+    commands.op_remember(
+        vault,
+        title=f23_dismissal.OPEN_TITLE,
+        content=f23_dismissal.seed_content(
+            marker="A signal nobody has decided about",
+            check_by=_f23_check_by(),
+            anchor="f23-open",
+        ),
+    )
+    due_state.reconcile(vault)
+    due_state.reset_emission_state()
+
+    # One genuine delivery, before the batch under test.
+    assert due_state.should_emit(due_state.served(vault), vault_root=vault)
+
+    def project(phase: str):
+        return f23_dismissal.project_run(
+            vault,
+            captured={},
+            subject="dismissal-none",
+            dismissed_key="none:none",
+            passes=0,
+            phase=phase,
+            taken_at="2026-08-16T00:00:00Z",
+        )
+
+    prior = project("f23-p1")
+    seeded = prior.item("surface-due_state_counters")
+    assert int(seeded.raw["emissions"]) == 1
+    assert int(seeded.raw["due_total"]) >= 1
+
+    # Twelve governed writes inside a batch scope, delivering nothing.
+    pages = _f23_carrier_pages(vault, 12)
+    with due_state.batch_scope(vault):
+        for page in pages:
+            due_state.should_emit(due_state.block_for_write(vault, page), vault_root=vault)
+
+    later = project("f23-p2")
+    ledger = later.item("surface-due_state_counters")
+    assert int(ledger.raw["writes"]) - int(seeded.raw["writes"]) == 12
+    assert int(ledger.raw["emissions"]) == 1
+    # The stale denominator is still positive, which is exactly the trap.
+    assert int(ledger.raw["due_total"]) >= 1
+
+    result = resolve("counter_emission_not_repeated_per_write")(
+        AssertionContext(snapshot=later, prior=prior, family="f23")
+    )
+    assert result.outcome == "unsupported", result.evidence
+    assert "delivered 0 block(s)" in result.evidence, result.evidence

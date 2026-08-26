@@ -1,0 +1,86 @@
+# referent-resolution Specification
+
+## Purpose
+TBD - created by archiving change add-referent-resolution. Update Purpose after archive.
+
+## Requirements
+
+### Requirement: Deterministic Referent Cue Detection
+The system SHALL detect entity cues from a closed person-noun set, resolver-local supplementary nouns, and every active core or vault-defined entity type's aliases, cue nouns, ID, label, and folder. Cue maps SHALL be cached by entity registry identity, SHALL give registry values precedence on conflicts, SHALL bind counts only within three preceding tokens, and SHALL run no model.
+
+#### Scenario: Counted plural cue
+- **WHEN** a query says "my two coastal friends"
+- **THEN** the cue identifies person referents with expected count two
+
+#### Scenario: Every active registry entity type stays type-constrained
+- **WHEN** the cue noun names any active core or vault-defined entity type
+- **THEN** candidates are restricted to that entity type unless exact-name rules apply
+- **AND** organization, library, decision, concept, person, and a synthetic `place` cue are covered by tests or the unchanged benchmark
+
+#### Scenario: Every registry entity type stays type-constrained
+- **WHEN** the cue noun names any entity type in the registry
+- **THEN** candidates are restricted to that entity type unless exact-name rules apply
+- **AND** organization, library, decision, concept, and person cues are covered by the benchmark
+
+### Requirement: Evidence Kinds Are Categorical And Transient
+Evidence SHALL use only exact-name, fuzzy-name, retrieval, graph, and attribute categories, SHALL contain no confidence floats, and SHALL never be written to the vault.
+
+#### Scenario: Evidence block emitted
+- **WHEN** an entity is evaluated from authored recall state
+- **THEN** its evidence is categorical, integer/string valued, and response-only
+
+### Requirement: Resolution Requires Exact Name Or Two Independent Evidence Kinds
+An active entity SHALL resolve by exact title/alias alone, or by cue-type match plus at least two distinct non-exact evidence kinds. One kind SHALL remain a candidate; inactive or mismatched entities SHALL be dropped unless exact-name rules apply.
+
+#### Scenario: Retrieval alone abstains
+- **WHEN** a person entity appears only as a recall hit
+- **THEN** it is a candidate and is not resolved
+
+### Requirement: Expected Count Yields Resolved Partial Ambiguous Or Unresolved
+The resolver SHALL emit resolved at exact count, partial with an unresolved count below it, ambiguous above it, and unresolved when no entity resolves.
+
+#### Scenario: One of two represented
+- **WHEN** one person resolves and the query expected two
+- **THEN** status is partial and unresolved_count is one
+
+#### Scenario: Candidate envelope remains bounded
+- **WHEN** more than 25 entities have candidate or resolved evidence
+- **THEN** each list contains its first 25 paths in deterministic order
+- **AND** omitted_candidate_count reports the total omitted remainder
+
+#### Scenario: Active release gate hides vault-wide counters
+- **WHEN** policy or lifecycle tombstones activate the release gate
+- **THEN** the referents block carries neither reasons nor omitted_candidate_count
+- **AND** those keys remain absent regardless of whether this query withheld a match
+
+### Requirement: Referents Never Reorder Or Alter Hits
+The referent stage SHALL run after release annotation, SHALL never enter the hit cache, and SHALL omit itself without changing hits on disablement or error.
+
+#### Scenario: Kill switch
+- **WHEN** EXOMEM_DISABLE_REFERENTS is enabled
+- **THEN** hits are byte-identical and no referents block or timing stage appears
+
+### Requirement: Graph Corroboration Is Optional And Ablatable
+Graph evidence SHALL use the top ten released hits as its bounded prefix, SHALL ignore any superseded hit inside that prefix, and SHALL make one sidecar neighbor call. It SHALL be absent when graph is false or unavailable.
+
+#### Scenario: Graph off
+- **WHEN** the existing graph argument is false
+- **THEN** no graph evidence appears while non-graph resolution remains available
+
+### Requirement: Entity Registry Enumeration Avoids Corpus Walks
+The entity registry SHALL enumerate every active core and vault-defined entity folder and SHALL cache immutable records by vault root, entity registry identity, and KB projection key, rebuilding only when one of those keys changes.
+
+#### Scenario: Warm checkpoint
+- **WHEN** two cue queries share one freshness key and entity registry identity
+- **THEN** entity pages are enumerated only on the first query
+
+#### Scenario: Extension registry change invalidates enumeration
+- **WHEN** `_Schema/entity-types.yaml` changes its content hash
+- **THEN** the next query rebuilds enumeration and includes the active extension folders
+
+### Requirement: Referent Benchmark Fixture And Floors
+A deterministic synthetic graph-on/off fixture SHALL enforce set accuracy at least 0.9, false-resolution rate zero, abstention and partial accuracy one, and graph incremental value at least one.
+
+#### Scenario: Benchmark check
+- **WHEN** the benchmark runs with --check
+- **THEN** it exits successfully only when every aggregate floor holds

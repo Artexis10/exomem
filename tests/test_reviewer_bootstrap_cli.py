@@ -207,8 +207,13 @@ def _locks() -> dict:
         "contract": OPENAI_PACKAGE_LOCK["schema_contract_sha256"],
         "command_surface": OPENAI_PACKAGE_LOCK["command_surface_sha256"],
         "plugin_version": "0.1.0",
-        "fixture_version": "v1",
+        "fixture_version": "v2",
         "fixture_digest": "ff" * 32,
+        "fixture": {
+            "fixture_version": "v2",
+            "payload_sha256": "ff" * 32,
+            "payload": {"notes": [{"key": "fixture-note"}], "absent_notes": [{}]},
+        },
         "openai_package_lock": OPENAI_PACKAGE_LOCK,
         "openai_archive_lock": OPENAI_ARCHIVE_LOCK,
     }
@@ -288,6 +293,53 @@ def test_attach_surfaces_a_rejected_attachment(monkeypatch) -> None:
 
     with pytest.raises(SystemExit):
         module.attach_openai_locks(cp, "cand-1", _locks())
+
+
+def test_attach_refuses_an_unproven_already_attached_response(monkeypatch) -> None:
+    module = _load_module()
+    monkeypatch.setenv("EXOMEM_HOSTED_CONTRACT_IMPORT_KEY_ID", "key-1")
+    monkeypatch.setenv("EXOMEM_HOSTED_CONTRACT_IMPORT_SECRET", "s3cret")
+    cp = _RecordingControlPlane({"prepare-attach-openai-locks": (200, {"attached": False})})
+
+    with pytest.raises(SystemExit) as raised:
+        module.attach_openai_locks(cp, "cand-1", _locks())
+
+    assert "could not prove" in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    "field",
+    ("command_surface_sha256", "schema_contract_sha256", "compatibility_sha256"),
+)
+def test_load_locks_rejects_cross_platform_contract_drift(
+    tmp_path: pathlib.Path, field: str
+) -> None:
+    module = _load_module()
+    generated = tmp_path / "plugins" / "hosted" / "generated"
+    generated.mkdir(parents=True)
+    fixture = tmp_path / "plugins" / "hosted" / "marketplace-review-fixture-v2.json"
+
+    claude_lock = {
+        **OPENAI_PACKAGE_LOCK,
+        "platform": "claude",
+        "artifact_sha256": "9d" * 32,
+    }
+    openai_lock = {
+        **OPENAI_PACKAGE_LOCK,
+        field: "aa" * 32,
+    }
+    (generated / "claude.lock.json").write_text(json.dumps(claude_lock))
+    (generated / "claude.zip.lock.json").write_text(
+        json.dumps({"platform": "claude", "archive_sha256": "0d" * 32})
+    )
+    (generated / "openai.lock.json").write_text(json.dumps(openai_lock))
+    (generated / "openai.zip.lock.json").write_text(json.dumps(OPENAI_ARCHIVE_LOCK))
+    fixture.write_text(json.dumps({"fixture_version": "v1", "payload_sha256": "ff" * 32}))
+
+    with pytest.raises(SystemExit) as raised:
+        module.load_locks(tmp_path)
+
+    assert field in str(raised.value)
 
 
 def test_prepare_attaches_the_openai_locks_before_anything_else(monkeypatch) -> None:
@@ -578,7 +630,14 @@ def test_run_writes_the_outcome_file_promotion_evidence_reads(monkeypatch, tmp_p
             "run-authority": (200, {"authority": {"id": authority_id}}),
             "run-authorize": (303, {}),
             "run-redeem": (200, {"destination": "https://x/cb?code=abc"}),
-            "run-token": (200, {}),
+            "run-token": (
+                200,
+                {
+                    "access_token": "setup-access-token",
+                    "refresh_token": "setup-refresh-token",
+                    "token_type": "Bearer",
+                },
+            ),
             "run-authority-outcome": (
                 200,
                 {
@@ -593,11 +652,27 @@ def test_run_writes_the_outcome_file_promotion_evidence_reads(monkeypatch, tmp_p
                     ]
                 },
             ),
+            "run-owner-status": (
+                200,
+                {"success": True, "status": {"state": "ready", "code": "CELL_READY"}},
+            ),
             # Stop right after the outcome is written.
             "run-sibling-stage-claude": (500, {}),
         }
     )
     cp.state_dir = tmp_path
+    monkeypatch.setattr(
+        module,
+        "seed_marketplace_review_fixture",
+        lambda fixture, call_tool: {
+            "fixture_version": fixture["fixture_version"],
+            "payload_sha256": fixture["payload_sha256"],
+            "note_count": 1,
+            "verified": True,
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(module, "HostedMCPToolCaller", lambda *_: object(), raising=False)
 
     with pytest.raises(SystemExit):
         module.run(
@@ -611,6 +686,7 @@ def test_run_writes_the_outcome_file_promotion_evidence_reads(monkeypatch, tmp_p
                 "state": "st",
                 "codeChallenge": "ch",
                 "codeVerifier": "cv",
+                "stageExpiresAt": "2999-01-01T00:00:00.000Z",
             },
             "tok",
             _locks(),
@@ -629,3 +705,286 @@ def test_run_writes_the_outcome_file_promotion_evidence_reads(monkeypatch, tmp_p
     # mode is an access-control fact.
     if has_posix_file_modes():
         assert (tmp_path / "bootstrap-outcome-final.json").stat().st_mode & 0o777 == 0o600
+
+
+def _run_context() -> dict[str, str]:
+    return {
+        "inviteId": "invite-1",
+        "stageId": "stage-1",
+        "oauthClientId": "client-record-1",
+        "candidateId": "cand-1",
+        "clientId": "bootstrap-client-1",
+        "state": "state-1",
+        "codeChallenge": "challenge-1",
+        "codeVerifier": "verifier-1",
+        "stageExpiresAt": "2999-01-01T00:00:00.000Z",
+    }
+
+
+def _run_responses(*, token_status: int = 200, owner_status: tuple[int, dict] | None = None):
+    authority_id = "11111111-1111-4111-8111-111111111111"
+    return {
+        "run-authority": (200, {"authority": {"id": authority_id}}),
+        "run-authorize": (303, {}),
+        "run-redeem": (200, {"destination": "https://x/cb?code=abc"}),
+        "run-token": (
+            token_status,
+            (
+                {
+                    "access_token": "setup-access-token",
+                    "refresh_token": "setup-refresh-token",
+                    "token_type": "Bearer",
+                }
+                if token_status == 200
+                else {"error": "invalid_grant"}
+            ),
+        ),
+        "run-authority-outcome": (
+            200,
+            {
+                "bootstrapAuthorities": [
+                    {
+                        "id": authority_id,
+                        "state": "consumed",
+                        "outcomeTenantId": "tenant-1",
+                        "outcomeAssignmentId": "assignment-1",
+                        "outcomeAssignmentGeneration": 1,
+                    }
+                ]
+            },
+        ),
+        "run-owner-status": owner_status
+        or (200, {"success": True, "status": {"state": "ready", "code": "CELL_READY"}}),
+        "run-sibling-stage-claude": (500, {}),
+    }
+
+
+def test_run_requires_successful_setup_token_before_any_credential_call(
+    monkeypatch, tmp_path
+) -> None:
+    module = _load_module()
+    monkeypatch.setattr(
+        module, "chatgpt_cimd_identity", lambda *_: ("https://c/x.json", ["https://c/cb"])
+    )
+    cp = _RecordingControlPlane(_run_responses(token_status=400))
+    cp.state_dir = tmp_path
+
+    with pytest.raises(SystemExit, match="token exchange failed"):
+        module.run(cp, _run_context(), "invite-token", _locks(), "CONN")
+
+    labels = [call["label"] for call in cp.calls]
+    assert "run-authority-outcome" not in labels
+    assert not any(label.startswith("run-canary-") for label in labels)
+
+
+def test_run_readiness_failure_makes_zero_reviewer_credential_calls(
+    monkeypatch, tmp_path
+) -> None:
+    module = _load_module()
+    monkeypatch.setattr(
+        module, "chatgpt_cimd_identity", lambda *_: ("https://c/x.json", ["https://c/cb"])
+    )
+    cp = _RecordingControlPlane(
+        _run_responses(owner_status=(503, {"code": "PROVISIONING_UNAVAILABLE"}))
+    )
+    cp.state_dir = tmp_path
+
+    with pytest.raises(SystemExit, match="owner status"):
+        module.run(cp, _run_context(), "invite-token", _locks(), "CONN")
+
+    labels = [call["label"] for call in cp.calls]
+    assert not any(label.startswith("run-canary-") for label in labels)
+
+
+def test_run_seeds_exact_fixture_after_cell_ready_and_before_credentials(
+    monkeypatch, tmp_path
+) -> None:
+    module = _load_module()
+    monkeypatch.setattr(
+        module, "chatgpt_cimd_identity", lambda *_: ("https://c/x.json", ["https://c/cb"])
+    )
+    events: list[str] = []
+
+    class _OrderedControlPlane(_RecordingControlPlane):
+        def call(self, method, path, *, label, body=None, **kwargs):
+            events.append(label)
+            return super().call(method, path, label=label, body=body, **kwargs)
+
+    cp = _OrderedControlPlane(_run_responses())
+    cp.state_dir = tmp_path
+
+    class _Caller:
+        def __init__(self, base_url, bearer_token):
+            assert base_url == cp.base_url
+            assert bearer_token == "setup-access-token"
+
+        def __call__(self, name, arguments):
+            raise AssertionError("the shared seeder is stubbed in this order test")
+
+    def seed(fixture, call_tool):
+        events.append("seed-fixture")
+        assert fixture is _locks()["fixture"] or fixture == _locks()["fixture"]
+        assert isinstance(call_tool, _Caller)
+        return {
+            "fixture_version": "v2",
+            "payload_sha256": "ff" * 32,
+            "note_count": 1,
+            "verified": True,
+        }
+
+    monkeypatch.setattr(module, "HostedMCPToolCaller", _Caller, raising=False)
+    monkeypatch.setattr(module, "seed_marketplace_review_fixture", seed, raising=False)
+
+    with pytest.raises(SystemExit, match="claude sibling stage failed"):
+        module.run(cp, _run_context(), "invite-token", _locks(), "CONN")
+
+    assert events.index("run-owner-status") < events.index("seed-fixture")
+    assert events.index("seed-fixture") < events.index("run-sibling-stage-claude")
+    receipt = json.loads((tmp_path / "reviewer-fixture-seed.json").read_text())
+    assert receipt == {
+        "fixture_version": "v2",
+        "payload_sha256": "ff" * 32,
+        "note_count": 1,
+        "verified": True,
+    }
+
+
+def test_run_fixture_failure_makes_zero_reviewer_credential_calls(
+    monkeypatch, tmp_path
+) -> None:
+    module = _load_module()
+    monkeypatch.setattr(
+        module, "chatgpt_cimd_identity", lambda *_: ("https://c/x.json", ["https://c/cb"])
+    )
+    monkeypatch.setattr(module, "HostedMCPToolCaller", lambda *_: object())
+    monkeypatch.setattr(
+        module,
+        "seed_marketplace_review_fixture",
+        lambda *_: (_ for _ in ()).throw(ValueError("fixture rejected")),
+    )
+    cp = _RecordingControlPlane(_run_responses())
+    cp.state_dir = tmp_path
+
+    with pytest.raises(SystemExit, match="reviewer fixture seeding failed"):
+        module.run(cp, _run_context(), "invite-token", _locks(), "CONN")
+
+    labels = [call["label"] for call in cp.calls]
+    assert not any(label.startswith("run-canary-") for label in labels)
+    assert not any(label.startswith("run-sibling-") for label in labels)
+
+
+def test_owner_status_polling_records_only_content_free_progress(monkeypatch, tmp_path) -> None:
+    module = _load_module()
+    monkeypatch.setattr(module.time, "sleep", lambda _seconds: None)
+    responses = iter(
+        [
+            (200, {"success": True, "status": {"state": "preparing", "code": "CELL_PREPARING"}}),
+            (200, {"success": True, "status": {"state": "ready", "code": "CELL_READY"}}),
+        ]
+    )
+
+    class _PollingControlPlane(_RecordingControlPlane):
+        def call(self, method, path, *, label, body=None, **kwargs):
+            self.calls.append({"method": method, "path": path, "label": label, "body": body})
+            return next(responses)
+
+    cp = _PollingControlPlane({})
+    cp.state_dir = tmp_path
+
+    module.wait_for_reviewer_cell(cp, _run_context())
+
+    assert [call["label"] for call in cp.calls] == ["run-owner-status", "run-owner-status"]
+    progress = json.loads((tmp_path / "reviewer-cell-readiness.json").read_text())
+    assert progress == {
+        "code": "CELL_READY",
+        "poll_count": 2,
+        "ready": True,
+        "state": "ready",
+    }
+    assert "tenant" not in json.dumps(progress).lower()
+
+
+@pytest.mark.parametrize("content_type", ["application/json", "text/event-stream"])
+def test_hosted_mcp_caller_uses_bearer_header_and_decodes_json_or_sse(
+    content_type: str, monkeypatch
+) -> None:
+    module = _load_module()
+    captured: dict[str, object] = {}
+
+    class _Headers:
+        def get_content_type(self):
+            return content_type
+
+    class _Response:
+        headers = _Headers()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self, _size=-1):
+            request_id = captured["payload"]["id"]
+            envelope = {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": {"structuredContent": {"path": "verified.md"}},
+            }
+            encoded = json.dumps(envelope).encode()
+            return encoded if content_type == "application/json" else b"data: " + encoded + b"\n\n"
+
+    class _Opener:
+        def open(self, request, timeout):
+            captured["timeout"] = timeout
+            captured["headers"] = dict(request.header_items())
+            captured["payload"] = json.loads(request.data)
+            return _Response()
+
+    monkeypatch.setattr(module, "_OPENER", _Opener())
+    token = "secret-bearer-value"
+
+    result = module.HostedMCPToolCaller("https://example.invalid", token)(
+        "read_memory", {"path": "verified.md"}
+    )
+
+    assert result == {"path": "verified.md"}
+    headers = captured["headers"]
+    assert headers["Authorization"] == f"Bearer {token}"
+    assert headers["Accept"] == "application/json, text/event-stream"
+    assert token not in json.dumps(captured["payload"])
+
+
+def test_hosted_mcp_caller_redacts_protocol_response_content(monkeypatch) -> None:
+    module = _load_module()
+    secret_body = "do-not-echo-this-fixture-content"
+
+    class _Headers:
+        def get_content_type(self):
+            return "application/json"
+
+    class _Response:
+        headers = _Headers()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self, _size=-1):
+            return json.dumps({"error": {"message": secret_body}}).encode()
+
+    class _Opener:
+        def open(self, request, timeout):
+            return _Response()
+
+    monkeypatch.setattr(module, "_OPENER", _Opener())
+
+    with pytest.raises(SystemExit) as raised:
+        module.HostedMCPToolCaller("https://example.invalid", "secret-token")(
+            "remember", {"content": secret_body}
+        )
+
+    assert secret_body not in str(raised.value)
+    assert "secret-token" not in str(raised.value)

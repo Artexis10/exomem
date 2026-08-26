@@ -320,6 +320,22 @@ def test_emit_batches_review_state_and_endpoint_ref_reads(
     )
 
     assert len(warnings) == 2
+    # One read for suppression, and one for the first-surfaced ledger's own
+    # write, which re-reads under the lock rather than writing back a snapshot
+    # taken before the advisories were composed. Both are per CALL, not per
+    # advisory, which is what this test exists to pin: a second emission of the
+    # same advisories reads once, because the ledger already holds them.
+    assert calls == {"load": 2, "refs": 1}
+
+    calls.update(load=0, refs=0)
+    assert (
+        len(
+            corpus_aware.emit_write_advisories(
+                vault, self_path=path, kind="overlap", candidates=candidates
+            )
+        )
+        == 2
+    )
     assert calls == {"load": 1, "refs": 1}
 
 

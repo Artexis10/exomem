@@ -141,7 +141,7 @@ _PRESERVED_HEADING = "## Preserved notes"
 # The title + locator lines _render_sidecar emits. Re-emitted on every render, so
 # they are regenerated rather than preserved.
 _SIDECAR_BOILERPLATE_RE = re.compile(
-    r"(?m)^# Evidence: .*$\n?|^Preserved under `[^`]*`\.[ \t]*$\n?"
+    r"(?m)^# (?:Evidence|Source): .*$\n?|^Preserved under `[^`]*`\.[ \t]*$\n?"
 )
 _INCOMPLETE_ENGINES = {"", "none", "pending"}
 _PROVENANCE_FIELDS = (
@@ -305,12 +305,19 @@ def reconcile_media(
     deferred_created: list[Path] = []
 
     def _write_sidecar(write: PlannedWrite) -> None:
-        written = batch_atomic_write(
-            [write],
-            vault_root=vault,
-            post_commit_fanout=commit_guard is None,
-        )
+        from .governance import catalog_publication
+
+        try:
+            written = _preserve_module().commit_media_sidecar_writes(
+                vault,
+                (write,),
+                post_commit_fanout=commit_guard is None,
+                batch_writer=batch_atomic_write,
+            )
+        except catalog_publication.CatalogCommitError as error:
+            raise MediaProcessingError(error.code, error.reason) from error
         if commit_guard is not None:
+            assert isinstance(written, list)
             deferred_fanout.extend(written)
             if write.create_only or write.expected_hash == MISSING_CONTENT_HASH:
                 deferred_created.extend(written)
@@ -591,12 +598,23 @@ def _needs_reconciliation(
     return True
 
 
-def _is_pending_sidecar_shape(
-    vault: Path,
-    binary: Path,
-    frontmatter: dict[str, object],
-    media_type: str,
-) -> bool:
+def _capture_owned_shape_is_valid(frontmatter: dict[str, object]) -> bool:
+    """Whether the fields the *capture* owns are present and well-formed.
+
+    The media pipeline owns `media_type`, `evidence_file`, `extracted_by`,
+    `processing_state`, and the binary provenance fields. Everything else on the
+    page — its identity, its classification, its title, its tags, its body —
+    belongs to whoever captured the artifact, so this predicate checks those for
+    validity rather than for particular values.
+
+    That distinction used to be absent. Both shape checks required
+    `source_type: other`, which is the Evidence sidecar's hard-coded value and
+    which no real Source has, so a media page captured as a Source failed every
+    check and was rebuilt from scratch — losing its title, kind, domain,
+    projects and tags, and having its body demoted under `## Preserved notes`.
+    A non-empty `tags` list was required for the same reason, and did the same
+    to a capture that legitimately has none.
+    """
     captured = frontmatter.get("captured")
     try:
         if isinstance(captured, dt.date):
@@ -605,16 +623,32 @@ def _is_pending_sidecar_shape(
             dt.date.fromisoformat(str(captured))
     except (TypeError, ValueError):
         return False
+    title = frontmatter.get("title")
+    source_type = frontmatter.get("source_type")
     tags = frontmatter.get("tags")
-    ingested_into = frontmatter.get("ingested_into")
-    digest = str(frontmatter.get("binary_sha256", ""))
-    expected_path = binary.relative_to(vault).as_posix()
     return (
         frontmatter.get("type") == "source"
         and memory_refs.normalize_id(frontmatter.get("exomem_id")) is not None
-        and isinstance(frontmatter.get("title"), str)
-        and bool(str(frontmatter["title"]).strip())
-        and frontmatter.get("source_type") == "other"
+        and isinstance(title, str)
+        and bool(title.strip())
+        and isinstance(source_type, str)
+        and bool(source_type.strip())
+        and isinstance(tags, list)
+        and all(isinstance(tag, str) and tag.strip() for tag in tags)
+        and isinstance(frontmatter.get("ingested_into"), list)
+    )
+
+
+def _is_pending_sidecar_shape(
+    vault: Path,
+    binary: Path,
+    frontmatter: dict[str, object],
+    media_type: str,
+) -> bool:
+    digest = str(frontmatter.get("binary_sha256", ""))
+    expected_path = binary.relative_to(vault).as_posix()
+    return (
+        _capture_owned_shape_is_valid(frontmatter)
         and frontmatter.get("media_type") == media_type
         and frontmatter.get("evidence_file") == expected_path
         and frontmatter.get("original_filename") == binary.name
@@ -624,10 +658,6 @@ def _is_pending_sidecar_shape(
         and _is_nonnegative_int(frontmatter.get("binary_size"))
         and _is_nonnegative_int(frontmatter.get("binary_mtime_ns"))
         and _is_nonnegative_int(frontmatter.get("binary_ctime_ns"))
-        and isinstance(tags, list)
-        and bool(tags)
-        and all(isinstance(tag, str) and tag.strip() for tag in tags)
-        and isinstance(ingested_into, list)
     )
 
 
@@ -1078,13 +1108,7 @@ def _render_pending_sidecar(
             body if raw_frontmatter is not None else original
         )
 
-    parts = Path(provenance.relative_path).parts
-    evidence_index = next(
-        (i for i, part in enumerate(parts) if part.casefold() == "evidence"), None
-    )
-    folders = parts[evidence_index + 1 : -1] if evidence_index is not None else ()
-    scope = folders[0] if folders else "evidence"
-    category = folders[1] if len(folders) > 1 else "uncategorized"
+    tree, scope, category = preserve.artifact_location(provenance.relative_path)
     rendered = preserve._render_sidecar(
         artifact_name=binary.name,
         scope=scope,
@@ -1093,6 +1117,7 @@ def _render_pending_sidecar(
         media_type=media_type,
         evidence_file=provenance.relative_path,
         extracted_by="pending",
+        tree=tree,
     )
     if existing_id is not None:
         rendered = preserve._set_frontmatter_field(rendered, "exomem_id", existing_id)
@@ -1163,29 +1188,11 @@ def _is_canonical_pending_shape(
     media_type: str,
     provenance: _BinaryProvenance,
 ) -> bool:
-    captured = frontmatter.get("captured")
-    try:
-        if isinstance(captured, dt.date):
-            captured.isoformat()
-        else:
-            dt.date.fromisoformat(str(captured))
-    except (TypeError, ValueError):
-        return False
-    tags = frontmatter.get("tags")
-    ingested_into = frontmatter.get("ingested_into")
     return (
-        frontmatter.get("type") == "source"
-        and memory_refs.normalize_id(frontmatter.get("exomem_id")) is not None
-        and isinstance(frontmatter.get("title"), str)
-        and bool(str(frontmatter["title"]).strip())
-        and frontmatter.get("source_type") == "other"
+        _capture_owned_shape_is_valid(frontmatter)
         and frontmatter.get("media_type") == media_type
         and frontmatter.get("evidence_file") == provenance.relative_path
         and str(frontmatter.get("extracted_by", "")).strip().lower() == "pending"
-        and isinstance(tags, list)
-        and bool(tags)
-        and all(isinstance(tag, str) and tag.strip() for tag in tags)
-        and isinstance(ingested_into, list)
     )
 
 
@@ -1303,17 +1310,20 @@ def mark_processing_unavailable(
                         retryable=True,
                         next_action=next_action,
                     )
-                    written = batch_atomic_write(
-                        [
+                    written_result = preserve.commit_media_sidecar_writes(
+                        vault,
+                        (
                             PlannedWrite(
                                 path=job.sidecar_path,
                                 content=blocked,
                                 expected_hash=content_hash(content),
-                            )
-                        ],
-                        vault_root=vault,
+                            ),
+                        ),
                         post_commit_fanout=commit_guard is None,
+                        batch_writer=batch_atomic_write,
                     )
+                    assert isinstance(written_result, list)
+                    written = written_result
                 store.mark(job.id, media_jobs.BLOCKED, reason)
                 changed += 1
         except Exception:  # noqa: BLE001 - one stale job must not abort startup

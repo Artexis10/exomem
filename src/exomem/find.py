@@ -226,7 +226,7 @@ def _set_rerank_timing_profile(
 
 def _set_catalog_timing_profile(
     timings: FindTimings | None,
-    readiness: object | None = None,
+    readiness: Any | None = None,
     *,
     cache_hit: bool = False,
 ) -> None:
@@ -235,6 +235,14 @@ def _set_catalog_timing_profile(
     from . import lexstore
 
     timings.profile["catalog"] = lexstore.catalog_timing_profile(readiness, cache_hit=cache_hit)
+
+
+def _set_recall_projection_timing_outcome(
+    timings: FindTimings | None,
+    outcome: str,
+) -> None:
+    if timings is not None:
+        timings.profile.setdefault("recall_projection", {})["outcome"] = outcome
 
 
 def _record_filter_eligibility_cache_hit(timings: FindTimings | None) -> None:
@@ -412,12 +420,29 @@ class FreshnessSnapshot:
     scope (sub-ms, syscall-free); otherwise falls back to a full stat-walk that
     yields a byte-identical triple."""
 
-    def __init__(self, vault_root: Path) -> None:
+    def __init__(
+        self,
+        vault_root: Path,
+        *,
+        require_live_recall: bool = False,
+        timings: FindTimings | None = None,
+        expected_recall_checkpoints: dict[
+            str, freshness.RecallFreshnessCheckpoint
+        ]
+        | None = None,
+    ) -> None:
         self._root = vault_root
+        self._require_live_recall = require_live_recall
+        self._timings = timings
+        self._expected_recall_checkpoints = expected_recall_checkpoints or {}
         self._kb: tuple[int, int, str] | None = None
         self._vault: tuple[int, int, str] | None = None
         self._recall: dict[str, freshness.RecallFreshnessCheckpoint] = {}
         self._recall_paths: dict[str, frozenset[str]] = {}
+
+    @property
+    def requires_live_recall(self) -> bool:
+        return self._require_live_recall
 
     def kb(self) -> tuple[int, int, str]:
         if self._kb is None:
@@ -481,34 +506,91 @@ class FreshnessSnapshot:
     def _load_recall_projection(self, scope: str) -> None:
         if scope in self._recall and scope in self._recall_paths:
             return
-        root = self._root.absolute()
-        cache_key = (root, scope)
-        checkpoint = freshness.recall_checkpoint(self._root, scope)
-        with _RECALL_PATH_CACHE_LOCK:
-            cached = _RECALL_PATH_CACHE.get(cache_key)
-            if cached is not None and cached[0] == checkpoint:
-                _RECALL_PATH_CACHE.move_to_end(cache_key)
-                self._recall[scope] = checkpoint
-                self._recall_paths[scope] = cached[1]
-                return
-
-        checkpoint, entries = freshness.recall_projection_snapshot(self._root, scope)
-        paths: set[str] = set()
-        for raw_path in entries:
+        with _span(self._timings, "recall_projection"):
             try:
-                paths.add(Path(raw_path).absolute().relative_to(root).as_posix())
-            except (OSError, ValueError):
-                # Registry identities outside the literal vault spelling are
-                # never valid semantic-search parents; fail closed.
-                continue
-        projected = frozenset(paths)
-        self._recall[scope] = checkpoint
-        self._recall_paths[scope] = projected
-        with _RECALL_PATH_CACHE_LOCK:
-            _RECALL_PATH_CACHE[cache_key] = (checkpoint, projected)
-            _RECALL_PATH_CACHE.move_to_end(cache_key)
-            while len(_RECALL_PATH_CACHE) > _RECALL_PATH_CACHE_SIZE:
-                _RECALL_PATH_CACHE.popitem(last=False)
+                root = self._root.absolute()
+                cache_key = (root, scope)
+                projection_live = freshness.recall_is_live(self._root, scope)
+                checkpoint = (
+                    freshness.live_recall_checkpoint(self._root, scope)
+                    if self._require_live_recall
+                    else freshness.recall_checkpoint(self._root, scope)
+                    if projection_live
+                    else None
+                )
+                if checkpoint is None and self._require_live_recall:
+                    raise freshness.RecallProjectionUnavailable(
+                        f"maintained recall projection is not live for scope={scope!r}"
+                    )
+                expected = self._expected_recall_checkpoints.get(scope)
+                if checkpoint is not None and expected is not None and checkpoint != expected:
+                    raise freshness.RecallProjectionUnavailable(
+                        f"maintained recall projection advanced for scope={scope!r}"
+                    )
+                if checkpoint is not None:
+                    with _RECALL_PATH_CACHE_LOCK:
+                        cached = _RECALL_PATH_CACHE.get(cache_key)
+                        if cached is not None and cached[0] == checkpoint:
+                            _RECALL_PATH_CACHE.move_to_end(cache_key)
+                            self._recall[scope] = checkpoint
+                            self._recall_paths[scope] = cached[1]
+                            _set_recall_projection_timing_outcome(
+                                self._timings,
+                                "live_cache" if self._require_live_recall else "cache",
+                            )
+                            return
+
+                if self._require_live_recall:
+                    checkpoint, entries = freshness.recall_projection_snapshot(
+                        self._root,
+                        scope,
+                        allow_fallback=False,
+                    )
+                elif projection_live and freshness.recall_is_live(self._root, scope):
+                    checkpoint, entries = freshness.recall_projection_snapshot(
+                        self._root,
+                        scope,
+                    )
+                else:
+                    checkpoint, entries, scope_triple = (
+                        freshness.recall_projection_scope_snapshot(self._root, scope)
+                    )
+                    if scope == "vault":
+                        self._vault = scope_triple
+                    else:
+                        self._kb = scope_triple
+                if expected is not None and checkpoint != expected:
+                    raise freshness.RecallProjectionUnavailable(
+                        f"maintained recall projection advanced for scope={scope!r}"
+                    )
+                paths: set[str] = set()
+                for raw_path in entries:
+                    try:
+                        paths.add(Path(raw_path).absolute().relative_to(root).as_posix())
+                    except (OSError, ValueError):
+                        # Registry identities outside the literal vault spelling are
+                        # never valid semantic-search parents; fail closed.
+                        continue
+                projected = frozenset(paths)
+                self._recall[scope] = checkpoint
+                self._recall_paths[scope] = projected
+                with _RECALL_PATH_CACHE_LOCK:
+                    _RECALL_PATH_CACHE[cache_key] = (checkpoint, projected)
+                    _RECALL_PATH_CACHE.move_to_end(cache_key)
+                    while len(_RECALL_PATH_CACHE) > _RECALL_PATH_CACHE_SIZE:
+                        _RECALL_PATH_CACHE.popitem(last=False)
+                _set_recall_projection_timing_outcome(
+                    self._timings,
+                    (
+                        "live"
+                        if self._require_live_recall
+                        or freshness.recall_is_live(self._root, scope)
+                        else "offline_fallback"
+                    ),
+                )
+            except freshness.RecallProjectionUnavailable as exc:
+                _set_recall_projection_timing_outcome(self._timings, "unavailable")
+                raise RetrievalIndexWarming(status="temporarily_unavailable") from exc
 
 
 def _freshness_key(
@@ -648,6 +730,7 @@ def find(
     degraded_out: list[str] | None = None,
     failed_out: list[str] | None = None,
     retrieval_trace: Any | None = None,
+    catalog_proof_out: dict[str, freshness.RecallFreshnessCheckpoint] | None = None,
 ) -> list[Hit] | list[SemanticUnitHit] | list[Hit | SemanticUnitHit]:
     """Search the vault. Returns up to `limit` hits.
 
@@ -748,6 +831,8 @@ def find(
     and `signals.usage_boost`. Strict no-op on cold start, absent logs, or
     `EXOMEM_DISABLE_USAGE_BOOST`. Bypasses the hot find cache.
     """
+    if catalog_proof_out is not None:
+        catalog_proof_out.clear()
     if scope not in ("kb", "vault", "kb-only"):
         raise ValueError(f"find: scope must be 'kb', 'vault', or 'kb-only', got {scope!r}")
     if mode not in ("hybrid", "keyword", "vector"):
@@ -791,6 +876,52 @@ def find(
             hard_max=MAX_RERANK_CANDIDATES,
         )
     query_norm = (query or "").lower().strip()
+
+    from . import lexstore, readiness
+
+    managed_runtime = readiness.runtime_managed()
+    admission = readiness.retrieval_admission()
+    if managed_runtime and admission["state"] == "unavailable":
+        # A background repair may have published the exact catalog after its
+        # one promotion callback lost a race.  Re-prove once before scheduling
+        # another whole-corpus rebuild; normal ready requests keep one proof.
+        admission = readiness.retrieval_admission(vault_root)
+    state = str(admission["state"]) if managed_runtime else "unverified"
+    require_live_recall = managed_runtime and freshness.event_indexes_enabled()
+    catalog_proof: dict[str, freshness.RecallFreshnessCheckpoint] | None = None
+    with _span(timings, "recall_projection"):
+        if state == "ready" and require_live_recall:
+            raw_proof = lexstore.runtime_retrieval_catalog_proof(vault_root)
+            if raw_proof is None:
+                readiness.mark_unready("retrieval_catalog")
+                state = "unavailable"
+            else:
+                catalog_proof = {
+                    scope: checkpoint
+                    for scope, checkpoint in raw_proof.items()
+                    if isinstance(checkpoint, freshness.RecallFreshnessCheckpoint)
+                }
+                if set(catalog_proof) != set(freshness.SCOPES):
+                    readiness.mark_unready("retrieval_catalog")
+                    catalog_proof = None
+                    state = "unavailable"
+                elif catalog_proof_out is not None:
+                    catalog_proof_out.update(catalog_proof)
+        if state in {"warming", "unavailable"}:
+            if state == "unavailable":
+                lexstore.request_repair(vault_root)
+            _set_recall_projection_timing_outcome(timings, state)
+            raise RetrievalIndexWarming(
+                status=(
+                    "temporarily_unavailable"
+                    if state == "unavailable"
+                    else "warming"
+                )
+            )
+        _set_recall_projection_timing_outcome(
+            timings,
+            "admitted" if require_live_recall else "offline",
+        )
 
     language_registry = None
 
@@ -881,7 +1012,12 @@ def find(
     # One freshness snapshot + one parsed-page memo per request: every
     # consumer below (hot cache, BM25, resolver, auto-widen, boost passes)
     # shares them instead of re-walking / re-stat'ing.
-    snapshot = FreshnessSnapshot(vault_root)
+    snapshot = FreshnessSnapshot(
+        vault_root,
+        require_live_recall=require_live_recall,
+        timings=timings,
+        expected_recall_checkpoints=catalog_proof,
+    )
     page_memo: dict[str, ParsedPage | None] = {}
 
     def _page_of(rel: str) -> ParsedPage | None:
@@ -1893,7 +2029,16 @@ def _find_semantic_units(
                 if failed_out is not None:
                     failed_out.append("semantic_units_lexical")
                 _record_degradation("semantic_units_lexical")
-                records = {}
+                # Content-only unit recall may use its established Python rung
+                # for a provably small corpus.  A catalog-identity change can
+                # invalidate every stored semantic row even though the text
+                # query remains answerable from current Markdown; do not turn
+                # that bounded fallback into an authoritative empty result.
+                records = (
+                    _eligible_unit_records(vault_root, scope=scope, plan=plan)
+                    if _bounded_lexical_repair_allowed(snapshot.for_scope(scope))
+                    else {}
+                )
             else:
                 records = _eligible_unit_records(vault_root, scope=scope, plan=plan)
         elif dnf_clauses is None:
@@ -2687,6 +2832,7 @@ def _find_keyword(
     failed_out: list[str] | None = None,
 ) -> list[Hit]:
     """Keyword-mode recall, hydrating only maintained-index matches."""
+    lexical_repair = _bounded_lexical_repair_allowed(freshness_key)
     if query_norm:
         candidate_paths = _keyword_match_paths(
             vault_root,
@@ -2694,7 +2840,7 @@ def _find_keyword(
             scope,
             freshness=freshness_key,
             failed_out=failed_out,
-            repair=_bounded_lexical_repair_allowed(freshness_key),
+            repair=lexical_repair,
         )
         if eligible_paths is not None:
             # A finite eligible set (a complete category/kind plan resolved
@@ -2708,6 +2854,26 @@ def _find_keyword(
         # plan resolved through the maintained index) iterates those parents
         # directly rather than walking the scope to rediscover them.
         walk = (vault_root / rel_path for rel_path in eligible_paths)
+    elif not lexical_repair:
+        from . import lexstore
+
+        if lexstore.maintained_content_index_enabled():
+            catalog = lexstore.get_store(vault_root).catalog_readiness(
+                scope,
+                freshness_key,
+            )
+            if not catalog.complete:
+                _raise_catalog_outcome(catalog)
+        if scope == "kb":
+            kb = vault_root / kb_dirname()
+            if not kb.is_dir():
+                log.error("KB directory missing: %s", kb)
+                return []
+            walk = _walk_md(kb)
+        else:
+            from .vault import walk_vault_md
+
+            walk = walk_vault_md(vault_root)
     elif scope == "kb":
         kb = vault_root / kb_dirname()
         if not kb.is_dir():
@@ -2844,12 +3010,26 @@ def _find_semantic(
     `degraded_out`'s "the lane was deferred while a model preload is warming".
     """
     # Lazy imports — keep keyword-mode users out of the torch import path.
-    from . import embeddings, readiness, scene_frames
+    from . import embeddings, lexstore, readiness, scene_frames
 
     if snapshot is None:
         snapshot = FreshnessSnapshot(vault_root)
     if page_memo is None:
         page_memo = {}
+
+    lexical_freshness = snapshot.for_scope(scope)
+    lexical_repair = _bounded_lexical_repair_allowed(lexical_freshness)
+    if (
+        mode != "vector"
+        and not lexical_repair
+        and lexstore.maintained_content_index_enabled()
+    ):
+        catalog = lexstore.get_store(vault_root).catalog_readiness(
+            scope,
+            lexical_freshness,
+        )
+        if not catalog.complete:
+            _raise_catalog_outcome(catalog)
 
     def _page_of(rel: str) -> ParsedPage | None:
         if rel not in page_memo:
@@ -2860,33 +3040,42 @@ def _find_semantic(
             )
         return page_memo[rel]
 
-    bundle = find_candidates.collect_candidates(
-        vault_root,
-        query=query,
-        query_norm=query_norm,
-        limit=limit,
-        scope=scope,
-        mode=mode,
-        graph=graph,
-        temporal=temporal,
-        intent=intent,
-        prefer_compiled=prefer_compiled,
-        prefer_active=prefer_active,
-        prefer_used=prefer_used,
-        config=config,
-        timings=timings,
-        snapshot=snapshot,
-        page_of=_page_of,
-        keyword_match_paths=_keyword_match_paths,
-        outbound_wikilink_paths=_outbound_wikilink_paths,
-        get_query_resolver=recall_resolver_snapshot,
-        record_degradation=_record_degradation,
-        degraded_out=degraded_out,
-        failed_out=failed_out,
-        recall_paths=snapshot.recall_paths(recall_scope or scope),
-        eligible_paths=eligible_paths,
-        capture_trace=retrieval_trace is not None,
-    )
+    try:
+        bundle = find_candidates.collect_candidates(
+            vault_root,
+            query=query,
+            query_norm=query_norm,
+            limit=limit,
+            scope=scope,
+            mode=mode,
+            graph=graph,
+            temporal=temporal,
+            intent=intent,
+            prefer_compiled=prefer_compiled,
+            prefer_active=prefer_active,
+            prefer_used=prefer_used,
+            config=config,
+            timings=timings,
+            snapshot=snapshot,
+            page_of=_page_of,
+            keyword_match_paths=_keyword_match_paths,
+            outbound_wikilink_paths=_outbound_wikilink_paths,
+            get_query_resolver=lambda root, freshness=None: recall_resolver_snapshot(
+                root,
+                freshness=freshness,
+                allow_fallback=not snapshot.requires_live_recall,
+                expected_checkpoint=snapshot.recall_checkpoint("vault"),
+            ),
+            record_degradation=_record_degradation,
+            degraded_out=degraded_out,
+            failed_out=failed_out,
+            recall_paths=snapshot.recall_paths(recall_scope or scope),
+            lexical_repair=lexical_repair,
+            eligible_paths=eligible_paths,
+            capture_trace=retrieval_trace is not None,
+        )
+    except lexstore.CatalogUnavailable as error:
+        _raise_catalog_outcome(error.readiness)
 
     if not bundle.had_rankings:
         # Both rankers failed or produced nothing. Degrade to keyword.
@@ -3363,23 +3552,47 @@ def _find_outside_kb(
     score_by_path: dict[str, float] = {}
     lexical_backend = lexstore.cache_token(vault_root)
     try:
-        search_kwargs = {
-            "scope": "vault",
-            "freshness": snapshot.for_scope("vault") if snapshot is not None else None,
-            "allowed_paths": allowed_outside,
-        }
-        search_kwargs["repair"] = _bounded_lexical_repair_allowed(search_kwargs["freshness"])
-        bm25_hits = lexstore.search_bm25(
-            vault_root,
-            query,
-            bm25_k,
-            **search_kwargs,
-        )
+        vault_freshness = snapshot.for_scope("vault") if snapshot is not None else None
+        lexical_repair = _bounded_lexical_repair_allowed(vault_freshness)
+        bm25_hits: list[tuple[str, float]] | None
+        if (
+            not lexical_repair
+            and lexstore.maintained_content_index_enabled()
+        ):
+            catalog_result = lexstore.search_bm25_result(
+                vault_root,
+                query,
+                bm25_k,
+                scope="vault",
+                freshness=vault_freshness,
+                allowed_paths=allowed_outside,
+            )
+            if not catalog_result.readiness.complete:
+                _raise_catalog_outcome(catalog_result.readiness)
+            bm25_hits = list(catalog_result.value or [])
+        else:
+            bm25_hits = lexstore.search_bm25(
+                vault_root,
+                query,
+                bm25_k,
+                scope="vault",
+                freshness=vault_freshness,
+                allowed_paths=allowed_outside,
+                repair=lexical_repair,
+            )
         if bm25_hits is None:
             if lexstore.backend() == "python":
                 # An explicit operator rollback is allowed to use the old
                 # in-process corpus. Automatic sidecar failure is not.
-                bm25_hits = bm25.search(vault_root, query, k=bm25_k, **search_kwargs)
+                bm25_hits = bm25.search(
+                    vault_root,
+                    query,
+                    k=bm25_k,
+                    scope="vault",
+                    freshness=vault_freshness,
+                    allowed_paths=allowed_outside,
+                    repair=lexical_repair,
+                )
                 lexical_backend = "keyword_fallback"
             else:
                 if failed_out is not None:
@@ -3390,6 +3603,8 @@ def _find_outside_kb(
             if not path.startswith(kb_prefix()):
                 candidates.append(path)
                 score_by_path[path] = float(_score)
+    except RetrievalIndexWarming:
+        raise
     except Exception as e:  # noqa: BLE001 — widening must never break find
         log.warning("auto-widen lexical sidecar failed: %s", e)
         if failed_out is not None:
@@ -3468,40 +3683,6 @@ def _any_stem_present(page: ParsedPage, query_norm: str) -> bool:
     return any(qs in page.stem_set for qs in bm25_module.tokenize(query_norm))
 
 
-# Function words that must never, on their own, carry the degraded-retention
-# majority: articles/determiners, quantifiers, pronouns, wh-words,
-# prepositions/conjunctions, auxiliaries, negation. Surface forms; matched in
-# stem space via _function_word_stems() so classification consumes the same
-# tokenize() output presence checks use. (claims.py keeps a private
-# _STOPWORDS lexicon for contradiction topic-overlap, but it has no wh-words
-# and its own tokenizer — retention gating keeps an independent frozen set so
-# unrelated lexicon edits cannot reshape retrieval.)
-_FUNCTION_WORDS = frozenset(
-    """a an the this that these those all any some each no not
-    i we you he she it they me us them my our your their his her its
-    what which who whom whose when where why how
-    of in on at to for from by with about as into over under
-    and or but if then than so
-    is are was were be been being am
-    do does did done doing have has had having
-    can could will would shall should may might must""".split()
-)
-_FUNCTION_WORD_STEMS: frozenset[str] | None = None
-
-
-def _function_word_stems() -> frozenset[str]:
-    """Stem-space view of `_FUNCTION_WORDS`, built lazily (bm25 owns the
-    stemmer) and memoized — the set is tiny and the computation idempotent."""
-    global _FUNCTION_WORD_STEMS
-    if _FUNCTION_WORD_STEMS is None:
-        from . import bm25 as bm25_module
-
-        _FUNCTION_WORD_STEMS = frozenset(
-            bm25_module.stem_word(word) for word in _FUNCTION_WORDS
-        )
-    return _FUNCTION_WORD_STEMS
-
-
 def _query_word_stem_groups(query_norm: str) -> list[tuple[list[str], bool]]:
     """Per whitespace word: (BM25 subtoken stems, is_function_word).
 
@@ -3514,18 +3695,7 @@ def _query_word_stem_groups(query_norm: str) -> list[tuple[list[str], bool]]:
     (known limit: mixed-script queries are gated more permissively than
     v0.36.0's all-stems veto).
     """
-    from . import bm25 as bm25_module
-
-    function_stems = _function_word_stems()
-    groups: list[tuple[list[str], bool]] = []
-    for word in query_norm.split():
-        subtoken_stems = bm25_module.tokenize(word)
-        if not subtoken_stems:
-            continue
-        groups.append(
-            (subtoken_stems, all(s in function_stems for s in subtoken_stems))
-        )
-    return groups
+    return find_policy.query_word_stem_groups(query_norm)
 
 
 def _stem_word_coverage(
@@ -3546,15 +3716,7 @@ def _stem_word_coverage(
     `_any_stem_present` (>=1 stem anywhere) and `_stem_tokens_present` (ALL
     whitespace tokens, whole-token stems).
     """
-    text_stems = page.stem_set
-    present = 0
-    content_present = 0
-    for subtoken_stems, is_function in word_stem_groups:
-        if all(stem in text_stems for stem in subtoken_stems):
-            present += 1
-            if not is_function:
-                content_present += 1
-    return present, len(word_stem_groups), content_present
+    return find_policy.stem_word_coverage(page.stem_set, word_stem_groups)
 
 
 def _outside_kb_keyword_paths(vault_root: Path, query_norm: str) -> list[str]:
@@ -3692,6 +3854,17 @@ def _keyword_match_paths(
         return []
     from . import lexstore
 
+    if not repair and lexstore.maintained_content_index_enabled():
+        catalog_result = lexstore.search_substring_result(
+            vault_root,
+            query_norm,
+            scope=scope,
+            freshness=freshness,
+            k=k,
+        )
+        if not catalog_result.readiness.complete:
+            _raise_catalog_outcome(catalog_result.readiness)
+        return list(catalog_result.value or [])
     indexed = lexstore.search_substring(
         vault_root,
         query_norm,
@@ -4012,7 +4185,13 @@ def shared_resolver(vault_root: Path):
     return _get_query_resolver(vault_root)
 
 
-def recall_resolver_snapshot(vault_root: Path, freshness: tuple | None = None):
+def recall_resolver_snapshot(
+    vault_root: Path,
+    freshness: tuple | None = None,
+    *,
+    allow_fallback: bool = True,
+    expected_checkpoint: freshness.RecallFreshnessCheckpoint | None = None,
+):
     """Resolver for ordinary recall and graph expansion only.
 
     Unlike the writer resolver, this view is intentionally constructed from
@@ -4029,7 +4208,11 @@ def recall_resolver_snapshot(vault_root: Path, freshness: tuple | None = None):
     # must not pay another broad/event-registry walk just to warm this resolver.
     # The key remains distinct from the broad writer resolver by policy identity.
     freshness_key = (
-        freshness if freshness is not None else FreshnessSnapshot(root).projection_key("vault")
+        freshness
+        if freshness is not None
+        else _recall_checkpoint_identity(expected_checkpoint)
+        if expected_checkpoint is not None
+        else FreshnessSnapshot(root).projection_key("vault")
     )
     policy_version, access_fingerprint = recall_policy.recall_policy_identity(root)
     if (
@@ -4045,10 +4228,20 @@ def recall_resolver_snapshot(vault_root: Path, freshness: tuple | None = None):
     else:
         identity = (freshness_key, policy_version, access_fingerprint)
     checkpoint: freshness_module.RecallFreshnessCheckpoint | None = None
-    if freshness_module.recall_is_live(root, "vault"):
+    candidate = expected_checkpoint
+    if candidate is not None and not allow_fallback:
+        if not freshness_module.recall_checkpoint_is_current(root, "vault", candidate):
+            lexstore.request_repair(root)
+            raise RetrievalIndexWarming(status="temporarily_unavailable")
+    if candidate is None:
+        candidate = freshness_module.live_recall_checkpoint(root, "vault")
+    if candidate is None and allow_fallback:
         candidate = freshness_module.recall_checkpoint(root, "vault")
-        if identity == _recall_checkpoint_identity(candidate):
-            checkpoint = candidate
+    if candidate is not None and identity == _recall_checkpoint_identity(candidate):
+        checkpoint = candidate
+    if not allow_fallback and checkpoint is None:
+        lexstore.request_repair(root)
+        raise RetrievalIndexWarming(status="temporarily_unavailable")
     with _RESOLVER_LOCK:
         cached = _RECALL_RESOLVER_CACHE.get(root)
         if cached and cached[0] == identity:
@@ -4089,10 +4282,11 @@ def recall_resolver_snapshot(vault_root: Path, freshness: tuple | None = None):
     # would then elect itself leader and rebuild -- reintroducing the stampede
     # this exists to prevent, just narrowed to a race window.
     try:
-        entries = lexstore.get_store(root).recall_resolver_entries(
-            "vault", checkpoint.triple if checkpoint is not None else None
-        )
+        entries = lexstore.get_store(root).recall_resolver_entries("vault", checkpoint)
         if entries is None:
+            if not allow_fallback:
+                lexstore.request_repair(root)
+                raise RetrievalIndexWarming(status="temporarily_unavailable")
             entries = []
             for path in walk_vault_md(root):
                 if not recall_policy.is_recall_candidate(root, path):

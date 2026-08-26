@@ -4,11 +4,18 @@ from __future__ import annotations
 
 import secrets
 import sqlite3
+import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Final
 
-from . import authorization_custody, authorization_sessions, schema_v4
+from . import (
+    authorization_custody,
+    authorization_serving_membership,
+    authorization_sessions,
+    schema_v4,
+)
 
 MAX_SESSION_TTL_SECONDS: Final = 3_600
 _MAX_SQLITE_INTEGER: Final = (1 << 63) - 1
@@ -140,6 +147,47 @@ def _ready_custody(
             expected_activation_epoch=control.activation_epoch,
             expected_activation_state_digest=control.activation_state_digest,
         )
+        membership = custody.serving_membership
+        local_replica_id = custody.local_replica_id
+        if membership is None or local_replica_id is None:
+            raise AuthorizationSessionUnavailable
+        if membership.record_digest and (
+            membership.record_digest != control.serving_membership_digest
+        ):
+            raise AuthorizationSessionUnavailable
+        live_key_rows = connection.execute(
+            "SELECT DISTINCT verifier_key_id FROM governance_authorization_sessions "
+            "WHERE status='active' AND expires_at>?",
+            (current,),
+        ).fetchall()
+        readiness = authorization_serving_membership.evaluate_serving_membership(
+            membership,
+            now=current,
+            local_replica_id=local_replica_id,
+            local_software_version=authorization_custody.runtime_software_version(),
+            local_schema_version=schema_v4.SCHEMA_USER_VERSION,
+            expected_cell_id=control.cell_id,
+            expected_control_digest=authorization_custody.control_attestation_digest(
+                control
+            ),
+            expected_keyring_digest=authorization_custody.keyring_attestation_digest(
+                keyring
+            ),
+            local_active_key_id=keyring.active_key_id,
+            local_accepted_key_ids=tuple(
+                sorted(key.key_id for key in keyring.accepted_keys)
+            ),
+            valid_verifier_key_ids=tuple(
+                sorted(
+                    key.key_id
+                    for key in keyring.accepted_keys
+                    if key.not_before <= current < key.not_after
+                )
+            ),
+            live_verifier_key_ids=tuple(sorted(str(row[0]) for row in live_key_rows)),
+        )
+        if not readiness.ready:
+            raise AuthorizationSessionUnavailable
         return active_key
     except (
         AttributeError,
@@ -148,9 +196,57 @@ def _ready_custody(
         sqlite3.Error,
         schema_v4.SchemaV4Error,
         authorization_custody.AuthorizationCustodyUnavailable,
+        authorization_serving_membership.ServingMembershipUnavailable,
         AuthorizationSessionUnavailable,
     ):
         raise AuthorizationSessionUnavailable from None
+
+
+def serving_membership_readiness(
+    vault_root: Path,
+    *,
+    now: int | None = None,
+) -> authorization_serving_membership.ServingMembershipReadiness:
+    """Recheck exact-v4 fleet readiness for a content-free control surface."""
+
+    connection: sqlite3.Connection | None = None
+    try:
+        current = int(time.time()) if now is None else _bounded_time(now)
+        custody = authorization_custody.load_authorization_custody(
+            Path(vault_root),
+            now=current,
+        )
+        from . import store
+
+        connection = store.open_authorization_session_connection(Path(vault_root))
+        _ready_custody(connection, custody, now=current)
+        membership = custody.serving_membership
+        if membership is None:
+            raise AuthorizationSessionUnavailable
+        return authorization_serving_membership.ServingMembershipReadiness(
+            ready=True,
+            code="AUTHORIZATION_MEMBERSHIP_READY",
+            epoch=membership.epoch,
+            serving_replicas=sum(
+                item.state == "SERVING" for item in membership.replicas
+            ),
+            draining_replicas=sum(
+                item.state == "DRAINING" for item in membership.replicas
+            ),
+        )
+    except (
+        OSError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+        sqlite3.Error,
+        AuthorizationSessionUnavailable,
+        authorization_custody.AuthorizationCustodyUnavailable,
+    ):
+        return authorization_serving_membership.unavailable_readiness()
+    finally:
+        if connection is not None:
+            connection.close()
 
 
 def _expiry(

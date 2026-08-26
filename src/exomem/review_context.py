@@ -38,6 +38,8 @@ _SAFE_FRONTMATTER = frozenset(
     }
 )
 _EVIDENCE_FIELDS = ("evidence", "evidences", "evidence_paths", "evidence_file")
+#: The one member of the tuple above that is not evidence-specific.
+_ARTIFACT_POINTER_FIELD = "evidence_file"
 
 
 class _ReferenceResolver:
@@ -390,14 +392,29 @@ def _provenance_section(
     *,
     ref_resolver: _ReferenceResolver,
 ) -> dict[str, Any]:
-    sources = _provenance_rows(
-        vault_root,
-        _link_values(frontmatter.get("sources")),
-        ref_resolver=ref_resolver,
-    )
+    source_values = _link_values(frontmatter.get("sources"))
     evidence_values: list[str] = []
     for field in _EVIDENCE_FIELDS:
-        evidence_values.extend(_link_values(frontmatter.get(field)))
+        values = _link_values(frontmatter.get(field))
+        if field != _ARTIFACT_POINTER_FIELD:
+            evidence_values.extend(values)
+            continue
+        # `evidence_file` is the artifact pointer on any page describing stored
+        # bytes, in either append-only tree — the name is a misnomer kept
+        # because roughly fifteen readers depend on it. Grouping it by that name
+        # presented a captured Source as evidence, which is the exact
+        # Source/Evidence confusion the lane split exists to end, so the row
+        # follows the tree the bytes are actually in.
+        for value in values:
+            if vault.in_append_only_tree(value) == "Sources":
+                source_values.append(value)
+            else:
+                evidence_values.append(value)
+    sources = _provenance_rows(
+        vault_root,
+        _dedupe(source_values),
+        ref_resolver=ref_resolver,
+    )
     evidence = _provenance_rows(
         vault_root,
         _dedupe(evidence_values),

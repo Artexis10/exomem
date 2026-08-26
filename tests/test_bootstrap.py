@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 
 import pytest
+import yaml
 from starlette.testclient import TestClient
 
 from exomem import commands, entity_types, semantic_authoring, server
@@ -25,6 +26,37 @@ def _client(vault: Path, monkeypatch: pytest.MonkeyPatch, **env: str) -> TestCli
         monkeypatch.setenv(key, value)
     mcp = server.build_server(require_auth=False)
     return TestClient(mcp.http_app())
+
+
+def test_entity_capture_types_include_vault_defined_types(tmp_path: Path) -> None:
+    path = tmp_path / "Knowledge Base" / "_Schema" / "entity-types.yaml"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "entity_types": {
+                    "place": {
+                        "folder": "Places",
+                        "label": "Place",
+                        "aliases": ["location"],
+                        "capture_guidance": "A stable place identity.",
+                        "parent": "concept",
+                    }
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    result = commands.op_bootstrap(tmp_path)
+
+    assert [item["id"] for item in result["entity_registry"]["types"]] == [
+        *entity_types.ENTITY_TYPE_IDS,
+        "place",
+    ]
+    assert "save-entity-types" in result["entity_registry"]["capture_rule"]
 
 
 def test_bootstrap_compact_contract_is_public_safe(vault: Path) -> None:
@@ -147,6 +179,15 @@ def test_bootstrap_compact_contract_is_public_safe(vault: Path) -> None:
     assert "Progressive disclosure" not in serialized
 
 
+def test_search_guidance_teaches_referents_contract(vault: Path) -> None:
+    out = commands.op_bootstrap(vault, profile="compact")
+    guidance = out["search_guidance"]["semantic_recall"]["referents"]
+    assert "partial" in guidance
+    assert "ambiguous" in guidance
+    assert "unresolved" in guidance
+    assert "never guess" in guidance
+
+
 def test_bootstrap_full_teaches_copyable_direct_and_fallback_artifact_calls(vault: Path) -> None:
     examples = commands.op_bootstrap(vault, profile="full")["examples"]
     calls = [example["call"] for example in examples]
@@ -200,6 +241,21 @@ def test_bootstrap_routes_observed_state_to_records_without_activating_state(
         "prediction": (
             "a checkable claim about a future observation, which is neither "
             "observed state nor intent to act; see epistemic_contract"
+        ),
+        # The three keys above name a KIND of durable content. These three name a
+        # kind of UTTERANCE and where it goes, because the evidence for them exists
+        # only in the conversation and a hookless client reads nothing else.
+        "stated_intent": (
+            "work the user commits to, sequences or reorders; route: plan_memory"
+        ),
+        "observed_outcome": (
+            "reported as happened: produced, delivered, approved, published, "
+            "failed; route: record_memory"
+        ),
+        "pairing_rule": (
+            "an outcome on an open committed Planning item is one landing, "
+            "two consequences: record then transition, once. A tentative "
+            "claim is not an event, elapsed time not an outcome"
         ),
     }
     assert "ordinary editable files" in contract["manual_first"]
@@ -506,6 +562,38 @@ def test_product_front_door_metadata_is_registry_derived() -> None:
         assert set(command.product_actions) <= actions
 
 
+def test_simple_action_catalog_reaches_every_product_command() -> None:
+    """Consolidation must not cost capability.
+
+    The catalog is the intended agent entry point, so a product command that no
+    action names is capability an agent cannot reach through it. `bootstrap` is
+    the one exception: it is the call that returns the catalog, so it cannot sit
+    behind it.
+
+    The companion assertion in `test_simple_action_catalog_is_registry_routed`
+    checks the other direction -- every route names a known command -- which is
+    why the gap survived: the catalog reached 18 of 29 commands, `adopt`,
+    `maintain` and `record` resolved UNAVAILABLE on the shipped hosted profile,
+    and nothing failed.
+    """
+    catalog = commands.simple_action_catalog()
+    reachable: set[str] = set()
+    for entry in catalog.values():
+        reachable.add(entry["route"]["tool"])
+        reachable.update(
+            value["tool"]
+            for key, value in entry.items()
+            if key.endswith("_route") and isinstance(value, dict)
+        )
+        reachable.update(entry["advanced"])
+
+    unreachable = {command.name for command in commands.PRODUCT_COMMANDS} - reachable
+    assert unreachable == {"bootstrap"}, (
+        "every product command must be reachable from some action; unreachable: "
+        f"{sorted(unreachable - {'bootstrap'})}"
+    )
+
+
 def test_simple_action_catalog_is_registry_routed() -> None:
     catalog = commands.simple_action_catalog()
 
@@ -518,6 +606,7 @@ def test_simple_action_catalog_is_registry_routed() -> None:
         "adopt",
         "maintain",
         "record",
+        "plan",
     }
     assert catalog["ask"]["route"] == {
         "tool": "ask_memory",
@@ -531,6 +620,10 @@ def test_simple_action_catalog_is_registry_routed() -> None:
     assert catalog["connect"]["relations_route"]["tool"] == "connect_memory"
     assert catalog["adopt"]["route"] == {"tool": "adopt_vault", "args": {"mode": "scan-only"}}
     assert catalog["maintain"]["fix_route"]["tool"] == "maintain_memory"
+    assert catalog["plan"]["route"] == {
+        "tool": "plan_memory",
+        "args": {"action": "inspect"},
+    }
     assert catalog["record"]["route"] == {
         "tool": "record_memory",
         "args": {"action": "inspect"},

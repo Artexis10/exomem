@@ -16,7 +16,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
-from .entity_types import ENTITY_TYPE_IDS
+from .entity_types import ENTITY_TYPE_IDS, load_entity_types
 from .kbdir import kb_dirname, kb_prefix
 from .vault import PlannedWrite, batch_atomic_write, kb_root
 
@@ -161,7 +161,9 @@ def pack_schema() -> dict:
     }
 
 
-def validate_pack_dict(raw: dict[str, Any]) -> KnowledgePack:
+def validate_pack_dict(
+    raw: dict[str, Any], *, vault_root: Path | None = None
+) -> KnowledgePack:
     """Validate a declarative knowledge-pack mapping and return a typed pack.
 
     Validation is intentionally strict: unknown fields are rejected so a custom
@@ -245,7 +247,12 @@ def validate_pack_dict(raw: dict[str, Any]) -> KnowledgePack:
         raise PackValidationError("INVALID_ACTION", f"unsupported action(s): {bad_actions}")
 
     default_entity_types = _string_tuple("default_entity_types")
-    bad_entity_types = sorted(set(default_entity_types) - set(ENTITY_TYPE_IDS))
+    active_entity_types = (
+        load_entity_types(vault_root).active_ids
+        if vault_root is not None
+        else ENTITY_TYPE_IDS
+    )
+    bad_entity_types = sorted(set(default_entity_types) - set(active_entity_types))
     if bad_entity_types:
         raise PackValidationError(
             "INVALID_ENTITY_TYPE",

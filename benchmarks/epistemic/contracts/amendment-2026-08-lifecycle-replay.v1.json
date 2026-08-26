@@ -1,0 +1,17 @@
+{
+  "affected_sections": [
+    "§1 Scenario families",
+    "§2 Assertion registry",
+    "§4 Acceptance predicates",
+    "§7 Amendments"
+  ],
+  "amended_on": "2026-08-23",
+  "artifact_type": "preregistration-amendment-receipt.v1",
+  "contract_path": "benchmarks/epistemic/PREREGISTRATION.md",
+  "contract_sha256": "f978f0f5aeab0b8edf1441bbfae93cc3d57f0c072078319e09e9ef9eee1e44c9",
+  "effective_policy": "Applies only after founder acknowledgment; until then f27 cannot support comparative runs, scores or claims. A development run executed while this receipt is unacknowledged is evidence about the harness and the current runtime, recorded as the family's finding, and is not a comparative claim.",
+  "parent_contract_sha256": "025da49d60e4959a1e4899c9f0f11280e083fdf0c545aa6c70bdabef00d41f6e",
+  "rationale": "Add the deterministic lifecycle-routing replay family f27 with its paired assertions lifecycle_consequence_landed_unprompted and no_structured_write_beyond_expectation through the governed post-ratification amendment path. Contracts-first: the measurement files before the contract slice built against it. f27 measures what the shipped lifecycle-routing runtime cannot be measured on today — a real agent replaying an authored episode of ordinary working language with every store-bearing utterance removed, diffed against the fold of the corpus's own annotations in three tiers, with the false-write dual reported from the same run. Adds no catastrophic assertion, no budget constant, no operation kind, and no runtime or tool-surface change; the only projection change is one additive, default-empty field (CollectionProjection.storage_source, VaultProjector.version 0.2.0 -> 0.3.0) so the false-write dual's collection exemption reads the manifest instead of guessing a convention, and nothing the projector already emitted changed; leaves the unprompted-family, absence-meta and item-pair registries unchanged. f27 is declared expected-partial on the current runtime as the next slice's falsification target.",
+  "schema_version": 1,
+  "sequence": 3
+}

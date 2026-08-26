@@ -366,6 +366,7 @@ class _HttpResponse:
         return self._body[:maximum]
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX owner/mode contract")
 def test_substrate_collector_uses_private_token_and_bounded_https(
     tmp_path: Path,
 ) -> None:
@@ -1042,15 +1043,19 @@ def test_operator_cli_collects_three_authorities_and_writes_private_phase_facts(
         "timeout_seconds": 15,
         "bootstrap_image": observer_image,
     }
-    assert stat.S_IMODE(inventory_path.stat().st_mode) == 0o600
-    assert stat.S_IMODE(facts_path.stat().st_mode) == 0o600
+    if os.name != "nt":
+        assert stat.S_IMODE(inventory_path.stat().st_mode) == 0o600
+        assert stat.S_IMODE(facts_path.stat().st_mode) == 0o600
 
 
-def test_collector_failures_never_echo_tokens_paths_or_remote_output(tmp_path: Path) -> None:
+def test_collector_failures_never_echo_tokens_paths_or_remote_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     module = _module()
     token = tmp_path / "operator-token-with-sensitive-path"
     token.write_text("secret-bearer", encoding="utf-8")
     token.chmod(0o600)
+    monkeypatch.setattr(module, "_private_token", lambda _path: "secret-bearer")
 
     def failing_opener(_request, *, timeout):
         del timeout

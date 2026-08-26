@@ -2072,25 +2072,74 @@ def _simple_capture_main(argv: list[str]) -> int:
     return _core_op_main(_with_json(core, args.json))
 
 
+def _compose_review_why(reason: str | None, why: str | None) -> str | None:
+    """Compose `--reason` onto `--why` as the leading colon token the store parses.
+
+    The reason code travels inside the existing free-text `why` rather than as a
+    parameter of its own, so the pinned tool input schema does not move and a
+    client that only ever sends `why` keeps working unchanged.
+    """
+    text = (why or "").strip()
+    if not reason:
+        return text or None
+    return f"{reason}: {text}" if text else f"{reason}:"
+
+
 def _simple_review_main(argv: list[str]) -> int:
     triage_actions = {"dismiss", "snooze", "reopen", "competing"}
-    if argv and argv[0] in triage_actions:
+    disposition_actions = {"quiet", "off", "normal"}
+    if argv and argv[0] in triage_actions | disposition_actions:
+        from .review_state import DEFAULT_REASON, REASON_CODES, family_ref
+
         action = argv[0]
+        family = action in disposition_actions
         parser = argparse.ArgumentParser(
             prog=f"exomem review {action}",
-            description=f"{action.title()} one Epistemic Inbox item.",
+            description=(
+                f"Set one signal family's disposition to `{action}`."
+                if family
+                else f"{action.title()} one Epistemic Inbox item."
+            ),
         )
-        parser.add_argument("ref", help="stable exomem://review/<id> reference")
+        parser.add_argument(
+            "ref",
+            help=(
+                "signal family name, or its exomem://review/family/<name> reference"
+                if family
+                else "stable exomem://review/<id> reference"
+            ),
+        )
         if action == "snooze":
             parser.add_argument("--until", required=True, help="snooze through YYYY-MM-DD")
+        # `quiet` and `off` refuse `unspecified` in the store, so the CLI must
+        # refuse it at the parser. Accepting a value and then failing on it a
+        # layer down turns a spelling mistake into a runtime error with a
+        # different message, and hides the real vocabulary from `--help`.
+        reason_choices = (
+            tuple(code for code in REASON_CODES if code != DEFAULT_REASON)
+            if action in {"quiet", "off"}
+            else REASON_CODES
+        )
+        parser.add_argument(
+            "--reason",
+            choices=reason_choices,
+            required=action in {"quiet", "off"},
+            help=(
+                "closed reason code (required)"
+                if action in {"quiet", "off"}
+                else "closed reason code"
+            ),
+        )
         parser.add_argument("--why", help="optional review rationale")
         parser.add_argument("--json", action="store_true", help="emit the shared JSON envelope")
         args = parser.parse_args(argv[1:])
-        core = ["triage_memory", args.ref, "--action", action]
+        ref = family_ref(args.ref) if family and "://" not in args.ref else args.ref
+        core = ["triage_memory", ref, "--action", action]
         if action == "snooze":
             core.extend(["--until", args.until])
-        if args.why:
-            core.extend(["--why", args.why])
+        why = _compose_review_why(args.reason, args.why)
+        if why:
+            core.extend(["--why", why])
         return _core_op_main(_with_json(core, args.json))
 
     parser = argparse.ArgumentParser(
@@ -2547,6 +2596,30 @@ def _print_human(result, *, op: str | None = None) -> None:
     if op == "triage_memory" and isinstance(result, dict):
         _print_triage_human(result)
         return
+    if (
+        isinstance(result, dict)
+        and isinstance(result.get("hits"), list)
+        and isinstance(result.get("referents"), dict)
+        and not (
+            set(result)
+            - {"hits", "referents", "timings", "pack", "warming", "degraded"}
+        )
+    ):
+        _print_human(result["hits"], op=op)
+        referents = result["referents"]
+        resolved = ", ".join(
+            str(item.get("title") or item.get("path") or "")
+            for item in referents.get("resolved") or []
+            if isinstance(item, dict)
+        )
+        unresolved = referents.get("unresolved_count")
+        if not isinstance(unresolved, int):
+            unresolved = 0
+        print(
+            f"referents: {referents.get('status', 'unresolved')}; "
+            f"resolved: {resolved or '(none)'}; unresolved: {unresolved}"
+        )
+        return
     if isinstance(result, list):
         if not result:
             print("(no results)")
@@ -2599,6 +2672,15 @@ def _print_review_human(result: dict) -> None:
 
 
 def _print_triage_human(result: dict) -> None:
+    if result.get("family"):
+        print(f"Signal family {result['family']} set to {result.get('disposition')}")
+        if result.get("reason"):
+            print(f"  reason: {result['reason']}")
+        if result.get("why"):
+            print(f"  {result['why']}")
+        if result.get("ref"):
+            print(f"  {result['ref']}")
+        return
     print(f"Review item {result.get('state', 'updated')}")
     if result.get("path"):
         print(f"  {result['path']}")
