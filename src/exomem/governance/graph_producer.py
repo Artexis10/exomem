@@ -227,8 +227,55 @@ def replacements_for_semantic_transition(
     )
     return _replacements_between(before_corpus, target_corpus)
 
+
+def replacements_for_removed_markdown(
+    vault_root: Path,
+    *,
+    before_corpus: semantic_contract.SemanticCorpusContext,
+    removed_paths: tuple[str, ...],
+    writes: tuple[vault.PlannedWrite, ...],
+    language_registry: semantic_language_registry.SemanticLanguageRegistry | None = None,
+) -> tuple[catalog_publication.GraphMeasurementReplacement, ...]:
+    """Build replacements after removing an exact Markdown identity set."""
+
+    root = Path(vault_root)
+    if before_corpus.vault_root != root:
+        raise GraphProducerError("graph producer corpus belongs to another vault")
+    if (
+        type(removed_paths) is not tuple
+        or not removed_paths
+        or any(type(path) is not str or path not in before_corpus.pages for path in removed_paths)
+        or len(set(removed_paths)) != len(removed_paths)
+    ):
+        raise GraphProducerError("graph producer removals do not bind the source corpus")
+    removed = frozenset(removed_paths)
+    after_corpus = semantic_contract.SemanticCorpusContext.from_states(
+        root,
+        (
+            state
+            for path, state in before_corpus.pages.items()
+            if path not in removed
+        ),
+        registry=before_corpus.registry,
+        identity_census=semantic_contract.StableIdentityCensus(
+            tuple(
+                entry
+                for entry in before_corpus.identity_census.entries
+                if entry.path not in removed
+            )
+        ),
+    )
+    target_corpus = _planned_overlay(
+        root,
+        base_corpus=after_corpus,
+        writes=writes,
+        language_registry=language_registry,
+    )
+    return _replacements_between(before_corpus, target_corpus)
+
 __all__ = [
     "GraphProducerError",
+    "replacements_for_removed_markdown",
     "replacements_for_planned_markdown",
     "replacements_for_semantic_transition",
 ]

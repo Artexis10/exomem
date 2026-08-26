@@ -23,8 +23,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import media_types, reserved_paths
-from .governance import catalog_publication, lifecycle
+from . import media_types, reserved_paths, semantic_contract
+from .governance import catalog_publication, graph_producer, lifecycle
 from .kbdir import kb_dirname, kb_prefix
 from .vault import (
     VaultPathError,
@@ -318,11 +318,22 @@ def delete_directory(
     )
     catalog_target: catalog_publication.PreparedMarkdownCatalogPublication | None = None
     if log_plan.writes or catalog_removals:
+        def graph_replacement_provider():
+            return graph_producer.replacements_for_removed_markdown(
+                vault_root,
+                before_corpus=semantic_contract.build_corpus_context(vault_root),
+                removed_paths=tuple(md_rels_to_unindex),
+                writes=log_plan.writes,
+            )
+
         try:
             catalog_target = catalog_publication.prepare_catalog_membership_batch(
                 vault_root,
                 writes=log_plan.writes,
                 removals=catalog_removals,
+                graph_replacement_provider=(
+                    graph_replacement_provider if md_rels_to_unindex else None
+                ),
                 now=int(time.time()),
             )
         except catalog_publication.CatalogPublicationError as error:

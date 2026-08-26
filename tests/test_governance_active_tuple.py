@@ -32,6 +32,7 @@ from exomem import (
     preserve,
     reserved_paths,
     scene_frames,
+    semantic_contract,
     semantic_writes,
     writer_lease,
 )
@@ -2959,6 +2960,15 @@ def test_markdown_removal_and_log_write_publish_one_v4_catalog_generation(
         now=now,
     )
 
+    def reject_graph_corpus(*_args, **_kwargs):
+        raise AssertionError("lexical-only trash must not invoke the graph producer")
+
+    monkeypatch.setattr(
+        semantic_contract,
+        "build_corpus_context",
+        reject_graph_corpus,
+    )
+
     removed = delete_file_module.delete_file(
         vault,
         path=relative,
@@ -2996,6 +3006,104 @@ def test_markdown_removal_and_log_write_publish_one_v4_catalog_generation(
             vault_module.content_hash((vault / log_relative).read_text(encoding="utf-8")),
         )
     ]
+
+
+def test_v4_file_trash_removes_inbound_graph_edge_in_one_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = int(time.time())
+    monkeypatch.setenv(
+        "EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-state")
+    )
+    writer_lease.reset_managers_for_tests()
+    vault = tmp_path / "vault"
+    removed_relative = "Knowledge Base/Notes/private.md"
+    referrer_relative = "Knowledge Base/Notes/referrer.md"
+    log_relative = "Knowledge Base/log.md"
+    removed_source = "---\ntitle: Private\nstatus: draft\n---\n\nPrivate.\n"
+    referrer_source = (
+        "---\ntitle: Referrer\nstatus: draft\n---\n\n"
+        "See [[Knowledge Base/Notes/private]].\n"
+    )
+    log_before = "# Log\n\n---\n"
+    for path, source in (
+        (removed_relative, removed_source),
+        (referrer_relative, referrer_source),
+        (log_relative, log_before),
+    ):
+        target = vault / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(source, encoding="utf-8")
+    _write_workspace(vault, _documents(ceiling=6))
+    migration = _migrate_with_projection_items(
+        vault,
+        items=(
+            (removed_relative, removed_source),
+            (referrer_relative, referrer_source),
+            (log_relative, log_before),
+        ),
+        ceiling=6,
+        graph_edges=(
+            projected_graph.ProjectionGraphEdge(
+                referrer_relative,
+                removed_relative,
+                "links_to",
+            ),
+        ),
+        now=now,
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+
+    removed = delete_file_module.delete_file(
+        vault,
+        path=removed_relative,
+        confirm=True,
+        force_orphan=True,
+        today=dt.date(2026, 8, 25),
+        now=dt.datetime.fromtimestamp(now),
+    )
+
+    assert not (vault / removed_relative).exists()
+    assert (vault / removed.trash_path).is_file()
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    active, manifest, items = _load_active_projection_items(
+        vault,
+        activation_epoch=2,
+        activation_state_digest=custody.control.activation_state_digest or "",
+    )
+    evidence = projection_store.namespace_evidence_from_snapshot(active)
+    graph_root = next(
+        root for root in evidence.required_measurement_roots if root.lane == "graph"
+    )
+    family = projection_measurement_store.MeasurementFamilyKey(
+        namespace_key=evidence.manifest.namespace_key,
+        lane=graph_root.lane,
+        extractor_version=graph_root.extractor_version,
+        model_version=graph_root.model_version,
+    )
+    namespace = projection_store.bind_active_projection_namespace(
+        active,
+        manifest=manifest,
+        items=items,
+    )
+    _graph_manifest, graph_rows = projection_measurement_store.load_measurement_store(
+        vault,
+        namespace=namespace,
+        family=family,
+        expected_rows_digest=graph_root.rows_digest,
+    )
+    assert all(
+        edge.target_item_identity != removed_relative
+        for row in graph_rows
+        for edge in row.edges
+    )
 
 
 def test_v4_trash_refuses_unsupported_non_markdown_before_moving_bytes(
@@ -3120,6 +3228,106 @@ def test_v4_directory_trash_retires_all_rows_and_publishes_log_once(
             vault_module.content_hash((vault / log_relative).read_text(encoding="utf-8")),
         )
     ]
+
+
+def test_v4_directory_trash_removes_inbound_graph_edge_in_one_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = int(time.time())
+    monkeypatch.setenv(
+        "EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-state")
+    )
+    writer_lease.reset_managers_for_tests()
+    vault = tmp_path / "vault"
+    directory = "Knowledge Base/Notes/private-tree"
+    removed_relative = f"{directory}/private.md"
+    referrer_relative = "Knowledge Base/Notes/referrer.md"
+    log_relative = "Knowledge Base/log.md"
+    removed_source = "---\ntitle: Private\nstatus: draft\n---\n\nPrivate.\n"
+    referrer_source = (
+        "---\ntitle: Referrer\nstatus: draft\n---\n\n"
+        "See [[Knowledge Base/Notes/private-tree/private]].\n"
+    )
+    log_before = "# Log\n\n---\n"
+    for path, source in (
+        (removed_relative, removed_source),
+        (referrer_relative, referrer_source),
+        (log_relative, log_before),
+    ):
+        target = vault / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(source, encoding="utf-8")
+    _write_workspace(vault, _documents(ceiling=6))
+    migration = _migrate_with_projection_items(
+        vault,
+        items=(
+            (removed_relative, removed_source),
+            (referrer_relative, referrer_source),
+            (log_relative, log_before),
+        ),
+        ceiling=6,
+        graph_edges=(
+            projected_graph.ProjectionGraphEdge(
+                referrer_relative,
+                removed_relative,
+                "links_to",
+            ),
+        ),
+        now=now,
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+
+    removed = delete_directory_module.delete_directory(
+        vault,
+        path=directory,
+        confirm=True,
+        recursive=True,
+        force_orphan=True,
+        today=dt.date(2026, 8, 25),
+        now=dt.datetime.fromtimestamp(now),
+    )
+
+    assert not (vault / directory).exists()
+    assert (vault / removed.trash_path).is_dir()
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    active, manifest, items = _load_active_projection_items(
+        vault,
+        activation_epoch=2,
+        activation_state_digest=custody.control.activation_state_digest or "",
+    )
+    evidence = projection_store.namespace_evidence_from_snapshot(active)
+    graph_root = next(
+        root for root in evidence.required_measurement_roots if root.lane == "graph"
+    )
+    family = projection_measurement_store.MeasurementFamilyKey(
+        namespace_key=evidence.manifest.namespace_key,
+        lane=graph_root.lane,
+        extractor_version=graph_root.extractor_version,
+        model_version=graph_root.model_version,
+    )
+    namespace = projection_store.bind_active_projection_namespace(
+        active,
+        manifest=manifest,
+        items=items,
+    )
+    _graph_manifest, graph_rows = projection_measurement_store.load_measurement_store(
+        vault,
+        namespace=namespace,
+        family=family,
+        expected_rows_digest=graph_root.rows_digest,
+    )
+    assert all(
+        edge.target_item_identity != removed_relative
+        for row in graph_rows
+        for edge in row.edges
+    )
 
 
 def test_v4_directory_trash_refuses_non_markdown_child_before_moving_tree(
