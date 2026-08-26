@@ -3350,7 +3350,7 @@ def commit_recovery(
                 census_guard.recheck(root)
             if preflight.recovery_sidecar_guard is not None:
                 preflight.recovery_sidecar_guard.recheck(root)
-            from .governance import catalog_publication
+            from .governance import catalog_publication, graph_producer
 
             catalog_writes = [*lifecycle_writes, *preflight.catalog_auxiliary_writes]
             catalog_writes.extend(
@@ -3364,11 +3364,25 @@ def commit_recovery(
                     preflight.entries, destination_guards, strict=True
                 )
             )
+            semantic_states = {
+                item.after.path: item.after for item in preflight.evaluations
+            }
+
+            def graph_replacement_provider():
+                return graph_producer.replacements_for_semantic_transition(
+                    root,
+                    before_corpus=preflight.before_corpus,
+                    after_corpus=preflight.after_corpus,
+                    writes=tuple(catalog_writes),
+                    semantic_states=semantic_states,
+                )
+
             try:
                 catalog_target = catalog_publication.prepare_catalog_membership_batch(
                     root,
                     writes=tuple(catalog_writes),
                     content_paths=preflight.catalog_content_paths,
+                    graph_replacement_provider=graph_replacement_provider,
                     now=preflight.catalog_publication_now,
                 )
             except catalog_publication.CatalogPublicationError as error:
