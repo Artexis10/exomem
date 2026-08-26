@@ -1,15 +1,16 @@
-"""dedupe-get-payload (BREAKING): get's default response drops raw
-`content` (it duplicated frontmatter+body); `include_raw=true` restores it;
-the content_hash drift-guard loop is untouched."""
+"""Direct-read payload and governance projection contracts."""
 
 from __future__ import annotations
 
+import os
+import time
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
-from exomem import commands
-from exomem.governance import egress
+from exomem import commands, mutation_lock, writer_lease
+from exomem.governance import authorization_custody, egress, policy
 from exomem.governance.principal import RequestPrincipal, request_scope
 from exomem.vault import content_hash
 
@@ -54,6 +55,46 @@ def _govern(vault: Path, *, ceiling: int, options: str = "") -> None:
 
 def _external() -> RequestPrincipal:
     return RequestPrincipal(audience_id="external", surface="mcp")
+
+
+@pytest.fixture
+def registry_proven_never_enrolled(
+    vault: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[None]:
+    external = tmp_path / "authorization-custody"
+    external.mkdir(mode=0o700)
+    lease_state = tmp_path / "writer-lease-state"
+    lease_state.mkdir(mode=0o700)
+    if os.name == "nt":  # pragma: no cover - exercised by Windows CI
+        sid = mutation_lock._windows_current_user_sid()
+        mutation_lock._windows_apply_private_dacl(external, sid)
+        mutation_lock._windows_apply_private_dacl(lease_state, sid)
+    monkeypatch.setenv(
+        authorization_custody.KEYRING_FILE_ENV,
+        str(external / "authorization-keyring.json"),
+    )
+    monkeypatch.setenv(
+        authorization_custody.CONTROL_FILE_ENV,
+        str(external / "authorization-control.json"),
+    )
+    monkeypatch.setenv(
+        authorization_custody.MEMBERSHIP_FILE_ENV,
+        str(external / "authorization-serving-membership.json"),
+    )
+    monkeypatch.setenv(authorization_custody.REPLICA_ID_ENV, "standalone")
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(lease_state))
+    writer_lease.reset_managers_for_tests()
+    authorization_custody.provision_standalone_custody(vault, now=int(time.time()))
+    policy._CACHE.clear()
+    egress.clear_decision_memo()
+    try:
+        yield
+    finally:
+        policy._CACHE.clear()
+        egress.clear_decision_memo()
+        writer_lease.reset_managers_for_tests()
 
 
 def test_default_get_has_no_content_key(vault: Path) -> None:
@@ -109,6 +150,12 @@ def test_include_raw_is_identical_to_default_below_l6(
     _govern(vault, ceiling=ceiling)
 
     with request_scope(_external()):
+        default = commands.op_get(
+            vault,
+            path=rel,
+            include_history=True,
+            links=True,
+        )
         ordinary = commands.op_get(
             vault,
             path=rel,
@@ -130,6 +177,7 @@ def test_include_raw_is_identical_to_default_below_l6(
             include_raw=True,
         )
 
+    assert default == ordinary
     assert raw_requested == ordinary
     assert frontmatter_only == ordinary
     assert "content" not in ordinary
@@ -190,6 +238,96 @@ def test_l6_raw_is_exact_and_default_remains_raw_free(vault: Path) -> None:
     assert raw["content_hash"] == ordinary["content_hash"]
 
 
+def test_registry_proven_never_enrolled_preserves_l6_shapes_and_edit_guard(
+    vault: Path,
+    registry_proven_never_enrolled: None,
+) -> None:
+    rel = _page(vault)
+    target = vault / rel
+    exact_raw = (
+        b"---\r\ntype: research-note\r\nproject: project-alpha\r\n---\r\n\r\n"
+        b"# Registry-proven page\r\n\r\nbyte exact body\r\n"
+    )
+    target.write_bytes(exact_raw)
+
+    with request_scope(RequestPrincipal(audience_id="owner", surface="cli")):
+        ordinary = commands.op_get(vault, path=rel)
+        explicit_false = commands.op_get(vault, path=rel, include_raw=False)
+        frontmatter_only = commands.op_get(vault, path=rel, frontmatter_only=True)
+        raw = commands.op_get(vault, path=rel, include_raw=True)
+        edited = commands.op_edit(
+            vault,
+            path=rel,
+            new_body=ordinary["body"] + "\ncommitted with the read hash\n",
+            expected_hash=ordinary["content_hash"],
+            why="prove never-enrolled get/edit hash compatibility",
+        )
+
+    assert explicit_false == ordinary
+    assert set(ordinary) == {"path", "frontmatter", "body", "content_hash", "mtime"}
+    assert frontmatter_only == {
+        "path": rel,
+        "frontmatter": {
+            "type": "research-note",
+            "project": "project-alpha",
+        },
+        "has_frontmatter": True,
+    }
+    assert raw["content"] == exact_raw.decode("utf-8")
+    assert raw["content_hash"] == ordinary["content_hash"] == content_hash(
+        exact_raw.decode("utf-8")
+    )
+    assert edited
+    assert "committed with the read hash" in target.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "secret",
+    [
+        "AKIA" + "IOSFODNN7EXAMPLE",
+        (
+            "as1."
+            + "AAECAwQFBgcICQoLDA0ODw"
+            + "."
+            + "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
+        ),
+    ],
+)
+def test_registry_proven_never_enrolled_secret_raw_is_blocked_and_edit_stays_stale(
+    vault: Path,
+    registry_proven_never_enrolled: None,
+    secret: str,
+) -> None:
+    rel = _page(vault)
+    target = vault / rel
+    target.write_text(
+        target.read_text(encoding="utf-8") + f"\n{secret}\n",
+        encoding="utf-8",
+    )
+
+    with request_scope(RequestPrincipal(audience_id="owner", surface="cli")):
+        ordinary = commands.op_get(vault, path=rel)
+        with pytest.raises(ValueError, match="^SECRET_BLOCKED:") as blocked:
+            commands.op_get(vault, path=rel, include_raw=True)
+        before_drift = target.read_text(encoding="utf-8")
+        target.write_text(
+            before_drift + "\nout-of-band drift\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="^STALE_EDIT:"):
+            commands.op_edit(
+                vault,
+                path=rel,
+                new_body=ordinary["body"] + "\nmust not commit\n",
+                expected_hash=ordinary["content_hash"],
+                why="prove secret refusal does not alter stale edit semantics",
+            )
+
+    assert secret not in str(blocked.value)
+    assert ordinary["content_hash"] == content_hash(before_drift)
+    assert "must not commit" not in target.read_text(encoding="utf-8")
+
+
 @pytest.mark.parametrize("governed", [False, True])
 @pytest.mark.parametrize(
     "secret",
@@ -219,9 +357,23 @@ def test_include_raw_secret_is_content_free_and_hash_semantics_survive(
         ordinary = commands.op_get(vault, path=rel)
         with pytest.raises(ValueError, match="^SECRET_BLOCKED:") as blocked:
             commands.op_get(vault, path=rel, include_raw=True)
+        before_drift = target.read_text(encoding="utf-8")
+        target.write_text(
+            before_drift + "\nout-of-band drift\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="^STALE_EDIT:"):
+            commands.op_edit(
+                vault,
+                path=rel,
+                new_body=ordinary["body"] + "\nmust not commit\n",
+                expected_hash=ordinary["content_hash"],
+                why="prove raw refusal leaves stale edit semantics unchanged",
+            )
 
     assert secret not in str(blocked.value)
-    assert ordinary["content_hash"] == content_hash(target.read_bytes().decode("utf-8"))
+    assert ordinary["content_hash"] == content_hash(before_drift)
+    assert "must not commit" not in target.read_text(encoding="utf-8")
 
 
 def test_l5_projection_omits_every_exact_provenance_channel(vault: Path) -> None:

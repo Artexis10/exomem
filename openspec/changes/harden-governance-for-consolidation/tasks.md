@@ -441,7 +441,7 @@ made before both PRs and their combined verification are complete.
 
 ## 7. Governed Raw Direct-Read Projection
 
-- [ ] 7.1 Add red `tests/test_get_payload.py` cases at L0-L6 for default,
+- [x] 7.1 Add red `tests/test_get_payload.py` cases at L0-L6 for default,
   `frontmatter_only`, `include_raw=false`, and `include_raw=true`; assert exact bytes/hash
   only at L6, identical true/false projection at L1-L5, and same-input present-L0 versus
   absent byte equality. Add secret-free and secret/canonical-bearer L6 fixtures in both
@@ -464,7 +464,7 @@ made before both PRs and their combined verification are complete.
   separate from public hash projection, run the shared terminal parser before emission,
   omit/refuse secret-bearing raw deterministically, and enforce L6-or-missing for every
   structured direct representation registered by 7.3.
-- [ ] 7.6 Preserve registry-proven never-enrolled/L6 default shape, byte-exact scrub-safe
+- [x] 7.6 Preserve registry-proven never-enrolled/L6 default shape, byte-exact scrub-safe
   opt-in raw content, full-raw `content_hash`, and `edit(expected_hash)` stale-write
   semantics; update lower projection code/docs so excerpts/bridge abstractions are
   Markdown-only and run payload, egress, media, dataset, edit, and postfilter tests.
