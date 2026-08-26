@@ -47,6 +47,8 @@ The system SHALL compute markdown freshness for a single `find` request at most 
 - **THEN** it consumes the same exact checkpoint pair admitted by that find
 - **AND** it omits the enrichment if the projection advances rather than reading a different generation
 
+## ADDED Requirements
+
 ### Requirement: Managed Catalogue Recovery Has One Owner
 
 Managed server startup SHALL either prove the maintained catalogue current or delegate recovery to the existing single-flight background repair worker. It MUST NOT run synchronous in-place catalogue reconciliation concurrently with watcher-driven repair. The repair worker SHALL promote retrieval readiness only after publishing a checkpoint-current catalogue. An explicit offline caller MAY retain synchronous reconciliation when no managed repair owner exists.
@@ -87,8 +89,6 @@ Managed server startup SHALL either prove the maintained catalogue current or de
 - **AND** the watcher path re-proves both scopes read-only after releasing the publication barrier
 - **AND** it promotes retrieval only when the catalogue exactly matches both live projections
 - **AND** it does not require another whole-corpus rebuild to clear stale process admission
-
-## ADDED Requirements
 
 ### Requirement: Recall Projection Timing Is Attributed
 

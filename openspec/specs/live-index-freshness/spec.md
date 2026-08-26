@@ -113,58 +113,72 @@ event once the signature changes or the suppression entry expires.
 
 ### Requirement: Event-Maintained Markdown Freshness Keys
 
-The system SHALL maintain, in memory, a per-scope registry of `{vault-relative path: mtime}` for
-markdown under each freshness scope (`kb`, `vault`), updated from the live file watcher and from
-in-process writer paths as they mutate the vault, so that a live registry can answer a scope's
-freshness triple (file count, max mtime, digest) without a filesystem walk. The registry MUST apply
-the identical inclusion rules the walk it replaces would apply (the same skip-directories, the same
-`.md`-only filter, the same scope tree roots), so that the triple derived from the registry is
-identical to the triple a fresh walk of the same tree would produce. When the registry for a scope
-is not live (never seeded, or event-maintained indexes are disabled), consumers MUST fall back to
-performing the walk exactly as before this capability existed. A rename MUST change the scope's
-digest even when the renamed file's mtime is unchanged, because the digest is derived over
-vault-relative paths as well as mtimes. A write performed by an Exomem writer whose watcher echo is
-suppressed for embedding-reindex purposes MUST still update the freshness registry for the written
-or removed path.
+The system SHALL maintain, in memory, a per-scope registry of policy-admitted `{path: signature}` rows for markdown under each recall scope (`kb`, `vault`), updated from a safely enumerated seed, the live file watcher, and in-process writer events. A live registry SHALL answer a scope's freshness triple and exact allowed-path projection without a request-time filesystem walk. Seed and reconcile SHALL publish a complete replacement map and its checkpoint atomically; readers SHALL continue observing the last proven map until the replacement is authoritative. Observation events received before initial seed publication SHALL be retained and replayed against the published generation. Event-derived paths SHALL retain Windows long-name canonicalisation, reparse/no-follow validation, access-policy checks, and Records/Planning admission before publication.
+
+Activated server consumers MUST NOT fall back to a walk when a registry is not live; they SHALL report retrieval warming/unavailable and allow background recovery to establish authority. Explicit offline callers and deployments with event indexes disabled MAY use the prior walk fallback. A rename MUST change the scope digest even when mtime is preserved, and a suppressed self-write MUST still update every affected live projection.
 
 #### Scenario: Live registry answers freshness without a walk
 
-- **WHEN** the freshness registry for a scope is live and a caller requests that scope's freshness
-  triple
-- **THEN** the triple is derived from the in-memory map with no filesystem walk
-- **AND** the triple is identical to the triple a fresh walk of the same tree would produce
+- **WHEN** the recall registry for a scope is live and a caller requests its checkpoint and allowed paths
+- **THEN** both are copied from one authoritative in-memory generation with no filesystem walk
+- **AND** they equal a fresh policy-projected walk over the same state
+
+#### Scenario: Server with a not-live registry declines without walking
+
+- **WHEN** an activated server request needs a scope whose recall registry is not live
+- **THEN** the request receives an explicit warming or unavailable outcome
+- **AND** the request does not walk the scope
+
+#### Scenario: Offline caller retains the walk fallback
+
+- **WHEN** an explicit offline caller has no live registry, or event-maintained indexes are disabled
+- **THEN** the caller may compute the projection by walking the source tree
+- **AND** the same admission and access policy is applied
 
 #### Scenario: Not-live registry falls back to a walk
 
-- **WHEN** the freshness registry for a scope has never been seeded, or event-maintained indexes are
-  disabled
-- **THEN** the freshness triple for that scope is computed by walking the tree, exactly as before
-  this capability existed
+- **WHEN** an explicit offline caller's freshness registry has never been seeded, or a deployment runs with event-maintained indexes disabled
+- **THEN** the freshness triple for that scope is computed by walking the tree exactly as before this capability existed
+- **AND** an activated managed server with event-maintained indexes enabled still declines instead of taking this fallback
+
+#### Scenario: Reconcile replacement is atomic
+
+- **WHEN** periodic reconciliation derives a replacement projection while readers are active
+- **THEN** readers observe either the complete previous checkpoint/map or the complete replacement checkpoint/map
+- **AND** no reader observes a mixed or empty intermediate generation
+
+#### Scenario: Startup event survives seed replacement
+
+- **WHEN** a create, modify, delete, or move is observed after enumeration begins but before initial replacement publication
+- **THEN** the event remains buffered until the replacement is authoritative
+- **AND** applying the event advances the resulting live generation before consumers rely on it
+
+#### Scenario: Event path aliases are validated once before publication
+
+- **WHEN** Windows reports a changed file through an 8.3, case, or equivalent alias spelling
+- **THEN** event ingress canonicalises and validates that changed identity before publishing it
+- **AND** the alias cannot bypass Records/Planning suppression or the vault boundary
 
 #### Scenario: A create, modify, delete, or move updates the registry
 
-- **WHEN** a markdown file within a scope's tree is created, modified, deleted, or moved
-- **THEN** the scope's registry reflects the change (the path's presence and mtime, or its absence
-  for a delete) without requiring a fresh walk to observe it
+- **WHEN** an admitted markdown identity is created, modified, deleted, or moved through an external event
+- **THEN** every affected live scope advances to a checkpoint containing that change without a full re-seed
 
 #### Scenario: A rename with a preserved mtime still changes the digest
 
-- **WHEN** a markdown file is renamed such that its mtime is unchanged by the rename
-- **THEN** the scope's registry-derived digest changes, because the digest is derived over
-  vault-relative paths as well as mtimes
+- **WHEN** an admitted markdown identity is renamed without changing its mtime
+- **THEN** every affected registry-derived digest changes because the digest includes the canonical relative path
 
 #### Scenario: A suppressed self-write still updates freshness
 
-- **WHEN** an Exomem writer performs a markdown mutation whose watcher echo is suppressed to avoid a
-  duplicate embedding reindex
-- **THEN** the freshness registry for the affected scope(s) is still updated to reflect the
-  mutation, independent of the embedding-reindex suppression
+- **WHEN** an Exomem writer performs a markdown mutation whose watcher echo is suppressed to avoid duplicate embedding work
+- **THEN** every affected live projection advances to a checkpoint containing that mutation independently of watcher suppression
 
 #### Scenario: Event-maintained indexes can be disabled wholesale
 
-- **WHEN** the server runs with event-maintained indexes disabled
-- **THEN** the freshness registry is never treated as live, and every freshness lookup falls back to
-  the walk-based computation
+- **WHEN** the server runs with event-maintained indexes explicitly disabled
+- **THEN** no recall registry is treated as live
+- **AND** the declared legacy walk-backed fallback remains available
 
 ### Requirement: Freshness Reconciliation Bounds Missed Events
 
@@ -548,3 +562,109 @@ can be updated cheaply.
 - **AND** the user runs the explicit indexing command for the affected scope
 - **THEN** the command processes the changed files and clears the corresponding
   deferred semantic work record
+
+### Requirement: Managed Lexical Repair Converges Under Live Traffic
+
+While managed retrieval is unavailable, the system SHALL allow a detached full
+lexical repair to publish under ordinary writer and watcher traffic without
+weakening authoritative source, projection, policy, or semantic-identity
+validation.
+
+#### Scenario: Concurrent live write is rebased before publication
+
+- **WHEN** a watcher generation changes or deletes Markdown paths while a
+  detached full repair is building
+- **AND** the complete bounded delta from the repair checkpoints to the current
+  live checkpoints is retained
+- **THEN** the system applies that delta to the completed replacement under the
+  publication barrier
+- **AND** publishes only after the replacement proves the current checkpoints
+- **AND** managed retrieval can become ready without a process restart
+
+#### Scenario: Large batch landing during publication wait catches up off-barrier
+
+- **WHEN** a foreground watcher batch holds the publication barrier while a
+  completed detached repair waits
+- **AND** the retained final suffix is complete but exceeds the barrier replay cap
+- **THEN** the system preserves the completed replacement and releases the barrier
+- **AND** replays that suffix off-barrier without the foreground cap
+- **AND** repeats the independent source proof before retrying publication
+- **AND** limits catch-up retries so sustained live churn cannot monopolize repair
+
+#### Scenario: Published handoff does not repeat a current full scan
+
+- **WHEN** a successfully published and promoted repair leaves one generation
+  request pending at its bounded idle handoff
+- **AND** the next repair flight proves the persisted catalogue already covers
+  the current live projection
+- **THEN** the system acknowledges that handoff without another full-vault scan
+- **AND** a stale proof or a repair request arriving during the proof still
+  follows the normal full-repair path
+
+#### Scenario: Safety-net reconcile proof survives restart
+
+- **WHEN** the periodic safety-net walk discovers a filesystem event the live
+  watcher missed
+- **AND** it holds complete before and after recall maps under one unchanged
+  policy identity
+- **THEN** the system retains their exact changed/deleted set as a bridgeable
+  recall delta carrying explicit reconcile provenance, never as a trusted
+  watcher transition
+- **AND** the lexical replay persists the resulting current checkpoint only
+  after an independent off-barrier source proof matches that exact checkpoint
+- **AND** a fresh process admits the current catalogue without a full rebuild
+
+#### Scenario: Mixed reconcile walk cannot bless a stale catalogue
+
+- **WHEN** the off-lock safety-net walk mixes pre- and post-change
+  observations because a source path changed after the walk observed it
+- **AND** the lexical replay applies the reconcile delta's changed/deleted set
+- **THEN** the independent source proof fails to match the reconcile-derived
+  checkpoint
+- **AND** the system refuses to persist that scope's checkpoint and preserves
+  the conservative repair path
+
+#### Scenario: Source proof never holds the publication barrier
+
+- **WHEN** a watcher batch must prove a reconcile-tainted checkpoint against
+  the complete current source
+- **THEN** the O(vault) proof walk executes before the publication barrier is
+  acquired, with no locks held
+- **AND** validation under the barrier is an O(1) exact-checkpoint comparison
+- **AND** request and readiness paths refuse a reconcile-tainted delta without
+  ever walking the vault
+
+#### Scenario: Invalidated source proof refuses only the affected scope and converges
+
+- **WHEN** an observed event, reconcile, or policy change lands between the
+  off-barrier source proof and the publication barrier
+- **THEN** the superseded proof fails closed and only the affected scope's
+  checkpoint is refused
+- **AND** sibling scopes with exact observed witnesses still persist
+- **AND** the batch's rows still apply, and a later batch covering the current
+  delta re-proves and persists the checkpoint without a full rebuild
+- **AND** proof outcomes are counted in stable, content-free telemetry
+
+#### Scenario: SQLite token-only churn does not veto a current replacement
+
+- **WHEN** the live SQLite main, WAL, or SHM token changes during a detached
+  repair
+- **AND** source/projection checkpoints, policy, and semantic identity still
+  match the replacement proof
+- **THEN** token-only churn SHALL NOT decline publication
+
+#### Scenario: Unprovable catch-up fails closed
+
+- **WHEN** the required delta is incomplete
+- **OR** the final suffix remains oversized after the bounded catch-up retries
+- **OR** source, policy, projection identity, or semantic identity cannot be
+  proven current
+- **THEN** the system preserves the live catalogue
+- **AND** leaves the repair request pending for a later bounded flight
+
+#### Scenario: Repair telemetry preserves vault privacy
+
+- **WHEN** a detached repair advances, publishes, or declines
+- **THEN** telemetry reports a bounded phase, duration, and stable result reason
+- **AND** contains no vault path, note name, or note content
+
