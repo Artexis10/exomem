@@ -536,8 +536,13 @@ made before both PRs and their combined verification are complete.
   verify exactly one active row per variant, emit empty lower-variant rows, carry only
   content-identical L6 rows, require target-item/content-hash-bound replacements for
   changed L6 sources, reject stale outside-catalog targets, and publish the complete graph
-  root atomically. Connect every live graph producer to those replacements before checking
-  this task; keep any other unsupported required family blocked.
+  root atomically. Validate conservative producer replacements for affected lower-only
+  items, discard their edge payload, and emit only empty lower-variant rows. For the
+  existing-page semantic writer, derive replacements from its
+  retained detached preflight corpus plus the exact guarded planned-write overlay, include
+  indirect title-resolution and reverse-relation source changes, and never reopen the live
+  graph or walk the vault again. Connect every other live graph producer to those
+  replacements before checking this task; keep any unsupported required family blocked.
 - [x] 8.12 Implement BM25 posting intersection before cap, projected-corpus DF/IDF and
   exact top-k; exact filtered projected-vector top-k with visible-lane warming/disable;
   projected-only reranking before final top-k; and L6-only pre-cap CLIP authorization.

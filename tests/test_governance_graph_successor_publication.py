@@ -172,6 +172,170 @@ def test_graph_successor_carries_unchanged_rows_and_replaces_changed_source(
     assert by_variant[target.projection_variant_id].edges == ()
 
 
+def test_graph_successor_discards_edges_for_a_changed_lower_only_item(
+    tmp_path: Path,
+) -> None:
+    source = _variant("source", "1" * 64, level=3)
+    target = _variant("target", "2" * 64)
+    active_items = (
+        _item("source", "1" * 64, source),
+        _item("target", "2" * 64, target),
+    )
+    active_key = _key(18)
+    active_namespace = verified_namespace(active_key, active_items)
+    active_family = _family(active_key)
+    active_manifest = projection_measurement_store.stage_measurement_store(
+        tmp_path,
+        namespace=active_namespace,
+        family=active_family,
+        measurements=(
+            _measurement(active_family, source),
+            _measurement(active_family, target),
+        ),
+    )
+    changed_source = _variant("source", "3" * 64, level=3)
+    target_namespace = _prepared_namespace(
+        _key(19),
+        (
+            _item("source", "3" * 64, changed_source),
+            active_items[1],
+        ),
+    )
+
+    prepared = catalog_publication._prepare_target_measurements(
+        tmp_path,
+        active_namespace=active_namespace,
+        active_roots=(projection_measurement_store.measurement_root(active_manifest),),
+        target_namespace=target_namespace,
+        graph_replacements=(
+            catalog_publication.GraphMeasurementReplacement(
+                item_identity="source",
+                content_hash="3" * 64,
+                edges=(_edge("source", "target"),),
+            ),
+        ),
+    )
+
+    by_variant = {
+        row.measurement_key.projection_variant_id: row
+        for row in prepared[0].measurements
+    }
+    assert by_variant[changed_source.projection_variant_id].edges == ()
+
+    with pytest.raises(
+        catalog_publication.CatalogPublicationError,
+        match="replacement edge is invalid",
+    ):
+        catalog_publication._prepare_target_measurements(
+            tmp_path,
+            active_namespace=active_namespace,
+            active_roots=(
+                projection_measurement_store.measurement_root(active_manifest),
+            ),
+            target_namespace=target_namespace,
+            graph_replacements=(
+                catalog_publication.GraphMeasurementReplacement(
+                    item_identity="source",
+                    content_hash="3" * 64,
+                    edges=(_edge("source", "missing"),),
+                ),
+            ),
+        )
+
+
+def test_graph_successor_invokes_the_live_provider_only_for_a_graph_family(
+    tmp_path: Path,
+) -> None:
+    source = _variant("source", "4" * 64)
+    target = _variant("target", "5" * 64)
+    items = (
+        _item("source", "4" * 64, source),
+        _item("target", "5" * 64, target),
+    )
+    active_key = _key(20)
+    active_namespace = verified_namespace(active_key, items)
+    active_family = _family(active_key)
+    active_manifest = projection_measurement_store.stage_measurement_store(
+        tmp_path,
+        namespace=active_namespace,
+        family=active_family,
+        measurements=(
+            _measurement(active_family, source),
+            _measurement(active_family, target),
+        ),
+    )
+    called = 0
+
+    def replacements():
+        nonlocal called
+        called += 1
+        return (
+            catalog_publication.GraphMeasurementReplacement(
+                "source",
+                "4" * 64,
+                (_edge("source", "target"),),
+            ),
+        )
+
+    prepared = catalog_publication._prepare_target_measurements(
+        tmp_path,
+        active_namespace=active_namespace,
+        active_roots=(projection_measurement_store.measurement_root(active_manifest),),
+        target_namespace=_prepared_namespace(_key(21), items),
+        graph_replacement_provider=replacements,
+    )
+
+    assert called == 1
+    assert prepared[0].manifest.graph_edge_count == 1
+
+    def must_not_run():
+        raise AssertionError("lexical-only publication invoked the graph producer")
+
+    assert (
+        catalog_publication._prepare_target_measurements(
+            tmp_path,
+            active_namespace=active_namespace,
+            active_roots=(),
+            target_namespace=_prepared_namespace(_key(22), items),
+            graph_replacement_provider=must_not_run,
+        )
+        == ()
+    )
+
+    def broken_provider():
+        raise RuntimeError("private producer detail")
+
+    with pytest.raises(
+        catalog_publication.CatalogPublicationError,
+        match="live graph producer cannot prepare target measurements",
+    ) as caught:
+        catalog_publication._prepare_target_measurements(
+            tmp_path,
+            active_namespace=active_namespace,
+            active_roots=(
+                projection_measurement_store.measurement_root(active_manifest),
+            ),
+            target_namespace=_prepared_namespace(_key(23), items),
+            graph_replacement_provider=broken_provider,
+        )
+    assert "private producer detail" not in str(caught.value)
+
+    with pytest.raises(
+        catalog_publication.CatalogPublicationError,
+        match="multiple authorities",
+    ):
+        catalog_publication._prepare_target_measurements(
+            tmp_path,
+            active_namespace=active_namespace,
+            active_roots=(
+                projection_measurement_store.measurement_root(active_manifest),
+            ),
+            target_namespace=_prepared_namespace(_key(24), items),
+            graph_replacements=replacements(),
+            graph_replacement_provider=replacements,
+        )
+
+
 def test_prepare_markdown_batch_forwards_graph_replacements(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
