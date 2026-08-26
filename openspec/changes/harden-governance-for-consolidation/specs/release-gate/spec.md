@@ -153,6 +153,34 @@ mismatch, per-item variant overflow, or namespace overflow SHALL block activatio
 or prior-policy index MUST NOT be used as fallback. Old namespaces MAY be collected only
 after no active request or cursor binds their exact tuple.
 
+When the active tuple requires a CLIP measurement family, a content or companion
+publication SHALL verify the complete active image/video family before canonical bytes
+change. The successor SHALL carry only content-identical image/video rows, require an
+exact target item identity and target content hash for each changed visual-media
+replacement, and bind the complete successor family to the target projection namespace.
+An image SHALL retain exactly one untimestamped sample and a video one through forty
+strictly timestamp-ordered canonical samples. A derived frame companion carrying
+`parent_media` SHALL remain a textual catalog artifact and SHALL NOT become an
+independent CLIP measurement owner. Missing, stale, duplicate, mismatched, or dimension-
+incompatible CLIP state SHALL refuse before canonical bytes change. The successor catalog,
+projection namespace, vector/CLIP measurement roots, receipt, and active tuple SHALL
+publish atomically; graph or another unsupported required family SHALL remain blocked.
+
+#### Scenario: Visual successor publication is complete and atomic
+
+- **WHEN** an exact-v4 catalog edit carries an unchanged image or video, replaces a
+  changed video's canonical samples, or adds a derived frame companion
+- **THEN** the next namespace carries or replaces only exact target-bound CLIP rows,
+  excludes the frame companion from binary ownership, and activates its complete vector
+  and CLIP roots in the same catalog transaction
+
+#### Scenario: Incomplete visual state refuses before bytes
+
+- **WHEN** the active CLIP family is incomplete or a replacement has a stale item,
+  content hash, sample shape, timestamp order, or vector dimension
+- **THEN** catalog preparation refuses before canonical content or the active tuple
+  changes and does not fall back to a raw or prior CLIP family
+
 When the projected source is exhausted, L1-and-above items SHALL still emit the
 projection their policy authorizes while L0 items SHALL produce a silently shorter list,
 identical to physical absence. The canonical governed envelope for the same input SHALL

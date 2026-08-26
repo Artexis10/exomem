@@ -371,6 +371,8 @@ def _projection_item(
         ("status", parsed.frontmatter.get("status")),
         ("type", parsed.page_type),
         ("updated", parsed.updated),
+        ("media_type", parsed.frontmatter.get("media_type")),
+        ("parent_media", parsed.frontmatter.get("parent_media")),
     ):
         if value:
             search_fields[name] = str(value)
@@ -474,6 +476,11 @@ def _migrate_with_vector_projection_items(
     vault: Path,
     *,
     items: tuple[tuple[str, str], ...],
+    clip_samples_by_path: dict[
+        str,
+        tuple[projected_retrieval.ProjectionClipSample, ...],
+    ]
+    | None = None,
     now: int,
 ) -> tuple[
     schema_v4.MigrationResult,
@@ -534,6 +541,48 @@ def _migrate_with_vector_projection_items(
         family=family,
         measurements=measurements,
     )
+    measurement_roots = [
+        projection_measurement_store.measurement_root(measurement_manifest)
+    ]
+    if clip_samples_by_path is not None:
+        clip_family = projection_measurement_store.MeasurementFamilyKey(
+            namespace_key=key,
+            lane="clip",
+            extractor_version="pixels-v1",
+            model_version=embeddings.CLIP_MODEL_NAME,
+        )
+        clip_measurements = tuple(
+            projected_retrieval.ProjectionClipMeasurement(
+                measurement_key=projections.MeasurementKey(
+                    projection_variant_id=variant.projection_variant_id,
+                    lane=clip_family.lane,
+                    extractor_version=clip_family.extractor_version,
+                    model_version=clip_family.model_version,
+                ),
+                samples=clip_samples_by_path[item.item_identity],
+            )
+            for item in projected_items
+            for variant in item.variants
+            if projected_retrieval.clip_variant_applicable(variant)
+        )
+        expected_clip_items = {
+            item.item_identity
+            for item in projected_items
+            if any(
+                projected_retrieval.clip_variant_applicable(variant)
+                for variant in item.variants
+            )
+        }
+        assert set(clip_samples_by_path) == expected_clip_items
+        clip_manifest = projection_measurement_store.stage_measurement_store(
+            vault,
+            namespace=namespace,
+            family=clip_family,
+            measurements=clip_measurements,
+        )
+        measurement_roots.append(
+            projection_measurement_store.measurement_root(clip_manifest)
+        )
     connection = store.open_connection(vault)
     try:
         migration = schema_v4.migrate_v3_connection(
@@ -562,11 +611,7 @@ def _migrate_with_vector_projection_items(
                     namespace_id=key.namespace_id,
                     evidence=projection_store.projection_namespace_evidence_bytes(
                         manifest,
-                        required_measurement_roots=(
-                            projection_measurement_store.measurement_root(
-                                measurement_manifest
-                            ),
-                        ),
+                        required_measurement_roots=tuple(measurement_roots),
                     ),
                     ready_at=now,
                 ),
@@ -4675,6 +4720,201 @@ def test_semantic_edit_rebuilds_only_changed_vectors_before_v4_activation(
         for item in items
         for variant in item.variants
     }
+
+
+def test_semantic_edit_carries_complete_clip_family_into_the_same_v4_successor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = int(time.time())
+    monkeypatch.setenv(
+        "EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-state")
+    )
+    writer_lease.reset_managers_for_tests()
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    vault = tmp_path / "vault"
+    note_path = "Knowledge Base/Notes/changed.md"
+    video_path = "Knowledge Base/Evidence/Video/demo.mp4.md"
+    note_before = "---\ntitle: Changed\nstatus: draft\n---\n\nbefore\n"
+    note_after = note_before.replace("before", "after")
+    video_source = (
+        "---\ntitle: Demo video\ntype: source\nstatus: active\n"
+        "media_type: video\n---\n\nVideo evidence.\n"
+    )
+    for relative, source in (
+        (note_path, note_before),
+        (video_path, video_source),
+    ):
+        target = vault / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(source, encoding="utf-8")
+    _write_workspace(vault, _documents(ceiling=2))
+    samples = (
+        projected_retrieval.ProjectionClipSample(1_000, (1.0, 0.0)),
+        projected_retrieval.ProjectionClipSample(8_500, (0.0, 1.0)),
+    )
+    migration, _prior_vectors = _migrate_with_vector_projection_items(
+        vault,
+        items=((note_path, note_before), (video_path, video_source)),
+        clip_samples_by_path={video_path: samples},
+        now=now,
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    monkeypatch.setattr(
+        embeddings,
+        "embed_texts",
+        lambda texts, *, is_query: [(9.0, 1.0) for _text in texts],
+    )
+    preflight = semantic_writes.preflight_existing(
+        vault,
+        path=note_path,
+        after_source=note_after,
+        operation="edit",
+        expected_before_hash=vault_module.content_hash(note_before),
+    )
+
+    committed = semantic_writes.commit_existing(vault, preflight=preflight)
+
+    assert committed.mutated is True
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    active, manifest, items = _load_active_projection_items(
+        vault,
+        activation_epoch=2,
+        activation_state_digest=custody.control.activation_state_digest or "",
+    )
+    evidence = projection_store.namespace_evidence_from_snapshot(active)
+    assert tuple(root.lane for root in evidence.required_measurement_roots) == (
+        "vector",
+        "clip",
+    )
+    namespace = projection_store.bind_active_projection_namespace(
+        active,
+        manifest=manifest,
+        items=items,
+    )
+    clip_root = next(
+        root for root in evidence.required_measurement_roots if root.lane == "clip"
+    )
+    family = projection_measurement_store.MeasurementFamilyKey(
+        namespace_key=namespace.namespace_key,
+        lane=clip_root.lane,
+        extractor_version=clip_root.extractor_version,
+        model_version=clip_root.model_version,
+    )
+    _clip_manifest, rows = projection_measurement_store.load_measurement_store(
+        vault,
+        namespace=namespace,
+        family=family,
+        expected_rows_digest=clip_root.rows_digest,
+    )
+    assert len(rows) == 1
+    assert isinstance(rows[0], projected_retrieval.ProjectionClipMeasurement)
+    assert rows[0].samples == samples
+
+
+def test_video_edit_replaces_clip_samples_in_the_published_v4_successor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    video_path = "Knowledge Base/Evidence/Video/demo.mp4.md"
+    before = (
+        "---\ntitle: Demo video\ntype: source\nstatus: active\n"
+        "media_type: video\n---\n\nBefore.\n"
+    )
+    after = before.replace("Before.", "After.")
+    target = vault / video_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(before, encoding="utf-8")
+    _write_workspace(vault, _documents(ceiling=2))
+    old_samples = (
+        projected_retrieval.ProjectionClipSample(1_000, (1.0, 0.0)),
+    )
+    new_samples = (
+        projected_retrieval.ProjectionClipSample(1_000, (0.0, 1.0)),
+        projected_retrieval.ProjectionClipSample(8_500, (1.0, 0.0)),
+    )
+    migration, _prior_vectors = _migrate_with_vector_projection_items(
+        vault,
+        items=((video_path, before),),
+        clip_samples_by_path={video_path: old_samples},
+        now=now,
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setattr(
+        embeddings,
+        "embed_texts",
+        lambda texts, *, is_query: [(9.0, 1.0) for _text in texts],
+    )
+    prepared = catalog_publication.prepare_markdown_batch(
+        vault,
+        mutations=(
+            catalog_publication.MarkdownCatalogMutation(
+                video_path,
+                after,
+                vault_module.content_hash(before),
+            ),
+        ),
+        clip_replacements=(
+            catalog_publication.ClipMeasurementReplacement(
+                item_identity=video_path,
+                content_hash=vault_module.content_hash(after),
+                samples=new_samples,
+            ),
+        ),
+        now=now + 1,
+        activated_at=now + 1,
+    )
+    assert prepared is not None
+
+    target.write_text(after, encoding="utf-8")
+    published = catalog_publication.publish_markdown_batch(prepared)
+
+    assert published is not None
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    active, manifest, items = _load_active_projection_items(
+        vault,
+        activation_epoch=2,
+        activation_state_digest=custody.control.activation_state_digest or "",
+    )
+    evidence = projection_store.namespace_evidence_from_snapshot(active)
+    namespace = projection_store.bind_active_projection_namespace(
+        active,
+        manifest=manifest,
+        items=items,
+    )
+    clip_root = next(
+        root for root in evidence.required_measurement_roots if root.lane == "clip"
+    )
+    family = projection_measurement_store.MeasurementFamilyKey(
+        namespace_key=namespace.namespace_key,
+        lane=clip_root.lane,
+        extractor_version=clip_root.extractor_version,
+        model_version=clip_root.model_version,
+    )
+    _clip_manifest, rows = projection_measurement_store.load_measurement_store(
+        vault,
+        namespace=namespace,
+        family=family,
+        expected_rows_digest=clip_root.rows_digest,
+    )
+    assert len(rows) == 1
+    assert isinstance(rows[0], projected_retrieval.ProjectionClipMeasurement)
+    assert rows[0].samples == new_samples
 
 
 def test_vector_catalog_preflight_refuses_unknown_measurement_family_before_bytes(

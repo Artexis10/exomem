@@ -704,7 +704,16 @@ different visible order. Exhausting that bounded ranked window omits the continu
 Projection namespaces are built and validated before a governed compiled-policy
 generation is activated. An item write creates the next catalog generation, reuses only
 content-addressed unchanged rows, and publishes the complete catalog plus required
-projection/index rows atomically; it never mutates the prior namespace in place. A policy
+projection/index rows atomically; it never mutates the prior namespace in place. When
+the active tuple requires CLIP measurements, the successor builder verifies that the
+active image/video family is complete, carries only rows whose projection variant remains
+content-identical, and requires exact target-item/content-hash-bound replacement samples
+for changed visual media. Image rows remain one untimestamped sample; video rows remain
+one through forty canonical timestamped samples. Derived frame companions bind
+`parent_media` and are textual catalog artifacts, not duplicate CLIP measurement owners.
+The complete successor CLIP family binds the target namespace and activates in the same
+catalog publication transaction; missing, stale, mismatched, duplicate, or dimension-
+incompatible rows refuse before canonical bytes change. A policy
 fingerprint or projector-schema change builds a new namespace tuple and never relabels
 an old one. A model/extractor change writes or invalidates only the corresponding
 versioned measurement subkey. Initial migration builds the exact
