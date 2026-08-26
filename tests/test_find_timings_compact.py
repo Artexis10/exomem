@@ -46,7 +46,7 @@ def test_timings_envelope_and_stages(vault: Path) -> None:
     # No content leaks into diagnostics: numbers, flags, short names only.
     for entry in stages.values():
         for key in entry:
-            assert key in ("ms", "skipped", "error")
+            assert key in ("ms", "skipped", "error", "calls", "cache_hit")
 
 
 def test_timed_ranking_matches_untimed(vault: Path) -> None:

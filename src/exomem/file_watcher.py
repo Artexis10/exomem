@@ -3,10 +3,11 @@
 The vault is edited *around* the server — directly in Obsidian, on mobile, or via a
 filesystem write (Obsidian Sync, a git pull). Those bypass the writer hooks, so the
 embedding sidecar drifts until someone runs `reconcile`. This watcher closes that gap:
-it watches `<vault>/Knowledge Base/` for `.md` changes and re-embeds them through the
-SAME `index_sync.upsert_after_write` dispatch the writers (and `reconcile`) use —
-deletes go through `index_sync.delete_after_remove`. The dispatch fans out to every
-index sidecar (embedding AND lexical), each behind its own availability gates.
+it watches the complete vault for freshness and vault-scope lexical maintenance, while
+re-embedding only the `Knowledge Base/` subset through the SAME
+`index_sync.upsert_after_write` dispatch the writers (and `reconcile`) use — deletes go
+through `index_sync.delete_after_remove`. Each index remains behind its own availability
+and scope gates.
 
 Mirrors `MediaWorker`'s thread+queue shape: a single daemon dispatch thread coalesces
 rapid events behind a ~500ms debounce (a single Obsidian save fires several FS events;
@@ -157,7 +158,8 @@ def _publish_registry_change(
     A self-write's watcher echo is suppressed (redundant re-embed), but the
     write DID change the vault — so the freshness/inbound registries must still
     see it, or `find` would serve stale results for that file until the next
-    reconcile. No-op when the registries aren't live (guards inside)."""
+    reconcile. A live registry is patched immediately; an in-flight replacement
+    seed retains the target state for its final swap (guards inside)."""
     if not freshness.event_indexes_enabled():
         # Kill switch on: don't even pay the resolve() syscalls in _rel_posix.
         return
@@ -333,6 +335,11 @@ class FileWatcher:
         self._thread: threading.Thread | None = None
         self._observer = None
         self._reconcile_thread: threading.Thread | None = None
+        self._seed_published = threading.Event()
+        self._seed_complete = threading.Event()
+        self._seed_succeeded = False
+        self._startup_recovery_started = False
+        self._dispatch_waits_for_seed = False
 
     def _watcher_policy(self) -> mode.WatcherPolicy:
         return mode.watcher_policy()
@@ -481,6 +488,25 @@ class FileWatcher:
     # ---- debounce loop ----
 
     def _run_dispatch(self) -> None:
+        if self._dispatch_waits_for_seed:
+            # Observation is armed before the long seed.  Keep those events in
+            # the coalescing buffer until both scope maps are published, then
+            # replay them against the live generation instead of dropping them
+            # while ``on_files_changed`` has no authoritative map to patch.
+            while not self._stop.is_set() and not self._seed_published.wait(0.1):
+                pass
+            if not self._stop.is_set():
+                try:
+                    # Admission waits for this catch-up flush, not merely for
+                    # replacement-map publication.  Every event observed while
+                    # the seed was walking is therefore reflected before the
+                    # catalogue warm can prove a checkpoint.
+                    self._flush()
+                except Exception:  # noqa: BLE001 - failed catch-up is a failed seed
+                    self._seed_succeeded = False
+                    log.exception("file watcher: startup event catch-up failed")
+                finally:
+                    self._seed_complete.set()
         while not self._stop.is_set():
             self._wake.wait()
             if self._stop.is_set():
@@ -517,7 +543,7 @@ class FileWatcher:
             except OSError:
                 continue
 
-    def _reconcile_once(self, *, seed: bool) -> None:
+    def _reconcile_once(self, *, seed: bool) -> bool:
         """Re-derive the freshness maps from a fresh walk. `seed=True` on the
         first pass installs the maps and marks the scopes live; later passes
         heal any drift from a missed watchdog event AND dispatch that drift
@@ -536,6 +562,9 @@ class FileWatcher:
         baselines_current = True
         pending_epoch = None if seed else freshness.external_pending_epoch(self._vault_root)
         for scope in freshness.SCOPES:
+            if self._stop.is_set():
+                baselines_current = False
+                break
             try:
                 if seed:
                     freshness.seed(self._vault_root, scope, self._walk_entries(scope))
@@ -564,19 +593,10 @@ class FileWatcher:
             except Exception:  # noqa: BLE001 - discovery must never kill the watcher
                 log.exception("file watcher: periodic media reconciliation failed")
         if seed:
-            if baselines_current and self._validate_existing_graph_on_seed():
-                policy = self._watcher_policy()
-                full_limit = _background_deferred_limit(
-                    policy, policy.max_reconcile_embed_files
-                )
-                try:
-                    index_sync.drain_deferred_work(
-                        self._vault_root,
-                        limit=full_limit,
-                    )
-                except Exception:  # noqa: BLE001 - queued work remains retryable
-                    log.exception("file watcher: startup deferred index drain failed")
-            return
+            return baselines_current and all(
+                freshness.recall_is_live(self._vault_root, scope)
+                for scope in freshness.SCOPES
+            )
         policy = self._watcher_policy()
         drift_admission = 0
         if drifted:
@@ -604,10 +624,10 @@ class FileWatcher:
         except Exception:  # noqa: BLE001 - queued work remains retryable
             log.exception("file watcher: deferred index drain failed")
         if not drifted:
-            return
+            return baselines_current
         if policy.defer_expensive_indexes:
             log.info("file watcher: quiet reconcile deferred expensive warm-up")
-            return
+            return baselines_current
         from . import bm25
 
         for scope in freshness.SCOPES:
@@ -615,6 +635,33 @@ class FileWatcher:
                 bm25.warm(self._vault_root, scope)
             except Exception:  # noqa: BLE001
                 log.exception("file watcher: reconcile bm25 warm failed (scope=%s)", scope)
+        return baselines_current
+
+    def finish_startup_recovery(self) -> None:
+        """Drain deferred whole-index work after required admission.
+
+        Projection seeding is the startup critical path.  Graph validation and
+        deferred fan-out can be substantial, so runtime activation calls this
+        only after retrieval and semantic state have reached a terminal
+        admission result.  The method is idempotent for liveness/timer races.
+        """
+        with self._lock:
+            if self._startup_recovery_started:
+                return
+            self._startup_recovery_started = True
+        if not self._validate_existing_graph_on_seed():
+            return
+        policy = self._watcher_policy()
+        full_limit = _background_deferred_limit(
+            policy, policy.max_reconcile_embed_files
+        )
+        try:
+            index_sync.drain_deferred_work(
+                self._vault_root,
+                limit=full_limit,
+            )
+        except Exception:  # noqa: BLE001 - queued work remains retryable
+            log.exception("file watcher: startup deferred index drain failed")
 
     def _recover_external_pending(self, pending_epoch: int) -> None:
         """Recover one drained watcher epoch after exact periodic baselines.
@@ -938,7 +985,9 @@ class FileWatcher:
                 through=pending_epoch,
             )
 
-        # Index sidecars (embedding + lexical): Knowledge Base markdown only.
+        # Lexstore serves both KB and vault scopes, so it receives the complete
+        # vault-wide generation. index_sync keeps every heavier derived lane
+        # KB-scoped while applying that one combined lexical mutation.
         kb_del_rels = [r for r in del_rels if r.startswith(kb_prefix())]
         if not (kb_ups or kb_del_rels) and (up_rels or del_rels):
             # Graph sources live in KB, but their resolver is vault-wide. A
@@ -986,27 +1035,45 @@ class FileWatcher:
             )
             defer_semantic = True
             admitted_semantic = 0
-        if kb_ups:
+        lexical_batch_complete = False
+        if ups or del_rels:
             try:
-                index_sync.upsert_after_write(
+                report = index_sync.upsert_after_write(
                     self._vault_root,
-                    kb_ups,
+                    ups,
                     defer_semantic=defer_semantic,
                     publish_corpus_change=False,
+                    watcher_deleted_rel_paths=del_rels,
                 )
             except Exception:  # noqa: BLE001
-                log.exception("file watcher: upsert_after_write failed for %d file(s)", len(kb_ups))
-        if kb_del_rels:
+                log.exception(
+                    "file watcher: lexical watcher handoff failed for %d path(s)",
+                    len(ups) + len(del_rels),
+                )
+                try:
+                    from . import lexstore
+
+                    lexstore.request_repair(self._vault_root)
+                except Exception:  # noqa: BLE001 - the periodic reconcile remains the final belt
+                    pass
+            else:
+                lexical_batch_complete = any(
+                    component.component == "lexstore" and component.outcome == "completed"
+                    for component in getattr(report, "components", ())
+                )
+        downstream_del_rels = kb_del_rels
+        if downstream_del_rels:
             try:
                 index_sync.delete_after_remove(
                     self._vault_root,
-                    kb_del_rels,
+                    downstream_del_rels,
                     publish_corpus_change=False,
+                    dispatch_lexstore=not lexical_batch_complete,
                 )
             except Exception:  # noqa: BLE001
                 log.exception(
                     "file watcher: delete_after_remove failed for %d file(s)",
-                    len(kb_del_rels),
+                    len(downstream_del_rels),
                 )
         if (
             guarded_graph is not None
@@ -1061,29 +1128,51 @@ class FileWatcher:
     def _run_reconcile(self) -> None:
         # Seed immediately (off the boot path — this is the watcher's own
         # daemon thread), then re-walk every RECONCILE_INTERVAL to bound drift.
-        self._reconcile_once(seed=True)
+        succeeded = False
+        try:
+            succeeded = self._reconcile_once(seed=True)
+        except Exception:  # noqa: BLE001 - completion must unblock activation
+            log.exception("file watcher: startup freshness seed failed")
+        finally:
+            self._seed_succeeded = succeeded
+            self._seed_published.set()
+            if not self._dispatch_waits_for_seed:
+                self._seed_complete.set()
         while not self._stop.wait(self._reconcile_interval_seconds()):
             self._reconcile_once(seed=False)
+
+    def wait_until_seeded(self, timeout: float | None = None) -> bool:
+        """Wait for the startup seed's terminal result.
+
+        ``False`` means either the wait timed out or at least one recall scope
+        failed to become authoritative.  Callers must then keep retrieval
+        unadmitted; they must never turn the failed seed into reader-thread
+        fallback work.
+        """
+        if not self._seed_complete.wait(timeout):
+            return False
+        return self._seed_succeeded
+
+    def _start_reconcile_thread(self) -> None:
+        if self._reconcile_thread is not None and self._reconcile_thread.is_alive():
+            return
+        self._reconcile_thread = threading.Thread(
+            target=self._run_reconcile,
+            name="kb-freshness-reconcile",
+            daemon=True,
+        )
+        self._reconcile_thread.start()
 
     # ---- lifecycle ----
 
     def start(self) -> bool:
-        """Start watching. Returns False (no-op) when watchdog is unavailable.
-
-        Soft-fail: a missing `watchdog` dep leaves the server fully functional — edits
-        just won't be live-re-embedded until the next `reconcile`.
-        """
-        try:
-            Observer, FileSystemEventHandler = _import_watchdog()
-        except Exception as e:  # noqa: BLE001 — optional dep
-            log.info(
-                "file watcher: watchdog not available (%s); live re-embed disabled (no-op). "
-                "Out-of-band edits re-embed on the next reconcile.",
-                e,
-            )
-            return False
+        """Start observation, or reconcile-only polling when watchdog is absent."""
         if not self._vault_root.is_dir():
             log.info("file watcher: %s not found; not watching", self._vault_root)
+            return False
+        kb_root = self._vault_root / kb_dirname()
+        if not kb_root.is_dir():
+            log.info("file watcher: %s not found; not watching", kb_root)
             return False
 
         # Hosted quiesce/resume deliberately reuses the watcher instance. A
@@ -1091,6 +1180,24 @@ class FileWatcher:
         # recreating the dispatch/observer threads.
         self._stop.clear()
         self._wake.clear()
+        self._seed_published.clear()
+        self._seed_complete.clear()
+        self._seed_succeeded = False
+        self._startup_recovery_started = False
+        self._dispatch_waits_for_seed = False
+
+        try:
+            Observer, FileSystemEventHandler = _import_watchdog()
+        except Exception as e:  # noqa: BLE001 — optional dep
+            if freshness.event_indexes_enabled():
+                log.info(
+                    "file watcher: watchdog not available (%s); using reconcile-only polling",
+                    e,
+                )
+                self._start_reconcile_thread()
+                return True
+            log.info("file watcher: watchdog not available (%s); watcher disabled", e)
+            return False
 
         watcher = self
 
@@ -1112,6 +1219,7 @@ class FileWatcher:
                     watcher._record(Path(event.src_path), deleted=True)
                     watcher._record(Path(event.dest_path), deleted=False)
 
+        self._dispatch_waits_for_seed = freshness.event_indexes_enabled()
         self._thread = threading.Thread(
             target=self._run_dispatch, name="kb-file-watcher", daemon=True
         )
@@ -1127,12 +1235,17 @@ class FileWatcher:
             log.warning("file watcher: observer failed to start (%s); live re-embed disabled", e)
             self._stop.set()
             self._wake.set()
+            self._thread.join(timeout=2)
+            self._thread = None
+            if freshness.event_indexes_enabled():
+                self._dispatch_waits_for_seed = False
+                self._stop.clear()
+                self._wake.clear()
+                self._start_reconcile_thread()
+                return True
             return False
         if freshness.event_indexes_enabled():
-            self._reconcile_thread = threading.Thread(
-                target=self._run_reconcile, name="kb-freshness-reconcile", daemon=True
-            )
-            self._reconcile_thread.start()
+            self._start_reconcile_thread()
         log.info("file watcher started on %s", self._vault_root)
         return True
 

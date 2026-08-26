@@ -38,6 +38,11 @@ from .vault import resolve_vault
 
 log = logging.getLogger(__name__)
 
+# The production Windows seed has measured about 49 seconds under pressure.
+# Give it substantial headroom, but never let one blocked watcher prevent the
+# background catalogue warm/repair path from starting indefinitely.
+RECALL_SEED_WAIT_SECONDS = 120.0
+
 
 @dataclass(frozen=True)
 class ServerRuntime:
@@ -89,6 +94,10 @@ class LocalRuntimeActivation:
     """Start local background workers after transport liveness is observable."""
 
     def __init__(self, vault_root: Path, *, fallback_seconds: float = 5.0) -> None:
+        from . import readiness, warmup
+
+        if warmup.warmup_enabled():
+            readiness.manage_runtime()
         self.vault_root = vault_root
         self.fallback_seconds = fallback_seconds
         self._lock = threading.Lock()
@@ -117,24 +126,83 @@ class LocalRuntimeActivation:
         thread.start()
 
     def _activate(self) -> None:
+        self._start_component("file watcher", self._start_file_watcher)
+        if self.file_watcher is None:
+            # A maintained projection is authoritative only while something is
+            # actually maintaining it.  The explicit watcher-off mode and a
+            # watcher startup failure retain the supported walk-backed path.
+            self._downgrade_recall_runtime()
+        self._wait_for_recall_seed()
         self._start_component("retrieval", _start_compute_runtime)
         self._wait_for_required_admission()
+        self._start_component(
+            "file watcher recovery",
+            self._finish_file_watcher_startup,
+        )
         starters = (
-            ("file watcher", self._start_file_watcher),
             ("graph drain", _start_graph_drain),
             ("media", self._start_media_worker),
         )
         for label, starter in starters:
             self._start_component(label, starter)
 
+    def _wait_for_recall_seed(self) -> None:
+        """Order maintained-catalog verification behind watcher authority."""
+        from . import freshness
+
+        watcher = self.file_watcher
+        if watcher is None or not freshness.event_indexes_enabled():
+            return
+        try:
+            seeded = watcher.wait_until_seeded(timeout=RECALL_SEED_WAIT_SECONDS)
+        except Exception:  # noqa: BLE001 - retrieval fallback stays background-only
+            log.warning("file watcher seed wait failed", exc_info=True)
+            self._downgrade_recall_runtime()
+            return
+        if not seeded:
+            log.warning(
+                "file watcher did not establish both recall projections; "
+                "switching this process to exact walk-backed recall"
+            )
+            self._downgrade_recall_runtime()
+
+    def _downgrade_recall_runtime(self) -> None:
+        """Revoke an unavailable watcher generation and retain exact fallback."""
+        from . import freshness, readiness
+
+        watcher = self.file_watcher
+        # Invalidation cancels any replacement walk that is still in flight;
+        # if it eventually returns it cannot re-publish an unmaintained map.
+        freshness.invalidate(self.vault_root)
+        readiness.unmanage_runtime()
+        self.file_watcher = None
+        stop = getattr(watcher, "stop", None)
+        if callable(stop):
+            try:
+                stop()
+            except Exception:  # noqa: BLE001 - fallback is already authoritative
+                log.warning(
+                    "file watcher shutdown after recall downgrade failed",
+                    exc_info=True,
+                )
+
     def _wait_for_required_admission(self) -> None:
         """Keep reconcilers out until retrieval and mutation state are admitted."""
-        from . import readiness
+        from . import readiness, warmup
 
-        while readiness.is_warming():
+        if not warmup.warmup_enabled():
+            return
+        while True:
             catalog_ready = readiness.is_ready("retrieval_catalog")
             semantic_ready = readiness.is_ready("semantic_corpus")
-            if catalog_ready and semantic_ready:
+            if catalog_ready and (semantic_ready or not readiness.is_warming()):
+                # Semantic corpus has no independent post-warm repair signal.
+                # Let it serialize behind retrieval while the one-shot warm is
+                # active, then preserve the historical soft-failure behavior
+                # instead of stranding graph/media recovery forever.
+                return
+            if not readiness.warm_started():
+                # A custom/hosted starter elected not to open a managed warm.
                 return
             missing = "retrieval_catalog" if not catalog_ready else "semantic_corpus"
             readiness.wait(missing, timeout=0.1)
@@ -154,6 +222,12 @@ class LocalRuntimeActivation:
 
     def _start_file_watcher(self, vault_root: Path) -> None:
         self.file_watcher = _start_file_watcher(vault_root)
+
+    def _finish_file_watcher_startup(self, _vault_root: Path) -> None:
+        watcher = self.file_watcher
+        finish = getattr(watcher, "finish_startup_recovery", None)
+        if callable(finish):
+            finish()
 
     def lifespan(self):
         """Arm a fallback for clients that never call the liveness endpoint."""
@@ -413,7 +487,13 @@ def _start_retrieval_runtime(vault_root: Path) -> None:
 
     if warmup.warmup_enabled():
         if os.environ.get("EXOMEM_EAGER_BOOT"):
-            warmup.warm_all(vault_root)
+            from . import readiness
+
+            readiness.begin_warm()
+            try:
+                warmup.warm_all(vault_root)
+            finally:
+                readiness.finish_warm()
         else:
             warmup.start_background(vault_root)
 
@@ -566,9 +646,11 @@ def _start_file_watcher(vault_root: Path) -> Any | None:
     if watcher is None:
         return None
     try:
-        watcher.start()
+        if not watcher.start():
+            return None
     except Exception as exc:  # noqa: BLE001 - watcher must not break startup
         log.warning("file watcher start failed: %s", exc)
+        return None
     return watcher
 
 
