@@ -18,6 +18,7 @@ from exomem import embeddings, readiness, server, writer_lease
 from exomem.governance import (
     decisions,
     principal,
+    projected_graph,
     projected_retrieval,
     projection_authorization,
     projection_measurement_store,
@@ -32,6 +33,8 @@ from exomem.server_runtime import ServerRuntime
 _REST_KEY = "governance-oracle-key"
 _TRANSPORT_ONLY_HEADERS = frozenset({"date", "traceparent", "tracestate"})
 _VECTOR_EXTRACTOR = "projected-text-v1"
+_GRAPH_EXTRACTOR = "projected-graph-v1"
+_GRAPH_MODEL = "graph-schema-v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,6 +183,11 @@ def _runtime_from_items(
         [projections.ProjectionVariant], tuple[float, ...]
     ]
     | None = None,
+    graph_edges_for_variant: Callable[
+        [projections.ProjectionVariant],
+        tuple[projected_graph.ProjectionGraphEdge, ...],
+    ]
+    | None = None,
 ) -> projection_runtime.ActiveProjectionRuntime:
     key = projections.ProjectionNamespaceKey(
         policy_fingerprint=policy.fingerprint,
@@ -206,49 +214,95 @@ def _runtime_from_items(
             projection_store.projection_namespace_evidence_bytes(namespace.manifest)
         ),
     )
-    if vector_for_variant is None:
-        return projection_runtime.ActiveProjectionRuntime(snapshot, namespace)
-    measurements = tuple(
-        projected_retrieval.ProjectionVectorMeasurement(
-            projections.MeasurementKey(
-                projection_variant_id=variant.projection_variant_id,
+    roots: list[projection_store.ProjectionMeasurementRoot] = []
+    vector_index: projected_retrieval.ProjectedVectorIndex | None = None
+    graph_index: projected_graph.ProjectedGraphIndex | None = None
+    if vector_for_variant is not None:
+        vector_measurements = tuple(
+            projected_retrieval.ProjectionVectorMeasurement(
+                projections.MeasurementKey(
+                    projection_variant_id=variant.projection_variant_id,
+                    lane="vector",
+                    extractor_version=_VECTOR_EXTRACTOR,
+                    model_version=embeddings.MODEL_NAME,
+                ),
+                vector_for_variant(variant),
+            )
+            for item in items
+            for variant in item.variants
+        )
+        vector_index = projected_retrieval.ProjectedVectorIndex(
+            namespace,
+            vector_measurements,
+            extractor_version=_VECTOR_EXTRACTOR,
+            model_version=embeddings.MODEL_NAME,
+        )
+        vector_family = projection_measurement_store.MeasurementFamilyKey(
+            namespace_key=key,
+            lane="vector",
+            extractor_version=_VECTOR_EXTRACTOR,
+            model_version=embeddings.MODEL_NAME,
+        )
+        roots.append(
+            projection_store.ProjectionMeasurementRoot(
+                namespace_key=key,
+                family_id=vector_family.family_id,
                 lane="vector",
                 extractor_version=_VECTOR_EXTRACTOR,
                 model_version=embeddings.MODEL_NAME,
-            ),
-            vector_for_variant(variant),
+                measurement_count=len(vector_measurements),
+                vector_dimension=len(vector_measurements[0].vector),
+                graph_edge_count=0,
+                rows_digest="a" * 64,
+            )
         )
-        for item in items
-        for variant in item.variants
-    )
-    vector_index = projected_retrieval.ProjectedVectorIndex(
-        namespace,
-        measurements,
-        extractor_version=_VECTOR_EXTRACTOR,
-        model_version=embeddings.MODEL_NAME,
-    )
-    family = projection_measurement_store.MeasurementFamilyKey(
-        namespace_key=key,
-        lane="vector",
-        extractor_version=_VECTOR_EXTRACTOR,
-        model_version=embeddings.MODEL_NAME,
-    )
-    root = projection_store.ProjectionMeasurementRoot(
-        namespace_key=key,
-        family_id=family.family_id,
-        lane="vector",
-        extractor_version=_VECTOR_EXTRACTOR,
-        model_version=embeddings.MODEL_NAME,
-        measurement_count=len(measurements),
-        vector_dimension=len(measurements[0].vector),
-        graph_edge_count=0,
-        rows_digest="a" * 64,
-    )
+    if graph_edges_for_variant is not None:
+        graph_measurements = tuple(
+            projected_graph.ProjectionGraphMeasurement(
+                projections.MeasurementKey(
+                    projection_variant_id=variant.projection_variant_id,
+                    lane="graph",
+                    extractor_version=_GRAPH_EXTRACTOR,
+                    model_version=_GRAPH_MODEL,
+                ),
+                graph_edges_for_variant(variant),
+            )
+            for item in items
+            for variant in item.variants
+        )
+        graph_index = projected_graph.ProjectedGraphIndex(
+            namespace,
+            graph_measurements,
+            extractor_version=_GRAPH_EXTRACTOR,
+            model_version=_GRAPH_MODEL,
+        )
+        graph_family = projection_measurement_store.MeasurementFamilyKey(
+            namespace_key=key,
+            lane="graph",
+            extractor_version=_GRAPH_EXTRACTOR,
+            model_version=_GRAPH_MODEL,
+        )
+        roots.append(
+            projection_store.ProjectionMeasurementRoot(
+                namespace_key=key,
+                family_id=graph_family.family_id,
+                lane="graph",
+                extractor_version=_GRAPH_EXTRACTOR,
+                model_version=_GRAPH_MODEL,
+                measurement_count=len(graph_measurements),
+                vector_dimension=None,
+                graph_edge_count=sum(
+                    len(measurement.edges) for measurement in graph_measurements
+                ),
+                rows_digest="b" * 64,
+            )
+        )
     return projection_runtime.ActiveProjectionRuntime(
         snapshot,
         namespace,
-        (root,),
+        tuple(roots),
         vector_index=vector_index,
+        graph_index=graph_index,
     )
 
 
@@ -1031,4 +1085,133 @@ def test_reranker_receives_only_selected_projection_text_before_final_top_k(
         "rerankprojectionquartz alpha safe abstract",
     ]
     assert b"rawrerankquartz" not in responses["present"].content
+    assert b"oracle-hidden" not in responses["present"].content
+
+
+def _graph_runtime(
+    hidden_bodies: tuple[str, ...],
+) -> projection_runtime.ActiveProjectionRuntime:
+    visible = Scope(id="oracle-visible", source="scopes/oracle-visible.yaml")
+    hidden = Scope(
+        id="oracle-hidden",
+        source="scopes/oracle-hidden.yaml",
+        default_deny=True,
+    )
+    policy = Policy(
+        fingerprint="b" * 64,
+        scopes={visible.id: visible, hidden.id: hidden},
+    )
+    seed = "Knowledge Base/oracle-visible-000.md"
+    target = "Knowledge Base/oracle-visible-001.md"
+    hidden_identity = "Knowledge Base/private/oracle-hidden-000.md"
+    items = [
+        _projected_item(
+            policy,
+            path=seed,
+            scope_id=visible.id,
+            body="graphoraclequartz visible seed",
+        ),
+        _projected_item(
+            policy,
+            path=target,
+            scope_id=visible.id,
+            body="visible graph target",
+        ),
+    ]
+    items.extend(
+        _projected_item(
+            policy,
+            path=f"Knowledge Base/private/oracle-hidden-{index:03d}.md",
+            scope_id=hidden.id,
+            body=body,
+        )
+        for index, body in enumerate(hidden_bodies)
+    )
+    hidden_present = bool(hidden_bodies)
+
+    def graph_edges_for_variant(
+        variant: projections.ProjectionVariant,
+    ) -> tuple[projected_graph.ProjectionGraphEdge, ...]:
+        if variant.decision_level < 6:
+            return ()
+        targets: tuple[str, ...]
+        if variant.item_identity == seed:
+            targets = (target, hidden_identity) if hidden_present else (target,)
+        elif variant.item_identity == hidden_identity:
+            targets = (target,)
+        else:
+            targets = ()
+        return tuple(
+            projected_graph.ProjectionGraphEdge(
+                source_item_identity=variant.item_identity,
+                target_item_identity=edge_target,
+                relation_type="supports",
+            )
+            for edge_target in targets
+        )
+
+    return _runtime_from_items(
+        policy,
+        tuple(items),
+        graph_edges_for_variant=graph_edges_for_variant,
+    )
+
+
+def test_hidden_vertices_and_edges_cannot_change_public_graph_fusion_or_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    request = _request(query="graphoraclequartz", limit=2)
+    request["graph"] = True
+    runtimes, responses = _wire_pair(
+        monkeypatch,
+        tmp_path,
+        hidden_bodies=("graphoraclequartz hidden graph source",),
+        runtime_factory=_graph_runtime,
+        request=request,
+    )
+    present_runtime = runtimes["present"]
+    external = projection_authorization.build_authorization_map(
+        present_runtime.namespace,
+        policy=present_runtime.snapshot.policy,
+        audience="oracle-external",
+        purpose=None,
+        verified_session_grants=(),
+        catalog=present_runtime.catalog,
+    )
+    owner = projection_authorization.build_authorization_map(
+        present_runtime.namespace,
+        policy=present_runtime.snapshot.policy,
+        audience=principal.OWNER_AUDIENCE,
+        purpose=None,
+        verified_session_grants=(),
+        catalog=present_runtime.catalog,
+    )
+    graph_index = present_runtime.graph_index
+    assert graph_index is not None
+    external_graph = graph_index.authorize(external)
+    owner_graph = graph_index.authorize(owner)
+    seed = "Knowledge Base/oracle-visible-000.md"
+    target = "Knowledge Base/oracle-visible-001.md"
+    hidden = "Knowledge Base/private/oracle-hidden-000.md"
+    assert external_graph.vertices == (seed, target)
+    assert external_graph.neighbors(seed) == (target,)
+    assert external_graph.in_degree(target) == 1
+    assert hidden not in external_graph.vertices
+    assert owner_graph.neighbors(seed) == (target, hidden)
+    assert owner_graph.in_degree(target) == 2
+    assert owner_graph.reachable(seed, hidden) is True
+
+    _assert_same_success_envelope(responses)
+    data = responses["present"].json()["data"]
+    assert [hit["path"] for hit in data["hits"]] == [seed, target]
+    assert data["hits"][1]["signals"] == {
+        "graph_hop": True,
+        "graph_in_degree": 1,
+    }
+    assert data["hits"][1]["graph"] == {
+        "relation_type": "supports",
+        "direction": "outbound",
+        "seed": seed,
+    }
     assert b"oracle-hidden" not in responses["present"].content
