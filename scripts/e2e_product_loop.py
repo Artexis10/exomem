@@ -362,6 +362,19 @@ def _mutation_diagnostics(result: Any, *, operation: str) -> Any:
     return diagnostics
 
 
+def _single_affected_path(result: Any, *, operation: str) -> str:
+    """Return the one canonical item path committed by a mutation."""
+    paths = result.get("affected_paths") if isinstance(result, dict) else None
+    if (
+        not isinstance(paths, list)
+        or len(paths) != 1
+        or not isinstance(paths[0], str)
+        or not paths[0]
+    ):
+        raise RuntimeError(f"{operation} did not report one affected item path: {result!r}")
+    return paths[0]
+
+
 def _maintenance_diagnostics(result: Any, *, operation: str) -> Any:
     """Unwrap a tracked commit while preserving a raw no-op maintenance report."""
     terminal_fields = {"ok", "status", "mutated", "diagnostics"}
@@ -784,7 +797,7 @@ async def _planning_first_session(client, state: dict[str, Any], timeout: float)
         },
         timeout,
     )
-    await _call_mutation(
+    work_item_added = await _call_mutation(
         client,
         "plan_memory",
         {
@@ -907,8 +920,8 @@ async def _planning_first_session(client, state: dict[str, Any], timeout: float)
     if not any(row.get("plan_id") == home_outcome_id for row in home.get("rows", [])):
         raise RuntimeError("installed Planning multi-year view omitted the home outcome")
     software["work_item_id"] = work_item_id
-    software["work_item_path"] = (
-        "Knowledge Base/Planning/Software/Items/" + work_item_id + ".md"
+    software["work_item_path"] = _single_affected_path(
+        work_item_added, operation="plan_memory add"
     )
 
 

@@ -71,6 +71,10 @@ The two `validate` forms SHALL be mutually exclusive and read-only. Revision-mod
 - **WHEN** `plan_memory` runs `inspect`, either `validate` form, or `query`
 - **THEN** invocation classification treats it as read-only and does not contact the writer coordinator
 
+#### Scenario: Query does not acquire writer authority
+- **WHEN** `plan_memory` runs `query` or `inspect`
+- **THEN** invocation classification treats it as read-only and does not contact the writer coordinator
+
 #### Scenario: Planning mutation enters writer authority
 - **WHEN** `plan_memory` runs `create`, `add`, `update`, `triage`, `revise`, or `rebaseline`
 - **THEN** it uses the existing same-vault writer lease, idempotency, committed terminal envelope, governance projector, and retry identity
@@ -99,6 +103,10 @@ The existing `record_memory` command SHALL keep one finite product surface and S
 #### Scenario: Explicit child selector is discoverable everywhere
 - **WHEN** a client inspects the public Records schema or calls query over MCP, CLI, or REST
 - **THEN** `expand_child` has the same bounded string contract and reaches the same governed query leaf on every surface
+
+#### Scenario: Presentation repair does not add another tool
+- **WHEN** a caller needs to backfill a readable body for an existing item
+- **THEN** it uses guarded `record_memory(action="update", refresh_presentation=true, ...)` and no separate renderer, migration, or YAML tool is added
 
 #### Scenario: Presentation repair does not add another Records tool
 - **WHEN** a caller needs to backfill a readable body for one existing item
