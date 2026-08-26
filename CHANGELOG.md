@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.63.1](https://github.com/Artexis10/exomem/compare/v0.63.0...v0.63.1) (2026-08-26)
+
+
+### Bug Fixes
+
+* **index:** accept durably covered warm-up deferrals in batch reports ([#850](https://github.com/Artexis10/exomem/issues/850)) ([95faf25](https://github.com/Artexis10/exomem/commit/95faf25f60e812b2882e5911b202263750fcad39))
+
 ## [0.63.0](https://github.com/Artexis10/exomem/compare/v0.62.0...v0.63.0) (2026-08-26)
 
 
