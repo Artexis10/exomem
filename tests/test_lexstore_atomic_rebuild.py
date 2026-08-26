@@ -848,7 +848,42 @@ def test_foreground_delta_after_temp_target_rebases_replacement(
     assert not any("deletedcontent" in c for c in contents)
 
 
-def test_oversized_late_rebase_declines_and_preserves_live_catalog(
+def test_large_off_barrier_rebase_converges_without_another_full_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The first catch-up is background work, so it must absorb a sync burst."""
+    a = _kb_file(tmp_path, "a.md", "- [config] preservedtoken ^u1")
+    _seed(tmp_path, [a])
+    lexstore.ensure_fresh(tmp_path)
+    store = lexstore.get_store(tmp_path)
+    real_fold = store._fold_to_single_file
+    changed: list[Path] = []
+
+    def fold_then_sync_burst(conn: sqlite3.Connection) -> bool:
+        folded = real_fold(conn)
+        if not changed:
+            changed.extend(
+                _kb_file(
+                    tmp_path,
+                    f"burst-{index}.md",
+                    f"- [config] burst-{index} ^u{index + 2}",
+                )
+                for index in range(lexstore.CATALOG_FOREGROUND_DELTA_CAP + 1)
+            )
+            freshness.on_files_changed(tmp_path, changed=changed)
+        return folded
+
+    monkeypatch.setattr(store, "_fold_to_single_file", fold_then_sync_burst)
+    assert store.rebuild_atomic() is True
+    assert store._last_rebuild_result == "published"
+    assert store.catalog_checkpoint("kb") == freshness.recall_checkpoint(
+        tmp_path, "kb"
+    )
+    contents = {hit.content.strip() for hit in _units_in_category(tmp_path, "config")}
+    assert all(any(f"burst-{index}" in content for content in contents) for index in range(len(changed)))
+
+
+def test_oversized_final_barrier_rebase_declines_and_preserves_live_catalog(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     a = _kb_file(tmp_path, "a.md", "- [config] preservedtoken ^u1")
@@ -856,14 +891,13 @@ def test_oversized_late_rebase_declines_and_preserves_live_catalog(
     lexstore.ensure_fresh(tmp_path)
     store = lexstore.get_store(tmp_path)
     before = store.catalog_checkpoint("kb")
-    real_fold = store._fold_to_single_file
-    injected = False
+    real_rebase = store._rebase_detached_catalog
+    rebase_calls = 0
 
-    def fold_then_overflow_delta(conn: sqlite3.Connection) -> bool:
-        nonlocal injected
-        folded = real_fold(conn)
-        if not injected:
-            injected = True
+    def rebase_then_overflow_delta(*args: Any, **kwargs: Any) -> Any:
+        nonlocal rebase_calls
+        rebase_calls += 1
+        if rebase_calls == 2:
             changed = [
                 _kb_file(
                     tmp_path,
@@ -873,9 +907,9 @@ def test_oversized_late_rebase_declines_and_preserves_live_catalog(
                 for index in range(lexstore.CATALOG_FOREGROUND_DELTA_CAP + 1)
             ]
             freshness.on_files_changed(tmp_path, changed=changed)
-        return folded
+        return real_rebase(*args, **kwargs)
 
-    monkeypatch.setattr(store, "_fold_to_single_file", fold_then_overflow_delta)
+    monkeypatch.setattr(store, "_rebase_detached_catalog", rebase_then_overflow_delta)
     assert store.rebuild_atomic() is False
     assert store._last_rebuild_result == "delta_unavailable"
     assert store.catalog_checkpoint("kb") == before

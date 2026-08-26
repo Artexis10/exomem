@@ -3689,6 +3689,7 @@ class LexicalStore:
             temp_path,
             scope_targets,
             start_identity,
+            max_paths=None,
         )
         if rebased_targets is None:
             return False
@@ -3792,13 +3793,17 @@ class LexicalStore:
         temp_path: Path,
         scope_targets: dict[str, tuple],
         expected_identity: str,
+        *,
+        max_paths: int | None = CATALOG_FOREGROUND_DELTA_CAP,
     ) -> dict[str, tuple] | None:
         """Replay one complete bounded live suffix onto a detached catalogue.
 
         Returns updated scope targets, the original targets when nothing moved,
         or ``None`` when the latest generation cannot be proven safely. The
         caller may hold the publication barrier; this helper touches only the
-        detached SQLite family and never walks the vault.
+        detached SQLite family and never walks the vault. ``max_paths=None`` is
+        reserved for the first off-barrier background catch-up; the final call
+        under the publication barrier retains the foreground cap.
         """
         from . import freshness as freshness_module
 
@@ -3839,7 +3844,7 @@ class LexicalStore:
                 return None
             touched.update(delta.changed)
             touched.update(delta.deleted)
-            if len(touched) > CATALOG_FOREGROUND_DELTA_CAP:
+            if max_paths is not None and len(touched) > max_paths:
                 self._last_rebuild_result = "delta_unavailable"
                 return None
             if not self._delta_target_still_current(scope, delta):
