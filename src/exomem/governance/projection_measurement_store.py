@@ -52,6 +52,10 @@ ProjectionMeasurement: TypeAlias = (
     | projected_retrieval.ProjectionClipMeasurement
     | projected_graph.ProjectionGraphMeasurement
 )
+ProjectionNamespace: TypeAlias = (
+    projection_store.VerifiedProjectionNamespace
+    | projection_store.PreparedProjectionNamespace
+)
 
 
 def _bounded_text(value: object, name: str, *, maximum: int) -> str:
@@ -208,11 +212,17 @@ def _measurement_key(measurement: ProjectionMeasurement) -> projections.Measurem
 
 
 def _validate_measurements(
-    namespace: projection_store.VerifiedProjectionNamespace,
+    namespace: ProjectionNamespace,
     family: MeasurementFamilyKey,
     measurements: Iterable[ProjectionMeasurement],
 ) -> tuple[ProjectionMeasurement, ...]:
-    if not isinstance(namespace, projection_store.VerifiedProjectionNamespace):
+    if not isinstance(
+        namespace,
+        (
+            projection_store.VerifiedProjectionNamespace,
+            projection_store.PreparedProjectionNamespace,
+        ),
+    ):
         raise MeasurementStoreMismatch("verified projection namespace is unavailable")
     if family.namespace_key != namespace.namespace_key:
         raise MeasurementStoreMismatch(
@@ -307,7 +317,7 @@ def _stored_row(measurement: ProjectionMeasurement) -> _StoredRow:
 
 
 def _materialize(
-    namespace: projection_store.VerifiedProjectionNamespace,
+    namespace: ProjectionNamespace,
     family: MeasurementFamilyKey,
     measurements: Iterable[ProjectionMeasurement],
 ) -> tuple[tuple[_StoredRow, ...], MeasurementStoreManifest]:
@@ -626,7 +636,7 @@ def _verified_measurements(
 def _verify_connection(
     connection: sqlite3.Connection,
     *,
-    namespace: projection_store.VerifiedProjectionNamespace,
+    namespace: ProjectionNamespace,
     family: MeasurementFamilyKey,
     expected_rows_digest: str,
 ) -> tuple[MeasurementStoreManifest, tuple[ProjectionMeasurement, ...]]:
@@ -688,7 +698,7 @@ def _connect(
 def stage_measurement_store(
     vault_root: Path,
     *,
-    namespace: projection_store.VerifiedProjectionNamespace,
+    namespace: ProjectionNamespace,
     family: MeasurementFamilyKey,
     measurements: Iterable[ProjectionMeasurement],
 ) -> MeasurementStoreManifest:
@@ -763,10 +773,22 @@ def stage_measurement_store(
                     connection.close()
 
 
+def preview_measurement_store(
+    *,
+    namespace: ProjectionNamespace,
+    family: MeasurementFamilyKey,
+    measurements: Iterable[ProjectionMeasurement],
+) -> MeasurementStoreManifest:
+    """Validate and commit to one measurement family without writing its store."""
+
+    _material, manifest = _materialize(namespace, family, measurements)
+    return manifest
+
+
 def verify_measurement_store(
     vault_root: Path,
     *,
-    namespace: projection_store.VerifiedProjectionNamespace,
+    namespace: ProjectionNamespace,
     family: MeasurementFamilyKey,
     expected_rows_digest: str,
 ) -> MeasurementStoreManifest:
@@ -784,7 +806,7 @@ def verify_measurement_store(
 def load_measurement_store(
     vault_root: Path,
     *,
-    namespace: projection_store.VerifiedProjectionNamespace,
+    namespace: ProjectionNamespace,
     family: MeasurementFamilyKey,
     expected_rows_digest: str,
 ) -> tuple[MeasurementStoreManifest, tuple[ProjectionMeasurement, ...]]:
@@ -934,6 +956,7 @@ __all__ = [
     "load_vector_index",
     "measurement_root",
     "measurement_store_path",
+    "preview_measurement_store",
     "stage_measurement_store",
     "verify_measurement_store",
 ]
