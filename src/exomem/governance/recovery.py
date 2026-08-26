@@ -373,6 +373,36 @@ def _actual_component_value(
             )
         )
     if kind == "token":
+        version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+        if version >= schema_v4.SCHEMA_USER_VERSION:
+            row = conn.execute(
+                "SELECT authorization_session_id, principal_id, issuer_family, audience, "
+                "max_level, fingerprints, paths, scope_ids, purpose, org_ceiling, status, "
+                "prepared_event_id, expires_at, minted_at, consumed_at "
+                "FROM withhold_tokens WHERE jti=?",
+                (key,),
+            ).fetchone()
+            return (
+                {"status": "absent"}
+                if row is None
+                else authorization_row(
+                    authorization_session_id=str(row[0]),
+                    principal_id=str(row[1]),
+                    issuer_family=str(row[2]),
+                    audience=str(row[3]),
+                    max_level=int(row[4]),
+                    fingerprints=str(row[5]),
+                    paths=str(row[6]),
+                    scope_ids=str(row[7]),
+                    purpose=row[8],
+                    org_ceiling=int(row[9]),
+                    status=str(row[10]),
+                    prepared_event_id=row[11],
+                    expires_at=int(row[12]),
+                    minted_at=int(row[13]),
+                    consumed_at=row[14],
+                )
+            )
         row = conn.execute(
             "SELECT audience, max_level, fingerprints, paths, expires_at, minted_at, consumed_at, "
             "authorization_session, purpose, org_ceiling, status, prepared_event_id "
@@ -392,6 +422,38 @@ def _actual_component_value(
             }
         )
     if kind in {"grant", "dependent_grant"}:
+        version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+        if version >= schema_v4.SCHEMA_USER_VERSION:
+            row = conn.execute(
+                "SELECT authorization_session_id, principal_id, issuer_family, audience, "
+                "purpose, ceiling, paths, fingerprints, scope_ids, membership_manifest, "
+                "policy_fingerprint, token_jti, status, prepared_event_id, created_at, "
+                "expires_at, revoked_at FROM governance_session_grants WHERE grant_id=?",
+                (key,),
+            ).fetchone()
+            return (
+                {"status": "absent"}
+                if row is None
+                else authorization_row(
+                    authorization_session_id=str(row[0]),
+                    principal_id=str(row[1]),
+                    issuer_family=str(row[2]),
+                    audience=str(row[3]),
+                    purpose=row[4],
+                    ceiling=int(row[5]),
+                    paths=str(row[6]),
+                    fingerprints=str(row[7]),
+                    scope_ids=str(row[8]),
+                    membership_manifest=str(row[9]),
+                    policy_fingerprint=str(row[10]),
+                    token_jti=str(row[11]),
+                    status=str(row[12]),
+                    prepared_event_id=row[13],
+                    created_at=int(row[14]),
+                    expires_at=int(row[15]),
+                    revoked_at=row[16],
+                )
+            )
         row = conn.execute(
             "SELECT authorization_session, audience, purpose, ceiling, paths, fingerprints, token_jti, "
             "status, prepared_event_id, created_at, expires_at, revoked_at, membership_manifest, "

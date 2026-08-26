@@ -8,7 +8,7 @@ this reconciliation is `origin/main` at `9dc37201` plus stacked evidence PR #832
 
 | Area | Merged implementation evidence | Remaining end-state obligation |
 | --- | --- | --- |
-| Per-scope disclosure | Conservative lattice, option meet, unconditional scrubber, and session-bound scope enforcement are merged. | Exact v3 grant migration/recovery closure in 1.7/1.10. |
+| Per-scope disclosure | Conservative lattice, option meet, unconditional scrubber, and session-bound scope enforcement are merged. | Exact v3 grant migration and receipt-first v4 scope-bound recovery are implemented and evidenced in this stacked change; no section 1 obligation remains. Merge stays behind the Personal stability hold. |
 | Non-Markdown membership | Descriptor binding, owner backfill, fail-closed propagation, structured-read preflight, and the combined regression matrix are complete through #723, #724, #727, and green PR #832 CI. | No section 2 obligation remains. |
 | Policy authority | Prospective snapshots, exact proposal authority binding, atomic policy publication, the held workspace mirror, and policy/content/companion/measurement/graph writer successors are merged through #729, #740, and #800-#830. | Remaining workspace-race, migration, recovery, suspend/resume/undo, and combined evidence closure in 3.4-3.7 and 3.12-3.13. |
 | Reserved state | Held filesystem substrate and the closed reserved-path monopoly are merged and complete. | Final whole-change review/verification only. |
@@ -59,7 +59,7 @@ this reconciliation is `origin/main` at `9dc37201` plus stacked evidence PR #832
   proving the shared terminal secret/bearer scrubber is non-disableable under active
   governance. Assert legacy scrubber-off policy blocks compilation and the exact typed
   open/rotate issuance occurrence remains the only terminal exception.
-- [ ] 1.7 Extend `tests/test_govern_memory_tool.py` and `tests/test_governance_store.py`
+- [x] 1.7 Extend `tests/test_govern_memory_tool.py` and `tests/test_governance_store.py`
   with red persistence/drift tests for exact session-grant scope bindings and a
   monotonic migration that expires legacy rows unable to prove them.
 - [x] 1.8 Implement the pure per-scope lattice and closed conservative option meet in
@@ -70,7 +70,7 @@ this reconciliation is `origin/main` at `9dc37201` plus stacked evidence PR #832
   migration finding for every legacy occurrence, and make terminal scrubber invocation
   unconditional across content/error/control dispatch; retain only the exact validated
   issuance exception.
-- [ ] 1.10 Persist the reviewed scope set with session grants, return it from active-grant
+- [x] 1.10 Persist the reviewed scope set with session grants, return it from active-grant
   lookup, include it in composite digests/recovery, and make membership or policy drift
   invalidate rather than broaden it.
 - [x] 1.11 Run the focused compiler/lattice/scrubber/store/tool tests and preserve the red-before-green

@@ -1694,7 +1694,74 @@ def _inspect_v4_token(
     raise GovernanceError("AUTHORIZATION_SESSION_UNAVAILABLE", "authorization session is unavailable")
 
 
+def _v4_token_projection(
+    row: tuple[Any, ...],
+    *,
+    status: str,
+    prepared_event_id: str | None,
+    consumed_at: int | None,
+) -> dict[str, Any]:
+    return authorization_row(
+        authorization_session_id=str(row[0]),
+        principal_id=str(row[1]),
+        issuer_family=str(row[2]),
+        audience=str(row[3]),
+        max_level=int(row[4]),
+        fingerprints=str(row[5]),
+        paths=str(row[6]),
+        scope_ids=str(row[7]),
+        purpose=row[8],
+        org_ceiling=int(row[9]),
+        status=status,
+        prepared_event_id=prepared_event_id,
+        expires_at=int(row[12]),
+        minted_at=int(row[13]),
+        consumed_at=consumed_at,
+    )
+
+
+def _v4_grant_projection(
+    grant: authorization_session_authority.SessionGrant,
+    *,
+    status: str,
+    prepared_event_id: str | None,
+) -> dict[str, Any]:
+    membership_manifest = _canonical_json(
+        [
+            {
+                "fingerprint": item.fingerprint,
+                "path": item.path,
+                "scope_ids": list(item.scope_ids),
+            }
+            for item in grant.membership
+        ]
+    )
+    return authorization_row(
+        authorization_session_id=grant.authorization_session_id,
+        principal_id=grant.principal_id,
+        issuer_family=grant.issuer_family,
+        audience=grant.audience,
+        purpose=grant.purpose,
+        ceiling=grant.ceiling,
+        paths=_canonical_json(list(grant.paths)),
+        fingerprints=_canonical_json(list(grant.fingerprints)),
+        scope_ids=_canonical_json(list(grant.scope_ids)),
+        membership_manifest=membership_manifest,
+        policy_fingerprint=grant.policy_fingerprint,
+        token_jti=grant.token_jti,
+        status=status,
+        prepared_event_id=prepared_event_id,
+        created_at=grant.created_at,
+        expires_at=grant.expires_at,
+        revoked_at=None,
+    )
+
+
 def _grant_v4(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
+    reconcile = reconcile_governance_operations(vault_root)
+    if reconcile["blocked"]:
+        raise GovernanceError("GOVERNANCE_BLOCKED", "pending operation needs manual repair")
+    selection = kwargs["_selection"]
     who, context, custody, connection, now = _v4_authority_inputs(vault_root, kwargs)
     try:
         purpose = kwargs.get("purpose")
@@ -1739,8 +1806,9 @@ def _grant_v4(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
         ):
             raise GovernanceError("AUTHORIZATION_SESSION_UNAVAILABLE", "authorization session is unavailable")
         duration = max(1, int(kwargs.get("duration_seconds", 3600)))
-        grant = authorization_session_authority.redeem_escalation_token(
-            connection=connection,
+        grant_expires_at = min(review.expires_at, now + duration)
+        grant = authorization_session_authority.review_escalation_redemption(
+            connection,
             token=kwargs.get("token"),
             context=context,
             signing_key=signing_key,
@@ -1749,9 +1817,159 @@ def _grant_v4(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
             membership=current_membership,
             policy_fingerprint=bound_policy.fingerprint,
             now=now,
-            grant_expires_at=min(review.expires_at, now + duration),
+            grant_expires_at=grant_expires_at,
         )
-        return {"status": "committed", "grant_id": grant.grant_id}
+        token_row = connection.execute(
+            "SELECT authorization_session_id, principal_id, issuer_family, audience, "
+            "max_level, fingerprints, paths, scope_ids, purpose, org_ceiling, status, "
+            "prepared_event_id, expires_at, minted_at, consumed_at FROM withhold_tokens "
+            "WHERE jti=?",
+            (grant.token_jti,),
+        ).fetchone()
+        if token_row is None:
+            raise GovernanceError(
+                "AUTHORIZATION_SESSION_UNAVAILABLE",
+                "authorization session is unavailable",
+            )
+        nonce = uuid.uuid4().hex
+        causation_id = receipts.critical_event_id(
+            {
+                "operation": "governance_session_grant",
+                "jti": grant.token_jti,
+                "authorization_session": context.session_id,
+                "nonce": nonce,
+            }
+        )
+        child_ids = [
+            receipts.critical_event_id(
+                {"causation_id": causation_id, "intent": f"child-{index}"}
+            )
+            for index, _receipt in enumerate(selection.child_receipts, start=1)
+        ]
+        prepared_grant = _v4_grant_projection(
+            grant,
+            status="prepared",
+            prepared_event_id=causation_id,
+        )
+        phases = {
+            "prior": [
+                _component(
+                    "token",
+                    grant.token_jti,
+                    _v4_token_projection(
+                        token_row,
+                        status="active",
+                        prepared_event_id=None,
+                        consumed_at=None,
+                    ),
+                    status="active",
+                ),
+                _component("grant", grant.grant_id, {"status": "absent"}, status="absent"),
+            ],
+            "prepared": [
+                _component(
+                    "token",
+                    grant.token_jti,
+                    _v4_token_projection(
+                        token_row,
+                        status="prepared",
+                        prepared_event_id=causation_id,
+                        consumed_at=now,
+                    ),
+                    status="prepared",
+                ),
+                _component("grant", grant.grant_id, prepared_grant, status="prepared"),
+            ],
+            "final": [
+                _component(
+                    "token",
+                    grant.token_jti,
+                    _v4_token_projection(
+                        token_row,
+                        status="consumed",
+                        prepared_event_id=None,
+                        consumed_at=now,
+                    ),
+                    status="consumed",
+                ),
+                _component(
+                    "grant",
+                    grant.grant_id,
+                    {**prepared_grant, "status": "active", "prepared_event_id": None},
+                    status="active",
+                ),
+            ],
+        }
+        digests = {phase: _composite(phase, rows) for phase, rows in phases.items()}
+        affected = sorted(
+            hashlib.sha256(
+                f"{component['component_kind']}:{component['component_key']}".encode()
+            ).hexdigest()
+            for component in phases["prepared"]
+        )
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            persisted = _create_journal(
+                connection,
+                event_id=causation_id,
+                operation=selection.journal_operation,
+                who=who,
+                authorization_session=context.session_id,
+                direction="widening",
+                phases=phases,
+                child_ids=child_ids,
+                phase="allocating",
+                now=now,
+            )
+            if persisted != digests:
+                raise GovernanceError("GOVERNANCE_BLOCKED", "transition digest changed")
+            connection.commit()
+        except BaseException:
+            connection.rollback()
+            raise
+        for index, (child_id, child_operation) in enumerate(
+            zip(child_ids, selection.child_receipts, strict=True), start=1
+        ):
+            receipts.begin_event(
+                vault_root,
+                operation=child_operation,
+                prior=digests["prior"],
+                prepared=digests["prepared"],
+                target=digests["final"],
+                affected_ids=affected,
+                event_id=child_id,
+                parent_causation_id=causation_id,
+                intent_id=f"child-{index}",
+            )
+            if kwargs.get("crash_at") == f"after_child_intent:{index}":
+                raise GovernanceCrash(f"after_child_intent:{index}")
+        _arm_journal(vault_root, causation_id, now=now)
+        authorization_session_authority.prepare_escalation_redemption(
+            connection,
+            token=kwargs.get("token"),
+            context=context,
+            signing_key=signing_key,
+            audience=who.audience_id,
+            purpose=purpose,
+            membership=current_membership,
+            policy_fingerprint=bound_policy.fingerprint,
+            now=now,
+            grant_expires_at=grant_expires_at,
+            prepared_event_id=causation_id,
+            expected_grant=grant,
+        )
+        if kwargs.get("crash_at") == "after_compound_state":
+            raise GovernanceCrash("after_compound_state")
+        for index, child_id in enumerate(child_ids, start=1):
+            receipts.commit_event(vault_root, child_id, outcome="prepared")
+            if kwargs.get("crash_at") == f"after_child_terminal:{index}":
+                raise GovernanceCrash(f"after_child_terminal:{index}")
+        _activate_event(vault_root, causation_id, remove_marker=False, now=now)
+        return {
+            "status": "committed",
+            "causation_id": causation_id,
+            "grant_id": grant.grant_id,
+        }
     except authorization_session_lifecycle.AuthorizationSessionUnavailable:
         raise GovernanceError(
             "AUTHORIZATION_SESSION_UNAVAILABLE",

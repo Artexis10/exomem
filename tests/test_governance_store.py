@@ -8,13 +8,58 @@ never the enforcement authority, never consulted by the live `policy.load`/
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
 import pytest
 
 from exomem.governance import compile as governance_compile
-from exomem.governance import policy, store, tokens
+from exomem.governance import policy, schema_v4, store, tokens
+
+MIGRATION_NOW = 1_800_000_000
+
+
+def _legacy_expiry_migration_seed() -> schema_v4.MigrationSeed:
+    documents = (
+        (
+            "scopes/migration.yaml",
+            b"governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\npaths:\n  - Notes/**\n",
+        ),
+    )
+    compiled = policy.compile_documents(dict(documents))
+    assert not compiled.empty and not compiled.blocked
+    return schema_v4.MigrationSeed(
+        activation_store_id="activation-store-legacy-expiry",
+        logical_vault_id="logical-vault-legacy-expiry",
+        activation_epoch=1,
+        policy=schema_v4.PolicyGenerationSeed(
+            generation_id="01ARZ3NDEKTSV4RRFFQ69G5FAX",
+            source_documents=documents,
+            source_fingerprint=compiled.fingerprint,
+            conflict_digest="0" * 64,
+            compiled_policy=policy.canonical_compiled_bytes(compiled),
+            policy_fingerprint=compiled.fingerprint,
+            compiler_schema_version=1,
+            projector_schema_version=1,
+            predecessor_generation_id=None,
+            authoring_event_id="authoring-legacy-expiry",
+            receipt_event_id="receipt-legacy-expiry",
+            created_at=MIGRATION_NOW,
+        ),
+        catalog=schema_v4.CatalogGenerationSeed(
+            catalog_generation=1,
+            descriptor=b'{"artifacts":[]}',
+            artifact_count=0,
+            created_at=MIGRATION_NOW,
+        ),
+        namespace=schema_v4.ProjectionNamespaceSeed(
+            namespace_id="namespace-legacy-expiry",
+            evidence=b'{"ready":true}',
+            ready_at=MIGRATION_NOW,
+        ),
+        migrated_at=MIGRATION_NOW,
+    )
 
 
 def test_open_connection_creates_sidecar_with_pragmas_and_meta(vault: Path) -> None:
@@ -81,6 +126,54 @@ def test_v3_session_grant_rows_are_non_authoritative(vault: Path) -> None:
 
     assert active == []
     assert identity == "v3-session-grants-unscoped"
+
+
+def test_v3_to_v4_migration_monotonically_expires_manifest_only_session_grants(
+    vault: Path,
+) -> None:
+    connection = store.open_connection(vault)
+    connection.execute(
+        "INSERT INTO governance_session_grants "
+        "(grant_id, authorization_session, audience, purpose, ceiling, paths, "
+        "fingerprints, token_jti, status, created_at, expires_at, "
+        "membership_manifest, policy_fingerprint) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "legacy-grant",
+            "caller-chosen-session",
+            "external",
+            None,
+            6,
+            '["Notes/a.md"]',
+            '["hash"]',
+            "legacy-token",
+            "active",
+            0.0,
+            4_000_000_000.0,
+            '[{"path":"Notes/a.md","scope_ids":["scope-a"]}]',
+            "legacy-policy",
+        ),
+    )
+    connection.commit()
+
+    schema_v4.migrate_v3_connection(connection, _legacy_expiry_migration_seed())
+
+    assert connection.execute("PRAGMA user_version").fetchone() == (4,)
+    assert connection.execute(
+        "SELECT COUNT(*) FROM governance_session_grants"
+    ).fetchone() == (0,)
+    archived = connection.execute(
+        "SELECT row_json, reason, expired_at FROM governance_legacy_authority "
+        "WHERE source_table='governance_session_grants' AND source_key='legacy-grant'"
+    ).fetchone()
+    connection.close()
+    assert archived is not None
+    row = json.loads(archived[0])
+    assert "scope_ids" not in row
+    assert row["membership_manifest"] == (
+        '[{"path":"Notes/a.md","scope_ids":["scope-a"]}]'
+    )
+    assert archived[1:] == ("v3-unbound-authorization", MIGRATION_NOW)
 
 
 def test_existing_v3_sidecar_gets_purpose_staging_table_idempotently(vault: Path) -> None:
