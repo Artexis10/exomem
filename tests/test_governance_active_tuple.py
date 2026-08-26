@@ -4966,7 +4966,14 @@ def test_preserve_binary_v4_preflight_failure_leaves_no_canonical_bytes(
         now=now,
     )
 
-    def refuse(_vault_root: Path, *, writes, now=None):  # noqa: ANN001, ARG001
+    def refuse(
+        _vault_root: Path,
+        *,
+        writes,  # noqa: ANN001, ARG001
+        graph_replacement_provider,
+        now=None,  # noqa: ANN001, ARG001
+    ):
+        assert callable(graph_replacement_provider)
         raise catalog_publication.CatalogPublicationError("preflight refused")
 
     monkeypatch.setattr(

@@ -36,7 +36,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, BinaryIO
 
-from . import indexes, memory_refs, privacy_log, temporal
+from . import indexes, memory_refs, privacy_log, semantic_contract, temporal
 from .kbdir import kb_prefix
 from .vault import (
     MISSING_CONTENT_HASH,
@@ -416,12 +416,20 @@ def preserve(
         else:
             warnings.append(f"{kb_prefix()}log.md missing; skipped log entry")
 
-        from .governance import catalog_publication
+        from .governance import catalog_publication, graph_producer
+
+        def graph_replacement_provider():
+            return graph_producer.replacements_for_planned_markdown(
+                vault_root,
+                before_corpus=semantic_contract.build_corpus_context(vault_root),
+                writes=tuple(writes),
+            )
 
         try:
             prepared_catalog = catalog_publication.prepare_planned_markdown_batch(
                 vault_root,
                 writes=tuple(writes),
+                graph_replacement_provider=graph_replacement_provider,
             )
         except catalog_publication.CatalogPublicationError as error:
             raise catalog_publication.CatalogCommitError(
@@ -983,12 +991,20 @@ def commit_media_sidecar_writes(
 ) -> list[Path] | DeferredGraphCompletion:
     """Publish machine-owned Markdown through the active catalog tuple."""
 
-    from .governance import catalog_publication
+    from .governance import catalog_publication, graph_producer
+
+    def graph_replacement_provider():
+        return graph_producer.replacements_for_planned_markdown(
+            vault_root,
+            before_corpus=semantic_contract.build_corpus_context(vault_root),
+            writes=writes,
+        )
 
     try:
         prepared = catalog_publication.prepare_planned_markdown_batch(
             vault_root,
             writes=writes,
+            graph_replacement_provider=graph_replacement_provider,
         )
     except catalog_publication.CatalogPublicationError as error:
         raise catalog_publication.CatalogCommitError(

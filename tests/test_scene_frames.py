@@ -227,6 +227,44 @@ def test_v4_preflight_refusal_does_not_create_frame_bytes(
     assert not scene_frames.frames_dir_for(video).exists()
 
 
+def test_scene_frame_writer_forwards_lazy_graph_replacement_provider(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    video = _video(vault)
+    captured: dict[str, object] = {}
+
+    def prepare(
+        vault_root,
+        *,
+        writes,
+        clip_replacements,
+        graph_replacement_provider,
+    ):
+        captured.update(
+            vault_root=vault_root,
+            writes=writes,
+            clip_replacements=clip_replacements,
+            graph_replacement_provider=graph_replacement_provider,
+        )
+        return None
+
+    monkeypatch.setattr(
+        catalog_publication,
+        "prepare_planned_markdown_batch",
+        prepare,
+    )
+
+    pairs = scene_frames.write_scene_frames(
+        vault,
+        video,
+        [(_scene(10.0), _FakeImg())],
+    )
+
+    assert len(pairs) == 1
+    assert callable(captured["graph_replacement_provider"])
+
+
 def test_rewrite_clears_stale_frames(vault: Path) -> None:
     video = _video(vault)
     scene_frames.write_scene_frames(
