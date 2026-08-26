@@ -36,6 +36,8 @@ from .. import (
     memory_refs,
     reserved_paths,
     review_state,
+    semantic_contract,
+    vault,
 )
 from ..kbdir import kb_dirname
 from . import (
@@ -45,6 +47,7 @@ from . import (
     catalog_publication,
     companion_backfill,
     decisions,
+    graph_producer,
     membership,
     projection_store,
     projections,
@@ -4250,11 +4253,30 @@ def _backfill_commit(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
             "STALE_COMPANION_BACKFILL", "reviewed companion snapshots changed"
         )
     try:
+        target_source = plan.target_bytes.decode("utf-8")
+        expected_before_hash = hashlib.sha256(plan.prior_bytes).hexdigest()
+
+        def graph_replacement_provider() -> tuple[
+            catalog_publication.GraphMeasurementReplacement, ...
+        ]:
+            before_corpus = semantic_contract.build_corpus_context(vault_root)
+            write = vault.PlannedWrite(
+                path=vault_root / plan.companion_path,
+                content=target_source,
+                expected_hash=expected_before_hash,
+            )
+            return graph_producer.replacements_for_planned_markdown(
+                vault_root,
+                before_corpus=before_corpus,
+                writes=(write,),
+            )
+
         catalog_target = catalog_publication.prepare_markdown_upsert(
             vault_root,
             path=plan.companion_path,
-            source=plan.target_bytes.decode("utf-8"),
-            expected_before_hash=hashlib.sha256(plan.prior_bytes).hexdigest(),
+            source=target_source,
+            expected_before_hash=expected_before_hash,
+            graph_replacement_provider=graph_replacement_provider,
             now=int(now),
         )
         catalog_values = (

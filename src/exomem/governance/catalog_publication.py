@@ -1394,6 +1394,10 @@ def prepare_markdown_batch(
     mutations: tuple[MarkdownCatalogMutation, ...],
     clip_replacements: tuple[ClipMeasurementReplacement, ...] = (),
     graph_replacements: tuple[GraphMeasurementReplacement, ...] = (),
+    graph_replacement_provider: Callable[
+        [], tuple[GraphMeasurementReplacement, ...]
+    ]
+    | None = None,
     now: int | None = None,
     activated_at: int | None = None,
 ) -> PreparedMarkdownCatalogPublication | None:
@@ -1411,6 +1415,7 @@ def prepare_markdown_batch(
         removals=(),
         clip_replacements=clip_replacements,
         graph_replacements=graph_replacements,
+        graph_replacement_provider=graph_replacement_provider,
         now=now,
         activated_at=activated_at,
     )
@@ -1484,6 +1489,10 @@ def prepare_markdown_upsert(
     expected_before_hash: str | None,
     clip_replacements: tuple[ClipMeasurementReplacement, ...] = (),
     graph_replacements: tuple[GraphMeasurementReplacement, ...] = (),
+    graph_replacement_provider: Callable[
+        [], tuple[GraphMeasurementReplacement, ...]
+    ]
+    | None = None,
     now: int | None = None,
     activated_at: int | None = None,
 ) -> PreparedMarkdownCatalogPublication | None:
@@ -1494,6 +1503,7 @@ def prepare_markdown_upsert(
         mutations=(MarkdownCatalogMutation(path, source, expected_before_hash),),
         clip_replacements=clip_replacements,
         graph_replacements=graph_replacements,
+        graph_replacement_provider=graph_replacement_provider,
         now=now,
         activated_at=activated_at,
     )

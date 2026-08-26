@@ -520,7 +520,7 @@ made before both PRs and their combined verification are complete.
   capacity/lane reduction, scheduler-tolerance subtraction, post-observation padding,
   and missed fixed deadline. Require both bounds simultaneously within manifest, 25 ms,
   and 10% of physically-absent p95.
-- [ ] 8.11 Implement principal-free canonical fixed projection records and lexical/vector/CLIP/
+- [x] 8.11 Implement principal-free canonical fixed projection records and lexical/vector/CLIP/
   graph measurement rows plus a request-local membership/decision authorization map that
   selects exactly one hashed variant or L0 per catalog artifact. Enumerate/deduplicate
   finite reachable outputs, enforce 256, and keep principal, purpose, session, grant, and

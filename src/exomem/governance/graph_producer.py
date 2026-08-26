@@ -196,6 +196,37 @@ def replacements_for_planned_markdown(
     return _replacements_between(before_corpus, after_corpus)
 
 
+def replacements_for_current_markdown(
+    vault_root: Path,
+    *,
+    current_corpus: semantic_contract.SemanticCorpusContext,
+    paths: tuple[str, ...],
+) -> tuple[catalog_publication.GraphMeasurementReplacement, ...]:
+    """Rebind already-committed Markdown to its exact recovery topology."""
+
+    root = Path(vault_root)
+    if current_corpus.vault_root != root:
+        raise GraphProducerError("graph producer corpus belongs to another vault")
+    if (
+        type(paths) is not tuple
+        or not paths
+        or len(set(paths)) != len(paths)
+        or any(type(path) is not str or path not in current_corpus.pages for path in paths)
+    ):
+        raise GraphProducerError(
+            "graph producer recovery paths do not bind the current corpus"
+        )
+    edges = _edges_by_source(current_corpus)
+    return tuple(
+        catalog_publication.GraphMeasurementReplacement(
+            item_identity=path,
+            content_hash=current_corpus.pages[path].source_hash,
+            edges=edges.get(path, ()),
+        )
+        for path in sorted(paths)
+    )
+
+
 def replacements_for_semantic_transition(
     vault_root: Path,
     *,
@@ -275,6 +306,7 @@ def replacements_for_removed_markdown(
 
 __all__ = [
     "GraphProducerError",
+    "replacements_for_current_markdown",
     "replacements_for_removed_markdown",
     "replacements_for_planned_markdown",
     "replacements_for_semantic_transition",

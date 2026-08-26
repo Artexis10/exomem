@@ -132,6 +132,39 @@ def test_planned_source_replaces_its_exact_outgoing_edges(tmp_path: Path) -> Non
     )
 
 
+def test_current_source_rebinds_its_exact_recovery_edges(tmp_path: Path) -> None:
+    source_path = "Knowledge Base/Notes/Insights/source.md"
+    target_path = "Knowledge Base/Notes/Insights/target.md"
+    source = _source(
+        "Source",
+        "00000000-0000-0000-0000-000000000001",
+        body="## Observations\n\n- [decision] Keep the edge.\n\n[[Target]]\n",
+    )
+    current = _corpus(
+        tmp_path,
+        _state(tmp_path, source_path, source),
+        _state(
+            tmp_path,
+            target_path,
+            _source("Target", "00000000-0000-0000-0000-000000000002"),
+        ),
+    )
+
+    replacements = graph_producer.replacements_for_current_markdown(
+        tmp_path,
+        current_corpus=current,
+        paths=(source_path,),
+    )
+
+    assert replacements == (
+        catalog_publication.GraphMeasurementReplacement(
+            source_path,
+            vault.content_hash(source),
+            (_edge(source_path, target_path),),
+        ),
+    )
+
+
 def test_title_change_replaces_sources_whose_resolution_changed(tmp_path: Path) -> None:
     source_path = "Knowledge Base/Notes/Insights/source.md"
     target_path = "Knowledge Base/Notes/Insights/target.md"
