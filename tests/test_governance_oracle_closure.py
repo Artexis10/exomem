@@ -162,7 +162,17 @@ def _projected_item(
     )
 
 
-def _counterfactual_runtime(*, hidden_present: bool) -> projection_runtime.ActiveProjectionRuntime:
+_DEFAULT_VISIBLE_BODIES = (
+    "oracle-visible alpha projected result",
+    "oracle-visible beta projected result",
+)
+
+
+def _counterfactual_runtime(
+    *,
+    hidden_bodies: tuple[str, ...],
+    visible_bodies: tuple[str, ...] = _DEFAULT_VISIBLE_BODIES,
+) -> projection_runtime.ActiveProjectionRuntime:
     visible = Scope(id="oracle-visible", source="scopes/oracle-visible.yaml")
     hidden = Scope(
         id="oracle-hidden",
@@ -176,24 +186,19 @@ def _counterfactual_runtime(*, hidden_present: bool) -> projection_runtime.Activ
     items = [
         _projected_item(
             policy,
-            path="Knowledge Base/oracle-visible-a.md",
+            path=f"Knowledge Base/oracle-visible-{index:03d}.md",
             scope_id=visible.id,
-            body="oracle-visible alpha projected result",
-        ),
-        _projected_item(
-            policy,
-            path="Knowledge Base/oracle-visible-b.md",
-            scope_id=visible.id,
-            body="oracle-visible beta projected result",
-        ),
+            body=body,
+        )
+        for index, body in enumerate(visible_bodies)
     ]
-    if hidden_present:
+    for index, body in enumerate(hidden_bodies):
         items.append(
             _projected_item(
                 policy,
-                path="Knowledge Base/private/oracle-hidden.md",
+                path=f"Knowledge Base/private/oracle-hidden-{index:03d}.md",
                 scope_id=hidden.id,
-                body="oracle-visible " * 32 + "counterfactual hidden source",
+                body=body,
             )
         )
     item_tuple = tuple(items)
@@ -236,12 +241,17 @@ def _client(monkeypatch: pytest.MonkeyPatch, root: Path) -> TestClient:
     return TestClient(server.build_server(require_auth=False).http_app())
 
 
-def test_l0_present_and_physically_absent_have_the_same_complete_wire_envelope(
+def _wire_pair(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-) -> None:
-    """A default-denied row cannot alter any serialized application field."""
-
+    *,
+    hidden_bodies: tuple[str, ...],
+    request: dict[str, object],
+    visible_bodies: tuple[str, ...] = _DEFAULT_VISIBLE_BODIES,
+) -> tuple[
+    dict[str, projection_runtime.ActiveProjectionRuntime],
+    dict[str, httpx.Response],
+]:
     monkeypatch.setenv("EXOMEM_REST_API_KEY", _REST_KEY)
     monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
     monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
@@ -251,6 +261,7 @@ def test_l0_present_and_physically_absent_have_the_same_complete_wire_envelope(
     monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(writer_state))
     monkeypatch.setattr(writer_lease, "start_server_lifecycle", lambda: None)
     writer_lease.reset_managers_for_tests()
+    projection_runtime._clear_projected_continuations_for_tests()
     monkeypatch.setattr(
         principal,
         "resolve_rest_principal",
@@ -268,11 +279,83 @@ def test_l0_present_and_physically_absent_have_the_same_complete_wire_envelope(
     }
     for root in roots.values():
         (root / "Knowledge Base").mkdir(parents=True)
-    runtimes = {
-        roots["absent"]: _counterfactual_runtime(hidden_present=False),
-        roots["present"]: _counterfactual_runtime(hidden_present=True),
+    runtimes_by_root = {
+        roots["absent"]: _counterfactual_runtime(
+            hidden_bodies=(),
+            visible_bodies=visible_bodies,
+        ),
+        roots["present"]: _counterfactual_runtime(
+            hidden_bodies=hidden_bodies,
+            visible_bodies=visible_bodies,
+        ),
     }
-    present_runtime = runtimes[roots["present"]]
+    monkeypatch.setattr(
+        projection_runtime,
+        "has_preactivated_projection_runtime",
+        lambda root: Path(root) in runtimes_by_root,
+    )
+    monkeypatch.setattr(
+        projection_runtime,
+        "load_active_projection_runtime",
+        lambda root: runtimes_by_root[Path(root)],
+    )
+    clients = {name: _client(monkeypatch, root) for name, root in roots.items()}
+    try:
+        responses = {
+            name: client.post(
+                "/api/ask_memory",
+                json=request,
+                headers={"Authorization": f"Bearer {_REST_KEY}"},
+            )
+            for name, client in clients.items()
+        }
+    finally:
+        for client in clients.values():
+            client.close()
+        projection_runtime._clear_projected_continuations_for_tests()
+        writer_lease.reset_managers_for_tests()
+    return (
+        {name: runtimes_by_root[root] for name, root in roots.items()},
+        responses,
+    )
+
+
+def _request(*, query: str, limit: int, mode: str = "hybrid") -> dict[str, object]:
+    return {
+        "query": query,
+        "scope": "vault",
+        "mode": mode,
+        "graph": False,
+        "rerank": False,
+        "limit": limit,
+        "detail": "full",
+        "include_timings": True,
+    }
+
+
+def _assert_same_success_envelope(responses: dict[str, httpx.Response]) -> None:
+    assert responses["absent"].status_code == 200, responses["absent"].text
+    assert responses["present"].status_code == 200, responses["present"].text
+    assert _canonical_transport_envelope(
+        responses["present"], transport="http"
+    ) == _canonical_transport_envelope(responses["absent"], transport="http")
+
+
+def test_l0_present_and_physically_absent_have_the_same_complete_wire_envelope(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A default-denied row cannot alter any serialized application field."""
+
+    runtimes, responses = _wire_pair(
+        monkeypatch,
+        tmp_path,
+        hidden_bodies=(
+            "oracle-visible " * 32 + "counterfactual hidden source",
+        ),
+        request=_request(query="oracle-visible", limit=2, mode="keyword"),
+    )
+    present_runtime = runtimes["present"]
     authorization = projection_authorization.build_authorization_map(
         present_runtime.namespace,
         policy=present_runtime.snapshot.policy,
@@ -281,53 +364,100 @@ def test_l0_present_and_physically_absent_have_the_same_complete_wire_envelope(
         verified_session_grants=(),
         catalog=present_runtime.catalog,
     )
-    assert "Knowledge Base/private/oracle-hidden.md" in authorization.withheld_identities
+    assert (
+        "Knowledge Base/private/oracle-hidden-000.md"
+        in authorization.withheld_identities
+    )
     assert decisions.decide(
         ["oracle-hidden"],
         audience="oracle-external",
         policy=present_runtime.snapshot.policy,
     ).level == 0
-    monkeypatch.setattr(
-        projection_runtime,
-        "has_preactivated_projection_runtime",
-        lambda root: Path(root) in runtimes,
-    )
-    monkeypatch.setattr(
-        projection_runtime,
-        "load_active_projection_runtime",
-        lambda root: runtimes[Path(root)],
-    )
-    clients = {name: _client(monkeypatch, root) for name, root in roots.items()}
-    body = {
-        "query": "oracle-visible",
-        "scope": "vault",
-        "mode": "keyword",
-        "graph": False,
-        "rerank": False,
-        "limit": 2,
-        "detail": "full",
-        "include_timings": True,
-    }
-    try:
-        responses = {
-            name: client.post(
-                "/api/ask_memory",
-                json=body,
-                headers={"Authorization": f"Bearer {_REST_KEY}"},
-            )
-            for name, client in clients.items()
-        }
-    finally:
-        for client in clients.values():
-            client.close()
-        writer_lease.reset_managers_for_tests()
-
-    assert responses["absent"].status_code == 200, responses["absent"].text
-    assert responses["present"].status_code == 200, responses["present"].text
+    _assert_same_success_envelope(responses)
     assert responses["absent"].json()["data"]["timings_suppressed"] == {
         "status": "governed_projection"
     }
     assert b"oracle-hidden" not in responses["present"].content
-    assert _canonical_transport_envelope(
-        responses["present"], transport="http"
-    ) == _canonical_transport_envelope(responses["absent"], transport="http")
+
+
+_RANK_VISIBLE_BODIES = (
+    "rank-needle " * 16 + "visible high",
+    "rank-needle " * 4 + "visible middle",
+    "rank-needle visible low",
+)
+
+
+@pytest.mark.parametrize(
+    ("rank_band", "hidden_body", "expected_owner_rank"),
+    (
+        ("high", "rank-needle " * 32 + "hidden high", 0),
+        ("middle", "rank-needle " * 8 + "hidden middle", 1),
+        ("low", "rank-needle " + "filler " * 96 + "hidden low", 3),
+    ),
+)
+def test_hidden_raw_rank_cannot_displace_the_public_top_k(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    rank_band: str,
+    hidden_body: str,
+    expected_owner_rank: int,
+) -> None:
+    runtimes, responses = _wire_pair(
+        monkeypatch,
+        tmp_path,
+        hidden_bodies=(hidden_body,),
+        visible_bodies=_RANK_VISIBLE_BODIES,
+        request=_request(query="rank-needle", limit=1),
+    )
+    present_runtime = runtimes["present"]
+    owner_authorization = projection_authorization.build_authorization_map(
+        present_runtime.namespace,
+        policy=present_runtime.snapshot.policy,
+        audience=principal.OWNER_AUDIENCE,
+        purpose=None,
+        verified_session_grants=(),
+        catalog=present_runtime.catalog,
+    )
+    owner_order = [
+        hit.item_identity
+        for hit in present_runtime.lexical_index.search_bm25(
+            owner_authorization,
+            "rank-needle",
+            k=4,
+        )
+    ]
+    hidden_identity = "Knowledge Base/private/oracle-hidden-000.md"
+    assert owner_order.index(hidden_identity) == expected_owner_rank, rank_band
+
+    _assert_same_success_envelope(responses)
+    data = responses["present"].json()["data"]
+    assert len(data["hits"]) == 1
+    assert isinstance(data["continuation"], str)
+    assert b"oracle-hidden" not in responses["present"].content
+
+
+def test_hidden_candidates_beyond_the_visible_top_k_never_consume_the_lane_cap(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runtimes, responses = _wire_pair(
+        monkeypatch,
+        tmp_path,
+        hidden_bodies=tuple(
+            "rank-needle " * 24 + f"hidden {index}" for index in range(80)
+        ),
+        visible_bodies=_RANK_VISIBLE_BODIES,
+        request=_request(query="rank-needle", limit=1),
+    )
+    external_authorization = projection_authorization.build_authorization_map(
+        runtimes["present"].namespace,
+        policy=runtimes["present"].snapshot.policy,
+        audience="oracle-external",
+        purpose=None,
+        verified_session_grants=(),
+        catalog=runtimes["present"].catalog,
+    )
+    assert len(external_authorization.withheld_identities) == 80
+
+    _assert_same_success_envelope(responses)
+    assert len(responses["present"].json()["data"]["hits"]) == 1
