@@ -307,6 +307,7 @@ def _wire_pages(
     request: dict[str, object],
     max_pages: int,
     query_vector: tuple[float, ...] | None = None,
+    rerank_scorer: Callable[[str, list[str]], list[float]] | None = None,
     visible_bodies: tuple[str, ...] = _DEFAULT_VISIBLE_BODIES,
     runtime_factory: Callable[
         [tuple[str, ...]], projection_runtime.ActiveProjectionRuntime
@@ -321,7 +322,6 @@ def _wire_pages(
         monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
     else:
         monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
-        monkeypatch.setattr(readiness, "should_defer", lambda _lane: False)
 
         def embed_query(_texts: list[str], *, is_query: bool) -> list[list[float]]:
             assert is_query is True
@@ -332,8 +332,15 @@ def _wire_pages(
             "embed_texts",
             embed_query,
         )
+    if query_vector is not None or rerank_scorer is not None:
+        monkeypatch.setattr(readiness, "should_defer", lambda _lane: False)
     monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
-    monkeypatch.setenv("EXOMEM_DISABLE_RANKING", "1")
+    if rerank_scorer is None:
+        monkeypatch.setenv("EXOMEM_DISABLE_RANKING", "1")
+    else:
+        monkeypatch.delenv("EXOMEM_DISABLE_RANKING", raising=False)
+        monkeypatch.setattr(embeddings, "ranking_enabled", lambda: True)
+        monkeypatch.setattr(embeddings, "rerank_pairs", rerank_scorer)
     writer_state = tmp_path / "writer-state"
     writer_state.mkdir()
     monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(writer_state))
@@ -417,6 +424,7 @@ def _wire_pair(
     hidden_bodies: tuple[str, ...],
     request: dict[str, object],
     query_vector: tuple[float, ...] | None = None,
+    rerank_scorer: Callable[[str, list[str]], list[float]] | None = None,
     visible_bodies: tuple[str, ...] = _DEFAULT_VISIBLE_BODIES,
     runtime_factory: Callable[
         [tuple[str, ...]], projection_runtime.ActiveProjectionRuntime
@@ -433,6 +441,7 @@ def _wire_pair(
         request=request,
         max_pages=1,
         query_vector=query_vector,
+        rerank_scorer=rerank_scorer,
         visible_bodies=visible_bodies,
         runtime_factory=runtime_factory,
     )
@@ -905,3 +914,121 @@ def test_vector_ranking_uses_only_the_selected_projection_before_top_k(
     assert b"vectorprojectionquartz" in content
     assert b"rawvectorquartz" not in content
     assert b"oracle-hidden" not in content
+
+
+def _rerank_runtime(
+    hidden_bodies: tuple[str, ...],
+) -> projection_runtime.ActiveProjectionRuntime:
+    alpha = Scope(id="oracle-alpha", source="scopes/oracle-alpha.yaml")
+    beta = Scope(id="oracle-beta", source="scopes/oracle-beta.yaml")
+    hidden = Scope(
+        id="oracle-hidden",
+        source="scopes/oracle-hidden.yaml",
+        default_deny=True,
+    )
+    policy = Policy(
+        fingerprint="c" * 64,
+        scopes={alpha.id: alpha, beta.id: beta, hidden.id: hidden},
+        rules=tuple(
+            Rule(
+                id=f"oracle-rerank-{scope.id}",
+                source=f"rules/oracle-rerank-{scope.id}.yaml",
+                scope_ids=(scope.id,),
+                audience="oracle-external",
+                ceiling=3,
+                options={
+                    "abstract": f"rerankprojectionquartz {label} safe abstract"
+                },
+            )
+            for scope, label in ((alpha, "alpha"), (beta, "beta"))
+        ),
+    )
+    items = [
+        _projected_item(
+            policy,
+            path=f"Knowledge Base/oracle-visible-{index:03d}.md",
+            scope_id=scope.id,
+            body=f"rawrerankquartz visible item {index}",
+        )
+        for index, scope in enumerate((alpha, beta))
+    ]
+    items.extend(
+        _projected_item(
+            policy,
+            path=f"Knowledge Base/private/oracle-hidden-{index:03d}.md",
+            scope_id=hidden.id,
+            body=body,
+        )
+        for index, body in enumerate(hidden_bodies)
+    )
+    return _runtime_from_items(policy, tuple(items))
+
+
+def test_reranker_receives_only_selected_projection_text_before_final_top_k(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    observed: list[tuple[str, tuple[str, ...]]] = []
+
+    def rerank_scorer(query: str, passages: list[str]) -> list[float]:
+        observed.append((query, tuple(passages)))
+        return [
+            100.0
+            if "oracle-hidden-000" in passage
+            else 10.0
+            if "beta safe abstract" in passage
+            else 1.0
+            for passage in passages
+        ]
+
+    request = _request(query="rerankprojectionquartz", limit=2)
+    request["rerank"] = True
+    runtimes, responses = _wire_pair(
+        monkeypatch,
+        tmp_path,
+        hidden_bodies=("rerankprojectionquartz hidden raw source",),
+        runtime_factory=_rerank_runtime,
+        rerank_scorer=rerank_scorer,
+        request=request,
+    )
+
+    assert len(observed) == 2
+    for query, passages in observed:
+        assert query == "rerankprojectionquartz"
+        assert len(passages) == 2
+        assert all("rerankprojectionquartz" in value for value in passages)
+        assert all("rawrerankquartz" not in value for value in passages)
+        assert all("oracle-hidden" not in value for value in passages)
+
+    present_runtime = runtimes["present"]
+    owner = projection_authorization.build_authorization_map(
+        present_runtime.namespace,
+        policy=present_runtime.snapshot.policy,
+        audience=principal.OWNER_AUDIENCE,
+        purpose=None,
+        verified_session_grants=(),
+        catalog=present_runtime.catalog,
+    )
+    owner_reranked = present_runtime.reranker.rerank_batch(
+        owner,
+        "rerankprojectionquartz",
+        (
+            "Knowledge Base/oracle-visible-000.md",
+            "Knowledge Base/oracle-visible-001.md",
+            "Knowledge Base/private/oracle-hidden-000.md",
+        ),
+        scorer=rerank_scorer,
+        k=3,
+    )
+    assert owner_reranked[0].item_identity == (
+        "Knowledge Base/private/oracle-hidden-000.md"
+    )
+
+    _assert_same_success_envelope(responses)
+    data = responses["present"].json()["data"]
+    assert [hit["abstract"] for hit in data["hits"]] == [
+        "rerankprojectionquartz beta safe abstract",
+        "rerankprojectionquartz alpha safe abstract",
+    ]
+    assert b"rawrerankquartz" not in responses["present"].content
+    assert b"oracle-hidden" not in responses["present"].content
