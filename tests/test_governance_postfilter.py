@@ -1803,17 +1803,19 @@ def test_a_raised_payload_naming_a_withheld_memory_ref_is_filtered(
     assert egress.WITHHELD_REFERENCE in text
 
 
-def test_an_identity_collision_does_not_name_the_colliding_pages(vault: Path) -> None:
-    """The reachable case, end to end. Duplicating an identity is an ordinary
-    consequence of a merge or a sync copy, so a caller can manufacture the
-    collision and then read the colliding vault paths out of the error."""
+def test_hidden_identity_collision_is_identical_to_physical_absence(
+    vault: Path,
+) -> None:
+    """Ambiguity is computed from caller-visible candidates, never raw rows."""
     from exomem import commands, memory_refs
     from exomem.writer_lease import invoke_command
 
     patterns = vault / "Knowledge Base" / "Notes" / "Patterns"
     identity = memory_refs.new_id()
+    pages = []
     for name in ("kill-switch-for-risky-releases.md", "kill-switch-copy.md"):
         page = patterns / name
+        pages.append(page)
         updated, _ = memory_refs.add_id_to_markdown(
             page.read_text(encoding="utf-8")
             if page.exists()
@@ -1824,15 +1826,87 @@ def test_an_identity_collision_does_not_name_the_colliding_pages(vault: Path) ->
     _govern_patterns_shut(vault)
 
     command = {c.name: c for c in commands.COMMANDS}["get"]
+
+    def _error() -> ValueError:
+        with _external_scope():
+            with pytest.raises(ValueError) as excinfo:
+                invoke_command(command, vault, path=memory_refs.memory_ref(identity))
+        return excinfo.value
+
+    hidden_present = _error()
+    memory_refs.ReferenceIndex(vault).delete_paths(
+        [page.relative_to(vault).as_posix() for page in pages]
+    )
+    for page in pages:
+        page.unlink()
+    physically_absent = _error()
+
+    assert type(hidden_present) is type(physically_absent)
+    assert hidden_present.args == physically_absent.args
+    text = str(hidden_present)
+    assert "REFERENCE_NOT_FOUND" in text
+    assert "AMBIGUOUS_REFERENCE" not in text
+    assert "2 pages" not in text
+    for leaked in ("kill-switch-for-risky-releases", "kill-switch-copy", "Patterns"):
+        assert leaked not in text, f"collision named {leaked!r}: {text!r}"
+
+
+def test_hidden_identity_collision_does_not_shadow_one_visible_page(
+    vault: Path,
+) -> None:
+    """One visible candidate resolves as though its hidden twin did not exist."""
+    from exomem import commands, memory_refs
+    from exomem.writer_lease import invoke_command
+
+    identity = memory_refs.new_id()
+    hidden = vault / ERROR_WITHHELD
+    visible = vault / "Knowledge Base" / "Notes" / "Insights" / "visible-twin.md"
+    visible.parent.mkdir(parents=True, exist_ok=True)
+    for page, body in ((hidden, "private"), (visible, "public")):
+        updated, _ = memory_refs.add_id_to_markdown(
+            page.read_text(encoding="utf-8")
+            if page.exists()
+            else f"---\ntype: insight\n---\n{body}\n",
+            identity,
+        )
+        page.write_text(updated, encoding="utf-8")
+    _govern_patterns_shut(vault)
+
+    command = {c.name: c for c in commands.COMMANDS}["get"]
     with _external_scope():
-        with pytest.raises(Exception) as excinfo:
+        result = invoke_command(command, vault, path=memory_refs.memory_ref(identity))
+
+    assert result["path"] == visible.relative_to(vault).as_posix()
+    assert result["body"].strip() == "public"
+    assert "kill-switch-for-risky-releases" not in json.dumps(result)
+
+
+def test_identity_collision_counts_only_visible_pages(vault: Path) -> None:
+    """A genuine ambiguity retains its stable code and visible-only count."""
+    from exomem import commands, memory_refs
+    from exomem.writer_lease import invoke_command
+
+    identity = memory_refs.new_id()
+    insights = vault / "Knowledge Base" / "Notes" / "Insights"
+    insights.mkdir(parents=True, exist_ok=True)
+    for name in ("visible-one.md", "visible-two.md"):
+        page = insights / name
+        updated, _ = memory_refs.add_id_to_markdown(
+            "---\ntype: insight\n---\npublic\n", identity
+        )
+        page.write_text(updated, encoding="utf-8")
+    _govern_patterns_shut(vault)
+
+    command = {c.name: c for c in commands.COMMANDS}["get"]
+    with _external_scope():
+        with pytest.raises(ValueError) as excinfo:
             invoke_command(command, vault, path=memory_refs.memory_ref(identity))
 
     text = str(excinfo.value)
-    assert "AMBIGUOUS_REFERENCE" in text, f"the stable code must survive: {text!r}"
-    assert "2" in text, "the match count is what an owner needs"
-    for leaked in ("kill-switch-for-risky-releases", "kill-switch-copy", "Patterns"):
-        assert leaked not in text, f"collision named {leaked!r}: {text!r}"
+    assert "AMBIGUOUS_REFERENCE" in text
+    assert "2 pages" in text
+    assert "visible-one" not in text
+    assert "visible-two" not in text
 
 
 def test_a_blocked_policy_fails_the_error_path_closed(vault: Path) -> None:
