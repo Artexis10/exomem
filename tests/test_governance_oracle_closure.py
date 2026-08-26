@@ -14,11 +14,13 @@ import pytest
 from governance_projection_support import verified_namespace
 from starlette.testclient import TestClient
 
-from exomem import server, writer_lease
+from exomem import embeddings, readiness, server, writer_lease
 from exomem.governance import (
     decisions,
     principal,
+    projected_retrieval,
     projection_authorization,
+    projection_measurement_store,
     projection_runtime,
     projection_store,
     projections,
@@ -29,6 +31,7 @@ from exomem.server_runtime import ServerRuntime
 
 _REST_KEY = "governance-oracle-key"
 _TRANSPORT_ONLY_HEADERS = frozenset({"date", "traceparent", "tracestate"})
+_VECTOR_EXTRACTOR = "projected-text-v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,6 +175,11 @@ _DEFAULT_VISIBLE_BODIES = (
 def _runtime_from_items(
     policy: Policy,
     items: tuple[projection_store.ProjectionItemVariants, ...],
+    *,
+    vector_for_variant: Callable[
+        [projections.ProjectionVariant], tuple[float, ...]
+    ]
+    | None = None,
 ) -> projection_runtime.ActiveProjectionRuntime:
     key = projections.ProjectionNamespaceKey(
         policy_fingerprint=policy.fingerprint,
@@ -198,7 +206,50 @@ def _runtime_from_items(
             projection_store.projection_namespace_evidence_bytes(namespace.manifest)
         ),
     )
-    return projection_runtime.ActiveProjectionRuntime(snapshot, namespace)
+    if vector_for_variant is None:
+        return projection_runtime.ActiveProjectionRuntime(snapshot, namespace)
+    measurements = tuple(
+        projected_retrieval.ProjectionVectorMeasurement(
+            projections.MeasurementKey(
+                projection_variant_id=variant.projection_variant_id,
+                lane="vector",
+                extractor_version=_VECTOR_EXTRACTOR,
+                model_version=embeddings.MODEL_NAME,
+            ),
+            vector_for_variant(variant),
+        )
+        for item in items
+        for variant in item.variants
+    )
+    vector_index = projected_retrieval.ProjectedVectorIndex(
+        namespace,
+        measurements,
+        extractor_version=_VECTOR_EXTRACTOR,
+        model_version=embeddings.MODEL_NAME,
+    )
+    family = projection_measurement_store.MeasurementFamilyKey(
+        namespace_key=key,
+        lane="vector",
+        extractor_version=_VECTOR_EXTRACTOR,
+        model_version=embeddings.MODEL_NAME,
+    )
+    root = projection_store.ProjectionMeasurementRoot(
+        namespace_key=key,
+        family_id=family.family_id,
+        lane="vector",
+        extractor_version=_VECTOR_EXTRACTOR,
+        model_version=embeddings.MODEL_NAME,
+        measurement_count=len(measurements),
+        vector_dimension=len(measurements[0].vector),
+        graph_edge_count=0,
+        rows_digest="a" * 64,
+    )
+    return projection_runtime.ActiveProjectionRuntime(
+        snapshot,
+        namespace,
+        (root,),
+        vector_index=vector_index,
+    )
 
 
 def _counterfactual_runtime(
@@ -255,6 +306,7 @@ def _wire_pages(
     hidden_bodies: tuple[str, ...],
     request: dict[str, object],
     max_pages: int,
+    query_vector: tuple[float, ...] | None = None,
     visible_bodies: tuple[str, ...] = _DEFAULT_VISIBLE_BODIES,
     runtime_factory: Callable[
         [tuple[str, ...]], projection_runtime.ActiveProjectionRuntime
@@ -265,7 +317,21 @@ def _wire_pages(
     dict[str, tuple[httpx.Response, ...]],
 ]:
     monkeypatch.setenv("EXOMEM_REST_API_KEY", _REST_KEY)
-    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    if query_vector is None:
+        monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    else:
+        monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+        monkeypatch.setattr(readiness, "should_defer", lambda _lane: False)
+
+        def embed_query(_texts: list[str], *, is_query: bool) -> list[list[float]]:
+            assert is_query is True
+            return [list(query_vector)]
+
+        monkeypatch.setattr(
+            embeddings,
+            "embed_texts",
+            embed_query,
+        )
     monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
     monkeypatch.setenv("EXOMEM_DISABLE_RANKING", "1")
     writer_state = tmp_path / "writer-state"
@@ -350,6 +416,7 @@ def _wire_pair(
     *,
     hidden_bodies: tuple[str, ...],
     request: dict[str, object],
+    query_vector: tuple[float, ...] | None = None,
     visible_bodies: tuple[str, ...] = _DEFAULT_VISIBLE_BODIES,
     runtime_factory: Callable[
         [tuple[str, ...]], projection_runtime.ActiveProjectionRuntime
@@ -365,6 +432,7 @@ def _wire_pair(
         hidden_bodies=hidden_bodies,
         request=request,
         max_pages=1,
+        query_vector=query_vector,
         visible_bodies=visible_bodies,
         runtime_factory=runtime_factory,
     )
@@ -713,3 +781,127 @@ def test_hidden_rows_cannot_change_any_pagination_boundary_cursor_or_order(
     assert [data.get("continuation") for data in present_data] == [
         data.get("continuation") for data in absent_data
     ]
+
+
+def _projection_vector_runtime(
+    hidden_bodies: tuple[str, ...],
+) -> projection_runtime.ActiveProjectionRuntime:
+    projected = Scope(id="oracle-projected", source="scopes/oracle-projected.yaml")
+    hidden = Scope(
+        id="oracle-hidden",
+        source="scopes/oracle-hidden.yaml",
+        default_deny=True,
+    )
+    policy = Policy(
+        fingerprint="d" * 64,
+        scopes={projected.id: projected, hidden.id: hidden},
+        rules=(
+            Rule(
+                id="oracle-vector-external",
+                source="rules/oracle-vector-external.yaml",
+                scope_ids=(projected.id,),
+                audience="oracle-external",
+                ceiling=3,
+                options={"abstract": "vectorprojectionquartz safe abstract"},
+            ),
+        ),
+    )
+    items = [
+        _projected_item(
+            policy,
+            path=f"Knowledge Base/oracle-visible-{index:03d}.md",
+            scope_id=projected.id,
+            body=f"rawvectorquartz visible item {index}",
+        )
+        for index in range(2)
+    ]
+    items.extend(
+        _projected_item(
+            policy,
+            path=f"Knowledge Base/private/oracle-hidden-{index:03d}.md",
+            scope_id=hidden.id,
+            body=body,
+        )
+        for index, body in enumerate(hidden_bodies)
+    )
+
+    def vector_for_variant(
+        variant: projections.ProjectionVariant,
+    ) -> tuple[float, ...]:
+        if variant.decision_level == 3:
+            return (1.0, 0.0)
+        if "/private/" in variant.item_identity:
+            return (0.0, 1.0)
+        return (-1.0, 0.0)
+
+    return _runtime_from_items(
+        policy,
+        tuple(items),
+        vector_for_variant=vector_for_variant,
+    )
+
+
+@pytest.mark.parametrize(
+    ("query_vector", "expected_external_score"),
+    (
+        ((1.0, 0.0), 1.0),
+        ((0.0, 1.0), 0.0),
+    ),
+)
+def test_vector_ranking_uses_only_the_selected_projection_before_top_k(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    query_vector: tuple[float, ...],
+    expected_external_score: float,
+) -> None:
+    runtimes, responses = _wire_pair(
+        monkeypatch,
+        tmp_path,
+        hidden_bodies=("rawvectorquartz hidden source",),
+        runtime_factory=_projection_vector_runtime,
+        query_vector=query_vector,
+        request=_request(query="vector oracle", limit=2, mode="vector"),
+    )
+    present_runtime = runtimes["present"]
+    external = projection_authorization.build_authorization_map(
+        present_runtime.namespace,
+        policy=present_runtime.snapshot.policy,
+        audience="oracle-external",
+        purpose=None,
+        verified_session_grants=(),
+        catalog=present_runtime.catalog,
+    )
+    owner = projection_authorization.build_authorization_map(
+        present_runtime.namespace,
+        policy=present_runtime.snapshot.policy,
+        audience=principal.OWNER_AUDIENCE,
+        purpose=None,
+        verified_session_grants=(),
+        catalog=present_runtime.catalog,
+    )
+    vector_index = present_runtime.vector_index
+    assert vector_index is not None
+    external_hits = vector_index.search_vector(
+        external,
+        query_vector,
+        k=2,
+    )
+    owner_hits = vector_index.search_vector(
+        owner,
+        query_vector,
+        k=3,
+    )
+    assert [hit.decision_level for hit in external_hits] == [3, 3]
+    assert [hit.score for hit in external_hits] == [
+        expected_external_score,
+        expected_external_score,
+    ]
+    assert owner_hits[0].item_identity == (
+        "Knowledge Base/private/oracle-hidden-000.md"
+    )
+
+    _assert_same_success_envelope(responses)
+    content = responses["present"].content
+    assert b"vectorprojectionquartz" in content
+    assert b"rawvectorquartz" not in content
+    assert b"oracle-hidden" not in content
