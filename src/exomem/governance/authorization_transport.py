@@ -14,6 +14,7 @@ from functools import partial
 from io import TextIOWrapper
 from pathlib import Path
 from typing import Any, Final
+from urllib.parse import quote_plus, unquote_plus
 
 import anyio
 import mcp.types
@@ -37,6 +38,7 @@ from .authorization_request import (
 AUTHORIZATION_SESSION_HEADER_NAME: Final = "X-Exomem-Authorization-Session"
 AUTHORIZATION_SESSION_HEADER: Final = AUTHORIZATION_SESSION_HEADER_NAME.lower().encode()
 MCP_CREDENTIAL_PARAMETER: Final = "authorization_session_credential"
+_REDACTED_CREDENTIAL_VALUE: Final = "authorization-session-credential-removed"
 _MAX_MCP_JSON_BYTES: Final = 64 * 1024 * 1024
 _REQUEST_CARRIER: ContextVar[CredentialCarrier | None] = ContextVar(
     "exomem_authorization_credential_carrier", default=None
@@ -193,6 +195,42 @@ def _pairs_to_value(value: object) -> object:
     return value
 
 
+def _redact_canonical_bearer_text(value: str) -> tuple[str, bool]:
+    spans = tuple(authorization_sessions.iter_credential_spans(value))
+    if not spans:
+        return value, False
+    output: list[str] = []
+    cursor = 0
+    for start, end in spans:
+        output.extend((value[cursor:start], _REDACTED_CREDENTIAL_VALUE))
+        cursor = end
+    output.append(value[cursor:])
+    return "".join(output), True
+
+
+def _redact_canonical_bearers(value: object) -> tuple[object, bool]:
+    if isinstance(value, str):
+        return _redact_canonical_bearer_text(value)
+    if isinstance(value, dict):
+        output: dict[object, object] = {}
+        found = False
+        for key, item in value.items():
+            clean_key, key_found = _redact_canonical_bearers(key)
+            clean_item, item_found = _redact_canonical_bearers(item)
+            output[clean_key] = clean_item
+            found = found or key_found or item_found
+        return output, found
+    if isinstance(value, list):
+        output = []
+        found = False
+        for item in value:
+            clean_item, item_found = _redact_canonical_bearers(item)
+            output.append(clean_item)
+            found = found or item_found
+        return output, found
+    return value, False
+
+
 def _pair_value(pairs: _ObjectPairs, key: str) -> object:
     matches = [value for candidate, value in pairs if candidate == key]
     return matches[-1] if matches else None
@@ -245,6 +283,12 @@ def _sanitize_call(value: _ObjectPairs) -> tuple[object, CredentialCarrier, str 
             for key, item in arguments
             if key != MCP_CREDENTIAL_PARAMETER
         }
+    sanitized_arguments, misplaced_bearer = _redact_canonical_bearers(
+        sanitized_arguments
+    )
+    if misplaced_bearer:
+        carrier.discard()
+        carrier = CredentialCarrier.invalid()
 
     sanitized_params = {
         key: (
@@ -319,6 +363,103 @@ def sanitize_mcp_stdio_line(line: str) -> SessionMessage:
             request_context=_StdioAuthorizationRequest(sanitized.carrier)
         ),
     )
+
+
+def _is_http_command_path(path: str) -> bool:
+    parts = tuple(part for part in path.rstrip("/").split("/") if part)
+    return (
+        (len(parts) == 2 and parts[0] == "api")
+        or (
+            len(parts) == 5
+            and parts[:4] == ("private", "exomem", "v1", "command")
+        )
+        or (
+            len(parts) == 7
+            and parts[:4] == ("private", "exomem", "v1", "agent")
+            and parts[5] == "command"
+        )
+    )
+
+
+def _redact_forbidden_query_carrier(raw: object) -> bytes:
+    if raw is None:
+        return b""
+    if not isinstance(raw, bytes) or not raw:
+        return b""
+    changed = False
+    carrier_present = False
+    output: list[str] = []
+    try:
+        text = raw.decode("ascii")
+        for field in text.split("&"):
+            name, separator, value = field.partition("=")
+            decoded_name = unquote_plus(name)
+            decoded_value = unquote_plus(value)
+            cleaned_value, bearer_found = _redact_canonical_bearer_text(
+                decoded_value
+            )
+            if decoded_name == MCP_CREDENTIAL_PARAMETER:
+                cleaned_value = _REDACTED_CREDENTIAL_VALUE
+                separator = "="
+                carrier_present = True
+            if bearer_found or decoded_name == MCP_CREDENTIAL_PARAMETER:
+                value = quote_plus(cleaned_value)
+                changed = True
+            output.append(name + separator + value)
+    except (UnicodeDecodeError, ValueError):
+        scrubbed = _scrub_canonical_bearers_from_bytes(raw)
+        if scrubbed == raw:
+            return raw
+        return (
+            scrubbed
+            + b"&"
+            + MCP_CREDENTIAL_PARAMETER.encode()
+            + b"="
+            + _REDACTED_CREDENTIAL_VALUE.encode()
+        )
+    if changed and not carrier_present:
+        output.append(
+            MCP_CREDENTIAL_PARAMETER + "=" + quote_plus(_REDACTED_CREDENTIAL_VALUE)
+        )
+    return "&".join(output).encode("ascii") if changed else raw
+
+
+def _scrub_canonical_bearers_from_bytes(raw: bytes) -> bytes:
+    text = raw.decode("latin-1")
+    cleaned, found = _redact_canonical_bearer_text(text)
+    return cleaned.encode("latin-1") if found else raw
+
+
+def _redact_forbidden_http_body_carrier(raw: bytes) -> bytes:
+    try:
+        parsed = json.loads(raw, object_pairs_hook=_ObjectPairs)
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
+        return _scrub_canonical_bearers_from_bytes(raw)
+    if not isinstance(parsed, _ObjectPairs):
+        return raw
+    carrier_present = any(key == MCP_CREDENTIAL_PARAMETER for key, _value in parsed)
+    sanitized, bearer_found = _redact_canonical_bearers(_pairs_to_value(parsed))
+    if not carrier_present and not bearer_found:
+        return raw
+    assert isinstance(sanitized, dict)
+    sanitized[MCP_CREDENTIAL_PARAMETER] = _REDACTED_CREDENTIAL_VALUE
+    return json.dumps(sanitized, separators=(",", ":"), ensure_ascii=False).encode()
+
+
+def _redacting_http_receive(original_receive: Receive) -> Receive:
+    replay: Receive | None = None
+
+    async def receive() -> ASGIMessage:
+        nonlocal replay
+        if replay is None:
+            raw = await _read_asgi_body(original_receive)
+            replay = _replay_body(
+                _redact_forbidden_http_body_carrier(raw),
+                original_receive,
+            )
+        return await replay()
+
+    return receive
 
 
 @asynccontextmanager
@@ -507,6 +648,14 @@ class AuthorizationCarrierMiddleware:
         carrier = header_carrier
         request_receive = receive
         request_path = str(scope.get("path") or "").rstrip("/") or "/"
+        if scope.get("method") == "POST" and _is_http_command_path(request_path):
+            sanitized_scope = {
+                **sanitized_scope,
+                "query_string": _redact_forbidden_query_carrier(
+                    scope.get("query_string")
+                ),
+            }
+            request_receive = _redacting_http_receive(receive)
         if (
             self.mcp_path is not None
             and scope.get("method") == "POST"

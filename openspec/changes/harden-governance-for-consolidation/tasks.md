@@ -322,7 +322,7 @@ made before both PRs and their combined verification are complete.
   status, close, replay of the old bearer, restart/resume, and two v4 processes/replicas.
   Add malformed/extra-copy/raised issuance tests proving the terminal scrubber exception
   activates only after exact response validation and otherwise scrubs/refuses.
-- [ ] 5.5 Add red hygiene tests that scan request copies, sidecar rows, receipts, journals,
+- [x] 5.5 Add red hygiene tests that scan request copies, sidecar rows, receipts, journals,
   token claims, logs, metrics, traces, error/remediation strings, repr/debug output,
   idempotency/control-plane rows, and corpus projection for the exact raw bearer and find zero copies outside the
   exact typed successful issue field/protected request input; scan retry/validation/

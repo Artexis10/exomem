@@ -2563,6 +2563,19 @@ class LeaseManager:
         else:
             assert public_idempotency_key is None or isinstance(public_idempotency_key, str)
             effective_public_idempotency_key = public_idempotency_key
+        authorization_issuance = (
+            command.name == "govern_memory"
+            and kwargs.get("operation") == "session"
+            and kwargs.get("session_action") in {"open", "rotate"}
+        )
+        if authorization_issuance:
+            # The generic mutation store pickles its terminal for replay. An
+            # authorization-session issuance terminal contains the one raw
+            # bearer occurrence the product may return, so it must never enter
+            # that durable cache (or be emitted a second time by replay).
+            idempotency_key = None
+            implicit_idempotency_scope = None
+            effective_public_idempotency_key = None
         invocation_read_only = command.read_only if read_only is None else read_only
         if invocation_read_only:
             # Reads never take the mutation boundary, hosted or local: every
