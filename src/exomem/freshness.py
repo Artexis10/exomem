@@ -1126,22 +1126,24 @@ def reconcile(
                 _recall_generations[key] = _next_gen()
                 _recall_history[key] = []
             elif old_recall != recall_fresh:
-                # The safety-net walk has both complete maps, so a missed
-                # filesystem event is still an exact, bridgeable recall delta.
-                # Retain it just like an observed watcher event.  Clearing the
-                # history here used to make the lexical watcher replay update
-                # every changed row but refuse to persist its checkpoint; the
-                # next process then launched a whole-vault rebuild despite an
-                # exact-current catalog.
+                # The safety-net walk holds both complete same-policy maps, so
+                # a missed filesystem event yields a BRIDGEABLE old/new map
+                # diff — but never a TRUSTED one: the walk ran off-lock and is
+                # not an atomic source snapshot, so a concurrent edit can leave
+                # it mixing pre- and post-change observations. The event is
+                # therefore recorded with ``requires_source_proof=True``: a
+                # consumer may replay the exact diff, but must independently
+                # re-prove the resulting target against the complete current
+                # source before persisting (blessing) that checkpoint, and
+                # request paths refuse it outright. Clearing the history here
+                # instead used to strand an exact-current catalog behind a
+                # stale persisted checkpoint and launch a whole-vault rebuild
+                # on the next restart.
                 recall_touched = {
                     path
                     for path in set(old_recall) | set(recall_fresh)
                     if old_recall.get(path) != recall_fresh.get(path)
                 }
-                # Unlike a watcher event, one off-lock walk is not an atomic
-                # source snapshot. Consumers may replay this exact old/new map
-                # diff only after independently proving its target against the
-                # complete current source.
                 _record_recall_event(
                     key,
                     recall_touched,

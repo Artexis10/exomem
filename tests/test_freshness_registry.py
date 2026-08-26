@@ -302,6 +302,54 @@ def test_reconcile_detects_and_heals_a_missed_event(vault: Path) -> None:
     assert recall_delta.requires_source_proof is True
 
 
+def test_policy_identity_change_clears_reconcile_bridge(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A policy/access identity change is a hard proof boundary: even a
+    bridgeable tainted reconcile delta recorded before it can never resume
+    through the new projection (checkpoints read as incomplete, exposing no
+    partial suffix)."""
+    from exomem import recall_policy
+
+    state = {"fingerprint": "fingerprint-before"}
+    real_identity = recall_policy.recall_policy_identity
+    monkeypatch.setattr(
+        recall_policy,
+        "recall_policy_identity",
+        lambda root: (real_identity(root)[0], state["fingerprint"]),
+    )
+    _seed_both_scopes(vault)
+    before = freshness.recall_checkpoint(vault, "kb")
+
+    target = next(find_module._walk_md(vault / "Knowledge Base"))
+    future = time.time() + 10_000
+    os.utime(target, (future, future))
+    # No on_files_changed call here — simulates a missed watchdog event.
+    kb_dir = vault / "Knowledge Base"
+    drift = freshness.reconcile(
+        vault,
+        "kb",
+        ((str(p), freshness.stat_signature(p)) for p in find_module._walk_md(kb_dir)),
+    )
+    assert drift.changed == [str(target)]
+    tainted = freshness.recall_delta_since(vault, "kb", before)
+    assert tainted.complete is True
+    assert tainted.requires_source_proof is True
+
+    state["fingerprint"] = "fingerprint-after"
+    freshness.reconcile(
+        vault,
+        "kb",
+        ((str(p), freshness.stat_signature(p)) for p in find_module._walk_md(kb_dir)),
+    )
+
+    for checkpoint in (before, tainted.to):
+        bridged = freshness.recall_delta_since(vault, "kb", checkpoint)
+        assert bridged.complete is False
+        assert bridged.changed == frozenset()
+        assert bridged.deleted == frozenset()
+
+
 def test_reconcile_with_no_drift_returns_false(vault: Path) -> None:
     _seed_both_scopes(vault)
 

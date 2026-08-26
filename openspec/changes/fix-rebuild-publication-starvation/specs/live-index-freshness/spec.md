@@ -45,9 +45,42 @@ validation.
 - **AND** it holds complete before and after recall maps under one unchanged
   policy identity
 - **THEN** the system retains their exact changed/deleted set as a bridgeable
-  recall delta
-- **AND** the lexical replay persists the resulting current checkpoint
+  recall delta carrying explicit reconcile provenance, never as a trusted
+  watcher transition
+- **AND** the lexical replay persists the resulting current checkpoint only
+  after an independent off-barrier source proof matches that exact checkpoint
 - **AND** a fresh process admits the current catalogue without a full rebuild
+
+#### Scenario: Mixed reconcile walk cannot bless a stale catalogue
+
+- **WHEN** the off-lock safety-net walk mixes pre- and post-change
+  observations because a source path changed after the walk observed it
+- **AND** the lexical replay applies the reconcile delta's changed/deleted set
+- **THEN** the independent source proof fails to match the reconcile-derived
+  checkpoint
+- **AND** the system refuses to persist that scope's checkpoint and preserves
+  the conservative repair path
+
+#### Scenario: Source proof never holds the publication barrier
+
+- **WHEN** a watcher batch must prove a reconcile-tainted checkpoint against
+  the complete current source
+- **THEN** the O(vault) proof walk executes before the publication barrier is
+  acquired, with no locks held
+- **AND** validation under the barrier is an O(1) exact-checkpoint comparison
+- **AND** request and readiness paths refuse a reconcile-tainted delta without
+  ever walking the vault
+
+#### Scenario: Invalidated source proof refuses only the affected scope and converges
+
+- **WHEN** an observed event, reconcile, or policy change lands between the
+  off-barrier source proof and the publication barrier
+- **THEN** the superseded proof fails closed and only the affected scope's
+  checkpoint is refused
+- **AND** sibling scopes with exact observed witnesses still persist
+- **AND** the batch's rows still apply, and a later batch covering the current
+  delta re-proves and persists the checkpoint without a full rebuild
+- **AND** proof outcomes are counted in stable, content-free telemetry
 
 #### Scenario: SQLite token-only churn does not veto a current replacement
 

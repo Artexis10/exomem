@@ -90,11 +90,21 @@ current live projection may promote retrieval. If the projection advances after
 publication but before promotion, the work remains pending and the next bounded
 delta catches up; readiness is never manufactured from a stale generation.
 
-The periodic safety-net walk is also an exact transition when it holds complete
-before and after recall maps. A missed filesystem event discovered there is
-retained as a bridgeable recall delta. Once its changed/deleted set is replayed,
-the lexical writer persists the resulting checkpoint so a process restart does
-not forget an exact-current catalogue and launch another full repair.
+The periodic safety-net walk holds complete before and after recall maps, so a
+missed filesystem event discovered there yields the exact changed/deleted set —
+but the walk runs off-lock and is not an atomic source snapshot, so that diff
+is retained as a bridgeable recall delta with explicit reconcile provenance,
+never as a trusted watcher transition. The lexical writer may replay it, and
+persists the resulting checkpoint only after an independent full-source
+re-proof executed off-barrier (at watcher-batch entry, before the publication
+barrier is taken) and validated under the barrier as an O(1) exact-checkpoint
+comparison. A scope whose proof is missing or superseded is refused alone;
+sibling scopes with exact observed witnesses still persist. The residual window
+— a source edit landing after the proof walk observed a path — is bounded by
+the next periodic reconcile, the same eventual-freshness bound
+`rebuild_atomic`'s existing off-barrier source proof already carries, so this
+weakens nothing relative to the status quo. Request and readiness paths refuse
+a reconcile-tainted delta outright rather than walking.
 
 ### 5. Report bounded, privacy-safe repair progress
 
@@ -110,7 +120,18 @@ reason such as `source_changed`, `delta_unavailable`, `identity_changed`, or
   the current sidecar rather than guessing.
 - **A policy transition changes proof authority.** Reconcile history remains
   discontinuous across policy identity changes; only same-policy complete map
-  diffs become bridgeable missed-event deltas.
+  diffs become bridgeable missed-event deltas, and even those carry reconcile
+  provenance requiring an independent source proof before any checkpoint
+  persists.
+- **The source-proof walk can itself be superseded.** The proof is prepared
+  off-barrier, so an edit after the walk observed a path is not seen by that
+  proof. The under-barrier validation compares the exact recall checkpoint, so
+  any observed event, reconcile, or policy change between the walk and the
+  barrier fails the proof closed (the scope is refused, rows still apply). An
+  edit that no event and no generation change ever observes within that window
+  is bounded by the next periodic reconcile, which re-detects the drift and
+  re-proves — bounded staleness, never a stale bless and never a starvation
+  loop.
 - **Replaying too much work can lengthen the publication barrier.** Final replay
   stays capped. A transient oversized suffix is caught up off-barrier and retried;
   repeated oversized suffixes exhaust the bounded retries, decline publication,

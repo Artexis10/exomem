@@ -158,6 +158,40 @@ _DEFERRED_UPSERTS: dict[Path, set[Path]] = {}
 _FULL_REBUILD_REQUESTED: set[Path] = set()
 _REPAIR_PROGRESS: dict[Path, dict[str, object]] = {}
 _REPAIRS_LOCK = threading.Lock()
+#: Reconcile source-proof outcomes — stable, content-free counters ONLY (no
+#: vault paths, note names, or content). ``prepared`` counts scopes an
+#: off-barrier walk proved; ``proof_mismatch`` counts scopes the walk refuted;
+#: ``walk_failed`` counts prepare passes that failed closed on OS/sqlite
+#: errors; ``ticket_stale`` counts proofs invalidated by an event between the
+#: prepare and the barrier; ``proof_missing`` counts tainted scopes that
+#: reached publication with no prepared proof; ``blessed`` counts tainted
+#: scopes actually persisted after their proof validated.
+_SOURCE_PROOF_TELEMETRY_KEYS = (
+    "prepared",
+    "proof_mismatch",
+    "walk_failed",
+    "ticket_stale",
+    "proof_missing",
+    "blessed",
+)
+_SOURCE_PROOF_TELEMETRY: dict[str, int] = dict.fromkeys(_SOURCE_PROOF_TELEMETRY_KEYS, 0)
+_SOURCE_PROOF_LOCK = threading.Lock()
+
+
+def _note_source_proof(reason: str) -> None:
+    """Count one stable reconcile source-proof outcome (never content).
+
+    Direct indexing on purpose: a typo'd reason raises KeyError instead of
+    silently minting a counter outside the stable key set.
+    """
+    with _SOURCE_PROOF_LOCK:
+        _SOURCE_PROOF_TELEMETRY[reason] += 1
+
+
+def source_proof_telemetry() -> dict[str, int]:
+    """Snapshot the stable, content-free reconcile source-proof counters."""
+    with _SOURCE_PROOF_LOCK:
+        return dict(_SOURCE_PROOF_TELEMETRY)
 
 
 @dataclass(frozen=True, slots=True)
@@ -779,6 +813,11 @@ def clear_stores() -> None:
     with _REPAIRS_LOCK:
         if not _REPAIRS_IN_FLIGHT:
             _REPAIR_PROGRESS.clear()
+    with _SOURCE_PROOF_LOCK:
+        _SOURCE_PROOF_TELEMETRY.clear()
+        _SOURCE_PROOF_TELEMETRY.update(
+            dict.fromkeys(_SOURCE_PROOF_TELEMETRY_KEYS, 0)
+        )
 
 
 def _schedule_repair(vault_root: Path, *, deferred_paths: list[Path] | None = None) -> None:
@@ -1649,6 +1688,12 @@ class LexicalStore:
         # snapshot recomputes it so an ordinary-note edit is never missed.
         self._broad_seen: dict[str, tuple | None] = {}
         self._recall_seen: dict[str, object] = {}
+        # scope -> the exact RecallFreshnessCheckpoint one off-barrier source
+        # walk proved for a tainted (reconcile-derived) delta. Prepared at
+        # `apply_watcher_batch` entry with NO locks held, validated O(1) under
+        # the publication barrier by exact-checkpoint equality, and single-use:
+        # cleared when the batch finishes, whatever the outcome.
+        self._reconciled_source_proofs: dict[str, object] = {}
         self._failed = False  # runtime-retired for this process
         self._last_rebuild_result: str | None = None
         self._lock = threading.Lock()
@@ -3212,12 +3257,16 @@ class LexicalStore:
         from .vault import VaultLockError
 
         try:
+            # Prove any tainted reconcile-derived target against one source
+            # walk BEFORE taking the publication barrier: the walk is O(vault)
+            # and holds no locks here, while the validation under the barrier
+            # is an O(1) exact-checkpoint comparison. The proof is single-use
+            # per batch; running the prepare inside this try keeps it covered
+            # by the seam's deferred-heal handlers and the `finally` clear
+            # (the prepare's own internal catch remains primary).
+            self._prepare_reconcile_source_proof(paths, rel_paths)
             with self._publication_lock(timeout=_PUBLICATION_TIMEOUT_FOREGROUND):
-                applied = self._apply_paths_locked(
-                    paths,
-                    rel_paths,
-                    allow_reconciled_source_proof=True,
-                )
+                applied = self._apply_paths_locked(paths, rel_paths)
         except VaultLockError as e:
             log.info("lexical watcher batch deferred (%s); heals on next sync", e)
             _schedule_runtime_catalog_repair(self.vault_root)
@@ -3230,6 +3279,8 @@ class LexicalStore:
             log.info("lexical watcher source changed during repair (%s)", e)
             _schedule_runtime_catalog_repair(self.vault_root)
             return False
+        finally:
+            self._reconciled_source_proofs.clear()
         if not applied:
             _schedule_runtime_catalog_repair(self.vault_root)
         else:
@@ -3271,8 +3322,6 @@ class LexicalStore:
         self,
         paths: list[Path],
         rel_paths: list[str],
-        *,
-        allow_reconciled_source_proof: bool = False,
     ) -> bool:
         """Apply a changed/deleted union with the publication barrier held."""
         from . import freshness as freshness_module
@@ -3298,13 +3347,7 @@ class LexicalStore:
                 )
                 for scope in ("kb", "vault")
             }
-            requested_paths = {
-                key for path in paths if (key := self._live_event_path(path)) is not None
-            } | {
-                key
-                for rel in rel_paths
-                if (key := self._live_event_path(self.vault_root / rel)) is not None
-            }
+            requested_paths = self._requested_event_paths(paths, rel_paths)
             prepared: list[tuple[Path, str, tuple[int, int, int], bool, bool]] = []
             suppressed: list[str] = []
             for path in paths:
@@ -3358,7 +3401,6 @@ class LexicalStore:
                 witness_targets,
                 requested_paths,
                 catalog_identity,
-                allow_reconciled_source_proof=allow_reconciled_source_proof,
             )
             return True
         finally:
@@ -3444,6 +3486,23 @@ class LexicalStore:
         """`delete_rel_paths` body with the publication barrier already held."""
         return self._apply_paths_locked([], rel_paths)
 
+    def _requested_event_paths(
+        self, paths: list[Path], rel_paths: list[str]
+    ) -> set[str]:
+        """The live-registry path keys one bounded request names.
+
+        Shared by the under-barrier witness coverage check and the off-barrier
+        source-proof prepare so the two can never diverge on what "covered"
+        means.
+        """
+        return {
+            key for path in paths if (key := self._live_event_path(path)) is not None
+        } | {
+            key
+            for rel in rel_paths
+            if (key := self._live_event_path(self.vault_root / rel)) is not None
+        }
+
     def _remember_live_witnesses(
         self,
         targets: dict[str, tuple[object | None, object | None]],
@@ -3455,6 +3514,12 @@ class LexicalStore:
         paths cover every projected delta from the catalog's stored checkpoint.
         Without that proof (or without a live registry), the next read takes the
         conservative verify/rebuild path.
+
+        A reconcile-tainted checkpoint (``requires_source_proof``) is returned
+        for proof-gated publication but NEVER enters ``self._witnessed``: the
+        in-process witness map is consumed proof-free by ``_reconcile_live``,
+        so admitting a tainted checkpoint there would let a later request bless
+        a mixed-walk target without any source proof.
         """
         from . import freshness as freshness_module
 
@@ -3478,29 +3543,84 @@ class LexicalStore:
                     or not (set(delta.changed) | set(delta.deleted)) <= requested_paths
                 ):
                     self._witnessed.pop(scope, None)
+                elif getattr(delta, "requires_source_proof", False):
+                    self._witnessed.pop(scope, None)
+                    witnessed[scope] = (checkpoint, True)
                 else:
                     self._witnessed[scope] = checkpoint
-                    witnessed[scope] = (
-                        checkpoint,
-                        bool(getattr(delta, "requires_source_proof", False)),
-                    )
+                    witnessed[scope] = (checkpoint, False)
         return witnessed
 
-    def _source_matches_recall_targets(self, targets: dict[str, object]) -> bool:
-        """Independently prove selected recall checkpoints against one full walk."""
+    def _prepare_reconcile_source_proof(
+        self, paths: list[Path], rel_paths: list[str]
+    ) -> None:
+        """Prove tainted reconcile targets against one walk, with NO locks held.
+
+        Runs on the dispatching thread at ``apply_watcher_batch`` entry, before
+        the publication barrier: the O(vault) walk must never extend the
+        barrier hold (the design the uncommitted experiment got wrong). A scope
+        needs the proof only when a bless could actually result — its stored
+        checkpoint bridges to the current one through a complete, covered,
+        tainted delta. The proof is the exact current
+        ``RecallFreshnessCheckpoint``; any event, reconcile, or policy change
+        between this walk and the barrier advances the generation and fails the
+        under-barrier equality check closed (``ticket_stale``). Walk or sqlite
+        errors fail closed too: no proof is stored, the batch still applies its
+        rows, and the bless waits for a later batch (``walk_failed``).
+        """
         from . import freshness as freshness_module
 
-        members, signatures = self._walk_entries()
-        for scope, checkpoint in targets.items():
+        if not self.path.exists():
+            return
+        requested_paths = self._requested_event_paths(paths, rel_paths)
+        proof_targets: dict[str, object] = {}
+        try:
+            conn = self._connect()
+            try:
+                if not self._schema_is_current(conn):
+                    return
+                for scope in ("kb", "vault"):
+                    if not freshness_module.recall_is_live(self.vault_root, scope):
+                        continue
+                    current = freshness_module.recall_checkpoint(self.vault_root, scope)
+                    stored = self._meta_checkpoint(conn, scope)
+                    if stored is None or stored == current:
+                        continue
+                    delta = freshness_module.recall_delta_since(
+                        self.vault_root, scope, stored
+                    )
+                    if (
+                        delta.complete
+                        and getattr(delta, "requires_source_proof", False)
+                        and delta.to == current
+                        and (set(delta.changed) | set(delta.deleted)) <= requested_paths
+                    ):
+                        proof_targets[scope] = current
+            finally:
+                conn.close()
+            if not proof_targets:
+                return
+            members, signatures = self._walk_entries()
+        except (OSError, sqlite3.Error):
+            _note_source_proof("walk_failed")
+            return
+        for scope, checkpoint in proof_targets.items():
             idx = 1 if scope == "vault" else 0
             entries = [
                 (str(path), signatures[path])
                 for path, flags in members.items()
                 if flags[idx]
             ]
-            if freshness_module.triple_from_entries(entries) != checkpoint.triple:
-                return False
-        return True
+            if freshness_module.triple_from_entries(entries) == checkpoint.triple:
+                self._reconciled_source_proofs[scope] = checkpoint
+                _note_source_proof("prepared")
+            else:
+                # The refutation is authoritative: a walk that disproves this
+                # checkpoint must also EVICT any stale stored proof for the
+                # scope, or a proof prepared before an unobserved edit could be
+                # consumed after the newest walk refuted its exact target.
+                self._reconciled_source_proofs.pop(scope, None)
+                _note_source_proof("proof_mismatch")
 
     def _publish_live_witnesses(
         self,
@@ -3508,26 +3628,37 @@ class LexicalStore:
         targets: dict[str, tuple[object | None, object | None]],
         requested_paths: set[str],
         catalog_identity: str,
-        *,
-        allow_reconciled_source_proof: bool,
     ) -> None:
-        """Persist exact watcher witnesses while the publication barrier is held."""
+        """Persist exact watcher witnesses while the publication barrier is held.
+
+        Per-scope: an untainted witness blesses as before; a tainted witness
+        blesses only when the off-barrier prepare stored a proof for EXACTLY
+        this checkpoint. A missing or superseded proof refuses that one scope
+        (fail closed, O(1)) without touching the other scope's witness — no
+        walk is reachable while the barrier is held from any path into this
+        publication seam (the explicit repair seam, `ensure_fresh` →
+        `_reconcile_live` → `_rebuild`, walks under the barrier by design).
+        """
         from . import freshness as freshness_module
 
         witnessed = self._remember_live_witnesses(targets, requested_paths)
-        proof_targets = {
-            scope: checkpoint
-            for scope, (checkpoint, requires_source_proof) in witnessed.items()
-            if requires_source_proof
-        }
-        if proof_targets and (
-            not allow_reconciled_source_proof
-            or not self._source_matches_recall_targets(proof_targets)
-        ):
-            for scope in witnessed:
-                self._witnessed.pop(scope, None)
-            return
-        for scope, (checkpoint, _requires_source_proof) in witnessed.items():
+        for scope, (checkpoint, requires_source_proof) in witnessed.items():
+            if requires_source_proof:
+                proof = self._reconciled_source_proofs.pop(scope, None)
+                if proof is None:
+                    # No proof was prepared (non-batch path, coverage changed,
+                    # or the prepare failed closed). Refuse this scope only.
+                    _note_source_proof("proof_missing")
+                    continue
+                if proof != checkpoint:
+                    # An event landed between the prepare and the barrier; the
+                    # walk proved a superseded target. Refuse this scope only.
+                    # Exact-checkpoint equality is defense-in-depth here:
+                    # identity/policy divergence is closed upstream by delta
+                    # incompleteness, generation advance by this ticket
+                    # invalidation.
+                    _note_source_proof("ticket_stale")
+                    continue
             if (
                 freshness_module.recall_checkpoint(self.vault_root, scope) != checkpoint
                 or catalog_semantic_identity(self.vault_root) != catalog_identity
@@ -3544,6 +3675,8 @@ class LexicalStore:
                 checkpoint,
                 identity=catalog_identity,
             )
+            if requires_source_proof:
+                _note_source_proof("blessed")
             self._witnessed.pop(scope, None)
 
     def ensure_fresh(self) -> None:
