@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,6 +25,7 @@ from exomem.governance import (
     projection_measurement_store,
     projection_runtime,
     projection_store,
+    projection_timing,
     projections,
     schema_v4,
 )
@@ -33,6 +35,7 @@ from exomem.server_runtime import ServerRuntime
 _REST_KEY = "governance-oracle-key"
 _TRANSPORT_ONLY_HEADERS = frozenset({"date", "traceparent", "tracestate"})
 _VECTOR_EXTRACTOR = "projected-text-v1"
+_CLIP_EXTRACTOR = "pixels-v1"
 _GRAPH_EXTRACTOR = "projected-graph-v1"
 _GRAPH_MODEL = "graph-schema-v1"
 
@@ -146,8 +149,18 @@ def _projected_item(
     path: str,
     scope_id: str,
     body: str,
+    media_type: str | None = None,
 ) -> projection_store.ProjectionItemVariants:
     content_hash = hashlib.sha256(body.encode("utf-8")).hexdigest()
+    search_fields = {
+        "title": Path(path).stem,
+        "body": body,
+        "type": "media" if media_type is not None else "insight",
+        "status": "active",
+        "updated": "2026-08-26",
+    }
+    if media_type is not None:
+        search_fields["media_type"] = media_type
     return projection_store.ProjectionItemVariants(
         item_identity=path,
         content_hash=content_hash,
@@ -158,13 +171,7 @@ def _projected_item(
             scope_ids=(scope_id,),
             policy=policy,
             projector_schema_version=projections.PROJECTOR_SCHEMA_VERSION,
-            full_search_fields={
-                "title": Path(path).stem,
-                "body": body,
-                "type": "insight",
-                "status": "active",
-                "updated": "2026-08-26",
-            },
+            full_search_fields=search_fields,
         ),
     )
 
@@ -181,6 +188,11 @@ def _runtime_from_items(
     *,
     vector_for_variant: Callable[
         [projections.ProjectionVariant], tuple[float, ...]
+    ]
+    | None = None,
+    clip_samples_for_variant: Callable[
+        [projections.ProjectionVariant],
+        tuple[projected_retrieval.ProjectionClipSample, ...] | None,
     ]
     | None = None,
     graph_edges_for_variant: Callable[
@@ -216,6 +228,7 @@ def _runtime_from_items(
     )
     roots: list[projection_store.ProjectionMeasurementRoot] = []
     vector_index: projected_retrieval.ProjectedVectorIndex | None = None
+    clip_index: projected_retrieval.ProjectedClipIndex | None = None
     graph_index: projected_graph.ProjectedGraphIndex | None = None
     if vector_for_variant is not None:
         vector_measurements = tuple(
@@ -256,6 +269,52 @@ def _runtime_from_items(
                 rows_digest="a" * 64,
             )
         )
+    if clip_samples_for_variant is not None:
+        clip_measurements: list[
+            projected_retrieval.ProjectionClipMeasurement
+        ] = []
+        for item in items:
+            for variant in item.variants:
+                samples = clip_samples_for_variant(variant)
+                if samples is None:
+                    continue
+                clip_measurements.append(
+                    projected_retrieval.ProjectionClipMeasurement(
+                        projections.MeasurementKey(
+                            projection_variant_id=variant.projection_variant_id,
+                            lane="clip",
+                            extractor_version=_CLIP_EXTRACTOR,
+                            model_version=embeddings.CLIP_MODEL_NAME,
+                        ),
+                        samples=samples,
+                    )
+                )
+        if clip_measurements:
+            clip_index = projected_retrieval.ProjectedClipIndex(
+                namespace,
+                clip_measurements,
+                extractor_version=_CLIP_EXTRACTOR,
+                model_version=embeddings.CLIP_MODEL_NAME,
+            )
+            clip_family = projection_measurement_store.MeasurementFamilyKey(
+                namespace_key=key,
+                lane="clip",
+                extractor_version=_CLIP_EXTRACTOR,
+                model_version=embeddings.CLIP_MODEL_NAME,
+            )
+            roots.append(
+                projection_store.ProjectionMeasurementRoot(
+                    namespace_key=key,
+                    family_id=clip_family.family_id,
+                    lane="clip",
+                    extractor_version=_CLIP_EXTRACTOR,
+                    model_version=embeddings.CLIP_MODEL_NAME,
+                    measurement_count=len(clip_measurements),
+                    vector_dimension=len(clip_measurements[0].samples[0].vector),
+                    graph_edge_count=0,
+                    rows_digest="c" * 64,
+                )
+            )
     if graph_edges_for_variant is not None:
         graph_measurements = tuple(
             projected_graph.ProjectionGraphMeasurement(
@@ -302,6 +361,7 @@ def _runtime_from_items(
         namespace,
         tuple(roots),
         vector_index=vector_index,
+        clip_index=clip_index,
         graph_index=graph_index,
     )
 
@@ -361,6 +421,7 @@ def _wire_pages(
     request: dict[str, object],
     max_pages: int,
     query_vector: tuple[float, ...] | None = None,
+    clip_query_vector: tuple[float, ...] | None = None,
     rerank_scorer: Callable[[str, list[str]], list[float]] | None = None,
     visible_bodies: tuple[str, ...] = _DEFAULT_VISIBLE_BODIES,
     runtime_factory: Callable[
@@ -371,6 +432,13 @@ def _wire_pages(
     dict[str, projection_runtime.ActiveProjectionRuntime],
     dict[str, tuple[httpx.Response, ...]],
 ]:
+    # This suite proves canonical application bytes, not wall-clock release timing.
+    # The dedicated actual-wire gate owns the fixed completion-class assertions.
+    monkeypatch.setattr(
+        projection_timing,
+        "fixed_public_completion",
+        lambda *_args, **_kwargs: nullcontext(),
+    )
     monkeypatch.setenv("EXOMEM_REST_API_KEY", _REST_KEY)
     if query_vector is None:
         monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
@@ -386,9 +454,22 @@ def _wire_pages(
             "embed_texts",
             embed_query,
         )
-    if query_vector is not None or rerank_scorer is not None:
+    if (
+        query_vector is not None
+        or clip_query_vector is not None
+        or rerank_scorer is not None
+    ):
         monkeypatch.setattr(readiness, "should_defer", lambda _lane: False)
-    monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
+    if clip_query_vector is None:
+        monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
+    else:
+        monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
+        monkeypatch.setattr(embeddings, "clip_enabled", lambda: True)
+        monkeypatch.setattr(
+            embeddings,
+            "embed_clip_text",
+            lambda _query: list(clip_query_vector),
+        )
     if rerank_scorer is None:
         monkeypatch.setenv("EXOMEM_DISABLE_RANKING", "1")
     else:
@@ -478,6 +559,7 @@ def _wire_pair(
     hidden_bodies: tuple[str, ...],
     request: dict[str, object],
     query_vector: tuple[float, ...] | None = None,
+    clip_query_vector: tuple[float, ...] | None = None,
     rerank_scorer: Callable[[str, list[str]], list[float]] | None = None,
     visible_bodies: tuple[str, ...] = _DEFAULT_VISIBLE_BODIES,
     runtime_factory: Callable[
@@ -495,6 +577,7 @@ def _wire_pair(
         request=request,
         max_pages=1,
         query_vector=query_vector,
+        clip_query_vector=clip_query_vector,
         rerank_scorer=rerank_scorer,
         visible_bodies=visible_bodies,
         runtime_factory=runtime_factory,
@@ -1214,4 +1297,315 @@ def test_hidden_vertices_and_edges_cannot_change_public_graph_fusion_or_evidence
         "direction": "outbound",
         "seed": seed,
     }
+    assert b"oracle-hidden" not in responses["present"].content
+
+
+def _image_clip_runtime(
+    hidden_bodies: tuple[str, ...],
+) -> projection_runtime.ActiveProjectionRuntime:
+    visible = Scope(id="oracle-visible", source="scopes/oracle-visible.yaml")
+    hidden = Scope(
+        id="oracle-hidden",
+        source="scopes/oracle-hidden.yaml",
+        default_deny=True,
+    )
+    policy = Policy(
+        fingerprint="a" * 64,
+        scopes={visible.id: visible, hidden.id: hidden},
+    )
+    items = [
+        _projected_item(
+            policy,
+            path=f"Knowledge Base/media/oracle-visible-{index:03d}.jpg",
+            scope_id=visible.id,
+            body=f"visible image {index}",
+            media_type="image",
+        )
+        for index in range(2)
+    ]
+    items.extend(
+        _projected_item(
+            policy,
+            path=f"Knowledge Base/private/oracle-hidden-{index:03d}.jpg",
+            scope_id=hidden.id,
+            body=body,
+            media_type="image",
+        )
+        for index, body in enumerate(hidden_bodies)
+    )
+
+    def samples_for_variant(
+        variant: projections.ProjectionVariant,
+    ) -> tuple[projected_retrieval.ProjectionClipSample, ...] | None:
+        if not projected_retrieval.clip_variant_applicable(variant):
+            return None
+        if "/private/" in variant.item_identity:
+            vector = (1.0, 0.0)
+        elif variant.item_identity.endswith("000.jpg"):
+            vector = (0.8, 0.6)
+        else:
+            vector = (0.6, 0.8)
+        return (
+            projected_retrieval.ProjectionClipSample(
+                frame_timestamp_ms=None,
+                vector=vector,
+            ),
+        )
+
+    return _runtime_from_items(
+        policy,
+        tuple(items),
+        clip_samples_for_variant=samples_for_variant,
+    )
+
+
+def test_hidden_best_image_match_is_authorized_before_the_clip_cap(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runtimes, responses = _wire_pair(
+        monkeypatch,
+        tmp_path,
+        hidden_bodies=("hidden image pixels",),
+        runtime_factory=_image_clip_runtime,
+        clip_query_vector=(1.0, 0.0),
+        request=_request(query="visual oracle", limit=1, mode="vector"),
+    )
+    present_runtime = runtimes["present"]
+    external = projection_authorization.build_authorization_map(
+        present_runtime.namespace,
+        policy=present_runtime.snapshot.policy,
+        audience="oracle-external",
+        purpose=None,
+        verified_session_grants=(),
+        catalog=present_runtime.catalog,
+    )
+    owner = projection_authorization.build_authorization_map(
+        present_runtime.namespace,
+        policy=present_runtime.snapshot.policy,
+        audience=principal.OWNER_AUDIENCE,
+        purpose=None,
+        verified_session_grants=(),
+        catalog=present_runtime.catalog,
+    )
+    clip_index = present_runtime.clip_index
+    assert clip_index is not None
+    assert clip_index.search_clip(external, (1.0, 0.0), k=1)[0].item_identity == (
+        "Knowledge Base/media/oracle-visible-000.jpg"
+    )
+    assert clip_index.search_clip(owner, (1.0, 0.0), k=1)[0].item_identity == (
+        "Knowledge Base/private/oracle-hidden-000.jpg"
+    )
+
+    _assert_same_success_envelope(responses)
+    data = responses["present"].json()["data"]
+    assert [hit["path"] for hit in data["hits"]] == [
+        "Knowledge Base/media/oracle-visible-000.jpg"
+    ]
+    assert data["hits"][0]["signals"] == {"clip_rank": 1, "clip_score": 0.8}
+    assert b"oracle-hidden" not in responses["present"].content
+
+
+def _video_clip_runtime(
+    hidden_bodies: tuple[str, ...],
+) -> projection_runtime.ActiveProjectionRuntime:
+    visible = Scope(id="oracle-visible", source="scopes/oracle-visible.yaml")
+    hidden = Scope(
+        id="oracle-hidden",
+        source="scopes/oracle-hidden.yaml",
+        default_deny=True,
+    )
+    policy = Policy(
+        fingerprint="9" * 64,
+        scopes={visible.id: visible, hidden.id: hidden},
+    )
+    items = [
+        _projected_item(
+            policy,
+            path="Knowledge Base/media/oracle-visible-video.mp4",
+            scope_id=visible.id,
+            body="visible video",
+            media_type="video",
+        )
+    ]
+    items.extend(
+        _projected_item(
+            policy,
+            path=f"Knowledge Base/private/oracle-hidden-{index:03d}.mp4",
+            scope_id=hidden.id,
+            body=body,
+            media_type="video",
+        )
+        for index, body in enumerate(hidden_bodies)
+    )
+
+    def samples_for_variant(
+        variant: projections.ProjectionVariant,
+    ) -> tuple[projected_retrieval.ProjectionClipSample, ...] | None:
+        if not projected_retrieval.clip_variant_applicable(variant):
+            return None
+        if "/private/" in variant.item_identity:
+            timestamp_vectors = ((2_000, (1.0, 0.0)),)
+        else:
+            timestamp_vectors = (
+                (1_000, (0.8, 0.6)),
+                (4_500, (0.95, 0.3122498999)),
+                (8_500, (0.95, 0.3122498999)),
+            )
+        return tuple(
+            projected_retrieval.ProjectionClipSample(
+                frame_timestamp_ms=timestamp_ms,
+                vector=vector,
+            )
+            for timestamp_ms, vector in timestamp_vectors
+        )
+
+    return _runtime_from_items(
+        policy,
+        tuple(items),
+        clip_samples_for_variant=samples_for_variant,
+    )
+
+
+def test_hidden_video_match_cannot_change_the_earliest_best_visible_frame(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runtimes, responses = _wire_pair(
+        monkeypatch,
+        tmp_path,
+        hidden_bodies=("hidden video pixels",),
+        runtime_factory=_video_clip_runtime,
+        clip_query_vector=(1.0, 0.0),
+        request=_request(query="video scene", limit=1, mode="vector"),
+    )
+    present_runtime = runtimes["present"]
+    external = projection_authorization.build_authorization_map(
+        present_runtime.namespace,
+        policy=present_runtime.snapshot.policy,
+        audience="oracle-external",
+        purpose=None,
+        verified_session_grants=(),
+        catalog=present_runtime.catalog,
+    )
+    owner = projection_authorization.build_authorization_map(
+        present_runtime.namespace,
+        policy=present_runtime.snapshot.policy,
+        audience=principal.OWNER_AUDIENCE,
+        purpose=None,
+        verified_session_grants=(),
+        catalog=present_runtime.catalog,
+    )
+    clip_index = present_runtime.clip_index
+    assert clip_index is not None
+    external_hit = clip_index.search_clip(external, (1.0, 0.0), k=1)[0]
+    owner_hit = clip_index.search_clip(owner, (1.0, 0.0), k=1)[0]
+    assert external_hit.item_identity == (
+        "Knowledge Base/media/oracle-visible-video.mp4"
+    )
+    assert external_hit.clip_frame_timestamp_ms == 4_500
+    assert owner_hit.item_identity == "Knowledge Base/private/oracle-hidden-000.mp4"
+
+    _assert_same_success_envelope(responses)
+    data = responses["present"].json()["data"]
+    assert data["hits"][0]["clip_match_at"] == "0:04"
+    assert b"oracle-hidden" not in responses["present"].content
+
+
+def _companion_only_clip_runtime(
+    hidden_bodies: tuple[str, ...],
+) -> projection_runtime.ActiveProjectionRuntime:
+    companion = Scope(id="oracle-companion", source="scopes/oracle-companion.yaml")
+    hidden = Scope(
+        id="oracle-hidden",
+        source="scopes/oracle-hidden.yaml",
+        default_deny=True,
+    )
+    policy = Policy(
+        fingerprint="8" * 64,
+        scopes={companion.id: companion, hidden.id: hidden},
+        rules=(
+            Rule(
+                id="oracle-companion-external",
+                source="rules/oracle-companion-external.yaml",
+                scope_ids=(companion.id,),
+                audience="oracle-external",
+                ceiling=3,
+                options={
+                    "abstract": "companionvisualquartz safe image description"
+                },
+            ),
+        ),
+    )
+    items = [
+        _projected_item(
+            policy,
+            path="Knowledge Base/media/lower-image.jpg.md",
+            scope_id=companion.id,
+            body="raw companion metadata",
+        )
+    ]
+    items.extend(
+        _projected_item(
+            policy,
+            path=f"Knowledge Base/private/oracle-hidden-{index:03d}.jpg",
+            scope_id=hidden.id,
+            body=body,
+            media_type="image",
+        )
+        for index, body in enumerate(hidden_bodies)
+    )
+
+    def samples_for_variant(
+        variant: projections.ProjectionVariant,
+    ) -> tuple[projected_retrieval.ProjectionClipSample, ...] | None:
+        if not projected_retrieval.clip_variant_applicable(variant):
+            return None
+        return (
+            projected_retrieval.ProjectionClipSample(
+                frame_timestamp_ms=None,
+                vector=(1.0, 0.0),
+            ),
+        )
+
+    return _runtime_from_items(
+        policy,
+        tuple(items),
+        clip_samples_for_variant=samples_for_variant,
+    )
+
+
+def test_lower_media_uses_only_its_authorized_textual_companion_projection(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runtimes, responses = _wire_pair(
+        monkeypatch,
+        tmp_path,
+        hidden_bodies=("hidden image pixels",),
+        runtime_factory=_companion_only_clip_runtime,
+        clip_query_vector=(1.0, 0.0),
+        request=_request(query="companionvisualquartz", limit=1),
+    )
+    present_runtime = runtimes["present"]
+    external = projection_authorization.build_authorization_map(
+        present_runtime.namespace,
+        policy=present_runtime.snapshot.policy,
+        audience="oracle-external",
+        purpose=None,
+        verified_session_grants=(),
+        catalog=present_runtime.catalog,
+    )
+    selected = present_runtime.catalog.select(external)
+    assert len(selected) == 1
+    assert selected[0].decision_level == 3
+    assert not projected_retrieval.clip_variant_applicable(selected[0])
+
+    _assert_same_success_envelope(responses)
+    data = responses["present"].json()["data"]
+    assert data["hits"][0]["abstract"] == (
+        "companionvisualquartz safe image description"
+    )
+    assert data.get("warming") is None
+    assert b"raw companion metadata" not in responses["present"].content
     assert b"oracle-hidden" not in responses["present"].content
