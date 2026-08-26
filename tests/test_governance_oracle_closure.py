@@ -248,12 +248,13 @@ def _client(monkeypatch: pytest.MonkeyPatch, root: Path) -> TestClient:
     return TestClient(server.build_server(require_auth=False).http_app())
 
 
-def _wire_pair(
+def _wire_pages(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     *,
     hidden_bodies: tuple[str, ...],
     request: dict[str, object],
+    max_pages: int,
     visible_bodies: tuple[str, ...] = _DEFAULT_VISIBLE_BODIES,
     runtime_factory: Callable[
         [tuple[str, ...]], projection_runtime.ActiveProjectionRuntime
@@ -261,7 +262,7 @@ def _wire_pair(
     | None = None,
 ) -> tuple[
     dict[str, projection_runtime.ActiveProjectionRuntime],
-    dict[str, httpx.Response],
+    dict[str, tuple[httpx.Response, ...]],
 ]:
     monkeypatch.setenv("EXOMEM_REST_API_KEY", _REST_KEY)
     monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
@@ -312,14 +313,26 @@ def _wire_pair(
     )
     clients = {name: _client(monkeypatch, root) for name, root in roots.items()}
     try:
-        responses = {
-            name: client.post(
-                "/api/ask_memory",
-                json=request,
-                headers={"Authorization": f"Bearer {_REST_KEY}"},
-            )
-            for name, client in clients.items()
-        }
+        responses: dict[str, tuple[httpx.Response, ...]] = {}
+        for name, client in clients.items():
+            pages: list[httpx.Response] = []
+            continuation: str | None = None
+            for _page_number in range(max_pages):
+                page_request = dict(request)
+                if continuation is not None:
+                    page_request["continuation"] = continuation
+                response = client.post(
+                    "/api/ask_memory",
+                    json=page_request,
+                    headers={"Authorization": f"Bearer {_REST_KEY}"},
+                )
+                pages.append(response)
+                if response.status_code != 200:
+                    break
+                continuation = response.json()["data"].get("continuation")
+                if continuation is None:
+                    break
+            responses[name] = tuple(pages)
     finally:
         for client in clients.values():
             client.close()
@@ -329,6 +342,33 @@ def _wire_pair(
         {name: runtimes_by_root[root] for name, root in roots.items()},
         responses,
     )
+
+
+def _wire_pair(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    hidden_bodies: tuple[str, ...],
+    request: dict[str, object],
+    visible_bodies: tuple[str, ...] = _DEFAULT_VISIBLE_BODIES,
+    runtime_factory: Callable[
+        [tuple[str, ...]], projection_runtime.ActiveProjectionRuntime
+    ]
+    | None = None,
+) -> tuple[
+    dict[str, projection_runtime.ActiveProjectionRuntime],
+    dict[str, httpx.Response],
+]:
+    runtimes, pages = _wire_pages(
+        monkeypatch,
+        tmp_path,
+        hidden_bodies=hidden_bodies,
+        request=request,
+        max_pages=1,
+        visible_bodies=visible_bodies,
+        runtime_factory=runtime_factory,
+    )
+    return runtimes, {name: responses[0] for name, responses in pages.items()}
 
 
 def _request(*, query: str, limit: int, mode: str = "hybrid") -> dict[str, object]:
@@ -622,4 +662,54 @@ def test_hidden_document_frequency_cannot_change_visible_bm25_order(
     ] == [
         "Knowledge Base/oracle-visible-000.md",
         "Knowledge Base/oracle-visible-001.md",
+    ]
+
+
+def test_hidden_rows_cannot_change_any_pagination_boundary_cursor_or_order(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    visible_bodies = tuple("paginationquartz visible page row" for _ in range(5))
+    _runtimes, pages = _wire_pages(
+        monkeypatch,
+        tmp_path,
+        hidden_bodies=tuple(
+            "paginationquartz " * 32 + f"hidden row {index}" for index in range(80)
+        ),
+        visible_bodies=visible_bodies,
+        request=_request(query="paginationquartz", limit=2),
+        max_pages=4,
+    )
+
+    assert len(pages["absent"]) == 3
+    assert len(pages["present"]) == 3
+    for absent, present in zip(pages["absent"], pages["present"], strict=True):
+        assert absent.status_code == 200, absent.text
+        assert present.status_code == 200, present.text
+        assert _canonical_transport_envelope(
+            present, transport="http"
+        ) == _canonical_transport_envelope(absent, transport="http")
+
+    absent_data = [response.json()["data"] for response in pages["absent"]]
+    present_data = [response.json()["data"] for response in pages["present"]]
+    assert [
+        [hit["path"] for hit in data["hits"]] for data in present_data
+    ] == [
+        [
+            "Knowledge Base/oracle-visible-000.md",
+            "Knowledge Base/oracle-visible-001.md",
+        ],
+        [
+            "Knowledge Base/oracle-visible-002.md",
+            "Knowledge Base/oracle-visible-003.md",
+        ],
+        ["Knowledge Base/oracle-visible-004.md"],
+    ]
+    assert [data.get("continuation") is not None for data in present_data] == [
+        True,
+        True,
+        False,
+    ]
+    assert [data.get("continuation") for data in present_data] == [
+        data.get("continuation") for data in absent_data
     ]
