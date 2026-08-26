@@ -3,17 +3,18 @@
 This checklist is an end-state acceptance ledger, not a percentage-complete meter. A
 checkbox is complete only when its whole obligation is evidenced; several broad open
 tasks therefore contain substantial merged foundations. The implementation baseline for
-this reconciliation is `origin/main` at `1a7f30e1` (merged PR #778).
+this reconciliation is `origin/main` at `9dc37201` plus stacked evidence PR #832
+(`fd77c5b3`).
 
 | Area | Merged implementation evidence | Remaining end-state obligation |
 | --- | --- | --- |
 | Per-scope disclosure | Conservative lattice, option meet, unconditional scrubber, and session-bound scope enforcement are merged. | Exact v3 grant migration/recovery closure in 1.7/1.10. |
-| Non-Markdown membership | Descriptor binding, owner backfill, fail-closed propagation, and structured-read preflight are merged in #723, #724, and #727. | Final combined evidence run in 2.11. |
-| Policy authority | Prospective snapshots and the immutable active policy/catalog tuple substrate are merged in #729 and #740. | Product writer/mirror integration, migration, recovery, and concurrency closure in 3.3-3.7 and 3.10-3.13. |
+| Non-Markdown membership | Descriptor binding, owner backfill, fail-closed propagation, structured-read preflight, and the combined regression matrix are complete through #723, #724, #727, and green PR #832 CI. | No section 2 obligation remains. |
+| Policy authority | Prospective snapshots, exact proposal authority binding, atomic policy publication, the held workspace mirror, and policy/content/companion/measurement/graph writer successors are merged through #729, #740, and #800-#830. | Remaining workspace-race, migration, recovery, suspend/resume/undo, and combined evidence closure in 3.4-3.7 and 3.12-3.13. |
 | Reserved state | Held filesystem substrate and the closed reserved-path monopoly are merged and complete. | Final whole-change review/verification only. |
 | Authorization sessions | Credential verification, external custody, schema-v4 authority, transport binding, standalone attachment, and serving-membership verification are merged in #728, #732, #734, #737, #741, #772, #775, and #778. | Hosted membership publisher, complete move/restore and v3 migration/downmigration, hygiene, and combined lifecycle evidence in the remaining section 5 tasks. |
-| Direct reads | Markdown projection and structured direct-read gates are merged in #730 and #731. | Complete the remaining L0-L6/never-enrolled matrix and combined regression evidence in 7.1/7.6. |
-| Projected retrieval | Projection/measurement stores, preactivation, request-local authorization, lane reduction, and timing/release foundations are merged in #748-#753 and #771. | #774 deliberately reclosed serving until genuine hidden-state error, real pagination, exact-capacity, and active-model evidence satisfy 8.1-8.6, 8.9, 8.11, and 8.14-8.16. |
+| Direct reads | Markdown and structured-direct gates are merged in #730/#731; the full L0-L6 and registry-proven never-enrolled matrix is complete in stacked PR #832. | No section 7 implementation obligation remains; merge stays behind the Personal stability hold. |
+| Projected retrieval | Projection/measurement stores, preactivation, request-local authorization, lane reduction, real visible continuation, CPU-vector certification, and every catalog/measurement/graph writer successor are merged through #748-#753, #771, #781, #792, and #804-#830. | #774 deliberately reclosed serving until the remaining counterfactual, exact-capacity, timing, and active-model gates in section 8 are complete. |
 | Closeout | No consolidation workflow is exposed. | Sections 9-11: integration/migration gates, independent security recheck, independent verification, canonical sync, and archive. |
 
 ## 0. Evidence-Gated Prerequisite Bookkeeping
@@ -120,7 +121,7 @@ this reconciliation is `origin/main` at `1a7f30e1` (merged PR #778).
 - [x] 2.10 Wire direct media/frame/dataset reads, corpus walks, proposal membership, and
   active-session-grant revalidation to propagate unresolved membership; remove every
   fallback that converts it to `frozenset()`.
-- [ ] 2.11 Run the membership, preserve/media-processing, scene-frame, query-dataset,
+- [x] 2.11 Run the membership, preserve/media-processing, scene-frame, query-dataset,
   egress, Records, and grant-drift focused tests with embeddings/media model extras
   disabled; retain red/green output for every legacy fixture class.
 
@@ -132,7 +133,8 @@ this reconciliation is `origin/main` at `1a7f30e1` (merged PR #778).
 - [x] 3.2 Add red tests for timestamp-preserving byte replacement, added/deleted policy
   files, pending-guard generation changes, symlink/non-regular policy paths, and mixed
   before/after document sets during prospective acquisition.
-- [ ] 3.3 Add red `tests/test_govern_memory_tool.py` coverage proving proposals persist
+- [x] 3.3 Add red `govern_memory` integration coverage in
+  `tests/test_governance_active_tuple.py` proving proposals persist
   exact workspace byte map/source/conflict/guard identities, reviewed active policy/
   projector/catalog tuple, canonical target compiled bytes/fingerprint/schema versions,
   exact membership, and ready projection namespace; reject any tuple mismatch at commit.
@@ -170,7 +172,7 @@ this reconciliation is `origin/main` at `1a7f30e1` (merged PR #778).
   compiled bytes/fingerprints, compiler/projector versions, predecessor/event/receipt,
   projection namespace, immutable store id, epoch, and activation digest; enforce
   no-follow private store and immutable row constraints.
-- [ ] 3.10 Implement one `BEGIN IMMEDIATE` publication transaction that inserts the
+- [x] 3.10 Implement one `BEGIN IMMEDIATE` publication transaction that inserts the
   complete target and CASes the full policy/projector/catalog tuple with receipt,
   activation epoch/digest, and ready namespace. Make policy commits CAS expected catalog,
   content/companion writers CAS expected policy, and readers pin one tuple; remove direct
