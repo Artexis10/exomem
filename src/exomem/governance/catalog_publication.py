@@ -20,6 +20,7 @@ from .. import find_corpus, reserved_paths, vault
 from . import (
     authorization_custody,
     membership,
+    projected_graph,
     projected_retrieval,
     projection_measurement_store,
     projection_store,
@@ -67,6 +68,15 @@ class ClipMeasurementReplacement:
     item_identity: str
     content_hash: str
     samples: tuple[projected_retrieval.ProjectionClipSample, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class GraphMeasurementReplacement:
+    """Exact new outgoing graph edges for one target catalog item."""
+
+    item_identity: str
+    content_hash: str
+    edges: tuple[projected_graph.ProjectionGraphEdge, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -858,6 +868,140 @@ def _target_clip_measurements(
     )
 
 
+def _target_graph_measurements(
+    vault_root: Path,
+    *,
+    active_namespace: projection_store.VerifiedProjectionNamespace,
+    active_root: projection_store.ProjectionMeasurementRoot,
+    target_namespace: projection_store.PreparedProjectionNamespace,
+    replacements: tuple[GraphMeasurementReplacement, ...],
+) -> PreparedMeasurementPublication:
+    """Carry complete graph rows and replace exact changed L6 source items."""
+
+    if active_root.lane != "graph":
+        raise CatalogPublicationError(
+            "content publication requires a supported graph measurement family"
+        )
+    active_family = projection_measurement_store.MeasurementFamilyKey(
+        namespace_key=active_namespace.namespace_key,
+        lane=active_root.lane,
+        extractor_version=active_root.extractor_version,
+        model_version=active_root.model_version,
+    )
+    try:
+        _active_manifest, active_rows = (
+            projection_measurement_store.load_measurement_store(
+                vault_root,
+                namespace=active_namespace,
+                family=active_family,
+                expected_rows_digest=active_root.rows_digest,
+            )
+        )
+    except projection_measurement_store.MeasurementStoreError as error:
+        raise CatalogPublicationError(
+            "the active graph measurement family cannot be verified"
+        ) from error
+    active_expected = {
+        variant.projection_variant_id
+        for item in active_namespace.items
+        for variant in item.variants
+    }
+    active_by_id: dict[str, projected_graph.ProjectionGraphMeasurement] = {}
+    for row in active_rows:
+        if not isinstance(row, projected_graph.ProjectionGraphMeasurement):
+            raise CatalogPublicationError(
+                "the active graph measurement family has an invalid row"
+            )
+        active_by_id[row.measurement_key.projection_variant_id] = row
+    if set(active_by_id) != active_expected:
+        raise CatalogPublicationError(
+            "the active graph measurement family is incomplete"
+        )
+
+    if type(replacements) is not tuple:
+        raise CatalogPublicationError(
+            "graph measurement replacements must be a finite immutable tuple"
+        )
+    target_items = {item.item_identity: item for item in target_namespace.items}
+    replacement_by_identity: dict[str, GraphMeasurementReplacement] = {}
+    for replacement in replacements:
+        if not isinstance(replacement, GraphMeasurementReplacement):
+            raise CatalogPublicationError("graph measurement replacement is invalid")
+        if replacement.item_identity in replacement_by_identity:
+            raise CatalogPublicationError("graph measurement replacements collide")
+        target_item = target_items.get(replacement.item_identity)
+        if (
+            target_item is None
+            or target_item.content_hash != replacement.content_hash
+            or not any(variant.decision_level == 6 for variant in target_item.variants)
+        ):
+            raise CatalogPublicationError(
+                "graph measurement replacement does not match target content"
+            )
+        if type(replacement.edges) is not tuple:
+            raise CatalogPublicationError(
+                "graph measurement replacement edges must be immutable"
+            )
+        replacement_by_identity[replacement.item_identity] = replacement
+
+    target_family = projection_measurement_store.MeasurementFamilyKey(
+        namespace_key=target_namespace.namespace_key,
+        lane=active_root.lane,
+        extractor_version=active_root.extractor_version,
+        model_version=active_root.model_version,
+    )
+    try:
+        target_rows: list[projected_graph.ProjectionGraphMeasurement] = []
+        for item in target_namespace.items:
+            replacement = replacement_by_identity.get(item.item_identity)
+            for variant in item.variants:
+                active = active_by_id.get(variant.projection_variant_id)
+                if variant.decision_level < 6:
+                    edges: tuple[projected_graph.ProjectionGraphEdge, ...] = ()
+                elif replacement is not None:
+                    edges = replacement.edges
+                elif active is not None:
+                    edges = active.edges
+                else:
+                    raise CatalogPublicationError(
+                        "the target graph measurement family is incomplete"
+                    )
+                target_rows.append(
+                    projected_graph.ProjectionGraphMeasurement(
+                        measurement_key=projections.MeasurementKey(
+                            projection_variant_id=variant.projection_variant_id,
+                            lane=target_family.lane,
+                            extractor_version=target_family.extractor_version,
+                            model_version=target_family.model_version,
+                        ),
+                        edges=edges,
+                    )
+                )
+        target_manifest = projection_measurement_store.preview_measurement_store(
+            namespace=target_namespace,
+            family=target_family,
+            measurements=tuple(target_rows),
+        )
+    except CatalogPublicationError:
+        raise
+    except (
+        projection_measurement_store.MeasurementStoreError,
+        projections.ProjectionError,
+        OSError,
+        sqlite3.Error,
+        RuntimeError,
+        ValueError,
+    ) as error:
+        raise CatalogPublicationError(
+            "the target graph measurement family cannot be prepared"
+        ) from error
+    return PreparedMeasurementPublication(
+        family=target_family,
+        measurements=tuple(target_rows),
+        manifest=target_manifest,
+    )
+
+
 def _prepare_target_measurements(
     vault_root: Path,
     *,
@@ -865,11 +1009,16 @@ def _prepare_target_measurements(
     active_roots: tuple[projection_store.ProjectionMeasurementRoot, ...],
     target_namespace: projection_store.PreparedProjectionNamespace,
     clip_replacements: tuple[ClipMeasurementReplacement, ...] = (),
+    graph_replacements: tuple[GraphMeasurementReplacement, ...] = (),
 ) -> tuple[PreparedMeasurementPublication, ...]:
     if not active_roots:
         if clip_replacements:
             raise CatalogPublicationError(
                 "CLIP measurement replacements require an active CLIP family"
+            )
+        if graph_replacements:
+            raise CatalogPublicationError(
+                "graph measurement replacements require an active graph family"
             )
         return ()
     if any(
@@ -882,6 +1031,12 @@ def _prepare_target_measurements(
     if clip_replacements and not any(root.lane == "clip" for root in active_roots):
         raise CatalogPublicationError(
             "CLIP measurement replacements require an active CLIP family"
+        )
+    if graph_replacements and not any(
+        root.lane == "graph" for root in active_roots
+    ):
+        raise CatalogPublicationError(
+            "graph measurement replacements require an active graph family"
         )
     prepared: list[PreparedMeasurementPublication] = []
     for active_root in active_roots:
@@ -904,6 +1059,16 @@ def _prepare_target_measurements(
                     replacements=clip_replacements,
                 )
             )
+        elif active_root.lane == "graph":
+            prepared.append(
+                _target_graph_measurements(
+                    vault_root,
+                    active_namespace=active_namespace,
+                    active_root=active_root,
+                    target_namespace=target_namespace,
+                    replacements=graph_replacements,
+                )
+            )
         else:
             raise CatalogPublicationError(
                 "content publication requires rebuilt model and graph measurements"
@@ -919,6 +1084,7 @@ def _prepare_markdown_batch(
     removals: tuple[CatalogRemoval, ...] = (),
     content_paths: tuple[str, ...] = (),
     clip_replacements: tuple[ClipMeasurementReplacement, ...] = (),
+    graph_replacements: tuple[GraphMeasurementReplacement, ...] = (),
     now: int | None = None,
     activated_at: int | None = None,
 ) -> PreparedMarkdownCatalogPublication | None:
@@ -927,8 +1093,9 @@ def _prepare_markdown_batch(
     Lexical-only namespaces need no measurement work. The certified projected-
     text vector family reuses content-addressed unchanged rows and rebuilds new
     variants before canonical bytes change. The CLIP family carries complete
-    image/video rows and accepts only exact target-bound replacements. Graph and
-    unknown families remain blocked until their exact builders are connected.
+    image/video rows and accepts only exact target-bound replacements. The graph
+    family carries complete content-identical rows and accepts exact target-bound
+    replacements for changed L6 sources. Unknown families remain blocked.
     """
 
     root = Path(vault_root)
@@ -1109,6 +1276,7 @@ def _prepare_markdown_batch(
             active_roots=evidence.required_measurement_roots,
             target_namespace=target_namespace,
             clip_replacements=clip_replacements,
+            graph_replacements=graph_replacements,
         )
         target_measurement_roots = tuple(
             projection_measurement_store.measurement_root(target.manifest)
@@ -1176,6 +1344,7 @@ def prepare_markdown_batch(
     *,
     mutations: tuple[MarkdownCatalogMutation, ...],
     clip_replacements: tuple[ClipMeasurementReplacement, ...] = (),
+    graph_replacements: tuple[GraphMeasurementReplacement, ...] = (),
     now: int | None = None,
     activated_at: int | None = None,
 ) -> PreparedMarkdownCatalogPublication | None:
@@ -1192,6 +1361,7 @@ def prepare_markdown_batch(
         planned_writes=None,
         removals=(),
         clip_replacements=clip_replacements,
+        graph_replacements=graph_replacements,
         now=now,
         activated_at=activated_at,
     )
@@ -1202,6 +1372,7 @@ def prepare_planned_markdown_batch(
     *,
     writes: tuple[vault.PlannedWrite, ...],
     clip_replacements: tuple[ClipMeasurementReplacement, ...] = (),
+    graph_replacements: tuple[GraphMeasurementReplacement, ...] = (),
     now: int | None = None,
 ) -> PreparedMarkdownCatalogPublication | None:
     """Prepare catalog rows lazily so v3/open planned writes remain unchanged."""
@@ -1212,6 +1383,7 @@ def prepare_planned_markdown_batch(
         planned_writes=writes,
         removals=(),
         clip_replacements=clip_replacements,
+        graph_replacements=graph_replacements,
         now=now,
     )
 
@@ -1223,6 +1395,7 @@ def prepare_catalog_membership_batch(
     removals: tuple[CatalogRemoval, ...] = (),
     content_paths: tuple[str, ...] = (),
     clip_replacements: tuple[ClipMeasurementReplacement, ...] = (),
+    graph_replacements: tuple[GraphMeasurementReplacement, ...] = (),
     now: int | None = None,
 ) -> PreparedMarkdownCatalogPublication | None:
     """Prepare lazy write/removal membership changes for a product mutation.
@@ -1239,6 +1412,7 @@ def prepare_catalog_membership_batch(
         removals=removals,
         content_paths=content_paths,
         clip_replacements=clip_replacements,
+        graph_replacements=graph_replacements,
         now=now,
     )
 
@@ -1250,6 +1424,7 @@ def prepare_markdown_upsert(
     source: str,
     expected_before_hash: str | None,
     clip_replacements: tuple[ClipMeasurementReplacement, ...] = (),
+    graph_replacements: tuple[GraphMeasurementReplacement, ...] = (),
     now: int | None = None,
     activated_at: int | None = None,
 ) -> PreparedMarkdownCatalogPublication | None:
@@ -1259,6 +1434,7 @@ def prepare_markdown_upsert(
         vault_root,
         mutations=(MarkdownCatalogMutation(path, source, expected_before_hash),),
         clip_replacements=clip_replacements,
+        graph_replacements=graph_replacements,
         now=now,
         activated_at=activated_at,
     )
@@ -1404,6 +1580,7 @@ __all__ = [
     "CatalogPublicationError",
     "CatalogRemoval",
     "ClipMeasurementReplacement",
+    "GraphMeasurementReplacement",
     "MarkdownCatalogMutation",
     "PreparedMarkdownCatalogPublication",
     "catalog_component_values",
