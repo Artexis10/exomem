@@ -45,18 +45,22 @@ Alternative rejected: keep the exact SQLite token as a hard veto. That is the
 observed livelock because normal maintained-index traffic mutates the token during
 every long rebuild.
 
-### 2. Rebase the completed replacement under the publication barrier
+### 2. Rebase the completed replacement around a bounded publication barrier
 
 The detached worker records the recall checkpoints represented by its completed
-catalogue. Under the existing short publication barrier it compares those with
-the latest live projection. When the complete changed/deleted delta is retained
-and bounded, it applies that delta to the replacement, persists the exact new
-checkpoints, and revalidates before atomic replacement. If no logical generation
-changed, publication proceeds despite token-only churn.
+catalogue. It first replays the complete retained suffix off-barrier and proves
+the resulting source snapshot. It then waits on a background-only publication
+bound sized for a large foreground batch, compares its targets with the latest
+live projection, and applies only a small final suffix while holding the barrier.
+If a complete final suffix exceeds that cap, the worker preserves its completed
+temp catalogue, releases the barrier, catches up without the cap, re-proves the
+source, and retries. Retry count is bounded so sustained writes cannot turn one
+repair flight into an infinite owner.
 
-If the delta is missing, exceeds the bounded replay limit, fails validation, or
-the policy/semantic identity changes, the worker preserves the live catalogue and
-leaves repair pending for a later bounded flight.
+An incomplete delta, a suffix that remains oversized across the bounded retries,
+failed validation, or a policy/semantic identity change preserves the live
+catalogue and leaves repair pending for a later bounded flight. If no logical
+generation changed, publication proceeds despite token-only churn.
 
 Alternative rejected: hold the publication lock during the full scan. On the
 observed vault this would block normal work for ten to fifteen minutes.
@@ -91,9 +95,10 @@ reason such as `source_changed`, `delta_unavailable`, `identity_changed`, or
   exact published checkpoints again; a later generation stays pending.
 - **A retained delta can be incomplete.** Publication fails closed and preserves
   the current sidecar rather than guessing.
-- **Replaying too much work can lengthen the publication barrier.** Replay is
-  capped; an oversized delta declines publication and schedules a fresh bounded
-  flight.
+- **Replaying too much work can lengthen the publication barrier.** Final replay
+  stays capped. A transient oversized suffix is caught up off-barrier and retried;
+  repeated oversized suffixes exhaust the bounded retries, decline publication,
+  and leave repair pending.
 - **Another process can mutate the live sidecar.** Logical checkpoints and
   identity are re-read under the barrier; unexplained authoritative drift still
   aborts even though token-only churn does not.

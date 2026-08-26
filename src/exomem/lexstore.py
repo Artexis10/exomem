@@ -98,7 +98,19 @@ CATALOG_FOREGROUND_DELTA_CAP = 32
 # non-reentrant per-thread across ALL namespaces, so a helper already under it
 # must be handed ownership, never re-acquire.
 _PUBLICATION_TIMEOUT_BACKGROUND = 30.0
+# A completed whole-vault replacement is far more valuable than an ordinary
+# background reconcile. Large watcher batches legitimately hold the same
+# publication barrier while applying hundreds of rows; on a memory-pressured
+# Windows host that exceeded the ordinary 30-second bound and discarded 21
+# minutes of completed work. Only the final background publish uses this longer
+# bound. Requests and writers retain their 50ms fail-fast path.
+_PUBLICATION_TIMEOUT_PUBLISH = 120.0
 _PUBLICATION_TIMEOUT_FOREGROUND = 0.05
+# A watcher may land another large batch while a completed build is waiting for
+# the publication barrier. Catch that generation up outside the barrier, prove
+# the source again, and retry; never turn sustained write traffic into an
+# unbounded repair worker.
+_PUBLICATION_CATCHUP_RETRIES = 2
 
 _PROBE_RESULT: bool | None = None
 _PROBE_LOCK = threading.Lock()
@@ -3526,12 +3538,14 @@ class LexicalStore:
         4. Persist each scope's exact target checkpoint/triple and the matching
            identity in the temp DB, then fold its WAL into a single self-contained
            main file — publication is refused unless that provably succeeds.
-        5. Rebase one bounded retained suffix, then re-walk the source and require
-           its exact triples to still match the temp targets. Under the publication
-           lock, rebase the final bounded suffix and reject only authoritative
-           guard conflicts; harmless live SQLite byte churn is not canonical state.
-           Fold the live WAL safely and publish with one `os.replace`. On any
-           failure/abort the live sidecar is preserved untouched.
+        5. Rebase one retained suffix off-barrier, then re-walk the source and
+           require its exact triples to still match the temp targets. Under the
+           publication lock, rebase the final bounded suffix. If a large writer
+           batch landed while publication waited, preserve the temp, catch up
+           off-barrier, re-prove the source, and retry a bounded number of times.
+           Reject only authoritative guard conflicts; harmless live SQLite byte
+           churn is not canonical state. Fold the live WAL safely and publish
+           with one `os.replace`. On any abort the live sidecar stays untouched.
 
         Returns True when it published, False when it declined (transient
         failure, incomplete/overflowed delta, identity change mid-build, a WAL
@@ -3696,43 +3710,121 @@ class LexicalStore:
         scope_targets = rebased_targets
         temp_targets = {scope: target[2] for scope, target in scope_targets.items()}
 
-        # A last identity re-check before publication: a shift after the scan
-        # means the built units reflect a superseded projection.
-        if catalog_semantic_identity(self.vault_root) != start_identity:
-            return self._decline_rebuild("identity_changed")
+        def source_matches_targets() -> bool:
+            # A shift after the scan means the built units reflect a superseded
+            # projection. The independent source snapshot also closes the gap
+            # where another process edits the shared corpus without this process
+            # observing a watcher event. This is background-only: no request path
+            # pays for the walk.
+            if catalog_semantic_identity(self.vault_root) != start_identity:
+                self._last_rebuild_result = "identity_changed"
+                return False
+            final_members, final_signatures = self._walk_entries()
+            for scope, idx in (("kb", 0), ("vault", 1)):
+                entries = [
+                    (str(path), final_signatures[path])
+                    for path, flags in final_members.items()
+                    if flags[idx]
+                ]
+                final_triple = freshness_module.triple_from_entries(entries)
+                if final_triple != scope_targets[scope][3]:
+                    log.info(
+                        "lexical atomic publish aborted: %s source changed after target capture",
+                        scope,
+                    )
+                    self._last_rebuild_result = "source_changed"
+                    return False
+            return True
 
-        # The replay target proves registry continuity, but another machine or
-        # process may edit the shared corpus without this process observing a
-        # watcher event. A final independent source snapshot closes that gap. It
-        # is deliberately background-only: no request path pays for this walk.
-        final_members, final_signatures = self._walk_entries()
-        for scope, idx in (("kb", 0), ("vault", 1)):
-            entries = [
-                (str(path), final_signatures[path])
-                for path, flags in final_members.items()
-                if flags[idx]
-            ]
-            final_triple = freshness_module.triple_from_entries(entries)
-            if final_triple != scope_targets[scope][3]:
-                log.info(
-                    "lexical atomic publish aborted: %s source changed after target capture",
-                    scope,
-                )
-                return self._decline_rebuild("source_changed")
+        if not source_matches_targets():
+            return False
 
         # Serialize the guard re-read + live-WAL fold + replace against any
         # concurrent publish (background rebuild or foreground delta) so a newer
         # live catalog is never overwritten and the replace is snapshot-consistent.
-        _mark_active_repair_phase(self.vault_root, "publishing")
-        with self._publication_lock():
-            # Close the final watcher race under the publication barrier. This is
-            # bounded to the foreground delta cap, so the barrier never grows into
-            # another whole-vault operation. An incomplete or oversized suffix
-            # declines safely and leaves the request pending for the next flight.
+        catchup_attempts = 0
+        while True:
+            _mark_active_repair_phase(self.vault_root, "publishing")
+            needs_off_barrier_catchup = False
+            with self._publication_lock(timeout=_PUBLICATION_TIMEOUT_PUBLISH):
+                # Close the final watcher race under the publication barrier. This
+                # is bounded to the foreground delta cap, so the barrier never
+                # grows into another whole-vault operation. If a large batch landed
+                # while this build waited, preserve the completed temp and catch it
+                # up outside the barrier instead of throwing the whole build away.
+                rebased_targets = self._rebase_detached_catalog(
+                    temp_path,
+                    scope_targets,
+                    start_identity,
+                )
+                if rebased_targets is None:
+                    needs_off_barrier_catchup = (
+                        self._last_rebuild_result == "delta_unavailable"
+                        and catchup_attempts < _PUBLICATION_CATCHUP_RETRIES
+                    )
+                    if not needs_off_barrier_catchup:
+                        return False
+                else:
+                    scope_targets = rebased_targets
+                    temp_targets = {
+                        scope: target[2] for scope, target in scope_targets.items()
+                    }
+                    now_guard = self._live_publication_guard()
+                    if self._publication_guard_changed(
+                        start_live_guard,
+                        now_guard,
+                        temp_targets,
+                    ):
+                        # Foreign-process/out-of-order checkpoints remain incomparable.
+                        # Same-process advances are safe only when the bounded rebase
+                        # above put their exact target into the replacement.
+                        log.info(
+                            "lexical atomic publish aborted: live catalog changed during build"
+                        )
+                        return self._decline_rebuild("publish_conflict")
+                    if self._live_regressed(now_guard, temp_targets, start_identity):
+                        # A foreground delta (or another rebuild) advanced the live
+                        # catalog past this build's target while we were building.
+                        # Abort rather than regress it.
+                        log.info(
+                            "lexical atomic publish aborted: live catalog advanced past build"
+                        )
+                        return self._decline_rebuild("publish_conflict")
+                    # The live main + `-wal` + `-shm` are one disposable set. A
+                    # missing main with orphan sidecars, or a proven-fatal main+WAL
+                    # that can never checkpoint itself, must move aside as a set.
+                    if self._live_set_disposition() == "quarantine":
+                        published = self._publish_over_quarantined_set(temp_path)
+                        if not published:
+                            self._last_rebuild_result = "publish_conflict"
+                        return published
+                    # Fold the healthy LIVE WAL before replacing its main file.
+                    if not self._quiesce_live_wal():
+                        log.info(
+                            "lexical atomic publish declined: live WAL not safely foldable"
+                        )
+                        return self._decline_rebuild("wal_busy")
+                    with reserved_paths._subsystem_authority_scope("lexstore"):
+                        reserved_paths._move_owner_file(
+                            self.vault_root,
+                            temp_path,
+                            "lexical-rebuild",
+                            self.path,
+                            "lexical-store",
+                            replace=True,
+                        )
+                    # Live `-wal`/`-shm` were folded away by `_quiesce_live_wal`.
+                    return True
+
+            # The capped suffix was complete but too large to replay while
+            # blocking writers. Rebase it without the barrier, then repeat the
+            # independent source proof before another short final suffix.
+            catchup_attempts += 1
             rebased_targets = self._rebase_detached_catalog(
                 temp_path,
                 scope_targets,
                 start_identity,
+                max_paths=None,
             )
             if rebased_targets is None:
                 return False
@@ -3740,53 +3832,8 @@ class LexicalStore:
             temp_targets = {
                 scope: target[2] for scope, target in scope_targets.items()
             }
-            now_guard = self._live_publication_guard()
-            if self._publication_guard_changed(
-                start_live_guard,
-                now_guard,
-                temp_targets,
-            ):
-                # Foreign-process/out-of-order checkpoints remain incomparable.
-                # Same-process advances are safe only when the bounded rebase
-                # above put their exact target into the replacement.
-                log.info("lexical atomic publish aborted: live catalog changed during build")
-                return self._decline_rebuild("publish_conflict")
-            if self._live_regressed(now_guard, temp_targets, start_identity):
-                # A foreground delta (or another rebuild) advanced the live catalog
-                # past this build's target while we were building. Abort rather
-                # than regress it; the later target stays in the registry history
-                # and a subsequent rebuild will capture it.
-                log.info("lexical atomic publish aborted: live catalog advanced past build")
-                return self._decline_rebuild("publish_conflict")
-            # The live main + `-wal` + `-shm` are one disposable set. A missing
-            # main with orphan sidecars, or a proven-fatal main+WAL that can never
-            # checkpoint itself, cannot be folded in place: recover by moving the
-            # WHOLE live-name set aside before installing the temp, so no stale WAL
-            # can share the freshly published main's name.
-            if self._live_set_disposition() == "quarantine":
-                published = self._publish_over_quarantined_set(temp_path)
-                if not published:
-                    self._last_rebuild_result = "publish_conflict"
-                return published
-            # Normal/healthy set: fold the LIVE `-wal`/`-shm` (content-preserving)
-            # so the single-file replace cannot strand a live WAL, and so we never
-            # blindly delete a live `-wal` a concurrent reader depends on. A busy/
-            # healthy WAL declines here rather than evicting a valid open DB.
-            if not self._quiesce_live_wal():
-                log.info("lexical atomic publish declined: live WAL not safely foldable")
-                return self._decline_rebuild("wal_busy")
-            with reserved_paths._subsystem_authority_scope("lexstore"):
-                reserved_paths._move_owner_file(
-                    self.vault_root,
-                    temp_path,
-                    "lexical-rebuild",
-                    self.path,
-                    "lexical-store",
-                    replace=True,
-                )
-            # Live `-wal`/`-shm` were folded away by `_quiesce_live_wal` before the
-            # replace; there is nothing to blindly unlink here.
-        return True
+            if not source_matches_targets():
+                return False
 
     def _rebase_detached_catalog(
         self,
@@ -3802,8 +3849,8 @@ class LexicalStore:
         or ``None`` when the latest generation cannot be proven safely. The
         caller may hold the publication barrier; this helper touches only the
         detached SQLite family and never walks the vault. ``max_paths=None`` is
-        reserved for the first off-barrier background catch-up; the final call
-        under the publication barrier retains the foreground cap.
+        reserved for off-barrier background catch-up; every final call under the
+        publication barrier retains the foreground cap.
         """
         from . import freshness as freshness_module
 
