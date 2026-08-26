@@ -107,6 +107,27 @@ def _clip(
     )
 
 
+def _video_clip(
+    variant: projections.ProjectionVariant,
+    *samples: tuple[int, tuple[float, ...]],
+) -> projected_retrieval.ProjectionClipMeasurement:
+    return projected_retrieval.ProjectionClipMeasurement(
+        measurement_key=projections.MeasurementKey(
+            projection_variant_id=variant.projection_variant_id,
+            lane="clip",
+            extractor_version="extractor-v1",
+            model_version="model-v1",
+        ),
+        samples=tuple(
+            projected_retrieval.ProjectionClipSample(
+                frame_timestamp_ms=timestamp_ms,
+                vector=vector,
+            )
+            for timestamp_ms, vector in samples
+        ),
+    )
+
+
 def _graph(
     variant: projections.ProjectionVariant,
     *edges: projected_graph.ProjectionGraphEdge,
@@ -233,6 +254,55 @@ def test_clip_family_accepts_only_l6_projection_rows(tmp_path: Path) -> None:
         expected_rows_digest=manifest.rows_digest,
     )
     assert loaded == (_clip(full),)
+
+
+def test_clip_family_round_trips_every_timestamped_video_sample(
+    tmp_path: Path,
+) -> None:
+    namespace, _lower, full = _namespace()
+    video = projections.build_projection_variant(
+        item_identity=full.item_identity,
+        content_hash=full.content_hash,
+        decision=Decision(level=6, options={}),
+        projector_schema_version=1,
+        full_search_fields={"body": "full video", "media_type": "video"},
+    )
+    assert video is not None
+    namespace = verified_namespace(
+        _key(),
+        (
+            projection_store.ProjectionItemVariants(
+                item_identity=video.item_identity,
+                content_hash=video.content_hash,
+                variants=(video,),
+            ),
+        ),
+    )
+    family = _family("clip")
+    row = _video_clip(
+        video,
+        (1_000, (1.0, 0.0)),
+        (8_500, (0.0, 1.0)),
+        (19_000, (0.5, 0.5)),
+    )
+
+    manifest = projection_measurement_store.stage_measurement_store(
+        tmp_path,
+        namespace=namespace,
+        family=family,
+        measurements=(row,),
+    )
+    loaded_manifest, loaded = projection_measurement_store.load_measurement_store(
+        tmp_path,
+        namespace=namespace,
+        family=family,
+        expected_rows_digest=manifest.rows_digest,
+    )
+
+    assert loaded_manifest == manifest
+    assert loaded == (row,)
+    assert manifest.measurement_count == 1
+    assert manifest.vector_dimension == 2
 
 
 def test_graph_family_round_trips_canonical_edges(tmp_path: Path) -> None:

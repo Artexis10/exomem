@@ -114,7 +114,12 @@ text embedding rows before its cap; a missing/stale selected embedding SHALL war
 disable that visible lane and MUST NOT fall back to a raw embedding. Reranking SHALL
 receive only selected projected fields and SHALL precede final top-k. CLIP pixels and
 keyframes SHALL participate only for artifacts selected at L6, with the authorization
-map applied inside the lane before its cap. Below L6, image/video recall SHALL use only
+map applied inside the lane before its cap. Each L6 media projection SHALL bind one
+immutable measurement row: exactly one untimestamped vector for an image, or one through
+forty vectors for a video in strict canonical `frame_timestamp_ms` order. The forty-sample
+ceiling SHALL NOT be configurable. The lane SHALL score every authorized sample, return
+the parent media item once at its best score, and bind the earliest best frame timestamp.
+Below L6, image/video recall SHALL use only
 an authorized textual companion projection, or exclude the binary lane when none is
 available. Graph vertices and edges SHALL be admitted before expansion and every graph
 reduction SHALL run over the selected projected graph.
