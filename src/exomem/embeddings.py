@@ -1132,7 +1132,13 @@ def upsert_after_write_status(
                     len(md_paths),
                 )
                 return EmbeddingSyncStatus(
-                    "deferred", "deferred_warmup", eligible_count
+                    "deferred",
+                    # The durable receipts above are the coverage evidence the
+                    # batch report trusts.  When recording them failed, say so
+                    # in the code so a stale queue entry for the same path can
+                    # never bless this batch as durably covered.
+                    "deferred_warmup" if race_receipts else "deferred_warmup_volatile",
+                    eligible_count,
                 )
 
     def finish(status: EmbeddingSyncStatus) -> EmbeddingSyncStatus:

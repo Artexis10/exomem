@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import gc
 import logging
+import threading
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -49,6 +50,44 @@ _FULL_UPSERT_COMPONENTS = frozenset(
         "embeddings",
     }
 )
+
+#: Write-time deferral accounting — stable, content-free counters ONLY (no
+#: vault paths, note names, or content).  ``covered_deferral_accepted`` counts
+#: batch-report judgements where an embeddings deferral was accepted because
+#: durable path-exact receipts already covered the batch;
+#: ``uncovered_deferral_escalated`` counts embeddings deferrals that failed
+#: the report — at the write-time call site that minting judgement is what
+#: records the durable full-component refresh demand — because no such
+#: coverage could be proven.  Drain-time re-judgements of a still-deferred
+#: batch count too: the counters observe report decisions, not receipts.
+_DEFERRAL_TELEMETRY_KEYS = (
+    "covered_deferral_accepted",
+    "uncovered_deferral_escalated",
+)
+_DEFERRAL_TELEMETRY: dict[str, int] = dict.fromkeys(_DEFERRAL_TELEMETRY_KEYS, 0)
+_DEFERRAL_TELEMETRY_LOCK = threading.Lock()
+
+
+def _note_deferral(reason: str) -> None:
+    """Count one stable deferral-accounting outcome (never content).
+
+    Direct indexing on purpose: a typo'd reason raises KeyError instead of
+    silently minting a counter outside the stable key set.
+    """
+    with _DEFERRAL_TELEMETRY_LOCK:
+        _DEFERRAL_TELEMETRY[reason] += 1
+
+
+def deferral_telemetry() -> dict[str, int]:
+    """Snapshot the stable, content-free deferral-accounting counters."""
+    with _DEFERRAL_TELEMETRY_LOCK:
+        return dict(_DEFERRAL_TELEMETRY)
+
+
+def reset_deferral_telemetry() -> None:
+    """Test seam: zero the deferral-accounting counters."""
+    with _DEFERRAL_TELEMETRY_LOCK:
+        _DEFERRAL_TELEMETRY.update(dict.fromkeys(_DEFERRAL_TELEMETRY_KEYS, 0))
 
 
 def _evict_corpus_projection_consumers(vault_root: Path) -> None:
@@ -620,18 +659,29 @@ def full_upsert_succeeded(vault_root: Path, replaced: list[Path], report: object
                 and graph_sync.registered_checkpoint(vault_root) == checkpoint
             ):
                 continue
-        if (
-            component.component == "embeddings"
-            and component.outcome == "deferred"
-            and component.code == "deferred_durable"
-            and replaced_rels
-        ):
-            if receipt_rels is None:
-                receipt_rels = {
-                    receipt.rel_path for receipt in deferred_index.snapshot(vault_root)
-                }
-            if replaced_rels <= receipt_rels:
-                continue
+        if component.component == "embeddings" and component.outcome == "deferred":
+            # A deferral that is already durably queued path-by-path is not a
+            # batch failure — declaring it one is what escalated an O(1) cause
+            # into whole-vault work (bound-contended-write-index-refresh).
+            # Only a deferral whose durable recording succeeded names a
+            # coverage-claiming code (`deferred_durable` from the durable-defer
+            # branch, `deferred_warmup` from the warm-up branch); anything
+            # else — `deferred_warmup_volatile` included — carries no claim,
+            # so a stale queue entry can never bless it.
+            if (
+                component.code in {"deferred_durable", "deferred_warmup"}
+                and replaced_rels
+            ):
+                if receipt_rels is None:
+                    receipt_rels = {
+                        receipt.rel_path
+                        for receipt in deferred_index.snapshot(vault_root)
+                    }
+                if replaced_rels <= receipt_rels:
+                    _note_deferral("covered_deferral_accepted")
+                    continue
+            _note_deferral("uncovered_deferral_escalated")
+            return False
         return False
     return True
 
