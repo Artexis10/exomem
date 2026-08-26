@@ -47,6 +47,37 @@ The system SHALL compute markdown freshness for a single `find` request at most 
 - **THEN** it consumes the same exact checkpoint pair admitted by that find
 - **AND** it omits the enrichment if the projection advances rather than reading a different generation
 
+### Requirement: Managed Catalogue Recovery Has One Owner
+
+Managed server startup SHALL either prove the maintained catalogue current or delegate recovery to the existing single-flight background repair worker. It MUST NOT run synchronous in-place catalogue reconciliation concurrently with watcher-driven repair. The repair worker SHALL promote retrieval readiness only after publishing a checkpoint-current catalogue. An explicit offline caller MAY retain synchronous reconciliation when no managed repair owner exists.
+
+#### Scenario: Stale managed startup delegates instead of rebuilding twice
+
+- **WHEN** watcher seeding has completed but the managed server catalogue is not current
+- **THEN** startup requests the single-flight background repair and leaves retrieval unadmitted
+- **AND** startup does not invoke synchronous in-place catalogue reconciliation
+- **AND** successful background publication promotes retrieval without a process restart
+
+#### Scenario: Repeated stale probes coalesce into the active full repair
+
+- **WHEN** health or request probes repeatedly observe the same stale catalogue while its full background rebuild is active
+- **THEN** the repair scheduler treats those observations as one level-triggered repair request
+- **AND** it does not queue another full-corpus pass behind the active pass
+- **AND** a stronger full-rebuild request arriving during a targeted repair is still honoured
+
+#### Scenario: A declined or superseded pass does not acknowledge uncovered work
+
+- **WHEN** a full repair request arrives during a pass that declines publication or cannot prove its publication current
+- **THEN** that request remains pending after the active worker yields
+- **AND** the worker does not immediately chain another whole-corpus scan
+- **AND** a later caller starts one fresh bounded repair flight for the pending work
+
+#### Scenario: A post-proof generation is not acknowledged by the older proof
+
+- **WHEN** a repair proves generation N current and generation N+1 is observed before the worker clears its active marker
+- **THEN** the generation-tagged N+1 repair request remains pending
+- **AND** generation N's proof does not acknowledge or discard it
+
 ## ADDED Requirements
 
 ### Requirement: Recall Projection Timing Is Attributed

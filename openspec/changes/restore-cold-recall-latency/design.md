@@ -48,6 +48,8 @@ A read-only promotion helper will verify both KB and vault catalogues against th
 
 Promotion is monotonic for a proven checkpoint. A later projection loss or mismatch demotes retrieval before serving; repair must prove the new state before promotion. The health endpoint therefore reports transport liveness separately from partial/full retrieval admission.
 
+Managed startup has exactly one catalogue-recovery owner. After the watcher seed, warm-up may prove an already-current catalogue, but an incomplete catalogue is delegated to the existing single-flight background repair worker; warm-up never calls the synchronous in-place `ensure_fresh` path or catalogue-dependent BM25/resolver cache warming beside it. The repair worker alone publishes and promotes readiness. Repeated observations during a successful checkpoint-current full pass are tagged with their exact recall-generation pair and acknowledged only when the publication proof covers that pair. An observation that the pass declines, cannot promote, or that names a later generation remains pending across an idle boundary; one worker never chains whole-corpus scans. Explicit offline callers retain synchronous reconciliation because no watcher-driven repair owner exists there.
+
 Alternative rejected: set readiness directly when the watcher seed finishes. A live projection alone does not prove that the maintained lexical catalogue represents it.
 
 ### 4. Keep heavy and model-backed lanes optional

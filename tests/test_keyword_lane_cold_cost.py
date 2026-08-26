@@ -559,10 +559,16 @@ def test_vector_graph_resolver_inherits_strict_server_projection_policy(
             for scope in freshness.SCOPES
         },
     )
-    observed: list[bool] = []
+    observed: list[tuple[bool, object]] = []
 
-    def resolver(_root: Path, freshness=None, *, allow_fallback=True):  # noqa: ANN001
-        observed.append(allow_fallback)
+    def resolver(
+        _root: Path,
+        freshness=None,  # noqa: ANN001
+        *,
+        allow_fallback=True,  # noqa: ANN001
+        expected_checkpoint=None,  # noqa: ANN001
+    ):
+        observed.append((allow_fallback, expected_checkpoint))
         raise find_module.RetrievalIndexWarming(status="temporarily_unavailable")
 
     def collect(root: Path, **kwargs):  # noqa: ANN003
@@ -587,7 +593,9 @@ def test_vector_graph_resolver_inherits_strict_server_projection_policy(
             catalog_proof_out=catalog_proof_out,
         )
 
-    assert observed == [False]
+    assert observed == [
+        (False, freshness.live_recall_checkpoint(tmp_path, "vault"))
+    ]
     assert set(catalog_proof_out) == set(freshness.SCOPES)
     assert all(
         catalog_proof_out[scope] == freshness.live_recall_checkpoint(tmp_path, scope)
@@ -726,6 +734,7 @@ def test_failed_catalog_warm_retries_repair_before_refusing_request(
         raise AssertionError("failed-warm retry must precede cold freshness walks")
         yield  # pragma: no cover - keep this a generator-shaped test double
 
+    readiness.manage_runtime()
     readiness.begin_warm()
     readiness.finish_warm()
     monkeypatch.setattr(find_module, "_walk_md", forbidden_walk)

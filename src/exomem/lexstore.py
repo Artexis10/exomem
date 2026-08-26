@@ -106,6 +106,25 @@ _PROBE_LOCK = threading.Lock()
 _STORES: dict[Path, LexicalStore] = {}
 _STORES_LOCK = threading.Lock()
 _REPAIRS_IN_FLIGHT: set[Path] = set()
+#: Vaults whose single repair worker is already executing a full-corpus pass.
+#:
+#: Full requests are level-triggered ("this catalogue is stale"), not a count of
+#: independently required jobs. Health and request probes can all observe the
+#: same stale generation while a detached rebuild is running; remembering each
+#: observation as a follow-up pass turns steady polling into an endless rebuild
+#: chain. The active set lets the scheduler coalesce those duplicate requests
+#: while still preserving a full request that arrives during a targeted pass.
+_FULL_REBUILDS_IN_FLIGHT: set[Path] = set()
+#: Full-repair observations made while the full pass is active, tagged with the
+#: exact live recall generation pair the caller observed. They are acknowledged
+#: only when the pass's promotion proof covers that pair. The sentinel is used
+#: by the explicit event-index rollback, where no live generation exists.
+_UNKNOWN_REPAIR_GENERATION = object()
+_FULL_REBUILD_REOBSERVED: dict[Path, set[object]] = {}
+#: One worker may scan the whole vault at most once. If that pass cannot cover a
+#: request observed during it, the request stays pending for a later caller to
+#: restart after an idle boundary instead of chaining full scans forever.
+_MAX_FULL_REBUILDS_PER_FLIGHT = 1
 #: Paths a CONTENDED foreground upsert declined, awaiting a targeted retry.
 #:
 #: A governed write's incremental upsert cannot take the publication barrier
@@ -545,18 +564,90 @@ def runtime_retrieval_catalog_current(
     )
 
 
-def _mark_runtime_retrieval_ready_if_current(vault_root: Path) -> bool:
+def _live_repair_generation(vault_root: Path) -> tuple[object, ...] | None:
+    """Return the exact live recall generation pair without walking the vault."""
+    from . import freshness as freshness_module
+
+    checkpoints: list[object] = []
+    for scope in freshness_module.SCOPES:
+        checkpoint = freshness_module.live_recall_checkpoint(vault_root, scope)
+        if checkpoint is None:
+            return None
+        checkpoints.append(checkpoint)
+    return tuple(checkpoints)
+
+
+def _repair_generation_from_proof(
+    proof: dict[str, object],
+) -> tuple[object, ...] | None:
+    """Normalize an admitted proof into the scheduler's ordered generation pair."""
+    from . import freshness as freshness_module
+
+    if any(scope not in proof for scope in freshness_module.SCOPES):
+        return None
+    return tuple(proof[scope] for scope in freshness_module.SCOPES)
+
+
+def _repair_generation_covers(
+    covered: tuple[object, ...] | None,
+    observed: object,
+) -> bool:
+    """Whether one exact admitted pair includes an observed repair generation."""
+    if covered is None:
+        return False
+    if observed is _UNKNOWN_REPAIR_GENERATION:
+        # Rollback mode has no event generation to compare. A successful exact
+        # catalogue proof is the strongest available acknowledgement.
+        return True
+    if not isinstance(observed, tuple) or len(covered) != len(observed):
+        return False
+    for admitted, requested in zip(covered, observed, strict=True):
+        if admitted == requested:
+            continue
+        if any(
+            getattr(admitted, field, None) != getattr(requested, field, None)
+            for field in (
+                "instance_id",
+                "policy_version",
+                "access_policy_fingerprint",
+            )
+        ):
+            return False
+        admitted_generation = getattr(admitted, "generation", None)
+        requested_generation = getattr(requested, "generation", None)
+        if (
+            isinstance(admitted_generation, bool)
+            or not isinstance(admitted_generation, int)
+            or isinstance(requested_generation, bool)
+            or not isinstance(requested_generation, int)
+            or admitted_generation <= requested_generation
+        ):
+            # Equal generations with unequal payloads are contradictory, not
+            # ordered. Only a strictly later generation covers a non-equal one.
+            return False
+    return True
+
+
+def _mark_runtime_retrieval_ready_if_current(
+    vault_root: Path,
+    *,
+    proof_out: dict[str, object] | None = None,
+) -> bool:
     """Admit the configured runtime after projections and catalogs agree."""
     if not _is_configured_runtime_vault(vault_root):
         return False
     from . import freshness as freshness_module
     from . import readiness
 
-    if not runtime_retrieval_catalog_current(
+    proof = runtime_retrieval_catalog_proof(
         vault_root,
         require_live_projection=freshness_module.event_indexes_enabled(),
-    ):
+    )
+    if proof is None:
         return False
+    if proof_out is not None:
+        proof_out.clear()
+        proof_out.update(proof)
     readiness.mark_ready("retrieval_catalog")
     return True
 
@@ -627,12 +718,22 @@ def _schedule_repair(vault_root: Path, *, deferred_paths: list[Path] | None = No
     Every other caller passes nothing and still gets the rebuild, so this can
     only ever do LESS work than before, never less repair: a targeted retry that
     fails escalates, and a rebuild request queued while a targeted retry is
-    running is honoured on the worker's next pass.
+    running is honoured on the worker's next pass. Repeated full requests while
+    a full pass is already active are one level-triggered observation and are
+    coalesced into that pass instead of creating an unbounded rebuild chain.
     """
     key = vault_root.resolve()
+    observation: object = _UNKNOWN_REPAIR_GENERATION
+    if not deferred_paths:
+        try:
+            observation = _live_repair_generation(vault_root) or observation
+        except Exception:  # noqa: BLE001 - scheduling must remain best-effort
+            pass
     with _REPAIRS_LOCK:
         if deferred_paths:
             _DEFERRED_UPSERTS.setdefault(key, set()).update(deferred_paths)
+        elif key in _FULL_REBUILDS_IN_FLIGHT:
+            _FULL_REBUILD_REOBSERVED.setdefault(key, set()).add(observation)
         else:
             _FULL_REBUILD_REQUESTED.add(key)
         if key in _REPAIRS_IN_FLIGHT:
@@ -643,27 +744,114 @@ def _schedule_repair(vault_root: Path, *, deferred_paths: list[Path] | None = No
 
     def _run() -> None:
         rebuild = False
+        full_pass = False
+        full_passes = 0
         paths: list[Path] = []
         try:
             store = get_store(vault_root)
             while True:
                 with _REPAIRS_LOCK:
-                    rebuild = key in _FULL_REBUILD_REQUESTED
-                    _FULL_REBUILD_REQUESTED.discard(key)
+                    full_requested = key in _FULL_REBUILD_REQUESTED
                     paths = sorted(_DEFERRED_UPSERTS.pop(key, set()))
+                    if full_requested and full_passes >= _MAX_FULL_REBUILDS_PER_FLIGHT:
+                        if not paths:
+                            # Keep the full request pending, but yield ownership.
+                            # A later caller starts a fresh bounded flight; this
+                            # worker never chains whole-vault scans indefinitely.
+                            _FULL_REBUILDS_IN_FLIGHT.discard(key)
+                            _FULL_REBUILD_REOBSERVED.pop(key, None)
+                            _REPAIRS_IN_FLIGHT.discard(key)
+                            return
+                        rebuild = False
+                    else:
+                        rebuild = full_requested
+                        if rebuild:
+                            _FULL_REBUILD_REQUESTED.discard(key)
                     if not rebuild and not paths:
                         # Nothing left, and nothing can arrive between here and
                         # releasing the flight: a caller that takes this lock
                         # next sees no flight and starts its own worker.
+                        _FULL_REBUILDS_IN_FLIGHT.discard(key)
+                        _FULL_REBUILD_REOBSERVED.pop(key, None)
                         _REPAIRS_IN_FLIGHT.discard(key)
                         return
-                if rebuild or not store.retry_deferred_upsert(paths):
+                full_pass = rebuild or not store.retry_deferred_upsert(paths)
+                if full_pass:
+                    with _REPAIRS_LOCK:
+                        if full_passes >= _MAX_FULL_REBUILDS_PER_FLIGHT:
+                            # A targeted retry after this worker's full pass just
+                            # proved that another full repair is necessary. Keep
+                            # both claims for the next bounded flight.
+                            _FULL_REBUILD_REQUESTED.add(key)
+                            if paths:
+                                _DEFERRED_UPSERTS.setdefault(key, set()).update(paths)
+                            _FULL_REBUILD_REOBSERVED.pop(key, None)
+                            _REPAIRS_IN_FLIGHT.discard(key)
+                            return
+                        full_passes += 1
+                        # A failed targeted retry escalates to the same full pass
+                        # a queued request asked for. Consume that level here so
+                        # it cannot become a redundant pass immediately after.
+                        _FULL_REBUILD_REQUESTED.discard(key)
+                        _FULL_REBUILD_REOBSERVED.pop(key, None)
+                        _FULL_REBUILDS_IN_FLIGHT.add(key)
                     repaired = store.rebuild_atomic()
                 else:
                     repaired = True
+                configured_runtime = _is_configured_runtime_vault(vault_root)
+                promoted = False
+                promotion_proof: dict[str, object] = {}
                 if repaired:
-                    _mark_runtime_retrieval_ready_if_current(vault_root)
+                    if configured_runtime:
+                        promoted = _mark_runtime_retrieval_ready_if_current(
+                            vault_root,
+                            proof_out=promotion_proof,
+                        )
+                    else:
+                        # Offline callers have no runtime event to mark, but the
+                        # scheduler still needs an exact proof before it may
+                        # acknowledge a generation-tagged request. Prefer the
+                        # non-walking live pair when one exists; explicit offline
+                        # mode retains its established walk-backed proof.
+                        live_generation = _live_repair_generation(vault_root)
+                        offline_proof = runtime_retrieval_catalog_proof(
+                            vault_root,
+                            require_live_projection=live_generation is not None,
+                        )
+                        if offline_proof is not None:
+                            promotion_proof.update(offline_proof)
+                            promoted = True
+                if full_pass:
+                    with _REPAIRS_LOCK:
+                        # Keep the pass active through readiness promotion. A
+                        # probe in the publish-to-promotion window still observed
+                        # the generation this pass just repaired.
+                        covered_generation = _repair_generation_from_proof(
+                            promotion_proof
+                        )
+                        reobserved = _FULL_REBUILD_REOBSERVED.pop(key, set())
+                        uncovered = {
+                            generation
+                            for generation in reobserved
+                            if not (
+                                bool(repaired)
+                                and promoted
+                                and (
+                                    _repair_generation_covers(
+                                        covered_generation,
+                                        generation,
+                                    )
+                                )
+                            )
+                        }
+                        if not (repaired and promoted):
+                            if paths:
+                                _DEFERRED_UPSERTS.setdefault(key, set()).update(paths)
+                        if uncovered:
+                            _FULL_REBUILD_REQUESTED.add(key)
+                        _FULL_REBUILDS_IN_FLIGHT.discard(key)
                 rebuild = False
+                full_pass = False
                 paths = []
         except Exception as e:  # noqa: BLE001 - daemon must not escape into stderr
             log.warning("lexical background repair skipped (%s)", e)
@@ -678,6 +866,10 @@ def _schedule_repair(vault_root: Path, *, deferred_paths: list[Path] | None = No
                     _FULL_REBUILD_REQUESTED.add(key)
                 if paths:
                     _DEFERRED_UPSERTS.setdefault(key, set()).update(paths)
+                if _FULL_REBUILD_REOBSERVED.get(key):
+                    _FULL_REBUILD_REQUESTED.add(key)
+                _FULL_REBUILD_REOBSERVED.pop(key, None)
+                _FULL_REBUILDS_IN_FLIGHT.discard(key)
                 _REPAIRS_IN_FLIGHT.discard(key)
 
     # Static name, deliberately — every other exomem thread name is a literal
@@ -699,6 +891,8 @@ def _schedule_repair(vault_root: Path, *, deferred_paths: list[Path] | None = No
         thread.start()
     except RuntimeError:
         with _REPAIRS_LOCK:
+            _FULL_REBUILD_REOBSERVED.pop(key, None)
+            _FULL_REBUILDS_IN_FLIGHT.discard(key)
             _REPAIRS_IN_FLIGHT.discard(key)
         log.warning("lexical background repair could not start for %s", key)
 

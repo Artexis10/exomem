@@ -340,7 +340,7 @@ def test_warm_all_marks_components_ready_in_semantic_lexical_model_order(
     monkeypatch.setattr(
         warmup,
         "warm_retrieval_catalog",
-        lambda vr: call_order.append("catalog"),
+        lambda vr: call_order.append("catalog") or True,
         raising=False,
     )
     monkeypatch.setattr(warmup, "warm_caches", lambda vr, **_kw: call_order.append("lexical") or {})
@@ -381,7 +381,7 @@ def test_warm_all_marks_semantic_corpus_ready_before_optional_cache_warm(
     monkeypatch.setattr(
         warmup,
         "warm_retrieval_catalog",
-        lambda vr: call_order.append("catalog"),
+        lambda vr: call_order.append("catalog") or True,
         raising=False,
     )
     monkeypatch.setattr(
@@ -417,8 +417,9 @@ def test_warm_all_marks_catalog_ready_before_optional_cache_work(
     monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
     call_order: list[str] = []
 
-    def catalog(_vault_root: Path) -> None:
+    def catalog(_vault_root: Path) -> bool:
         call_order.append("catalog")
+        return True
 
     def optional_caches(_vault_root: Path, **_kwargs) -> dict:
         assert readiness.is_ready("retrieval_catalog") is True
@@ -477,9 +478,105 @@ def test_warm_retrieval_catalog_verifies_kb_and_vault_scopes(
         lambda _root, _scope: SimpleNamespace(triple=(1, 1, "digest")),
     )
 
-    warmup.warm_retrieval_catalog(tmp_path)
+    assert warmup.warm_retrieval_catalog(tmp_path) is True
 
     assert calls == ["ensure", "kb", "vault"]
+
+
+def test_managed_retrieval_warm_delegates_stale_catalog_to_one_repair_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+    readiness.manage_runtime()
+    monkeypatch.setattr(lexstore, "maintained_content_index_enabled", lambda: True)
+    monkeypatch.setattr(freshness, "event_indexes_enabled", lambda: True)
+    monkeypatch.setattr(freshness, "recall_is_live", lambda _root, _scope: True)
+    monkeypatch.setattr(
+        lexstore,
+        "runtime_retrieval_catalog_current",
+        lambda _root, *, require_live_projection: (
+            calls.append(f"proof:{require_live_projection}") or False
+        ),
+    )
+    monkeypatch.setattr(
+        lexstore,
+        "request_repair",
+        lambda _root: calls.append("repair"),
+    )
+    monkeypatch.setattr(
+        lexstore,
+        "ensure_fresh",
+        lambda _root: (_ for _ in ()).throw(
+            AssertionError("managed startup must not start a second catalog owner")
+        ),
+    )
+
+    assert warmup.warm_retrieval_catalog(tmp_path) is False
+    assert calls == ["proof:True", "repair"]
+
+
+def test_eager_managed_retrieval_warm_waits_for_the_single_repair_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The eager rollback lever stays synchronous without adding an owner."""
+    calls: list[str] = []
+    proofs = iter((False, True))
+    readiness.manage_runtime()
+    monkeypatch.setenv("EXOMEM_EAGER_BOOT", "1")
+    monkeypatch.setattr(lexstore, "maintained_content_index_enabled", lambda: True)
+    monkeypatch.setattr(freshness, "event_indexes_enabled", lambda: True)
+    monkeypatch.setattr(freshness, "recall_is_live", lambda _root, _scope: True)
+    monkeypatch.setattr(
+        lexstore,
+        "runtime_retrieval_catalog_current",
+        lambda _root, *, require_live_projection: (
+            calls.append(f"proof:{require_live_projection}") or next(proofs)
+        ),
+    )
+    monkeypatch.setattr(
+        lexstore,
+        "request_repair",
+        lambda _root: calls.append("repair"),
+    )
+    monkeypatch.setattr(
+        lexstore,
+        "await_repairs_idle",
+        lambda _root: calls.append("wait") or True,
+    )
+    monkeypatch.setattr(
+        lexstore,
+        "ensure_fresh",
+        lambda _root: (_ for _ in ()).throw(
+            AssertionError("eager managed startup must use the same repair owner")
+        ),
+    )
+
+    assert warmup.warm_retrieval_catalog(tmp_path) is True
+    assert calls == ["proof:True", "repair", "wait", "proof:True"]
+
+
+def test_warm_all_does_not_admit_catalog_while_background_repair_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    monkeypatch.setattr(warmup, "warm_retrieval_catalog", lambda _root: False)
+    monkeypatch.setattr(
+        warmup,
+        "warm_caches",
+        lambda _root, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("catalog-dependent caches must not become a second owner")
+        ),
+    )
+    monkeypatch.setattr(
+        "exomem.semantic_contract.build_corpus_context",
+        lambda _root: None,
+    )
+
+    warmup.warm_all(tmp_path)
+
+    assert readiness.is_ready("retrieval_catalog") is False
+    assert readiness.is_ready("semantic_corpus") is True
+    assert readiness.is_ready("lexical") is False
 
 
 def test_unmanaged_retrieval_warm_does_not_publish_one_shot_live_projections(
@@ -514,7 +611,7 @@ def test_unmanaged_retrieval_warm_does_not_publish_one_shot_live_projections(
     )
 
     assert readiness.runtime_managed() is False
-    warmup.warm_retrieval_catalog(tmp_path)
+    assert warmup.warm_retrieval_catalog(tmp_path) is True
 
     assert calls == ["ensure", "kb", "vault"]
 
@@ -529,7 +626,7 @@ def test_warm_all_quiet_mode_still_reconciles_the_catalog(
     monkeypatch.setattr(
         warmup,
         "warm_retrieval_catalog",
-        lambda _root: calls.append("catalog"),
+        lambda _root: calls.append("catalog") or True,
         raising=False,
     )
     monkeypatch.setattr(

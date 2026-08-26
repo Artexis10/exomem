@@ -4,6 +4,10 @@
 - [x] 1.2 Add readiness tests proving a repaired retrieval catalog can promote to ready and a lost live projection demotes it again.
 - [x] 1.3 Add request-path tests proving every find mode, including vector mode, refuses a missing live projection without walking the vault while offline use retains one bounded fallback walk.
 - [x] 1.4 Add timing-attribution coverage for recall-projection work.
+- [x] 1.5 Add startup coverage proving managed warm-up never starts a second lexical rebuild owner while repair is in flight.
+- [x] 1.6 Add scheduler coverage proving repeated stale probes cannot chain duplicate full-corpus rebuilds.
+- [x] 1.7 Add failed/superseded publication coverage proving uncovered repair work survives a bounded idle handoff.
+- [x] 1.8 Add post-proof race coverage proving an older publication cannot acknowledge a newer generation's repair request.
 
 ## 2. Runtime fix
 
@@ -12,6 +16,10 @@
 - [x] 2.3 Implement read-only retrieval-catalog readiness promotion and projection-loss demotion.
 - [x] 2.4 Enforce the live-projection policy across all server find modes while preserving the explicit offline fallback.
 - [x] 2.5 Attribute recall-projection work in find timings.
+- [x] 2.6 Delegate managed startup catalogue recovery to the existing single-flight repair worker while retaining synchronous reconciliation for offline callers.
+- [x] 2.7 Coalesce full-rebuild requests observed during an already-active full repair while preserving escalation from targeted repair.
+- [x] 2.8 Skip catalogue-dependent optional cache warming while managed repair owns recovery and preserve uncovered full requests without chaining scans.
+- [x] 2.9 Bind full-repair coalescing to the exact recall-generation pair proven by publication so a post-proof generation survives.
 
 ## 3. Verification and delivery
 
