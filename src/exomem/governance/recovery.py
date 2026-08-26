@@ -15,8 +15,8 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
-from .. import reserved_paths
-from . import catalog_publication
+from .. import reserved_paths, semantic_contract
+from . import catalog_publication, graph_producer
 from . import policy as policy_module
 from . import receipts, schema_v4, store
 from .operations import RECOVERY_STRATEGY_KEYS, journal_variant, recovery_strategy
@@ -945,11 +945,23 @@ def _recover_companion_catalog_publication(
         expected_before_hash = prior_companion[1].get("sha256")
         if not isinstance(expected_before_hash, str):
             return False
+
+        def graph_replacement_provider() -> tuple[
+            catalog_publication.GraphMeasurementReplacement, ...
+        ]:
+            current_corpus = semantic_contract.build_corpus_context(vault_root)
+            return graph_producer.replacements_for_current_markdown(
+                vault_root,
+                current_corpus=current_corpus,
+                paths=(prepared_companion[0],),
+            )
+
         prepared = catalog_publication.prepare_markdown_upsert(
             vault_root,
             path=prepared_companion[0],
             source=source,
             expected_before_hash=expected_before_hash,
+            graph_replacement_provider=graph_replacement_provider,
             now=int(time.time()),
             activated_at=int(float(journal["created_at"])),
         )

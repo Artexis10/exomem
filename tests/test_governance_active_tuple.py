@@ -700,6 +700,41 @@ def _load_active_projection_items(
     return active, manifest, items
 
 
+def _load_active_graph_rows(
+    vault: Path,
+    *,
+    active: schema_v4.VerifiedActiveGovernanceState,
+    manifest: projection_store.VariantStoreManifest,
+    items: tuple[projection_store.ProjectionItemVariants, ...],
+) -> tuple[projected_graph.ProjectionGraphMeasurement, ...]:
+    evidence = projection_store.namespace_evidence_from_snapshot(active)
+    graph_root = next(
+        root for root in evidence.required_measurement_roots if root.lane == "graph"
+    )
+    family = projection_measurement_store.MeasurementFamilyKey(
+        namespace_key=evidence.manifest.namespace_key,
+        lane=graph_root.lane,
+        extractor_version=graph_root.extractor_version,
+        model_version=graph_root.model_version,
+    )
+    namespace = projection_store.bind_active_projection_namespace(
+        active,
+        manifest=manifest,
+        items=items,
+    )
+    _graph_manifest, rows = projection_measurement_store.load_measurement_store(
+        vault,
+        namespace=namespace,
+        family=family,
+        expected_rows_digest=graph_root.rows_digest,
+    )
+    return tuple(
+        row
+        for row in rows
+        if isinstance(row, projected_graph.ProjectionGraphMeasurement)
+    )
+
+
 def _configure_media_v4(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -827,6 +862,8 @@ def test_v4_companion_backfill_publishes_catalog_successor(
     migration = _migrate_with_projection_items(
         vault,
         items=((companion_path, (vault / companion_path).read_text(encoding="utf-8")),),
+        ceiling=6,
+        graph_edges=(),
         now=now,
     )
     _configure_custody(
@@ -859,6 +896,20 @@ def test_v4_companion_backfill_publishes_catalog_successor(
     assert manifest.item_count == 1
     assert {item.item_identity: item.content_hash for item in items} == {
         companion_path: vault_module.content_hash(companion_after)
+    }
+    graph_rows = _load_active_graph_rows(
+        vault,
+        active=active,
+        manifest=manifest,
+        items=items,
+    )
+    assert {
+        (row.measurement_key.projection_variant_id, row.edges)
+        for row in graph_rows
+    } == {
+        (variant.projection_variant_id, ())
+        for item in items
+        for variant in item.variants
     }
     connection = store.open_connection(vault)
     try:
@@ -902,6 +953,8 @@ def test_v4_companion_backfill_recovers_after_catalog_publication(
     migration = _migrate_with_projection_items(
         vault,
         items=((companion_path, (vault / companion_path).read_text(encoding="utf-8")),),
+        ceiling=6,
+        graph_edges=(),
         now=now,
     )
     _configure_custody(
@@ -952,6 +1005,8 @@ def test_v4_companion_backfill_recovers_catalog_after_companion_publication(
     migration = _migrate_with_projection_items(
         vault,
         items=((companion_path, (vault / companion_path).read_text(encoding="utf-8")),),
+        ceiling=6,
+        graph_edges=(),
         now=now,
     )
     _configure_custody(
@@ -980,6 +1035,25 @@ def test_v4_companion_backfill_recovers_catalog_after_companion_publication(
     assert recovered["activated"] == 1
     custody = authorization_custody.load_authorization_custody(vault, now=now + 3)
     assert custody.control.activation_epoch == 2
+    active, manifest, items = _load_active_projection_items(
+        vault,
+        activation_epoch=2,
+        activation_state_digest=custody.control.activation_state_digest or "",
+    )
+    graph_rows = _load_active_graph_rows(
+        vault,
+        active=active,
+        manifest=manifest,
+        items=items,
+    )
+    assert {
+        (row.measurement_key.projection_variant_id, row.edges)
+        for row in graph_rows
+    } == {
+        (variant.projection_variant_id, ())
+        for item in items
+        for variant in item.variants
+    }
     replayed = _commit_companion_backfill(
         vault,
         payload,
@@ -3743,8 +3817,17 @@ def test_v4_recovery_refuses_non_markdown_before_moving_bytes(
         json.dumps({"original_path": original}),
         encoding="utf-8",
     )
-    _write_workspace(vault, _documents(ceiling=2))
-    migration = _migrate_with_empty_projection_catalog(vault, now=now)
+    log_relative = "Knowledge Base/log.md"
+    log_source = "# Log\n\n---\n"
+    (vault / log_relative).write_text(log_source, encoding="utf-8")
+    _write_workspace(vault, _documents(ceiling=6))
+    migration = _migrate_with_projection_items(
+        vault,
+        items=((log_relative, log_source),),
+        ceiling=6,
+        graph_edges=(),
+        now=now,
+    )
     _configure_custody(
         monkeypatch,
         tmp_path / "custody",
@@ -4047,8 +4130,17 @@ def test_v4_move_refuses_unsupported_non_markdown_before_moving_bytes(
     source = vault / old_relative
     source.parent.mkdir(parents=True, exist_ok=True)
     source.write_bytes(b"private bytes")
-    _write_workspace(vault, _documents(ceiling=2))
-    migration = _migrate_with_empty_projection_catalog(vault, now=now)
+    log_relative = "Knowledge Base/log.md"
+    log_source = "# Log\n\n---\n"
+    (vault / log_relative).write_text(log_source, encoding="utf-8")
+    _write_workspace(vault, _documents(ceiling=6))
+    migration = _migrate_with_projection_items(
+        vault,
+        items=((log_relative, log_source),),
+        ceiling=6,
+        graph_edges=(),
+        now=now,
+    )
     _configure_custody(
         monkeypatch,
         tmp_path / "custody",
