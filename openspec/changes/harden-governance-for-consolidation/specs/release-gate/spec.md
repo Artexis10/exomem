@@ -219,6 +219,23 @@ required family SHALL remain blocked.
 - **THEN** the complete target graph root advances with the target namespace, other
   required measurement roots, receipt, and active tuple in one catalog publication
 
+#### Scenario: Lower-only changed items retain empty graph rows
+
+- **WHEN** a live producer conservatively returns a target-bound replacement for an
+  affected item whose target namespace contains no L6 variant
+- **THEN** publication validates its exact item/content binding, edge sources, edge
+  targets, uniqueness, and aggregate capacity, discards the edge payload, and emits only
+  empty lower-variant graph rows
+
+#### Scenario: Semantic writes derive graph successors from retained preflight state
+
+- **WHEN** an existing-page semantic write changes a direct edge, a title used by
+  another page's link, or a reverse relation whose logical source is another page
+- **THEN** the writer derives target-bound replacements from the retained detached
+  before-corpus and exact guarded planned bytes, includes every logical source whose
+  outgoing edge tuple changes, and does not reopen the live graph or current Markdown
+- **AND** open and lexical-only writes do not invoke the graph producer
+
 When the projected source is exhausted, L1-and-above items SHALL still emit the
 projection their policy authorizes while L0 items SHALL produce a silently shorter list,
 identical to physical absence. The canonical governed envelope for the same input SHALL

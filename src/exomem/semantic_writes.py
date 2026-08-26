@@ -2067,10 +2067,24 @@ def _commit_existing_locked(
             guard=preflight.primary_guard,
         )
     )
-    from .governance import catalog_publication
+    from .governance import catalog_publication, graph_producer
+
+    planned_writes = tuple(writes)
+
+    def graph_replacement_provider():
+        return graph_producer.replacements_for_planned_markdown(
+            root,
+            before_corpus=preflight.before_corpus,
+            writes=planned_writes,
+            semantic_states={preflight.path: preflight.after},
+        )
 
     try:
-        catalog_target = _prepare_markdown_catalog_publication(root, writes)
+        catalog_target = _prepare_markdown_catalog_publication(
+            root,
+            planned_writes,
+            graph_replacement_provider=graph_replacement_provider,
+        )
     except catalog_publication.CatalogPublicationError as error:
         raise SemanticWriteError(
             "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
@@ -2144,6 +2158,8 @@ def _revalidate_existing_preflight(
 def _prepare_markdown_catalog_publication(
     vault_root: Path,
     writes: Sequence[vault.PlannedWrite],
+    *,
+    graph_replacement_provider: Callable[[], tuple[Any, ...]] | None = None,
 ):  # noqa: ANN202 - private bridge returns the governance publication token
     """Prepare one exact catalog successor for the canonical Markdown subset."""
 
@@ -2152,6 +2168,7 @@ def _prepare_markdown_catalog_publication(
     return catalog_publication.prepare_planned_markdown_batch(
         vault_root,
         writes=tuple(writes),
+        graph_replacement_provider=graph_replacement_provider,
     )
 
 

@@ -13,6 +13,7 @@ import os
 import sqlite3
 import time
 import unicodedata
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -921,19 +922,21 @@ def _target_graph_measurements(
     if type(replacements) is not tuple:
         raise CatalogPublicationError(
             "graph measurement replacements must be a finite immutable tuple"
-        )
+    )
     target_items = {item.item_identity: item for item in target_namespace.items}
     replacement_by_identity: dict[str, GraphMeasurementReplacement] = {}
+    seen_replacement_identities: set[str] = set()
+    replacement_edge_count = 0
     for replacement in replacements:
         if not isinstance(replacement, GraphMeasurementReplacement):
             raise CatalogPublicationError("graph measurement replacement is invalid")
-        if replacement.item_identity in replacement_by_identity:
+        if replacement.item_identity in seen_replacement_identities:
             raise CatalogPublicationError("graph measurement replacements collide")
+        seen_replacement_identities.add(replacement.item_identity)
         target_item = target_items.get(replacement.item_identity)
         if (
             target_item is None
             or target_item.content_hash != replacement.content_hash
-            or not any(variant.decision_level == 6 for variant in target_item.variants)
         ):
             raise CatalogPublicationError(
                 "graph measurement replacement does not match target content"
@@ -942,6 +945,27 @@ def _target_graph_measurements(
             raise CatalogPublicationError(
                 "graph measurement replacement edges must be immutable"
             )
+        replacement_edge_count += len(replacement.edges)
+        if replacement_edge_count > projections.MAX_GOVERNED_GRAPH_EDGES:
+            raise CatalogPublicationError(
+                "graph measurement replacement capacity is exceeded"
+            )
+        seen_edges: set[projected_graph.ProjectionGraphEdge] = set()
+        for edge in replacement.edges:
+            if (
+                not isinstance(edge, projected_graph.ProjectionGraphEdge)
+                or edge.source_item_identity != replacement.item_identity
+                or edge.target_item_identity not in target_items
+                or edge in seen_edges
+            ):
+                raise CatalogPublicationError(
+                    "graph measurement replacement edge is invalid"
+                )
+            seen_edges.add(edge)
+        if not any(
+            variant.decision_level == 6 for variant in target_item.variants
+        ):
+            continue
         replacement_by_identity[replacement.item_identity] = replacement
 
     target_family = projection_measurement_store.MeasurementFamilyKey(
@@ -1010,7 +1034,34 @@ def _prepare_target_measurements(
     target_namespace: projection_store.PreparedProjectionNamespace,
     clip_replacements: tuple[ClipMeasurementReplacement, ...] = (),
     graph_replacements: tuple[GraphMeasurementReplacement, ...] = (),
+    graph_replacement_provider: Callable[
+        [], tuple[GraphMeasurementReplacement, ...]
+    ]
+    | None = None,
 ) -> tuple[PreparedMeasurementPublication, ...]:
+    if graph_replacement_provider is not None and graph_replacements:
+        raise CatalogPublicationError(
+            "graph measurement replacements have multiple authorities"
+        )
+    if any(
+        not isinstance(root, projection_store.ProjectionMeasurementRoot)
+        for root in active_roots
+    ) or len({root.lane for root in active_roots}) != len(active_roots):
+        raise CatalogPublicationError(
+            "content publication requires rebuilt model and graph measurements"
+        )
+    has_graph_family = any(root.lane == "graph" for root in active_roots)
+    if graph_replacement_provider is not None and has_graph_family:
+        try:
+            graph_replacements = graph_replacement_provider()
+        except Exception as error:  # noqa: BLE001 - producer faults fail closed
+            raise CatalogPublicationError(
+                "the live graph producer cannot prepare target measurements"
+            ) from error
+        if type(graph_replacements) is not tuple:
+            raise CatalogPublicationError(
+                "the live graph producer returned an invalid replacement set"
+            )
     if not active_roots:
         if clip_replacements:
             raise CatalogPublicationError(
@@ -1021,13 +1072,6 @@ def _prepare_target_measurements(
                 "graph measurement replacements require an active graph family"
             )
         return ()
-    if any(
-        not isinstance(root, projection_store.ProjectionMeasurementRoot)
-        for root in active_roots
-    ) or len({root.lane for root in active_roots}) != len(active_roots):
-        raise CatalogPublicationError(
-            "content publication requires rebuilt model and graph measurements"
-        )
     if clip_replacements and not any(root.lane == "clip" for root in active_roots):
         raise CatalogPublicationError(
             "CLIP measurement replacements require an active CLIP family"
@@ -1085,6 +1129,10 @@ def _prepare_markdown_batch(
     content_paths: tuple[str, ...] = (),
     clip_replacements: tuple[ClipMeasurementReplacement, ...] = (),
     graph_replacements: tuple[GraphMeasurementReplacement, ...] = (),
+    graph_replacement_provider: Callable[
+        [], tuple[GraphMeasurementReplacement, ...]
+    ]
+    | None = None,
     now: int | None = None,
     activated_at: int | None = None,
 ) -> PreparedMarkdownCatalogPublication | None:
@@ -1277,6 +1325,7 @@ def _prepare_markdown_batch(
             target_namespace=target_namespace,
             clip_replacements=clip_replacements,
             graph_replacements=graph_replacements,
+            graph_replacement_provider=graph_replacement_provider,
         )
         target_measurement_roots = tuple(
             projection_measurement_store.measurement_root(target.manifest)
@@ -1373,6 +1422,10 @@ def prepare_planned_markdown_batch(
     writes: tuple[vault.PlannedWrite, ...],
     clip_replacements: tuple[ClipMeasurementReplacement, ...] = (),
     graph_replacements: tuple[GraphMeasurementReplacement, ...] = (),
+    graph_replacement_provider: Callable[
+        [], tuple[GraphMeasurementReplacement, ...]
+    ]
+    | None = None,
     now: int | None = None,
 ) -> PreparedMarkdownCatalogPublication | None:
     """Prepare catalog rows lazily so v3/open planned writes remain unchanged."""
@@ -1384,6 +1437,7 @@ def prepare_planned_markdown_batch(
         removals=(),
         clip_replacements=clip_replacements,
         graph_replacements=graph_replacements,
+        graph_replacement_provider=graph_replacement_provider,
         now=now,
     )
 

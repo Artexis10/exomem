@@ -736,6 +736,22 @@ roots, receipt, and active tuple. Live graph producers remain responsible for su
 the target-bound replacements for every affected changed L6 source; an unknown required
 measurement family remains blocked.
 
+A producer may conservatively return a target-bound replacement for an affected item
+whose target namespace has no L6 variant. The publisher still validates its item,
+content, edge sources, edge targets, uniqueness, and aggregate capacity, then discards
+that edge payload and emits only the required empty lower-variant rows. A lower-only
+policy projection therefore cannot turn an otherwise valid semantic write into a graph
+publication refusal or persist raw graph authority below L6.
+
+The existing-page semantic writer derives its graph replacements from the detached
+before-corpus retained by semantic preflight plus the exact guarded planned-write
+overlay. It does not reopen the live graph or walk the vault again. The overlay
+re-resolves title-dependent links and reverse relations, so the replacement set includes
+both directly changed paths and otherwise-unchanged logical sources whose outgoing edge
+tuple changes. This producer is invoked lazily only when the active tuple contains a
+graph family; open and lexical-only writes do no graph-producer work. Other live writer
+families remain blocked until they supply the same target-bound replacement contract.
+
 A policy
 fingerprint or projector-schema change builds a new namespace tuple and never relabels
 an old one. A model/extractor change writes or invalidates only the corresponding
