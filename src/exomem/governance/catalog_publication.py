@@ -1450,6 +1450,10 @@ def prepare_catalog_membership_batch(
     content_paths: tuple[str, ...] = (),
     clip_replacements: tuple[ClipMeasurementReplacement, ...] = (),
     graph_replacements: tuple[GraphMeasurementReplacement, ...] = (),
+    graph_replacement_provider: Callable[
+        [], tuple[GraphMeasurementReplacement, ...]
+    ]
+    | None = None,
     now: int | None = None,
 ) -> PreparedMarkdownCatalogPublication | None:
     """Prepare lazy write/removal membership changes for a product mutation.
@@ -1467,6 +1471,7 @@ def prepare_catalog_membership_batch(
         content_paths=content_paths,
         clip_replacements=clip_replacements,
         graph_replacements=graph_replacements,
+        graph_replacement_provider=graph_replacement_provider,
         now=now,
     )
 
