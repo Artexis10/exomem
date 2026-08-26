@@ -201,6 +201,43 @@ def test_ready_retrieval_catalog_admits_runtime_readiness() -> None:
     assert snapshot["reasons"] == []
 
 
+def test_retrieval_repair_progress_is_bounded_and_privacy_safe() -> None:
+    snapshot = build_runtime_readiness(
+        coordination={
+            "enabled": False,
+            "role": "standalone",
+            "replica_id": None,
+            "coordinator_healthy": True,
+        },
+        release="1.2.3",
+        mcp_tool_surface_sha256="d" * 64,
+        retrieval={
+            "state": "unavailable",
+            "admitted": False,
+            "repair": {
+                "phase": "building",
+                "age_seconds": 12.3456,
+                "last_duration_seconds": 8.7654,
+                "last_result": "delta_unavailable",
+                "vault_path": "must-not-leak",
+                "note": "must-not-leak-either",
+            },
+        },
+    )
+
+    assert snapshot["retrieval"] == {
+        "state": "unavailable",
+        "admitted": False,
+        "repair": {
+            "phase": "building",
+            "age_seconds": 12.346,
+            "last_duration_seconds": 8.765,
+            "last_result": "delta_unavailable",
+        },
+    }
+    assert "must-not-leak" not in repr(snapshot)
+
+
 def test_readiness_exposes_only_bounded_mutation_holder_metadata() -> None:
     snapshot = build_runtime_readiness(
         coordination={
@@ -240,8 +277,8 @@ def test_readiness_exposes_only_bounded_mutation_holder_metadata() -> None:
 def test_runtime_readiness_measures_the_configured_vault(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from exomem import lexstore, readiness, writer_lease
     from exomem import runtime_readiness as readiness_module
-    from exomem import writer_lease
 
     vault = tmp_path / "configured-vault"
     observed: list[Path | None] = []
@@ -258,9 +295,30 @@ def test_runtime_readiness_measures_the_configured_vault(
 
     monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
     monkeypatch.setattr(writer_lease, "coordination_status", fake_coordination_status)
-    readiness_module.runtime_readiness(mcp_tool_surface_sha256="f" * 64)
+    monkeypatch.setattr(
+        readiness,
+        "retrieval_admission",
+        lambda _vault_root=None: {"state": "unavailable", "admitted": False},
+    )
+    monkeypatch.setattr(
+        lexstore,
+        "repair_progress",
+        lambda _vault_root: {
+            "phase": "publishing",
+            "age_seconds": 4.2,
+            "last_duration_seconds": None,
+            "last_result": None,
+        },
+    )
+    snapshot = readiness_module.runtime_readiness(mcp_tool_surface_sha256="f" * 64)
 
     assert observed == [vault]
+    assert snapshot["retrieval"]["repair"] == {
+        "phase": "publishing",
+        "age_seconds": 4.2,
+        "last_duration_seconds": None,
+        "last_result": None,
+    }
 
 
 def test_runtime_readiness_fails_closed_within_a_tight_bound_when_status_blocks(

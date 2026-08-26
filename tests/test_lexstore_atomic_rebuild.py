@@ -24,8 +24,8 @@ parts of 1.4 — the exact contracts the atomic rebuild must uphold:
 Publication is serialized against foreground deltas and single-file-safe:
 
 * a foreground delta that advances the live catalog after this build captured
-  its temp target aborts the replace under the publication lock, leaving the
-  newer live rows and checkpoint intact rather than regressing them;
+  its temp target is replayed into the replacement under the publication lock,
+  so ordinary traffic cannot starve a logically current build;
 * a temp WAL that cannot be folded to a single self-contained file (the
   checkpoint/``journal_mode=DELETE`` proof fails, or a temp ``-wal`` survives)
   discards the temp and never publishes, preserving live;
@@ -407,12 +407,14 @@ def test_foreign_instance_publication_aborts_incomparable_older_build(
         live.close()
 
 
-def test_live_db_set_token_change_aborts_even_when_checkpoints_match(
+def test_live_db_set_token_churn_does_not_veto_current_replacement(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A foreign writer can change the live DB set without publishing a useful
-    comparable checkpoint. The private bounded DB token still makes the stale
-    temp ineligible, preserving the writer's committed marker."""
+    """The live SQLite set is disposable, not source-of-truth state.
+
+    WAL/main churn that leaves the authoritative checkpoints and identity
+    unchanged must not veto a logically current detached replacement.
+    """
     a = _kb_file(tmp_path, "a.md", "- [config] stablecontent ^u1")
     _seed(tmp_path, [a])
     lexstore.ensure_fresh(tmp_path)
@@ -438,14 +440,14 @@ def test_live_db_set_token_change_aborts_even_when_checkpoints_match(
         return folded
 
     monkeypatch.setattr(store, "_fold_to_single_file", fold_then_mutate_live_set)
-    assert store.rebuild_atomic() is False
+    assert store.rebuild_atomic() is True
 
     live = store._connect()
     try:
         assert store._meta_checkpoint(live, "kb") == before
         assert live.execute(
             "SELECT value FROM meta WHERE key = 'db_set_marker'"
-        ).fetchone() == ("committed",)
+        ).fetchone() is None
     finally:
         live.close()
 
@@ -798,15 +800,18 @@ def test_wal_mode_main_without_sidecars_is_persistently_switched_to_delete(
     assert not wal.exists() and not shm.exists()
 
 
-def test_foreground_delta_after_temp_target_aborts_replacement(
+def test_foreground_delta_after_temp_target_rebases_replacement(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A background rebuild must never overwrite a NEWER live catalog. If a
-    foreground delta advances the live sidecar past the temp build's captured
-    target while the build is finishing, publication aborts under the publication
-    lock and the newer live rows/checkpoint are preserved."""
+    """A normal live delta must not starve a completed detached rebuild.
+
+    If the watcher advances the live catalogue after the temp target was
+    captured, publication rebases the temp to that exact retained generation
+    under the barrier and publishes the current replacement.
+    """
     a = _kb_file(tmp_path, "a.md", "- [config] startcontent ^u1")
-    _seed(tmp_path, [a])
+    b = _kb_file(tmp_path, "b.md", "- [config] deletedcontent ^u2")
+    _seed(tmp_path, [a, b])
     lexstore.ensure_fresh(tmp_path)
     store = lexstore.get_store(tmp_path)
 
@@ -820,7 +825,8 @@ def test_foreground_delta_after_temp_target_aborts_replacement(
             state["injected"] = True
             a.write_text(_page_text("a", "- [config] newercontent ^u1"), encoding="utf-8")
             _touch_future(a)
-            freshness.on_files_changed(tmp_path, changed=[a])
+            b.unlink()
+            freshness.on_files_changed(tmp_path, changed=[a], deleted=[b])
             newer = freshness.recall_triple(tmp_path, "kb")
             state["newer"] = newer
             readiness = store.catalog_readiness("kb", newer)
@@ -831,12 +837,56 @@ def test_foreground_delta_after_temp_target_aborts_replacement(
     published = store.rebuild_atomic()
     monkeypatch.undo()
 
-    # The publish aborted rather than regress the newer live catalog.
-    assert published is False
+    assert published is True
+    assert store.catalog_checkpoint("kb") == freshness.recall_checkpoint(
+        tmp_path, "kb"
+    )
     assert store.catalog_checkpoint("kb").triple == state["newer"]
     contents = {hit.content.strip() for hit in _units_in_category(tmp_path, "config")}
     assert any("newercontent" in c for c in contents)
     assert not any("startcontent" in c for c in contents)
+    assert not any("deletedcontent" in c for c in contents)
+
+
+def test_oversized_late_rebase_declines_and_preserves_live_catalog(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    a = _kb_file(tmp_path, "a.md", "- [config] preservedtoken ^u1")
+    _seed(tmp_path, [a])
+    lexstore.ensure_fresh(tmp_path)
+    store = lexstore.get_store(tmp_path)
+    before = store.catalog_checkpoint("kb")
+    real_fold = store._fold_to_single_file
+    injected = False
+
+    def fold_then_overflow_delta(conn: sqlite3.Connection) -> bool:
+        nonlocal injected
+        folded = real_fold(conn)
+        if not injected:
+            injected = True
+            changed = [
+                _kb_file(
+                    tmp_path,
+                    f"late-{index}.md",
+                    f"- [config] late-{index} ^u{index + 2}",
+                )
+                for index in range(lexstore.CATALOG_FOREGROUND_DELTA_CAP + 1)
+            ]
+            freshness.on_files_changed(tmp_path, changed=changed)
+        return folded
+
+    monkeypatch.setattr(store, "_fold_to_single_file", fold_then_overflow_delta)
+    assert store.rebuild_atomic() is False
+    assert store._last_rebuild_result == "delta_unavailable"
+    assert store.catalog_checkpoint("kb") == before
+    assert not list(store.path.parent.glob("*rebuild*"))
+    live = store._connect()
+    try:
+        assert live.execute(
+            "SELECT 1 FROM semantic_units WHERE content LIKE '%preservedtoken%'"
+        ).fetchone() == (1,)
+    finally:
+        live.close()
 
 
 def test_readiness_and_query_stay_snapshot_consistent_across_replacement(
@@ -1044,6 +1094,48 @@ def test_await_repairs_idle_waits_for_an_in_flight_repair() -> None:
 
     # Idle on a key nobody ever registered.
     assert lexstore.await_repairs_idle(root, timeout=30.0) is True
+
+
+def test_repair_progress_reports_bounded_phase_duration_and_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    store = lexstore.get_store(tmp_path)
+
+    def rebuild() -> bool:
+        store._last_rebuild_result = "published"
+        entered.set()
+        assert release.wait(5)
+        return True
+
+    monkeypatch.setattr(store, "rebuild_atomic", rebuild)
+    monkeypatch.setattr(
+        lexstore,
+        "runtime_retrieval_catalog_proof",
+        lambda *_args, **_kwargs: {"kb": object(), "vault": object()},
+    )
+    lexstore._schedule_repair(tmp_path)
+    assert entered.wait(5)
+
+    active = lexstore.repair_progress(tmp_path)
+    assert active is not None
+    assert active["phase"] == "building"
+    assert isinstance(active["age_seconds"], float)
+    assert set(active) == {
+        "phase",
+        "age_seconds",
+        "last_duration_seconds",
+        "last_result",
+    }
+
+    release.set()
+    assert lexstore.await_repairs_idle(tmp_path, timeout=5)
+    finished = lexstore.repair_progress(tmp_path)
+    assert finished is not None
+    assert finished["phase"] == "idle"
+    assert finished["last_result"] == "published"
+    assert isinstance(finished["last_duration_seconds"], float)
 
 
 def test_await_repairs_idle_keys_on_the_resolved_path(tmp_path: Path) -> None:

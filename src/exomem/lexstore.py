@@ -140,6 +140,7 @@ _DEFERRED_UPSERTS: dict[Path, set[Path]] = {}
 #: sqlite error, a noncurrent schema, a source that moved. These are NOT
 #: contention, and none of them is fixed by re-applying rows.
 _FULL_REBUILD_REQUESTED: set[Path] = set()
+_REPAIR_PROGRESS: dict[Path, dict[str, object]] = {}
 _REPAIRS_LOCK = threading.Lock()
 
 
@@ -699,10 +700,69 @@ def request_repair(vault_root: Path) -> None:
         _schedule_repair(vault_root)
 
 
+def repair_progress(vault_root: Path) -> dict[str, object] | None:
+    """Return fixed, content-free progress for one managed lexical repair."""
+    key = vault_root.resolve()
+    with _REPAIRS_LOCK:
+        progress = _REPAIR_PROGRESS.get(key)
+        if progress is None:
+            return None
+        started_at = progress.get("started_at")
+        age = (
+            max(0.0, time.monotonic() - float(started_at))
+            if isinstance(started_at, int | float)
+            and not isinstance(started_at, bool)
+            and progress.get("phase") != "idle"
+            else 0.0
+        )
+        return {
+            "phase": progress.get("phase", "idle"),
+            "age_seconds": round(age, 3),
+            "last_duration_seconds": progress.get("last_duration_seconds"),
+            "last_result": progress.get("last_result"),
+        }
+
+
+def _set_repair_progress(
+    key: Path,
+    phase: str,
+    *,
+    result: str | None = None,
+) -> None:
+    """Update process-local repair progress; caller holds `_REPAIRS_LOCK`."""
+    now = time.monotonic()
+    prior = _REPAIR_PROGRESS.get(key, {})
+    started_at = prior.get("started_at")
+    if phase == "queued" or not isinstance(started_at, int | float):
+        started_at = now
+    duration = prior.get("last_duration_seconds")
+    last_result = prior.get("last_result")
+    if phase == "idle":
+        duration = round(max(0.0, now - float(started_at)), 3)
+        last_result = result or last_result
+    _REPAIR_PROGRESS[key] = {
+        "phase": phase,
+        "started_at": started_at,
+        "last_duration_seconds": duration,
+        "last_result": last_result,
+    }
+
+
+def _mark_active_repair_phase(vault_root: Path, phase: str) -> None:
+    """Advance telemetry only when the managed scheduler owns this rebuild."""
+    key = vault_root.resolve()
+    with _REPAIRS_LOCK:
+        if key in _REPAIRS_IN_FLIGHT:
+            _set_repair_progress(key, phase)
+
+
 def clear_stores() -> None:
     """Test seam: drop per-process stores (sync memos, failure flags)."""
     with _STORES_LOCK:
         _STORES.clear()
+    with _REPAIRS_LOCK:
+        if not _REPAIRS_IN_FLIGHT:
+            _REPAIR_PROGRESS.clear()
 
 
 def _schedule_repair(vault_root: Path, *, deferred_paths: list[Path] | None = None) -> None:
@@ -748,12 +808,14 @@ def _schedule_repair(vault_root: Path, *, deferred_paths: list[Path] | None = No
             # request is picked up rather than dropped.
             return
         _REPAIRS_IN_FLIGHT.add(key)
+        _set_repair_progress(key, "queued")
 
     def _run() -> None:
         rebuild = False
         full_pass = False
         full_passes = 0
         paths: list[Path] = []
+        outcome: str | None = None
         try:
             store = get_store(vault_root)
             while True:
@@ -768,6 +830,11 @@ def _schedule_repair(vault_root: Path, *, deferred_paths: list[Path] | None = No
                             _FULL_REBUILDS_IN_FLIGHT.discard(key)
                             _FULL_REBUILD_REOBSERVED.pop(key, None)
                             _REPAIRS_IN_FLIGHT.discard(key)
+                            _set_repair_progress(
+                                key,
+                                "idle",
+                                result=outcome or "delta_unavailable",
+                            )
                             return
                         rebuild = False
                     else:
@@ -781,6 +848,11 @@ def _schedule_repair(vault_root: Path, *, deferred_paths: list[Path] | None = No
                         _FULL_REBUILDS_IN_FLIGHT.discard(key)
                         _FULL_REBUILD_REOBSERVED.pop(key, None)
                         _REPAIRS_IN_FLIGHT.discard(key)
+                        _set_repair_progress(
+                            key,
+                            "idle",
+                            result=outcome or "targeted",
+                        )
                         return
                 full_pass = rebuild or not store.retry_deferred_upsert(paths)
                 if full_pass:
@@ -794,6 +866,11 @@ def _schedule_repair(vault_root: Path, *, deferred_paths: list[Path] | None = No
                                 _DEFERRED_UPSERTS.setdefault(key, set()).update(paths)
                             _FULL_REBUILD_REOBSERVED.pop(key, None)
                             _REPAIRS_IN_FLIGHT.discard(key)
+                            _set_repair_progress(
+                                key,
+                                "idle",
+                                result=outcome or "delta_unavailable",
+                            )
                             return
                         full_passes += 1
                         # A failed targeted retry escalates to the same full pass
@@ -802,13 +879,25 @@ def _schedule_repair(vault_root: Path, *, deferred_paths: list[Path] | None = No
                         _FULL_REBUILD_REQUESTED.discard(key)
                         _FULL_REBUILD_REOBSERVED.pop(key, None)
                         _FULL_REBUILDS_IN_FLIGHT.add(key)
+                        _set_repair_progress(key, "building")
                     repaired = store.rebuild_atomic()
+                    # Telemetry is observational, never part of the scheduler's
+                    # store protocol. Minimal stores used by tests/integrations
+                    # may expose only `rebuild_atomic`.
+                    outcome = getattr(store, "_last_rebuild_result", None) or (
+                        "published" if repaired else "error"
+                    )
                 else:
+                    with _REPAIRS_LOCK:
+                        _set_repair_progress(key, "targeted")
                     repaired = True
+                    outcome = "targeted"
                 configured_runtime = _is_configured_runtime_vault(vault_root)
                 promoted = False
                 promotion_proof: dict[str, object] = {}
                 if repaired:
+                    with _REPAIRS_LOCK:
+                        _set_repair_progress(key, "promoting")
                     if configured_runtime:
                         promoted = _mark_runtime_retrieval_ready_if_current(
                             vault_root,
@@ -852,6 +941,12 @@ def _schedule_repair(vault_root: Path, *, deferred_paths: list[Path] | None = No
                             )
                         }
                         if not (repaired and promoted):
+                            # A consumed full request is acknowledged only after
+                            # both publication and the exact-current promotion
+                            # proof succeed. Preserve a declined pass across the
+                            # bounded idle boundary even when nobody happened to
+                            # re-observe staleness while it was running.
+                            _FULL_REBUILD_REQUESTED.add(key)
                             if paths:
                                 _DEFERRED_UPSERTS.setdefault(key, set()).update(paths)
                         if uncovered:
@@ -878,6 +973,7 @@ def _schedule_repair(vault_root: Path, *, deferred_paths: list[Path] | None = No
                 _FULL_REBUILD_REOBSERVED.pop(key, None)
                 _FULL_REBUILDS_IN_FLIGHT.discard(key)
                 _REPAIRS_IN_FLIGHT.discard(key)
+                _set_repair_progress(key, "idle", result="error")
 
     # Static name, deliberately — every other exomem thread name is a literal
     # too. Thread names now reach the log through `JsonLinesFormatter`'s
@@ -901,6 +997,7 @@ def _schedule_repair(vault_root: Path, *, deferred_paths: list[Path] | None = No
             _FULL_REBUILD_REOBSERVED.pop(key, None)
             _FULL_REBUILDS_IN_FLIGHT.discard(key)
             _REPAIRS_IN_FLIGHT.discard(key)
+            _set_repair_progress(key, "idle", result="error")
         log.warning("lexical background repair could not start for %s", key)
 
 
@@ -1497,7 +1594,13 @@ class LexicalStore:
         self._broad_seen: dict[str, tuple | None] = {}
         self._recall_seen: dict[str, object] = {}
         self._failed = False  # runtime-retired for this process
+        self._last_rebuild_result: str | None = None
         self._lock = threading.Lock()
+
+    def _decline_rebuild(self, reason: str) -> bool:
+        """Record one stable, content-free repair result and decline."""
+        self._last_rebuild_result = reason
+        return False
 
     # -------------------------------------------------------------- plumbing
 
@@ -1805,26 +1908,42 @@ class LexicalStore:
         )
 
     @staticmethod
-    def _publication_guard_changed(start_guard: dict, now_guard: dict) -> bool:
-        """Whether another process/writer changed the live DB set during build.
+    def _publication_guard_changed(
+        start_guard: dict,
+        now_guard: dict,
+        temp_targets: dict[str, object] | None = None,
+    ) -> bool:
+        """Whether live authoritative state conflicts with the replacement.
 
-        Exact equality is intentionally required. Checkpoint generations from
-        different process instances are incomparable, so ordering them is unsafe;
-        any changed currentness/identity/checkpoint/DB-set token aborts this stale
-        publish. Equivalent state compares equal and remains publishable.
+        SQLite main/WAL/SHM metadata is deliberately excluded: the lexical
+        sidecar is disposable derived state, and ordinary maintained-index work
+        changes those bytes throughout a long detached build. Treating that
+        observation as canonical made every healthy live write veto publication.
+
+        Schema/identity/existence changes still conflict. A checkpoint advance is
+        accepted only when it is the exact same-process target already replayed
+        into the temp catalogue; foreign or uncovered checkpoint changes remain
+        incomparable and fail closed.
         """
-        keys = (
-            "exists",
-            "schema_current",
-            "identity",
-            "checkpoints",
-            "db_set_token",
-        )
-        changed = tuple(
-            key for key in keys if start_guard.get(key) != now_guard.get(key)
-        )
+        changed = [
+            key
+            for key in ("exists", "schema_current", "identity")
+            if start_guard.get(key) != now_guard.get(key)
+        ]
+        start_checkpoints = start_guard.get("checkpoints", {})
+        now_checkpoints = now_guard.get("checkpoints", {})
+        if start_checkpoints != now_checkpoints:
+            targets = temp_targets or {}
+            for scope in set(start_checkpoints) | set(now_checkpoints):
+                before = start_checkpoints.get(scope)
+                after = now_checkpoints.get(scope)
+                if before == after:
+                    continue
+                target = targets.get(scope)
+                if after is None or target is None or after != target:
+                    changed.append(f"checkpoint:{scope}")
         if changed:
-            log.debug("lexical publication guard changed fields: %s", changed)
+            log.debug("lexical publication guard changed fields: %s", tuple(changed))
         return bool(changed)
 
     @staticmethod
@@ -2301,7 +2420,7 @@ class LexicalStore:
             return None
         try:
             val = ast.literal_eval(row[0])
-            return tuple(val) if isinstance(val, (list, tuple)) else None
+            return tuple(val) if isinstance(val, list | tuple) else None
         except (ValueError, SyntaxError):
             return None
 
@@ -2388,7 +2507,7 @@ class LexicalStore:
             val = ast.literal_eval(row[0])
         except (ValueError, SyntaxError):
             return None
-        if not isinstance(val, (list, tuple)) or len(val) != 5:
+        if not isinstance(val, list | tuple) or len(val) != 5:
             return None
         instance_id, generation, triple, policy_version, access_fingerprint = val
         if not isinstance(instance_id, str) or not instance_id:
@@ -2396,7 +2515,7 @@ class LexicalStore:
         if isinstance(generation, bool) or not isinstance(generation, int):
             return None
         if triple is not None:
-            if not isinstance(triple, (list, tuple)) or len(triple) != 3:
+            if not isinstance(triple, list | tuple) or len(triple) != 3:
                 return None
             count, mtime_ns, digest = triple
             if (
@@ -3392,10 +3511,10 @@ class LexicalStore:
 
         Sequence:
 
-        1. Under the cross-process publication lock, capture the live DB-set guard,
+        1. Under the cross-process publication lock, capture the live logical guard,
            each scope's start freshness checkpoint, and the semantic projection
            identity BEFORE the (potentially long) corpus scan. Any later live
-           publication changes that exact guard and makes this build ineligible.
+           publication establishes the baseline for later conflict detection.
         2. Build a fresh temp sidecar from the walk; if the projection identity
            shifted under the scan, discard it (the parsed units used the old
            projection).
@@ -3407,12 +3526,12 @@ class LexicalStore:
         4. Persist each scope's exact target checkpoint/triple and the matching
            identity in the temp DB, then fold its WAL into a single self-contained
            main file — publication is refused unless that provably succeeds.
-        5. Re-walk the source and require its exact triples to still match the temp
-           targets. Then, under the publication lock, require the live DB-set guard
-           to be equivalent to its start guard. This catches foreign-process
-           publications whose checkpoint generations cannot be ordered. Fold the
-           live WAL safely and publish with one `os.replace`. On any failure/abort
-           the live sidecar is preserved untouched.
+        5. Rebase one bounded retained suffix, then re-walk the source and require
+           its exact triples to still match the temp targets. Under the publication
+           lock, rebase the final bounded suffix and reject only authoritative
+           guard conflicts; harmless live SQLite byte churn is not canonical state.
+           Fold the live WAL safely and publish with one `os.replace`. On any
+           failure/abort the live sidecar is preserved untouched.
 
         Returns True when it published, False when it declined (transient
         failure, incomplete/overflowed delta, identity change mid-build, a WAL
@@ -3424,8 +3543,9 @@ class LexicalStore:
         from . import freshness as freshness_module
         from .vault import VaultLockError
 
+        self._last_rebuild_result = None
         if backend() == "python":
-            return False
+            return self._decline_rebuild("transient_failure")
 
         try:
             with self._publication_lock():
@@ -3439,7 +3559,7 @@ class LexicalStore:
             log.warning(
                 "lexical atomic rebuild baseline deferred (%s); live sidecar preserved", e
             )
-            return False
+            return self._decline_rebuild("transient_failure")
         temp_path = self.path.with_name(f"{self.path.name}.rebuild-{uuid.uuid4().hex}.tmp")
         try:
             try:
@@ -3453,22 +3573,23 @@ class LexicalStore:
                 if classify_sqlite_error(e) == "transient":
                     # A passing lock/interrupt fails only this attempt; the next
                     # request retries. Never escalate to a scheduled repair.
-                    return False
+                    return self._decline_rebuild("transient_failure")
                 raise
             except VaultLockError as e:
                 # Could not take (or timed out on) the publication lock, so this
                 # build cannot safely serialize its replace against a concurrent
                 # publish. Decline; the live sidecar is untouched.
                 log.warning("lexical atomic publish deferred (%s); live sidecar preserved", e)
-                return False
+                return self._decline_rebuild("publish_conflict")
             except OSError as e:
                 # A failed atomic publish leaves the live sidecar untouched.
                 log.warning("lexical atomic publish failed (%s); live sidecar preserved", e)
-                return False
+                return self._decline_rebuild("error")
         finally:
             self._cleanup_sidecar_files(temp_path)
 
         if published:
+            self._last_rebuild_result = "published"
             with self._lock:
                 # A published current catalog clears the disposable-failure flag
                 # and every stale attestation; the persisted meta triples let the
@@ -3490,7 +3611,7 @@ class LexicalStore:
         members, signatures = self._walk_entries()  # the corpus scan
         # The projection identity must not have shifted under the scan.
         if catalog_semantic_identity(self.vault_root) != start_identity:
-            return False
+            return self._decline_rebuild("identity_changed")
 
         # Deltas from each start checkpoint, captured (non-destructively) BEFORE
         # any temp write; an incomplete/overflowed span cannot prove the target.
@@ -3503,7 +3624,7 @@ class LexicalStore:
                     self.vault_root, scope, start_checkpoints[scope]
                 )
                 if not delta.complete:
-                    return False
+                    return self._decline_rebuild("delta_unavailable")
                 scope_targets[scope] = ("delta", delta, delta.to, delta.to.triple)
             else:
                 # No projected live registry: the policy-filtered walk is the
@@ -3558,12 +3679,26 @@ class LexicalStore:
             log.warning(
                 "lexical temp WAL fold incomplete; discarding build and preserving live"
             )
+            return self._decline_rebuild("fold_failed")
+
+        # Work observed while the temp rows were being materialized is not part
+        # of the earlier target capture. Replay that retained suffix now, before
+        # the independent source proof, so ordinary watcher traffic cannot force
+        # a whole-vault retry merely by arriving during a long build.
+        rebased_targets = self._rebase_detached_catalog(
+            temp_path,
+            scope_targets,
+            start_identity,
+        )
+        if rebased_targets is None:
             return False
+        scope_targets = rebased_targets
+        temp_targets = {scope: target[2] for scope, target in scope_targets.items()}
 
         # A last identity re-check before publication: a shift after the scan
         # means the built units reflect a superseded projection.
         if catalog_semantic_identity(self.vault_root) != start_identity:
-            return False
+            return self._decline_rebuild("identity_changed")
 
         # The replay target proves registry continuity, but another machine or
         # process may edit the shared corpus without this process observing a
@@ -3582,41 +3717,63 @@ class LexicalStore:
                     "lexical atomic publish aborted: %s source changed after target capture",
                     scope,
                 )
-                return False
+                return self._decline_rebuild("source_changed")
 
         # Serialize the guard re-read + live-WAL fold + replace against any
         # concurrent publish (background rebuild or foreground delta) so a newer
         # live catalog is never overwritten and the replace is snapshot-consistent.
+        _mark_active_repair_phase(self.vault_root, "publishing")
         with self._publication_lock():
-            now_guard = self._live_publication_guard()
-            if self._publication_guard_changed(start_live_guard, now_guard):
-                # Checkpoint generation ordering is meaningful only within one
-                # process instance. Exact guard equality also catches a foreign
-                # process/out-of-order publish and DB-set replacement that cannot
-                # be compared safely; a later rebuild can retry from that baseline.
-                log.info("lexical atomic publish aborted: live catalog changed during build")
+            # Close the final watcher race under the publication barrier. This is
+            # bounded to the foreground delta cap, so the barrier never grows into
+            # another whole-vault operation. An incomplete or oversized suffix
+            # declines safely and leaves the request pending for the next flight.
+            rebased_targets = self._rebase_detached_catalog(
+                temp_path,
+                scope_targets,
+                start_identity,
+            )
+            if rebased_targets is None:
                 return False
+            scope_targets = rebased_targets
+            temp_targets = {
+                scope: target[2] for scope, target in scope_targets.items()
+            }
+            now_guard = self._live_publication_guard()
+            if self._publication_guard_changed(
+                start_live_guard,
+                now_guard,
+                temp_targets,
+            ):
+                # Foreign-process/out-of-order checkpoints remain incomparable.
+                # Same-process advances are safe only when the bounded rebase
+                # above put their exact target into the replacement.
+                log.info("lexical atomic publish aborted: live catalog changed during build")
+                return self._decline_rebuild("publish_conflict")
             if self._live_regressed(now_guard, temp_targets, start_identity):
                 # A foreground delta (or another rebuild) advanced the live catalog
                 # past this build's target while we were building. Abort rather
                 # than regress it; the later target stays in the registry history
                 # and a subsequent rebuild will capture it.
                 log.info("lexical atomic publish aborted: live catalog advanced past build")
-                return False
+                return self._decline_rebuild("publish_conflict")
             # The live main + `-wal` + `-shm` are one disposable set. A missing
             # main with orphan sidecars, or a proven-fatal main+WAL that can never
             # checkpoint itself, cannot be folded in place: recover by moving the
             # WHOLE live-name set aside before installing the temp, so no stale WAL
             # can share the freshly published main's name.
             if self._live_set_disposition() == "quarantine":
-                return self._publish_over_quarantined_set(temp_path)
+                published = self._publish_over_quarantined_set(temp_path)
+                if not published:
+                    self._last_rebuild_result = "publish_conflict"
+                return published
             # Normal/healthy set: fold the LIVE `-wal`/`-shm` (content-preserving)
             # so the single-file replace cannot strand a live WAL, and so we never
             # blindly delete a live `-wal` a concurrent reader depends on. A busy/
             # healthy WAL declines here rather than evicting a valid open DB.
             if not self._quiesce_live_wal():
                 log.info("lexical atomic publish declined: live WAL not safely foldable")
-                return False
+                return self._decline_rebuild("wal_busy")
             with reserved_paths._subsystem_authority_scope("lexstore"):
                 reserved_paths._move_owner_file(
                     self.vault_root,
@@ -3629,6 +3786,110 @@ class LexicalStore:
             # Live `-wal`/`-shm` were folded away by `_quiesce_live_wal` before the
             # replace; there is nothing to blindly unlink here.
         return True
+
+    def _rebase_detached_catalog(
+        self,
+        temp_path: Path,
+        scope_targets: dict[str, tuple],
+        expected_identity: str,
+    ) -> dict[str, tuple] | None:
+        """Replay one complete bounded live suffix onto a detached catalogue.
+
+        Returns updated scope targets, the original targets when nothing moved,
+        or ``None`` when the latest generation cannot be proven safely. The
+        caller may hold the publication barrier; this helper touches only the
+        detached SQLite family and never walks the vault.
+        """
+        from . import freshness as freshness_module
+
+        if catalog_semantic_identity(self.vault_root) != expected_identity:
+            self._last_rebuild_result = "identity_changed"
+            return None
+
+        deltas: dict[str, object] = {}
+        touched: set[str] = set()
+        updated = dict(scope_targets)
+        for scope, (kind, _prior_delta, checkpoint, _triple) in scope_targets.items():
+            live_checkpoint = freshness_module.live_recall_checkpoint(
+                self.vault_root, scope
+            )
+            if kind != "delta" or live_checkpoint is None:
+                # Switching between walk-backed and live projection modes changes
+                # the proof model; a fresh flight must establish the new baseline.
+                if kind == "delta" or live_checkpoint is not None:
+                    self._last_rebuild_result = "delta_unavailable"
+                    return None
+                continue
+            delta = freshness_module.recall_delta_since(
+                self.vault_root, scope, checkpoint
+            )
+            if (
+                not delta.complete
+                or delta.from_ != checkpoint
+                or (
+                    delta.to.policy_version,
+                    delta.to.access_policy_fingerprint,
+                )
+                != (
+                    checkpoint.policy_version,
+                    checkpoint.access_policy_fingerprint,
+                )
+            ):
+                self._last_rebuild_result = "delta_unavailable"
+                return None
+            touched.update(delta.changed)
+            touched.update(delta.deleted)
+            if len(touched) > CATALOG_FOREGROUND_DELTA_CAP:
+                self._last_rebuild_result = "delta_unavailable"
+                return None
+            if not self._delta_target_still_current(scope, delta):
+                self._last_rebuild_result = "source_changed"
+                return None
+            if delta.to != checkpoint:
+                deltas[scope] = delta
+                updated[scope] = ("delta", delta, delta.to, delta.to.triple)
+
+        if not deltas:
+            return updated
+
+        conn = self._connect_setup(temp_path)
+        folded = False
+        try:
+            if (
+                not self._schema_is_current(conn)
+                or self._meta_catalog_identity(conn) != expected_identity
+            ):
+                self._last_rebuild_result = "identity_changed"
+                return None
+            try:
+                with conn:
+                    for delta in deltas.values():
+                        self._apply_delta_rows(conn, delta)
+                    if catalog_semantic_identity(self.vault_root) != expected_identity:
+                        raise _DeltaReplayStale
+                    for scope, delta in deltas.items():
+                        if not self._delta_target_still_current(scope, delta):
+                            raise _DeltaReplayStale
+                        if delta.to.triple is not None:
+                            conn.execute(
+                                "INSERT INTO meta(key, value) VALUES(?, ?) "
+                                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                                (f"triple:{scope}", repr(tuple(delta.to.triple))),
+                            )
+                        self._write_checkpoint(conn, scope, delta.to)
+                    self._write_catalog_identity(conn, expected_identity)
+            except _DeltaReplayStale:
+                self._last_rebuild_result = "source_changed"
+                return None
+            folded = self._fold_to_single_file(conn)
+        finally:
+            conn.close()
+
+        wal, shm = self._wal_shm_paths(temp_path)
+        if not folded or wal.exists() or shm.exists():
+            self._last_rebuild_result = "fold_failed"
+            return None
+        return updated
 
     # ---------------------------------------------------------- delta sidecar
 

@@ -205,6 +205,33 @@ def test_full_request_during_declined_rebuild_survives_a_bounded_idle_boundary(
     assert store.rebuilds == 2
 
 
+def test_declined_full_rebuild_preserves_demand_without_reobservation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed full pass must not rely on another probe to request repair."""
+
+    class _DecliningOnceStore(_FakeStore):
+        def rebuild_atomic(self) -> bool:
+            self.rebuilds += 1
+            return self.rebuilds > 1
+
+    store = _DecliningOnceStore()
+    _install(monkeypatch, store)
+    key = tmp_path.resolve()
+
+    lexstore._schedule_repair(tmp_path)
+    assert _wait_for_flight_end(tmp_path)
+
+    with lexstore._REPAIRS_LOCK:
+        assert key in lexstore._FULL_REBUILD_REQUESTED
+        assert key not in lexstore._FULL_REBUILDS_IN_FLIGHT
+    assert store.rebuilds == 1, "a declined pass retried without an idle boundary"
+
+    lexstore._schedule_repair(tmp_path)
+    assert _quiesce()
+    assert store.rebuilds == 2
+
+
 def test_newer_generation_observed_during_promotion_survives_for_next_flight(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

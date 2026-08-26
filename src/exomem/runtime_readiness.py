@@ -195,7 +195,7 @@ def _public_last_holder(value: object) -> dict[str, Any] | None:
             value.get("holder_kind"), fallback="unknown"
         ),
         "observed_at": float(observed_at)
-        if isinstance(observed_at, (int, float)) and not isinstance(observed_at, bool)
+        if isinstance(observed_at, int | float) and not isinstance(observed_at, bool)
         else 0.0,
         "source": source if source in {"refusal", "release"} else "unknown",
     }
@@ -216,7 +216,7 @@ def _public_contention(value: object) -> dict[str, Any] | None:
         "busy_refusals": _non_negative_int(value.get("busy_refusals")),
         "busy_refusals_recent": _non_negative_int(value.get("busy_refusals_recent")),
         "recent_window_seconds": float(window)
-        if isinstance(window, (int, float)) and not isinstance(window, bool)
+        if isinstance(window, int | float) and not isinstance(window, bool)
         else 0.0,
         # Stated, not implied: the counters describe this process only, so a
         # zero refusal count is not evidence that the boundary is uncontended.
@@ -301,6 +301,47 @@ _DEFAULT_OBSERVABILITY: dict[str, Any] = {
     "journal_ok": None,
 }
 
+_LEXICAL_REPAIR_PHASES = frozenset(
+    {"queued", "targeted", "building", "publishing", "promoting", "idle"}
+)
+_LEXICAL_REPAIR_RESULTS = frozenset(
+    {
+        "published",
+        "targeted",
+        "delta_unavailable",
+        "identity_changed",
+        "source_changed",
+        "publish_conflict",
+        "wal_busy",
+        "fold_failed",
+        "transient_failure",
+        "error",
+    }
+)
+
+
+def _public_lexical_repair(value: object) -> dict[str, object] | None:
+    """Project fixed, content-free repair progress into public readiness."""
+    if not isinstance(value, Mapping):
+        return None
+    raw_phase = value.get("phase")
+    phase = raw_phase if raw_phase in _LEXICAL_REPAIR_PHASES else "idle"
+    raw_result = value.get("last_result")
+    result = raw_result if raw_result in _LEXICAL_REPAIR_RESULTS else None
+
+    def duration(name: str) -> float | None:
+        raw = value.get(name)
+        if isinstance(raw, bool) or not isinstance(raw, int | float):
+            return None
+        return round(min(max(float(raw), 0.0), 604800.0), 3)
+
+    return {
+        "phase": phase,
+        "age_seconds": duration("age_seconds"),
+        "last_duration_seconds": duration("last_duration_seconds"),
+        "last_result": result,
+    }
+
 
 def build_runtime_readiness(
     *,
@@ -340,6 +381,9 @@ def build_runtime_readiness(
             state = "unverified"
         retrieval_admitted = bool(retrieval.get("admitted")) and state == "ready"
         retrieval_payload = {"state": state, "admitted": retrieval_admitted}
+        repair = _public_lexical_repair(retrieval.get("repair"))
+        if repair is not None:
+            retrieval_payload["repair"] = repair
         if not retrieval_admitted:
             reasons.append(f"retrieval_{state}")
 
@@ -547,6 +591,16 @@ def runtime_readiness(
             # here is what made MUTATION_LOCK_UNAVAILABLE read as healthy.
             "mutation_boundary": {"state": "unknown", "reason": "status_error"},
         }
+    retrieval = readiness.retrieval_admission(configured_vault)
+    if configured_vault is not None:
+        try:
+            from . import lexstore
+
+            progress = lexstore.repair_progress(configured_vault)
+        except Exception:  # noqa: BLE001 - diagnostics must not break readiness
+            progress = None
+        if progress is not None:
+            retrieval = {**retrieval, "repair": progress}
     return build_runtime_readiness(
         coordination=coordination,
         release=package_release(),
@@ -558,5 +612,5 @@ def runtime_readiness(
             if traffic is not None
             else get_silent_traffic_monitor().snapshot()
         ),
-        retrieval=readiness.retrieval_admission(configured_vault),
+        retrieval=retrieval,
     )
