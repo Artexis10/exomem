@@ -388,7 +388,7 @@ vault mutation path.
 Releases carrying semantic parser changes bump the parser generation used by the
 lexical, vector, graph, pack, and count sidecars. Canonical Markdown is not
 rewritten. After upgrading, quiesce vault mutations and explicitly run
-`exomem maintain --reconcile` (or call `maintain_memory(mode="reconcile")`) to
+`exomem maintain --reconcile` on the host to
 refresh stale derived rows; service restart alone does not promise this rebuild. Anonymous
 unit references whose normalized content changed become explicitly stale rather
 than resolving to a nearby unit; authored `^anchors` remain the stable reference

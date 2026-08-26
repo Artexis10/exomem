@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -11,6 +12,7 @@ from exomem_provisioner.durability_store import (
     B2RestoreObjectStore,
     B2UploadOnlyObjectStore,
     ProviderObjectConflict,
+    provider_retention_covers,
 )
 
 
@@ -145,14 +147,37 @@ class TruncatedSiblingFloodS3Client:
         sibling = f"{key}-sibling"
         return {
             "Versions": [
-                {"Key": sibling, "VersionId": f"sibling-{index:03d}"}
-                for index in range(100)
+                {"Key": sibling, "VersionId": f"sibling-{index:03d}"} for index in range(100)
             ],
             "DeleteMarkers": [],
             "IsTruncated": True,
             "NextKeyMarker": sibling,
             "NextVersionIdMarker": "sibling-099",
         }
+
+
+def test_provider_retention_uses_whole_second_precision() -> None:
+    required = datetime(2030, 1, 8, 12, 0, 0, 987654, tzinfo=UTC)
+
+    assert provider_retention_covers(required.replace(microsecond=0), required) is True
+    assert provider_retention_covers(required - timedelta(seconds=1), required) is False
+
+
+def test_provider_retention_requires_exact_lock_presence() -> None:
+    required = datetime(2030, 1, 8, 12, 0, tzinfo=UTC)
+
+    assert provider_retention_covers(None, required) is False
+    assert provider_retention_covers(required, None) is False
+    assert provider_retention_covers(None, None) is True
+
+
+def test_provider_retention_rejects_earlier_utc_in_dst_fold() -> None:
+    london = ZoneInfo("Europe/London")
+    actual = datetime(2026, 10, 25, 1, 45, tzinfo=london, fold=0)
+    required = datetime(2026, 10, 25, 1, 30, tzinfo=london, fold=1)
+
+    assert actual.timestamp() < required.timestamp()
+    assert provider_retention_covers(actual, required) is False
 
 
 @pytest.mark.asyncio

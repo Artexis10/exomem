@@ -507,7 +507,9 @@ def test_agent_audit_history_caps_head_to_predecessor_chain_without_value_projec
         last = records.append_record(
             tmp_path,
             manifest.path,
-            item=_item(f"2026-08-{index % 28 + 1:02d}", "Pull"),
+            # Distinct natural keys: the collection declares `[occurred_on, title]`,
+            # so 51 same-titled sessions over 28 dates would now be twins.
+            item=_item(f"2026-08-{index % 28 + 1:02d}", f"Pull {index}"),
             item_key=f"{index + 1:08x}-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
             expected_container_hash=current_hash,
             why=f"audit chain {index}",

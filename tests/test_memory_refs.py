@@ -551,3 +551,101 @@ def test_product_move_preserves_identity_and_heals_reference(vault: Path) -> Non
     assert read["path"] == destination
     assert read["ref"] == created.ref
     assert read["frontmatter"]["exomem_id"] == before
+
+
+class _CountingConnection:
+    """Records how many SQL variables each query binds, then delegates."""
+
+    def __init__(self, inner, binds: list[int]) -> None:
+        self._inner = inner
+        self._binds = binds
+
+    def execute(self, sql, parameters=()):
+        self._binds.append(len(parameters))
+        return self._inner.execute(sql, parameters)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+def test_a_bulk_lookup_is_chunked_so_one_query_never_binds_the_whole_list(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One bind per path, and SQLite has a ceiling on binds.
+
+    `WHERE path IN (?,...)` binds one variable per path, and SQLite refuses past
+    `SQLITE_MAX_VARIABLE_NUMBER` — measured on this build as fine at 32,766 and
+    `OperationalError: too many SQL variables` at 32,767. Any caller that
+    derives its path list from the vault can cross that, and one of them
+    (`review_memory(mode="dispositions")`) does it outside the try that promises
+    a count never breaks the view.
+
+    Asserted with a chunk of 3 over 10 paths, because the property is "no single
+    query carries the whole list", not "the ceiling is 32,767": a test that had
+    to build 32,767 pages would be measuring SQLite rather than this code.
+    """
+    vault = tmp_path / "vault"
+    notes = vault / "Knowledge Base" / "Notes"
+    notes.mkdir(parents=True)
+    expected = {}
+    for index_number in range(10):
+        identity = memory_refs.new_id()
+        relative = f"Knowledge Base/Notes/chunk-{index_number:02d}.md"
+        (vault / relative).write_text(_page(identity), encoding="utf-8")
+        expected[relative] = memory_refs.memory_ref(identity)
+
+    index = memory_refs.ReferenceIndex(vault)
+    index.rebuild_all()
+
+    binds: list[int] = []
+    real = memory_refs.ReferenceIndex._refs_from_connection
+
+    def counting(self, conn, wanted):
+        return real(self, _CountingConnection(conn, binds), wanted)
+
+    monkeypatch.setattr(memory_refs, "REFS_QUERY_CHUNK", 3)
+    monkeypatch.setattr(memory_refs.ReferenceIndex, "_refs_from_connection", counting)
+
+    resolved = index.refs_for_paths(list(expected))
+
+    # Chunking must not lose or reorder anything: the whole mapping comes back.
+    assert resolved == expected
+    assert binds, "no query was observed"
+    assert max(binds) <= 3, binds
+    # ceil(10 / 3) == 4 batches, each running the path query at least once.
+    assert len([count for count in binds if count > 0]) >= 4, binds
+
+
+def test_an_unchunked_lookup_would_bind_every_path(tmp_path: Path) -> None:
+    """The other half: without the chunk the single query binds all ten.
+
+    Pins that the chunk is what bounds the query, and not some upstream caller
+    that happened to pass a short list.
+    """
+    vault = tmp_path / "vault"
+    notes = vault / "Knowledge Base" / "Notes"
+    notes.mkdir(parents=True)
+    paths = []
+    for index_number in range(10):
+        relative = f"Knowledge Base/Notes/whole-{index_number:02d}.md"
+        (vault / relative).write_text(_page(memory_refs.new_id()), encoding="utf-8")
+        paths.append(relative)
+
+    index = memory_refs.ReferenceIndex(vault)
+    index.rebuild_all()
+
+    binds: list[int] = []
+    real = memory_refs.ReferenceIndex._refs_from_connection
+
+    def counting(self, conn, wanted):
+        return real(self, _CountingConnection(conn, binds), wanted)
+
+    original = memory_refs.ReferenceIndex._refs_from_connection
+    memory_refs.ReferenceIndex._refs_from_connection = counting
+    try:
+        # Default chunk (500) is above ten, so this is the unchunked shape.
+        index.refs_for_paths(paths)
+    finally:
+        memory_refs.ReferenceIndex._refs_from_connection = original
+
+    assert max(binds) == 10, binds

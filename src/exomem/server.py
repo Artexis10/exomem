@@ -36,7 +36,7 @@ from .server_auth import (  # noqa: F401 - re-exported for compatibility
 )
 from .server_hosted import register_hosted_routes
 from .server_rest import register_rest_facade
-from .server_runtime import initialize_runtime
+from .server_runtime import LocalRuntimeActivation, initialize_runtime
 from .server_transfer import register_transfer_routes
 from .server_transport import PrimeMcpSSEMiddleware
 
@@ -494,12 +494,19 @@ def build_server(*, require_auth: bool) -> FastMCP:
             transfer_security_authority=security_authority,
         )
     else:
+        runtime_activation = LocalRuntimeActivation(runtime.vault_root)
         auth = build_oauth(require_auth=require_auth, base_url=runtime.base_url)
-        mcp = ExomemFastMCP("exomem", auth=auth, icons=server_icons())
+        mcp = ExomemFastMCP(
+            "exomem",
+            auth=auth,
+            icons=server_icons(),
+            lifespan=runtime_activation.lifespan(),
+        )
         mcp.add_middleware(AuthorizationSessionMiddleware(runtime.vault_root))
         mcp.add_middleware(CallTraceMiddleware())
 
-        register_asset_routes(mcp)
+        register_asset_routes(mcp, on_liveness=runtime_activation.start)
+        mcp._exomem_local_runtime_activation = runtime_activation
         register_oauth_metadata_route(mcp, base_url=runtime.base_url, auth_enabled=auth is not None)
         transfer_config = register_transfer_routes(
             mcp, vault_root=runtime.vault_root, media_worker=runtime.media_worker

@@ -230,7 +230,13 @@ def _inspection_saved_view(value: Any) -> dict[str, Any] | None:
 
 
 def _inspection_plan_descriptor(value: Any) -> dict[str, Any] | None:
-    if not isinstance(value, Mapping) or set(value) != {"reference", "query"}:
+    if not isinstance(value, Mapping) or not set(value) <= {"reference", "query", "join"} or not {
+        "reference",
+        "query",
+    } <= set(value):
+        return None
+    join = _inspection_plan_join(value["join"]) if "join" in value else None
+    if "join" in value and join is None:
         return None
     reference = _opaque_plan_reference(value.get("reference"))
     query = value.get("query")
@@ -252,7 +258,28 @@ def _inspection_plan_descriptor(value: Any) -> dict[str, Any] | None:
                 return None
             normalized_filters[field] = projected
         normalized_query = {"filters": normalized_filters, "limit": limit}
-    return {"reference": reference, "query": normalized_query}
+    descriptor = {"reference": reference, "query": normalized_query}
+    if join is not None:
+        descriptor["join"] = join
+    return descriptor
+
+
+def _inspection_plan_join(value: Any) -> dict[str, str] | None:
+    """Re-validate the authored join on the way out; no Planning side is read."""
+    if not isinstance(value, Mapping) or not 1 <= len(value) <= 4:
+        return None
+    join: dict[str, str] = {}
+    for record_field, plan_field in value.items():
+        field = _inspection_field_name(record_field)
+        if (
+            field is None
+            or type(plan_field) is not str
+            or not plan_field.strip()
+            or len(plan_field.encode("utf-8")) > 128
+        ):
+            return None
+        join[field] = plan_field
+    return join
 
 
 def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -530,12 +557,23 @@ egress.register_projector(
 
 
 def full_release_filter(vault_root: Path) -> Callable[[str], bool]:
-    """Return the Records full-content gate without the normal L5 walk floor."""
+    """Return the Records full-content gate without the normal L5 walk floor.
+
+    The policy is loaded ONCE for the life of the filter and handed to every
+    decision, the way `egress.release_walk_filter` already does for a walk. The
+    plane does not move while one pass runs, and the per-path load was 7,480
+    authoring-guard probes -- 8.9 s -- of a single structured write's delta.
+    Semantics are untouched: the same `refuse_if_excluded` and the same
+    `LEVEL_FULL` floor, decided against the same policy every path would have
+    loaded for itself.
+    """
     root = Path(vault_root)
+    policy = egress.policy_module.load(root)
 
     def allowed(relative: str) -> bool:
         return not access.refuse_if_excluded(root, relative) and (
-            egress.release_level_for_path_only(root, relative) == egress.LEVEL_FULL
+            egress.release_level_for_path_only(root, relative, policy=policy)
+            == egress.LEVEL_FULL
         )
 
     return allowed
@@ -1072,8 +1110,13 @@ def _presentation_inspection(findings: tuple[dict[str, Any], ...]) -> dict[str, 
     }
 
 
-def inventory_collections(vault_root: Path) -> dict[str, Any]:
-    """Return a bounded authorized inventory without opening canonical item data."""
+def inventory_collections(vault_root: Path, *, semantic_profile: str = "records") -> dict[str, Any]:
+    """Return a bounded authorized inventory without opening canonical item data.
+
+    Both profiles answer "what is here?" the same way and under the same
+    disclosure filtering; only the profile selected and the legacy-tracker sweep
+    (a Records-layer artifact) differ.
+    """
     root = Path(vault_root)
     with egress.disclosure_boundary(root, "record_inspection", join_existing=True) as collector:
         def authorize(path: str) -> bool:
@@ -1082,13 +1125,16 @@ def inventory_collections(vault_root: Path) -> dict[str, Any]:
         manifests = [
             manifest
             for manifest in collections.discover_collections(root, authorize_path=authorize)
-            if manifest.semantic_profile == "records" and authorize(manifest.storage.source)
+            if manifest.semantic_profile == semantic_profile and authorize(manifest.storage.source)
         ]
-        legacy, legacy_truncated = collections.discover_legacy_trackers(
-            root, authorize_path=authorize
-        )
+        legacy: tuple[collections.LegacyCollection, ...] = ()
+        legacy_truncated = False
+        if semantic_profile == "records":
+            legacy, legacy_truncated = collections.discover_legacy_trackers(
+                root, authorize_path=authorize
+            )
         payload = {
-            "kind": "records_inventory",
+            "kind": f"{semantic_profile}_inventory",
             "report_only": True,
             "collections": [
                 {
@@ -1098,14 +1144,31 @@ def inventory_collections(vault_root: Path) -> dict[str, Any]:
                     "semantic_profile": manifest.semantic_profile,
                     "lifecycle": manifest.lifecycle,
                     "storage_strategy": manifest.storage.strategy,
+                    "natural_key": list(manifest.schema.natural_key),
                 }
                 for manifest in manifests
             ],
-            "legacy_trackers": [
-                {"path": tracker.path, "inspect_only": tracker.inspect_only}
-                for tracker in legacy
-            ],
-            "truncated": {"collections": False, "legacy_trackers": legacy_truncated},
+            # Records-layer only. Planning has no legacy trackers to sweep, and an
+            # empty list there reads as "swept, found none" -- a claim about a
+            # sweep that never ran. Absent is the honest shape.
+            **(
+                {
+                    "legacy_trackers": [
+                        {"path": tracker.path, "inspect_only": tracker.inspect_only}
+                        for tracker in legacy
+                    ]
+                }
+                if semantic_profile == "records"
+                else {}
+            ),
+            "truncated": {
+                "collections": False,
+                **(
+                    {"legacy_trackers": legacy_truncated}
+                    if semantic_profile == "records"
+                    else {}
+                ),
+            },
             "contract_route": {
                 "tool": "record_memory",
                 "arguments": {"action": "describe"},
@@ -1925,7 +1988,12 @@ def _project_plan_link(
     if reference is None:
         return None
     query = _project_manifest_query(root, manifest, plan.query, links=links)
-    return {"reference": reference, "query": query} if query is not None else None
+    if query is None:
+        return None
+    projected = {"reference": reference, "query": query}
+    if plan.join:
+        projected["join"] = dict(plan.join)
+    return projected
 
 
 def _project_views(root: Path, manifest: collections.CollectionManifest, *, links: _LinkProjector | None = None) -> dict[str, Any]:

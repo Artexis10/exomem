@@ -14,6 +14,12 @@ no envelope is installed, the journey refuses with
 a fallback would quietly turn a carrier test into a library test, which is the
 one substitution this family cannot survive.
 
+f27's :mod:`~epistemic.journeys.f27_replay` is the agent-driven sibling. Both
+insist on a discovered client surface; they differ in what they read back. f26
+reads only the responses, because a claim about delivery cannot be settled from
+stored state. f27 reads only the vault, because a claim about what a session
+left cannot be settled from what the agent said it did.
+
 Nothing here reads a clock. ``captured_at`` is supplied by the caller so a
 journey artifact is reproducible from its inputs.
 """
@@ -71,7 +77,14 @@ class Envelope:
     executable: Path
     version: str
 
-    def run(self, args: Sequence[str], *, cwd: Path, timeout: float = 60.0) -> str:
+    def run(
+        self,
+        args: Sequence[str],
+        *,
+        cwd: Path,
+        timeout: float = 60.0,
+        extra_env: Mapping[str, str] | None = None,
+    ) -> str:
         completed = subprocess.run(  # noqa: S603 - resolved executable, fixed argv
             [str(self.executable), *args],
             cwd=str(cwd),
@@ -80,6 +93,13 @@ class Envelope:
             timeout=timeout,
             env={
                 **os.environ,
+                # Documented configuration a journey varies deliberately, such
+                # as the prominence level f23 sweeps across its declared range.
+                # FIRST, so the pinned keys below win: a journey that could
+                # override `EXOMEM_VAULT_PATH` or re-enable embeddings would be
+                # measuring a different runtime than the harness set up, and the
+                # failure would look like a product one.
+                **dict(extra_env or {}),
                 "EXOMEM_DISABLE_EMBEDDINGS": "1",
                 # The envelope locates the vault from the environment, not from
                 # the working directory. Passing only ``cwd`` produced a

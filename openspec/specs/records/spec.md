@@ -302,3 +302,4 @@ A reviewer SHALL take only bounded provenance and counts from the envelope — t
 #### Scenario: Records keeps no review state
 - **WHEN** a plan-progress review executes bound Records views repeatedly
 - **THEN** no Records manifest, canonical source, audit head, mutation receipt, or query cache is written, and the collection's next ordinary query is unaffected
+

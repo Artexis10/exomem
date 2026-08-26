@@ -27,7 +27,7 @@ _RECOVERY_STRATEGIES: Mapping[str, RecoveryStrategy] = MappingProxyType(
             "composite_sidecar", frozenset({"grant", "purpose"})
         ),
         "composite_companion": RecoveryStrategy(
-            "composite_companion", frozenset({"companion", "proposal"})
+            "composite_companion", frozenset({"catalog", "companion", "proposal"})
         ),
         "compound_grant": RecoveryStrategy(
             "compound_grant", frozenset({"grant", "token"})

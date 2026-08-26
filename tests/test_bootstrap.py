@@ -242,6 +242,21 @@ def test_bootstrap_routes_observed_state_to_records_without_activating_state(
             "a checkable claim about a future observation, which is neither "
             "observed state nor intent to act; see epistemic_contract"
         ),
+        # The three keys above name a KIND of durable content. These three name a
+        # kind of UTTERANCE and where it goes, because the evidence for them exists
+        # only in the conversation and a hookless client reads nothing else.
+        "stated_intent": (
+            "work the user commits to, sequences or reorders; route: plan_memory"
+        ),
+        "observed_outcome": (
+            "reported as happened: produced, delivered, approved, published, "
+            "failed; route: record_memory"
+        ),
+        "pairing_rule": (
+            "an outcome on an open committed Planning item is one landing, "
+            "two consequences: record then transition, once. A tentative "
+            "claim is not an event, elapsed time not an outcome"
+        ),
     }
     assert "ordinary editable files" in contract["manual_first"]
     assert "schema" in contract["template_rule"]
@@ -547,6 +562,38 @@ def test_product_front_door_metadata_is_registry_derived() -> None:
         assert set(command.product_actions) <= actions
 
 
+def test_simple_action_catalog_reaches_every_product_command() -> None:
+    """Consolidation must not cost capability.
+
+    The catalog is the intended agent entry point, so a product command that no
+    action names is capability an agent cannot reach through it. `bootstrap` is
+    the one exception: it is the call that returns the catalog, so it cannot sit
+    behind it.
+
+    The companion assertion in `test_simple_action_catalog_is_registry_routed`
+    checks the other direction -- every route names a known command -- which is
+    why the gap survived: the catalog reached 18 of 29 commands, `adopt`,
+    `maintain` and `record` resolved UNAVAILABLE on the shipped hosted profile,
+    and nothing failed.
+    """
+    catalog = commands.simple_action_catalog()
+    reachable: set[str] = set()
+    for entry in catalog.values():
+        reachable.add(entry["route"]["tool"])
+        reachable.update(
+            value["tool"]
+            for key, value in entry.items()
+            if key.endswith("_route") and isinstance(value, dict)
+        )
+        reachable.update(entry["advanced"])
+
+    unreachable = {command.name for command in commands.PRODUCT_COMMANDS} - reachable
+    assert unreachable == {"bootstrap"}, (
+        "every product command must be reachable from some action; unreachable: "
+        f"{sorted(unreachable - {'bootstrap'})}"
+    )
+
+
 def test_simple_action_catalog_is_registry_routed() -> None:
     catalog = commands.simple_action_catalog()
 
@@ -559,6 +606,7 @@ def test_simple_action_catalog_is_registry_routed() -> None:
         "adopt",
         "maintain",
         "record",
+        "plan",
     }
     assert catalog["ask"]["route"] == {
         "tool": "ask_memory",
@@ -572,6 +620,10 @@ def test_simple_action_catalog_is_registry_routed() -> None:
     assert catalog["connect"]["relations_route"]["tool"] == "connect_memory"
     assert catalog["adopt"]["route"] == {"tool": "adopt_vault", "args": {"mode": "scan-only"}}
     assert catalog["maintain"]["fix_route"]["tool"] == "maintain_memory"
+    assert catalog["plan"]["route"] == {
+        "tool": "plan_memory",
+        "args": {"action": "inspect"},
+    }
     assert catalog["record"]["route"] == {
         "tool": "record_memory",
         "args": {"action": "inspect"},

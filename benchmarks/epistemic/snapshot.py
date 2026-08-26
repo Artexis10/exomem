@@ -244,6 +244,39 @@ class ProjectorMeta(StrictModel):
     loc_code: int = Field(default=0, ge=0)
 
 
+class CollectionItem(StrictModel):
+    """One item of a structured collection, as its own file declares it.
+
+    `lifecycle` and `status` are Planning's vocabulary and are simply absent on a
+    Records item. They stay `None` rather than acquiring a plausible default: the
+    projector reports what the vault wrote down, and inventing a state here would
+    decide the very question the acceptance journey asks.
+    """
+
+    key: str = Field(min_length=1)
+    natural_key: dict[str, str] = Field(default_factory=dict)
+    lifecycle: str | None = None
+    status: str | None = None
+
+
+class CollectionProjection(StrictModel):
+    """One structured collection: its contract, and the items under it."""
+
+    id: str = Field(min_length=1)
+    profile: str = Field(min_length=1)
+    manifest: str = Field(min_length=1)
+    title: str = ""
+    schema_version: int = Field(ge=1)
+    #: The subdirectory the manifest declares its items live in (`storage.source`).
+    #: Additive and default-empty. Recorded because "is this page an item file or
+    #: a prose page someone wrote in the collection's folder?" is a question the
+    #: false-write dual has to answer, and guessing `Items/` would be the
+    #: harness inventing a contract the manifest is the authority on.
+    storage_source: str = ""
+    natural_key: tuple[str, ...] = ()
+    items: tuple[CollectionItem, ...] = ()
+
+
 class EpistemicStateSnapshot(StrictModel):
     """State as observed at one phase, by one projector, for one provider.
 
@@ -258,6 +291,9 @@ class EpistemicStateSnapshot(StrictModel):
     items: tuple[StateItem, ...] = ()
     relations: tuple[Relation, ...] = ()
     declarations: tuple[FieldDeclaration, ...] = ()
+    #: Structured collections observed alongside the pages. Additive and
+    #: default-empty, so a vault that holds none serialises exactly as before.
+    collections: tuple[CollectionProjection, ...] = ()
     projector: ProjectorMeta
     completeness_notes: str = ""
 

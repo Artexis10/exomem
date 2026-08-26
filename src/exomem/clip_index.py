@@ -228,6 +228,7 @@ class ClipIndex:
                 with reserved_paths._identity_coordination_scope(
                     self.vault_root,
                     descriptor_ids=("clip-store",),
+                    identity_may_change=False,
                 ):
                     with reserved_paths._sqlite_owner_target_scope(
                         self.vault_root,

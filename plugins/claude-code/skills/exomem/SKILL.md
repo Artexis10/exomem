@@ -87,8 +87,9 @@ yet*, which is a reason to consider capturing, not to disengage.
 
 **Stepping-stone capture (write) — then report.** When the conversation reaches
 a **stepping-stone** — a durable conclusion lands, a durable recurring entity
-accumulates reusable facts, history, or relations, or **a method was actually
-carried out and the user reports how it went** — capture it:
+accumulates reusable facts, history, or relations, **a method was actually
+carried out and the user reports how it went**, **a stated intent or commitment
+is made**, or **an observed outcome or event is reported** — capture it:
 
 - Capture whether or not the KB already holds the topic. A durable conclusion on
   brand-new ground is first-class: it becomes the first page on that topic, which
@@ -121,6 +122,23 @@ carried out and the user reports how it went** — capture it:
   Route by what it yielded — a proven method to its own how-to page, a
   parameter comparison to an **experiment**, a diagnosed failure mode to a
   **failure** note. A one-off with nothing reusable stays unwritten.
+- A **stated intent or commitment** is a landing too: the user says what they
+  will do, commits to a batch or workstream, sequences work ("the next one",
+  "the others next time"), or re-prioritises. Route it to Planning —
+  `plan_memory(action="add")` into the inbox state, or `triage`/`update` on an
+  item that already exists.
+- An **observed outcome or event** is the mirror class: the conversation reports
+  that something happened, was produced, measured, delivered, approved,
+  published, or failed. Route it to Records — `record_memory(action="append")`
+  into the one compatible collection.
+- **Pairing rule.** An observed outcome that lands on an open committed Planning
+  item is *one landing with two consequences*: append the record first (it is the
+  canonical observation), then transition the item (status, and lifecycle where
+  the collection's convention archives completed work). Do both together and
+  report them once, in the user's own words, citing the collection the way recall
+  cites a page. A **tentative** claim ("probably posted, not sure") is never
+  written as an event — say so in a note field if the manifest offers one — and
+  elapsed time is never an outcome.
 - Pause and ask only when type or scope is genuinely ambiguous (research vs.
   insight vs. experiment; which `Notes/Research/<scope>`).
 
@@ -324,7 +342,7 @@ experiments, proof-bearing records, review, and supersession.
 | `relations` | "review suggested relations," "pay down relation debt," "accept/reject suggested links" | `review_memory(mode="relation-queue")` for the batched read; accept one reviewed candidate via `connect_memory(operation="accept-relation")` (requires the queue fingerprint, target `expected_hash`, and an audit reason); reject via `triage_memory` |
 | `connect` | "connect these ideas," "suggest relations," "show the surrounding context" | `connect_memory`; use `operation="context"` for bounded graph, provenance, evidence, and history |
 | `adopt` | "what does this existing vault contain," "import/adopt this vault safely" | `adopt_vault(mode="scan-only")` first; explicit modes for manifest/copy/compile planning |
-| `maintain` | "check vault health," "fix safe drift" | `maintain_memory(mode="audit")`; explicit `fix` or `reconcile` modes only with fix intent |
+| `maintain` | "check vault health," "fix safe drift" | Remote tools may use `maintain_memory(mode="audit")` or explicit dry runs. Actual `fix`/`reconcile` writes are host-operator work via `exomem maintain --fix` / `--reconcile` |
 | `schema` | "what structure or relation vocabulary recurs," "validate this graph lens" | `schema_memory`; infer before saving, and keep governance optional |
 
 Records routing is semantic: use it for durable observed events or current state
@@ -365,7 +383,8 @@ Examples:
   observed Record, not a compiled conclusion. If none fits, propose a collection
   rather than creating one silently.
 - "Show my last three months" -> `record_memory(action="query")` with a bounded date/query shape; use a compiled Note only for an explicit conclusion from that history.
-- "Save this feature idea" -> `plan_memory(action="add")`; use explicit `triage` for a horizon or hierarchy change, never infer it from prose or elapsed time.
+- "The second one is done, the rest can wait" -> one landing, two consequences: `record_memory(action="append")` for the produced deliverable, then `plan_memory(action="triage")` to complete that work item; the others stay queued and nothing else moves. Report it once: "<deliverable> is done and logged; the rest stay queued." Read the Planning inventory with `plan_memory(action="inspect")` when no collection is named yet, and resolve the item with `plan_memory(action="query")` filtered on the title or a natural-key field plus `lifecycle` and `status`.
+- "Save this feature idea" -> `plan_memory(action="add")`; use explicit `triage` for a horizon or hierarchy change, never infer it from elapsed time — a stated outcome is evidence, the clock is not.
 - "Compile these three sources" -> draft a sourced note with
   `remember(suggestions=true, response_detail="full")` link suggestions, then
   write after the applicable approval rule.
@@ -478,7 +497,7 @@ and index updates are determined by the operation, not the caller.
 | **adopt** | Safe first-run adoption workflow for an existing vault: scan-only by default; can save a manifest or copy selected legacy text files as Sources while preserving originals | `Knowledge Base/_Adoption/` or `Sources/Imported/` only in explicit write modes |
 | **propose_compilation** | Draft a note scaffold from unprocessed source(s) — the backlog-drain companion to audit (read-only) | proposals only |
 | **replace** | Supersession: mark old, write new with header pointer | both old + new |
-| **reconcile** | Heal drift from out-of-band edits (any editor/sync/mobile, e.g. Obsidian): recompute index counts + re-embed stale files + report remaining drift. Idempotent; `dry_run` reports only | drifted indexes + embedding sidecar |
+| **reconcile** | Heal drift from out-of-band edits (any editor/sync/mobile, e.g. Obsidian): recompute index counts + re-embed stale files + report remaining drift. Remote tools may preview with `dry_run=true`; actual repair is host-operator work via `exomem maintain --reconcile` | drifted indexes + embedding sidecar |
 | **provenance_report** | Scan note bodies for `<!-- key:value -->` provenance tags (filter by key/value/path). Read-only | — |
 
 For the full per-operation spec — inputs, validation, write rules, edge cases —
@@ -606,7 +625,7 @@ reference for the canonical operation leaves that product commands route to.
 - "audit the KB," "lint the vault," "check for orphans" → **audit**
 - "what does this vault look like," "assess my vault," "how is this vault organized" → **overview**
 - "what should Exomem do with this existing vault," "how can we migrate this safely" → **adopt**
-- "I edited the vault directly / on my phone — sync it up," "heal the drift" → **reconcile**
+- "I edited the vault directly / on my phone — sync it up," "heal the drift" → preview remotely, then have the host operator run **reconcile**
 - "this replaces the old strategy," "supersede the old note on X" → **replace**
 - "make a new folder for X" → **create_file** (`kind="dir"`, Tier 2)
 - "rename this page," "move this note to Patterns/" → **move_file** (Tier 2)
@@ -621,6 +640,8 @@ reference for the canonical operation leaves that product commands route to.
 - topic maps to a project/domain/entity, or "what did I conclude about X" -> proactive **ask_memory** first, fold the hits into the answer
 - a decision is made or a problem just got solved -> stepping-stone: capture via **capture_source**/**remember**, then report the path
 - a method was run and the user says how it turned out -> stepping-stone: capture the method, the adjustment and the outcome, then report the path
+- the user states an intent or commits to work -> stepping-stone: **plan_memory** (`add` into the inbox, or `triage`/`update` an existing item)
+- the user reports that something happened, was produced, delivered, approved, published or failed -> stepping-stone: **record_memory** (`append` into the one compatible collection); when it lands on an open committed plan item, do the Planning transition in the same turn and report both once
 
 When you say something oblique like "interesting, save it," default to
 **capture_source** and ask whether to compile only if there is a durable

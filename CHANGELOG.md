@@ -5,6 +5,102 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.62.0](https://github.com/Artexis10/exomem/compare/v0.61.1...v0.62.0) (2026-08-25)
+
+
+### Features
+
+* **governance:** bind v4 policy proposals to active authority ([#800](https://github.com/Artexis10/exomem/issues/800)) ([064fa3b](https://github.com/Artexis10/exomem/commit/064fa3bae5071b3ee0702c7efbf6983c2d0b79c2))
+* **governance:** mirror reviewed v4 policy workspace ([#803](https://github.com/Artexis10/exomem/issues/803)) ([8217825](https://github.com/Artexis10/exomem/commit/8217825a0acc593e5de95c96bf10bb284641dcf4))
+* **governance:** publish reviewed v4 policy authority ([#802](https://github.com/Artexis10/exomem/issues/802)) ([16fdf32](https://github.com/Artexis10/exomem/commit/16fdf3203f439cc6f1b558584bc78527a6543d8d))
+* **governance:** publish semantic content batches ([#805](https://github.com/Artexis10/exomem/issues/805)) ([0ea0cb7](https://github.com/Artexis10/exomem/commit/0ea0cb7335a1e86e1b2cf75979eb4e2d00a57386))
+* **governance:** publish semantic writes through v4 catalog ([#804](https://github.com/Artexis10/exomem/issues/804)) ([056d1aa](https://github.com/Artexis10/exomem/commit/056d1aad3833d48c91d674c43a02fa7ada7e7eb4))
+* **governance:** publish trash through v4 catalog ([#807](https://github.com/Artexis10/exomem/issues/807)) ([1e10f05](https://github.com/Artexis10/exomem/commit/1e10f0563ee5610ce8eda2e111f8b5c2c5b7397b))
+
+
+### Bug Fixes
+
+* bound background deferred index repair ([#798](https://github.com/Artexis10/exomem/issues/798)) ([ee0f3ab](https://github.com/Artexis10/exomem/commit/ee0f3ab34328ec3cbaf55f3a5cecd3965f8451c3))
+* preserve low-cap deferred fairness ([#801](https://github.com/Artexis10/exomem/issues/801)) ([3ceda58](https://github.com/Artexis10/exomem/commit/3ceda58608a318231449f199d7e78acc7788287f))
+* refuse unbounded remote maintenance ([#797](https://github.com/Artexis10/exomem/issues/797)) ([d7dc55c](https://github.com/Artexis10/exomem/commit/d7dc55ce823f74ee7a64758f2d6283c7167dce21))
+
+## [0.61.1](https://github.com/Artexis10/exomem/compare/v0.61.0...v0.61.1) (2026-08-25)
+
+
+### Bug Fixes
+
+* bind transport before startup warm ([#795](https://github.com/Artexis10/exomem/issues/795)) ([53cb58f](https://github.com/Artexis10/exomem/commit/53cb58fbaa58220433153c8e08dd3da44aa8c450))
+
+## [0.61.0](https://github.com/Artexis10/exomem/compare/v0.60.1...v0.61.0) (2026-08-25)
+
+
+### Features
+
+* **governance:** certify CPU vector profile ([#792](https://github.com/Artexis10/exomem/issues/792)) ([ce1bc60](https://github.com/Artexis10/exomem/commit/ce1bc607fd9a446c2d12c2a30e993583361936c1))
+
+
+### Bug Fixes
+
+* bound startup retrieval admission ([#794](https://github.com/Artexis10/exomem/issues/794)) ([ca76818](https://github.com/Artexis10/exomem/commit/ca768183a10d048ef5898593734e17ff1b8a6f63))
+
+## [0.60.1](https://github.com/Artexis10/exomem/compare/v0.60.0...v0.60.1) (2026-08-25)
+
+
+### Bug Fixes
+
+* **ci:** keep cross-platform matrix nightly ([#790](https://github.com/Artexis10/exomem/issues/790)) ([b4beee1](https://github.com/Artexis10/exomem/commit/b4beee10627e5c107c2fa2562534699558e56775))
+* **runtime:** allow real-vault readiness snapshots ([#788](https://github.com/Artexis10/exomem/issues/788)) ([c60a61d](https://github.com/Artexis10/exomem/commit/c60a61d0e25ac1501a574085329f960eb42b9659))
+* **runtime:** warm due state off interactive reads ([#791](https://github.com/Artexis10/exomem/issues/791)) ([a25ba2f](https://github.com/Artexis10/exomem/commit/a25ba2f960386426ff0066130a6f99b37a8522b4))
+
+## [0.60.0](https://github.com/Artexis10/exomem/compare/v0.59.0...v0.60.0) (2026-08-24)
+
+
+### Features
+
+* **governance:** release projected retrieval paging ([#781](https://github.com/Artexis10/exomem/issues/781)) ([2530ae7](https://github.com/Artexis10/exomem/commit/2530ae7641bbfdceaf23111aef1271cb97c20321))
+
+
+### Bug Fixes
+
+* **hosted:** accept provider retention precision ([4f7adc3](https://github.com/Artexis10/exomem/commit/4f7adc30ef55974201d65a2a676f19f5b83359eb))
+* **hosted:** rotate database backup credential ([#784](https://github.com/Artexis10/exomem/issues/784)) ([7fda7ba](https://github.com/Artexis10/exomem/commit/7fda7bac36b4eb7b0c90bd3f1ade9c788f1dc363))
+* **hosted:** rotate provisioner database credential ([#786](https://github.com/Artexis10/exomem/issues/786)) ([c999ebe](https://github.com/Artexis10/exomem/commit/c999ebed23349297868bfc5ac6398440613d4d6d))
+* **runtime:** bound startup graph coordination ([#776](https://github.com/Artexis10/exomem/issues/776)) ([57f725c](https://github.com/Artexis10/exomem/commit/57f725c1d89b38c40dd223cae52f81519032f8e1))
+
+## [0.59.0](https://github.com/Artexis10/exomem/compare/v0.58.0...v0.59.0) (2026-08-24)
+
+
+### Features
+
+* **benchmarks:** file the lifecycle-routing replay family f27 as amendment sequence 3 ([#762](https://github.com/Artexis10/exomem/issues/762)) ([287b984](https://github.com/Artexis10/exomem/commit/287b984418ff3a02b26e05aafeb3bcbae255b27b))
+* **entities:** vault-defined entity types via _Schema/entity-types.yaml ([5f28651](https://github.com/Artexis10/exomem/commit/5f286516fd7d970a5cca94bc35364afdefc0219e))
+* **governance:** add projected timing gate foundation ([#749](https://github.com/Artexis10/exomem/issues/749)) ([a65dcd3](https://github.com/Artexis10/exomem/commit/a65dcd386ead1d1851abcf4129900574adf1ef85))
+* **governance:** bind standalone custody attachment ([#772](https://github.com/Artexis10/exomem/issues/772)) ([328a8f9](https://github.com/Artexis10/exomem/commit/328a8f97890873266477cb7961dbd5ea1a64d212))
+* **governance:** build projected retrieval foundation ([#748](https://github.com/Artexis10/exomem/issues/748)) ([4216b44](https://github.com/Artexis10/exomem/commit/4216b44f601cd6fe508fabd7a9eca27c7781f4ed))
+* **governance:** gate projected retrieval release ([#771](https://github.com/Artexis10/exomem/issues/771)) ([4d50428](https://github.com/Artexis10/exomem/commit/4d50428daf0da60adc402a065de5631e538fb65d))
+* **governance:** integrate projected retrieval lanes ([#753](https://github.com/Artexis10/exomem/issues/753)) ([abd9357](https://github.com/Artexis10/exomem/commit/abd93571fd12030c9f886a8a9841076e9b1dc505))
+* **governance:** persist projected measurements ([#750](https://github.com/Artexis10/exomem/issues/750)) ([4a7a723](https://github.com/Artexis10/exomem/commit/4a7a72324502124639e1a4caacf581fde04fdd98))
+* **governance:** preactivate projected measurements ([#751](https://github.com/Artexis10/exomem/issues/751)) ([e4d62e4](https://github.com/Artexis10/exomem/commit/e4d62e41cc56c27ae662e2bd0ce08786ffe3f483))
+* **governance:** verify serving membership epochs ([#778](https://github.com/Artexis10/exomem/issues/778)) ([1a7f30e](https://github.com/Artexis10/exomem/commit/1a7f30e195ec6daaccca74b5084b942ff34cbc2f))
+* **graph:** suggest epistemic relations from authored structure ([#756](https://github.com/Artexis10/exomem/issues/756)) ([1d9b52c](https://github.com/Artexis10/exomem/commit/1d9b52c95203be96643507b402f1c23c39645005))
+* **hosted:** make the hosted agent surface the product surface minus recorded exclusions ([#767](https://github.com/Artexis10/exomem/issues/767)) ([2af0c8d](https://github.com/Artexis10/exomem/commit/2af0c8df43fe1507561319147e98ac7bd58500c7))
+* **lifecycle:** route lifecycle consequences without nudges ([#758](https://github.com/Artexis10/exomem/issues/758)) ([9c66a24](https://github.com/Artexis10/exomem/commit/9c66a24ec5d029f94efcc9341b9f4db1db2e7f0d))
+* **planning:** flag plans premised on superseded knowledge ([#757](https://github.com/Artexis10/exomem/issues/757)) ([bda487e](https://github.com/Artexis10/exomem/commit/bda487e8558470eeb3134e7e32dd31c1d46b0217))
+* **recall:** resolve vague entity referents from the registry and the typed graph ([bd8aa5b](https://github.com/Artexis10/exomem/commit/bd8aa5b1bcdba0d1d887f228382ffa576846979a))
+* **review:** govern signal families, capture triage metrics and scale the review state ([#755](https://github.com/Artexis10/exomem/issues/755)) ([e41c396](https://github.com/Artexis10/exomem/commit/e41c396d4f74c79f0df07f70113e06b8349820bc))
+* **sources:** capture attached files as Sources, by intent rather than transport ([#760](https://github.com/Artexis10/exomem/issues/760)) ([21fe9cb](https://github.com/Artexis10/exomem/commit/21fe9cb7539c446f1f196b05e41914c19285645a))
+
+
+### Bug Fixes
+
+* **governance:** accept canonical private Windows custody DACL ([#773](https://github.com/Artexis10/exomem/issues/773)) ([2193361](https://github.com/Artexis10/exomem/commit/219336199af8bc55fb41d2ab0afe7776cf207d8c))
+* **governance:** guard projected serving release ([#774](https://github.com/Artexis10/exomem/issues/774)) ([9d15f64](https://github.com/Artexis10/exomem/commit/9d15f648675de500b5606b982d6002f558aab45d))
+* **governance:** harden standalone custody bootstrap ([#775](https://github.com/Artexis10/exomem/issues/775)) ([99eec04](https://github.com/Artexis10/exomem/commit/99eec047a33f8ae1572218e3f38018f2244cf963))
+* **governance:** project session grants across content routes ([#741](https://github.com/Artexis10/exomem/issues/741)) ([60352ee](https://github.com/Artexis10/exomem/commit/60352eec92d0ff48c691aeaec825b43990efdae1))
+* **governance:** restore Windows session custody ([#745](https://github.com/Artexis10/exomem/issues/745)) ([b82322b](https://github.com/Artexis10/exomem/commit/b82322bcd179687502fb1b120f6f8a947e5d214f))
+* **hosted:** fail closed on reviewer lock drift ([#747](https://github.com/Artexis10/exomem/issues/747)) ([d4bbe01](https://github.com/Artexis10/exomem/commit/d4bbe010fecee221d26d8aeca80ff85bd1c8d46b))
+* **hosted:** seed reviewer fixture before credentials ([#777](https://github.com/Artexis10/exomem/issues/777)) ([a57cc1e](https://github.com/Artexis10/exomem/commit/a57cc1ee50c77b7b9a5441db30731f17d798a3da))
+
 ## [0.58.0](https://github.com/Artexis10/exomem/compare/v0.57.2...v0.58.0) (2026-08-22)
 
 

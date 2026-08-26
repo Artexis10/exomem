@@ -273,6 +273,22 @@ advance; an unreachable member remains included and blocks issuance. A rejoin SH
 attest the current epoch before `SERVING`. Stale/missing attestations, epoch mismatch, or
 active-key union outside the intersection SHALL fail readiness/issuance closed.
 
+The version-1 membership record SHALL be closed canonical UTF-8 JSON bounded to 64 KiB
+and 64 admitted replicas. Its exact fields SHALL be `{version, epoch, cell_id,
+logical_vault_id, previous_epoch_digest, issued_at, expires_at, replicas,
+signing_key_id, mac}` and each exact replica attestation SHALL contain `{version, epoch,
+replica_id, state, software_version, schema_version, cell_id, active_key_id,
+accepted_key_ids, control_digest, keyring_digest, attested_at, expires_at,
+issuance_stopped, no_in_flight, signing_key_id, mac}`. Identifiers SHALL be bounded opaque
+ASCII, lists SHALL be sorted and unique, numbers SHALL be bounded integers, and duplicate,
+extra, noncanonical, over-capacity, or older-than-maximum-TTL-plus-30-seconds records SHALL
+fail closed. The signed control record SHALL bind SHA-256 of the complete canonical signed
+membership record. Replica `control_digest` SHALL use the domain-separated immutable
+control identity/attachment basis so it does not circularly include that membership
+digest; mutable enrollment and activation fields remain independently authenticated and
+rechecked on every request. An epoch successor SHALL bind its exact predecessor digest,
+and no member or live verifier key may disappear merely because it is silent or omitted.
+
 #### Scenario: Cross-principal capability is rejected
 
 - **WHEN** principal B presents a valid bearer issued to principal A

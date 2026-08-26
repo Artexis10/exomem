@@ -2,7 +2,9 @@
 
 ## Purpose
 TBD - created by archiving change preserve-client-artifacts. Update Purpose after archive.
+
 ## Requirements
+
 ### Requirement: Canonical batch artifact preservation command
 
 The system SHALL expose a client-neutral `preserve_artifacts` mutation command across MCP, REST, OpenAPI, and CLI. The command SHALL require `scope`, `category`, and a non-empty ordered `files` array supporting at least eight items. Each file object SHALL declare string properties `download_url`, `file_id`, `mime_type`, and `file_name`, require only `download_url` and `file_id`, and permit the two latter metadata values to be omitted. The same command leaf SHALL serve every generated surface.
@@ -62,16 +64,22 @@ Each successfully staged file SHALL be committed through the existing `preserve_
 
 ### Requirement: Capability-driven fallback remains available
 
-The system SHALL retain `transfer_artifact(operation="upload")` and `/upload` for clients that cannot expose attachment handles. Bootstrap, tool descriptions, and scaffold guidance SHALL route capable clients to `preserve_artifacts` and other clients to the existing out-of-band upload path. Guidance MUST NOT claim token minting proves byte transfer and MUST name `operation`, not the nonexistent `mode` parameter.
+The system SHALL retain `transfer_artifact(operation="upload")` and `/upload` for clients that cannot expose attachment handles. Bootstrap, tool descriptions, and scaffold guidance SHALL select the destination lane before the transport: raw material to the Sources capture command and proof-bearing material to the Evidence preservation commands. Having selected the lane, guidance SHALL route capable clients to the file-handle path for that lane and other clients to the existing out-of-band upload path, which SHALL carry the selected lane on the minted capability. Guidance MUST NOT claim token minting proves byte transfer and MUST name `operation`, not the nonexistent `mode` parameter.
 
 #### Scenario: Claude lacks a direct file handle
 
-- **WHEN** a Claude runtime can access an attachment locally but cannot populate `preserve_artifacts.files`
-- **THEN** guidance directs it to mint an upload capability with `transfer_artifact(operation="upload")` and POST the bytes to `/upload`
+- **WHEN** a Claude runtime can access an attachment locally but cannot populate the file-handle parameter of the command for the selected lane
+- **THEN** guidance directs it to mint an upload capability with `transfer_artifact(operation="upload")` naming that lane, and POST the bytes to `/upload`
 - **AND** preservation is considered successful only after the response includes stored path, size, and digest
 
 #### Scenario: ChatGPT sandbox lacks egress
 
 - **WHEN** ChatGPT can populate file parameters but Code Interpreter cannot resolve the Exomem host
-- **THEN** guidance directs ChatGPT to call `preserve_artifacts` directly
+- **THEN** guidance directs ChatGPT to call the file-handle command for the selected lane directly
 - **AND** no client-side `curl` step is attempted
+
+#### Scenario: An attachment is raw material rather than proof
+
+- **WHEN** an attached transcript, article, or screenshot is being kept as material for later compilation
+- **THEN** guidance selects the Sources lane before considering which transport the client supports
+- **AND** the artifact is not routed to Evidence merely because the file-handle path was convenient

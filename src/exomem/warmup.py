@@ -59,6 +59,95 @@ def model_preload_allowed(mode_name: str | None = None) -> bool:
     return mode.preload_models(mode_name or "normal")
 
 
+def warm_retrieval_catalog(vault_root: Path) -> bool:
+    """Verify both maintained lexical scopes through exactly one repair owner.
+
+    A managed server must never run ``ensure_fresh`` alongside the watcher-driven
+    repair worker. Both paths can rebuild the full catalog, and starting them
+    together makes each publication contend with or invalidate the other. The
+    server therefore proves an already-current catalog cheaply and otherwise
+    delegates to the existing single-flight repair worker. Offline callers keep
+    the synchronous reconciliation contract.
+
+    Returns ``True`` only when retrieval may be admitted now. A ``False`` result
+    means normal managed repair is running in the background and will promote
+    readiness after it publishes a checkpoint-current catalog. Eager managed
+    boot waits for that same owner, preserving its synchronous rollback contract
+    without introducing a second rebuild path.
+    """
+    from . import freshness, lexstore, readiness
+
+    if not lexstore.maintained_content_index_enabled():
+        # Explicit Python mode and SQLite builds without FTS retain the supported
+        # reference implementation; there is no maintained content index to gate.
+        if readiness.runtime_managed():
+            generation = readiness.retrieval_proof_generation()
+            return readiness.admit_retrieval_proof(
+                generation
+            ) or readiness.is_ready("retrieval_catalog")
+        return True
+    event_indexes = freshness.event_indexes_enabled()
+    if readiness.runtime_managed() and event_indexes and not all(
+        freshness.recall_is_live(vault_root, scope) for scope in freshness.SCOPES
+    ):
+        # The normal activation path waits for the watcher seed before getting
+        # here.  Watchdog-free or failed-seed deployments still need one
+        # authoritative process projection, but the expensive source walk must
+        # remain on this background warm thread rather than migrate to find().
+        baselines = freshness.rebaseline(vault_root)
+        if not all(baselines.values()):
+            raise RuntimeError(
+                f"maintained recall projection incomplete: {baselines!r}"
+            )
+    if readiness.runtime_managed():
+        def _prove_and_admit() -> bool:
+            proof_generation = readiness.retrieval_proof_generation()
+            if not lexstore.runtime_retrieval_catalog_current(
+                vault_root,
+                require_live_projection=event_indexes,
+            ):
+                return False
+            # Bind the CAS token to this successful proof, not to the whole
+            # warm operation: an earlier stale proof or completed repair may
+            # legitimately advance admission before an eager retry succeeds.
+            return readiness.admit_retrieval_proof(
+                proof_generation
+            ) or readiness.is_ready("retrieval_catalog")
+
+        if _prove_and_admit():
+            return True
+        # ``catalog_readiness`` above may already have scheduled this repair.
+        # Request it explicitly as well so every incomplete outcome records the
+        # full-rebuild requirement; the repair scheduler is single-flight.
+        lexstore.request_repair(vault_root)
+        log.info("managed retrieval catalog delegated to background repair")
+        if os.environ.get("EXOMEM_EAGER_BOOT"):
+            if not lexstore.await_repairs_idle(vault_root):
+                raise RuntimeError("managed retrieval catalog repair timed out")
+            if not _prove_and_admit():
+                raise RuntimeError(
+                    "managed retrieval catalog repair did not publish a current catalog"
+                )
+            return True
+        return False
+    lexstore.ensure_fresh(vault_root)
+    store = lexstore.get_store(vault_root)
+    incomplete = [
+        (scope, verdict.status)
+        for scope in ("kb", "vault")
+        if not (
+            verdict := store.catalog_readiness(
+                scope,
+                freshness.recall_checkpoint(vault_root, scope).triple,
+                allow_delta=False,
+            )
+        ).complete
+    ]
+    if incomplete:
+        raise RuntimeError(f"maintained lexical catalog incomplete: {incomplete!r}")
+    return True
+
+
 def warm_caches(
     vault_root: Path,
     *,
@@ -149,10 +238,11 @@ def warm_caches(
 
 
 def warm_all(vault_root: Path) -> dict[str, float]:
-    """Lexical caches, then model preloads, marking readiness as each lands.
+    """Required catalog/corpus state, then optional caches and model preloads.
 
-    Order is the product contract (lexical-first): a `find` is useful the
-    moment the BM25/page caches are hot, long before torch finishes loading.
+    Order is the product contract (catalog-first): retrieval admission lands
+    first, then semantic write admission, before optional full-corpus caches
+    and models can extend the warm window.
     Each stage soft-fails; a failed model preload leaves its component
     not-ready (never marked), so requests defer for the rest of the warm and
     then return to inline lazy-load semantics. Never raises.
@@ -162,14 +252,20 @@ def warm_all(vault_root: Path) -> dict[str, float]:
     mode_name = mode.resolve_mode()
     preload = model_preload_allowed(mode_name)
     durations: dict[str, float] = {}
-    durations.update(
-        warm_caches(
-            vault_root,
-            preload_models=preload,
-            preload_cpu_caches=mode.preload_cpu_caches(),
+    catalog_ready = False
+    catalog_started = time.perf_counter()
+    managed_catalog = readiness.runtime_managed()
+    try:
+        catalog_ready = warm_retrieval_catalog(vault_root)
+        if catalog_ready and not managed_catalog:
+            readiness.mark_ready("retrieval_catalog")
+    except Exception:  # noqa: BLE001 — startup stays live while repair retries
+        log.warning("maintained retrieval catalog warm-up failed", exc_info=True)
+    finally:
+        durations["retrieval_catalog"] = round(
+            (time.perf_counter() - catalog_started) * 1000.0,
+            1,
         )
-    )
-    readiness.mark_ready("lexical")
     semantic_started = time.perf_counter()
     try:
         from . import semantic_contract
@@ -183,6 +279,21 @@ def warm_all(vault_root: Path) -> dict[str, float]:
             (time.perf_counter() - semantic_started) * 1000.0,
             1,
         )
+    if catalog_ready:
+        durations.update(
+            warm_caches(
+                vault_root,
+                preload_models=preload,
+                preload_cpu_caches=mode.preload_cpu_caches(),
+            )
+        )
+        readiness.mark_ready("lexical")
+    else:
+        # BM25/resolver warm-up reaches the live lexical sidecar with repair
+        # enabled. Running it beside the detached repair owner makes the two
+        # publications invalidate one another, so leave these disposable caches
+        # cold until the admitted catalogue can serve their first request.
+        log.info("optional recall cache warm-up skipped during catalog repair")
 
     def _model_step(name: str, fn) -> bool:
         t0 = time.perf_counter()

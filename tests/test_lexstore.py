@@ -290,7 +290,7 @@ def test_bounded_delete_witness_does_not_bless_interleaved_live_event(tmp_path, 
             _write_page(tmp_path, "Knowledge Base/b.md", "nectarspinfresh")
             os.utime(b, ns=(before.st_atime_ns, before.st_mtime_ns))
             freshness.on_files_changed(tmp_path, changed=[b])
-            remember(*args, **kwargs)
+            return remember(*args, **kwargs)
 
         monkeypatch.setattr(store, "_remember_live_witnesses", _interleave_b)
         assert store.delete_rel_paths(["Knowledge Base/a.md"])

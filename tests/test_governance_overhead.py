@@ -24,7 +24,7 @@ from typing import Any
 
 import pytest
 
-from exomem import commands, governance
+from exomem import commands, governance, lexstore
 from exomem import find as find_module
 from exomem.find_types import Hit, SemanticUnitHit
 from exomem.governance import store
@@ -293,6 +293,7 @@ def test_empty_policy_op_find_overhead_under_budget(tmp_path: Path, monkeypatch)
     vault = tmp_path / "dense"
     gen_dense_vault(vault, _OVERHEAD_N_NOTES)
     _seed_freshness_live(vault)
+    lexstore.ensure_fresh(vault)
     # Warm every lane before measuring: the first call builds the BM25 corpus
     # and the resolver, which would swamp a millisecond-scale delta.
     for query in _OVERHEAD_QUERIES:

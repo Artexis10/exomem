@@ -329,8 +329,15 @@ def emit_write_advisory_groups(
             raise ValueError("one or more write advisory counterparts are unreadable")
         store = review_state.ReviewStateStore(root)
         payload = store.load()
+        excluded_kinds = _excluded_advisory_kinds(payload)
         emitted: list[str] = []
+        surfaced: list[tuple[str, str]] = []
         for kind, candidate, candidate_rel in eligible:
+            if kind in excluded_kinds:
+                # The user said this KIND of advisory is noise in this vault.
+                # Read from the same payload the per-item suppression uses, so
+                # a store this path cannot read fails open for both together.
+                continue
             identity = write_advisory_identity(
                 root,
                 kind=kind,
@@ -347,7 +354,9 @@ def emit_write_advisory_groups(
             if state in {"dismissed", "snoozed"}:
                 continue
             emitted.append(_render_identified_write_advisory(kind, candidate, identity))
+            surfaced.append((identity.review_id, identity.fingerprint))
         warnings.extend(emitted)
+        _record_surfaced_advisories(root, surfaced, known=payload)
     except Exception as error:  # noqa: BLE001 — advisory state must fail open
         log.debug("write advisory suppression failed open: %s", error)
         warnings.extend(
@@ -355,6 +364,44 @@ def emit_write_advisory_groups(
             for kind, candidate, _path in eligible
         )
     return warnings
+
+
+def _excluded_advisory_kinds(payload: dict) -> frozenset[str]:
+    """Advisory kinds a family disposition silences on the write path.
+
+    Named and separate so it is a mechanism a test can remove. It reads the same
+    review-state payload the per-item suppression already loaded, which is what
+    keeps the fail-open posture identical: a store this path cannot read raises
+    out of the caller's `try` and every advisory is emitted unfiltered.
+    """
+    from . import review_state
+
+    return frozenset(
+        family
+        for family in review_state.disposition_map(payload)
+        if family in _WRITE_ADVISORY_KINDS
+    )
+
+
+def _record_surfaced_advisories(
+    vault_root: Path, entries: list[tuple[str, str]], *, known: dict | None = None
+) -> None:
+    """Stamp the first surfacing of advisories that were actually emitted.
+
+    Not the suppressed ones and not the disposition-excluded ones: the ledger
+    measures when a signal reached somebody, and one that was filtered out
+    reached nobody.
+    """
+    if not entries:
+        return
+    from . import review_state
+
+    try:
+        review_state.record_surfaced(
+            vault_root, entries, surface="write", known=known
+        )
+    except Exception as error:  # noqa: BLE001 — advisory state must fail open
+        log.debug("first-surfaced ledger not recorded for advisories: %s", error)
 
 
 def detected_overlap_advisory_groups(

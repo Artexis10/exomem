@@ -35,6 +35,7 @@ from exomem.server_hosted import register_hosted_routes
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 V3_PROFILE = "hosted-alpha-agent-v3"
+V4_PROFILE = "hosted-alpha-agent-v4"
 #: Drive-qualified and UNC probe spellings are assembled rather than written
 #: out. Spelled literally they trip the public-artifact privacy scan's
 #: absolute-local-path rule, and weakening a privacy rule to write a test is
@@ -62,6 +63,27 @@ class _ProfileConfig(HostedCellConfig):
         return V3_PROFILE
 
 
+class _ParityProfileConfig(HostedCellConfig):
+    """The same stub for the parity profile, which alone exposes some guards."""
+
+    @property
+    def active_agent_profile(self) -> str:
+        return V4_PROFILE
+
+
+def _profile_exposing(command: str) -> str:
+    """The narrowest test profile that actually routes `command`.
+
+    The guarded-command probes parametrise over PROTECTED_TREE_PATH_ARGUMENTS
+    and used a v3 cell for all of them. A command v3 does not expose answers
+    COMMAND_NOT_FOUND, and a 404 is not a refusal -- it would read as "the
+    guard held" while the guard was never reached.
+    """
+
+    v3 = set(commands_module.PRODUCT_SURFACE_PROFILES[V3_PROFILE].command_names)
+    return V3_PROFILE if command in v3 else V4_PROFILE
+
+
 def _request(app: Any, method: str, path: str, **kwargs: Any) -> httpx.Response:
     async def send() -> httpx.Response:
         transport = httpx.ASGITransport(app=app)
@@ -82,7 +104,10 @@ def _cell(tmp_path: Path, *, profile: str = V3_PROFILE) -> tuple[Any, HostedCell
     vault_root = tmp_path / "vault"
     init_vault(vault_root)
     _seed_user_schema_documents(vault_root)
-    factory = _ProfileConfig if profile == V3_PROFILE else HostedCellConfig
+    factory = {
+        V3_PROFILE: _ProfileConfig,
+        V4_PROFILE: _ParityProfileConfig,
+    }.get(profile, HostedCellConfig)
     config = factory(
         cell_id="cell-protected-tree",
         vault_root=vault_root,
@@ -122,10 +147,14 @@ def _headers(config: HostedCellConfig) -> dict[str, str]:
 
 
 def _call(app: Any, config: HostedCellConfig, command: str, body: dict[str, Any]) -> httpx.Response:
+    # Address the profile the cell is actually serving. Pinning V3_PROFILE here
+    # meant a probe against any other cell answered
+    # HOSTED_SURFACE_PROFILE_UNSUPPORTED before reaching a command, which reads
+    # as a refusal without being one.
     return _request(
         app,
         "POST",
-        f"/private/exomem/v1/agent/{V3_PROFILE}/command/{command}",
+        f"/private/exomem/v1/agent/{config.active_agent_profile}/command/{command}",
         json=body,
         headers=_headers(config),
     )
@@ -336,6 +365,12 @@ def _guarded_body(command: str, target: str) -> dict[str, Any]:
         }
     if command == "replace_memory":
         return {"old_path": target, "content": "hijacked doctrine", "title": "Hijacked"}
+    if command == "manage_memory_file":
+        # This helper used to fall through to a `plan_memory` body for anything
+        # it did not name. A command whose guarded argument is absent from the
+        # body cannot be refused by an argument guard, so the fallback quietly
+        # certified any newly guarded command as passing every probe below.
+        return {"operation": "create", "path": target, "content": "hijacked\n"}
     return {"action": "describe", "manifest_path": target}
 
 
@@ -362,7 +397,7 @@ def test_every_guarded_command_refuses_a_leading_separator_path(
     Assert the 403.
     """
 
-    app, config = _cell(tmp_path)
+    app, config = _cell(tmp_path, profile=_profile_exposing(command))
     schema_doc = _schema_doc(config.vault_root, "references/frontmatter.md")
     before = schema_doc.read_bytes()
 
@@ -468,7 +503,7 @@ def test_guard_refuses_a_native_ntfs_short_name_alias(tmp_path: Path) -> None:
 def test_every_guarded_command_refuses_an_os_aliased_protected_tree(
     tmp_path: Path, command: str, candidate: str
 ) -> None:
-    app, config = _cell(tmp_path)
+    app, config = _cell(tmp_path, profile=_profile_exposing(command))
     _alias_protected_trees(Path(config.vault_root))
     governance = Path(config.vault_root) / _kb() / "_Governance" / "README.md"
     schema_doc = _schema_doc(config.vault_root)
@@ -914,16 +949,18 @@ def test_guard_refuses_a_page_that_does_not_exist_yet(tmp_path: Path) -> None:
     how doctrine would actually be extended.
     """
 
-    app, config = _cell(tmp_path)
-    fresh = _schema_doc(config.vault_root, "brand-new-doctrine.md")
-    assert not fresh.exists()
+    # One cell per command: a guarded command its cell does not expose answers
+    # COMMAND_NOT_FOUND, which passes for a refusal without being one.
+    for index, command in enumerate(sorted(gateway.PROTECTED_TREE_PATH_ARGUMENTS)):
+        app, config = _cell(tmp_path / f"cell-{index}", profile=_profile_exposing(command))
+        fresh = _schema_doc(config.vault_root, "brand-new-doctrine.md")
+        assert not fresh.exists()
 
-    for command in sorted(gateway.PROTECTED_TREE_PATH_ARGUMENTS):
         for target in ("_Schema/brand-new-doctrine.md", f"{_kb()}/_Schema/brand-new-doctrine.md"):
             response = _call(app, config, command, _guarded_body(command, target))
             assert response.status_code == 403, f"{command} {target}: {response.text}"
             assert "HOSTED_PROTECTED_TREE_MUTATION" in response.text
-    assert not fresh.exists()
+        assert not fresh.exists()
 
 
 def test_guard_and_page_leaves_share_one_normaliser() -> None:
@@ -1054,7 +1091,11 @@ def test_target_constrained_mutations_are_actually_constrained(tmp_path: Path) -
                     stack.extend(node.get(branch) or [])
         return found
 
-    app, config = _cell(tmp_path)
+    # v4 is the profile that exposes every member. On a v3 cell the five this
+    # widening adds answer COMMAND_NOT_FOUND, and a 404 satisfies both
+    # assertions below without exercising anything -- the routability check in
+    # the probe loop is what keeps that from passing as evidence.
+    app, config = _cell(tmp_path, profile=V4_PROFILE)
 
     # A manifest the parser actually accepts, so `record_memory` is refused on
     # its *target* rather than bouncing off manifest validation first. Taken
@@ -1095,6 +1136,18 @@ def test_target_constrained_mutations_are_actually_constrained(tmp_path: Path) -
             "manifest_text": manifest_text,
             "why": "probe",
         },
+        # The five the parity widening adds. Each is given the arguments its
+        # own published schema marks required, so the probe below reaches
+        # placement rather than bouncing on a missing field.
+        "maintain_memory": {"mode": "audit"},
+        "schema_memory": {"operation": "validate", "subject": "categories"},
+        "preserve_artifacts": {
+            "scope": "probe",
+            "category": "probe",
+            "files": [{"name": "probe.txt", "content": "probe"}],
+        },
+        "adoption_studio": {"action": "status"},
+        "govern_memory": {"operation": "list"},
     }
     assert set(baseline) == set(gateway.TARGET_CONSTRAINED_MUTATIONS)
 
@@ -1108,6 +1161,9 @@ def test_target_constrained_mutations_are_actually_constrained(tmp_path: Path) -
         probed[name] = set()
         for argument in sorted(arguments):
             response = _call(app, config, name, {**baseline[name], argument: injection})
+            # A command the cell does not route proves nothing: it never reaches
+            # a leaf, so "the guard did not fire" is vacuous.
+            assert "COMMAND_NOT_FOUND" not in response.text, f"{name}.{argument} not routable"
             # Refused by the leaf, not by the guard -- that is the claim.
             assert "HOSTED_PROTECTED_TREE_MUTATION" not in response.text, f"{name}.{argument}"
             assert _protected_tree_state(config.vault_root) == trees_before, f"{name}.{argument}"
@@ -1131,8 +1187,39 @@ def test_guarded_set_is_exactly_what_the_widening_newly_exposes() -> None:
 
     v2 = set(commands_module.PRODUCT_SURFACE_PROFILES["hosted-alpha-agent-v2"].command_names)
     v3 = set(commands_module.PRODUCT_SURFACE_PROFILES[V3_PROFILE].command_names)
+    v4 = set(commands_module.PRODUCT_SURFACE_PROFILES[V4_PROFILE].command_names)
 
-    assert set(gateway.PROTECTED_TREE_PATH_ARGUMENTS) == v3 - v2
+    # The v3 widening guarded all three commands it added. The v4 widening adds
+    # six mutating commands and guards one, so restating "everything newly
+    # exposed" would now be false. The rule underneath it is unchanged and is
+    # what gets asserted: a caller-supplied *write destination* is guarded, and
+    # the declaration of which arguments are destinations already exists on the
+    # command as `path_roles`. Reading it here instead of restating a name list
+    # means a leaf that grows a destination argument fails this test rather than
+    # being waved through by a pin that agrees with itself.
+    destination_roles = {"destination", "source-destination", "recovery-destination"}
+
+    def has_write_destination(name: str) -> bool:
+        command = next(c for c in commands_module.PRODUCT_COMMANDS if c.name == name)
+        return any(role.role in destination_roles for role in command.path_roles)
+
+    newly_exposed = (v3 - v2) | (v4 - v3)
+    mutating = {
+        name
+        for name in newly_exposed
+        if not next(c for c in commands_module.PRODUCT_COMMANDS if c.name == name).read_only
+    }
+
+    assert set(gateway.PROTECTED_TREE_PATH_ARGUMENTS) >= {
+        name for name in mutating if has_write_destination(name)
+    }
+    # Already-published surface stays classified as it was: nothing v2 shipped
+    # has been moved into the guarded map by a later widening.
+    assert set(gateway.PROTECTED_TREE_PATH_ARGUMENTS).isdisjoint(v2)
+    # Every newly exposed mutation is accounted for in exactly one list.
+    assert mutating <= (
+        set(gateway.PROTECTED_TREE_PATH_ARGUMENTS) | gateway.TARGET_CONSTRAINED_MUTATIONS
+    )
     assert gateway.TARGET_CONSTRAINED_MUTATIONS.isdisjoint(gateway.PROTECTED_TREE_PATH_ARGUMENTS)
 
 
@@ -1192,11 +1279,29 @@ def test_a_profile_with_an_unclassified_mutation_refuses_to_serve() -> None:
 
     from types import MappingProxyType
 
+    # The stand-in used to be `schema_memory`, which the parity widening
+    # classified -- at which point this test passed a profile the classifier was
+    # happy with and asserted it raised. Pick a command that is genuinely
+    # unclassified instead, so the probe cannot be silently defused by the very
+    # widening it exists to police.
+    unclassified = sorted(
+        command.name
+        for command in commands_module.PRODUCT_COMMANDS
+        if not command.read_only
+        and command.name not in gateway.PROTECTED_TREE_PATH_ARGUMENTS
+        and command.name not in gateway.TARGET_CONSTRAINED_MUTATIONS
+    )
+    assert unclassified, (
+        "no unclassified mutating command remains to probe with; if every "
+        "product command is now classified, this test needs a synthetic one "
+        "rather than being deleted"
+    )
+
     original = commands_module.PRODUCT_SURFACE_PROFILES
     widened = dict(original)
     widened["hosted-test-unclassified"] = commands_module.ProductSurfaceProfile(
         name="hosted-test-unclassified",
-        command_names=("bootstrap", "ask_memory", "schema_memory"),
+        command_names=("bootstrap", "ask_memory", unclassified[0]),
     )
     commands_module.PRODUCT_SURFACE_PROFILES = MappingProxyType(widened)
     try:

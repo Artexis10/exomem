@@ -46,7 +46,15 @@ _KB_WRITE = re.compile(
     r"(?:exomem|knowledge[_-]?base).*(?:"
     r"note|add|edit|append|create_file|replace|remember|capture_source|"
     r"preserve_evidence|manage_memory_file|"
-    r"connect_memory:(?:create-entity|accept-relation)"
+    r"connect_memory:(?:create-entity|accept-relation)|"
+    # Structured-collection lifecycle writes. A turn that filed the record or
+    # moved the plan item did exactly what the capture contract asks for, and
+    # was nudged anyway because the detector knew only page and entity writes.
+    # Spelled out per action so `inspect`/`query`/`describe`/`validate` stay
+    # read-only discovery that leaves the check armed.
+    r"record_memory:(?:create|append|update|revise|rebaseline)|"
+    r"plan_memory:(?:create|add|update|triage)|"
+    r"observe_memory:(?:add|update|remove)"
     r")",
     re.I,
 )
@@ -66,6 +74,9 @@ REMINDER = (
     "turn contradicted a conclusion an active page already states, supersede that page "
     "with replace_memory instead of appending a correction beside it: nothing is "
     "deleted either way, but two live versions of one conclusion both read as current. "
+    "Route a stated intent or commitment to Planning with plan_memory and an observed "
+    "outcome or event to Records with record_memory; when one landing does both, do "
+    "them together and report it once. "
     "If neither case applies, or no Knowledge Base is configured, do nothing and stop."
 )
 
@@ -344,16 +355,16 @@ def _successful_kb_write(tool: dict) -> bool:
     if tool.get("failed"):
         return False
     name = str(tool.get("name") or "")
-    operation = str(tool.get("operation") or "")
+    tool_input = tool.get("input") if isinstance(tool.get("input"), dict) else {}
+    # `operation` for the mixed tools that use it; `action` for the two
+    # structured-collection commands, whose selector is spelled `action`. Without
+    # the second name every Records and Planning call looked like a bare tool
+    # name, so a mutation and a read were indistinguishable here.
+    operation = str(tool.get("operation") or "") or str(tool_input.get("action") or "")
     selector = f"{name}:{operation}" if operation else name
     if not _KB_WRITE.search(selector):
         return False
-    tool_input = tool.get("input")
-    if (
-        "edit_memory" in name.lower()
-        and isinstance(tool_input, dict)
-        and tool_input.get("validate_only") is True
-    ):
+    if "edit_memory" in name.lower() and tool_input.get("validate_only") is True:
         return False
     return True
 

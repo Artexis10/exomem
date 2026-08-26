@@ -43,7 +43,7 @@ import pytest
 import yaml
 
 from exomem import find as find_module
-from exomem import freshness
+from exomem import freshness, lexstore
 from exomem.vault import walk_vault_md
 
 # Reuse the ONE synthetic-vault generator (scripts/synth_vault.py).
@@ -125,6 +125,10 @@ def _build_dense_vault(root: Path, n: int) -> Path:
     vault = root / f"vault-{n}"
     gen_dense_vault(vault, n)
     _seed_freshness_live(vault)
+    # Startup owns the potentially unbounded catalog build.  Interactive find
+    # calls intentionally refuse to become that build for a large corpus, so
+    # this steady-state latency fixture must perform the explicit warmup first.
+    lexstore.ensure_fresh(vault)
     # Warm every lane once so the measured passes reflect steady state, not the
     # first-touch lexical-sidecar / bm25-corpus / resolver build.
     for q in _QUERIES:
@@ -355,6 +359,7 @@ def test_referent_stage_stays_bounded_at_scale(
     vault = _build_dense_vault(tmp_path, N_NOTES)
     gen_entity_overlay(vault, 500, seed=19)
     _seed_freshness_live(vault)
+    lexstore.ensure_fresh(vault)
     cold_referents_ms, referents_ms, block = _measure_referent_stage(vault)
     assert cold_referents_ms < CEIL_REFERENTS_COLD_MS
     assert referents_ms < CEIL_REFERENTS_MS
@@ -400,11 +405,13 @@ def test_referent_stage_does_not_scale_linearly(tmp_path: Path, model_free) -> N
     small = _build_dense_vault(tmp_path, N_NOTES)
     gen_entity_overlay(small, 125, seed=23)
     _seed_freshness_live(small)
+    lexstore.ensure_fresh(small)
     _, small_ms, _ = _measure_referent_stage(small)
 
     large = _build_dense_vault(tmp_path, N_NOTES_LARGE)
     gen_entity_overlay(large, 500, seed=23)
     _seed_freshness_live(large)
+    lexstore.ensure_fresh(large)
     _, large_ms, _ = _measure_referent_stage(large)
 
     bound = max(

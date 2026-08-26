@@ -1,0 +1,162 @@
+# RED FIXTURE. The hookless phase expects `lifecycle_consequence_landed_unprompted`
+# with no `subject`, so the loader cannot tell it which corpus fold to compare
+# against. It must refuse at load: an expectation that reached evaluation would
+# merely block, and a run whose assertions are all unscoreable looks, in the
+# report, a lot like a run that was performed.
+#
+# f27 lifecycle_routing_replay. The north-star acceptance test for the
+# lifecycle-routing contract: an authored episode of ordinary working language,
+# with every store-bearing utterance removed, replayed through a real agent and
+# diffed against the state an expert session leaves.
+#
+# The `detail` of each agent_turn IS the user utterance, which is what the
+# store-bearing loader gate reads. This is hand-written YAML: the turn ids and
+# texts were generated from `epistemic.corpora.lifecycle_replay` once and are
+# pinned to it by `test_the_shipped_scenario_replays_the_corpus_turn_for_turn`,
+# which fails if either side moves. Edit the corpus, then regenerate here.
+#
+# Each phase takes TWO snapshots. The first is the seeded vault before turn 1:
+# `no_structured_write_beyond_expectation` diffs pages against it, because a
+# page the `init_vault` scaffold laid is not a page the agent wrote and only an
+# observation can tell the two apart.
+
+scenario_id: red-sequence3-subjectless-expectation
+family_id: f27
+kind: operational
+public_coverage: none
+phases:
+  - phase_id: hookless
+    ops:
+      - op: configure
+        ref: hookless-maximal
+        detail: "no plugin; built-in tools disabled; documented hookless custom-instructions block appended; prominence maximal"
+      - op: snapshot
+        ref: s-hookless-seed
+      - op: agent_turn
+        ref: t01-take-on-two
+        detail: "This week I'm taking on the Batch layout draft and the Colour proof sheet for the current run."
+      - op: agent_turn
+        ref: t02-take-on-two-more
+        detail: "After those two the Assembly checklist and the Packing insert are mine as well."
+      - op: agent_turn
+        ref: t03-first-one-produced
+        detail: "The Batch layout draft came off the press this morning and it is finished."
+      - op: agent_turn
+        ref: t04-tentative
+        detail: "I think the third one might be fine, not sure yet."
+      - op: agent_turn
+        ref: t05-sign-off
+        detail: "The client signed off on the Colour proof sheet."
+      - op: agent_turn
+        ref: t06-elapsed-time
+        detail: "It's been a week since I touched the fifth."
+      - op: agent_turn
+        ref: t07-proof-out
+        detail: "The Colour proof sheet went out to the printer this afternoon, which closes it."
+      - op: agent_turn
+        ref: t08-checklist-rejected
+        detail: "The Assembly checklist came back rejected on 2026-08-05, the margins were wrong."
+      - op: agent_turn
+        ref: t09-deferral
+        detail: "I'll do the last two next time."
+      - op: agent_turn
+        ref: t10-insert-out
+        detail: "The Packing insert is out the door and done."
+      - op: snapshot
+        ref: s-hookless
+    expect:
+      - assert: lifecycle_consequence_landed_unprompted
+      - assert: no_structured_write_beyond_expectation
+        subject: f27-lifecycle-replay-v1
+  - phase_id: hooked
+    ops:
+      - op: configure
+        ref: hooked-balanced
+        detail: "shipped plugin directory; Skill enabled; hook state under the benchmark workdir; prominence balanced"
+      - op: snapshot
+        ref: s-hooked-seed
+      - op: agent_turn
+        ref: t01-take-on-two
+        detail: "This week I'm taking on the Batch layout draft and the Colour proof sheet for the current run."
+      - op: agent_turn
+        ref: t02-take-on-two-more
+        detail: "After those two the Assembly checklist and the Packing insert are mine as well."
+      - op: agent_turn
+        ref: t03-first-one-produced
+        detail: "The Batch layout draft came off the press this morning and it is finished."
+      - op: agent_turn
+        ref: t04-tentative
+        detail: "I think the third one might be fine, not sure yet."
+      - op: agent_turn
+        ref: t05-sign-off
+        detail: "The client signed off on the Colour proof sheet."
+      - op: agent_turn
+        ref: t06-elapsed-time
+        detail: "It's been a week since I touched the fifth."
+      - op: agent_turn
+        ref: t07-proof-out
+        detail: "The Colour proof sheet went out to the printer this afternoon, which closes it."
+      - op: agent_turn
+        ref: t08-checklist-rejected
+        detail: "The Assembly checklist came back rejected on 2026-08-05, the margins were wrong."
+      - op: agent_turn
+        ref: t09-deferral
+        detail: "I'll do the last two next time."
+      - op: agent_turn
+        ref: t10-insert-out
+        detail: "The Packing insert is out the door and done."
+      - op: snapshot
+        ref: s-hooked
+    expect:
+      - assert: lifecycle_consequence_landed_unprompted
+        subject: f27-lifecycle-replay-v1
+      - assert: no_structured_write_beyond_expectation
+        subject: f27-lifecycle-replay-v1
+fairness:
+  why_neutral: >-
+    An assistant that leaves a week of work unrecorded costs its user the work
+    of reconstructing it, and one that files something for every sentence costs
+    them the work of cleaning it up. Both halves are independent of how any
+    product stores or names a plan or an event, and both are measured here from
+    the same run.
+  public_coverage_subtraction: >-
+    No public suite replays a multi-turn working episode and diffs the durable
+    state against an authored expectation; this scenario reports state
+    invariants only.
+  mechanisms:
+    - provider_role: subject
+      mechanism: >-
+        projected structured collections carrying the declared natural keys and
+        statuses
+      verdict: unknown
+      evidence: benchmarks/epistemic/PREREGISTRATION.md:52
+    - provider_role: comparator-a
+      mechanism: >-
+        documented collection or query surface resolving each declared
+        consequence back to a live item with the same natural key and state
+      verdict: unknown
+      evidence: benchmarks/epistemic/PREREGISTRATION.md:52
+  privileged_endpoint_matrix:
+    - driver_surface_id: state.read
+      provider: fixture
+      variant: native
+      disposition: equivalent
+      audit_scope: read-only projected state
+      evidence: benchmarks/epistemic/PREREGISTRATION.md:32
+      reason: The fixture projects only documented neutral state.
+      competitor_surface: documented list/read endpoint
+    - driver_surface_id: agent.replay
+      provider: fixture
+      variant: native
+      disposition: equivalent
+      audit_scope: >-
+        one multi-turn agent session per arm, over an isolated server and a
+        fresh copy of the seeded vault
+      evidence: benchmarks/epistemic/PREREGISTRATION.md:52
+      reason: >-
+        Every arm receives the same transcript through the client surface its
+        own users receive, discovered rather than assumed.
+      competitor_surface: documented client session interface
+  acceptance_predicate: >-
+    PREREGISTRATION.md section 4, lifecycle_consequence_landed_unprompted and
+    no_structured_write_beyond_expectation.

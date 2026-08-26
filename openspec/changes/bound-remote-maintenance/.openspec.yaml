@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-08-25
+goal: Prevent abandoned remote maintenance requests from monopolizing the vault
+  mutation boundary.

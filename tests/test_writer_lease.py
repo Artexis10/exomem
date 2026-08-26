@@ -1177,8 +1177,69 @@ def test_reserved_identity_guard_does_not_fsync_diagnostic_holder_metadata(
         vault,
         domains={"graph-store"},
         exclusive=False,
-    ):
+    ) as first_generation:
         assert list((state_dir / "mutation-locks").glob("*.holder.json")) == []
+
+    with manager.reserved_identity_guard(
+        vault,
+        domains={"graph-store"},
+        exclusive=False,
+    ) as second_generation:
+        pass
+
+    with manager.reserved_identity_guard(
+        vault,
+        domains={"graph-store"},
+        exclusive=False,
+        advance_generation=False,
+    ) as read_generation:
+        pass
+
+    with manager.reserved_identity_guard(
+        vault,
+        domains={"graph-store"},
+        exclusive=True,
+    ) as observed_generation:
+        pass
+
+    assert first_generation != second_generation
+    assert read_generation == second_generation
+    assert observed_generation == second_generation
+
+
+def test_reserved_identity_owner_acquires_gate_before_its_domain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    manager = LeaseManager(LeaseConfig(state_dir=tmp_path / "state"))
+    entered: list[str] = []
+
+    class RecordingCoordinator:
+        def __init__(self, identity: str) -> None:
+            self.identity = identity
+
+        @contextmanager
+        def hold(self, **_kwargs: object):
+            entered.append(self.identity)
+            yield self
+
+    monkeypatch.setattr(
+        manager,
+        "_mutation_coordinator_for",
+        lambda identity: RecordingCoordinator(str(identity)),
+    )
+
+    with manager.reserved_identity_guard(
+        vault,
+        domains={"graph-store"},
+        exclusive=False,
+    ):
+        pass
+
+    assert len(entered) == 2
+    assert ":gate:" in entered[0]
+    assert ":graph-store:" in entered[1]
 
 
 def test_direct_mutation_guard_threads_fence_to_atomic_commit(

@@ -136,7 +136,10 @@ CONTRACTS: dict[str, ProminenceContract] = {
             "Capture when the conversation reaches a stepping stone: a durable "
             "conclusion lands, a recurring entity accumulates reusable facts, or a "
             "method was carried out and the user reports how it went. Not "
-            "mid-thought exploration, tangents, or unresolved questions."
+            "mid-thought exploration, tangents, or unresolved questions. "
+            "Route stated intent to Planning, observed outcome to Records; an "
+            "outcome on an open committed item is one landing, two consequences: "
+            "record then transition, once."
         ),
         narration=(
             "Stay quiet. Mention memory only when a search returned something you "
@@ -157,7 +160,10 @@ CONTRACTS: dict[str, ProminenceContract] = {
             "a decision, a resolved problem, a diagnosed failure, a reusable pattern, "
             "a fact about a recurring entity, a method you actually ran and how it "
             "turned out. When torn between capturing and letting it pass, capture. "
-            "Prefer a real page over a mental note, and do not wait to be asked."
+            "Prefer a real page over a mental note, and do not wait to be asked. "
+            "Route stated intent to Planning, observed outcome to Records; an "
+            "outcome on an open committed item is one landing, two consequences: "
+            "record then transition, once."
         ),
         narration=(
             "Say what you did. Name what you recalled and cite it; state one line "

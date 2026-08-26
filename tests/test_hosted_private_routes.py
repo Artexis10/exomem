@@ -245,6 +245,7 @@ def _cell(
     expose_tier2: bool = True,
     records_reader_version: int = 2,
     lifecycle_actions_enabled: bool = False,
+    production_invoker: bool = False,
 ) -> tuple[_ASGIClient, HostedCellConfig, HostedCellLifecycle, IsolatedInvoker]:
     vault_root = tmp_path / cell_id / "vault"
     from exomem.init import init_vault
@@ -291,7 +292,7 @@ def _cell(
         config=config,
         lifecycle=lifecycle,
         source_schema=schema.load_source_schema(vault_root),
-        invoke_command_func=isolated,
+        invoke_command_func=None if production_invoker else isolated,
         mutation_guard_factory=mutation_guard,
         private_authenticator=private_authenticator,
         expose_tier2=expose_tier2,
@@ -340,6 +341,13 @@ def test_private_routes_use_the_injected_dynamic_authority_for_every_request(
         "security_revision": 1,
         "service_authenticated": True,
         "mutation_authority": True,
+        "authorization_session": {
+            "ready": False,
+            "code": "AUTHORIZATION_MEMBERSHIP_UNAVAILABLE",
+            "servingMembershipEpoch": None,
+            "servingReplicaCount": 0,
+            "drainingReplicaCount": 0,
+        },
         "admission_phase": "active",
         "read_admission": True,
         "write_admission": True,
@@ -1055,6 +1063,13 @@ def test_private_readiness_is_a_complete_control_plane_binding_proof(tmp_path: P
         "readAdmission": True,
         "writeAdmission": True,
         "workerPolicy": {"workerCount": 0, "semantic": False, "media": False},
+        "authorizationSession": {
+            "ready": False,
+            "code": "AUTHORIZATION_MEMBERSHIP_UNAVAILABLE",
+            "servingMembershipEpoch": None,
+            "servingReplicaCount": 0,
+            "drainingReplicaCount": 0,
+        },
         "code": "CELL_READY",
     }
 
@@ -1375,6 +1390,102 @@ def test_hosted_warming_error_preserves_retry_contract(tmp_path: Path) -> None:
         "retry_after_ms": 750,
         "request_id": DEFAULT_REQUEST_ID,
         "receipt_id": "0123456789abcdef",
+    }
+
+
+def test_hosted_operator_maintenance_refusal_preserves_terminal_guidance(
+    tmp_path: Path,
+) -> None:
+    client, config, _lifecycle, _invoker = _cell(
+        tmp_path,
+        cell_id="cell-operator-maintenance-refusal",
+        credential="operator-maintenance-service-credential-0001",
+        invoker=MutationErrorInvoker(
+            "MAINTENANCE_REQUIRES_CLI",
+            status="terminal",
+            committed=False,
+        ),
+    )
+
+    response = client.post(
+        "/private/exomem/v1/command/maintain_memory",
+        headers=_headers(config),
+        json={"mode": "reconcile", "dry_run": False},
+    )
+
+    assert response.status_code == 400, response.text
+    assert response.json()["error"] == {
+        "code": "MAINTENANCE_REQUIRES_CLI",
+        "message": "write-mode maintenance is unavailable through request-bound remote commands",
+        "remediation": (
+            "Run `exomem maintain --fix` or `exomem maintain --reconcile` on the host; "
+            "for ID backfill, run `exomem maintain_memory --mode backfill-ids "
+            "--no-dry-run`. Use audit or dry_run=true remotely."
+        ),
+        "status": "terminal",
+        "committed": False,
+        "request_id": DEFAULT_REQUEST_ID,
+        "receipt_id": "0123456789abcdef",
+    }
+    assert "private mutation exception sentinel" not in response.text
+    assert "private-holder-sentinel" not in response.text
+    assert "private-detail-sentinel" not in response.text
+
+
+@pytest.mark.parametrize(
+    ("path", "agent_profile"),
+    [
+        ("/private/exomem/v1/command/maintain_memory", None),
+        (
+            (
+                "/private/exomem/v1/agent/"
+                f"{commands_module.HOSTED_ALPHA_AGENT_V4_PROFILE}/command/maintain_memory"
+            ),
+            commands_module.HOSTED_ALPHA_AGENT_V4_PROFILE,
+        ),
+    ],
+)
+def test_hosted_http_surfaces_refuse_write_maintenance_before_manager_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    agent_profile: str | None,
+) -> None:
+    monkeypatch.setattr(
+        writer_lease,
+        "get_manager",
+        lambda: pytest.fail("hosted write maintenance reached manager dispatch"),
+    )
+    if agent_profile is not None:
+        monkeypatch.setattr(
+            HostedCellConfig,
+            "active_agent_profile",
+            property(lambda _config: agent_profile),
+        )
+    client, config, _lifecycle, _invoker = _cell(
+        tmp_path,
+        cell_id="cell-production-maintenance-refusal",
+        credential="production-maintenance-service-credential-0001",
+        production_invoker=True,
+    )
+
+    response = client.post(
+        path,
+        headers=_headers(config),
+        json={"mode": "reconcile", "dry_run": False},
+    )
+
+    assert response.status_code == 400, response.text
+    assert response.json()["error"] == {
+        "code": "MAINTENANCE_REQUIRES_CLI",
+        "message": "write-mode maintenance is unavailable through request-bound remote commands",
+        "remediation": (
+            "Run `exomem maintain --fix` or `exomem maintain --reconcile` on the host; "
+            "for ID backfill, run `exomem maintain_memory --mode backfill-ids "
+            "--no-dry-run`. Use audit or dry_run=true remotely."
+        ),
+        "status": "terminal",
+        "committed": False,
     }
 
 
