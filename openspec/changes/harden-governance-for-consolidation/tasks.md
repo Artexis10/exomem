@@ -10,7 +10,7 @@ this reconciliation is `origin/main` at `9dc37201` plus stacked evidence PR #832
 | --- | --- | --- |
 | Per-scope disclosure | Conservative lattice, option meet, unconditional scrubber, and session-bound scope enforcement are merged. | Exact v3 grant migration and receipt-first v4 scope-bound recovery are implemented and evidenced in this stacked change; no section 1 obligation remains. Merge stays behind the Personal stability hold. |
 | Non-Markdown membership | Descriptor binding, owner backfill, fail-closed propagation, structured-read preflight, and the combined regression matrix are complete through #723, #724, #727, and green PR #832 CI. | No section 2 obligation remains. |
-| Policy authority | Prospective snapshots, exact proposal authority binding, atomic policy publication, the held workspace mirror, and policy/content/companion/measurement/graph writer successors are merged through #729, #740, and #800-#830. | Remaining workspace-race, migration, recovery, suspend/resume/undo, and combined evidence closure in 3.4-3.7 and 3.12-3.13. |
+| Policy authority | Prospective snapshots, exact proposal authority binding, atomic policy publication, the held workspace mirror, and policy/content/companion/measurement/graph writer successors are merged through #729, #740, and #800-#830. | Direct workspace pending-vs-blocked authority evidence is complete in this stacked change. Remaining publication concurrency, migration, recovery, suspend/resume/undo, and combined evidence closure is in 3.5-3.7 and 3.12-3.13. |
 | Reserved state | Held filesystem substrate and the closed reserved-path monopoly are merged and complete. | Final whole-change review/verification only. |
 | Authorization sessions | Credential verification, external custody, schema-v4 authority, transport binding, standalone attachment, and serving-membership verification are merged in #728, #732, #734, #737, #741, #772, #775, and #778. | Hosted membership publisher, complete move/restore and v3 migration/downmigration, hygiene, and combined lifecycle evidence in the remaining section 5 tasks. |
 | Direct reads | Markdown and structured-direct gates are merged in #730/#731; the full L0-L6 and registry-proven never-enrolled matrix is complete in stacked PR #832. | No section 7 implementation obligation remains; merge stays behind the Personal stability hold. |
@@ -138,7 +138,7 @@ this reconciliation is `origin/main` at `9dc37201` plus stacked evidence PR #832
   exact workspace byte map/source/conflict/guard identities, reviewed active policy/
   projector/catalog tuple, canonical target compiled bytes/fingerprint/schema versions,
   exact membership, and ready projection namespace; reject any tuple mismatch at commit.
-- [ ] 3.4 Add red tests proving direct workspace create/edit/delete/conflict never changes
+- [x] 3.4 Add red tests proving direct workspace create/edit/delete/conflict never changes
   active authority. Prove valid edits/deletions remain pending and deletion does not
   revoke, while missing/corrupt/conflicted workspace blocks warm/restart content. Barrier
   every edit before/after snapshot and tuple commit; assert the cooperatively fenced

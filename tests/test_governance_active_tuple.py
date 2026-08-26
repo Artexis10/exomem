@@ -2256,6 +2256,126 @@ def test_v4_policy_load_uses_the_verified_immutable_generation_not_live_yaml(
     assert pending.rules[0].ceiling == 2
 
 
+@pytest.mark.parametrize("mutation", ("create", "edit", "delete"))
+def test_v4_valid_direct_workspace_mutation_is_pending_not_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    _write_workspace(vault, _documents(ceiling=2))
+    result = _migrate(vault, now=now)
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=result.activation_state_digest,
+        now=now,
+    )
+    active_before = policy.load(vault)
+    rule = vault / "Knowledge Base" / "_Governance" / "rules" / "external.yaml"
+    if mutation == "create":
+        rule.with_name("pending.yaml").write_text(
+            "governance_version: 1\n"
+            "id: 01ARZ3NDEKTSV4RRFFQ69G5FB1\n"
+            "scope_ids:\n"
+            f"  - {SCOPE_ID}\n"
+            "audience: external\n"
+            "ceiling: 0\n",
+            encoding="utf-8",
+        )
+    elif mutation == "edit":
+        rule.write_bytes(dict(_documents(ceiling=0))["rules/external.yaml"])
+    else:
+        rule.unlink()
+
+    pending = policy.compile_prospective(vault, {})
+    served = policy.load(vault)
+    with sqlite3.connect(store.sidecar_path(vault)) as connection:
+        active_after = connection.execute(
+            "SELECT policy_generation_id, policy_fingerprint, projector_schema_version, "
+            "catalog_generation "
+            "FROM active_governance_tuple WHERE singleton=1"
+        ).fetchone()
+        activation_after = connection.execute(
+            "SELECT activation_epoch, activation_state_digest "
+            "FROM governance_activation_store WHERE singleton=1"
+        ).fetchone()
+        policy_publications = connection.execute(
+            "SELECT COUNT(*) FROM governance_tuple_publications "
+            "WHERE publication_kind='policy'"
+        ).fetchone()
+
+    assert pending is not None and not pending.policy.blocked
+    assert pending.policy.fingerprint != active_before.fingerprint
+    assert served == active_before
+    assert served.rules[0].ceiling == 2
+    assert active_after == (
+        FIRST_GENERATION_ID,
+        active_before.fingerprint,
+        1,
+        1,
+    )
+    assert activation_after == (1, result.activation_state_digest)
+    assert policy_publications == (0,)
+
+
+@pytest.mark.parametrize("mutation", ("conflict", "unparsable", "missing"))
+def test_v4_invalid_direct_workspace_blocks_warm_and_restart_without_tuple_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    _write_workspace(vault, _documents(ceiling=2))
+    result = _migrate(vault, now=now)
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=result.activation_state_digest,
+        now=now,
+    )
+    assert policy.load(vault).rules[0].ceiling == 2
+    rule = vault / "Knowledge Base" / "_Governance" / "rules" / "external.yaml"
+    if mutation == "conflict":
+        rule.with_name(
+            "external.sync-conflict-20260826-120000-ABCDEFG.yaml"
+        ).write_bytes(rule.read_bytes())
+    elif mutation == "unparsable":
+        rule.write_text("governance_version: 1\nceiling: [\n", encoding="utf-8")
+    else:
+        root = vault / "Knowledge Base" / "_Governance"
+        for path in sorted(root.rglob("*"), reverse=True):
+            path.rmdir() if path.is_dir() else path.unlink()
+        root.rmdir()
+
+    warm = policy.load(vault)
+    policy._CACHE.clear()
+    policy._LAST_GOOD.clear()
+    policy._compile_pinned_documents.cache_clear()
+    restarted = policy.load(vault)
+    with sqlite3.connect(store.sidecar_path(vault)) as connection:
+        active_after = connection.execute(
+            "SELECT policy_generation_id, policy_fingerprint "
+            "FROM active_governance_tuple WHERE singleton=1"
+        ).fetchone()
+        activation_after = connection.execute(
+            "SELECT activation_epoch, activation_state_digest "
+            "FROM governance_activation_store WHERE singleton=1"
+        ).fetchone()
+
+    assert warm.blocked
+    assert restarted.blocked
+    assert active_after == (
+        FIRST_GENERATION_ID,
+        _compiled(_documents(ceiling=2)).fingerprint,
+    )
+    assert activation_after == (1, result.activation_state_digest)
+
+
 def test_v4_policy_load_blocks_registry_tuple_mismatch_and_workspace_loss(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
