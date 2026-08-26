@@ -25,7 +25,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, BinaryIO, Literal
+from typing import IO, TYPE_CHECKING, Any, BinaryIO, Literal
 
 import yaml
 from slugify import slugify as _slugify
@@ -1957,6 +1957,116 @@ class _BatchWorkspace:
                     os.close(descriptor)
             raise
 
+    def create_stream_artifact(
+        self,
+        name: str,
+        stream: IO[bytes],
+        *,
+        expected_size: int,
+        expected_hash: str,
+    ) -> _WorkspaceArtifact:
+        """Copy a reviewed seekable stream into one held private stage."""
+
+        if (
+            not isinstance(expected_size, int)
+            or isinstance(expected_size, bool)
+            or expected_size < 0
+            or not isinstance(expected_hash, str)
+            or len(expected_hash) != 64
+            or any(character not in "0123456789abcdef" for character in expected_hash)
+        ):
+            raise PathGuardError(
+                "PATH_GUARD_INVALID", "binary batch identity is invalid"
+            )
+        try:
+            stream.seek(0)
+        except (AttributeError, OSError, ValueError) as error:
+            raise PathGuardError(
+                "PATH_GUARD_INVALID", "binary batch stream is not seekable"
+            ) from error
+
+        self.recheck()
+        held_file: held_fs.HeldFile | None = None
+        if self.held_filesystem is not None and self.held_directory is not None:
+            opened = self.held_filesystem.file(
+                self.held_directory,
+                name,
+                access="write",
+                create=True,
+                exclusive=True,
+            )
+            if not opened.ok:
+                raise PathGuardError(
+                    "PATH_GUARD_UNSAFE", "batch stage create was refused"
+                )
+            held_file = opened.require()
+            descriptor = getattr(held_file, "descriptor", None)
+            if not isinstance(descriptor, int):
+                held_file.close()
+                raise PathGuardError(
+                    "PATH_GUARD_UNSAFE", "batch stage is unavailable"
+                )
+        else:
+            flags = (
+                os.O_RDWR
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_BINARY", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+            )
+            if os.open in getattr(os, "supports_dir_fd", set()):
+                descriptor = os.open(name, flags, 0o600, dir_fd=self.descriptor)
+            else:  # pragma: no cover - legacy rootless Windows route
+                descriptor = os.open(self.path / name, flags, 0o600)
+        artifact: _WorkspaceArtifact | None = None
+        try:
+            self.recheck_identity()
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode) or _is_reparse(info):
+                raise PathGuardError("PATH_GUARD_UNSAFE", "batch stage is unsafe")
+            identity = _identity(name, info)
+            artifact = _WorkspaceArtifact(
+                self,
+                name,
+                descriptor,
+                identity,
+                expected_hash,
+                held_file=held_file,
+            )
+            self.artifacts[name] = artifact
+            digest = hashlib.sha256()
+            written = 0
+            while True:
+                chunk = stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                if not isinstance(chunk, bytes):
+                    raise PathGuardError(
+                        "PATH_GUARD_INVALID", "binary batch stream returned non-bytes"
+                    )
+                written += len(chunk)
+                if written > expected_size:
+                    raise PathGuardError(
+                        "PATH_GUARD_CONTENT", "binary batch size changed"
+                    )
+                digest.update(chunk)
+                _write_all(descriptor, chunk)
+            if written != expected_size or digest.hexdigest() != expected_hash:
+                raise PathGuardError(
+                    "PATH_GUARD_CONTENT", "binary batch content changed"
+                )
+            artifact.content_bound = True
+            artifact.recheck()
+            self.recheck()
+            return artifact
+        except Exception:
+            if artifact is None:
+                if held_file is not None:
+                    held_file.close()
+                else:
+                    os.close(descriptor)
+            raise
+
     def _replace_once(self, artifact: _WorkspaceArtifact, final: Path) -> None:
         if os.replace in getattr(os, "supports_dir_fd", set()):
             os.replace(
@@ -3628,11 +3738,20 @@ def read_guarded_text(vault_root: Path, path: Path) -> tuple[str, PathGuard]:
 
 
 @dataclass
+class PreparedBinaryContent:
+    """One seekable binary payload with its exact precomputed identity."""
+
+    stream: IO[bytes]
+    size: int
+    sha256: str
+
+
+@dataclass
 class PlannedWrite:
     """One target file in a batch write, with an optional commit-time CAS guard."""
 
     path: Path
-    content: str
+    content: str | PreparedBinaryContent
     create_only: bool = False
     guard: PathGuard | None = None
     expected_hash: str | None = None
@@ -4254,6 +4373,10 @@ def _enqueue_graph_debt(vault_root: Path, checkpoint_write: PlannedWrite) -> Non
     """
     from . import deferred_index, graph_sync
 
+    if not isinstance(checkpoint_write.content, str):
+        raise PathGuardError(
+            "PATH_GUARD_INVALID", "graph checkpoint content is not textual"
+        )
     checkpoint = graph_sync.GraphSyncCheckpoint.parse(checkpoint_write.content)
     if checkpoint is None:  # pragma: no cover - graph_sync renders its own token
         return
@@ -4349,7 +4472,13 @@ def _batch_atomic_write_locked(
         if epoch_writes is not None:
             floor_write, checkpoint_write = epoch_writes
             if defer_graph_completion:
-                deferred_checkpoint = graph_sync.GraphSyncCheckpoint.parse(checkpoint_write.content)
+                if not isinstance(checkpoint_write.content, str):
+                    raise PathGuardError(
+                        "PATH_GUARD_INVALID", "graph checkpoint content is not textual"
+                    )
+                deferred_checkpoint = graph_sync.GraphSyncCheckpoint.parse(
+                    checkpoint_write.content
+                )
                 if deferred_checkpoint is None:  # pragma: no cover - graph_sync renders its own token
                     raise ValueError("deferred graph completion checkpoint is invalid")
                 writes = [floor_write, *writes]
@@ -4374,6 +4503,15 @@ def _batch_atomic_write_locked(
         absolute_parts = Path(os.path.abspath(write.path)).parts
         if any(part.startswith(_BATCH_RESIDUE_PREFIX) for part in absolute_parts):
             raise _batch_residue_error("BATCH_RESIDUE_UNSAFE")
+        if isinstance(write.content, PreparedBinaryContent):
+            if not write.create_only or write.expected_hash != MISSING_CONTENT_HASH:
+                raise PathGuardError(
+                    "PATH_GUARD_INVALID",
+                    "binary batch content requires an exact missing destination",
+                )
+            if os.path.lexists(write.path):
+                raise CreateOnlyConflict(_safe_write_target(write.path, vault_root))
+            continue
         if write.expected_hash is not None:
             try:
                 current = write.path.read_text(encoding="utf-8")
@@ -4492,9 +4630,26 @@ def _batch_atomic_write_locked(
                 )
         for index, write in enumerate(writes):
             workspace = workspace_by_parent[Path(os.path.abspath(write.path.parent))]
-            artifact = workspace.create_artifact(
-                f"stage-{index}.tmp", write.content.encode("utf-8")
-            )
+            if isinstance(write.content, str):
+                artifact = workspace.create_artifact(
+                    f"stage-{index}.tmp", write.content.encode("utf-8")
+                )
+            elif isinstance(write.content, PreparedBinaryContent):
+                if not write.create_only or write.expected_hash != MISSING_CONTENT_HASH:
+                    raise PathGuardError(
+                        "PATH_GUARD_INVALID",
+                        "binary batch content requires an exact missing destination",
+                    )
+                artifact = workspace.create_stream_artifact(
+                    f"stage-{index}.tmp",
+                    write.content.stream,
+                    expected_size=write.content.size,
+                    expected_hash=write.content.sha256,
+                )
+            else:  # pragma: no cover - the public union is closed
+                raise PathGuardError(
+                    "PATH_GUARD_INVALID", "batch content type is unsupported"
+                )
             staged.append((write.path, workspace, artifact))
         for final, _workspace, _artifact in staged:
             if not os.path.lexists(final):

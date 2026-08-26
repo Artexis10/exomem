@@ -46,6 +46,7 @@ from exomem import (
 from exomem.governance import (
     authorization_custody,
     catalog_publication,
+    companions,
     membership,
     policy,
     projected_retrieval,
@@ -4121,6 +4122,257 @@ def test_existing_binary_backfill_pages_publish_v4_catalog_membership(
         media_sidecar.relative_to(vault).as_posix(),
         artifact_page.relative_to(vault).as_posix(),
     }
+
+
+def test_preserve_binary_publishes_bound_companion_and_v4_catalog_successor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_empty_projection_catalog(vault, now=now)
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+
+    result = preserve.preserve_bytes(
+        vault,
+        scope="Private",
+        category="files",
+        filename="payload.bin",
+        data=b"governed binary payload",
+        today=dt.date(2026, 8, 26),
+    )
+
+    bound = companions.classify(vault, result.path)
+    assert bound.projects == ()
+    assert bound.tags == ()
+    assert bound.types == ()
+    assert bound.classes == ()
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    assert custody.control.activation_epoch == 2
+    active, manifest, items = _load_active_projection_items(
+        vault,
+        activation_epoch=2,
+        activation_state_digest=custody.control.activation_state_digest or "",
+    )
+    assert active.active.catalog_generation == 2
+    assert manifest.item_count == 1
+    assert {item.item_identity for item in items} == {result.sidecar_path}
+
+
+def test_preserve_v4_updates_navigation_in_the_same_projection_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    kb = vault / "Knowledge Base"
+    kb.mkdir(parents=True)
+    index = kb / "index.md"
+    log = kb / "log.md"
+    index.write_text("# Knowledge Base\n\n## Recent activity\n\n", encoding="utf-8")
+    log.write_text("# Activity log\n\n---\n", encoding="utf-8")
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_projection_items(
+        vault,
+        items=(
+            ("Knowledge Base/index.md", index.read_text(encoding="utf-8")),
+            ("Knowledge Base/log.md", log.read_text(encoding="utf-8")),
+        ),
+        now=now,
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+
+    result = preserve.preserve_bytes(
+        vault,
+        scope="Private",
+        category="files",
+        filename="with-navigation.bin",
+        data=b"governed payload",
+        today=dt.date(2026, 8, 26),
+    )
+
+    assert "with-navigation.bin" in index.read_text(encoding="utf-8")
+    assert "with-navigation.bin" in log.read_text(encoding="utf-8")
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    _active, _manifest, items = _load_active_projection_items(
+        vault,
+        activation_epoch=2,
+        activation_state_digest=custody.control.activation_state_digest or "",
+    )
+    assert {item.item_identity for item in items} == {
+        result.sidecar_path,
+        "Knowledge Base/index.md",
+        "Knowledge Base/log.md",
+    }
+
+
+def test_preserve_binary_rebuilds_vector_measurements_before_v4_activation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = int(time.time())
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    vault = tmp_path / "vault"
+    _write_workspace(vault, _documents(ceiling=2))
+    migration, _prior = _migrate_with_vector_projection_items(
+        vault,
+        items=(),
+        now=now,
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    embedded: list[str] = []
+
+    def embed_target(texts: list[str], *, is_query: bool = False):
+        assert is_query is False
+        embedded.extend(texts)
+        return tuple(
+            tuple(float(index + 1) for _component in range(embeddings.VECTOR_DIM))
+            for index, _text in enumerate(texts)
+        )
+
+    monkeypatch.setattr(embeddings, "embed_texts", embed_target)
+
+    result = preserve.preserve_bytes(
+        vault,
+        scope="Private",
+        category="files",
+        filename="vector.bin",
+        data=b"vector-backed payload",
+        text="projection-only searchable text",
+        today=dt.date(2026, 8, 26),
+    )
+
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    active, manifest, items = _load_active_projection_items(
+        vault,
+        activation_epoch=2,
+        activation_state_digest=custody.control.activation_state_digest or "",
+    )
+    evidence = projection_store.namespace_evidence_from_snapshot(active)
+    namespace = projection_store.bind_active_projection_namespace(
+        active,
+        manifest=manifest,
+        items=items,
+    )
+    root = evidence.required_measurement_roots[0]
+    family = projection_measurement_store.MeasurementFamilyKey(
+        namespace_key=namespace.namespace_key,
+        lane=root.lane,
+        extractor_version=root.extractor_version,
+        model_version=root.model_version,
+    )
+    _measurement_manifest, measurements = (
+        projection_measurement_store.load_measurement_store(
+            vault,
+            namespace=namespace,
+            family=family,
+            expected_rows_digest=root.rows_digest,
+        )
+    )
+    assert {item.item_identity for item in items} == {result.sidecar_path}
+    assert len(measurements) == sum(len(item.variants) for item in items)
+    assert len(embedded) == len(measurements)
+
+
+def test_preserve_binary_v4_preflight_failure_leaves_no_canonical_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_empty_projection_catalog(vault, now=now)
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+
+    def refuse(_vault_root: Path, *, writes, now=None):  # noqa: ANN001, ARG001
+        raise catalog_publication.CatalogPublicationError("preflight refused")
+
+    monkeypatch.setattr(
+        catalog_publication,
+        "prepare_planned_markdown_batch",
+        refuse,
+    )
+    with pytest.raises(catalog_publication.CatalogCommitError) as blocked:
+        preserve.preserve_bytes(
+            vault,
+            scope="Private",
+            category="files",
+            filename="blocked.bin",
+            data=b"must not commit",
+            today=dt.date(2026, 8, 26),
+        )
+
+    assert blocked.value.code == "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED"
+    folder = vault / "Knowledge Base" / "Evidence" / "Private" / "files"
+    assert not (folder / "blocked.bin").exists()
+    assert not (folder / "blocked.bin.md").exists()
+
+
+def test_preserve_binary_v4_catalog_terminal_loss_is_explicitly_uncertain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_empty_projection_catalog(vault, now=now)
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+
+    def lose_terminal(_prepared) -> None:  # noqa: ANN001
+        raise catalog_publication.CatalogPublicationError("lost catalog terminal")
+
+    monkeypatch.setattr(
+        catalog_publication,
+        "publish_markdown_batch",
+        lose_terminal,
+    )
+    with pytest.raises(catalog_publication.CatalogCommitError) as uncertain:
+        preserve.preserve_bytes(
+            vault,
+            scope="Private",
+            category="files",
+            filename="uncertain.bin",
+            data=b"canonical bytes committed",
+            today=dt.date(2026, 8, 26),
+        )
+
+    assert uncertain.value.code == "GOVERNANCE_CATALOG_PUBLICATION_UNCERTAIN"
+    folder = vault / "Knowledge Base" / "Evidence" / "Private" / "files"
+    assert (folder / "uncertain.bin").read_bytes() == b"canonical bytes committed"
+    assert (folder / "uncertain.bin.md").exists()
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    assert custody.control.activation_epoch == 1
 
 
 def test_semantic_edit_publishes_auxiliary_markdown_in_the_same_v4_generation(

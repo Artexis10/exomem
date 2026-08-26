@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import io
 import os
 import threading
 from pathlib import Path
@@ -116,6 +118,147 @@ def test_path_guards_allow_fresh_multiwrite_without_self_invalidation(
         "content-1",
         "content-2",
     ]
+
+
+def test_batch_write_streams_binary_and_markdown_in_one_rollback_set(
+    tmp_path: Path,
+) -> None:
+    payload = b"\x00binary payload\xff"
+    binary = tmp_path / "Evidence" / "artifact.bin"
+    companion = tmp_path / "Evidence" / "artifact.bin.md"
+
+    written = vault.batch_atomic_write(
+        [
+            vault.PlannedWrite(
+                binary,
+                vault.PreparedBinaryContent(
+                    io.BytesIO(payload),
+                    len(payload),
+                    hashlib.sha256(payload).hexdigest(),
+                ),
+                create_only=True,
+                expected_hash=vault.MISSING_CONTENT_HASH,
+            ),
+            vault.PlannedWrite(
+                companion,
+                "---\ntitle: Artifact\n---\n\nBound companion.\n",
+                create_only=True,
+                expected_hash=vault.MISSING_CONTENT_HASH,
+            ),
+        ],
+        vault_root=tmp_path,
+    )
+
+    assert written == [binary, companion]
+    assert binary.read_bytes() == payload
+    assert companion.read_text(encoding="utf-8").endswith("Bound companion.\n")
+
+
+def test_batch_binary_create_only_refuses_existing_non_utf8_leaf(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "Evidence" / "artifact.bin"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"\xffexisting")
+    payload = b"replacement"
+
+    with pytest.raises(vault.CreateOnlyConflict) as conflict:
+        vault.batch_atomic_write(
+            [
+                vault.PlannedWrite(
+                    target,
+                    vault.PreparedBinaryContent(
+                        io.BytesIO(payload),
+                        len(payload),
+                        hashlib.sha256(payload).hexdigest(),
+                    ),
+                    create_only=True,
+                    expected_hash=vault.MISSING_CONTENT_HASH,
+                )
+            ],
+            vault_root=tmp_path,
+        )
+
+    assert conflict.value.code == "CREATE_ONLY_CONFLICT"
+    assert target.read_bytes() == b"\xffexisting"
+
+
+def test_batch_write_rejects_changed_binary_stream_before_publication(
+    tmp_path: Path,
+) -> None:
+    binary = tmp_path / "Evidence" / "artifact.bin"
+    companion = tmp_path / "Evidence" / "artifact.bin.md"
+    reviewed = b"reviewed"
+
+    with pytest.raises(vault.PathGuardError) as changed:
+        vault.batch_atomic_write(
+            [
+                vault.PlannedWrite(
+                    binary,
+                    vault.PreparedBinaryContent(
+                        io.BytesIO(b"changed!"),
+                        len(reviewed),
+                        hashlib.sha256(reviewed).hexdigest(),
+                    ),
+                    create_only=True,
+                    expected_hash=vault.MISSING_CONTENT_HASH,
+                ),
+                vault.PlannedWrite(
+                    companion,
+                    "companion",
+                    create_only=True,
+                    expected_hash=vault.MISSING_CONTENT_HASH,
+                ),
+            ],
+            vault_root=tmp_path,
+        )
+
+    assert changed.value.code == "PATH_GUARD_CONTENT"
+    assert not binary.exists()
+    assert not companion.exists()
+
+
+def test_batch_write_rolls_back_binary_when_later_publication_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = b"rollback payload"
+    binary = tmp_path / "Evidence" / "artifact.bin"
+    companion = tmp_path / "Evidence" / "artifact.bin.md"
+    real_hook = vault._after_batch_destination_published
+
+    def fail_after_companion(path: Path) -> None:
+        real_hook(path)
+        if path == companion:
+            raise RuntimeError("injected publication failure")
+
+    monkeypatch.setattr(vault, "_after_batch_destination_published", fail_after_companion)
+
+    with pytest.raises(RuntimeError, match="injected publication failure"):
+        vault.batch_atomic_write(
+            [
+                vault.PlannedWrite(
+                    binary,
+                    vault.PreparedBinaryContent(
+                        io.BytesIO(payload),
+                        len(payload),
+                        hashlib.sha256(payload).hexdigest(),
+                    ),
+                    create_only=True,
+                    expected_hash=vault.MISSING_CONTENT_HASH,
+                ),
+                vault.PlannedWrite(
+                    companion,
+                    "companion",
+                    create_only=True,
+                    expected_hash=vault.MISSING_CONTENT_HASH,
+                ),
+            ],
+            vault_root=tmp_path,
+        )
+
+    assert not binary.exists()
+    assert not companion.exists()
 
 
 def test_path_guards_share_new_parent_chain_safely(tmp_path: Path) -> None:
