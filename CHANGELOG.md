@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.63.0](https://github.com/Artexis10/exomem/compare/v0.62.0...v0.63.0) (2026-08-26)
+
+
+### Features
+
+* **governance:** complete graph writer successors ([#830](https://github.com/Artexis10/exomem/issues/830)) ([b530b99](https://github.com/Artexis10/exomem/commit/b530b99c7b1b5659a3d8c81ac42ffb57c60b4d08))
+* **governance:** prepare graph measurement successors ([#821](https://github.com/Artexis10/exomem/issues/821)) ([a59ec49](https://github.com/Artexis10/exomem/commit/a59ec49e1d6214cf7f6619e93054c72038a81a82))
+* **governance:** preserve projected video keyframes ([#818](https://github.com/Artexis10/exomem/issues/818)) ([3e64352](https://github.com/Artexis10/exomem/commit/3e64352539eb7726ea197ffa0e07f70acbf4b31a))
+* **governance:** publish classified scene frames ([#817](https://github.com/Artexis10/exomem/issues/817)) ([6c2058e](https://github.com/Artexis10/exomem/commit/6c2058eebd5fb3da0c04e265aa7c062e4b87cb43))
+* **governance:** publish CLIP measurement successors ([#819](https://github.com/Artexis10/exomem/issues/819)) ([dbfe8d0](https://github.com/Artexis10/exomem/commit/dbfe8d0b2dec428737f09f9ac0e02e76d6ccbf8d))
+* **governance:** publish creation graph successors ([#823](https://github.com/Artexis10/exomem/issues/823)) ([cc91e0e](https://github.com/Artexis10/exomem/commit/cc91e0e1bfa8d6d020e07a5585bf47f80dacae11))
+* **governance:** publish deletion graph successors ([#827](https://github.com/Artexis10/exomem/issues/827)) ([4c0d28a](https://github.com/Artexis10/exomem/commit/4c0d28a1f3e5962161d362feba78120b52425385))
+* **governance:** publish governed binary capture ([#816](https://github.com/Artexis10/exomem/issues/816)) ([80ce6ef](https://github.com/Artexis10/exomem/commit/80ce6efa81e9fe52bd7fb67d9f43e0cd81a7d980))
+* **governance:** publish media graph successors ([#828](https://github.com/Artexis10/exomem/issues/828)) ([e900877](https://github.com/Artexis10/exomem/commit/e9008772e75506f21c5cacc1b1f0b7b7a95d51fb))
+* **governance:** publish move graph successors ([#824](https://github.com/Artexis10/exomem/issues/824)) ([9e344d3](https://github.com/Artexis10/exomem/commit/9e344d3afac22889a4d2a20807be5aa90425cc7f))
+* **governance:** publish recovery graph successors ([#826](https://github.com/Artexis10/exomem/issues/826)) ([c8bb17d](https://github.com/Artexis10/exomem/commit/c8bb17d030d32c6b3ca93e5dd5e96544f71e4e69))
+* **governance:** publish scene CLIP successors ([#820](https://github.com/Artexis10/exomem/issues/820)) ([a020c0b](https://github.com/Artexis10/exomem/commit/a020c0bec48b527b91a737245d356b332ef330b6))
+* **governance:** publish semantic graph successors ([#822](https://github.com/Artexis10/exomem/issues/822)) ([74492ba](https://github.com/Artexis10/exomem/commit/74492ba2da2efc95ee8c085129988e998ab4d7db))
+* **governance:** publish vector measurement successors ([#815](https://github.com/Artexis10/exomem/issues/815)) ([8f718af](https://github.com/Artexis10/exomem/commit/8f718afc6a5c6912da44c95f9ee01611deee9b3e))
+
+
+### Bug Fixes
+
+* **benchmarks:** preserve guest execution contracts ([#743](https://github.com/Artexis10/exomem/issues/743)) ([2d0190a](https://github.com/Artexis10/exomem/commit/2d0190a875623cca29f2199fc1cd79fa537652d2))
+* **governance:** publish companion backfill catalog ([#813](https://github.com/Artexis10/exomem/issues/813)) ([0eb7ce9](https://github.com/Artexis10/exomem/commit/0eb7ce99113cd7e6abb2c6123dd6d8a86af5ab29))
+* **governance:** publish directory trash membership ([#810](https://github.com/Artexis10/exomem/issues/810)) ([77a2c64](https://github.com/Artexis10/exomem/commit/77a2c64aab6f0098afd538fde5b1ad848e939818))
+* **governance:** publish media sidecar catalog ([#814](https://github.com/Artexis10/exomem/issues/814)) ([367025c](https://github.com/Artexis10/exomem/commit/367025cbe9220836a2d7b5aa5168ff23b8308f61))
+* **governance:** publish move catalog membership ([#808](https://github.com/Artexis10/exomem/issues/808)) ([b864885](https://github.com/Artexis10/exomem/commit/b8648854125d11d46578f19529a57b7120f49ff2))
+* **governance:** publish recovery catalog membership ([#812](https://github.com/Artexis10/exomem/issues/812)) ([b50bab8](https://github.com/Artexis10/exomem/commit/b50bab87d9712a46e419201e804535117e316c06))
+* **relations:** refuse invalid aliases, classify before truncating, and stop title headings swallowing pages ([#764](https://github.com/Artexis10/exomem/issues/764)) ([c3346c2](https://github.com/Artexis10/exomem/commit/c3346c2ac65cce4c59cfe0a0e7a20599c4b560e0))
+* restore durable recall admission ([#811](https://github.com/Artexis10/exomem/issues/811)) ([ab335d3](https://github.com/Artexis10/exomem/commit/ab335d338d314ebee6df78ff92f9acc2829a4721))
+* **retrieval:** prevent rebuild publication starvation and persist reconcile freshness durably ([#825](https://github.com/Artexis10/exomem/issues/825)) ([eb6ce61](https://github.com/Artexis10/exomem/commit/eb6ce61508c7695c6d0f251f9688bd41971d1232))
+* **sources:** stage attached sources before taking the vault mutation lock ([#765](https://github.com/Artexis10/exomem/issues/765)) ([9dbe4f1](https://github.com/Artexis10/exomem/commit/9dbe4f1cbb60c8eccab97cfc3e51bbe9ba592f13))
+
 ## [0.62.0](https://github.com/Artexis10/exomem/compare/v0.61.1...v0.62.0) (2026-08-25)
 
 
