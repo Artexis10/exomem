@@ -227,16 +227,20 @@ required family SHALL remain blocked.
   targets, uniqueness, and aggregate capacity, discards the edge payload, and emits only
   empty lower-variant graph rows
 
-#### Scenario: Semantic writes, creations, moves, and recoveries derive graph successors from retained state
+#### Scenario: Semantic writes, creations, moves, recoveries, and trash derive graph successors from retained state
 
 - **WHEN** an existing-page semantic write, semantic creation, semantic move, or semantic
-  trash recovery changes a direct edge, a path/title used by another page's link, or a
-  reverse relation whose logical source is another page
-- **THEN** the writer derives target-bound replacements from the freshest validated
-  detached before-corpus carried into the mutation boundary, the move or recovery's exact
-  detached after-corpus when applicable, and exact guarded planned bytes; it includes
-  every logical source whose outgoing edge tuple changes and does not reopen the live graph
-  or current Markdown
+  trash recovery or file/directory trash changes a direct edge, a path/title used by
+  another page's link, or a reverse relation whose logical source is another page
+- **THEN** the existing/edit/create/move/recovery writer derives target-bound replacements
+  from the freshest validated detached before-corpus carried into the mutation boundary,
+  the move or recovery's exact detached after-corpus when applicable, and exact guarded
+  planned bytes; it includes every logical source whose outgoing edge tuple changes and
+  does not reopen the live graph or current Markdown
+- **AND** trash removes the exact held Markdown identity set before applying its guarded
+  log overlay from one lazy detached before-corpus built only for an active graph family
+  before canonical bytes change, so otherwise-unchanged inbound sources lose edges to
+  removed targets
 - **AND** open and lexical-only writes do not invoke the graph producer
 
 When the projected source is exhausted, L1-and-above items SHALL still emit the

@@ -28,8 +28,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import media_types, reserved_paths
-from .governance import catalog_publication, lifecycle
+from . import media_types, reserved_paths, semantic_contract
+from .governance import catalog_publication, graph_producer, lifecycle
 from .kbdir import kb_dirname, kb_prefix
 from .vault import (
     VaultPathError,
@@ -347,6 +347,15 @@ def delete_file(
         rel_path_no_ext=rel_no_ext,
         body=log_body,
     )
+    def graph_replacement_provider():
+        graph_before_corpus = semantic_contract.build_corpus_context(vault_root)
+        return graph_producer.replacements_for_removed_markdown(
+            vault_root,
+            before_corpus=graph_before_corpus,
+            removed_paths=(rel_path,),
+            writes=log_plan.writes,
+        )
+
     try:
         catalog_target = catalog_publication.prepare_catalog_membership_batch(
             vault_root,
@@ -356,6 +365,11 @@ def delete_file(
                     rel_path,
                     catalog_before_hash,
                 ),
+            ),
+            graph_replacement_provider=(
+                graph_replacement_provider
+                if rel_path.lower().endswith(".md")
+                else None
             ),
             now=int(time.time()),
         )
