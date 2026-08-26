@@ -373,6 +373,32 @@ def test_prepare_markdown_batch_forwards_graph_replacements(
     assert captured["graph_replacements"] == (replacement,)
 
 
+def test_prepare_membership_batch_forwards_lazy_graph_provider(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def provider():
+        return ()
+
+    def fake_prepare(vault_root: Path, **kwargs: object) -> None:
+        captured["vault_root"] = vault_root
+        captured.update(kwargs)
+
+    monkeypatch.setattr(catalog_publication, "_prepare_markdown_batch", fake_prepare)
+
+    assert (
+        catalog_publication.prepare_catalog_membership_batch(
+            tmp_path,
+            writes=(),
+            graph_replacement_provider=provider,
+        )
+        is None
+    )
+    assert captured["graph_replacement_provider"] is provider
+
+
 def test_graph_successor_refuses_an_incomplete_active_family(tmp_path: Path) -> None:
     source = _variant("source", "5" * 64)
     target = _variant("target", "6" * 64)

@@ -349,3 +349,59 @@ def test_creation_catalog_bridge_builds_provider_from_retained_preflight(
             (_edge(source_path, created_path),),
         ),
     )
+
+
+def test_semantic_transition_replaces_moved_target_and_its_referrers(
+    tmp_path: Path,
+) -> None:
+    source_path = "Knowledge Base/Notes/Insights/source.md"
+    old_path = "Knowledge Base/Notes/Insights/old.md"
+    new_path = "Knowledge Base/Notes/Insights/new.md"
+    source = _source(
+        "Source",
+        "00000000-0000-0000-0000-000000000001",
+        body="## Observations\n\n- [decision] Follow the move.\n\n[[Target]]\n",
+    )
+    target = _source(
+        "Target",
+        "00000000-0000-0000-0000-000000000002",
+    )
+    before = _corpus(
+        tmp_path,
+        _state(tmp_path, source_path, source),
+        _state(tmp_path, old_path, target),
+    )
+    moved_state = _state(tmp_path, new_path, target)
+    after = _corpus(
+        tmp_path,
+        _state(tmp_path, source_path, source),
+        moved_state,
+    )
+    writes = (
+        vault.PlannedWrite(
+            tmp_path / new_path,
+            target,
+            create_only=True,
+        ),
+    )
+
+    replacements = graph_producer.replacements_for_semantic_transition(
+        tmp_path,
+        before_corpus=before,
+        after_corpus=after,
+        writes=writes,
+        semantic_states={new_path: moved_state},
+    )
+
+    assert replacements == (
+        catalog_publication.GraphMeasurementReplacement(
+            new_path,
+            vault.content_hash(target),
+            (),
+        ),
+        catalog_publication.GraphMeasurementReplacement(
+            source_path,
+            vault.content_hash(source),
+            (_edge(source_path, new_path),),
+        ),
+    )

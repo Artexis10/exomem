@@ -50,6 +50,7 @@ from exomem.governance import (
     companions,
     membership,
     policy,
+    projected_graph,
     projected_retrieval,
     projection_measurement_store,
     projection_store,
@@ -410,9 +411,11 @@ def _migrate_with_projection_items(
     vault: Path,
     *,
     items: tuple[tuple[str, str], ...],
+    ceiling: int = 2,
+    graph_edges: tuple[projected_graph.ProjectionGraphEdge, ...] | None = None,
     now: int,
 ) -> schema_v4.MigrationResult:
-    documents = _documents(ceiling=2)
+    documents = _documents(ceiling=ceiling)
     compiled = _compiled(documents)
     key = projections.ProjectionNamespaceKey(
         policy_fingerprint=compiled.fingerprint,
@@ -434,6 +437,48 @@ def _migrate_with_projection_items(
         key=key,
         items=projected_items,
     )
+    measurement_roots: tuple[projection_store.ProjectionMeasurementRoot, ...] = ()
+    if graph_edges is not None:
+        namespace = projection_store.prepare_projection_namespace(
+            key=key,
+            manifest=manifest,
+            items=projected_items,
+        )
+        family = projection_measurement_store.MeasurementFamilyKey(
+            namespace_key=key,
+            lane="graph",
+            extractor_version="projected-graph-v1",
+            model_version="graph-schema-v1",
+        )
+        graph_manifest = projection_measurement_store.stage_measurement_store(
+            vault,
+            namespace=namespace,
+            family=family,
+            measurements=tuple(
+                projected_graph.ProjectionGraphMeasurement(
+                    measurement_key=projections.MeasurementKey(
+                        projection_variant_id=variant.projection_variant_id,
+                        lane=family.lane,
+                        extractor_version=family.extractor_version,
+                        model_version=family.model_version,
+                    ),
+                    edges=(
+                        tuple(
+                            edge
+                            for edge in graph_edges
+                            if edge.source_item_identity == item.item_identity
+                        )
+                        if variant.decision_level == 6
+                        else ()
+                    ),
+                )
+                for item in projected_items
+                for variant in item.variants
+            ),
+        )
+        measurement_roots = (
+            projection_measurement_store.measurement_root(graph_manifest),
+        )
     connection = store.open_connection(vault)
     try:
         return schema_v4.migrate_v3_connection(
@@ -461,7 +506,8 @@ def _migrate_with_projection_items(
                 namespace=schema_v4.ProjectionNamespaceSeed(
                     namespace_id=key.namespace_id,
                     evidence=projection_store.projection_namespace_evidence_bytes(
-                        manifest
+                        manifest,
+                        required_measurement_roots=measurement_roots,
                     ),
                     ready_at=now,
                 ),
@@ -3566,13 +3612,21 @@ def test_v4_move_replaces_membership_and_publishes_auxiliaries_once(
         target = vault / existing
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
-    _write_workspace(vault, _documents(ceiling=2))
+    _write_workspace(vault, _documents(ceiling=6))
     migration = _migrate_with_projection_items(
         vault,
         items=(
             (old_relative, source),
             (inbound_relative, inbound_before),
             (log_relative, log_before),
+        ),
+        ceiling=6,
+        graph_edges=(
+            projected_graph.ProjectionGraphEdge(
+                inbound_relative,
+                old_relative,
+                "links_to",
+            ),
         ),
         now=now,
     )
@@ -3583,6 +3637,18 @@ def test_v4_move_replaces_membership_and_publishes_auxiliaries_once(
         activation_state_digest=migration.activation_state_digest,
         now=now,
     )
+    real_prepare_membership = catalog_publication.prepare_catalog_membership_batch
+    graph_providers: list[object] = []
+
+    def capture_graph_provider(*args, **kwargs):
+        graph_providers.append(kwargs.get("graph_replacement_provider"))
+        return real_prepare_membership(*args, **kwargs)
+
+    monkeypatch.setattr(
+        catalog_publication,
+        "prepare_catalog_membership_batch",
+        capture_graph_provider,
+    )
 
     moved = move_file_module.move_file(
         vault,
@@ -3592,6 +3658,7 @@ def test_v4_move_replaces_membership_and_publishes_auxiliaries_once(
     )
 
     assert moved.wikilinks_updated == 1
+    assert graph_providers and callable(graph_providers[-1])
     assert not (vault / old_relative).exists()
     assert (vault / new_relative).read_text(encoding="utf-8") == source
     assert "renamed-private" in (vault / inbound_relative).read_text(encoding="utf-8")
@@ -3622,6 +3689,39 @@ def test_v4_move_replaces_membership_and_publishes_auxiliaries_once(
     assert active.active.catalog_generation == 2
     assert manifest.item_count == len(expected_paths)
     assert {item.item_identity: item.content_hash for item in items} == expected
+    graph_root = next(
+        root for root in evidence.required_measurement_roots if root.lane == "graph"
+    )
+    graph_family = projection_measurement_store.MeasurementFamilyKey(
+        namespace_key=evidence.manifest.namespace_key,
+        lane=graph_root.lane,
+        extractor_version=graph_root.extractor_version,
+        model_version=graph_root.model_version,
+    )
+    namespace = projection_store.bind_active_projection_namespace(
+        active,
+        manifest=manifest,
+        items=items,
+    )
+    _graph_manifest, graph_rows = projection_measurement_store.load_measurement_store(
+        vault,
+        namespace=namespace,
+        family=graph_family,
+        expected_rows_digest=graph_root.rows_digest,
+    )
+    referrer_edges = tuple(
+        edge
+        for row in graph_rows
+        for edge in row.edges
+        if edge.source_item_identity == inbound_relative
+    )
+    assert referrer_edges == (
+        projected_graph.ProjectionGraphEdge(
+            inbound_relative,
+            new_relative,
+            "links_to",
+        ),
+    )
 
 
 def test_v4_move_refuses_unsupported_non_markdown_before_moving_bytes(

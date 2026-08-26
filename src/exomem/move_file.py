@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import reserved_paths, semantic_index, semantic_writes
-from .governance import catalog_publication
+from .governance import catalog_publication, graph_producer
 from .kbdir import kb_dirname
 from .vault import (
     LogWritePlan,
@@ -540,11 +540,25 @@ def move_file(
                     *log_plan.writes,
                 ]
                 try:
+                    graph_states = {
+                        item.after.path: item.after for item in preflight.evaluations
+                    }
+
+                    def graph_replacement_provider():
+                        return graph_producer.replacements_for_semantic_transition(
+                            vault_root,
+                            before_corpus=preflight.before_corpus,
+                            after_corpus=preflight.after_corpus,
+                            writes=tuple(catalog_writes),
+                            semantic_states=graph_states,
+                        )
+
                     catalog_target = (
                         catalog_publication.prepare_catalog_membership_batch(
                             vault_root,
                             writes=tuple(catalog_writes),
                             removals=tuple(catalog_removals),
+                            graph_replacement_provider=graph_replacement_provider,
                             now=int(time.time()),
                         )
                     )
