@@ -9,7 +9,9 @@ import json
 import os
 import re
 import sqlite3
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -2566,6 +2568,386 @@ def test_policy_publication_cas_has_one_winner_and_no_losing_rows(
     finally:
         second.close()
         first.close()
+
+
+@pytest.mark.parametrize(
+    ("winner_kind", "loser_kind"),
+    [
+        ("policy", "policy"),
+        ("policy", "catalog"),
+        ("catalog", "policy"),
+    ],
+)
+def test_tuple_publications_serialize_at_the_sqlite_barrier(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    winner_kind: str,
+    loser_kind: str,
+) -> None:
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate(vault, now=now)
+    connection = store.open_authorization_session_connection(vault)
+    try:
+        expected = schema_v4.load_active_state(
+            connection,
+            expected_logical_vault_id=LOGICAL_VAULT_ID,
+            expected_activation_store_id=ACTIVATION_STORE_ID,
+            expected_activation_epoch=1,
+            expected_activation_state_digest=migration.activation_state_digest,
+        )
+    finally:
+        connection.close()
+
+    winner_inside_transaction = threading.Event()
+    release_winner = threading.Event()
+    loser_attempted_transaction = threading.Event()
+    winner_thread_id: list[int] = []
+    winner_point = f"{winner_kind}-publication-before-commit"
+
+    def barrier(point: str) -> None:
+        if point == winner_point and threading.get_ident() == winner_thread_id[0]:
+            winner_inside_transaction.set()
+            assert release_winner.wait(timeout=5)
+
+    monkeypatch.setattr(schema_v4, "_crash_point", barrier)
+
+    def publish(kind: str, *, winner: bool) -> schema_v4.TuplePublicationResult:
+        active = store.open_authorization_session_connection(vault)
+        try:
+            if not winner:
+                active.set_trace_callback(
+                    lambda statement: (
+                        loser_attempted_transaction.set()
+                        if statement == "BEGIN IMMEDIATE"
+                        else None
+                    )
+                )
+            if kind == "policy":
+                return schema_v4.publish_policy_generation(
+                    active,
+                    expected=expected,
+                    policy=_policy_seed(
+                        generation_id=(
+                            SECOND_GENERATION_ID if winner else LOSING_GENERATION_ID
+                        ),
+                        documents=_documents(ceiling=1 if winner else 0),
+                        predecessor_generation_id=FIRST_GENERATION_ID,
+                        event_suffix="barrier-winner" if winner else "barrier-loser",
+                        now=now + 1,
+                    ),
+                    namespace=schema_v4.ProjectionNamespaceSeed(
+                        namespace_id=(
+                            "namespace-barrier-winner"
+                            if winner
+                            else "namespace-barrier-loser"
+                        ),
+                        evidence=b'{"ready":true}',
+                        ready_at=now + 1,
+                    ),
+                    activated_at=now + 1,
+                    acknowledge_registry=_acknowledge,
+                )
+            return schema_v4.publish_catalog_generation(
+                active,
+                expected=expected,
+                catalog=schema_v4.CatalogGenerationSeed(
+                    catalog_generation=2,
+                    descriptor=b'{"artifacts":["Notes/barrier.md"]}',
+                    artifact_count=1,
+                    created_at=now + 1,
+                ),
+                namespace=schema_v4.ProjectionNamespaceSeed(
+                    namespace_id=(
+                        "namespace-barrier-winner"
+                        if winner
+                        else "namespace-barrier-loser"
+                    ),
+                    evidence=b'{"ready":true}',
+                    ready_at=now + 1,
+                ),
+                receipt_event_id=(
+                    "receipt-barrier-winner"
+                    if winner
+                    else "receipt-barrier-loser"
+                ),
+                activated_at=now + 1,
+                acknowledge_registry=_acknowledge,
+            )
+        finally:
+            active.close()
+
+    def publish_winner() -> schema_v4.TuplePublicationResult:
+        winner_thread_id.append(threading.get_ident())
+        return publish(winner_kind, winner=True)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        winner_future = executor.submit(publish_winner)
+        assert winner_inside_transaction.wait(timeout=5)
+        loser_future = executor.submit(publish, loser_kind, winner=False)
+        assert loser_attempted_transaction.wait(timeout=5)
+        release_winner.set()
+        winner = winner_future.result(timeout=5)
+        with pytest.raises(schema_v4.ActiveTupleStale):
+            loser_future.result(timeout=5)
+
+    connection = store.open_authorization_session_connection(vault)
+    try:
+        active = schema_v4.load_active_state(
+            connection,
+            expected_logical_vault_id=LOGICAL_VAULT_ID,
+            expected_activation_store_id=ACTIVATION_STORE_ID,
+            expected_activation_epoch=winner.active.activation_epoch,
+            expected_activation_state_digest=winner.active.activation_state_digest,
+        )
+        assert active == winner.active
+        assert active.activation_epoch == 2
+        assert connection.execute(
+            "SELECT publication_kind, COUNT(*) FROM governance_tuple_publications "
+            "WHERE publication_kind != 'migration' GROUP BY publication_kind"
+        ).fetchall() == [(winner_kind, 1)]
+        assert connection.execute(
+            "SELECT COUNT(*) FROM compiled_policy_generations"
+        ).fetchone() == ((2,) if winner_kind == "policy" else (1,))
+        assert connection.execute(
+            "SELECT COUNT(*) FROM compiled_policy_generations "
+            "WHERE generation_id=?",
+            (LOSING_GENERATION_ID,),
+        ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM catalog_generation_descriptors "
+            "WHERE catalog_generation=2"
+        ).fetchone() == ((1,) if winner_kind == "catalog" else (0,))
+        assert connection.execute(
+            "SELECT COUNT(*) FROM governance_projection_namespaces "
+            "WHERE namespace_id='namespace-barrier-loser'"
+        ).fetchone() == (0,)
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("mutation", ["create", "edit", "delete", "companion"])
+def test_content_publication_wins_a_race_with_a_reviewed_policy_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    from exomem.governance.tool import GovernanceError, op_govern_memory
+
+    now = int(time.time())
+    monkeypatch.setenv(
+        "EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-state")
+    )
+    writer_lease.reset_managers_for_tests()
+    vault = tmp_path / "vault"
+    relative = "Knowledge Base/Notes/race.md"
+    before = "---\ntitle: Race\nstatus: draft\n---\n\nbefore\n"
+    after = before.replace("before", "after")
+    companion_payload: dict[str, object] | None = None
+    companion_proposal_id: str | None = None
+
+    if mutation == "create":
+        _write_workspace(vault, _documents(ceiling=2))
+        migration = _migrate_with_empty_projection_catalog(vault, now=now)
+    elif mutation == "companion":
+        _artifact, relative, before, companion_payload = (
+            _legacy_companion_backfill_input(vault)
+        )
+        _write_workspace(vault, _documents(ceiling=2))
+        migration = _migrate_with_projection_items(
+            vault,
+            items=((relative, before),),
+            now=now,
+        )
+    else:
+        target = vault / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(before, encoding="utf-8")
+        _write_workspace(vault, _documents(ceiling=2))
+        if mutation == "delete":
+            log_relative = "Knowledge Base/log.md"
+            log_source = "# Log\n\n---\n"
+            (vault / log_relative).write_text(log_source, encoding="utf-8")
+            migration = _migrate_with_projection_items(
+                vault,
+                items=((relative, before), (log_relative, log_source)),
+                now=now,
+            )
+        else:
+            migration = _migrate_with_projection_item(
+                vault,
+                path=relative,
+                source=before,
+                now=now,
+            )
+
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    if companion_payload is not None:
+        companion_proposal_id = str(
+            _preview_companion_backfill(
+                vault,
+                companion_payload,
+                now=now + 1,
+            )["proposal_id"]
+        )
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        policy_proposal = op_govern_memory(
+            vault,
+            operation="propose",
+            principal=owner_principal(),
+            intent="Lower the external ceiling after the content change",
+            documents={
+                path: source.decode("utf-8")
+                for path, source in _documents(ceiling=1)
+            },
+            target_ceiling=1,
+            now=now + 1,
+        )
+
+    edit_preflight = (
+        semantic_writes.preflight_existing(
+            vault,
+            path=relative,
+            after_source=after,
+            operation="edit",
+            expected_before_hash=vault_module.content_hash(before),
+        )
+        if mutation == "edit"
+        else None
+    )
+
+    content_inside_transaction = threading.Event()
+    release_content = threading.Event()
+    policy_ready_to_publish = threading.Event()
+    allow_policy_publication = threading.Event()
+    policy_attempting_publication = threading.Event()
+    content_thread_id: list[int] = []
+    real_policy_publication = schema_v4.publish_policy_generation
+
+    def tuple_barrier(point: str) -> None:
+        if (
+            point == "catalog-publication-before-commit"
+            and threading.get_ident() == content_thread_id[0]
+        ):
+            content_inside_transaction.set()
+            assert release_content.wait(timeout=5)
+
+    def publish_reviewed_policy(
+        *args: object, **kwargs: object
+    ) -> schema_v4.TuplePublicationResult:
+        policy_ready_to_publish.set()
+        assert allow_policy_publication.wait(timeout=5)
+        policy_attempting_publication.set()
+        return real_policy_publication(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(schema_v4, "_crash_point", tuple_barrier)
+    monkeypatch.setattr(
+        schema_v4,
+        "publish_policy_generation",
+        publish_reviewed_policy,
+    )
+
+    def commit_policy() -> dict[str, object]:
+        with reserved_paths._owner_authority_scope("govern_memory"):
+            return op_govern_memory(
+                vault,
+                operation="commit",
+                principal=owner_principal(),
+                proposal_id=policy_proposal["proposal_id"],
+                now=now + 2,
+            )
+
+    def commit_content() -> object:
+        content_thread_id.append(threading.get_ident())
+        if mutation == "create":
+            return create_file_module.create_file(
+                vault,
+                path=relative,
+                content="Created during the tuple race.\n",
+                frontmatter={"title": "Race", "status": "draft"},
+                today=dt.date(2026, 8, 26),
+            )
+        if mutation == "edit":
+            assert edit_preflight is not None
+            return semantic_writes.commit_existing(vault, preflight=edit_preflight)
+        if mutation == "delete":
+            return delete_file_module.delete_file(
+                vault,
+                path=relative,
+                confirm=True,
+                today=dt.date(2026, 8, 26),
+                now=dt.datetime.fromtimestamp(now),
+            )
+        assert companion_payload is not None and companion_proposal_id is not None
+        return _commit_companion_backfill(
+            vault,
+            companion_payload,
+            proposal_id=companion_proposal_id,
+            now=now + 2,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        policy_future = executor.submit(commit_policy)
+        assert policy_ready_to_publish.wait(timeout=5)
+        content_future = executor.submit(commit_content)
+        assert content_inside_transaction.wait(timeout=5)
+        allow_policy_publication.set()
+        assert policy_attempting_publication.wait(timeout=5)
+        release_content.set()
+        content_future.result(timeout=10)
+        with pytest.raises(GovernanceError) as stale:
+            policy_future.result(timeout=10)
+
+    assert stale.value.code == "STALE_GOVERNANCE_POLICY"
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 3)
+    connection = store.open_authorization_session_connection(vault)
+    try:
+        active = schema_v4.load_active_policy(
+            connection,
+            expected_logical_vault_id=LOGICAL_VAULT_ID,
+            expected_activation_store_id=ACTIVATION_STORE_ID,
+            expected_activation_epoch=2,
+            expected_activation_state_digest=(
+                custody.control.activation_state_digest or ""
+            ),
+        )
+        assert active.active.policy_generation_id == FIRST_GENERATION_ID
+        assert active.active.catalog_generation == 2
+        assert active.policy.rules[0].ceiling == 2
+        assert connection.execute(
+            "SELECT publication_kind, COUNT(*) FROM governance_tuple_publications "
+            "WHERE publication_kind != 'migration' GROUP BY publication_kind"
+        ).fetchall() == [("catalog", 1)]
+        assert connection.execute(
+            "SELECT COUNT(*) FROM compiled_policy_generations"
+        ).fetchone() == (1,)
+        assert connection.execute(
+            "SELECT status FROM governance_proposals WHERE proposal_id=?",
+            (policy_proposal["proposal_id"],),
+        ).fetchone() == ("pending",)
+    finally:
+        connection.close()
+
+    evidence = projection_store.namespace_evidence_from_snapshot(active)
+    _manifest, items = projection_store.load_projection_catalog(
+        vault,
+        key=evidence.manifest.namespace_key,
+        expected_rows_digest=evidence.manifest.rows_digest,
+    )
+    item_paths = {item.item_identity for item in items}
+    if mutation == "delete":
+        assert relative not in item_paths
+        assert not (vault / relative).exists()
+    else:
+        assert relative in item_paths
+        assert (vault / relative).is_file()
 
 
 def test_registry_ack_is_required_before_the_new_policy_can_serve(
