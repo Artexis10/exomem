@@ -641,7 +641,12 @@ The search lanes consume that map directly:
    vector disables or warms that visible lane without falling back to a raw embedding;
 3. reranking receives only selected projected text and runs before final visible top-k;
 4. CLIP pixels/keyframes participate only for items selected at L6, with authorization
-   filtering inside the CLIP lane before its cap. At L1-L5 an image/video can match only
+   filtering inside the CLIP lane before its cap. One immutable measurement row binds
+   each media projection: an image has one untimestamped vector, while a video has one
+   through forty strictly timestamp-ordered vectors using the canonical bounded
+   `frame_timestamp_ms`. The fixed forty-sample ceiling is not configurable. Retrieval
+   scores every authorized sample, emits the parent media item once at its best score,
+   and carries the earliest best frame timestamp. At L1-L5 an image/video can match only
    through its authorized textual companion projection; if that record is unavailable,
    the binary CLIP lane is excluded rather than searched raw;
 5. graph vertices and edges are projection-indexed and admitted before expansion, so
