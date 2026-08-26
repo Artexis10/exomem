@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from exomem import find as find_module
-from exomem import freshness, lexstore, readiness
+from exomem import freshness, index_sync, lexstore, readiness
 from exomem import vault as vault_module
 from exomem.vault import walk_vault_md
 
@@ -898,6 +898,76 @@ def test_successful_watcher_catalog_mutation_retries_runtime_admission(
         "admitted": True,
     }
     assert scheduled == []
+
+
+def test_vault_wide_watcher_handoff_promotes_both_catalog_scopes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sibling-folder edit belongs to the lexical generation, not embeddings."""
+    kb_target = _write_page(
+        tmp_path,
+        "Knowledge Base/Notes/target.md",
+        "vaultwide old kb payload",
+    )
+    vault_target = _write_page(
+        tmp_path,
+        "Sources/target.md",
+        "vaultwide old source payload",
+    )
+    vault_removed = _write_page(
+        tmp_path,
+        "Sources/removed.md",
+        "vaultwide removed source payload",
+    )
+    _materialize_live_catalog(tmp_path, "vaultwide")
+    store = lexstore.get_store(tmp_path)
+    before = {scope: store.catalog_checkpoint(scope) for scope in freshness.SCOPES}
+
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(tmp_path.resolve()))
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    readiness.manage_runtime()
+    readiness.begin_warm()
+    readiness.finish_warm()
+
+    _write_page(
+        tmp_path,
+        "Knowledge Base/Notes/target.md",
+        "vaultwide new kb payload",
+        updated="2026-08-26",
+    )
+    _write_page(
+        tmp_path,
+        "Sources/target.md",
+        "vaultwide new source payload",
+        updated="2026-08-26",
+    )
+    vault_removed.unlink()
+    freshness.on_files_changed(
+        tmp_path,
+        changed=[kb_target, vault_target],
+        deleted=[vault_removed],
+    )
+
+    report = index_sync.upsert_after_write(
+        tmp_path,
+        [kb_target, vault_target],
+        publish_corpus_change=False,
+        watcher_deleted_rel_paths=[vault_removed.relative_to(tmp_path).as_posix()],
+    )
+
+    after = {scope: freshness.live_recall_checkpoint(tmp_path, scope) for scope in freshness.SCOPES}
+    assert after != before
+    assert (
+        next(item for item in report.components if item.component == "lexstore").outcome
+        == "completed"
+    )
+    assert {scope: store.catalog_checkpoint(scope) for scope in freshness.SCOPES} == after
+    assert lexstore.runtime_retrieval_catalog_proof(tmp_path) == after
+    assert readiness.retrieval_admission() == {
+        "state": "ready",
+        "admitted": True,
+    }
 
 
 def test_small_lazy_repair_eventually_admits_configured_runtime(

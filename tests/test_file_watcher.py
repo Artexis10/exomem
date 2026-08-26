@@ -706,7 +706,7 @@ def test_modify_then_delete_only_deletes(vault, monkeypatch: pytest.MonkeyPatch)
     assert dels == [["Knowledge Base/Notes/x.md"]]
 
 
-def test_mixed_batch_uses_one_combined_lexical_handoff(
+def test_mixed_vault_batch_uses_one_complete_lexical_handoff(
     vault: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -738,20 +738,27 @@ def test_mixed_batch_uses_one_combined_lexical_handoff(
     changed.parent.mkdir(parents=True, exist_ok=True)
     changed.write_text("# Changed\n", encoding="utf-8")
     removed = vault / "Knowledge Base" / "Notes" / "removed.md"
+    outside_changed = vault / "Sources" / "changed.md"
+    outside_changed.parent.mkdir(parents=True, exist_ok=True)
+    outside_changed.write_text("# Outside changed\n", encoding="utf-8")
+    outside_removed = vault / "Sources" / "removed.md"
     watcher = file_watcher.FileWatcher(vault)
 
     watcher._record(changed, deleted=False)
     watcher._record(removed, deleted=True)
+    watcher._record(outside_changed, deleted=False)
+    watcher._record(outside_removed, deleted=True)
     watcher._flush()
 
     removed_rel = removed.relative_to(vault).as_posix()
+    outside_removed_rel = outside_removed.relative_to(vault).as_posix()
     assert upsert_calls == [
         (
-            [changed],
+            [changed, outside_changed],
             {
                 "defer_semantic": False,
                 "publish_corpus_change": False,
-                "watcher_deleted_rel_paths": [removed_rel],
+                "watcher_deleted_rel_paths": [removed_rel, outside_removed_rel],
             },
         )
     ]
@@ -764,6 +771,54 @@ def test_mixed_batch_uses_one_combined_lexical_handoff(
             },
         )
     ]
+
+
+def test_outside_kb_delete_only_uses_lexical_handoff(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    upsert_calls: list[tuple[list[Path], dict]] = []
+    delete_calls: list[tuple[list[str], dict]] = []
+
+    def complete_upsert(_root: Path, paths: list[Path], **kwargs):  # noqa: ANN001
+        upsert_calls.append((list(paths), dict(kwargs)))
+        return file_watcher.index_sync.IndexSyncReport(
+            "upsert",
+            (),
+            (),
+            (
+                file_watcher.index_sync.IndexComponentOutcome(
+                    "lexstore",
+                    "completed",
+                    "dispatch_completed",
+                ),
+            ),
+        )
+
+    def observe_delete(_root: Path, rels: list[str], **kwargs):  # noqa: ANN001
+        delete_calls.append((list(rels), dict(kwargs)))
+
+    monkeypatch.setattr(file_watcher.index_sync, "upsert_after_write", complete_upsert)
+    monkeypatch.setattr(file_watcher.index_sync, "delete_after_remove", observe_delete)
+    removed = vault / "Sources" / "removed.md"
+    watcher = file_watcher.FileWatcher(vault)
+
+    watcher._record(removed, deleted=True)
+    watcher._flush()
+
+    assert upsert_calls == [
+        (
+            [],
+            {
+                "defer_semantic": False,
+                "publish_corpus_change": False,
+                "watcher_deleted_rel_paths": [
+                    removed.relative_to(vault).as_posix()
+                ],
+            },
+        )
+    ]
+    assert delete_calls == []
 
 
 def test_delete_then_recreate_only_upserts(vault, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1256,7 +1311,7 @@ def test_external_batch_retries_the_complete_vault_delta_before_fanout(
     assert all(sorted(changed) == sorted([source, kb_note]) for changed, _ in calls)
     assert upserts == [
         (
-            [kb_note],
+            [kb_note, source],
             {
                 "defer_semantic": False,
                 "publish_corpus_change": False,
@@ -1601,7 +1656,7 @@ def test_missing_baseline_and_post_reconcile_watcher_do_not_phantom_fanout(
     target.unlink()
     watcher._reconcile_once(seed=False)
 
-    assert calls["upsert"] == []
+    assert calls["upsert"] == [[]]
     assert calls["delete"] == [[rel]]
     assert calls["inbound"] == [([], [rel])]
     assert calls["resolver"] == [([], [rel])]
@@ -1758,7 +1813,7 @@ def test_reconcile_delete_routes_to_delete_after_remove(
     w._reconcile_once(seed=False)
 
     assert calls["delete"] == [[rel]]
-    assert calls["upsert"] == []
+    assert calls["upsert"] == [[]]
     assert calls["resolver"] == [([], [rel])]
     assert calls["inbound"] == [([], [rel])]
 

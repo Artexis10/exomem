@@ -3,10 +3,11 @@
 The vault is edited *around* the server — directly in Obsidian, on mobile, or via a
 filesystem write (Obsidian Sync, a git pull). Those bypass the writer hooks, so the
 embedding sidecar drifts until someone runs `reconcile`. This watcher closes that gap:
-it watches `<vault>/Knowledge Base/` for `.md` changes and re-embeds them through the
-SAME `index_sync.upsert_after_write` dispatch the writers (and `reconcile`) use —
-deletes go through `index_sync.delete_after_remove`. The dispatch fans out to every
-index sidecar (embedding AND lexical), each behind its own availability gates.
+it watches the complete vault for freshness and vault-scope lexical maintenance, while
+re-embedding only the `Knowledge Base/` subset through the SAME
+`index_sync.upsert_after_write` dispatch the writers (and `reconcile`) use — deletes go
+through `index_sync.delete_after_remove`. Each index remains behind its own availability
+and scope gates.
 
 Mirrors `MediaWorker`'s thread+queue shape: a single daemon dispatch thread coalesces
 rapid events behind a ~500ms debounce (a single Obsidian save fires several FS events;
@@ -984,7 +985,9 @@ class FileWatcher:
                 through=pending_epoch,
             )
 
-        # Index sidecars (embedding + lexical): Knowledge Base markdown only.
+        # Lexstore serves both KB and vault scopes, so it receives the complete
+        # vault-wide generation. index_sync keeps every heavier derived lane
+        # KB-scoped while applying that one combined lexical mutation.
         kb_del_rels = [r for r in del_rels if r.startswith(kb_prefix())]
         if not (kb_ups or kb_del_rels) and (up_rels or del_rels):
             # Graph sources live in KB, but their resolver is vault-wide. A
@@ -1033,34 +1036,44 @@ class FileWatcher:
             defer_semantic = True
             admitted_semantic = 0
         lexical_batch_complete = False
-        if kb_ups:
+        if ups or del_rels:
             try:
                 report = index_sync.upsert_after_write(
                     self._vault_root,
-                    kb_ups,
+                    ups,
                     defer_semantic=defer_semantic,
                     publish_corpus_change=False,
-                    watcher_deleted_rel_paths=kb_del_rels,
+                    watcher_deleted_rel_paths=del_rels,
                 )
             except Exception:  # noqa: BLE001
-                log.exception("file watcher: upsert_after_write failed for %d file(s)", len(kb_ups))
+                log.exception(
+                    "file watcher: lexical watcher handoff failed for %d path(s)",
+                    len(ups) + len(del_rels),
+                )
+                try:
+                    from . import lexstore
+
+                    lexstore.request_repair(self._vault_root)
+                except Exception:  # noqa: BLE001 - the periodic reconcile remains the final belt
+                    pass
             else:
                 lexical_batch_complete = any(
                     component.component == "lexstore" and component.outcome == "completed"
                     for component in getattr(report, "components", ())
                 )
-        if kb_del_rels:
+        downstream_del_rels = kb_del_rels
+        if downstream_del_rels:
             try:
                 index_sync.delete_after_remove(
                     self._vault_root,
-                    kb_del_rels,
+                    downstream_del_rels,
                     publish_corpus_change=False,
                     dispatch_lexstore=not lexical_batch_complete,
                 )
             except Exception:  # noqa: BLE001
                 log.exception(
                     "file watcher: delete_after_remove failed for %d file(s)",
-                    len(kb_del_rels),
+                    len(downstream_del_rels),
                 )
         if (
             guarded_graph is not None

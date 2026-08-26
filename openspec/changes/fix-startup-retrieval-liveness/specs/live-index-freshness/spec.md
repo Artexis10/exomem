@@ -10,6 +10,14 @@ The system SHALL keep the lexical sidecar synchronized with the vault's Markdown
 - **THEN** the lexical sidecar reflects the change through the same seam that refreshes the embedding sidecars
 - **AND** a subsequent BM25- or keyword-lane query observes the change
 
+#### Scenario: A vault-wide watcher batch advances both lexical scopes
+
+- **WHEN** one published watcher generation contains a KB Markdown change and an outside-KB Markdown change or deletion
+- **THEN** the lexical sidecar applies the complete admitted, suppressed, and deleted vault-path union in one bounded mutation
+- **AND** both KB- and vault-scope catalog checkpoints may advance to that exact generation
+- **AND** embeddings, memory references, and graph indexing remain scoped to their existing KB inputs
+- **AND** runtime retrieval admission is restored once both catalog scopes prove current
+
 #### Scenario: A pre-existing vault is indexed without request-time scanning
 
 - **WHEN** a production-sized vault that predates the lexical sidecar is first used by an aware version

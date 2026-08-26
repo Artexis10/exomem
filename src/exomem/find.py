@@ -2024,7 +2024,16 @@ def _find_semantic_units(
                 if failed_out is not None:
                     failed_out.append("semantic_units_lexical")
                 _record_degradation("semantic_units_lexical")
-                records = {}
+                # Content-only unit recall may use its established Python rung
+                # for a provably small corpus.  A catalog-identity change can
+                # invalidate every stored semantic row even though the text
+                # query remains answerable from current Markdown; do not turn
+                # that bounded fallback into an authoritative empty result.
+                records = (
+                    _eligible_unit_records(vault_root, scope=scope, plan=plan)
+                    if _bounded_lexical_repair_allowed(snapshot.for_scope(scope))
+                    else {}
+                )
             else:
                 records = _eligible_unit_records(vault_root, scope=scope, plan=plan)
         elif dnf_clauses is None:

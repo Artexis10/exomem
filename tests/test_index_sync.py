@@ -246,7 +246,7 @@ def test_upsert_report_marks_synchronous_legacy_callbacks_completed(
     assert all(item.code != "accepted_unverified" for item in report.components)
 
 
-def test_watcher_upsert_combines_lexical_changes_and_deletes(
+def test_watcher_upsert_routes_full_vault_generation_only_to_lexstore(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -255,23 +255,77 @@ def test_watcher_upsert_combines_lexical_changes_and_deletes(
     target = tmp_path / "Knowledge Base" / "Notes" / "item.md"
     target.parent.mkdir(parents=True)
     target.write_text("# Item\n", encoding="utf-8")
+    outside = tmp_path / "Sources" / "item.md"
+    outside.parent.mkdir(parents=True)
+    outside.write_text("# Outside item\n", encoding="utf-8")
     removed_rel = "Knowledge Base/Notes/removed.md"
+    outside_removed_rel = "Sources/removed.md"
+    calls: list[tuple[list[Path], list[str]]] = []
+    embedding_calls: list[list[Path]] = []
+    monkeypatch.setattr(
+        lexstore,
+        "apply_watcher_batch",
+        lambda _root, paths, rels: calls.append((list(paths), list(rels))) or True,
+    )
+    monkeypatch.setattr(
+        embeddings,
+        "upsert_after_write_status",
+        lambda _root, paths: (
+            embedding_calls.append(list(paths))
+            or embeddings.EmbeddingSyncStatus(
+                "completed",
+                "embedding_upsert_completed",
+                len(paths),
+            )
+        ),
+    )
+
+    report = index_sync.upsert_after_write(
+        tmp_path,
+        [target, outside],
+        publish_corpus_change=False,
+        watcher_deleted_rel_paths=[removed_rel, outside_removed_rel],
+    )
+
+    assert calls == [([target, outside], [removed_rel, outside_removed_rel])]
+    assert embedding_calls == [[target]]
+    assert _outcome(report, "lexstore").outcome == "completed"
+
+
+def test_watcher_outside_delete_only_wakes_lexstore_not_kb_consumers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import lexstore
+
     calls: list[tuple[list[Path], list[str]]] = []
     monkeypatch.setattr(
         lexstore,
         "apply_watcher_batch",
         lambda _root, paths, rels: calls.append((list(paths), list(rels))) or True,
     )
+    monkeypatch.setattr(
+        embeddings,
+        "upsert_after_write_status",
+        lambda *_args, **_kwargs: pytest.fail("delete-only vault batch woke embeddings"),
+    )
+    monkeypatch.setattr(
+        epistemic_graph,
+        "upsert_after_write",
+        lambda *_args, **_kwargs: pytest.fail("delete-only vault batch woke graph"),
+    )
 
     report = index_sync.upsert_after_write(
         tmp_path,
-        [target],
+        [],
         publish_corpus_change=False,
-        watcher_deleted_rel_paths=[removed_rel],
+        watcher_deleted_rel_paths=["Sources/removed.md"],
     )
 
-    assert calls == [([target], [removed_rel])]
+    assert calls == [([], ["Sources/removed.md"])]
     assert _outcome(report, "lexstore").outcome == "completed"
+    assert _outcome(report, "embeddings").code == "no_eligible_paths"
+    assert _outcome(report, "epistemic_graph").code == "no_graph_input"
 
 
 def test_delete_report_marks_known_synchronous_callbacks_completed(
