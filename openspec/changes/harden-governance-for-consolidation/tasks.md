@@ -473,7 +473,7 @@ made before both PRs and their combined verification are complete.
 
 ## 8. Counterfactual Retrieval Rank Graph Count Error And Timing Closure
 
-- [ ] 8.1 Add a deterministic red paired-fixture suite in
+- [x] 8.1 Add a deterministic red paired-fixture suite in
   `tests/test_governance_oracle_closure.py` that serializes the exact same request with
   each L0 artifact present versus physically absent and compares the complete canonical
   governed envelope, not selected fields. Register one transport normalizer that may
