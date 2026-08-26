@@ -24,6 +24,7 @@ from exomem import (
     delete_file as delete_file_module,
 )
 from exomem import (
+    embeddings,
     find_corpus,
     graph_sync,
     media_jobs,
@@ -47,6 +48,8 @@ from exomem.governance import (
     catalog_publication,
     membership,
     policy,
+    projected_retrieval,
+    projection_measurement_store,
     projection_store,
     projections,
     receipts,
@@ -463,6 +466,114 @@ def _migrate_with_projection_items(
         )
     finally:
         connection.close()
+
+
+def _migrate_with_vector_projection_items(
+    vault: Path,
+    *,
+    items: tuple[tuple[str, str], ...],
+    now: int,
+) -> tuple[
+    schema_v4.MigrationResult,
+    tuple[projected_retrieval.ProjectionVectorMeasurement, ...],
+]:
+    documents = _documents(ceiling=2)
+    compiled = _compiled(documents)
+    key = projections.ProjectionNamespaceKey(
+        policy_fingerprint=compiled.fingerprint,
+        projector_schema_version=1,
+        catalog_generation=1,
+    )
+    projected_items = tuple(
+        _projection_item(
+            vault=vault,
+            compiled=compiled,
+            path=path,
+            source=source,
+            catalog_generation=1,
+        )
+        for path, source in items
+    )
+    manifest = projection_store.stage_variant_store(
+        vault,
+        key=key,
+        items=projected_items,
+    )
+    namespace = projection_store.prepare_projection_namespace(
+        key=key,
+        manifest=manifest,
+        items=projected_items,
+    )
+    family = projection_measurement_store.MeasurementFamilyKey(
+        namespace_key=key,
+        lane="vector",
+        extractor_version="projected-text-v1",
+        model_version=embeddings.MODEL_NAME,
+    )
+    measurements = tuple(
+        projected_retrieval.ProjectionVectorMeasurement(
+            measurement_key=projections.MeasurementKey(
+                projection_variant_id=variant.projection_variant_id,
+                lane="vector",
+                extractor_version=family.extractor_version,
+                model_version=family.model_version,
+            ),
+            vector=(float(index + 1), 1.0),
+        )
+        for index, variant in enumerate(
+            variant
+            for item in projected_items
+            for variant in item.variants
+        )
+    )
+    measurement_manifest = projection_measurement_store.stage_measurement_store(
+        vault,
+        namespace=namespace,
+        family=family,
+        measurements=measurements,
+    )
+    connection = store.open_connection(vault)
+    try:
+        migration = schema_v4.migrate_v3_connection(
+            connection,
+            schema_v4.MigrationSeed(
+                activation_store_id=ACTIVATION_STORE_ID,
+                logical_vault_id=LOGICAL_VAULT_ID,
+                activation_epoch=1,
+                policy=_policy_seed(
+                    generation_id=FIRST_GENERATION_ID,
+                    documents=documents,
+                    predecessor_generation_id=None,
+                    event_suffix="first",
+                    now=now,
+                ),
+                catalog=schema_v4.CatalogGenerationSeed(
+                    catalog_generation=1,
+                    descriptor=projection_store.catalog_descriptor_bytes(
+                        key,
+                        projected_items,
+                    ),
+                    artifact_count=len(projected_items),
+                    created_at=now,
+                ),
+                namespace=schema_v4.ProjectionNamespaceSeed(
+                    namespace_id=key.namespace_id,
+                    evidence=projection_store.projection_namespace_evidence_bytes(
+                        manifest,
+                        required_measurement_roots=(
+                            projection_measurement_store.measurement_root(
+                                measurement_manifest
+                            ),
+                        ),
+                    ),
+                    ready_at=now,
+                ),
+                migrated_at=now,
+            ),
+        )
+    finally:
+        connection.close()
+    return migration, measurements
 
 
 def _load_active_projection_items(
@@ -4107,6 +4218,294 @@ def test_semantic_edit_publishes_auxiliary_markdown_in_the_same_v4_generation(
             (auxiliary_relative, vault_module.content_hash(auxiliary_after)),
         )
     )
+
+
+def test_semantic_edit_rebuilds_only_changed_vectors_before_v4_activation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = int(time.time())
+    monkeypatch.setenv(
+        "EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-state")
+    )
+    writer_lease.reset_managers_for_tests()
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    vault = tmp_path / "vault"
+    changed_path = "Knowledge Base/Notes/changed.md"
+    stable_path = "Knowledge Base/Notes/stable.md"
+    changed_before = "---\ntitle: Changed\nstatus: draft\n---\n\nbefore\n"
+    changed_after = changed_before.replace("before", "after")
+    stable_source = "---\ntitle: Stable\nstatus: draft\n---\n\nstable\n"
+    for relative, source in (
+        (changed_path, changed_before),
+        (stable_path, stable_source),
+    ):
+        target = vault / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(source, encoding="utf-8")
+    _write_workspace(vault, _documents(ceiling=2))
+    migration, prior_measurements = _migrate_with_vector_projection_items(
+        vault,
+        items=((changed_path, changed_before), (stable_path, stable_source)),
+        now=now,
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    embedded: list[list[str]] = []
+
+    def embed_target(texts: list[str], *, is_query: bool = False):
+        assert is_query is False
+        embedded.append(list(texts))
+        return tuple((9.0, float(index + 1)) for index, _text in enumerate(texts))
+
+    monkeypatch.setattr(embeddings, "embed_texts", embed_target)
+    preflight = semantic_writes.preflight_existing(
+        vault,
+        path=changed_path,
+        after_source=changed_after,
+        operation="edit",
+        expected_before_hash=vault_module.content_hash(changed_before),
+    )
+
+    committed = semantic_writes.commit_existing(vault, preflight=preflight)
+
+    assert committed.mutated is True
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    active, manifest, items = _load_active_projection_items(
+        vault,
+        activation_epoch=2,
+        activation_state_digest=custody.control.activation_state_digest or "",
+    )
+    evidence = projection_store.namespace_evidence_from_snapshot(active)
+    assert tuple(root.lane for root in evidence.required_measurement_roots) == (
+        "vector",
+    )
+    namespace = projection_store.bind_active_projection_namespace(
+        active,
+        manifest=manifest,
+        items=items,
+    )
+    root = evidence.required_measurement_roots[0]
+    family = projection_measurement_store.MeasurementFamilyKey(
+        namespace_key=namespace.namespace_key,
+        lane=root.lane,
+        extractor_version=root.extractor_version,
+        model_version=root.model_version,
+    )
+    _measurement_manifest, target_measurements = (
+        projection_measurement_store.load_measurement_store(
+            vault,
+            namespace=namespace,
+            family=family,
+            expected_rows_digest=root.rows_digest,
+        )
+    )
+    stable_variant_ids = {
+        variant.projection_variant_id
+        for item in items
+        if item.item_identity == stable_path
+        for variant in item.variants
+    }
+    prior_by_id = {
+        row.measurement_key.projection_variant_id: row.vector
+        for row in prior_measurements
+    }
+    target_by_id = {
+        row.measurement_key.projection_variant_id: row.vector
+        for row in target_measurements
+    }
+    assert embedded and sum(len(batch) for batch in embedded) == (
+        len(target_measurements) - len(stable_variant_ids)
+    )
+    assert {
+        variant_id: target_by_id[variant_id] for variant_id in stable_variant_ids
+    } == {
+        variant_id: prior_by_id[variant_id] for variant_id in stable_variant_ids
+    }
+    assert set(target_by_id) == {
+        variant.projection_variant_id
+        for item in items
+        for variant in item.variants
+    }
+
+
+def test_vector_catalog_preflight_refuses_unknown_measurement_family_before_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    relative = "Knowledge Base/Notes/private.md"
+    before = "---\ntitle: Private\nstatus: draft\n---\n\nbefore\n"
+    after = before.replace("before", "after")
+    target = vault / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(before, encoding="utf-8")
+    _write_workspace(vault, _documents(ceiling=2))
+    migration, _measurements = _migrate_with_vector_projection_items(
+        vault,
+        items=((relative, before),),
+        now=now,
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    original = projection_store.namespace_evidence_from_snapshot
+
+    def unsupported(snapshot: schema_v4.ActivePolicySnapshot):
+        evidence = original(snapshot)
+        root = evidence.required_measurement_roots[0]
+        return projection_store.ProjectionNamespaceEvidence(
+            manifest=evidence.manifest,
+            required_measurement_roots=(
+                dataclasses.replace(root, model_version="unsupported-model"),
+            ),
+        )
+
+    monkeypatch.setattr(
+        projection_store,
+        "namespace_evidence_from_snapshot",
+        unsupported,
+    )
+
+    with pytest.raises(semantic_writes.SemanticWriteError) as blocked:
+        semantic_writes.commit_existing(
+            vault,
+            preflight=semantic_writes.preflight_existing(
+                vault,
+                path=relative,
+                after_source=after,
+                operation="edit",
+                expected_before_hash=vault_module.content_hash(before),
+            ),
+        )
+
+    assert blocked.value.code == "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED"
+    assert target.read_text(encoding="utf-8") == before
+
+
+@pytest.mark.parametrize("failure_mode", ["hard-off", "model-error"])
+def test_vector_rebuild_failure_refuses_catalog_mutation_before_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_mode: str,
+) -> None:
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    relative = "Knowledge Base/Notes/private.md"
+    before = "---\ntitle: Private\nstatus: draft\n---\n\nbefore\n"
+    after = before.replace("before", "after")
+    target = vault / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(before, encoding="utf-8")
+    _write_workspace(vault, _documents(ceiling=2))
+    migration, _measurements = _migrate_with_vector_projection_items(
+        vault,
+        items=((relative, before),),
+        now=now,
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+
+    def fail_rebuild(_texts: list[str], *, is_query: bool = False):
+        assert is_query is False
+        raise RuntimeError("model unavailable")
+
+    if failure_mode == "model-error":
+        monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+        monkeypatch.setattr(embeddings, "embed_texts", fail_rebuild)
+    else:
+        monkeypatch.setattr(
+            embeddings,
+            "embed_texts",
+            lambda *_args, **_kwargs: pytest.fail(
+                "hard-off publication must not call the vector model"
+            ),
+        )
+
+    with pytest.raises(semantic_writes.SemanticWriteError) as blocked:
+        semantic_writes.commit_existing(
+            vault,
+            preflight=semantic_writes.preflight_existing(
+                vault,
+                path=relative,
+                after_source=after,
+                operation="edit",
+                expected_before_hash=vault_module.content_hash(before),
+            ),
+        )
+
+    assert blocked.value.code == "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED"
+    assert target.read_text(encoding="utf-8") == before
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    assert custody.control.activation_epoch == 1
+    assert custody.control.activation_state_digest == migration.activation_state_digest
+
+
+def test_vector_catalog_preparation_does_not_publish_an_abandoned_family(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = int(time.time())
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    vault = tmp_path / "vault"
+    relative = "Knowledge Base/Notes/private.md"
+    before = "---\ntitle: Private\nstatus: draft\n---\n\nbefore\n"
+    after = before.replace("before", "after")
+    target = vault / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(before, encoding="utf-8")
+    _write_workspace(vault, _documents(ceiling=2))
+    migration, _measurements = _migrate_with_vector_projection_items(
+        vault,
+        items=((relative, before),),
+        now=now,
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    monkeypatch.setattr(
+        embeddings,
+        "embed_texts",
+        lambda texts, *, is_query=False: tuple(
+            (9.0, float(index + 1)) for index, _text in enumerate(texts)
+        ),
+    )
+
+    prepared = catalog_publication.prepare_markdown_upsert(
+        vault,
+        path=relative,
+        source=after,
+        expected_before_hash=vault_module.content_hash(before),
+        now=now + 1,
+    )
+
+    assert prepared is not None
+    assert len(prepared.target_measurements) == 1
+    family = prepared.target_measurements[0].family
+    assert not projection_measurement_store.measurement_store_path(
+        vault,
+        family,
+    ).exists()
+    assert target.read_text(encoding="utf-8") == before
 
 
 def test_semantic_edit_refuses_auxiliary_catalog_drift_before_changing_bytes(
