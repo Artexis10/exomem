@@ -719,7 +719,24 @@ milliseconds and pass that same immutable sample tuple into the planned frame-co
 publication. That transaction binds the samples to the guarded parent video sidecar and
 advances the parent CLIP row, companion catalog rows, vector/CLIP roots, and active tuple
 together; it neither invokes CLIP a second time nor gives a frame companion its own pixel
-row. A policy
+row.
+
+When the active tuple requires a graph measurement family, the successor builder first
+verifies exactly one active row for every active projection variant. The target family
+likewise contains exactly one row per target variant: every variant below L6 has an empty
+outgoing edge tuple, a content-identical L6 variant may carry its verified row, and a
+changed L6 source item requires an immutable replacement bound to its exact target item
+identity and content hash. Each replacement edge must name that source and a target
+identity present in the target catalog; deleting a target that an otherwise-carried row
+still names therefore refuses rather than relabeling stale graph state. Duplicate rows,
+duplicate edges, mismatched sources, outside-catalog targets, missing replacements, and
+capacity overflow all refuse before canonical bytes change. The complete successor graph
+family binds the target namespace and publishes with the catalog, other measurement
+roots, receipt, and active tuple. Live graph producers remain responsible for supplying
+the target-bound replacements for every affected changed L6 source; an unknown required
+measurement family remains blocked.
+
+A policy
 fingerprint or projector-schema change builds a new namespace tuple and never relabels
 an old one. A model/extractor change writes or invalidates only the corresponding
 versioned measurement subkey. Initial migration builds the exact

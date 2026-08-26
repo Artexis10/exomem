@@ -164,7 +164,22 @@ strictly timestamp-ordered canonical samples. A derived frame companion carrying
 independent CLIP measurement owner. Missing, stale, duplicate, mismatched, or dimension-
 incompatible CLIP state SHALL refuse before canonical bytes change. The successor catalog,
 projection namespace, vector/CLIP measurement roots, receipt, and active tuple SHALL
-publish atomically; graph or another unsupported required family SHALL remain blocked.
+publish atomically.
+
+When the active tuple requires a graph measurement family, a content or companion
+publication SHALL verify that the active family contains exactly one row for every active
+projection variant before canonical bytes change. The successor SHALL contain exactly
+one row for every target variant. Variants below L6 SHALL carry an empty outgoing edge
+tuple. A content-identical L6 variant MAY carry its verified active row; every changed L6
+source item SHALL instead provide an immutable replacement bound to its exact target item
+identity and content hash. Every replacement edge SHALL name that source and a target
+identity present in the target catalog. A deletion that leaves an otherwise-carried edge
+outside the target catalog SHALL refuse. Missing, duplicate, source-mismatched, outside-
+catalog, or over-capacity graph state SHALL refuse before canonical bytes change. The
+successor catalog, projection namespace, complete vector/CLIP/graph measurement roots,
+receipt, and active tuple SHALL publish atomically. A live graph producer SHALL supply
+target-bound replacements for every affected changed L6 source; another unsupported
+required family SHALL remain blocked.
 
 #### Scenario: Visual successor publication is complete and atomic
 
@@ -189,6 +204,20 @@ publish atomically; graph or another unsupported required family SHALL remain bl
   content hash, sample shape, timestamp order, or vector dimension
 - **THEN** catalog preparation refuses before canonical content or the active tuple
   changes and does not fall back to a raw or prior CLIP family
+
+#### Scenario: Graph successor rejects stale or incomplete lineage
+
+- **WHEN** an exact-v4 content change would leave a missing variant row, carry an edge to
+  a removed target, or change an L6 source without an exact target-bound replacement
+- **THEN** publication refuses before canonical bytes change and never relabels the old
+  graph family beneath the new catalog generation
+
+#### Scenario: Complete graph successor publishes with the active tuple
+
+- **WHEN** the complete active graph family verifies, every unchanged row remains bound,
+  every changed L6 source has an exact replacement, and all lower variants have empty rows
+- **THEN** the complete target graph root advances with the target namespace, other
+  required measurement roots, receipt, and active tuple in one catalog publication
 
 When the projected source is exhausted, L1-and-above items SHALL still emit the
 projection their policy authorizes while L0 items SHALL produce a silently shorter list,
