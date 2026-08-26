@@ -52,9 +52,7 @@ def _row(**overrides: Any) -> dict[str, Any]:
         "commitment": "committed",
         "horizon": "quarter",
         "health": "unknown",
-        "progress_evidence": [
-            {"collection": RECORDS_REF, "role": "progress", "view": "worked"}
-        ],
+        "progress_evidence": [{"collection": RECORDS_REF, "role": "progress", "view": "worked"}],
     }
     row.update(overrides)
     return row
@@ -888,9 +886,7 @@ def test_returned_sequence_is_identity_ordered_not_divergence_ordered(
         ids["Beta"],
         ids["Alpha"],
     ]
-    assert [
-        item["divergence"]["progress_observations"] for item in result["items"]
-    ] == [0, 6, 3]
+    assert [item["divergence"]["progress_observations"] for item in result["items"]] == [0, 6, 3]
 
 
 def test_review_leaves_the_vault_byte_identical(tmp_path: Path) -> None:
@@ -951,7 +947,7 @@ def test_review_echoes_authored_health_and_proposes_nothing(tmp_path: Path) -> N
     from exomem import plan_progress
 
     _build_vault(tmp_path)
-    plan_id = _add_plan(
+    _add_plan(
         tmp_path,
         _committed(
             "Ship the thing",
@@ -959,9 +955,7 @@ def test_review_echoes_authored_health_and_proposes_nothing(tmp_path: Path) -> N
             health="unknown",
         ),
     )
-    item_path = (
-        tmp_path / "Knowledge Base" / "Planning" / "Work" / "Items" / f"{plan_id}.md"
-    )
+    item_path = tmp_path / "Knowledge Base" / "Planning" / "Work" / "Items" / "Ship the thing.md"
     before = item_path.read_bytes()
 
     result = plan_progress.review(tmp_path)

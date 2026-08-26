@@ -515,6 +515,7 @@ def test_lifecycle_log_event_rejects_non_integer_version_fields(field: str, inva
             manifest=SimpleNamespace(
                 collection_id="11111111-1111-4111-8111-111111111111",
                 path="Knowledge Base/Records/Test/_collection.md",
+                semantic_profile="records",
                 storage=SimpleNamespace(source="Knowledge Base/Records/Test/log.md"),
             ),
             before_manifest_hash="a" * 64, after_manifest_hash="b" * 64,

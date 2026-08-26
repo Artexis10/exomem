@@ -28,12 +28,22 @@ reporting results.
 ## Planning
 
 `plan_memory` is the one public command for human-owned intended future state.
-It has exactly six actions: `inspect`, `create`, `query`, `add`, `update`, and
-`triage`. Canonical Planning is one ordinary Markdown item file per plan under
+It has exactly nine actions: read-only `inspect`, `validate`, and `query`, plus
+guarded `create`, `add`, `update`, `triage`, `revise`, and `rebaseline`.
+`inspect` requires one collection; use `browse_memory` to discover collections.
+Canonical Planning is one ordinary Markdown item file per plan under
 `Knowledge Base/Planning/`; the authored horizon is never auto-rebucketed.
 Outcomes, initiatives, and work items may form an explicit hierarchy; areas are
 separate membership. Records evidence and external execution pointers remain
 opaque. Review, dashboards, and UI workflows are separate product work.
+
+The plan UUID is durable identity. A manifest may render a human filename from
+stable descriptive fields and a readable managed body from canonical
+frontmatter. Keep status, priority, horizon, and other mutable state out of the
+filename. Existing UUID-named collections move only through
+`maintain_memory(mode="structured-files", collection=...)`: inspect the
+read-only preview, resolve every collision or immutable/withheld inbound-link
+blocker, then apply the exact `plan_id` and `source_snapshot` with a reason.
 
 ## Records
 
@@ -73,6 +83,16 @@ The intended Obsidian template root is `Knowledge Base/Templates/`: users keep
 their normal **Templates → Insert template** workflow. Exomem does not require
 Obsidian or a plugin and does not edit `.obsidian`; editing a template never
 rewrites historical records.
+
+For Markdown-item collections, UUIDs remain durable identity while a validated
+`item_filename` recipe controls the human file label. `item_presentation` and
+the compatible Records presentation recipe own only their marked generated
+block; frontmatter remains canonical and authored Markdown outside the markers
+is preserved byte-for-byte. Use a descriptive field such as title for a
+filename, not event status or another frequently changing value. Migrate a whole
+existing collection through the same preview/apply `structured-files` mode used
+by Planning; do not rename item files by hand because inbound Obsidian links and
+graph edges must move in the same guarded batch.
 
 An existing `type: tracker` without an adjacent reviewed collection manifest is
 inspectable only at collection level. Do not guess its item grammar or rewrite
@@ -312,7 +332,11 @@ to one of six compiled-page types: `research-note`, `insight`, `failure`,
 - Often follows immediately after an `add`.
 
 ### Inputs to gather
-- Source(s) to compile from — recently-`add`ed sources, in-conversation thinking, or (for experiments / production-logs) your own protocol or production description.
+- Governed Source/Evidence paths to compile from. Capture external originals
+  first. URLs, connector IDs, remote file IDs, scripts, excerpts, and derivative
+  summaries remain provenance or working material; they cannot directly satisfy
+  `sources:`. In-conversation or experiential thinking with no external source
+  uses an honest empty list.
 - Note type. Ask if ambiguous. Key distinctions:
   - **Research vs experiment:** synthesizing secondary sources (research) vs running a protocol with primary data (experiment).
   - **Research vs production-log:** secondary synthesis (research) vs documenting the making of a primary creative artifact (production-log).
@@ -339,24 +363,32 @@ to one of six compiled-page types: `research-note`, `insight`, `failure`,
    with older releases and may use language-blind transliteration; for any
    non-Latin title, prefer an explicit meaningful ASCII slug. The real title is
    always stored in frontmatter and the H1.
-3. **Draft the page in conversation** — show full content including frontmatter,
+3. Resolve every non-empty `sources:` entry to an authorized captured Source or
+   Evidence page. If an external original is missing, capture it explicitly and
+   then cite the returned governed path or stable ref. If the original cannot be
+   recovered, remove the unsupported claim; never reconstruct it from the draft.
+4. **Draft the page in conversation** — show full content including frontmatter,
    all sections per the page-type template, and wikilinks to existing pages where
    they obviously match. **Run `suggest_links` on the draft first; use
    `suggest_relations` when directional meaning matters.** Put accepted note-level
    edges under `## Relations` as `- relation_type [[Target]]`; keep claim-specific
    edges in semantic-block `relations:` metadata.
-4. **Wait for confirmation.** Default is propose-then-write.
-5. On confirm:
-   - Write the file.
-   - For each source cited, update that source's `ingested_into` field to include a wikilink to this new note.
+5. **Wait for confirmation.** Default is propose-then-write.
+6. On confirm:
+   - Write the file and each supported source `ingested_into` back-reference in
+     one guarded batch. Any unresolved citation or concurrent source change
+     refuses the whole write.
    - Update the relevant subfolder `index.md`.
-6. Report paths written and any wikilinks that target nonexistent pages (offer to create stubs via `link`).
+7. Report paths written and any body wikilinks that target nonexistent pages
+   (offer to create stubs via `link`).
 
 Upgrades and reconciliation never rename existing pages. Filename migration is
 an explicit reviewed operation because paths are graph addresses.
 
 ### Edge cases
-- **No clean source.** If you want to capture in-conversation thinking that wasn't first `add`-ed, it's fine to compile directly, but create a `Sources/Sessions/` capture of the conversation excerpt as a side-effect. Citation integrity matters.
+- **No external source.** Original, experiential, or in-conversation thinking
+  may compile with `sources: []`. Do not create a performative source merely to
+  avoid an empty list, and never invoke capture as a hidden side effect.
 - **Spans multiple projects (research-note).** If a research note touches multiple projects, that's a sign it might be an insight or pattern instead. Surface the option.
 - **Topic already covered.** Use `find` first; if a similar note exists, ask whether to extend it (in-place edit) or supersede it.
 - **New scope not in the project list.** Project keys are an open set — they auto-register on first use. Just pass the new slug-shaped key; the writer appends it to `_Schema/project-keys.yaml` and creates the matching `Notes/Research/<Folder>/`. A typo guard rejects near-misses. Pass `project_category` to bucket the new key.

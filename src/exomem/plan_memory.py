@@ -5,13 +5,26 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Literal, Never
 
-from . import planning, record_governance
+from . import planning
 from .cli_ops import OpError
 from .structured_collections import CollectionError
 
-ACTIONS = frozenset({"inspect", "create", "query", "add", "update", "triage"})
+ACTIONS = frozenset(
+    {
+        "inspect",
+        "validate",
+        "create",
+        "query",
+        "add",
+        "update",
+        "triage",
+        "revise",
+        "rebaseline",
+    }
+)
 _ACTION_FIELDS = {
     "inspect": frozenset({"collection"}),
+    "validate": frozenset({"collection", "manifest_path", "manifest_text"}),
     "create": frozenset({"manifest_path", "manifest_text", "why", "scaffold"}),
     "query": frozenset(
         {
@@ -57,11 +70,28 @@ _ACTION_FIELDS = {
             "transition",
         }
     ),
+    "revise": frozenset(
+        {
+            "collection",
+            "manifest_text",
+            "expected_manifest_hash",
+            "expected_container_hash",
+            "why",
+        }
+    ),
+    "rebaseline": frozenset(
+        {
+            "collection",
+            "expected_manifest_hash",
+            "expected_container_hash",
+            "acknowledged_gap_codes",
+            "why",
+        }
+    ),
 }
 _REQUIRED_FIELDS = {
-    # `inspect` is the only action that answers a question no selector is needed
-    # for: with no collection it returns the Planning inventory.
-    "inspect": frozenset(),
+    "inspect": frozenset({"collection"}),
+    "validate": frozenset({"manifest_text"}),
     "create": frozenset({"manifest_path", "manifest_text", "why"}),
     "query": frozenset({"collection"}),
     "add": frozenset({"collection", "item", "why"}),
@@ -78,18 +108,54 @@ _REQUIRED_FIELDS = {
             "transition",
         }
     ),
+    "revise": frozenset(
+        {
+            "collection",
+            "manifest_text",
+            "expected_manifest_hash",
+            "expected_container_hash",
+            "why",
+        }
+    ),
+    "rebaseline": frozenset(
+        {
+            "collection",
+            "expected_manifest_hash",
+            "expected_container_hash",
+            "acknowledged_gap_codes",
+            "why",
+        }
+    ),
 }
 _VIEW_SHAPING_FIELDS = frozenset(
     {
-        "filters", "columns", "sort_by", "descending", "limit", "aggregate", "date_from",
-        "date_to", "date_column", "lifecycle",
+        "filters",
+        "columns",
+        "sort_by",
+        "descending",
+        "limit",
+        "aggregate",
+        "date_from",
+        "date_to",
+        "date_column",
+        "lifecycle",
     }
 )
 
 
 def plan_memory(
     vault_root: Path,
-    action: Literal["inspect", "create", "query", "add", "update", "triage"],
+    action: Literal[
+        "inspect",
+        "validate",
+        "create",
+        "query",
+        "add",
+        "update",
+        "triage",
+        "revise",
+        "rebaseline",
+    ],
     collection: str | None = None,
     manifest_path: str | None = None,
     manifest_text: str | None = None,
@@ -114,16 +180,27 @@ def plan_memory(
     output_format: Literal["json", "markdown", "csv"] | None = None,
     item: dict[str, Any] | None = None,
     plan_id: str | None = None,
+    expected_manifest_hash: str | None = None,
     expected_container_hash: str | None = None,
+    acknowledged_gap_codes: list[str] | None = None,
     body: str | None = None,
     changes: dict[str, Any] | None = None,
     transition: dict[str, Any] | None = None,
     expected_item_version: str | None = None,
 ) -> dict[str, Any]:
-    """Inspect, create, query, add, update, or triage one Planning collection.
+    """Work with human-owned intended future state through one Planning surface.
 
-    `inspect` with no collection lists the Planning collections instead, so a
-    session can find the one it needs before naming a selector.
+    `inspect`, `validate`, and `query` are read-only. `create`, `add`, `update`,
+    `triage`, `revise`, and `rebaseline` are guarded mutations. Planning stores
+    goals, outcomes, initiatives, work items, horizons, priorities, and explicit
+    commitments; observed events belong in `record_memory`, while accepted
+    software change contracts and execution truth remain in the repository.
+
+    A plan's UUID is durable identity, not its reader-facing filename. New
+    collections can declare human filenames and managed presentation blocks;
+    existing UUID collections move only through an explicit read-only
+    `maintain_memory(mode="structured-files")` preview followed by exact-plan
+    apply. Never infer completion or horizon changes from elapsed time.
     """
     values = locals().copy()
     values.pop("vault_root")
@@ -131,11 +208,17 @@ def plan_memory(
     _validate_arguments(action, values)
     try:
         if action == "inspect":
-            if collection is None:
-                return record_governance.inventory_collections(
-                    vault_root, semantic_profile="planning"
-                )
+            assert collection is not None
             return planning.inspect(vault_root, collection)
+        if action == "validate":
+            assert manifest_text is not None
+            return planning.validate(
+                vault_root,
+                mode="revision" if collection is not None else "create",
+                manifest_text=manifest_text,
+                manifest_path=manifest_path,
+                collection=collection,
+            )
         if action == "create":
             assert manifest_path is not None and manifest_text is not None and why is not None
             return planning.create_collection(
@@ -214,6 +297,30 @@ def plan_memory(
                 expected_item_version=expected_item_version,
                 why=why,
             )
+        if action == "revise":
+            assert collection is not None and manifest_text is not None
+            assert expected_manifest_hash is not None and expected_container_hash is not None
+            assert why is not None
+            return planning.revise(
+                vault_root,
+                collection,
+                manifest_text=manifest_text,
+                expected_manifest_hash=expected_manifest_hash,
+                expected_container_hash=expected_container_hash,
+                why=why,
+            )
+        if action == "rebaseline":
+            assert collection is not None and acknowledged_gap_codes is not None
+            assert expected_manifest_hash is not None and expected_container_hash is not None
+            assert why is not None
+            return planning.rebaseline(
+                vault_root,
+                collection,
+                expected_manifest_hash=expected_manifest_hash,
+                expected_container_hash=expected_container_hash,
+                acknowledged_gap_codes=acknowledged_gap_codes,
+                why=why,
+            )
         raise CollectionError("INVALID_PLAN_ARGUMENTS", "Planning action is not available")
     except CollectionError as error:
         code = _public_error_code(error)
@@ -227,6 +334,10 @@ def _validate_arguments(action: object, values: dict[str, Any]) -> None:
     if not _REQUIRED_FIELDS[action] <= supplied or not supplied <= _ACTION_FIELDS[action]:
         _invalid_arguments()
     if action == "query" and values["view"] is not None and supplied & _VIEW_SHAPING_FIELDS:
+        _invalid_arguments()
+    if action == "validate" and (
+        (values["collection"] is None) == (values["manifest_path"] is None)
+    ):
         _invalid_arguments()
     if action == "update" and values["changes"] is None and values["body"] is None:
         _invalid_arguments()
