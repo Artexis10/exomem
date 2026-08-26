@@ -329,6 +329,14 @@ def test_mutation_diagnostics_requires_and_unwraps_committed_full_envelope() -> 
     ) == diagnostics
 
 
+def test_single_affected_path_accepts_human_structured_filename() -> None:
+    path = "Knowledge Base/Planning/Software/Items/Ship Planning query surface.md"
+
+    assert e2e_product_loop._single_affected_path(
+        {"affected_paths": [path]}, operation="plan_memory add"
+    ) == path
+
+
 def test_mutation_diagnostics_rejects_explicit_graph_sync_failure() -> None:
     with pytest.raises(
         RuntimeError,

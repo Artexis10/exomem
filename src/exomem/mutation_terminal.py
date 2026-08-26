@@ -116,9 +116,7 @@ def _operation_id(result: Any) -> str | None:
 
 def _without_graph_rebuild_handoff(result: Any) -> Any:
     if isinstance(result, Mapping) and "_graph_rebuild_handoff" in result:
-        return {
-            key: value for key, value in result.items() if key != "_graph_rebuild_handoff"
-        }
+        return {key: value for key, value in result.items() if key != "_graph_rebuild_handoff"}
     return result
 
 
@@ -192,9 +190,7 @@ def _path_projection(result: Any) -> dict[str, Any]:
     artifact_receipt = _artifact_receipt_projection(result)
     if artifact_receipt:
         paths = [
-            item["stored_path"]
-            for item in artifact_receipt["files"]
-            if item["outcome"] == "stored"
+            item["stored_path"] for item in artifact_receipt["files"] if item["outcome"] == "stored"
         ]
         if len(paths) == 1:
             return {"path": paths[0]}
@@ -204,14 +200,14 @@ def _path_projection(result: Any) -> dict[str, Any]:
     if isinstance(path, str):
         return {"path": path}
     affected_paths = result.get("affected_paths")
-    if valid_collection_receipt(result) and isinstance(affected_paths, (list, tuple)) and all(
-        isinstance(item, str) for item in affected_paths
+    if (
+        valid_collection_receipt(result)
+        and isinstance(affected_paths, (list, tuple))
+        and all(isinstance(item, str) for item in affected_paths)
     ):
         return {"paths": list(affected_paths)}
     raw_paths = result.get("paths")
-    if isinstance(raw_paths, (list, tuple)) and all(
-        isinstance(item, str) for item in raw_paths
-    ):
+    if isinstance(raw_paths, (list, tuple)) and all(isinstance(item, str) for item in raw_paths):
         return {"paths": list(raw_paths)}
     source = result.get("source")
     if isinstance(source, Mapping) and isinstance(source.get("path"), str):
@@ -251,23 +247,33 @@ def _path_projection(result: Any) -> dict[str, Any]:
 
 def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
     """Keep the bounded client-artifact outcome visible in compact terminals."""
+
     def string(value: Any, *, limit: int, allow_none: bool = False) -> bool:
-        return (allow_none and value is None) or (isinstance(value, str) and 0 < len(value) <= limit)
+        return (allow_none and value is None) or (
+            isinstance(value, str) and 0 < len(value) <= limit
+        )
 
     def nonnegative_int(value: Any) -> bool:
         return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
     def sha256(value: Any) -> bool:
-        return isinstance(value, str) and len(value) == 64 and all(
-            character in "0123456789abcdef" for character in value
+        return (
+            isinstance(value, str)
+            and len(value) == 64
+            and all(character in "0123456789abcdef" for character in value)
         )
 
     if not isinstance(result, Mapping):
         return {}
     files = result.get("files")
     summary = result.get("summary")
-    if not isinstance(files, (list, tuple)) or not 1 <= len(files) <= 8 or not isinstance(summary, Mapping):
+    if (
+        not isinstance(files, (list, tuple))
+        or not 1 <= len(files) <= 8
+        or not isinstance(summary, Mapping)
+    ):
         return {}
+
     def invalid_row(item: Any, index: int) -> dict[str, str]:
         file_id = item.get("file_id") if isinstance(item, Mapping) else None
         return {
@@ -314,8 +320,10 @@ def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
                 )
                 if key in item
             }
-        elif outcome == "failed" and string(item.get("code"), limit=64) and string(
-            item.get("reason"), limit=300
+        elif (
+            outcome == "failed"
+            and string(item.get("code"), limit=64)
+            and string(item.get("reason"), limit=300)
         ):
             row = {key: item[key] for key in ("file_id", "outcome", "code", "reason")}
         else:
@@ -374,9 +382,7 @@ def _structure_suggestion_projection(leaf: Any) -> dict[str, Any] | None:
         if kind == _SOURCE_CLASSIFICATION_KIND:
             domain = value.get("domain")
             captures = value.get("fallback_captures")
-            if not isinstance(domain, str) or not 0 < len(domain) <= (
-                _MAX_STRUCTURE_TOKEN_CHARS
-            ):
+            if not isinstance(domain, str) or not 0 < len(domain) <= (_MAX_STRUCTURE_TOKEN_CHARS):
                 continue
             if type(captures) is not int or captures < 0:
                 continue
@@ -464,9 +470,7 @@ def _due_state_projection(leaf: Any) -> tuple[dict[str, Any] | None, str]:
                 break
             if not _iso_date(due_since):
                 break
-            rows.append(
-                {"category": category, "ref": ref, "due_since": due_since}
-            )
+            rows.append({"category": category, "ref": ref, "due_since": due_since})
         else:
             hint = value.get("_vault")
             return (
@@ -551,12 +555,12 @@ def _without_advisory_due_state(result: Any) -> Any:
         if key == "due_state":
             changed = True
             continue
-        if key in ("creation", "semantic", "source") and isinstance(value, Mapping) and (
-            "due_state" in value
+        if (
+            key in ("creation", "semantic", "source")
+            and isinstance(value, Mapping)
+            and ("due_state" in value)
         ):
-            stripped[key] = {
-                inner: value[inner] for inner in value if inner != "due_state"
-            }
+            stripped[key] = {inner: value[inner] for inner in value if inner != "due_state"}
             changed = True
             continue
         stripped[key] = value
@@ -568,8 +572,7 @@ def _bounded_tokens(value: Any, limit: int) -> bool:
         isinstance(value, (list, tuple))
         and 0 < len(value) <= limit
         and all(
-            isinstance(item, str) and 0 < len(item) <= _MAX_STRUCTURE_TOKEN_CHARS
-            for item in value
+            isinstance(item, str) and 0 < len(item) <= _MAX_STRUCTURE_TOKEN_CHARS for item in value
         )
     )
 
@@ -625,16 +628,16 @@ def replayed_terminal(
     receipt_id: str | None,
     idempotency_key: str | None,
 ) -> dict[str, Any]:
-    """Present a verified Records no-op replay without fabricating a commit."""
+    """Present a verified governed no-op replay without fabricating a commit."""
     lifecycle_replay = (
         isinstance(leaf_result, Mapping)
         and leaf_result.get("receipt_version") == _LIFECYCLE_RECEIPT_VERSION
         and leaf_result.get("outcome") == "committed"
     )
-    if not valid_collection_receipt(leaf_result) or (
-        leaf_result.get("outcome") != "replayed" and not lifecycle_replay
-    ):
-        raise ValueError("replayed terminal requires a valid replayed collection receipt")
+    if not (
+        valid_collection_receipt(leaf_result) or valid_structured_files_receipt(leaf_result)
+    ) or (leaf_result.get("outcome") != "replayed" and not lifecycle_replay):
+        raise ValueError("replayed terminal requires a valid governed mutation receipt")
 
     terminal: dict[str, Any] = {
         "_terminal": _TERMINAL_MARKER,
@@ -668,10 +671,7 @@ def _is_guarded_precommit(result: Any) -> bool:
         return False
     if _operation_id(result) is None:
         return False
-    return any(
-        key in result
-        for key in ("committable_after_review", "draft_hash", "draft_token")
-    )
+    return any(key in result for key in ("committable_after_review", "draft_hash", "draft_token"))
 
 
 def needs_review_terminal(leaf_result: Any) -> Any:
@@ -772,10 +772,14 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
             value = graph_result.get(key)
             if isinstance(value, str):
                 compact[key] = value
-    if isinstance(leaf, Mapping) and all(
+    if (
+        isinstance(leaf, Mapping)
+        and all(
         type(leaf.get(key)) is bool
         for key in ("graph_rebuild_requested", "graph_rebuild_applicable")
-    ) and leaf.get("graph_rebuild_status") in {
+        )
+        and leaf.get("graph_rebuild_status")
+        in {
         "not_requested",
         "not_applicable",
         "would_quarantine",
@@ -783,7 +787,8 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
         "cleared",
         "retained",
         "failed",
-    }:
+        }
+    ):
         compact.update(
             {
                 key: leaf[key]
@@ -821,7 +826,10 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
 def valid_record_receipt(value: Any) -> bool:
     if not isinstance(value, Mapping):
         return False
-    if type(value.get("receipt_version")) is int and value.get("receipt_version") == _LIFECYCLE_RECEIPT_VERSION:
+    if (
+        type(value.get("receipt_version")) is int
+        and value.get("receipt_version") == _LIFECYCLE_RECEIPT_VERSION
+    ):
         return _valid_lifecycle_record_receipt(value)
     operation = value.get("operation")
     if (
@@ -937,7 +945,16 @@ def _valid_lifecycle_record_receipt(value: Mapping[str, Any]) -> bool:
         and value.get("item_key") is None
         and value.get("before_item_hash") is None
         and value.get("after_item_hash") is None
-        and all(_hash(value.get(name)) for name in ("before_manifest_hash", "after_manifest_hash", "before_container_hash", "after_container_hash", "payload_hash"))
+        and all(
+            _hash(value.get(name))
+            for name in (
+                "before_manifest_hash",
+                "after_manifest_hash",
+                "before_container_hash",
+                "after_container_hash",
+                "payload_hash",
+            )
+        )
     ):
         return False
     paths = value.get("affected_paths")
@@ -960,7 +977,12 @@ def _valid_lifecycle_record_receipt(value: Mapping[str, Any]) -> bool:
     ):
         return False
     if value["operation"] == "revise":
-        return value["continuity"] is True and codes == [] and value.get("gap_fingerprint") is None and value.get("checkpoint_snapshot_hash") is None
+        return (
+            value["continuity"] is True
+            and codes == []
+            and value.get("gap_fingerprint") is None
+            and value.get("checkpoint_snapshot_hash") is None
+        )
     return (
         value["continuity"] is False
         and codes == sorted(set(codes))
@@ -973,6 +995,8 @@ def _valid_lifecycle_record_receipt(value: Mapping[str, Any]) -> bool:
 def valid_planning_receipt(value: Any) -> bool:
     if not isinstance(value, Mapping):
         return False
+    if value.get("receipt_version") == _LIFECYCLE_RECEIPT_VERSION:
+        return _valid_lifecycle_planning_receipt(value)
     operation = value.get("operation")
     if (
         value.get("_plan_receipt") != _PLAN_RECEIPT_MARKER
@@ -1012,12 +1036,16 @@ def valid_planning_receipt(value: Any) -> bool:
         )
     if operation == "add":
         return (
+            (
             _hash(value.get("before_item_hash"))
             if value.get("outcome") == "replayed"
             else value.get("before_item_hash") is None
-        ) and _hash(value.get("after_item_hash")) and _hash(
-            value.get("before_container_hash")
-        ) and _hash(value.get("after_container_hash")) and _hash(value.get("payload_hash"))
+            )
+            and _hash(value.get("after_item_hash"))
+            and _hash(value.get("before_container_hash"))
+            and _hash(value.get("after_container_hash"))
+            and _hash(value.get("payload_hash"))
+        )
     return (
         value.get("outcome") == "committed"
         and _hash(value.get("before_item_hash"))
@@ -1028,8 +1056,131 @@ def valid_planning_receipt(value: Any) -> bool:
     )
 
 
+def _valid_lifecycle_planning_receipt(value: Mapping[str, Any]) -> bool:
+    expected = {
+        "_plan_receipt",
+        "receipt_version",
+        "operation",
+        "collection_id",
+        "item_key",
+        "before_item_hash",
+        "after_item_hash",
+        "before_manifest_hash",
+        "after_manifest_hash",
+        "before_container_hash",
+        "after_container_hash",
+        "affected_paths",
+        "payload_hash",
+        "outcome",
+        "audit_correlation",
+        "continuity",
+        "acknowledged_gap_codes",
+        "gap_fingerprint",
+        "checkpoint_snapshot_hash",
+        "minimum_reader_version",
+    }
+    if set(value) != expected:
+        return False
+    if not (
+        value.get("_plan_receipt") == _PLAN_RECEIPT_MARKER
+        and value.get("receipt_version") == _LIFECYCLE_RECEIPT_VERSION
+        and value.get("operation") in {"revise", "rebaseline"}
+        and _normalized_uuid(value.get("collection_id"))
+        and value.get("item_key") is None
+        and value.get("before_item_hash") is None
+        and value.get("after_item_hash") is None
+        and all(
+            _hash(value.get(name))
+            for name in (
+                "before_manifest_hash",
+                "after_manifest_hash",
+                "before_container_hash",
+                "after_container_hash",
+                "payload_hash",
+            )
+        )
+    ):
+        return False
+    paths = value.get("affected_paths")
+    correlation = value.get("audit_correlation")
+    codes = value.get("acknowledged_gap_codes")
+    if not (
+        isinstance(paths, list)
+        and 1 <= len(paths) <= 513
+        and all(isinstance(path, str) and 0 < len(path.encode("utf-8")) <= 1024 for path in paths)
+        and value.get("outcome") == "committed"
+        and isinstance(correlation, str)
+        and len(correlation) == 24
+        and all(character in "0123456789abcdef" for character in correlation)
+        and type(value.get("continuity")) is bool
+        and isinstance(codes, list)
+        and all(type(code) is str and code and len(code.encode("utf-8")) <= 256 for code in codes)
+        and value.get("minimum_reader_version") == 2
+    ):
+        return False
+    if value["operation"] == "revise":
+        return (
+            value["continuity"] is True
+            and codes == []
+            and value.get("gap_fingerprint") is None
+            and value.get("checkpoint_snapshot_hash") is None
+        )
+    return (
+        value["continuity"] is False
+        and codes == sorted(set(codes))
+        and bool(codes)
+        and _hash(value.get("gap_fingerprint"))
+        and _hash(value.get("checkpoint_snapshot_hash"))
+    )
+
+
 def valid_collection_receipt(value: Any) -> bool:
     return valid_record_receipt(value) or valid_planning_receipt(value)
+
+
+def valid_structured_files_receipt(value: Any) -> bool:
+    """Whether *value* is one bounded terminal structured-file receipt."""
+    if not isinstance(value, Mapping) or set(value) != {
+        "_structured_files_receipt",
+        "receipt_version",
+        "operation",
+        "collection_id",
+        "manifest_path",
+        "plan_id",
+        "source_snapshot",
+        "outcome",
+        "rationale",
+        "inverse",
+    }:
+        return False
+    inverse = value.get("inverse")
+    if not (
+        value.get("_structured_files_receipt") == "exomem.structured-files-migration"
+        and value.get("receipt_version") == 1
+        and value.get("operation") == "structured-files"
+        and _normalized_uuid(value.get("collection_id"))
+        and isinstance(value.get("manifest_path"), str)
+        and 0 < len(value["manifest_path"].encode("utf-8")) <= 1024
+        and _hash(value.get("plan_id"))
+        and _hash(value.get("source_snapshot"))
+        and value.get("outcome") in {"committed", "replayed"}
+        and isinstance(value.get("rationale"), str)
+        and 0 < len(value["rationale"].encode("utf-8")) <= 512
+        and isinstance(inverse, list)
+        and len(inverse) <= 2048
+    ):
+        return False
+    return all(
+        isinstance(entry, Mapping)
+        and set(entry) == {"before_path", "after_path", "before_hash", "after_hash"}
+        and all(
+            isinstance(entry.get(name), str) and 0 < len(entry[name].encode("utf-8")) <= 1024
+            for name in ("before_path", "after_path")
+        )
+        and _hash(entry.get("before_hash"))
+        and _hash(entry.get("after_hash"))
+        for entry in inverse
+    )
 
 
 _is_record_receipt = valid_record_receipt

@@ -287,9 +287,9 @@ The table contract SHALL be a derived render/egress allowlist, not another canon
 
 ### Requirement: Managed presentation preserves authored Markdown and exact authority
 
-An opted-in item SHALL contain at most one bounded managed block with exact versioned markers and SHA-256 over canonical JSON of recipe identity plus selected canonical values. Rendering SHALL be deterministic, escaped, inference-free, and labelled generated. Persisted link columns SHALL serialize canonical literals independent of audience policy; whole-file authorization controls access to stored bytes.
+An item opted in through valid `record_presentation` or `item_presentation` SHALL contain at most one bounded managed block with exact versioned markers and SHA-256 over canonical JSON of recipe identity plus selected canonical values. Rendering SHALL be deterministic, escaped, inference-free, and labelled generated. Persisted link columns SHALL serialize canonical literals independent of audience policy; whole-file authorization controls access to stored bytes.
 
-Append/value update SHALL render in the guarded audited item batch. Guarded update MAY use `refresh_presentation: true` with empty changes, current item/container guards, and `why`. Reads, query, inspect, revise, rebaseline, and reconcile SHALL NOT render.
+Append/value update SHALL render in the guarded audited item batch. Guarded Records update MAY use `refresh_presentation: true` with empty changes, current item/container guards, and `why`. Reads, query, inspect, rebaseline, and reconcile SHALL NOT render. A guarded manifest revision that removes or replaces a presentation recipe SHALL transactionally remove or replace every owned block or refuse. A guarded `maintain_memory(mode="structured-files")` apply SHALL render only the exact blocks in its current preview plan.
 
 Rendering SHALL source-splice exact bytes and preserve BOM, CRLF/LF, body separator/leading blanks, marker-like ordinary prose, and final-newline state. Duplicate/nested/malformed/oversized exact markers SHALL refuse every rendering mutation.
 
@@ -322,6 +322,14 @@ Semantic append replay SHALL hash canonical values plus exact authored body with
 #### Scenario: Policy does not rewrite stored presentation
 - **WHEN** link release policy changes without canonical byte changes
 - **THEN** expected managed bytes/item hash remain unchanged while query egress follows current policy
+
+#### Scenario: Recipe removal cleans every owned block atomically
+- **WHEN** a guarded complete manifest revision removes a presentation recipe from a collection whose items contain valid owned blocks
+- **THEN** the manifest and exact block removals publish together or no file changes
+
+#### Scenario: Migration renders only the approved plan
+- **WHEN** structured-files apply carries the current plan identity and unchanged source snapshot
+- **THEN** it writes only the previewed presentation transformations under one terminal receipt
 
 ### Requirement: Inspection validates presentation without trusting it
 
@@ -462,3 +470,59 @@ The implementation SHALL preserve shared canonical vectors for the three v2 dige
 #### Scenario: Lifecycle request vector
 - **WHEN** the canonical request is `{"acknowledged_gap_codes":["current-container-mismatch","current-manifest-mismatch"],"action":"rebaseline","before_container_hash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","before_manifest_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","collection_id":"11111111-1111-4111-8111-111111111111","proposed_manifest_hash":null,"rationale":"Acknowledge direct edit"}`
 - **THEN** the `exomem-record-lifecycle-request:v2\0` digest is `349c5a30baf4922922c42512efbfee05607c18888e27ccd39a37deefd9358f01`
+
+### Requirement: Structured manifests may declare shared item representation recipes
+
+A versioned Markdown-item collection manifest SHALL accept optional `item_filename` and `item_presentation` recipes defined by the human-owned structured-files capability. Manifest validation SHALL eagerly validate recipe versions, field existence, field eligibility, renderer compatibility, path safety, managed-marker uniqueness, and worst-case bounded output without reading items outside the declared collection source.
+
+#### Scenario: Invalid recipe fails before collection publication
+
+- **WHEN** create or revision validation receives a recipe with an unknown version, absent field, mutable filename field, unsafe path projection, or unbounded presentation
+- **THEN** validation refuses with exact recipe diagnostics and writes no manifest, item, template, or audit file
+
+#### Scenario: Recipe is optional and path-independent
+
+- **WHEN** a compatible existing collection declares neither shared recipe
+- **THEN** it remains valid and retains its current paths and body behaviour until explicitly revised
+
+### Requirement: Presentation ownership survives recipe removal and conversion
+
+The substrate SHALL recognize managed presentation markers independently of the currently active recipe. Removing or replacing a recipe SHALL either transactionally remove or replace every owned managed block as part of the guarded manifest revision, or SHALL refuse the revision. It SHALL NOT publish a manifest state that leaves a managed block with no active owner.
+
+#### Scenario: Recipe removal cannot orphan generated blocks
+
+- **WHEN** a complete manifest revision removes its presentation recipe while current items contain owned blocks
+- **THEN** the revision either includes their exact transactional cleanup or refuses before changing the manifest
+
+#### Scenario: Conversion preserves authored Markdown
+
+- **WHEN** a collection converts from a compatible profile-specific recipe to `item_presentation`
+- **THEN** each old owned block is replaced by the new deterministic block in the same batch and Markdown outside the markers remains byte-identical
+
+### Requirement: Inspection covers filenames and all managed presentation state
+
+Targeted collection inspection SHALL scan canonical item paths and recognized managed markers even when the active manifest declares no representation recipe. It SHALL report bounded diagnostics for filename drift, projected path collisions, missing presentation, stale recipe digest, stale item version, orphan managed block, unrenderable selected value, unresolved relationship presentation, and authored changes inside managed authority. Inspection SHALL remain report-only.
+
+#### Scenario: Orphan block is unhealthy without an active recipe
+
+- **WHEN** an item contains a recognized managed block but its manifest declares no owning recipe
+- **THEN** inspection reports `orphan_presentation` rather than declaring the collection healthy
+
+#### Scenario: Healthy collection proves representation agreement
+
+- **WHEN** manifest, items, audit, filenames, managed markers, and rendered content agree
+- **THEN** inspection returns no representation diagnostics without rewriting any file
+
+### Requirement: Representation transformations use current canonical collection mechanics
+
+Preview and apply SHALL reuse collection discovery, profile validation, source snapshots, same-vault writer serialization, idempotency, audit publication, stable reference resolution, and governance projection. They SHALL NOT create a second item index or treat rendered Markdown as canonical input.
+
+#### Scenario: Manual canonical edit appears in the next plan
+
+- **WHEN** a human validly edits an item between two read-only representation previews
+- **THEN** the second plan derives from the new canonical hash and receives a different source snapshot or plan identity
+
+#### Scenario: Apply shares existing writer protection
+
+- **WHEN** representation apply races another mutation in the same vault
+- **THEN** the existing writer boundary serializes them and prevents torn file moves or presentation bytes

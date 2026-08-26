@@ -66,6 +66,14 @@ class _AuditChain:
     required_guards: tuple[vault.PathGuard | vault.DirectoryCensusGuard, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class _PresentationRevision:
+    path: str
+    text: str
+    hash: str
+    guard: vault.PathGuard
+
+
 def _canonical_json(value: Any) -> bytes:
     return json.dumps(
         value, ensure_ascii=False, separators=(",", ":"), sort_keys=True, allow_nan=False
@@ -121,7 +129,8 @@ def lifecycle_gap_fingerprint(
 
 def lifecycle_checkpoint_fingerprint(paths_and_hashes: tuple[tuple[str, str], ...]) -> str:
     return hashlib.sha256(
-        _LIFECYCLE_CHECKPOINT_DOMAIN + _canonical_json([list(item) for item in sorted(paths_and_hashes)])
+        _LIFECYCLE_CHECKPOINT_DOMAIN
+        + _canonical_json([list(item) for item in sorted(paths_and_hashes)])
     ).hexdigest()
 
 
@@ -144,7 +153,11 @@ def append_record(
     expected_container_hash: str | None = None,
     why: str,
     body: str = "",
-    validate_snapshot: Callable[[collections.CollectionManifest, record_formats.AdapterSnapshot, str, Mapping[str, Any]], None] | None = None,
+    validate_snapshot: Callable[
+        [collections.CollectionManifest, record_formats.AdapterSnapshot, str, Mapping[str, Any]],
+        None,
+    ]
+    | None = None,
 ) -> dict[str, Any]:
     """Append one structured item, or return a content-identical replay."""
     root = Path(vault_root)
@@ -259,10 +272,15 @@ def append_record(
             canonical_path = source_path
             canonical_guard = source_guard
         else:
-            canonical_path, new_item_guards = _new_item_path(root, manifest, key, snapshot)
+            canonical_path, new_item_guards = _new_item_path(root, manifest, key, values, snapshot)
             directory_guards = (*directory_guards, *new_item_guards)
             replacement = record_formats.render_markdown_item(
-                manifest, values, key, body, audit_correlation
+                manifest,
+                values,
+                key,
+                body,
+                audit_correlation,
+                resolve_relationship=_presentation_relationship_resolver(root, manifest, snapshot),
             )
             after_text = replacement
             item_hash = hashlib.sha256(replacement.encode("utf-8")).hexdigest()
@@ -339,9 +357,7 @@ def append_record(
             audit_correlation=audit_correlation,
         )
     # Outside the guard on purpose -- see `_due_state_carrier`.
-    advisory = _due_state_carrier(
-        root, manifest, path=committed_path, key=key, values=values
-    )
+    advisory = _due_state_carrier(root, manifest, path=committed_path, key=key, values=values)
     return {"due_state": advisory, **committed} if advisory else committed
 
 
@@ -358,7 +374,11 @@ def update_record(
     delete_fields: tuple[str, ...] = (),
     body: str | None = None,
     refresh_presentation: bool = False,
-    validate_snapshot: Callable[[collections.CollectionManifest, record_formats.AdapterSnapshot, str, Mapping[str, Any]], None] | None = None,
+    validate_snapshot: Callable[
+        [collections.CollectionManifest, record_formats.AdapterSnapshot, str, Mapping[str, Any]],
+        None,
+    ]
+    | None = None,
 ) -> dict[str, Any]:
     """Apply a guarded, exact-key update to one existing Markdown record."""
     root = Path(vault_root)
@@ -367,16 +387,24 @@ def update_record(
         _validate_body(body)
     item_key = _validate_item_key(item_key)
     if type(refresh_presentation) is not bool:
-        raise collections.CollectionError("INVALID_RECORD_PRESENTATION", "refresh_presentation must be boolean")
-    if not isinstance(changes, Mapping) or (not changes and not delete_fields and body is None and not refresh_presentation):
+        raise collections.CollectionError(
+            "INVALID_RECORD_PRESENTATION", "refresh_presentation must be boolean"
+        )
+    if not isinstance(changes, Mapping) or (
+        not changes and not delete_fields and body is None and not refresh_presentation
+    ):
         raise collections.CollectionError(
             "INVALID_RECORD_CHANGES", "changes must be a non-empty object"
         )
     _refuse_excluded_authored_names(changes)
     with writer_lease.active_manager().mutation_guard(root, operation="record_update"):
         manifest, manifest_text, manifest_guard = _load_guarded_manifest(root, collection)
-        if refresh_presentation and manifest.record_presentation is None:
-            raise collections.CollectionError("INVALID_RECORD_PRESENTATION", "collection has no record_presentation")
+        if refresh_presentation and (
+            manifest.record_presentation is None and manifest.item_presentation is None
+        ):
+            raise collections.CollectionError(
+                "INVALID_RECORD_PRESENTATION", "collection has no presentation recipe"
+            )
         record_governance.require_mutation_visibility(root, manifest)
         adapter = record_formats.load_adapter(root, manifest)
         if not adapter.mutable:
@@ -440,8 +468,16 @@ def update_record(
                     "an existing item already holds this natural key under another identity",
                     {"item_keys": twins},
                 )
+        relationship_resolver = _presentation_relationship_resolver(root, manifest, snapshot)
         if refresh_presentation and not changes and not delete_fields and body is None:
-            if record_formats.splice_record_presentation(source_text, manifest, values) == source_text:
+            refreshed = record_formats.splice_record_presentation(source_text, manifest, values)
+            refreshed = record_formats.splice_item_presentation(
+                refreshed,
+                manifest,
+                values,
+                resolve_relationship=relationship_resolver,
+            )
+            if refreshed == source_text:
                 raise collections.CollectionError(
                     "NOOP_RECORD_PRESENTATION", "managed presentation is already current"
                 )
@@ -475,6 +511,12 @@ def update_record(
                 body=body,
             )
             replacement = record_formats.splice_record_presentation(replacement, manifest, values)
+            replacement = record_formats.splice_item_presentation(
+                replacement,
+                manifest,
+                values,
+                resolve_relationship=relationship_resolver,
+            )
             after_text = replacement
             canonical_path = source_path
             before_container_hash = snapshot.snapshot
@@ -703,6 +745,24 @@ def validate_collection_create(
     scaffold: bool = True,
 ) -> dict[str, Any]:
     """Preflight collection creation without writer authority or vault mutation."""
+    return _validate_collection_create_for_profile(
+        vault_root,
+        manifest_path,
+        manifest_text,
+        semantic_profile="records",
+        scaffold=scaffold,
+    )
+
+
+def _validate_collection_create_for_profile(
+    vault_root: Path,
+    manifest_path: str | Path,
+    manifest_text: str,
+    *,
+    semantic_profile: str,
+    scaffold: bool = True,
+) -> dict[str, Any]:
+    """Shared create preflight with one explicit product-profile boundary."""
     root = Path(vault_root)
     if not isinstance(manifest_text, str) or not manifest_text:
         raise collections.CollectionError(
@@ -711,7 +771,13 @@ def validate_collection_create(
     manifest = _preflight_collection_create(
         root, root / manifest_path, manifest_text, scaffold=scaffold
     )
-    record_governance.require_records_profile(manifest)
+    if manifest.semantic_profile != semantic_profile:
+        raise collections.CollectionError(
+            "RECORDS_PROFILE_REQUIRED"
+            if semantic_profile == "records"
+            else "PLANNING_PROFILE_REQUIRED",
+            f"{semantic_profile.title()} collection is required",
+        )
     _require_activity_log(root)
     if not all(
         record_governance.full_release_filter(root)(path)
@@ -744,17 +810,49 @@ def validate_collection_revision(
     manifest_text: str,
 ) -> dict[str, Any]:
     """Validate a proposed existing manifest without acquiring writer authority."""
+    return _validate_collection_revision_for_profile(
+        vault_root,
+        collection,
+        manifest_text,
+        semantic_profile="records",
+    )
+
+
+def _validate_collection_revision_for_profile(
+    vault_root: Path,
+    collection: str | Path | collections.CollectionManifest,
+    manifest_text: str,
+    *,
+    semantic_profile: str,
+) -> dict[str, Any]:
+    """Shared revision preflight with profile-specific identity and audit names."""
     root = Path(vault_root)
     current = record_governance.resolve_collection(root, collection)
+    if current.semantic_profile != semantic_profile:
+        raise collections.CollectionError(
+            "RECORDS_PROFILE_REQUIRED"
+            if semantic_profile == "records"
+            else "PLANNING_PROFILE_REQUIRED",
+            f"{semantic_profile.title()} collection is required",
+        )
     record_governance.require_mutation_visibility(root, current)
     snapshot = record_formats.load_adapter(root, current).read()
     _current_text, current_guard = _read_record_bytes(root, current.path)
     try:
         current_text = _current_text.decode("utf-8")
     except UnicodeDecodeError as error:
-        raise collections.CollectionError("INVALID_COLLECTION_MANIFEST", "manifest is not UTF-8") from error
+        raise collections.CollectionError(
+            "INVALID_COLLECTION_MANIFEST", "manifest is not UTF-8"
+        ) from error
     current_guard.recheck(root)
-    proposed = _validate_revision_manifest(root, current, current_text, manifest_text, snapshot)
+    proposed = _validate_revision_manifest(
+        root,
+        current,
+        current_text,
+        manifest_text,
+        snapshot,
+        semantic_profile=semantic_profile,
+    )
     return {
         "valid": True,
         "lifecycle_guards": lifecycle_guards(current, snapshot),
@@ -781,6 +879,7 @@ def revise_collection(
         expected_container_hash=expected_container_hash,
         acknowledged_gap_codes=(),
         why=why,
+        semantic_profile="records",
     )
 
 
@@ -807,6 +906,7 @@ def rebaseline_collection(
         expected_container_hash=expected_container_hash,
         acknowledged_gap_codes=tuple(acknowledged_gap_codes),
         why=why,
+        semantic_profile="records",
     )
 
 
@@ -820,6 +920,7 @@ def _lifecycle_mutation(
     expected_container_hash: str,
     acknowledged_gap_codes: tuple[str, ...],
     why: str,
+    semantic_profile: str,
 ) -> dict[str, Any]:
     root = Path(vault_root)
     _validate_why(why)
@@ -827,8 +928,13 @@ def _lifecycle_mutation(
         raise collections.CollectionError("INVALID_RECORD_ACTION", "lifecycle action is invalid")
     with writer_lease.active_manager().mutation_guard(root, operation=f"record_{action}"):
         current, current_text, manifest_guard = _load_guarded_manifest(root, collection)
-        if current.semantic_profile != "records":
-            raise collections.CollectionError("RECORDS_PROFILE_REQUIRED", "Records collection is required")
+        if current.semantic_profile != semantic_profile:
+            raise collections.CollectionError(
+                "RECORDS_PROFILE_REQUIRED"
+                if semantic_profile == "records"
+                else "PLANNING_PROFILE_REQUIRED",
+                f"{semantic_profile.title()} collection is required",
+            )
         record_governance.require_mutation_visibility(root, current)
         snapshot = record_formats.load_adapter(root, current).read()
         _require_unambiguous_snapshot(snapshot)
@@ -842,24 +948,43 @@ def _lifecycle_mutation(
         guards = lifecycle_guards(current, snapshot)
         _expect_hash(expected_manifest_hash, guards["expected_manifest_hash"], "manifest")
         _expect_hash(expected_container_hash, guards["expected_container_hash"], "container")
-        chain = _inspect_audit_chain(root, current, authorize_path=record_governance.full_release_filter(root))
+        chain = _inspect_audit_chain(
+            root, current, authorize_path=record_governance.full_release_filter(root)
+        )
         if action == "revise":
             if chain.status not in {"baseline", "ok"}:
-                raise collections.CollectionError("RECORD_AUDIT_GAP", "revision requires continuous audit history")
+                raise collections.CollectionError(
+                    "RECORD_AUDIT_GAP", "revision requires continuous audit history"
+                )
             assert manifest_text is not None
-            proposed = _validate_revision_manifest(root, current, current_text, manifest_text, snapshot)
+            proposed = _validate_revision_manifest(
+                root,
+                current,
+                current_text,
+                manifest_text,
+                snapshot,
+                semantic_profile=semantic_profile,
+            )
+            presentation_revisions = _plan_presentation_revision(root, current, proposed, snapshot)
             candidate_text = manifest_text
             codes: tuple[str, ...] = ()
             continuity = True
             gap_fingerprint = None
             checkpoint_fingerprint = None
         else:
-            if chain.status != "gap" or not chain.gaps or not _acknowledgeable_gap_codes(chain.gaps):
-                raise collections.CollectionError("RECORD_AUDIT_GAP", "rebaseline requires an inspectable audit gap")
+            if (
+                chain.status != "gap"
+                or not chain.gaps
+                or not _acknowledgeable_gap_codes(chain.gaps)
+            ):
+                raise collections.CollectionError(
+                    "RECORD_AUDIT_GAP", "rebaseline requires an inspectable audit gap"
+                )
             codes = _validate_gap_codes(acknowledged_gap_codes)
             if codes != chain.gaps:
                 raise collections.CollectionError("STALE_RECORD", "gap acknowledgement is stale")
             proposed = current
+            presentation_revisions = ()
             candidate_text = current_text
             continuity = False
             prior_head = current.audit_head or "baseline"
@@ -876,11 +1001,17 @@ def _lifecycle_mutation(
         marked_text = record_formats.render_manifest_audit_head(
             candidate_text,
             transition_id,
-            semantic_profile="records",
+            semantic_profile=semantic_profile,
             reader_version=2,
         )
-        after = collections.parse_manifest_bytes(root, root / current.path, marked_text.encode("utf-8"))
-        after_container_hash = _container_hash(after, snapshot)
+        after = collections.parse_manifest_bytes(
+            root, root / current.path, marked_text.encode("utf-8")
+        )
+        after_container_hash = _container_hash_with_replacements(
+            after,
+            snapshot,
+            {revision.path: revision.hash for revision in presentation_revisions},
+        )
         payload_hash = lifecycle_request_hash(
             action=action,
             collection_id=current.collection_id,
@@ -914,25 +1045,41 @@ def _lifecycle_mutation(
             root, current, authorize_path=record_governance.full_release_filter(root)
         )
         if rechecked_chain.status != chain.status or rechecked_chain.gaps != chain.gaps:
-            raise collections.CollectionError("STALE_RECORD", "audit history changed before publication")
+            raise collections.CollectionError(
+                "STALE_RECORD", "audit history changed before publication"
+            )
         record_governance.precommit_authorize_mutation(
             root,
             current,
             snapshot,
             planned_paths=(
                 current.path,
+                *(revision.path for revision in presentation_revisions),
                 *(write.path.relative_to(root).as_posix() for write in log_plan.writes),
             ),
         )
         try:
             vault.batch_atomic_write(
                 [
+                    *(
+                        vault.PlannedWrite(
+                            root / revision.path,
+                            revision.text,
+                            guard=revision.guard,
+                        )
+                        for revision in presentation_revisions
+                    ),
                     vault.PlannedWrite(root / current.path, marked_text, guard=manifest_guard),
                     *log_plan.writes,
                 ],
                 vault_root=root,
                 required_guards=(
-                    *snapshot.path_guards,
+                    *(
+                        guard
+                        for guard in snapshot.path_guards
+                        if guard.target
+                        not in {revision.path for revision in presentation_revisions}
+                    ),
                     *snapshot.directory_guards,
                     *rechecked_chain.required_guards,
                 ),
@@ -954,6 +1101,10 @@ def _lifecycle_mutation(
             acknowledged_gap_codes=codes,
             gap_fingerprint=gap_fingerprint,
             checkpoint_snapshot_hash=checkpoint_fingerprint,
+            affected_paths=(
+                current.path,
+                *(revision.path for revision in presentation_revisions),
+            ),
         )
 
 
@@ -963,15 +1114,21 @@ def _validate_revision_manifest(
     current_text: str,
     manifest_text: str,
     snapshot: record_formats.AdapterSnapshot,
+    *,
+    semantic_profile: str,
 ) -> collections.CollectionManifest:
     if not isinstance(manifest_text, str) or not manifest_text:
-        raise collections.CollectionError("INVALID_COLLECTION_MANIFEST", "manifest text is required")
-    proposed = collections.parse_manifest_bytes(root, root / current.path, manifest_text.encode("utf-8"))
+        raise collections.CollectionError(
+            "INVALID_COLLECTION_MANIFEST", "manifest text is required"
+        )
+    proposed = collections.parse_manifest_bytes(
+        root, root / current.path, manifest_text.encode("utf-8")
+    )
     _refuse_excluded_manifest_fields(proposed)
     if proposed.view_diagnostics:
         diagnostic = proposed.view_diagnostics[0]
         raise collections.CollectionError(diagnostic.code, diagnostic.reason)
-    if proposed.semantic_profile != "records" or (
+    if proposed.semantic_profile != semantic_profile or (
         proposed.collection_id != current.collection_id
         or proposed.semantic_profile != current.semantic_profile
         or proposed.storage.strategy != current.storage.strategy
@@ -981,35 +1138,172 @@ def _validate_revision_manifest(
         or proposed.schema.version != current.schema.version
         or proposed.schema.natural_key != current.schema.natural_key
     ):
-        raise collections.CollectionError("IMMUTABLE_COLLECTION_REPRESENTATION", "revision cannot migrate collection representation")
-    proposed_audit = _record_audit_mapping(manifest_text)
-    current_audit = _record_audit_mapping(current_text)
+        raise collections.CollectionError(
+            "IMMUTABLE_COLLECTION_REPRESENTATION",
+            "revision cannot migrate collection representation",
+        )
+    proposed_audit = _manifest_audit_mapping(manifest_text, semantic_profile)
+    current_audit = _manifest_audit_mapping(current_text, semantic_profile)
     if proposed_audit is not None and proposed_audit != current_audit:
-        raise collections.CollectionError("INVALID_RECORD_AUDIT", "proposed audit state must match current state")
+        raise collections.CollectionError(
+            "INVALID_RECORD_AUDIT", "proposed audit state must match current state"
+        )
     record_formats.validate_storage_contract(proposed)
     record_governance.require_proposed_manifest_visibility(root, proposed)
     for record in snapshot.records:
         _validate_values(proposed, record.values)
         if proposed.record_presentation is not None:
             record_formats._presentation_payload(proposed, record.values)
+        if proposed.item_presentation is not None:
+            record_formats._item_presentation_digests(proposed, record.values)
+    _plan_presentation_revision(root, current, proposed, snapshot)
     return proposed
 
 
-def _record_audit_mapping(text: str) -> dict[str, Any] | None:
+def _plan_presentation_revision(
+    root: Path,
+    current: collections.CollectionManifest,
+    proposed: collections.CollectionManifest,
+    snapshot: record_formats.AdapterSnapshot,
+) -> tuple[_PresentationRevision, ...]:
+    """Plan exact owned-block cleanup or conversion for one manifest revision."""
+    presentation_changed = (
+        current.record_presentation != proposed.record_presentation
+        or current.item_presentation != proposed.item_presentation
+    )
+    if not presentation_changed:
+        return ()
+    if current.storage.strategy != "markdown-items":
+        raise collections.CollectionError(
+            "IMMUTABLE_COLLECTION_REPRESENTATION",
+            "presentation revision requires markdown-items storage",
+        )
+    current_owner = (
+        "legacy"
+        if current.record_presentation is not None
+        else "shared"
+        if current.item_presentation is not None
+        else None
+    )
+    proposed_owner = (
+        "legacy"
+        if proposed.record_presentation is not None
+        else "shared"
+        if proposed.item_presentation is not None
+        else None
+    )
+    source_bytes = dict(snapshot.source_bytes)
+    guards = {
+        guard.target: guard for guard in snapshot.path_guards if isinstance(guard, vault.PathGuard)
+    }
+    resolve_relationship = record_formats.presentation_relationship_resolver(
+        root,
+        proposed,
+        snapshot,
+        authorize_path=record_governance.full_release_filter(root),
+    )
+    revisions: list[_PresentationRevision] = []
+    for record in snapshot.records:
+        data = source_bytes.get(record.source.path)
+        guard = guards.get(record.source.path)
+        if data is None or guard is None:
+            raise collections.CollectionError(
+                "SOURCE_NOT_FOUND", "item presentation source is unavailable"
+            )
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise collections.CollectionError(
+                "INVALID_RECORD_ITEM", "record item is not UTF-8"
+            ) from error
+        legacy_present = bool(
+            record_formats._PRESENTATION_OPEN.search(text)
+            or record_formats._PRESENTATION_CLOSE.search(text)
+        )
+        shared_present = bool(
+            record_formats._ITEM_PRESENTATION_OPEN.search(text)
+            or record_formats._ITEM_PRESENTATION_CLOSE.search(text)
+        )
+        if legacy_present and shared_present:
+            raise collections.CollectionError(
+                "ORPHANED_ITEM_PRESENTATION",
+                "item contains multiple managed presentation owners",
+            )
+        try:
+            legacy_span = record_formats._presentation_span(text) if legacy_present else None
+            shared_span = record_formats._item_presentation_span(text) if shared_present else None
+        except collections.CollectionError as error:
+            raise collections.CollectionError(
+                "ORPHANED_ITEM_PRESENTATION",
+                "managed presentation markers must be repaired before revision",
+            ) from error
+
+        if current_owner is None:
+            if (legacy_present and proposed_owner != "legacy") or (
+                shared_present and proposed_owner != "shared"
+            ):
+                raise collections.CollectionError(
+                    "ORPHANED_ITEM_PRESENTATION",
+                    "revision would retain an unowned managed presentation",
+                )
+            continue
+
+        owned_span = legacy_span if current_owner == "legacy" else shared_span
+        other_present = shared_present if current_owner == "legacy" else legacy_present
+        if other_present:
+            raise collections.CollectionError(
+                "ORPHANED_ITEM_PRESENTATION",
+                "revision would retain an unowned managed presentation",
+            )
+        if owned_span is None:
+            continue
+        updated = (
+            record_formats.remove_record_presentation(text)
+            if current_owner == "legacy"
+            else record_formats.remove_item_presentation(text)
+        )
+        if proposed_owner == "legacy":
+            updated = record_formats.splice_record_presentation(updated, proposed, record.values)
+        elif proposed_owner == "shared":
+            updated = record_formats.splice_item_presentation(
+                updated,
+                proposed,
+                record.values,
+                resolve_relationship=resolve_relationship,
+            )
+        if updated != text:
+            revisions.append(
+                _PresentationRevision(
+                    path=record.source.path,
+                    text=updated,
+                    hash=hashlib.sha256(updated.encode("utf-8")).hexdigest(),
+                    guard=guard,
+                )
+            )
+    return tuple(revisions)
+
+
+def _manifest_audit_mapping(text: str, semantic_profile: str) -> dict[str, Any] | None:
     try:
         frontmatter, _body, marker = vault.parse_frontmatter(text, strict=True)
     except vault.FrontmatterError as error:
-        raise collections.CollectionError("INVALID_COLLECTION_MANIFEST", "manifest requires valid frontmatter") from error
+        raise collections.CollectionError(
+            "INVALID_COLLECTION_MANIFEST", "manifest requires valid frontmatter"
+        ) from error
     if marker is None:
-        raise collections.CollectionError("INVALID_COLLECTION_MANIFEST", "manifest requires frontmatter")
-    audit = frontmatter.get("record_audit")
+        raise collections.CollectionError(
+            "INVALID_COLLECTION_MANIFEST", "manifest requires frontmatter"
+        )
+    audit = frontmatter.get(profile_for(semantic_profile).manifest_audit_property)
     return dict(audit) if isinstance(audit, Mapping) else None
 
 
 def _validate_gap_codes(value: tuple[str, ...]) -> tuple[str, ...]:
     codes = tuple(sorted(set(value)))
-    if not codes or len(codes) != len(value) or any(
-        not code or len(code.encode("utf-8")) > 256 for code in codes
+    if (
+        not codes
+        or len(codes) != len(value)
+        or any(not code or len(code.encode("utf-8")) > 256 for code in codes)
     ):
         raise collections.CollectionError("INVALID_RECORD_GAPS", "gap acknowledgement is invalid")
     return codes
@@ -1021,16 +1315,27 @@ def _acknowledgeable_gap_codes(codes: tuple[str, ...]) -> bool:
 
 def _require_unambiguous_snapshot(snapshot: record_formats.AdapterSnapshot) -> None:
     if snapshot.diagnostics or any(record.ambiguous for record in snapshot.records):
-        raise collections.CollectionError("INVALID_RECORD_COLLECTION", "collection items are not structurally valid")
+        raise collections.CollectionError(
+            "INVALID_RECORD_COLLECTION", "collection items are not structurally valid"
+        )
 
 
 def _container_hash(
     manifest: collections.CollectionManifest, snapshot: record_formats.AdapterSnapshot
 ) -> str:
+    return _container_hash_with_replacements(manifest, snapshot, {})
+
+
+def _container_hash_with_replacements(
+    manifest: collections.CollectionManifest,
+    snapshot: record_formats.AdapterSnapshot,
+    replacements: Mapping[str, str],
+) -> str:
     if manifest.storage.strategy == "markdown-log":
         return snapshot.source_versions[-1].hash
     pairs = [(manifest.manifest_version.path, manifest.manifest_version.hash)] + [
-        (f"{kind}:{path}", digest) for path, kind, digest in snapshot.source_inventory
+        (f"{kind}:{path}", replacements.get(path, digest))
+        for path, kind, digest in snapshot.source_inventory
     ]
     return hashlib.sha256(_canonical_json(pairs)).hexdigest()
 
@@ -1052,11 +1357,13 @@ def _lifecycle_audit_body(
     gap_fingerprint: str | None,
     checkpoint_snapshot_hash: str | None,
 ) -> str:
+    profile = profile_for(manifest.semantic_profile)
+    public_operation = f"plan_{operation}" if profile.name == "planning" else operation
     event = {
         "version": _LIFECYCLE_EVENT_VERSION,
         "transition_id": transition_id,
         "parent_id": parent_id,
-        "operation": operation,
+        "operation": public_operation,
         "collection_id": manifest.collection_id,
         "manifest_path": manifest.path,
         "source_path": manifest.storage.source,
@@ -1076,7 +1383,7 @@ def _lifecycle_audit_body(
         "checkpoint_snapshot_hash": checkpoint_snapshot_hash,
         "minimum_reader_version": 2,
     }
-    return profile_for("records").activity_prefix + json.dumps(
+    return profile.activity_prefix + json.dumps(
         event, ensure_ascii=False, separators=(",", ":"), allow_nan=False, sort_keys=True
     )
 
@@ -1095,9 +1402,13 @@ def _lifecycle_result(
     acknowledged_gap_codes: tuple[str, ...],
     gap_fingerprint: str | None,
     checkpoint_snapshot_hash: str | None,
+    affected_paths: tuple[str, ...],
 ) -> dict[str, Any]:
+    profile = profile_for(manifest.semantic_profile)
     return {
-        "_record_receipt": _RECEIPT_MARKER,
+        "_record_receipt" if profile.name == "records" else "_plan_receipt": (
+            _RECEIPT_MARKER if profile.name == "records" else "exomem.planning-mutation"
+        ),
         "receipt_version": _LIFECYCLE_RECEIPT_VERSION,
         "operation": operation,
         "collection_id": manifest.collection_id,
@@ -1108,7 +1419,7 @@ def _lifecycle_result(
         "after_manifest_hash": after_manifest_hash,
         "before_container_hash": before_container_hash,
         "after_container_hash": after_container_hash,
-        "affected_paths": [manifest.path],
+        "affected_paths": list(affected_paths),
         "payload_hash": payload_hash,
         "outcome": "committed",
         "audit_correlation": audit_correlation,
@@ -1214,7 +1525,11 @@ def agent_audit_history(
         "truncated": len(chain.events) > len(events),
         "events": [_project_agent_audit_event(event) for event in events],
         **({"discontinuity": dict(chain.discontinuity)} if chain.discontinuity is not None else {}),
-        **({"discontinuities": [dict(item) for item in chain.discontinuities]} if chain.discontinuities else {}),
+        **(
+            {"discontinuities": [dict(item) for item in chain.discontinuities]}
+            if chain.discontinuities
+            else {}
+        ),
     }
 
 
@@ -1329,7 +1644,9 @@ def _audit_chain(
     discontinuities: tuple[Mapping[str, Any], ...] = (),
     required_guards: tuple[vault.PathGuard | vault.DirectoryCensusGuard, ...] = (),
 ) -> _AuditChain:
-    return _AuditChain(status, gaps, events, complete, discontinuity, discontinuities, required_guards)
+    return _AuditChain(
+        status, gaps, events, complete, discontinuity, discontinuities, required_guards
+    )
 
 
 def _reconstruct_audit_chain(
@@ -1363,7 +1680,9 @@ def _reconstruct_audit_chain(
         # a current/deleted item is outside this request's release boundary.
         return _incomplete_audit_chain()
     if head is None and not markers and not relevant:
-        return _audit_chain("baseline" if history.parsed else "history_incomplete", (), (), complete=history.parsed)
+        return _audit_chain(
+            "baseline" if history.parsed else "history_incomplete", (), (), complete=history.parsed
+        )
     if not history.parsed:
         return _incomplete_audit_chain()
     all_by_id: dict[str, dict[str, Any]] = {}
@@ -1420,7 +1739,8 @@ def _reconstruct_audit_chain(
                 gaps.append("missing-parent:" + cursor["parent_id"])
                 break
             if cursor.get("operation") == "rebaseline" and cursor.get("continuity") is False:
-                discontinuities.append({
+                discontinuities.append(
+                    {
                     "provenance_continuity": False,
                     "prior_head": cursor["parent_id"],
                     "acknowledged_gap_codes": list(cursor["acknowledged_gap_codes"]),
@@ -1428,7 +1748,8 @@ def _reconstruct_audit_chain(
                     "checkpoint_transition": cursor["transition_id"],
                     "gap_fingerprint": cursor["gap_fingerprint"],
                     "checkpoint_snapshot_hash": cursor["checkpoint_snapshot_hash"],
-                })
+                    }
+                )
             elif (
                 cursor["before_container_hash"] != predecessor["after_container_hash"]
                 or cursor["before_manifest_hash"] != predecessor["after_manifest_hash"]
@@ -1573,7 +1894,9 @@ def _event_matches_collection(
 def _event_matches_transition(
     event: Mapping[str, Any], manifest: collections.CollectionManifest
 ) -> bool:
-    if not _valid_audit_event(event, manifest.semantic_profile) or not _event_matches_collection(event, manifest):
+    if not _valid_audit_event(event, manifest.semantic_profile) or not _event_matches_collection(
+        event, manifest
+    ):
         return False
     source = manifest.storage.source
     operation = event["operation"]
@@ -1589,7 +1912,7 @@ def _event_matches_transition(
             and event["before_item_hash"] is None
             and event["before_container_hash"] is None
         )
-    if operation in {"revise", "rebaseline"}:
+    if operation in {"revise", "rebaseline", "plan_revise", "plan_rebaseline"}:
         return (
             item_key is None
             and event["canonical_path"] == manifest.path
@@ -1668,7 +1991,9 @@ def _structural_audit_marker(
     if not lines:
         return None
     marker = re.compile(
-        rb"#\s*" + re.escape(profile_for(manifest.semantic_profile).item_audit_marker.encode()) + rb":\s*([0-9a-f]{24})\s*"
+        rb"#\s*"
+        + re.escape(profile_for(manifest.semantic_profile).item_audit_marker.encode())
+        + rb":\s*([0-9a-f]{24})\s*"
     )
     audit = marker.fullmatch(lines[-1].strip())
     return audit.group(1).decode("ascii") if audit is not None else None
@@ -1783,8 +2108,10 @@ def _audit_events(
         tuple(events),
         True,
         tuple(
-            (*((archive_guard,) if archive_guard is not None else ()),
-             *(guard for guard in file_guards if guard.target != live))
+            (
+                *((archive_guard,) if archive_guard is not None else ()),
+                *(guard for guard in file_guards if guard.target != live),
+            )
         ),
     )
 
@@ -1898,7 +2225,7 @@ def _audit_event_syntax(event: Any, semantic_profile: str = "records") -> bool:
 
 
 def _valid_lifecycle_audit_event(event: Mapping[str, Any], semantic_profile: str) -> bool:
-    if semantic_profile != "records" or set(event) != {
+    if semantic_profile not in {"records", "planning"} or set(event) != {
         "version",
         "transition_id",
         "parent_id",
@@ -1933,18 +2260,32 @@ def _valid_lifecycle_audit_event(event: Mapping[str, Any], semantic_profile: str
     if not (
         type(event["version"]) is int
         and event["version"] == _LIFECYCLE_EVENT_VERSION
-        and event["operation"] in {"revise", "rebaseline"}
+        and event["operation"]
+        in (
+            {"revise", "rebaseline"}
+            if semantic_profile == "records"
+            else {"plan_revise", "plan_rebaseline"}
+        )
         and isinstance(event["transition_id"], str)
         and re.fullmatch(r"[0-9a-f]{24}", event["transition_id"]) is not None
         and isinstance(event["parent_id"], str)
-        and (event["parent_id"] == "baseline" or re.fullmatch(r"[0-9a-f]{24}", event["parent_id"]) is not None)
+        and (
+            event["parent_id"] == "baseline"
+            or re.fullmatch(r"[0-9a-f]{24}", event["parent_id"]) is not None
+        )
         and _validate_audit_item_key(event["collection_id"]) is not None
-        and all(_safe_audit_path(event[name]) for name in ("manifest_path", "source_path", "canonical_path"))
+        and all(
+            _safe_audit_path(event[name])
+            for name in ("manifest_path", "source_path", "canonical_path")
+        )
         and event["canonical_path"] == event["manifest_path"]
         and event["item_key"] is None
         and event["before_item_hash"] is None
         and event["after_item_hash"] is None
-        and all(isinstance(event[name], str) and re.fullmatch(r"[0-9a-f]{64}", event[name]) for name in hashes)
+        and all(
+            isinstance(event[name], str) and re.fullmatch(r"[0-9a-f]{64}", event[name])
+            for name in hashes
+        )
         and isinstance(event["rationale"], str)
         and bool(event["rationale"].strip())
         and "\n" not in event["rationale"]
@@ -1952,13 +2293,16 @@ def _valid_lifecycle_audit_event(event: Mapping[str, Any], semantic_profile: str
         and len(event["rationale"].encode("utf-8")) <= _MAX_WHY_BYTES
         and type(event["continuity"]) is bool
         and isinstance(event["acknowledged_gap_codes"], list)
-        and all(type(code) is str and code and len(code.encode("utf-8")) <= 256 for code in event["acknowledged_gap_codes"])
+        and all(
+            type(code) is str and code and len(code.encode("utf-8")) <= 256
+            for code in event["acknowledged_gap_codes"]
+        )
         and type(event["minimum_reader_version"]) is int
         and event["minimum_reader_version"] == 2
     ):
         return False
     codes = event["acknowledged_gap_codes"]
-    if event["operation"] == "revise":
+    if event["operation"] == ("revise" if semantic_profile == "records" else "plan_revise"):
         return (
             event["continuity"] is True
             and codes == []
@@ -2070,9 +2414,7 @@ def _refuse_excluded_authored_names(names: object) -> None:
     if excluded is None:
         return
     field, reason = excluded
-    raise collections.CollectionError(
-        vault.EXCLUDED_FIELD_CODE, reason, details={"field": field}
-    )
+    raise collections.CollectionError(vault.EXCLUDED_FIELD_CODE, reason, details={"field": field})
 
 
 def _refuse_excluded_manifest_fields(
@@ -2085,9 +2427,7 @@ def _refuse_excluded_manifest_fields(
     if excluded is None:
         return
     field, reason = excluded
-    raise collections.CollectionError(
-        vault.EXCLUDED_FIELD_CODE, reason, details={"field": field}
-    )
+    raise collections.CollectionError(vault.EXCLUDED_FIELD_CODE, reason, details={"field": field})
 
 
 def _validate_representable(value: Any) -> None:
@@ -2209,10 +2549,24 @@ def _newline(data: bytes) -> str:
     return "\r\n" if b"\r\n" in data else "\n"
 
 
+def _presentation_relationship_resolver(
+    root: Path,
+    manifest: collections.CollectionManifest,
+    snapshot: record_formats.AdapterSnapshot,
+) -> Callable[[str, str], tuple[str, str] | None] | None:
+    return record_formats.presentation_relationship_resolver(
+        root,
+        manifest,
+        snapshot,
+        authorize_path=record_governance.full_release_filter(root),
+    )
+
+
 def _new_item_path(
     root: Path,
     manifest: collections.CollectionManifest,
     key: str,
+    values: Mapping[str, Any],
     snapshot: record_formats.AdapterSnapshot,
 ) -> tuple[Path, tuple[vault.DirectoryCensusGuard, ...]]:
     source = root / manifest.storage.source
@@ -2222,7 +2576,21 @@ def _new_item_path(
     )
     if source_guard is None or source_guard.directory_identity is None:
         raise collections.CollectionError("SOURCE_NOT_FOUND", "item directory could not be read")
-    target = source / f"{key}.md"
+    if manifest.item_filename is not None:
+        occupied_paths = {record.source.path for record in snapshot.records} | {
+            f"{manifest.storage.source.rstrip('/')}/{entry.relative_path}"
+            for entry in source_guard.entries
+            if not stat.S_ISDIR(entry.mode)
+        }
+        relative = collections.render_item_path(
+            manifest,
+            values,
+            key,
+            occupied_paths=occupied_paths,
+        )
+        target = root / relative
+    else:
+        target = source / f"{key}.md"
     target_name = target.name.casefold()
     if any(
         Path(entry.relative_path).name.casefold() == target_name for entry in source_guard.entries
