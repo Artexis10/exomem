@@ -100,4 +100,3 @@ Remediation SHALL require capture of the original material or explicit removal o
 
 - **WHEN** audit finds an unresolved original citation but only a partial derivative remains in the vault
 - **THEN** no automatic remediation creates a source from that derivative and the finding remains until original capture or explicit citation removal
-

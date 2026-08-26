@@ -36,4 +36,3 @@ Source and Evidence capture commands SHALL remain valid without a pending derive
 
 - **WHEN** a source entry resembles a connector URL or object identifier
 - **THEN** the writer refuses locally without network access or a hidden capture side effect
-

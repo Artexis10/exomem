@@ -119,4 +119,3 @@ Structured-file maintenance SHALL default to a read-only preview for exactly one
 
 - **WHEN** a structured-file plan commits successfully
 - **THEN** its audit receipt records the exact prior and final paths and content hashes needed for a guarded inverse operation
-

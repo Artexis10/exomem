@@ -41,4 +41,3 @@ Records inspection SHALL apply the shared representation diagnostics to both pre
 
 - **WHEN** a collection contains a legacy managed block but its current manifest declares no presentation recipe
 - **THEN** Records inspection reports the orphan and identifies explicit cleanup or manifest restoration as remediation
-

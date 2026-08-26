@@ -46,4 +46,3 @@ Newly scaffolded Planning Markdown-item manifests SHALL declare an `item_filenam
 
 - **WHEN** an item has Records evidence or external execution pointers
 - **THEN** the body may link or label the authored descriptors but does not infer completion, health, urgency, or next action
-

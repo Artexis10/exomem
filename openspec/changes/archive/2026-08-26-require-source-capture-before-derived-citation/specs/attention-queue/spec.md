@@ -41,4 +41,3 @@ Finding identity SHALL be deterministic from the derived page identity and norma
 
 - **WHEN** another source with similar text is captured but the cited value remains unresolved
 - **THEN** the finding identity and open audit result remain unchanged
-
