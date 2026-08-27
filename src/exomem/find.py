@@ -85,6 +85,13 @@ _collapse = find_results.collapse
 _DEGRADATION_LOCK = threading.Lock()
 _DEGRADATION_COUNTS: dict[str, int] = {}
 
+# Bounded-staleness disclosure. A request answered from the catalog's last
+# published recall projection — rather than one proven exactly current — rides
+# the existing `warming.components` envelope under this name, so a caller can
+# tell "these hits may not include the newest writes" from a fully current
+# answer without a new envelope field.
+_RECALL_PROJECTION_STALE_COMPONENT = "recall_projection"
+
 
 def _record_degradation(lane: str) -> None:
     """Increment the process-lifetime silent-degradation counter for `lane`."""
@@ -430,11 +437,17 @@ class FreshnessSnapshot:
             str, freshness.RecallFreshnessCheckpoint
         ]
         | None = None,
+        stale_recall_scopes: frozenset[str] = frozenset(),
     ) -> None:
         self._root = vault_root
         self._require_live_recall = require_live_recall
         self._timings = timings
         self._expected_recall_checkpoints = expected_recall_checkpoints or {}
+        # Scopes admitted at the catalog's published projection rather than an
+        # exactly-current live one. For those the live registry has no
+        # checkpoint to require, so liveness is not a precondition and the
+        # published projection is the answer.
+        self._stale_recall_scopes = stale_recall_scopes
         self._kb: tuple[int, int, str] | None = None
         self._vault: tuple[int, int, str] | None = None
         self._recall: dict[str, freshness.RecallFreshnessCheckpoint] = {}
@@ -510,20 +523,30 @@ class FreshnessSnapshot:
             try:
                 root = self._root.absolute()
                 cache_key = (root, scope)
+                # A scope admitted as stale is answered from the published
+                # projection the admission already identity-checked, so it does
+                # not additionally require a live registry.
+                stale = scope in self._stale_recall_scopes
+                require_live = self._require_live_recall and not stale
                 projection_live = freshness.recall_is_live(self._root, scope)
                 checkpoint = (
                     freshness.live_recall_checkpoint(self._root, scope)
-                    if self._require_live_recall
+                    if require_live
                     else freshness.recall_checkpoint(self._root, scope)
                     if projection_live
                     else None
                 )
-                if checkpoint is None and self._require_live_recall:
+                if checkpoint is None and require_live:
                     raise freshness.RecallProjectionUnavailable(
                         f"maintained recall projection is not live for scope={scope!r}"
                     )
                 expected = self._expected_recall_checkpoints.get(scope)
-                if checkpoint is not None and expected is not None and checkpoint != expected:
+                if (
+                    not stale
+                    and checkpoint is not None
+                    and expected is not None
+                    and checkpoint != expected
+                ):
                     raise freshness.RecallProjectionUnavailable(
                         f"maintained recall projection advanced for scope={scope!r}"
                     )
@@ -536,11 +559,16 @@ class FreshnessSnapshot:
                             self._recall_paths[scope] = cached[1]
                             _set_recall_projection_timing_outcome(
                                 self._timings,
-                                "live_cache" if self._require_live_recall else "cache",
+                                # `require_live`, not the request-wide flag: a
+                                # stale-admitted scope is served from the
+                                # published projection, so labelling its cache
+                                # hit `live_cache` would misreport it as an
+                                # exactly-current answer.
+                                "live_cache" if require_live else "cache",
                             )
                             return
 
-                if self._require_live_recall:
+                if require_live:
                     checkpoint, entries = freshness.recall_projection_snapshot(
                         self._root,
                         scope,
@@ -559,7 +587,7 @@ class FreshnessSnapshot:
                         self._vault = scope_triple
                     else:
                         self._kb = scope_triple
-                if expected is not None and checkpoint != expected:
+                if not stale and expected is not None and checkpoint != expected:
                     raise freshness.RecallProjectionUnavailable(
                         f"maintained recall projection advanced for scope={scope!r}"
                     )
@@ -889,9 +917,16 @@ def find(
     state = str(admission["state"]) if managed_runtime else "unverified"
     require_live_recall = managed_runtime and freshness.event_indexes_enabled()
     catalog_proof: dict[str, freshness.RecallFreshnessCheckpoint] | None = None
+    stale_recall_scopes: frozenset[str] = frozenset()
     with _span(timings, "recall_projection"):
         if state == "ready" and require_live_recall:
-            raw_proof = lexstore.runtime_retrieval_catalog_proof(vault_root)
+            # Bounded projection lag is served, not refused. `admission` takes
+            # the strict proof when it binds and otherwise falls back to the
+            # catalog's own published projection under an unchanged identity —
+            # so a cold or reprojection-evicted registry answers from the last
+            # published projection instead of blanking semantic recall.
+            admitted = lexstore.runtime_retrieval_catalog_admission(vault_root)
+            raw_proof = admitted.checkpoints if admitted is not None else None
             if raw_proof is None:
                 readiness.mark_unready("retrieval_catalog")
                 state = "unavailable"
@@ -905,8 +940,15 @@ def find(
                     readiness.mark_unready("retrieval_catalog")
                     catalog_proof = None
                     state = "unavailable"
-                elif catalog_proof_out is not None:
-                    catalog_proof_out.update(catalog_proof)
+                else:
+                    stale_recall_scopes = frozenset(admitted.lagging_scopes)
+                    if stale_recall_scopes and degraded_out is not None:
+                        # Rides the existing warming disclosure: the envelope
+                        # already projects `warming.components`, so a stale
+                        # answer is disclosed without a new envelope field.
+                        degraded_out.append(_RECALL_PROJECTION_STALE_COMPONENT)
+                    if catalog_proof_out is not None:
+                        catalog_proof_out.update(catalog_proof)
         if state in {"warming", "unavailable"}:
             if state == "unavailable":
                 lexstore.request_repair(vault_root)
@@ -1017,6 +1059,7 @@ def find(
         require_live_recall=require_live_recall,
         timings=timings,
         expected_recall_checkpoints=catalog_proof,
+        stale_recall_scopes=stale_recall_scopes,
     )
     page_memo: dict[str, ParsedPage | None] = {}
 

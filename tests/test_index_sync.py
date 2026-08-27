@@ -983,3 +983,136 @@ def test_contended_lexical_upsert_stays_swallowed_from_the_batch_report(
     ]
     # The only recovery for the refused rows is the process-local registry.
     assert scheduled == [{"root": tmp_path, "deferred_paths": [page]}]
+
+
+# --- Graph durable-coverage carve-out (tasks 1.1 / 1.2 / 2.1) ---------------
+#
+# During `recovery_required` the registered checkpoint never equals the live
+# one, so EVERY batch write's graph deferral fails the report and mints a
+# durable full-component receipt -- even when the deferral already recorded
+# per-path graph receipts covering exactly that batch. That funnel is what
+# self-sustains: backlog -> recovery_required -> every write mints -> backlog.
+
+
+_GRAPH_REL = "Knowledge Base/Notes/graph-accounting.md"
+
+
+def _graph_deferral_report(code: str = "graph_repair_queued") -> index_sync.IndexSyncReport:
+    """A batch report whose graph component deferred, everything else done."""
+    return index_sync.IndexSyncReport(
+        operation="upsert",
+        requested_paths=(_GRAPH_REL,),
+        eligible_paths=(_GRAPH_REL,),
+        components=(
+            index_sync.IndexComponentOutcome("memory_refs", "completed", "ok"),
+            index_sync.IndexComponentOutcome("resolver", "completed", "ok"),
+            index_sync.IndexComponentOutcome("semantic_purge", "completed", "ok"),
+            index_sync.IndexComponentOutcome("lexstore", "completed", "ok"),
+            index_sync.IndexComponentOutcome("epistemic_graph", "deferred", code),
+            index_sync.IndexComponentOutcome("embeddings", "completed", "ok"),
+        ),
+    )
+
+
+def test_covered_graph_deferral_during_recovery_is_batch_success(
+    tmp_path: Path,
+) -> None:
+    """Task 1.1: per-path graph receipts covering the batch ARE the demand."""
+    target = tmp_path / _GRAPH_REL
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("# Graph accounting\n", encoding="utf-8")
+    report = _graph_deferral_report()
+
+    # No registered checkpoint equals the live one: this is recovery_required,
+    # the state in which every graph deferral currently escalates.
+    assert graph_sync.registered_checkpoint(tmp_path) is None
+
+    index_sync.reset_deferral_telemetry()
+    # Uncovered first: nothing durably queued, so the report must still fail.
+    assert index_sync.full_upsert_succeeded(tmp_path, [target], report) is False
+    assert index_sync.deferral_telemetry()["uncovered_deferral_escalated"] == 1
+
+    # Now the deferral durably covers the batch's graph-input paths.
+    deferred_index.add_graph(tmp_path, [_GRAPH_REL])
+    assert deferred_index.snapshot_graph(tmp_path) != []
+
+    index_sync.reset_deferral_telemetry()
+    assert index_sync.full_upsert_succeeded(tmp_path, [target], report) is True
+    assert index_sync.deferral_telemetry() == {
+        "covered_deferral_accepted": 1,
+        "uncovered_deferral_escalated": 0,
+    }
+
+
+def test_uncovered_graph_deferral_still_fails_closed(tmp_path: Path) -> None:
+    """Task 1.2: a deferral with no covering receipts still mints the demand."""
+    target = tmp_path / _GRAPH_REL
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("# Graph accounting\n", encoding="utf-8")
+
+    # A queue entry for a DIFFERENT path cannot bless this batch.
+    deferred_index.add_graph(tmp_path, ["Knowledge Base/Notes/unrelated.md"])
+    report = _graph_deferral_report()
+
+    index_sync.reset_deferral_telemetry()
+    assert index_sync.full_upsert_succeeded(tmp_path, [target], report) is False
+    assert index_sync.deferral_telemetry()["uncovered_deferral_escalated"] == 1
+
+
+def test_graph_deferral_without_a_coverage_claiming_code_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """Only a code that means "durably queued" may be blessed by receipts.
+
+    `graph_index_disabled` records nothing, so a stale queue entry naming the
+    same path must not launder it into a success.
+    """
+    target = tmp_path / _GRAPH_REL
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("# Graph accounting\n", encoding="utf-8")
+    deferred_index.add_graph(tmp_path, [_GRAPH_REL])
+
+    report = _graph_deferral_report(code="graph_index_disabled")
+
+    assert index_sync.full_upsert_succeeded(tmp_path, [target], report) is False
+
+
+def test_empty_graph_batch_cannot_be_blessed_by_coverage(tmp_path: Path) -> None:
+    """The empty set is a subset of every queue; acceptance must not be vacuous."""
+    deferred_index.add_graph(tmp_path, [_GRAPH_REL])
+    report = _graph_deferral_report()
+
+    assert index_sync.full_upsert_succeeded(tmp_path, [], report) is False
+
+
+def test_non_graph_input_paths_cannot_bless_a_graph_deferral(tmp_path: Path) -> None:
+    """Coverage is over GRAPH-INPUT paths, not merely over Markdown.
+
+    A note living inside graph_sync's own receipt directory is not a graph
+    input, so a batch made only of such paths has nothing to cover and must
+    fail closed rather than be accepted vacuously.
+    """
+    rel = "Knowledge Base/Notes/.graph-commit-receipts/receipt-note.md"
+    assert graph_sync.is_graph_input_path(rel) is False
+    target = tmp_path / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("# Receipt note\n", encoding="utf-8")
+    deferred_index.add_graph(tmp_path, [rel])
+
+    report = index_sync.IndexSyncReport(
+        operation="upsert",
+        requested_paths=(rel,),
+        eligible_paths=(rel,),
+        components=(
+            index_sync.IndexComponentOutcome("memory_refs", "completed", "ok"),
+            index_sync.IndexComponentOutcome("resolver", "completed", "ok"),
+            index_sync.IndexComponentOutcome("semantic_purge", "completed", "ok"),
+            index_sync.IndexComponentOutcome("lexstore", "completed", "ok"),
+            index_sync.IndexComponentOutcome(
+                "epistemic_graph", "deferred", "graph_repair_queued"
+            ),
+            index_sync.IndexComponentOutcome("embeddings", "completed", "ok"),
+        ),
+    )
+
+    assert index_sync.full_upsert_succeeded(tmp_path, [target], report) is False

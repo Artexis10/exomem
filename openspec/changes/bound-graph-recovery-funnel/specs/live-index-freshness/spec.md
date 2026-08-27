@@ -72,11 +72,12 @@ A service restart that finds a coherent durable graph checkpoint SHALL admit gra
 
 Semantic recall SHALL NOT refuse solely because the maintained recall projection lags current content by in-flight writes; it SHALL serve from the last published projection while the projection refresh is pending, disclosing bounded staleness, and SHALL refuse only when no published projection exists or the projection's identity (policy, access fingerprint, catalog identity) no longer matches. The write path SHALL refresh the projection proportionally to the delta, never by whole-vault work.
 
-#### Scenario: A write does not interrupt semantic recall
+#### Scenario: A cold recall registry does not interrupt semantic recall
 
-- **WHEN** semantic recall arrives while writes have advanced content past the last published recall projection
+- **WHEN** semantic recall arrives while the live recall registry is cold or reprojection-evicted and a published, identity-matching recall projection exists
 - **THEN** the recall serves from the last published projection with a bounded-staleness disclosure
-- **AND** the projection refresh proceeds proportionally to the delta
+- **AND** the projection refresh proceeds proportionally to the delta rather than by whole-vault work
+- **AND** per-page access enforcement at egress remains live, so staleness is confined to ranking and recall-set membership
 
 #### Scenario: Identity changes still refuse
 
