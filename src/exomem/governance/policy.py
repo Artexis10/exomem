@@ -31,14 +31,14 @@ import re
 import sqlite3
 import stat
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from .. import held_fs, memory_refs
+from .. import held_fs, memory_refs, reserved_paths
 from ..kbdir import kb_dirname
 from . import store as store_module
 
@@ -424,6 +424,261 @@ def observe_authoring_snapshot(vault_root: Path) -> AuthoringSnapshot | None:
         directory_identities=read.directory_identities,
         governance_root_identity=read.root_identity,
     )
+
+
+def _mirror_relative_path(relative: str) -> bool:
+    path = Path(relative)
+    return (
+        not path.is_absolute()
+        and len(path.parts) == 2
+        and path.parts[0] in {"scopes", "rules", "grants"}
+        and path.parts[1] not in {"", ".", ".."}
+        and path.parts[1].endswith(".yaml")
+        and relative == path.as_posix()
+    )
+
+
+def _same_authoring_identity(
+    observed: held_fs.StableIdentity | None,
+    expected: held_fs.StableIdentity | None,
+) -> bool:
+    if observed is None or expected is None:
+        return observed is expected
+    return (
+        observed.device == expected.device
+        and observed.inode == expected.inode
+        and observed.kind == expected.kind
+        and (observed.kind != "file" or observed.link_count == expected.link_count == 1)
+    )
+
+
+def _workspace_mirror_plan(
+    current: AuthoringSnapshot,
+    reviewed: AuthoringSnapshot,
+    target_documents: tuple[tuple[str, bytes], ...],
+) -> list[tuple[str, bytes | None, AuthoringFileIdentity | None]] | None:
+    prior = dict(reviewed.documents)
+    target = dict(target_documents)
+    observed = dict(current.documents)
+    reviewed_identities = {item.path: item for item in reviewed.file_identities}
+    observed_identities = {item.path: item for item in current.file_identities}
+    reviewed_directories = dict(reviewed.directory_identities)
+    observed_directories = dict(current.directory_identities)
+    target_directories = {Path(relative).parent.as_posix() for relative in target}
+    if reviewed.governance_root_identity is not None and not _same_authoring_identity(
+        current.governance_root_identity,
+        reviewed.governance_root_identity,
+    ):
+        return None
+    if set(observed) - (set(prior) | set(target)):
+        return None
+    if set(observed_directories) - (set(reviewed_directories) | target_directories):
+        return None
+    for relative, expected in reviewed_directories.items():
+        if not _same_authoring_identity(observed_directories.get(relative), expected):
+            return None
+    effects: list[tuple[str, bytes | None, AuthoringFileIdentity | None]] = []
+    for relative in sorted(set(prior) | set(target)):
+        prior_bytes = prior.get(relative)
+        target_bytes = target.get(relative)
+        observed_bytes = observed.get(relative)
+        reviewed_identity = reviewed_identities.get(relative)
+        observed_identity = observed_identities.get(relative)
+        if prior_bytes == target_bytes:
+            if (
+                observed_bytes != prior_bytes
+                or reviewed_identity is None
+                or observed_identity != reviewed_identity
+            ):
+                return None
+            continue
+        if observed_bytes == target_bytes:
+            continue
+        if observed_bytes != prior_bytes:
+            return None
+        if prior_bytes is not None and (
+            reviewed_identity is None or observed_identity != reviewed_identity
+        ):
+            return None
+        effects.append((relative, target_bytes, observed_identity))
+    return effects
+
+
+def _workspace_mirror_failure(error: held_fs.HeldFsError | None) -> str:
+    if error is not None and error.code in {
+        "DESTINATION_EXISTS",
+        "IDENTITY_CHANGED",
+        "MISSING",
+        "UNSAFE_PATH",
+    }:
+        return "diverged"
+    return "pending"
+
+
+def mirror_authoring_workspace(
+    vault_root: Path,
+    *,
+    reviewed: AuthoringSnapshot,
+    target_documents: tuple[tuple[str, bytes], ...],
+    barrier: Callable[[str, str], None] | None = None,
+) -> str:
+    """Mirror reviewed immutable policy bytes through held filesystem handles.
+
+    The caller chooses the reviewed preimage and owns durable intent/recovery.
+    This primitive performs no authority selection and returns only the closed
+    effect status ``complete``, ``diverged``, or ``pending``.
+    """
+
+    if not isinstance(reviewed, AuthoringSnapshot):
+        return "diverged"
+    if not reserved_paths.owner_authorized("governance-tree"):
+        raise RuntimeError("policy workspace mirror lacks governance owner authority")
+    if (
+        not isinstance(target_documents, tuple)
+        or target_documents != tuple(sorted(target_documents))
+        or len(dict(target_documents)) != len(target_documents)
+        or any(
+            not isinstance(relative, str)
+            or not isinstance(content, bytes)
+            or not _mirror_relative_path(relative)
+            for relative, content in target_documents
+        )
+    ):
+        return "diverged"
+    notify = barrier if barrier is not None else lambda _phase, _relative: None
+    root = Path(vault_root)
+    base = f"{kb_dirname()}/{GOVERNANCE_DIRNAME}"
+    reviewed_directories = dict(reviewed.directory_identities)
+    with reserved_paths._identity_coordination_scope(
+        root,
+        descriptor_ids=("governance-tree",),
+        identity_may_change=True,
+    ):
+        current = observe_authoring_snapshot(root)
+        if current is None:
+            return "diverged"
+        effects = _workspace_mirror_plan(current, reviewed, target_documents)
+        if effects is None:
+            return "diverged"
+        acquired = held_fs.acquire(root)
+        if not acquired.ok:
+            return _workspace_mirror_failure(acquired.error)
+        publications = reserved_paths._reachable_owner_publications(
+            root, "governance-tree"
+        )
+        with acquired.require() as filesystem:
+            root_result = filesystem.parent(
+                base,
+                create=reviewed.governance_root_identity is None,
+                access="flush",
+            )
+            if not root_result.ok:
+                return _workspace_mirror_failure(root_result.error)
+            with root_result.require() as governance_root:
+                if reviewed.governance_root_identity is not None and not (
+                    _same_authoring_identity(
+                        governance_root.identity,
+                        reviewed.governance_root_identity,
+                    )
+                ):
+                    return "diverged"
+                publications[base] = governance_root.identity
+                for relative, target_bytes, current_identity in effects:
+                    notify("before_write", relative)
+                    path = Path(relative)
+                    parent_relative = Path(base, path.parent).as_posix()
+                    parent_result = filesystem.parent(
+                        parent_relative,
+                        create=current_identity is None,
+                        access="flush",
+                    )
+                    if not parent_result.ok:
+                        return _workspace_mirror_failure(parent_result.error)
+                    with parent_result.require() as parent:
+                        expected_parent = reviewed_directories.get(path.parent.as_posix())
+                        if expected_parent is not None and not _same_authoring_identity(
+                            parent.identity,
+                            expected_parent,
+                        ):
+                            return "diverged"
+                        publications[parent_relative] = parent.identity
+                        if target_bytes is None:
+                            mutable = filesystem.file(parent, path.name, access="mutate")
+                            if not mutable.ok:
+                                return _workspace_mirror_failure(mutable.error)
+                            with mutable.require() as existing:
+                                if current_identity is None or (
+                                    existing.identity != current_identity.identity
+                                ):
+                                    return "diverged"
+                                observed = filesystem.read(existing)
+                                if (
+                                    not observed.ok
+                                    or hashlib.sha256(observed.require()).hexdigest()
+                                    != current_identity.sha256
+                                ):
+                                    return "diverged"
+                                removed = filesystem.unlink(existing)
+                                if not removed.ok:
+                                    return _workspace_mirror_failure(removed.error)
+                            flushed = filesystem.flush_directory(parent)
+                            if not flushed.ok:
+                                return _workspace_mirror_failure(flushed.error)
+                            publications.pop(f"{base}/{relative}", None)
+                        else:
+                            published = held_fs.publish_bytes(
+                                filesystem,
+                                parent,
+                                path.name,
+                                target_bytes,
+                                expected_identity=(
+                                    None
+                                    if current_identity is None
+                                    else current_identity.identity
+                                ),
+                                expected_sha256=(
+                                    None
+                                    if current_identity is None
+                                    else current_identity.sha256
+                                ),
+                            )
+                            if not published.ok:
+                                return _workspace_mirror_failure(published.error)
+                            flushed = filesystem.flush_directory(parent)
+                            if not flushed.ok:
+                                return _workspace_mirror_failure(flushed.error)
+                            publications[f"{base}/{relative}"] = published.require()
+                        if (
+                            not filesystem.validate_directory(parent).ok
+                            or not filesystem.validate_directory(governance_root).ok
+                        ):
+                            return "diverged"
+                    notify("after_write", relative)
+                if not filesystem.validate_directory(governance_root).ok:
+                    return "diverged"
+        final = observe_authoring_snapshot(root)
+        if (
+            final is None
+            or final.documents != target_documents
+            or (
+                reviewed.governance_root_identity is not None
+                and not _same_authoring_identity(
+                    final.governance_root_identity,
+                    reviewed.governance_root_identity,
+                )
+            )
+        ):
+            return "diverged"
+        for item in final.file_identities:
+            publications[f"{base}/{item.path}"] = item.identity
+        for relative, identity in final.directory_identities:
+            publications[f"{base}/{relative}"] = identity
+        reserved_paths._publish_owner_identities(
+            root,
+            "governance-tree",
+            publications,
+        )
+    return "complete"
 
 
 @dataclass(frozen=True)
