@@ -321,7 +321,8 @@ made before both PRs and their combined verification are complete.
   restore uses the same drained/no-in-flight target-bound transfer protocol and
   invalidates every imported session-derived authority before serving. For exact-v4
   clone, prove one staged keyring fixes all fresh target ids across crash/retry, one
-  exclusive transaction preserves the active policy/projector/catalog plus immutable
+  exclusive transaction refuses receipt conflicts and preserves the active
+  policy/projector/catalog plus immutable
   history while committing session invalidation, a fresh receipt instance/genesis
   head/label secret that preserves copied evidence without sharing append identity, and a predecessor-bound
   `attachment-clone` activation publication, and copied or contradictory external

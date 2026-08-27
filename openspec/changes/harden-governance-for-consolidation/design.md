@@ -913,7 +913,8 @@ target registry attachment. It publishes one inert target keyring first, derivin
 new cell, logical-vault, keyring, and activation-store ids from that one staged random
 root plus the target attachment so retry never rotates identity. Under the target writer,
 schema, receipt, and held-filesystem fences, one `BEGIN EXCLUSIVE` transaction verifies
-the complete copied active tuple and its immutable publication chain, closes every copied
+the complete copied active tuple, immutable publication chain, and unforked receipt
+evidence/anchor set, closes every copied
 session and invalidates every session-derived grant, purpose, and token, changes only the
 activation-store/logical-vault identity, preserves copied receipt rows and evidence as
 historical input while replacing the active receipt singleton with a fresh target-derived

@@ -264,7 +264,8 @@ authenticated offline operation. The target SHALL have no external custody files
 registry attachment. One staged random key SHALL deterministically bind fresh target
 cell, logical-vault, keyring, activation-store, and attachment identities across retries.
 Under the target writer/schema/receipt/held-filesystem fences, one exclusive SQLite
-transaction SHALL verify the copied active tuple and immutable publication chain, close
+transaction SHALL verify the copied active tuple, immutable publication chain, and
+unforked receipt evidence/anchor set, close
 all copied sessions and invalidate all session-derived grants/purposes/tokens, replace
 only activation-store/logical-vault identity, preserve copied receipt rows/evidence as
 historical input while replacing the active receipt singleton with a fresh target-derived
