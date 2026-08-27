@@ -208,6 +208,12 @@ def test_enrolled_rich_v3_fixture_migrates_authority_conservatively(
     staged = authorization_custody.stage_standalone_v3_custody(vault, now=now)
     seed = _migration_seed(vault, staged, now=now + 1)
     target = schema_v4.migration_target(seed)
+    source = store.open_readonly_connection(vault)
+    assert source is not None
+    try:
+        source_store_digest = store._v3_snapshot_digest(source)
+    finally:
+        source.close()
     authorization_custody.enroll_standalone_v3_migration(
         vault,
         target=target,
@@ -218,6 +224,7 @@ def test_enrolled_rich_v3_fixture_migrates_authority_conservatively(
         store.migrate_enrolled_v3_store(
             vault,
             seed=seed,
+            expected_source_store_digest=source_store_digest,
             now=now + 2,
         )
         == target

@@ -16,7 +16,7 @@ Subcommands:
   (requires the optional `tui` extra; needs an interactive terminal)
 - `doctor` — read-only local install/setup preflight
 - `auth sessions|revoke` — operator-only durable MCP session administration
-- `governance-schema status|plan-migration|stage-migration|downmigrate` — offline schema control
+- `governance-schema status|plan-migration|stage-migration|commit-migration|downmigrate` — offline schema control
 - `status` — resource posture/residency diagnostics without loading models
 - `warm` — pre-download/load the search models (bge, reranker, CLIP) so the first
   server start doesn't pay the download in the background; optional `--vault`
@@ -1562,6 +1562,23 @@ def _governance_schema_main(argv: list[str]) -> int:
     )
     stage_parser.add_argument("--json", action="store_true", help="emit stable JSON")
 
+    commit_parser = subcommands.add_parser(
+        "commit-migration",
+        help="back up exact v3 and commit the reviewed staged v4 target",
+    )
+    commit_parser.add_argument(
+        "--vault", required=True, help="explicit absolute vault root"
+    )
+    commit_parser.add_argument(
+        "--expected-plan-digest",
+        required=True,
+        help="64-character digest copied from the reviewed migration plan",
+    )
+    commit_parser.add_argument(
+        "--yes", action="store_true", help="confirm the irreversible reviewed cutover"
+    )
+    commit_parser.add_argument("--json", action="store_true", help="emit stable JSON")
+
     downmigrate_parser = subcommands.add_parser(
         "downmigrate",
         help="restore exact schema v3 after every v4 replica is drained",
@@ -1658,6 +1675,70 @@ def _governance_schema_main(argv: list[str]) -> int:
         else:
             for key, value in result.items():
                 print(f"{key}: {value}")
+        return 0
+
+    if args.command == "commit-migration":
+        expected_plan_digest = args.expected_plan_digest
+        if not args.yes:
+            confirmation = {
+                "migrated": False,
+                "reason": "confirmation_required",
+                "plan_digest": expected_plan_digest,
+            }
+            if as_json:
+                print(json.dumps(confirmation))
+            else:
+                print(
+                    "migration cutover requires --yes after reviewing this exact plan: "
+                    f"{expected_plan_digest}",
+                    file=sys.stderr,
+                )
+            return 2
+        try:
+            result = schema_migration.commit_forward_migration(
+                vault,
+                expected_plan_digest=expected_plan_digest,
+                now=moment,
+            )
+        except schema_migration.ForwardMigrationPlanMismatch:
+            _governance_schema_print_error(
+                "GOVERNANCE_SCHEMA_PLAN_MISMATCH",
+                "the reviewed migration plan changed; no activation was attempted",
+                as_json=as_json,
+            )
+            return 1
+        except schema_migration.ForwardMigrationUnavailable:
+            _governance_schema_print_error(
+                "GOVERNANCE_SCHEMA_MIGRATION_UNAVAILABLE",
+                "the verified backup and exact v3-to-v4 cutover could not complete",
+                as_json=as_json,
+            )
+            return 1
+        target = result.target
+        terminal = {
+            "migrated": True,
+            "schema_version": result.schema_version,
+            "logical_vault_id": target.logical_vault_id,
+            "activation_store_id": target.activation_store_id,
+            "activation_epoch": target.activation_epoch,
+            "activation_state_digest": target.activation_state_digest,
+            "policy_generation_id": target.policy_generation_id,
+            "policy_fingerprint": target.policy_fingerprint,
+            "projector_schema_version": target.projector_schema_version,
+            "catalog_generation": target.catalog_generation,
+            "projection_namespace_id": target.projection_namespace_id,
+            "plan_digest": result.plan_digest,
+            "source_store_digest": result.source_store_digest,
+            "backup_reference": result.backup_reference,
+            "replayed": result.replayed,
+        }
+        if as_json:
+            print(json.dumps(terminal))
+        else:
+            delivery = "replayed" if result.replayed else "committed"
+            print(
+                f"schema v4 migration {delivery}; backup {result.backup_reference}"
+            )
         return 0
 
     try:

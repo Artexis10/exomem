@@ -16,6 +16,7 @@ import os
 import sqlite3
 import threading
 from collections import OrderedDict
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -247,11 +248,27 @@ def _schema_migration_barrier(point: str) -> None:
     del point
 
 
+def _v3_snapshot_digest(connection: sqlite3.Connection) -> str:
+    snapshot = sqlite3.connect(":memory:")
+    try:
+        connection.backup(snapshot)
+        snapshot.execute("VACUUM")
+        serialized = snapshot.serialize()
+    finally:
+        snapshot.close()
+    domain = b"exomem.governance-v3-snapshot.v1"
+    return hashlib.sha256(
+        domain + len(serialized).to_bytes(8, "big") + serialized
+    ).hexdigest()
+
+
 def migrate_enrolled_v3_store(
     vault_root: Path,
     *,
     seed: MigrationSeed,
+    expected_source_store_digest: str,
     now: int,
+    source_recheck: Callable[[], None] | None = None,
 ) -> VerifiedActiveGovernanceState:
     """Commit one pre-enrolled exact-v3 store to its exact v4 target.
 
@@ -269,6 +286,15 @@ def migrate_enrolled_v3_store(
 
     root = Path(vault_root)
     path = sidecar_path(root)
+    if (
+        not isinstance(expected_source_store_digest, str)
+        or len(expected_source_store_digest) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in expected_source_store_digest
+        )
+    ):
+        raise schema_v4.SchemaV4Error("migration source store digest is invalid")
     with reserved_paths._subsystem_authority_scope("governance.store"):
         with reserved_paths._identity_coordination_scope(
             root,
@@ -334,6 +360,12 @@ def migrate_enrolled_v3_store(
                         )
                     ):
                         raise authorization_custody.AuthorizationCustodyUnavailable
+                    if version == SCHEMA_USER_VERSION and (
+                        _v3_snapshot_digest(connection) != expected_source_store_digest
+                    ):
+                        raise schema_v4.SchemaV4Error(
+                            "migration source store changed after owner review"
+                        )
 
                     before = None
                     if version == SCHEMA_USER_VERSION:
@@ -404,6 +436,8 @@ def migrate_enrolled_v3_store(
                             raise schema_v4.SchemaV4Error(
                                 "migration policy workspace changed during commit"
                             )
+                    if source_recheck is not None:
+                        source_recheck()
                 finally:
                     connection.close()
 

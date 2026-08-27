@@ -111,7 +111,17 @@ def _stage_and_enroll(
     vault: Path,
     *,
     now: int,
-) -> tuple[schema_v4.MigrationSeed, schema_v4.VerifiedActiveGovernanceState]:
+) -> tuple[
+    schema_v4.MigrationSeed,
+    schema_v4.VerifiedActiveGovernanceState,
+    str,
+]:
+    source = store.open_readonly_connection(vault)
+    assert source is not None
+    try:
+        source_store_digest = store._v3_snapshot_digest(source)
+    finally:
+        source.close()
     staged = authorization_custody.stage_standalone_v3_custody(vault, now=now)
     seed = _seed(vault, staged, now=now + 1)
     target = schema_v4.migration_target(seed)
@@ -120,7 +130,7 @@ def _stage_and_enroll(
         target=target,
         now=now,
     )
-    return seed, target
+    return seed, target, source_store_digest
 
 
 def _schema_version(vault: Path) -> int:
@@ -136,7 +146,7 @@ def test_enrolled_exact_v3_store_migrates_to_the_precommitted_target(
 ) -> None:
     vault = _vault(tmp_path)
     now = int(time.time())
-    seed, target = _stage_and_enroll(vault, now=now)
+    seed, target, source_store_digest = _stage_and_enroll(vault, now=now)
     assert policy.load(vault).blocked
     enrolled = authorization_custody.load_authorization_custody(
         vault,
@@ -155,7 +165,12 @@ def test_enrolled_exact_v3_store_migrates_to_the_precommitted_target(
         for item in enrolled.serving_membership.replicas
     ] == [("DRAINING", 3, True, True)]
 
-    active = store.migrate_enrolled_v3_store(vault, seed=seed, now=now + 2)
+    active = store.migrate_enrolled_v3_store(
+        vault,
+        seed=seed,
+        expected_source_store_digest=source_store_digest,
+        now=now + 2,
+    )
 
     assert active == target
     assert _schema_version(vault) == 4
@@ -203,7 +218,7 @@ def test_store_migration_post_commit_crash_replays_exact_v4(
 ) -> None:
     vault = _vault(tmp_path)
     now = int(time.time())
-    seed, target = _stage_and_enroll(vault, now=now)
+    seed, target, source_store_digest = _stage_and_enroll(vault, now=now)
     crashed = False
 
     def crash(point: str) -> None:
@@ -214,13 +229,19 @@ def test_store_migration_post_commit_crash_replays_exact_v4(
 
     monkeypatch.setattr(store, "_schema_migration_barrier", crash)
     with pytest.raises(RuntimeError, match="post-commit"):
-        store.migrate_enrolled_v3_store(vault, seed=seed, now=now + 2)
+        store.migrate_enrolled_v3_store(
+            vault,
+            seed=seed,
+            expected_source_store_digest=source_store_digest,
+            now=now + 2,
+        )
 
     assert _schema_version(vault) == 4
     monkeypatch.setattr(store, "_schema_migration_barrier", lambda _point: None)
     assert store.migrate_enrolled_v3_store(
         vault,
         seed=seed,
+        expected_source_store_digest=source_store_digest,
         now=now + 3,
     ) == target
     custody = authorization_custody.load_authorization_custody(vault, now=now + 4)
@@ -235,7 +256,7 @@ def test_store_migration_advances_external_fence_before_the_v4_commit(
 ) -> None:
     vault = _vault(tmp_path)
     now = int(time.time())
-    seed, target = _stage_and_enroll(vault, now=now)
+    seed, target, source_store_digest = _stage_and_enroll(vault, now=now)
     state = writer_lease.SchemaFenceState(True, 3, 7)
     transitions: list[tuple[int, int]] = []
 
@@ -268,14 +289,24 @@ def test_store_migration_advances_external_fence_before_the_v4_commit(
 
     monkeypatch.setattr(store, "_schema_migration_barrier", crash)
     with pytest.raises(RuntimeError, match="fence-first"):
-        store.migrate_enrolled_v3_store(vault, seed=seed, now=now + 2)
+        store.migrate_enrolled_v3_store(
+            vault,
+            seed=seed,
+            expected_source_store_digest=source_store_digest,
+            now=now + 2,
+        )
 
     assert _schema_version(vault) == 3
     assert state_holder == [writer_lease.SchemaFenceState(True, 4, 8)]
     assert transitions == [(7, 4)]
 
     monkeypatch.setattr(store, "_schema_migration_barrier", lambda _point: None)
-    assert store.migrate_enrolled_v3_store(vault, seed=seed, now=now + 3) == target
+    assert store.migrate_enrolled_v3_store(
+        vault,
+        seed=seed,
+        expected_source_store_digest=source_store_digest,
+        now=now + 3,
+    ) == target
     assert _schema_version(vault) == 4
     assert transitions == [(7, 4)]
 
@@ -286,7 +317,7 @@ def test_store_migration_refuses_fence_generation_drift_after_the_v4_commit(
 ) -> None:
     vault = _vault(tmp_path)
     now = int(time.time())
-    seed, target = _stage_and_enroll(vault, now=now)
+    seed, target, source_store_digest = _stage_and_enroll(vault, now=now)
     state_holder = [writer_lease.SchemaFenceState(True, 3, 17)]
 
     class Client:
@@ -313,7 +344,12 @@ def test_store_migration_refuses_fence_generation_drift_after_the_v4_commit(
 
     monkeypatch.setattr(store, "_schema_migration_barrier", drift)
     with pytest.raises(authorization_custody.AuthorizationCustodyUnavailable):
-        store.migrate_enrolled_v3_store(vault, seed=seed, now=now + 2)
+        store.migrate_enrolled_v3_store(
+            vault,
+            seed=seed,
+            expected_source_store_digest=source_store_digest,
+            now=now + 2,
+        )
 
     assert _schema_version(vault) == 4
     custody = authorization_custody.load_authorization_custody(vault, now=now + 3)
@@ -322,7 +358,12 @@ def test_store_migration_refuses_fence_generation_drift_after_the_v4_commit(
     assert custody.serving_membership.epoch == 1
 
     monkeypatch.setattr(store, "_schema_migration_barrier", lambda _point: None)
-    assert store.migrate_enrolled_v3_store(vault, seed=seed, now=now + 3) == target
+    assert store.migrate_enrolled_v3_store(
+        vault,
+        seed=seed,
+        expected_source_store_digest=source_store_digest,
+        now=now + 3,
+    ) == target
     assert _schema_version(vault) == 4
     recovered = authorization_custody.load_authorization_custody(vault, now=now + 4)
     assert recovered.control.serving_membership_epoch == 2
@@ -334,7 +375,7 @@ def test_store_migration_refuses_membership_without_complete_v3_drain(
 ) -> None:
     vault = _vault(tmp_path)
     now = int(time.time())
-    seed, _target = _stage_and_enroll(vault, now=now)
+    seed, _target, source_store_digest = _stage_and_enroll(vault, now=now)
     custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
     assert custody.serving_membership is not None
     replica = custody.serving_membership.replicas[0]
@@ -358,7 +399,12 @@ def test_store_migration_refuses_membership_without_complete_v3_drain(
     )
 
     with pytest.raises(authorization_custody.AuthorizationCustodyUnavailable):
-        store.migrate_enrolled_v3_store(vault, seed=seed, now=now + 2)
+        store.migrate_enrolled_v3_store(
+            vault,
+            seed=seed,
+            expected_source_store_digest=source_store_digest,
+            now=now + 2,
+        )
 
     monkeypatch.setattr(
         authorization_custody,
@@ -374,7 +420,7 @@ def test_store_migration_recovers_membership_publish_before_control_ack(
 ) -> None:
     vault = _vault(tmp_path)
     now = int(time.time())
-    seed, target = _stage_and_enroll(vault, now=now)
+    seed, target, source_store_digest = _stage_and_enroll(vault, now=now)
     crashed = False
 
     def crash(point: str) -> None:
@@ -385,7 +431,12 @@ def test_store_migration_recovers_membership_publish_before_control_ack(
 
     monkeypatch.setattr(authorization_custody, "_migration_membership_barrier", crash)
     with pytest.raises(RuntimeError, match="membership publication"):
-        store.migrate_enrolled_v3_store(vault, seed=seed, now=now + 2)
+        store.migrate_enrolled_v3_store(
+            vault,
+            seed=seed,
+            expected_source_store_digest=source_store_digest,
+            now=now + 2,
+        )
 
     assert _schema_version(vault) == 4
     interrupted = authorization_custody.load_authorization_custody(vault, now=now + 3)
@@ -398,6 +449,7 @@ def test_store_migration_recovers_membership_publish_before_control_ack(
     assert store.migrate_enrolled_v3_store(
         vault,
         seed=seed,
+        expected_source_store_digest=source_store_digest,
         now=now + 3,
     ) == target
     recovered = authorization_custody.load_authorization_custody(vault, now=now + 4)
@@ -415,6 +467,12 @@ def test_store_migration_refuses_unsafe_preconditions_without_changing_v3(
     now = int(time.time())
     staged = authorization_custody.stage_standalone_v3_custody(vault, now=now)
     seed = _seed(vault, staged, now=now + 1)
+    source = store.open_readonly_connection(vault)
+    assert source is not None
+    try:
+        source_store_digest = store._v3_snapshot_digest(source)
+    finally:
+        source.close()
     target = schema_v4.migration_target(seed)
     if fault != "not-enrolled":
         authorization_custody.enroll_standalone_v3_migration(
@@ -443,7 +501,12 @@ def test_store_migration_refuses_unsafe_preconditions_without_changing_v3(
             store.UnsupportedGovernanceSchema,
         )
     ):
-        store.migrate_enrolled_v3_store(vault, seed=seed, now=now + 2)
+        store.migrate_enrolled_v3_store(
+            vault,
+            seed=seed,
+            expected_source_store_digest=source_store_digest,
+            now=now + 2,
+        )
 
     assert _schema_version(vault) == 3
 
@@ -454,10 +517,15 @@ def test_store_migration_refuses_a_copied_attachment(
     vault = _vault(tmp_path)
     copied = _vault(tmp_path, "copied-vault")
     now = int(time.time())
-    seed, _target = _stage_and_enroll(vault, now=now)
+    seed, _target, source_store_digest = _stage_and_enroll(vault, now=now)
 
     with pytest.raises(authorization_custody.AuthorizationCustodyUnavailable):
-        store.migrate_enrolled_v3_store(copied, seed=seed, now=now + 2)
+        store.migrate_enrolled_v3_store(
+            copied,
+            seed=seed,
+            expected_source_store_digest=source_store_digest,
+            now=now + 2,
+        )
 
     assert _schema_version(copied) == 3
 
@@ -477,6 +545,7 @@ def test_store_migration_refuses_future_schema_before_parsing_seed(
         store.migrate_enrolled_v3_store(
             vault,
             seed=object(),  # type: ignore[arg-type]
+            expected_source_store_digest="0" * 64,
             now=int(time.time()),
         )
 
@@ -488,8 +557,13 @@ def test_store_migration_replay_refuses_extended_v4_without_writes(
 ) -> None:
     vault = _vault(tmp_path)
     now = int(time.time())
-    seed, _target = _stage_and_enroll(vault, now=now)
-    store.migrate_enrolled_v3_store(vault, seed=seed, now=now + 2)
+    seed, _target, source_store_digest = _stage_and_enroll(vault, now=now)
+    store.migrate_enrolled_v3_store(
+        vault,
+        seed=seed,
+        expected_source_store_digest=source_store_digest,
+        now=now + 2,
+    )
     connection = sqlite3.connect(store.sidecar_path(vault))
     try:
         connection.execute(
@@ -500,7 +574,12 @@ def test_store_migration_replay_refuses_extended_v4_without_writes(
         connection.close()
 
     with pytest.raises(schema_v4.SchemaV4Error):
-        store.migrate_enrolled_v3_store(vault, seed=seed, now=now + 3)
+        store.migrate_enrolled_v3_store(
+            vault,
+            seed=seed,
+            expected_source_store_digest=source_store_digest,
+            now=now + 3,
+        )
 
     connection = sqlite3.connect(store.sidecar_path(vault))
     try:

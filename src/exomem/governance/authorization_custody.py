@@ -362,10 +362,15 @@ def _file_is_owner_protected(descriptor: int, info: os.stat_result) -> bool:
     )
 
 
-def _read_retained(descriptor: int, expected_size: int) -> bytes:
+def _read_retained(
+    descriptor: int,
+    expected_size: int,
+    *,
+    maximum_bytes: int = MAX_CUSTODY_FILE_BYTES,
+) -> bytes:
     os.lseek(descriptor, 0, os.SEEK_SET)
     chunks: list[bytes] = []
-    remaining = MAX_CUSTODY_FILE_BYTES + 1
+    remaining = maximum_bytes + 1
     while remaining:
         chunk = os.read(descriptor, min(remaining, 4096))
         if not chunk:
@@ -373,12 +378,24 @@ def _read_retained(descriptor: int, expected_size: int) -> bytes:
         chunks.append(chunk)
         remaining -= len(chunk)
     data = b"".join(chunks)
-    if len(data) != expected_size or len(data) > MAX_CUSTODY_FILE_BYTES:
+    if len(data) != expected_size or len(data) > maximum_bytes:
         raise AuthorizationCustodyUnavailable
     return data
 
 
 def _load_file(path: Path) -> _LoadedCustodyFile:
+    return _load_private_artifact(path, maximum_bytes=MAX_CUSTODY_FILE_BYTES)
+
+
+def _load_private_artifact(
+    path: Path,
+    *,
+    maximum_bytes: int,
+) -> _LoadedCustodyFile:
+    """Load one bounded owner-only external artifact through a retained handle."""
+
+    if maximum_bytes < 1:
+        raise AuthorizationCustodyUnavailable
     held: mutation_lock.RetainedRegularFile | None = None
     try:
         held = mutation_lock.retain_regular_file(path)
@@ -386,11 +403,15 @@ def _load_file(path: Path) -> _LoadedCustodyFile:
         if (
             not stat.S_ISREG(before.st_mode)
             or before.st_nlink != 1
-            or not 1 <= before.st_size <= MAX_CUSTODY_FILE_BYTES
+            or not 1 <= before.st_size <= maximum_bytes
             or not _file_is_owner_protected(held.fd, before)
         ):
             raise AuthorizationCustodyUnavailable
-        data = _read_retained(held.fd, before.st_size)
+        data = _read_retained(
+            held.fd,
+            before.st_size,
+            maximum_bytes=maximum_bytes,
+        )
         after = os.fstat(held.fd)
         if (
             _stat_identity(before) != _stat_identity(after)
@@ -895,7 +916,26 @@ def _private_parent_is_safe(path: Path) -> bool:
 def _publish_private_file(path: Path, data: bytes) -> bytes:
     """Create one exact private custody file, or adopt an exact concurrent retry."""
 
-    if not isinstance(data, bytes) or not 1 <= len(data) <= MAX_CUSTODY_FILE_BYTES:
+    return _publish_private_artifact(
+        path,
+        data,
+        maximum_bytes=MAX_CUSTODY_FILE_BYTES,
+    )
+
+
+def _publish_private_artifact(
+    path: Path,
+    data: bytes,
+    *,
+    maximum_bytes: int,
+) -> bytes:
+    """Publish one immutable bounded private artifact, or adopt an exact retry."""
+
+    if (
+        maximum_bytes < 1
+        or not isinstance(data, bytes)
+        or not 1 <= len(data) <= maximum_bytes
+    ):
         raise AuthorizationCustodyUnavailable
     parent_path = path.parent
     anchor = parent_path.parent
@@ -925,14 +965,20 @@ def _publish_private_file(path: Path, data: bytes) -> bytes:
                 if not published.ok:
                     if published.error is None or published.error.code != "DESTINATION_EXISTS":
                         raise AuthorizationCustodyUnavailable
-                    installed = _load_file(path)
+                    installed = _load_private_artifact(
+                        path,
+                        maximum_bytes=maximum_bytes,
+                    )
                     if not hmac.compare_digest(installed.data, data):
                         raise AuthorizationCustodyUnavailable
                     return installed.data
                 flushed = filesystem.flush_directory(parent)
                 if not flushed.ok:
                     raise AuthorizationCustodyUnavailable
-        installed = _load_file(path)
+        installed = _load_private_artifact(
+            path,
+            maximum_bytes=maximum_bytes,
+        )
         if not hmac.compare_digest(installed.data, data):
             raise AuthorizationCustodyUnavailable
         return installed.data

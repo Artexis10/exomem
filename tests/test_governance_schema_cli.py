@@ -11,6 +11,7 @@ from exomem.governance import (
     authorization_custody,
     schema_downmigration,
     schema_migration,
+    schema_v4,
     store,
 )
 
@@ -184,6 +185,115 @@ def test_governance_schema_stage_migration_refuses_a_stale_plan(
     assert json.loads(capsys.readouterr().out) == {
         "error": "GOVERNANCE_SCHEMA_PLAN_MISMATCH",
         "message": "the reviewed migration plan changed; no activation was attempted",
+    }
+
+
+def test_governance_schema_commit_migration_requires_digest_bound_confirmation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    calls: list[object] = []
+    monkeypatch.setattr(
+        schema_migration,
+        "commit_forward_migration",
+        lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+
+    code = main(
+        [
+            "governance-schema",
+            "commit-migration",
+            "--vault",
+            str(vault),
+            "--expected-plan-digest",
+            "f" * 64,
+            "--json",
+        ]
+    )
+
+    assert code == 2
+    assert calls == []
+    assert json.loads(capsys.readouterr().out) == {
+        "migrated": False,
+        "reason": "confirmation_required",
+        "plan_digest": "f" * 64,
+    }
+
+
+@pytest.mark.parametrize("replayed", [False, True])
+def test_governance_schema_commit_migration_returns_content_free_terminal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    replayed: bool,
+) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    target = schema_v4.VerifiedActiveGovernanceState(
+        logical_vault_id="logical-vault-cli",
+        activation_store_id="activation-store-cli",
+        activation_epoch=1,
+        activation_state_digest="a" * 64,
+        policy_generation_id="01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        policy_fingerprint="b" * 64,
+        projector_schema_version=1,
+        catalog_generation=1,
+        projection_namespace_id="c" * 64,
+    )
+    result = schema_migration.ForwardMigrationResult(
+        schema_version=4,
+        target=target,
+        plan_digest="f" * 64,
+        source_store_digest="e" * 64,
+        backup_reference="exomem-governance-v3-backup://sha256/" + "d" * 64,
+        replayed=replayed,
+    )
+    calls: list[tuple[Path, str, int]] = []
+
+    def commit(root: Path, *, expected_plan_digest: str, now: int):  # noqa: ANN202
+        calls.append((root, expected_plan_digest, now))
+        return result
+
+    monkeypatch.setattr(schema_migration, "commit_forward_migration", commit)
+
+    assert (
+        main(
+            [
+                "governance-schema",
+                "commit-migration",
+                "--vault",
+                str(vault),
+                "--expected-plan-digest",
+                "f" * 64,
+                "--yes",
+                "--json",
+            ]
+        )
+        == 0
+    )
+
+    assert len(calls) == 1
+    assert calls[0][0] == vault and calls[0][1] == "f" * 64
+    assert isinstance(calls[0][2], int) and calls[0][2] > 0
+    assert json.loads(capsys.readouterr().out) == {
+        "migrated": True,
+        "schema_version": 4,
+        "logical_vault_id": "logical-vault-cli",
+        "activation_store_id": "activation-store-cli",
+        "activation_epoch": 1,
+        "activation_state_digest": "a" * 64,
+        "policy_generation_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "policy_fingerprint": "b" * 64,
+        "projector_schema_version": 1,
+        "catalog_generation": 1,
+        "projection_namespace_id": "c" * 64,
+        "plan_digest": "f" * 64,
+        "source_store_digest": "e" * 64,
+        "backup_reference": "exomem-governance-v3-backup://sha256/" + "d" * 64,
+        "replayed": replayed,
     }
 
 
