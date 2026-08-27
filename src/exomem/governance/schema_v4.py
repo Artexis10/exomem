@@ -9,6 +9,7 @@ policy/projector/catalog tuple in one transaction.
 from __future__ import annotations
 
 import base64
+import functools
 import hashlib
 import hmac
 import json
@@ -192,6 +193,54 @@ class DownmigrationResult:
     expired_purposes: int
     expired_tokens: int
     expired_proposals: int
+
+
+def _complete_schema_signature(
+    connection: sqlite3.Connection,
+) -> tuple[tuple[object, ...], ...]:
+    return tuple(
+        tuple(row)
+        for row in connection.execute(
+            "SELECT type, name, tbl_name, sql FROM sqlite_master "
+            "WHERE name NOT LIKE 'sqlite_autoindex_%' "
+            "ORDER BY type, name"
+        )
+    )
+
+
+@functools.cache
+def _expected_v3_schema_signature() -> tuple[tuple[object, ...], ...]:
+    from .. import sidecar_store
+    from . import store
+
+    reference = sqlite3.connect(":memory:")
+    try:
+        store._migrate(reference)
+        sidecar_store.ensure_meta_table(
+            reference,
+            store.DATA_TABLE,
+            "governance-v3-reference",
+        )
+        return _complete_schema_signature(reference)
+    finally:
+        reference.close()
+
+
+def require_exact_v3_connection(connection: sqlite3.Connection) -> None:
+    """Refuse any database that is not the frozen current schema-v3 authority."""
+
+    try:
+        version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+        quick_check = tuple(connection.execute("PRAGMA quick_check(1)"))
+        signature = _complete_schema_signature(connection)
+    except (AttributeError, TypeError, ValueError, sqlite3.Error) as exc:
+        raise SchemaV4Error("schema v3 migration source is unavailable") from exc
+    if version != 3:
+        raise SchemaV4Error(
+            f"schema v3 migration source requires exact schema v3, found v{version}"
+        )
+    if quick_check != (("ok",),) or signature != _expected_v3_schema_signature():
+        raise SchemaV4Error("schema v3 migration source is not exact")
 
 
 @dataclass(frozen=True, slots=True)

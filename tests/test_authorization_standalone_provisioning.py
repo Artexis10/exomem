@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 import stat
 from collections.abc import Iterator
 from dataclasses import replace
@@ -9,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from exomem import mutation_lock, writer_lease
-from exomem.governance import authorization_custody, policy, schema_v4
+from exomem.governance import authorization_custody, policy, schema_v4, store
 
 
 @pytest.fixture(autouse=True)
@@ -66,6 +67,12 @@ def _target(
         catalog_generation=1,
         projection_namespace_id="projection-namespace-initial",
     )
+
+
+def _exact_v3(vault: Path) -> Path:
+    connection = store.open_connection(vault)
+    connection.close()
+    return store.sidecar_path(vault)
 
 
 def test_attachment_identity_is_stable_for_one_root_and_changes_for_a_copy(
@@ -140,6 +147,186 @@ def test_standalone_provisioning_refuses_opaque_hosted_attachment(
 
     with pytest.raises(authorization_custody.AuthorizationCustodyUnavailable):
         authorization_custody.provision_standalone_custody(vault, now=now + 1)
+
+
+def test_existing_exact_v3_stages_identity_without_registering_or_serving(
+    tmp_path: Path,
+) -> None:
+    vault = _vault(tmp_path)
+    _exact_v3(vault)
+    now = 1_800_000_000
+
+    first = authorization_custody.stage_standalone_v3_custody(vault, now=now)
+    keyring_before = first.keyring_path.read_bytes()
+    replay = authorization_custody.stage_standalone_v3_custody(vault, now=now + 1)
+
+    assert replay == first
+    assert first.keyring_path.read_bytes() == keyring_before
+    assert first.registry_attachment_id == authorization_custody.standalone_attachment_id(
+        vault
+    )
+    keyring = authorization_custody.parse_keyring(keyring_before)
+    assert first.keyring_id == keyring.keyring_id
+    assert first.cell_id == keyring.cell_id
+    assert first.logical_vault_id == keyring.logical_vault_id
+    assert keyring.active_key.key.hex() not in repr(first)
+    if os.name != "nt":
+        assert stat.S_IMODE(first.keyring_path.stat().st_mode) == 0o600
+    assert not Path(os.environ[authorization_custody.CONTROL_FILE_ENV]).exists()
+    assert not Path(os.environ[authorization_custody.MEMBERSHIP_FILE_ENV]).exists()
+    with pytest.raises(authorization_custody.AuthorizationCustodyUnavailable):
+        authorization_custody.load_authorization_custody(vault, now=now + 1)
+    with pytest.raises(authorization_custody.AuthorizationCustodyUnavailable):
+        authorization_custody.provision_standalone_custody(vault, now=now + 1)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "absent",
+        "corrupt",
+        "future",
+        "unknown-table",
+        "future-column",
+        "unknown-index",
+        "unknown-trigger",
+    ],
+)
+def test_v3_staging_refuses_nonexact_authority_without_external_registration(
+    tmp_path: Path,
+    source: str,
+) -> None:
+    vault = _vault(tmp_path)
+    if source != "absent":
+        sidecar = _exact_v3(vault)
+        if source == "corrupt":
+            sidecar.write_bytes(b"not a governance database")
+        else:
+            connection = sqlite3.connect(sidecar)
+            try:
+                if source == "future":
+                    connection.execute("PRAGMA user_version=4")
+                elif source == "unknown-table":
+                    connection.execute("CREATE TABLE migration_smuggled_state (value TEXT)")
+                elif source == "future-column":
+                    connection.execute(
+                        "ALTER TABLE governance_session_grants ADD COLUMN future_state TEXT"
+                    )
+                elif source == "unknown-index":
+                    connection.execute(
+                        "CREATE INDEX migration_smuggled_index "
+                        "ON compiled_policy(compiled_at)"
+                    )
+                else:
+                    connection.execute(
+                        "CREATE TRIGGER migration_smuggled_trigger "
+                        "AFTER INSERT ON compiled_policy BEGIN SELECT 1; END"
+                    )
+                connection.commit()
+            finally:
+                connection.close()
+
+    with pytest.raises(authorization_custody.AuthorizationCustodyUnavailable):
+        authorization_custody.stage_standalone_v3_custody(
+            vault,
+            now=1_800_000_000,
+        )
+
+    assert not Path(os.environ[authorization_custody.KEYRING_FILE_ENV]).exists()
+    assert not Path(os.environ[authorization_custody.CONTROL_FILE_ENV]).exists()
+    assert not Path(os.environ[authorization_custody.MEMBERSHIP_FILE_ENV]).exists()
+
+
+def test_v3_staging_keyring_cannot_be_claimed_by_a_copied_attachment(
+    tmp_path: Path,
+) -> None:
+    vault = _vault(tmp_path)
+    copied = _vault(tmp_path, "copied-vault")
+    original_sidecar = _exact_v3(vault)
+    copied_sidecar = store.sidecar_path(copied)
+    copied_sidecar.write_bytes(original_sidecar.read_bytes())
+    now = 1_800_000_000
+    first = authorization_custody.stage_standalone_v3_custody(vault, now=now)
+    keyring_before = first.keyring_path.read_bytes()
+
+    with pytest.raises(authorization_custody.AuthorizationCustodyUnavailable):
+        authorization_custody.stage_standalone_v3_custody(copied, now=now + 1)
+
+    assert first.keyring_path.read_bytes() == keyring_before
+    assert not Path(os.environ[authorization_custody.CONTROL_FILE_ENV]).exists()
+
+
+def test_v3_staging_schema_drift_after_keyring_publish_remains_inert_and_retryable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _vault(tmp_path)
+    sidecar = _exact_v3(vault)
+    now = 1_800_000_000
+    original = authorization_custody._publish_private_file
+    mutated = False
+
+    def publish_then_drift(path: Path, data: bytes) -> bytes:
+        nonlocal mutated
+        published = original(path, data)
+        if path == Path(os.environ[authorization_custody.KEYRING_FILE_ENV]) and not mutated:
+            mutated = True
+            connection = sqlite3.connect(sidecar)
+            try:
+                connection.execute("CREATE TABLE concurrent_schema_state (value TEXT)")
+                connection.commit()
+            finally:
+                connection.close()
+        return published
+
+    monkeypatch.setattr(
+        authorization_custody,
+        "_publish_private_file",
+        publish_then_drift,
+    )
+    with pytest.raises(authorization_custody.AuthorizationCustodyUnavailable):
+        authorization_custody.stage_standalone_v3_custody(vault, now=now)
+
+    keyring_path = Path(os.environ[authorization_custody.KEYRING_FILE_ENV])
+    keyring_before = keyring_path.read_bytes()
+    assert not Path(os.environ[authorization_custody.CONTROL_FILE_ENV]).exists()
+    assert not Path(os.environ[authorization_custody.MEMBERSHIP_FILE_ENV]).exists()
+
+    connection = sqlite3.connect(sidecar)
+    try:
+        connection.execute("DROP TABLE concurrent_schema_state")
+        connection.commit()
+    finally:
+        connection.close()
+    monkeypatch.setattr(authorization_custody, "_publish_private_file", original)
+
+    result = authorization_custody.stage_standalone_v3_custody(vault, now=now + 1)
+
+    assert result.keyring_path.read_bytes() == keyring_before
+
+
+def test_v3_staging_never_reclassifies_an_existing_registration(
+    tmp_path: Path,
+) -> None:
+    vault = _vault(tmp_path)
+    now = 1_800_000_000
+    provisioned = authorization_custody.provision_standalone_custody(vault, now=now)
+    control_before = provisioned.control_path.read_bytes()
+    membership_before = provisioned.membership_path.read_bytes()
+    _exact_v3(vault)
+
+    with pytest.raises(authorization_custody.AuthorizationCustodyUnavailable):
+        authorization_custody.stage_standalone_v3_custody(vault, now=now + 1)
+
+    assert provisioned.control_path.read_bytes() == control_before
+    assert provisioned.membership_path.read_bytes() == membership_before
+    assert (
+        authorization_custody.load_authorization_custody(
+            vault,
+            now=now + 1,
+        ).control.governance_enrolled
+        is False
+    )
 
 
 def test_standalone_control_remains_valid_past_bootstrap_hour(tmp_path: Path) -> None:

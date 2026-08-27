@@ -171,6 +171,18 @@ class StandaloneProvisioningResult:
 
 
 @dataclass(frozen=True, slots=True)
+class StandaloneV3StagingResult:
+    """Non-secret identity staged for one explicit offline v3 migration."""
+
+    keyring_path: Path
+    keyring_id: str
+    cell_id: str
+    logical_vault_id: str
+    registry_attachment_id: str
+    attachment_epoch: int
+
+
+@dataclass(frozen=True, slots=True)
 class _LoadedCustodyFile:
     path: Path
     data: bytes = field(repr=False)
@@ -1044,6 +1056,44 @@ def _verify_standalone_staging_keyring(
         raise AuthorizationCustodyUnavailable
 
 
+def _new_standalone_staging_keyring(
+    *,
+    attachment_id: str,
+    current_time: int,
+) -> AuthorizationKeyring:
+    key_bytes = secrets.token_bytes(32)
+    key = AuthorizationVerifierKey(
+        key_id=_standalone_staging_identifier(
+            "auth-key",
+            attachment_id=attachment_id,
+            key=key_bytes,
+        ),
+        key=key_bytes,
+        not_before=current_time,
+        not_after=current_time + _DEFAULT_KEY_TTL_SECONDS,
+    )
+    return AuthorizationKeyring(
+        version=1,
+        keyring_id=_standalone_staging_identifier(
+            "keyring",
+            attachment_id=attachment_id,
+            key=key_bytes,
+        ),
+        cell_id=_standalone_staging_identifier(
+            "cell",
+            attachment_id=attachment_id,
+            key=key_bytes,
+        ),
+        logical_vault_id=_standalone_staging_identifier(
+            "vault",
+            attachment_id=attachment_id,
+            key=key_bytes,
+        ),
+        active_key_id=key.key_id,
+        accepted_keys=(key,),
+    )
+
+
 def _keyring_bytes(keyring: AuthorizationKeyring) -> bytes:
     value = {
         "version": keyring.version,
@@ -1158,6 +1208,20 @@ def _governance_negative_scan(vault_root: Path) -> None:
         raise AuthorizationCustodyUnavailable from None
 
 
+def _require_exact_v3_authority(vault_root: Path) -> None:
+    from . import schema_v4, store
+
+    connection = store.open_readonly_connection(vault_root)
+    if connection is None:
+        raise AuthorizationCustodyUnavailable
+    try:
+        schema_v4.require_exact_v3_connection(connection)
+    except (schema_v4.SchemaV4Error, OSError, RuntimeError):
+        raise AuthorizationCustodyUnavailable from None
+    finally:
+        connection.close()
+
+
 def _provisioning_result(
     custody: AuthorizationCustody,
 ) -> StandaloneProvisioningResult:
@@ -1177,6 +1241,78 @@ def _provisioning_result(
         registry_attachment_id=custody.control.registry_attachment_id,
         attachment_epoch=custody.control.attachment_epoch,
         replica_id=custody.local_replica_id,
+    )
+
+
+def stage_standalone_v3_custody(
+    vault_root: Path,
+    *,
+    now: int,
+) -> StandaloneV3StagingResult:
+    """Stage inert external identity for an exact-v3 offline migration.
+
+    This explicit owner operation publishes only the keyring.  It does not
+    create a control or membership record, does not enrol governance, and
+    cannot make authorization-session service ready.  A later coordinator
+    must bind this identity to one exact initial v4 tuple under the full
+    schema/replica fence before it may migrate the sidecar.
+    """
+
+    root = Path(vault_root)
+    current_time = _bounded_time(now)
+    if current_time > _MAX_SIGNED_SQLITE_INTEGER - _DEFAULT_KEY_TTL_SECONDS:
+        raise AuthorizationCustodyUnavailable
+    attachment_id = standalone_attachment_id(root)
+    keyring_path = _configured_external_path(KEYRING_FILE_ENV, root)
+    control_path = _configured_external_path(CONTROL_FILE_ENV, root)
+    membership_path = _configured_external_path(MEMBERSHIP_FILE_ENV, root)
+    if len({keyring_path, control_path, membership_path}) != 3:
+        raise AuthorizationCustodyUnavailable
+
+    from .. import reserved_paths
+
+    with reserved_paths._identity_coordination_scope(root):
+        _require_exact_v3_authority(root)
+        for registered_path in (control_path, membership_path):
+            try:
+                registered = _load_file(registered_path)
+            except AuthorizationCustodyUnavailable:
+                if os.path.lexists(registered_path):
+                    raise
+            else:
+                if registered is not None:
+                    raise AuthorizationCustodyUnavailable
+
+        try:
+            loaded = _load_file(keyring_path)
+        except AuthorizationCustodyUnavailable:
+            if os.path.lexists(keyring_path):
+                raise
+            loaded = None
+        if loaded is None:
+            keyring = _new_standalone_staging_keyring(
+                attachment_id=attachment_id,
+                current_time=current_time,
+            )
+            _publish_private_file(keyring_path, _keyring_bytes(keyring))
+        else:
+            keyring = parse_keyring(loaded.data)
+
+        _verify_standalone_staging_keyring(
+            keyring,
+            attachment_id=attachment_id,
+        )
+        if not keyring.active_key.not_before <= current_time < keyring.active_key.not_after:
+            raise AuthorizationCustodyUnavailable
+        _require_exact_v3_authority(root)
+
+    return StandaloneV3StagingResult(
+        keyring_path=keyring_path,
+        keyring_id=keyring.keyring_id,
+        cell_id=keyring.cell_id,
+        logical_vault_id=keyring.logical_vault_id,
+        registry_attachment_id=attachment_id,
+        attachment_epoch=1,
     )
 
 
@@ -1239,36 +1375,9 @@ def provision_standalone_custody(
         if keyring_loaded is not None:
             keyring = parse_keyring(keyring_loaded.data)
         else:
-            key_bytes = secrets.token_bytes(32)
-            key = AuthorizationVerifierKey(
-                key_id=_standalone_staging_identifier(
-                    "auth-key",
-                    attachment_id=attachment_id,
-                    key=key_bytes,
-                ),
-                key=key_bytes,
-                not_before=current_time,
-                not_after=current_time + _DEFAULT_KEY_TTL_SECONDS,
-            )
-            keyring = AuthorizationKeyring(
-                version=1,
-                keyring_id=_standalone_staging_identifier(
-                    "keyring",
-                    attachment_id=attachment_id,
-                    key=key_bytes,
-                ),
-                cell_id=_standalone_staging_identifier(
-                    "cell",
-                    attachment_id=attachment_id,
-                    key=key_bytes,
-                ),
-                logical_vault_id=_standalone_staging_identifier(
-                    "vault",
-                    attachment_id=attachment_id,
-                    key=key_bytes,
-                ),
-                active_key_id=key.key_id,
-                accepted_keys=(key,),
+            keyring = _new_standalone_staging_keyring(
+                attachment_id=attachment_id,
+                current_time=current_time,
             )
             encoded_keyring = _keyring_bytes(keyring)
             _publish_private_file(keyring_path, encoded_keyring)
