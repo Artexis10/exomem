@@ -47,6 +47,16 @@
       the projection - measured live as the flapping-admission duty cycle).
 - [x] 2.5 Bounded startup validation: O(1) durable-checkpoint check in the
       watcher startup pass; whole-vault rebuild only on incoherence.
+- [x] 2.6 Bounded follower wait: managed recall callers decline within a
+      small bounded window when a resolver build is in flight (measured:
+      the 120 s follower wait exceeded every client deadline, so refusals
+      arrived as 31-90 s hangs); fallback callers keep the full build
+      bound, and the selection is pinned at the call site.
+- [x] 2.7 Refusal observability: every retrieval warming refusal carries a
+      `site` discriminator from a closed vocabulary enforced in the
+      constructor, plus `waited_ms`; the REST schema expresses the enum
+      derived from the code vocabulary; bidirectional vocabulary/raise-site
+      checks.
 
 ## 3. Verification and delivery
 
