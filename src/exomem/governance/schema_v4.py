@@ -193,6 +193,8 @@ class DownmigrationResult:
     expired_purposes: int
     expired_tokens: int
     expired_proposals: int
+    recovery_event_id: str
+    recovery_terminal_digest: str
 
 
 def _complete_schema_signature(
@@ -1295,6 +1297,52 @@ def _close_downmigration_authority(
     return sessions, grants, purposes, tokens, proposals
 
 
+def _downmigration_terminal(
+    *,
+    event_id: str,
+    plan_digest: str,
+    expected: VerifiedActiveGovernanceState,
+    workspace_digest: str,
+    catalog_digest: str,
+    downmigrated_at: int,
+    closed: tuple[int, int, int, int, int],
+) -> tuple[str, str]:
+    value: dict[str, str | int] = {
+        "schema": "exomem.governance-downmigration-terminal/v1",
+        "recovery_event_id": event_id,
+        "recovery_plan_digest": plan_digest,
+        "logical_vault_id": expected.logical_vault_id,
+        "activation_store_id": expected.activation_store_id,
+        "activation_epoch": expected.activation_epoch,
+        "activation_state_digest": expected.activation_state_digest,
+        "policy_generation_id": expected.policy_generation_id,
+        "policy_fingerprint": expected.policy_fingerprint,
+        "projector_schema_version": expected.projector_schema_version,
+        "catalog_generation": expected.catalog_generation,
+        "projection_namespace_id": expected.projection_namespace_id,
+        "workspace_digest": workspace_digest,
+        "catalog_digest": catalog_digest,
+        "downmigrated_at": downmigrated_at,
+        "closed_sessions": closed[0],
+        "expired_grants": closed[1],
+        "expired_purposes": closed[2],
+        "expired_tokens": closed[3],
+        "expired_proposals": closed[4],
+    }
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    digest = _framed_digest(
+        b"exomem.governance-downmigration-terminal.v1",
+        encoded,
+    )
+    return encoded.decode("utf-8"), digest
+
+
 def downmigrate_v4_connection(
     connection: sqlite3.Connection,
     *,
@@ -1303,6 +1351,8 @@ def downmigrate_v4_connection(
     expected_catalog_descriptor: bytes,
     verified_workspace_digest: str,
     verified_catalog_digest: str,
+    recovery_event_id: str,
+    recovery_plan_digest: str,
     downmigrated_at: int,
 ) -> DownmigrationResult:
     """Atomically return a fully verified, quiesced v4 store to exact schema v3.
@@ -1336,6 +1386,8 @@ def downmigrate_v4_connection(
         verified_catalog_digest,
         "verified_catalog_digest",
     )
+    event_id = _digest(recovery_event_id, "recovery_event_id")
+    plan_digest = _digest(recovery_plan_digest, "recovery_plan_digest")
     completed_at = _integer(downmigrated_at, "downmigrated_at")
     if not hmac.compare_digest(source_digest, workspace_digest):
         raise SchemaV4Error("downmigration workspace parity does not verify")
@@ -1351,6 +1403,11 @@ def downmigrate_v4_connection(
         ).fetchone()
         if pending is not None:
             raise SchemaV4Error("downmigration cannot discard an open recovery journal")
+        if connection.execute(
+            "SELECT 1 FROM governance_operation_journals WHERE event_id=?",
+            (event_id,),
+        ).fetchone() is not None:
+            raise SchemaV4Error("downmigration recovery event already exists")
         snapshot = load_active_policy(
             connection,
             expected_logical_vault_id=expected.logical_vault_id,
@@ -1367,6 +1424,48 @@ def downmigrate_v4_connection(
         closed = _close_downmigration_authority(
             connection,
             downmigrated_at=completed_at,
+        )
+        terminal_json, terminal_digest = _downmigration_terminal(
+            event_id=event_id,
+            plan_digest=plan_digest,
+            expected=expected,
+            workspace_digest=workspace_digest,
+            catalog_digest=rebuild_digest,
+            downmigrated_at=completed_at,
+            closed=closed,
+        )
+        affected_ids = json.dumps(
+            sorted((expected.activation_store_id, expected.logical_vault_id)),
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        )
+        connection.execute(
+            "INSERT INTO governance_operation_journals "
+            "(event_id, operation, causation_id, authorization_session, principal_id, "
+            "phase, direction, prior_digest, prepared_digest, final_digest, affected_ids, "
+            "required_child_intents, required_child_terminals, proposal_id, attempt_no, "
+            "marker_required, created_at, updated_at, blocked_reason) "
+            "VALUES (?, 'governance_schema_v4_downmigration', ?, NULL, "
+            "'offline-schema-coordinator', 'closed', 'narrowing', ?, ?, ?, ?, '[]', "
+            "'[]', NULL, 1, 0, ?, ?, NULL)",
+            (
+                event_id,
+                event_id,
+                expected.activation_state_digest,
+                plan_digest,
+                terminal_digest,
+                affected_ids,
+                completed_at,
+                completed_at,
+            ),
+        )
+        connection.execute(
+            "INSERT INTO governance_operation_components "
+            "(event_id, phase, ordinal, component_kind, component_key, value_json, "
+            "value_hash, status) VALUES (?, 'final', 0, "
+            "'schema-downmigration-terminal', ?, ?, ?, 'complete')",
+            (event_id, event_id, terminal_json, terminal_digest),
         )
         _crash_point("downmigration-after-authority-close")
         for table in (*_VERSIONED_AUTHORITY_TABLES, *_V4_ONLY_TABLES):
@@ -1395,6 +1494,8 @@ def downmigrate_v4_connection(
         expired_purposes=closed[2],
         expired_tokens=closed[3],
         expired_proposals=closed[4],
+        recovery_event_id=event_id,
+        recovery_terminal_digest=terminal_digest,
     )
 
 

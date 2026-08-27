@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 import sqlite3
 
 import pytest
@@ -17,6 +18,8 @@ COMPILED_POLICY = policy.compile_documents(dict(POLICY_DOCUMENTS))
 assert not COMPILED_POLICY.empty and not COMPILED_POLICY.blocked
 POLICY_FINGERPRINT = COMPILED_POLICY.fingerprint
 COMPILED_POLICY_BYTES = policy.canonical_compiled_bytes(COMPILED_POLICY)
+DOWNMIGRATION_EVENT_ID = "d" * 64
+DOWNMIGRATION_PLAN_DIGEST = "e" * 64
 
 
 def _v3_connection() -> sqlite3.Connection:
@@ -104,6 +107,8 @@ def _downmigrate(
     catalog_descriptor: bytes = b'{"artifacts":[]}',
     workspace_digest: str | None = None,
     catalog_digest: str | None = None,
+    recovery_event_id: str = DOWNMIGRATION_EVENT_ID,
+    recovery_plan_digest: str = DOWNMIGRATION_PLAN_DIGEST,
 ) -> schema_v4.DownmigrationResult:
     return schema_v4.downmigrate_v4_connection(
         connection,
@@ -120,6 +125,8 @@ def _downmigrate(
             if catalog_digest is None
             else catalog_digest
         ),
+        recovery_event_id=recovery_event_id,
+        recovery_plan_digest=recovery_plan_digest,
         downmigrated_at=1_800_000_100,
     )
 
@@ -664,6 +671,8 @@ def test_v4_downmigration_restores_exact_v3_and_expires_session_authority() -> N
     assert result.expired_tokens == 1
     assert result.expired_proposals == 1
     assert result.source_documents == POLICY_DOCUMENTS
+    assert result.recovery_event_id == DOWNMIGRATION_EVENT_ID
+    assert len(result.recovery_terminal_digest) == 64
     assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
     assert _schema_signature(connection) == _schema_signature(expected_v3)
     for table in (
@@ -676,6 +685,64 @@ def test_v4_downmigration_restores_exact_v3_and_expires_session_authority() -> N
     assert connection.execute(
         "SELECT status, spent_at FROM governance_proposals WHERE proposal_id='proposal-v4'"
     ).fetchone() == ("expired", 1_800_000_100)
+    assert connection.execute(
+        "SELECT operation, causation_id, principal_id, phase, direction, "
+        "prior_digest, prepared_digest, final_digest, affected_ids, "
+        "required_child_intents, required_child_terminals, marker_required, "
+        "created_at, updated_at FROM governance_operation_journals WHERE event_id=?",
+        (DOWNMIGRATION_EVENT_ID,),
+    ).fetchone() == (
+        "governance_schema_v4_downmigration",
+        DOWNMIGRATION_EVENT_ID,
+        "offline-schema-coordinator",
+        "closed",
+        "narrowing",
+        active.activation_state_digest,
+        DOWNMIGRATION_PLAN_DIGEST,
+        result.recovery_terminal_digest,
+        '["activation-store-7","logical-vault-7"]',
+        "[]",
+        "[]",
+        0,
+        1_800_000_100.0,
+        1_800_000_100.0,
+    )
+    component = connection.execute(
+        "SELECT phase, ordinal, component_kind, component_key, value_json, value_hash, "
+        "status FROM governance_operation_components WHERE event_id=?",
+        (DOWNMIGRATION_EVENT_ID,),
+    ).fetchone()
+    assert component is not None
+    terminal = json.loads(str(component[4]))
+    assert component[:4] == (
+        "final",
+        0,
+        "schema-downmigration-terminal",
+        DOWNMIGRATION_EVENT_ID,
+    )
+    assert component[5:] == (result.recovery_terminal_digest, "complete")
+    assert terminal == {
+        "activation_epoch": 1,
+        "activation_state_digest": active.activation_state_digest,
+        "activation_store_id": "activation-store-7",
+        "catalog_generation": 7,
+        "catalog_digest": schema_v4.catalog_rebuild_digest(b'{"artifacts":[]}'),
+        "closed_sessions": 1,
+        "downmigrated_at": 1_800_000_100,
+        "expired_grants": 1,
+        "expired_proposals": 1,
+        "expired_purposes": 1,
+        "expired_tokens": 1,
+        "logical_vault_id": "logical-vault-7",
+        "policy_fingerprint": POLICY_FINGERPRINT,
+        "policy_generation_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "projection_namespace_id": "projection-namespace-7",
+        "projector_schema_version": 1,
+        "recovery_event_id": DOWNMIGRATION_EVENT_ID,
+        "recovery_plan_digest": DOWNMIGRATION_PLAN_DIGEST,
+        "schema": "exomem.governance-downmigration-terminal/v1",
+        "workspace_digest": schema_v4.source_documents_digest(POLICY_DOCUMENTS),
+    }
 
 
 @pytest.mark.parametrize(
@@ -717,6 +784,50 @@ def test_v4_downmigration_refuses_unproved_workspace_or_catalog_parity(
             workspace_digest=workspace_digest,
             catalog_digest=catalog_digest,
         )
+
+    assert tuple(connection.iterdump()) == before
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (("recovery_event_id", "not-a-digest"), ("recovery_plan_digest", "not-a-digest")),
+)
+def test_v4_downmigration_refuses_malformed_recovery_identity_before_writes(
+    field: str,
+    value: str,
+) -> None:
+    connection, active = _migrated_v4()
+    before = tuple(connection.iterdump())
+
+    with pytest.raises(schema_v4.SchemaV4Error, match=field):
+        _downmigrate(connection, active, **{field: value})
+
+    assert not connection.in_transaction
+    assert tuple(connection.iterdump()) == before
+
+
+def test_v4_downmigration_refuses_recovery_event_collision_without_writes() -> None:
+    connection, active = _migrated_v4()
+    connection.execute(
+        "INSERT INTO governance_operation_journals "
+        "(event_id, operation, causation_id, principal_id, phase, direction, "
+        "prior_digest, prepared_digest, final_digest, affected_ids, "
+        "required_child_intents, required_child_terminals, created_at, updated_at) "
+        "VALUES (?, 'other', ?, 'principal', 'closed', 'narrowing', ?, ?, ?, '[]', "
+        "'[]', '[]', 1, 1)",
+        (
+            DOWNMIGRATION_EVENT_ID,
+            DOWNMIGRATION_EVENT_ID,
+            "1" * 64,
+            "2" * 64,
+            "3" * 64,
+        ),
+    )
+    connection.commit()
+    before = tuple(connection.iterdump())
+
+    with pytest.raises(schema_v4.SchemaV4Error, match="recovery event already exists"):
+        _downmigrate(connection, active)
 
     assert tuple(connection.iterdump()) == before
 
@@ -792,6 +903,8 @@ def test_v4_downmigration_refuses_non_v4_source_before_parsing_proofs() -> None:
             expected_catalog_descriptor="not-bytes",  # type: ignore[arg-type]
             verified_workspace_digest="not-a-digest",
             verified_catalog_digest="not-a-digest",
+            recovery_event_id="not-an-event-id",
+            recovery_plan_digest="not-a-plan-digest",
             downmigrated_at=0,
         )
 
