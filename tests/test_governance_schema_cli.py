@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -9,10 +10,61 @@ from exomem.__main__ import main
 from exomem.governance import (
     authorization_custody,
     schema_downmigration,
+    schema_migration,
     store,
 )
 
 ACTIVE_DIGEST = "a" * 64
+
+
+def test_governance_schema_plan_migration_emits_reviewable_target(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    summary = {
+        "schema_version": 3,
+        "logical_vault_id": "logical-vault-cli",
+        "activation_store_id": "activation-store-cli",
+        "activation_epoch": 1,
+        "activation_state_digest": ACTIVE_DIGEST,
+        "policy_generation_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "policy_fingerprint": "b" * 64,
+        "projector_schema_version": 1,
+        "catalog_generation": 1,
+        "projection_namespace_id": "c" * 64,
+        "source_store_digest": "e" * 64,
+        "projection_rows_digest": "d" * 64,
+        "item_count": 7,
+        "plan_digest": "f" * 64,
+    }
+    calls: list[tuple[Path, int]] = []
+
+    def prepare(root: Path, *, now: int):
+        calls.append((root, now))
+        return object()
+
+    monkeypatch.setattr(schema_migration, "prepare_forward_migration", prepare)
+    monkeypatch.setattr(schema_migration, "plan_summary", lambda _plan: summary)
+
+    assert (
+        main(
+            [
+                "governance-schema",
+                "plan-migration",
+                "--vault",
+                str(vault),
+                "--json",
+            ]
+        )
+        == 0
+    )
+
+    assert len(calls) == 1 and calls[0][0] == vault
+    assert isinstance(calls[0][1], int) and calls[0][1] > 0
+    assert json.loads(capsys.readouterr().out) == summary
 
 
 @pytest.fixture

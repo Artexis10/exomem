@@ -16,7 +16,7 @@ Subcommands:
   (requires the optional `tui` extra; needs an interactive terminal)
 - `doctor` — read-only local install/setup preflight
 - `auth sessions|revoke` — operator-only durable MCP session administration
-- `governance-schema status|downmigrate` — explicit offline schema inspection/rollback
+- `governance-schema status|plan-migration|downmigrate` — offline schema control
 - `status` — resource posture/residency diagnostics without loading models
 - `warm` — pre-download/load the search models (bge, reranker, CLIP) so the first
   server start doesn't pay the download in the background; optional `--vault`
@@ -1527,7 +1527,7 @@ def _governance_schema_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="exomem governance-schema",
         description=(
-            "Ops-only governance schema inspection and explicit offline rollback. "
+            "Ops-only governance schema inspection, planning, and explicit rollback. "
             "This command is not exposed through MCP, REST, or Hosted agent surfaces."
         ),
     )
@@ -1539,6 +1539,13 @@ def _governance_schema_main(argv: list[str]) -> int:
     )
     status_parser.add_argument("--vault", required=True, help="explicit absolute vault root")
     status_parser.add_argument("--json", action="store_true", help="emit stable JSON")
+
+    plan_parser = subcommands.add_parser(
+        "plan-migration",
+        help="stage and review an inert exact-v3 to exact-v4 migration target",
+    )
+    plan_parser.add_argument("--vault", required=True, help="explicit absolute vault root")
+    plan_parser.add_argument("--json", action="store_true", help="emit stable JSON")
 
     downmigrate_parser = subcommands.add_parser(
         "downmigrate",
@@ -1568,9 +1575,27 @@ def _governance_schema_main(argv: list[str]) -> int:
         )
         return 1
 
-    from .governance import authorization_custody, schema_downmigration
+    from .governance import authorization_custody, schema_downmigration, schema_migration
 
     moment = int(time.time())
+    if args.command == "plan-migration":
+        try:
+            plan = schema_migration.prepare_forward_migration(vault, now=moment)
+            summary = schema_migration.plan_summary(plan)
+        except schema_migration.ForwardMigrationUnavailable:
+            _governance_schema_print_error(
+                "GOVERNANCE_SCHEMA_MIGRATION_UNAVAILABLE",
+                "the exact quiesced v3 policy and catalog could not be prepared",
+                as_json=as_json,
+            )
+            return 1
+        if as_json:
+            print(json.dumps(summary))
+        else:
+            for key, value in summary.items():
+                print(f"{key}: {value}")
+        return 0
+
     try:
         status = _governance_schema_status(vault, now=moment)
     except (

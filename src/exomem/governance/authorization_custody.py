@@ -180,6 +180,7 @@ class StandaloneV3StagingResult:
     logical_vault_id: str
     registry_attachment_id: str
     attachment_epoch: int
+    staged_at: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -1320,6 +1321,7 @@ def stage_standalone_v3_custody(
         logical_vault_id=keyring.logical_vault_id,
         registry_attachment_id=attachment_id,
         attachment_epoch=1,
+        staged_at=keyring.active_key.not_before,
     )
 
 
