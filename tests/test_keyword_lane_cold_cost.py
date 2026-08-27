@@ -658,7 +658,10 @@ def test_vector_graph_resolver_inherits_strict_server_projection_policy(
         expected_checkpoint=None,  # noqa: ANN001
     ):
         observed.append((allow_fallback, expected_checkpoint))
-        raise find_module.RetrievalIndexWarming(status="temporarily_unavailable")
+        raise find_module.RetrievalIndexWarming(
+            site="resolver_checkpoint_stale",
+            status="temporarily_unavailable",
+        )
 
     def collect(root: Path, **kwargs):  # noqa: ANN003
         kwargs["get_query_resolver"](

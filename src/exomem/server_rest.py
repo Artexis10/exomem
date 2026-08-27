@@ -139,6 +139,22 @@ _OPENAPI_MUTATION_HOLDER_SCHEMA = {
     ],
     "additionalProperties": False,
 }
+def _retrieval_warming_sites() -> tuple[str, ...]:
+    """The refusal-site vocabulary, read from its single source of truth.
+
+    The `find` import is deferred out of the module's top-level import block,
+    but the schema below calls this while the module loads, so `find` is
+    still imported at process start — deliberately: the schema must be
+    correct at import time, and any process serving recall pays for `find`
+    on its first request anyway. Deriving the enum here rather than
+    transcribing the list is the point — a hand-copied enum goes stale
+    silently, which is the drift the vocabulary exists to prevent.
+    """
+    from .find import RETRIEVAL_WARMING_SITES
+
+    return RETRIEVAL_WARMING_SITES
+
+
 _OPENAPI_ERROR_SCHEMA = {
     "type": "object",
     "properties": {
@@ -155,6 +171,12 @@ _OPENAPI_ERROR_SCHEMA = {
         "complete": {"type": "boolean"},
         "committed": {"type": ["boolean", "null"]},
         "retry_after_ms": {"type": "integer", "minimum": 0},
+        # Which gate declined a RETRIEVAL_INDEX_WARMING, and how long it waited
+        # before giving up, so a client can attribute a refusal from the
+        # response alone rather than from the server's logs. The enum is
+        # DERIVED from the single source of truth, never transcribed.
+        "site": {"type": "string", "enum": list(_retrieval_warming_sites())},
+        "waited_ms": {"type": "integer", "minimum": 0},
         "unresolved_sources": {
             "type": "array",
             "items": {"type": "string", "maxLength": 256},

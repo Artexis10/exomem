@@ -137,6 +137,9 @@ def test_incomplete_catalog_outcomes_are_typed_and_not_cached(
         "complete": False,
         "status": public_status,
         "retry_after_ms": 250,
+        # Every refusal now names WHICH gate declined; this one is the exact
+        # catalog outcome, distinct from a projection or resolver refusal.
+        "site": "catalog_outcome",
     }
 
     recovered = commands.op_find(tmp_path, **request)
