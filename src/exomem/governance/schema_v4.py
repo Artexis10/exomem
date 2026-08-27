@@ -179,6 +179,22 @@ class MigrationResult:
 
 
 @dataclass(frozen=True, slots=True)
+class DownmigrationResult:
+    schema_version: int
+    activation_store_id: str
+    activation_epoch: int
+    activation_state_digest: str
+    policy_generation_id: str
+    policy_fingerprint: str
+    source_documents: tuple[tuple[str, bytes], ...]
+    closed_sessions: int
+    expired_grants: int
+    expired_purposes: int
+    expired_tokens: int
+    expired_proposals: int
+
+
+@dataclass(frozen=True, slots=True)
 class VerifiedActiveGovernanceState:
     logical_vault_id: str
     activation_store_id: str
@@ -254,6 +270,28 @@ def _source_document_bytes(documents: tuple[tuple[str, bytes], ...]) -> bytes:
     if len(encoded) > _MAX_BLOB_BYTES:
         raise SchemaV4Error("source_documents exceeds the bounded byte map")
     return bytes(encoded)
+
+
+def source_documents_digest(documents: tuple[tuple[str, bytes], ...]) -> str:
+    """Bind one exact ordered policy-source byte map for an offline mirror proof."""
+
+    return hashlib.sha256(
+        _framed(
+            b"exomem.governance-v3-workspace-mirror.v1",
+            _source_document_bytes(documents),
+        )
+    ).hexdigest()
+
+
+def catalog_rebuild_digest(descriptor: bytes) -> str:
+    """Bind the exact active catalog descriptor rebuilt by an offline rollback."""
+
+    return hashlib.sha256(
+        _framed(
+            b"exomem.governance-v3-catalog-rebuild.v1",
+            _blob(descriptor, "catalog descriptor", allow_empty=True),
+        )
+    ).hexdigest()
 
 
 def _decode_source_document_bytes(value: object) -> tuple[tuple[str, bytes], ...]:
@@ -981,6 +1019,238 @@ def migrate_v3_connection(
         connection.rollback()
         raise
     return MigrationResult(4, seed.activation_store_id, material.activation_digest)
+
+
+_V4_ONLY_TABLES: Final = (
+    "governance_authorization_sessions",
+    "compiled_policy_generations",
+    "catalog_generation_descriptors",
+    "governance_projection_namespaces",
+    "active_governance_tuple",
+    "governance_activation_store",
+    "governance_tuple_publications",
+    "governance_schema_migrations",
+    "governance_legacy_authority",
+)
+_VERSIONED_AUTHORITY_TABLES: Final = (
+    "governance_session_grants",
+    "governance_session_purpose",
+    "governance_session_purpose_staging",
+    "withhold_tokens",
+)
+_V3_COMMON_TABLES: Final = (
+    "compiled_policy",
+    "governance_operation_components",
+    "governance_operation_journals",
+    "governance_policy_archives",
+    "governance_proposals",
+    "receipt_instance",
+    "receipt_secrets",
+    "receipts_head",
+)
+
+
+def _versioned_schema_signature(
+    connection: sqlite3.Connection,
+) -> tuple[tuple[object, ...], ...]:
+    tables = (*_VERSIONED_AUTHORITY_TABLES, *_V4_ONLY_TABLES)
+    placeholders = ",".join("?" for _ in tables)
+    return tuple(
+        tuple(row)
+        for row in connection.execute(
+            "SELECT type, name, tbl_name, sql FROM sqlite_master "
+            f"WHERE tbl_name IN ({placeholders}) "
+            "AND name NOT LIKE 'sqlite_autoindex_%' "
+            "ORDER BY type, name",
+            tables,
+        )
+    )
+
+
+def _expected_versioned_schema_signature() -> tuple[tuple[object, ...], ...]:
+    reference = sqlite3.connect(":memory:")
+    try:
+        _create_legacy_archive(reference)
+        _create_v4_schema(reference)
+        return _versioned_schema_signature(reference)
+    finally:
+        reference.close()
+
+
+def _require_downmigration_schema(connection: sqlite3.Connection) -> None:
+    tables = {
+        str(row[0])
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+        )
+    }
+    required = (
+        set(_V4_ONLY_TABLES)
+        | set(_VERSIONED_AUTHORITY_TABLES)
+        | set(_V3_COMMON_TABLES)
+    )
+    if not required <= tables:
+        raise SchemaV4Error("schema v4 downmigration source is incomplete")
+    unexpected = tables - required - {"meta"}
+    if unexpected:
+        raise SchemaV4Error("schema v4 downmigration source has unknown state")
+    if _versioned_schema_signature(connection) != _expected_versioned_schema_signature():
+        raise SchemaV4Error("schema v4 downmigration source is not exact")
+
+
+def _close_downmigration_authority(
+    connection: sqlite3.Connection,
+    *,
+    downmigrated_at: int,
+) -> tuple[int, int, int, int, int]:
+    sessions = int(
+        connection.execute(
+            "UPDATE governance_authorization_sessions "
+            "SET status='closed', closed_at=? WHERE status='active'",
+            (downmigrated_at,),
+        ).rowcount
+        or 0
+    )
+    grants = int(
+        connection.execute(
+            "UPDATE governance_session_grants "
+            "SET status='revoked', revoked_at=? WHERE status<>'revoked'",
+            (downmigrated_at,),
+        ).rowcount
+        or 0
+    )
+    purposes = int(
+        connection.execute(
+            "UPDATE governance_session_purpose SET status='revoked' "
+            "WHERE status<>'revoked'"
+        ).rowcount
+        or 0
+    )
+    purposes += int(
+        connection.execute("DELETE FROM governance_session_purpose_staging").rowcount
+        or 0
+    )
+    tokens = int(
+        connection.execute(
+            "UPDATE withhold_tokens SET status='expired', "
+            "consumed_at=COALESCE(consumed_at, ?) WHERE status<>'expired'",
+            (downmigrated_at,),
+        ).rowcount
+        or 0
+    )
+    proposals = int(
+        connection.execute(
+            "UPDATE governance_proposals SET status='expired', "
+            "spent_at=COALESCE(spent_at, ?) WHERE status='pending'",
+            (downmigrated_at,),
+        ).rowcount
+        or 0
+    )
+    return sessions, grants, purposes, tokens, proposals
+
+
+def downmigrate_v4_connection(
+    connection: sqlite3.Connection,
+    *,
+    expected: VerifiedActiveGovernanceState,
+    expected_source_documents: tuple[tuple[str, bytes], ...],
+    expected_catalog_descriptor: bytes,
+    verified_workspace_digest: str,
+    verified_catalog_digest: str,
+    downmigrated_at: int,
+) -> DownmigrationResult:
+    """Atomically return a fully verified, quiesced v4 store to exact schema v3.
+
+    This is the database half of the offline rollback coordinator.  Its caller
+    must already hold the whole-tree/schema/replica fence and must supply the
+    digests produced after mirroring the pointed source bytes and rebuilding
+    the pointed catalog.  Ordinary openers never call this function.
+    """
+
+    version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+    if version != SCHEMA_USER_VERSION:
+        raise SchemaV4Error(
+            f"explicit governance downmigration requires exact schema v4, found v{version}"
+        )
+    if connection.in_transaction:
+        raise SchemaV4Error("schema v4 downmigration requires a clean transaction boundary")
+    if not isinstance(expected, VerifiedActiveGovernanceState):
+        raise SchemaV4Error("schema v4 downmigration expected tuple is invalid")
+    source_digest = source_documents_digest(expected_source_documents)
+    descriptor = _blob(
+        expected_catalog_descriptor,
+        "expected_catalog_descriptor",
+        allow_empty=True,
+    )
+    workspace_digest = _digest(
+        verified_workspace_digest,
+        "verified_workspace_digest",
+    )
+    rebuild_digest = _digest(
+        verified_catalog_digest,
+        "verified_catalog_digest",
+    )
+    completed_at = _integer(downmigrated_at, "downmigrated_at")
+    if not hmac.compare_digest(source_digest, workspace_digest):
+        raise SchemaV4Error("downmigration workspace parity does not verify")
+    if not hmac.compare_digest(catalog_rebuild_digest(descriptor), rebuild_digest):
+        raise SchemaV4Error("downmigration catalog parity does not verify")
+
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        _require_downmigration_schema(connection)
+        pending = connection.execute(
+            "SELECT event_id FROM governance_operation_journals "
+            "WHERE phase IN ('allocating','pending') ORDER BY event_id LIMIT 1"
+        ).fetchone()
+        if pending is not None:
+            raise SchemaV4Error("downmigration cannot discard an open recovery journal")
+        snapshot = load_active_policy(
+            connection,
+            expected_logical_vault_id=expected.logical_vault_id,
+            expected_activation_store_id=expected.activation_store_id,
+            expected_activation_epoch=expected.activation_epoch,
+            expected_activation_state_digest=expected.activation_state_digest,
+        )
+        if snapshot.active != expected:
+            raise SchemaV4Error("downmigration active tuple changed")
+        if snapshot.source_documents != expected_source_documents:
+            raise SchemaV4Error("downmigration workspace parity does not verify")
+        if not hmac.compare_digest(snapshot.catalog_descriptor, descriptor):
+            raise SchemaV4Error("downmigration catalog parity does not verify")
+        closed = _close_downmigration_authority(
+            connection,
+            downmigrated_at=completed_at,
+        )
+        _crash_point("downmigration-after-authority-close")
+        for table in (*_VERSIONED_AUTHORITY_TABLES, *_V4_ONLY_TABLES):
+            connection.execute(f"DROP TABLE {table}")
+        _crash_point("downmigration-after-v4-drop")
+        from . import store as store_module
+
+        store_module._migrate_v3(connection)
+        _crash_point("downmigration-after-v3-schema")
+        connection.execute("PRAGMA user_version=3")
+        _crash_point("downmigration-before-commit")
+        connection.commit()
+    except BaseException:
+        connection.rollback()
+        raise
+    return DownmigrationResult(
+        schema_version=3,
+        activation_store_id=expected.activation_store_id,
+        activation_epoch=expected.activation_epoch,
+        activation_state_digest=expected.activation_state_digest,
+        policy_generation_id=expected.policy_generation_id,
+        policy_fingerprint=expected.policy_fingerprint,
+        source_documents=expected_source_documents,
+        closed_sessions=closed[0],
+        expired_grants=closed[1],
+        expired_purposes=closed[2],
+        expired_tokens=closed[3],
+        expired_proposals=closed[4],
+    )
 
 
 def load_active_state(

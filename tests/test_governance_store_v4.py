@@ -70,6 +70,60 @@ def _columns(connection: sqlite3.Connection, table: str) -> tuple[str, ...]:
     return tuple(str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})"))
 
 
+def _schema_signature(connection: sqlite3.Connection) -> tuple[tuple[str, str, str], ...]:
+    return tuple(
+        (str(row[0]), str(row[1]), str(row[2]))
+        for row in connection.execute(
+            "SELECT type, name, sql FROM sqlite_master "
+            "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+        )
+    )
+
+
+def _migrated_v4() -> tuple[
+    sqlite3.Connection,
+    schema_v4.VerifiedActiveGovernanceState,
+]:
+    connection = _v3_connection()
+    migration = schema_v4.migrate_v3_connection(connection, _seed())
+    active = schema_v4.load_active_state(
+        connection,
+        expected_logical_vault_id="logical-vault-7",
+        expected_activation_store_id="activation-store-7",
+        expected_activation_epoch=1,
+        expected_activation_state_digest=migration.activation_state_digest,
+    )
+    return connection, active
+
+
+def _downmigrate(
+    connection: sqlite3.Connection,
+    active: schema_v4.VerifiedActiveGovernanceState,
+    *,
+    source_documents: tuple[tuple[str, bytes], ...] = POLICY_DOCUMENTS,
+    catalog_descriptor: bytes = b'{"artifacts":[]}',
+    workspace_digest: str | None = None,
+    catalog_digest: str | None = None,
+) -> schema_v4.DownmigrationResult:
+    return schema_v4.downmigrate_v4_connection(
+        connection,
+        expected=active,
+        expected_source_documents=source_documents,
+        expected_catalog_descriptor=catalog_descriptor,
+        verified_workspace_digest=(
+            schema_v4.source_documents_digest(source_documents)
+            if workspace_digest is None
+            else workspace_digest
+        ),
+        verified_catalog_digest=(
+            schema_v4.catalog_rebuild_digest(catalog_descriptor)
+            if catalog_digest is None
+            else catalog_digest
+        ),
+        downmigrated_at=1_800_000_100,
+    )
+
+
 def _insert_legacy_authority(connection: sqlite3.Connection) -> None:
     connection.execute(
         "INSERT INTO governance_session_grants "
@@ -501,6 +555,274 @@ def test_every_v4_migration_crash_barrier_restores_exact_v3(
         schema_v4.migrate_v3_connection(connection, _seed())
 
     assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert tuple(connection.iterdump()) == before
+
+
+def test_v4_downmigration_restores_exact_v3_and_expires_session_authority() -> None:
+    expected_v3 = _v3_connection()
+    connection, active = _migrated_v4()
+    connection.execute(
+        "INSERT INTO governance_authorization_sessions "
+        "(session_id, locator_digest, verifier, verifier_key_id, credential_generation, "
+        "principal_id, issuer_family, cell_id, logical_vault_id, keyring_id, status, "
+        "created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)",
+        (
+            "session-v4",
+            b"l" * 32,
+            b"v" * 32,
+            "key-v4",
+            1,
+            "principal-v4",
+            "rest-oauth",
+            "cell-v4",
+            "logical-vault-7",
+            "keyring-v4",
+            1_800_000_000,
+            1_900_000_000,
+        ),
+    )
+    connection.execute(
+        "INSERT INTO governance_session_grants "
+        "(grant_id, authorization_session_id, principal_id, issuer_family, audience, "
+        "ceiling, paths, fingerprints, scope_ids, membership_manifest, "
+        "policy_fingerprint, token_jti, status, created_at, expires_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)",
+        (
+            "grant-v4",
+            "session-v4",
+            "principal-v4",
+            "rest-oauth",
+            "external",
+            4,
+            '["Notes/a.md"]',
+            '["4"]',
+            '["scope-a"]',
+            "[]",
+            POLICY_FINGERPRINT,
+            "token-v4",
+            1_800_000_000,
+            1_900_000_000,
+        ),
+    )
+    connection.execute(
+        "INSERT INTO governance_session_purpose "
+        "(authorization_session_id, principal_id, issuer_family, audience, purpose, "
+        "status, created_at, expires_at) VALUES (?, ?, ?, ?, ?, 'active', ?, ?)",
+        (
+            "session-v4",
+            "principal-v4",
+            "rest-oauth",
+            "external",
+            "support",
+            1_800_000_000,
+            1_900_000_000,
+        ),
+    )
+    connection.execute(
+        "INSERT INTO withhold_tokens "
+        "(jti, authorization_session_id, principal_id, issuer_family, audience, "
+        "max_level, fingerprints, paths, scope_ids, org_ceiling, status, expires_at, "
+        "minted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)",
+        (
+            "token-v4",
+            "session-v4",
+            "principal-v4",
+            "rest-oauth",
+            "external",
+            4,
+            '["4"]',
+            '["Notes/a.md"]',
+            '["scope-a"]',
+            6,
+            1_900_000_000,
+            1_800_000_000,
+        ),
+    )
+    connection.execute(
+        "INSERT INTO governance_proposals "
+        "(proposal_id, created_at, expires_at, proposal_json, "
+        "fingerprint_at_propose, membership_manifest) VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            "proposal-v4",
+            1_800_000_000,
+            1_900_000_000,
+            "{}",
+            POLICY_FINGERPRINT,
+            "[]",
+        ),
+    )
+    connection.commit()
+
+    result = _downmigrate(connection, active)
+
+    assert result.schema_version == 3
+    assert result.activation_store_id == "activation-store-7"
+    assert result.activation_epoch == 1
+    assert result.closed_sessions == 1
+    assert result.expired_grants == 1
+    assert result.expired_purposes == 1
+    assert result.expired_tokens == 1
+    assert result.expired_proposals == 1
+    assert result.source_documents == POLICY_DOCUMENTS
+    assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert _schema_signature(connection) == _schema_signature(expected_v3)
+    for table in (
+        "governance_session_grants",
+        "governance_session_purpose",
+        "governance_session_purpose_staging",
+        "withhold_tokens",
+    ):
+        assert connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
+    assert connection.execute(
+        "SELECT status, spent_at FROM governance_proposals WHERE proposal_id='proposal-v4'"
+    ).fetchone() == ("expired", 1_800_000_100)
+
+
+@pytest.mark.parametrize(
+    ("source_documents", "catalog_descriptor", "workspace_digest", "catalog_digest"),
+    (
+        (
+            (
+                ("scopes/migration.yaml", b"governance_version: 1\n"),
+            ),
+            b'{"artifacts":[]}',
+            schema_v4.source_documents_digest(
+                (("scopes/migration.yaml", b"governance_version: 1\n"),)
+            ),
+            schema_v4.catalog_rebuild_digest(b'{"artifacts":[]}'),
+        ),
+        (
+            POLICY_DOCUMENTS,
+            b'{"artifacts":["changed"]}',
+            schema_v4.source_documents_digest(POLICY_DOCUMENTS),
+            schema_v4.catalog_rebuild_digest(b'{"artifacts":["changed"]}'),
+        ),
+    ),
+)
+def test_v4_downmigration_refuses_unproved_workspace_or_catalog_parity(
+    source_documents: tuple[tuple[str, bytes], ...],
+    catalog_descriptor: bytes,
+    workspace_digest: str,
+    catalog_digest: str,
+) -> None:
+    connection, active = _migrated_v4()
+    before = tuple(connection.iterdump())
+
+    with pytest.raises(schema_v4.SchemaV4Error, match="parity"):
+        _downmigrate(
+            connection,
+            active,
+            source_documents=source_documents,
+            catalog_descriptor=catalog_descriptor,
+            workspace_digest=workspace_digest,
+            catalog_digest=catalog_digest,
+        )
+
+    assert tuple(connection.iterdump()) == before
+
+
+def test_v4_downmigration_refuses_open_recovery_journal_without_writes() -> None:
+    connection, active = _migrated_v4()
+    connection.execute(
+        "INSERT INTO governance_operation_journals "
+        "(event_id, operation, causation_id, principal_id, phase, direction, "
+        "prior_digest, prepared_digest, final_digest, affected_ids, "
+        "required_child_intents, required_child_terminals, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "journal-v4",
+            "commit",
+            "cause-v4",
+            "principal-v4",
+            "narrowing",
+            "1" * 64,
+            "2" * 64,
+            "3" * 64,
+            "[]",
+            "[]",
+            "[]",
+            1_800_000_000,
+            1_800_000_001,
+        ),
+    )
+    connection.commit()
+    before = tuple(connection.iterdump())
+
+    with pytest.raises(schema_v4.SchemaV4Error, match="recovery journal"):
+        _downmigrate(connection, active)
+
+    assert tuple(connection.iterdump()) == before
+
+
+def test_v4_downmigration_refuses_unknown_governance_state_without_writes() -> None:
+    connection, active = _migrated_v4()
+    connection.execute("CREATE TABLE future_state (id TEXT PRIMARY KEY)")
+    connection.commit()
+    before = tuple(connection.iterdump())
+
+    with pytest.raises(schema_v4.SchemaV4Error, match="unknown state"):
+        _downmigrate(connection, active)
+
+    assert tuple(connection.iterdump()) == before
+
+
+def test_v4_downmigration_refuses_future_v4_column_without_writes() -> None:
+    connection, active = _migrated_v4()
+    connection.execute(
+        "ALTER TABLE governance_authorization_sessions ADD COLUMN future_state TEXT"
+    )
+    connection.commit()
+    before = tuple(connection.iterdump())
+
+    with pytest.raises(schema_v4.SchemaV4Error, match="not exact"):
+        _downmigrate(connection, active)
+
+    assert tuple(connection.iterdump()) == before
+
+
+def test_v4_downmigration_refuses_non_v4_source_before_parsing_proofs() -> None:
+    connection = _v3_connection()
+    before = tuple(connection.iterdump())
+
+    with pytest.raises(schema_v4.SchemaV4Error, match="exact schema v4"):
+        schema_v4.downmigrate_v4_connection(
+            connection,
+            expected="not-an-active-tuple",  # type: ignore[arg-type]
+            expected_source_documents="not-documents",  # type: ignore[arg-type]
+            expected_catalog_descriptor="not-bytes",  # type: ignore[arg-type]
+            verified_workspace_digest="not-a-digest",
+            verified_catalog_digest="not-a-digest",
+            downmigrated_at=0,
+        )
+
+    assert tuple(connection.iterdump()) == before
+
+
+@pytest.mark.parametrize(
+    "crash_at",
+    (
+        "downmigration-after-authority-close",
+        "downmigration-after-v4-drop",
+        "downmigration-after-v3-schema",
+        "downmigration-before-commit",
+    ),
+)
+def test_every_v4_downmigration_crash_barrier_restores_exact_v4(
+    crash_at: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection, active = _migrated_v4()
+    before = tuple(connection.iterdump())
+
+    def crash(point: str) -> None:
+        if point == crash_at:
+            raise RuntimeError(f"injected {point}")
+
+    monkeypatch.setattr(schema_v4, "_crash_point", crash)
+    with pytest.raises(RuntimeError, match=f"injected {crash_at}"):
+        _downmigrate(connection, active)
+
+    assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
     assert tuple(connection.iterdump()) == before
 
 
