@@ -14,7 +14,12 @@
       graph-disabled-while-recovery-checkpoint-exists combination FAILs
       immediately, including when the kill switch comes from an unowned
       site-packages `.pth`.
-- [ ] 1.4 Drain-refusal pin: `exomem index` against a vault whose live
+- [ ] 1.4 Startup-bound pin: a restart over a coherent durable graph
+      checkpoint currently schedules a whole-vault rebuild in the watcher
+      startup pass (measured: ~30 min of suspended reads per restart on a
+      3.3k-file vault); after the fix it admits after O(1) validation, and
+      only genuine incoherence rebuilds.
+- [ ] 1.5 Drain-refusal pin: `exomem index` against a vault whose live
       service owns graph work refuses with the documented remediation
       instead of taking the claim.
 
@@ -25,6 +30,8 @@
       warm-up carve-out from #850).
 - [ ] 2.2 Recovery-age telemetry + health surfacing + doctor FAIL findings.
 - [ ] 2.3 Live-service ownership probe and refusal in the CLI index path.
+- [ ] 2.4 Bounded startup validation: O(1) durable-checkpoint check in the
+      watcher startup pass; whole-vault rebuild only on incoherence.
 
 ## 3. Verification and delivery
 
