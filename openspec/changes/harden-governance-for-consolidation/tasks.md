@@ -493,7 +493,7 @@ made before both PRs and their combined verification are complete.
 - [ ] 8.4 Add red graph pairs where hidden vertices/edges change in-degree, out-degree,
   reachability, shortest paths, relation matches, seed expansion, graph-assisted fusion,
   and pagination; assert the visible graph/order is identical to physical absence.
-- [ ] 8.5 Add red error pairs for hidden malformed/stale/index-missing items, duplicate
+- [x] 8.5 Add red error pairs for hidden malformed/stale/index-missing items, duplicate
   identifiers, ambiguous refs, parser failures, and candidate-safety boundaries; assert
   identical success/error code, text, shape, count, and remediation when hidden versus
   absent.

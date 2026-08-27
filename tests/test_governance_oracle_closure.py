@@ -430,6 +430,10 @@ def _wire_pages(
         [tuple[str, ...]], projection_runtime.ActiveProjectionRuntime
     ]
     | None = None,
+    runtime_after_first_page_factory: Callable[
+        [tuple[str, ...]], projection_runtime.ActiveProjectionRuntime
+    ]
+    | None = None,
 ) -> tuple[
     dict[str, projection_runtime.ActiveProjectionRuntime],
     dict[str, tuple[httpx.Response, ...]],
@@ -537,6 +541,15 @@ def _wire_pages(
                     headers={"Authorization": f"Bearer {_REST_KEY}"},
                 )
                 pages.append(response)
+                if (
+                    _page_number == 0
+                    and runtime_after_first_page_factory is not None
+                ):
+                    runtimes_by_root[roots[name]] = (
+                        runtime_after_first_page_factory(
+                            () if name == "absent" else hidden_bodies
+                        )
+                    )
                 if response.status_code != 200:
                     break
                 continuation = response.json()["data"].get("continuation")
@@ -928,6 +941,67 @@ def test_hidden_rows_cannot_change_any_pagination_boundary_cursor_or_order(
     ]
     assert [data.get("continuation") for data in present_data] == [
         data.get("continuation") for data in absent_data
+    ]
+
+
+def test_hidden_only_catalog_change_preserves_the_live_wire_continuation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    visible_bodies = tuple(
+        "continuationchangequartz visible page row" for _ in range(5)
+    )
+
+    def current_runtime(
+        hidden_bodies: tuple[str, ...],
+    ) -> projection_runtime.ActiveProjectionRuntime:
+        changed_hidden = (
+            ()
+            if not hidden_bodies
+            else (
+                "continuationchangequartz changed hidden row",
+                "continuationchangequartz added hidden row",
+            )
+        )
+        return _counterfactual_runtime(
+            hidden_bodies=changed_hidden,
+            visible_bodies=visible_bodies,
+        )
+
+    runtimes, pages = _wire_pages(
+        monkeypatch,
+        tmp_path,
+        hidden_bodies=("continuationchangequartz original hidden row",),
+        visible_bodies=visible_bodies,
+        request=_request(query="continuationchangequartz", limit=2),
+        max_pages=4,
+        runtime_after_first_page_factory=current_runtime,
+    )
+
+    assert runtimes["absent"].namespace.namespace_key.catalog_generation == 5
+    assert runtimes["present"].namespace.namespace_key.catalog_generation == 7
+    assert len(pages["absent"]) == 3
+    assert len(pages["present"]) == 3
+    for absent, present in zip(pages["absent"], pages["present"], strict=True):
+        assert absent.status_code == 200, absent.text
+        assert present.status_code == 200, present.text
+        assert _canonical_transport_envelope(
+            present, transport="http"
+        ) == _canonical_transport_envelope(absent, transport="http")
+
+    assert [
+        [hit["path"] for hit in response.json()["data"]["hits"]]
+        for response in pages["present"]
+    ] == [
+        [
+            "Knowledge Base/oracle-visible-000.md",
+            "Knowledge Base/oracle-visible-001.md",
+        ],
+        [
+            "Knowledge Base/oracle-visible-002.md",
+            "Knowledge Base/oracle-visible-003.md",
+        ],
+        ["Knowledge Base/oracle-visible-004.md"],
     ]
 
 
