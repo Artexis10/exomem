@@ -915,7 +915,9 @@ root plus the target attachment so retry never rotates identity. Under the targe
 schema, receipt, and held-filesystem fences, one `BEGIN EXCLUSIVE` transaction verifies
 the complete copied active tuple and its immutable publication chain, closes every copied
 session and invalidates every session-derived grant, purpose, and token, changes only the
-activation-store/logical-vault identity, increments the activation epoch, recomputes its
+activation-store/logical-vault identity, preserves copied receipt rows and evidence as
+historical input while replacing the active receipt singleton with a fresh target-derived
+instance, genesis head, and label-HMAC secret, increments the activation epoch, recomputes its
 activation digest over the unchanged active policy/projector/catalog tuple, and appends
 one immutable `attachment-clone` tuple publication whose predecessor is the copied active
 digest. The immutable policy generations, catalog descriptors, projection namespaces,
@@ -928,7 +930,9 @@ only the exact staged-keyring-derived clone publication and external records; it
 generates a second identity, rekeys the source, reopens a copied session, or treats an
 old copied keyring/control file as target authority. A crash before the transaction may
 retry or abandon the inert keyring; a crash after it must finish the exact new identity
-or remain blocked. The source logical vault and its registry record are untouched and may
+or remain blocked. The source receipt chain continues only under its original instance;
+the clone appends only under the fresh instance, so later evidence cannot fork one chain.
+The source logical vault and its registry record are untouched and may
 continue independently because the clone has a different cell, logical-vault, keyring,
 activation-store, attachment, and membership identity.
 

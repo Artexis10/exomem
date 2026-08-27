@@ -24,7 +24,9 @@ and `attachment-clone`. An authenticated offline clone publication SHALL retain 
 complete active policy/projector/catalog tuple and immutable history, while one exclusive
 transaction changes the activation-store/logical-vault identity, increments the
 activation epoch, recomputes the activation digest, invalidates all copied session-derived
-authority, and appends the predecessor-bound `attachment-clone` row. No other
+authority, preserves copied receipt evidence while atomically starting a fresh target
+receipt instance/genesis head/label secret, and appends the predecessor-bound
+`attachment-clone` row. No other
 publication kind may change logical-vault or activation-store identity.
 
 The protected external cell registry SHALL carry a monotonic `governance_enrolled` flag
@@ -82,8 +84,9 @@ knowledge, including to owner/L6 or through non-Markdown classification.
   one verified exact-v4 copy
 - **THEN** the active policy generation, projector version, catalog generation,
   immutable rows, and namespace remain byte-identical while the new activation identity,
-  epoch/digest, session invalidation, and predecessor-bound `attachment-clone`
-  publication commit atomically
+  epoch/digest, session invalidation, fresh receipt append identity, and predecessor-bound
+  `attachment-clone` publication commit atomically; copied receipt rows remain historical
+  and source/clone cannot append under one shared instance
 
 #### Scenario: Unknown version fails closed
 

@@ -322,7 +322,8 @@ made before both PRs and their combined verification are complete.
   invalidates every imported session-derived authority before serving. For exact-v4
   clone, prove one staged keyring fixes all fresh target ids across crash/retry, one
   exclusive transaction preserves the active policy/projector/catalog plus immutable
-  history while committing session invalidation and a predecessor-bound
+  history while committing session invalidation, a fresh receipt instance/genesis
+  head/label secret that preserves copied evidence without sharing append identity, and a predecessor-bound
   `attachment-clone` activation publication, and copied or contradictory external
   custody files remain BLOCKED.
 - [x] 5.4 Add red lifecycle tests for exact typed `issued_credential` open/rotate,
@@ -362,7 +363,9 @@ made before both PRs and their combined verification are complete.
   before first migration. Freeze the tuple-publication kind registry as exactly
   `migration|policy|catalog|attachment-clone`; only the clone kind may atomically change
   logical-vault/activation-store identity while retaining the exact active
-  policy/projector/catalog tuple and predecessor chain.
+  policy/projector/catalog tuple and predecessor chain. Its transaction also preserves
+  old receipt rows/evidence but changes the active receipt append instance and label
+  secret to fresh target-derived values.
 - [ ] 5.11 Implement strict external keyring/control loading, authenticated owner/hosted
   provisioning, host/control-plane registry attachment with monotonic enrollment and
   activation-store tuple parity, copy collision, exclusive move/restore/clone rules, and
@@ -371,7 +374,8 @@ made before both PRs and their combined verification are complete.
   Implement exact-v4 clone with an inert staged keyring, stable derived target ids, the
   exclusive `attachment-clone` store transition, and control/membership/registry
   publication only after that commit; every partial or conflicting state stays BLOCKED
-  and recovery never rotates the staged identity or modifies the source registry.
+  and recovery never rotates the staged identity/receipt instance or modifies the source
+  registry.
 - [ ] 5.12 Integrate the serving-membership epoch with the existing deployment control
   plane/readiness surface: provisioner/cell control owns the Hosted record,
   `hosted_runtime.control_plane_readiness()` verifies/exposes content-free readiness, and
@@ -396,7 +400,7 @@ made before both PRs and their combined verification are complete.
   hosted, and both supported OS custody paths. Include restore-session invalidation and
   clone crash barriers after staged keyring, exclusive store publication, control,
   membership, and registry publication; prove retry keeps one identity and source and
-  clone serve independently only after distinct registry attachment.
+  clone serve independently only after distinct registry and receipt-instance attachment.
 
 ## 6. Real MCP REST Hosted And CLI Principal Binding
 

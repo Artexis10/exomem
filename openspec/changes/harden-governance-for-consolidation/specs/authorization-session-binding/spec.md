@@ -266,7 +266,9 @@ cell, logical-vault, keyring, activation-store, and attachment identities across
 Under the target writer/schema/receipt/held-filesystem fences, one exclusive SQLite
 transaction SHALL verify the copied active tuple and immutable publication chain, close
 all copied sessions and invalidate all session-derived grants/purposes/tokens, replace
-only activation-store/logical-vault identity, increment activation epoch, recompute the
+only activation-store/logical-vault identity, preserve copied receipt rows/evidence as
+historical input while replacing the active receipt singleton with a fresh target-derived
+instance, genesis head, and label-HMAC secret, increment activation epoch, recompute the
 activation digest over the unchanged policy/projector/catalog tuple, and append an
 immutable `attachment-clone` tuple publication whose predecessor is the copied active
 digest. Only after commit may target control, serving membership, and the new host-
@@ -358,7 +360,8 @@ and no member or live verifier key may disappear merely because it is silent or 
 - **WHEN** an authenticated owner clones an unattached exact-v4 copy with no target
   external custody files
 - **THEN** one exclusive transaction retains the exact active policy/projector/catalog
-  and immutable history, closes copied session authority, commits a predecessor-bound
+  and immutable history, closes copied session authority, starts a fresh receipt append
+  instance without deleting copied receipt evidence, commits a predecessor-bound
   `attachment-clone` publication with fresh logical-vault/activation-store identity, and
   the target publishes fresh cell/keyring/control/membership/registry custody only after
   that transaction
@@ -367,9 +370,9 @@ and no member or live verifier key may disappear merely because it is silent or 
 
 - **WHEN** clone crashes after inert keyring publication, after the clone transaction, or
   during control/membership/registry publication
-- **THEN** retry completes only the same staged-keyring-derived identity and publication,
-  while contradictory/copied external records or a different target make it remain
-  blocked
+- **THEN** retry completes only the same staged-keyring-derived identity, receipt
+  instance, label secret, and publication, while contradictory/copied external records
+  or a different target make it remain blocked
 
 #### Scenario: Standalone provisioning establishes external identity
 
