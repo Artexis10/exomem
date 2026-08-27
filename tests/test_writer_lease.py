@@ -842,6 +842,96 @@ def test_coordinator_schema_admission_uses_the_external_gate(monkeypatch) -> Non
     assert result.schema_fence_generation == 8
 
 
+def test_coordinator_schema_fence_operator_reads_and_advances_exact_generation(
+    monkeypatch,
+) -> None:
+    from exomem.writer_lease import LeaseCoordinatorClient
+
+    seen: list[tuple[str, str, object]] = []
+    responses = iter(
+        (
+            b'{"governance_enrolled":true,"schema_version":3,"generation":8}',
+            b'{"governance_enrolled":true,"schema_version":4,"generation":9}',
+        )
+    )
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def read(self):
+            return next(responses)
+
+    def fake_urlopen(request, timeout):  # noqa: ANN001, ARG001
+        seen.append(
+            (
+                request.method,
+                request.full_url,
+                None if request.data is None else json.loads(request.data),
+            )
+        )
+        assert request.headers["Authorization"] == "Bearer operator-secret"
+        return Response()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    client = LeaseCoordinatorClient(
+        LeaseConfig(
+            url="https://lease.example",
+            vault_id="main",
+            replica_id="offline-coordinator",
+            token="operator-secret",
+        )
+    )
+
+    current = client.schema_fence()
+    advanced = client.transition_schema_fence(
+        expected_generation=current.generation,
+        schema_version=4,
+    )
+
+    assert (current.schema_version, current.generation) == (3, 8)
+    assert (advanced.schema_version, advanced.generation) == (4, 9)
+    assert seen == [
+        (
+            "GET",
+            "https://lease.example/v1/vaults/main/schema-fence",
+            None,
+        ),
+        (
+            "PUT",
+            "https://lease.example/v1/vaults/main/schema-fence",
+            {"expected_generation": 8, "schema_version": 4},
+        ),
+    ]
+
+
+def test_configured_schema_fence_operator_requires_a_distinct_protected_token() -> None:
+    from exomem.writer_lease import configured_schema_fence_operator_client
+
+    base = {
+        "EXOMEM_WRITER_LEASE_URL": "https://lease.example",
+        "EXOMEM_WRITER_LEASE_VAULT_ID": "main",
+        "EXOMEM_WRITER_LEASE_REPLICA_ID": "offline-coordinator",
+        "EXOMEM_WRITER_LEASE_TOKEN": "ordinary-secret",
+    }
+
+    with pytest.raises(OpError, match="operator credential"):
+        configured_schema_fence_operator_client(base)
+    with pytest.raises(OpError, match="distinct"):
+        configured_schema_fence_operator_client(
+            {**base, "EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN": "ordinary-secret"}
+        )
+
+    client = configured_schema_fence_operator_client(
+        {**base, "EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN": "operator-secret"}
+    )
+    assert client is not None
+    assert client.config.token == "operator-secret"
+
+
 @pytest.mark.parametrize(
     ("response", "operation"),
     [

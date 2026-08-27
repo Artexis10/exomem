@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-from .. import held_fs, reserved_paths
+from .. import held_fs, reserved_paths, writer_lease
 from . import authorization_custody, policy, receipts, schema_v4, store
 
 _OPERATION: Final = "governance_schema_v4_downmigration"
@@ -88,6 +88,7 @@ class _RecoveryPlan:
     keyring_digest: str
     membership_epoch: int
     membership_digest: str
+    schema_fence_generation: int | None
     created_at: int
     value_json: str
     plan_digest: str
@@ -470,6 +471,7 @@ def _plan_from_parts(
     custody: authorization_custody.AuthorizationCustody,
     control_digest: str,
     keyring_digest: str,
+    schema_fence_generation: int | None,
     created_at: int,
 ) -> _RecoveryPlan:
     workspace_digest = schema_v4.source_documents_digest(active_snapshot.source_documents)
@@ -489,6 +491,7 @@ def _plan_from_parts(
         "keyring_digest": keyring_digest,
         "membership_epoch": membership.epoch,
         "membership_digest": membership.record_digest,
+        "schema_fence_generation": schema_fence_generation,
     }
     encoded = json.dumps(
         value,
@@ -529,6 +532,7 @@ def _plan_from_parts(
         keyring_digest=keyring_digest,
         membership_epoch=membership.epoch,
         membership_digest=membership.record_digest,
+        schema_fence_generation=schema_fence_generation,
         created_at=created_at,
         value_json=encoded.decode("utf-8"),
         plan_digest=plan_digest,
@@ -564,6 +568,7 @@ def _plan_from_json(
             "keyring_digest",
             "membership_epoch",
             "membership_digest",
+            "schema_fence_generation",
         }
         or value["schema"] != _PLAN_SCHEMA
     ):
@@ -595,6 +600,12 @@ def _plan_from_json(
         source_documents
     ) or catalog_digest != schema_v4.catalog_rebuild_digest(descriptor):
         raise DownmigrationUnavailable
+    raw_fence_generation = value["schema_fence_generation"]
+    schema_fence_generation = (
+        None
+        if raw_fence_generation is None
+        else _bounded_integer(raw_fence_generation, minimum=1)
+    )
     plan_digest = _framed_digest(_PLAN_DOMAIN, value_json.encode("utf-8"))
     target_digest = _framed_digest(
         _TARGET_DOMAIN,
@@ -621,6 +632,7 @@ def _plan_from_json(
         keyring_digest=_digest(value["keyring_digest"]),
         membership_epoch=_bounded_integer(value["membership_epoch"], minimum=1),
         membership_digest=_digest(value["membership_digest"]),
+        schema_fence_generation=schema_fence_generation,
         created_at=_sqlite_integer(created_at, minimum=1),
         value_json=value_json,
         plan_digest=plan_digest,
@@ -648,6 +660,58 @@ def _verify_plan_custody(
         or control.activation_store_id != plan.active.activation_store_id
         or control.activation_epoch != plan.active.activation_epoch
         or control.activation_state_digest != plan.active.activation_state_digest
+    ):
+        raise DownmigrationUnavailable
+
+
+def _require_plan_schema_fence(plan: _RecoveryPlan) -> None:
+    try:
+        client = writer_lease.configured_schema_fence_operator_client()
+        if plan.schema_fence_generation is None:
+            if client is not None:
+                raise DownmigrationUnavailable
+            return
+        if client is None:
+            raise DownmigrationUnavailable
+        current = client.schema_fence()
+    except writer_lease.OpError:
+        raise DownmigrationUnavailable from None
+    if (
+        current.schema_version != schema_v4.SCHEMA_USER_VERSION
+        or current.generation != plan.schema_fence_generation
+    ):
+        raise DownmigrationUnavailable
+
+
+def _complete_plan_schema_fence(plan: _RecoveryPlan) -> None:
+    try:
+        client = writer_lease.configured_schema_fence_operator_client()
+        if plan.schema_fence_generation is None:
+            if client is not None:
+                raise DownmigrationUnavailable
+            return
+        if client is None:
+            raise DownmigrationUnavailable
+        current = client.schema_fence()
+        if (
+            current.schema_version == store.SCHEMA_USER_VERSION
+            and current.generation == plan.schema_fence_generation + 1
+        ):
+            return
+        if (
+            current.schema_version != schema_v4.SCHEMA_USER_VERSION
+            or current.generation != plan.schema_fence_generation
+        ):
+            raise DownmigrationUnavailable
+        advanced = client.transition_schema_fence(
+            expected_generation=plan.schema_fence_generation,
+            schema_version=store.SCHEMA_USER_VERSION,
+        )
+    except writer_lease.OpError:
+        raise DownmigrationUnavailable from None
+    if (
+        advanced.schema_version != store.SCHEMA_USER_VERSION
+        or advanced.generation != plan.schema_fence_generation + 1
     ):
         raise DownmigrationUnavailable
 
@@ -849,6 +913,12 @@ def _load_or_prepare_plan(
     custody: authorization_custody.AuthorizationCustody,
     now: int,
 ) -> _RecoveryPlan:
+    try:
+        fence = writer_lease.require_configured_schema_fence(
+            schema_v4.SCHEMA_USER_VERSION
+        )
+    except writer_lease.OpError:
+        raise DownmigrationUnavailable from None
     with _owned_store_connection(
         vault_root,
         schema_version=schema_v4.SCHEMA_USER_VERSION,
@@ -878,6 +948,7 @@ def _load_or_prepare_plan(
         custody=custody,
         control_digest=control_digest,
         keyring_digest=keyring_digest,
+        schema_fence_generation=None if fence is None else fence.generation,
         created_at=now,
     )
 
@@ -1115,6 +1186,9 @@ def downmigrate_enrolled_v4_store(
         _verify_plan_custody(plan, custody, vault_root=root)
         _verify_completed_state(root, plan, now=moment)
         _ensure_receipt_intent(root, plan, must_exist=True)
+        _complete_plan_schema_fence(plan)
+        if plan.schema_fence_generation is not None:
+            _downmigration_barrier("after_schema_fence")
         _complete_receipt(root, plan)
         return OfflineDownmigrationResult(
             schema_version=3,
@@ -1127,7 +1201,6 @@ def downmigrate_enrolled_v4_store(
         )
     if version != schema_v4.SCHEMA_USER_VERSION:
         raise DownmigrationUnavailable
-
     plan = _load_or_prepare_plan(root, custody=custody, now=moment)
     _verify_plan_custody(plan, custody, vault_root=root)
     _ensure_receipt_intent(root, plan, must_exist=False)
@@ -1138,9 +1211,13 @@ def downmigrate_enrolled_v4_store(
     _downmigration_barrier("after_workspace_mirror")
     current_custody = _require_drained_custody(root, now=moment)
     _verify_plan_custody(plan, current_custody, vault_root=root)
+    _require_plan_schema_fence(plan)
     terminal_digest = _commit_database(root, plan, now=moment)
     _downmigration_barrier("after_store_commit")
     _verify_completed_state(root, plan, now=moment)
+    _complete_plan_schema_fence(plan)
+    if plan.schema_fence_generation is not None:
+        _downmigration_barrier("after_schema_fence")
     _complete_receipt(root, plan)
     _downmigration_barrier("after_receipt_commit")
     return OfflineDownmigrationResult(

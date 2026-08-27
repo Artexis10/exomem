@@ -264,6 +264,7 @@ def migrate_enrolled_v3_store(
     detected by the post-commit observation.
     """
 
+    from .. import writer_lease
     from . import authorization_custody, policy, schema_v4
 
     root = Path(vault_root)
@@ -349,6 +350,16 @@ def migrate_enrolled_v3_store(
                                 "migration policy workspace does not match the reviewed seed"
                             )
 
+                    try:
+                        fenced = writer_lease.advance_configured_schema_fence(
+                            source_schema_version=SCHEMA_USER_VERSION,
+                            target_schema_version=schema_v4.SCHEMA_USER_VERSION,
+                        )
+                    except writer_lease.OpError:
+                        raise authorization_custody.AuthorizationCustodyUnavailable from None
+                    if fenced is not None:
+                        _schema_migration_barrier("after_schema_fence")
+
                     result = schema_v4.migrate_v3_connection(connection, seed)
                     reserved_paths._publish_sqlite_owner_family(
                         root,
@@ -357,6 +368,17 @@ def migrate_enrolled_v3_store(
                         connection,
                     )
                     _schema_migration_barrier("after_store_commit")
+                    if fenced is not None:
+                        try:
+                            confirmed_fence = (
+                                writer_lease.require_configured_schema_fence(
+                                    schema_v4.SCHEMA_USER_VERSION
+                                )
+                            )
+                        except writer_lease.OpError:
+                            raise authorization_custody.AuthorizationCustodyUnavailable from None
+                        if confirmed_fence != fenced:
+                            raise authorization_custody.AuthorizationCustodyUnavailable
                     active = schema_v4.load_active_policy(
                         connection,
                         expected_logical_vault_id=target.logical_vault_id,

@@ -332,7 +332,7 @@ made before both PRs and their combined verification are complete.
   journals/direct-source policy. Prove every ordinary v3/v4-capable opener leaves v3 with
   no v4 DDL/DML; add red explicit v3→v4 session + immutable policy/catalog/tuple migration
   crash tests, irreversible enrollment, and unknown >v4 refusal.
-- [ ] 5.7 Add actual rollback/rollout tests: run the real pre-change v3 binary against an
+- [x] 5.7 Add actual rollback/rollout tests: run the real pre-change v3 binary against an
   isolated v4 copy and record exact startup/read/authoring behavior without permitting
   DDL/DML; prove the deployment schema/lease fence bars it from a live v4 cell even if a
   path does not self-refuse. Restore the v3 snapshot and test offline v4→v3 closure/

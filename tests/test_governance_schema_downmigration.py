@@ -247,6 +247,112 @@ def test_offline_downmigration_replays_receipt_after_post_commit_crash(
     ]
 
 
+def test_downmigration_admits_v3_only_after_the_v3_store_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _vault(tmp_path)
+    now = int(time.time())
+    _migrate(vault, now=now)
+    _set_pending_workspace(vault)
+    _drain_verified_membership(monkeypatch)
+    state_holder = [writer_lease.SchemaFenceState(True, 4, 11)]
+    transitions: list[tuple[int, int, int]] = []
+
+    class Client:
+        def schema_fence(self) -> writer_lease.SchemaFenceState:
+            return state_holder[0]
+
+        def transition_schema_fence(
+            self, *, expected_generation: int, schema_version: int
+        ) -> writer_lease.SchemaFenceState:
+            transitions.append(
+                (expected_generation, schema_version, _schema_version(vault))
+            )
+            state_holder[0] = writer_lease.SchemaFenceState(
+                True, schema_version, expected_generation + 1
+            )
+            return state_holder[0]
+
+    monkeypatch.setattr(
+        writer_lease,
+        "configured_schema_fence_operator_client",
+        lambda: Client(),
+    )
+
+    def crash(point: str) -> None:
+        if point == "after_store_commit":
+            raise RuntimeError("injected post-v3-commit crash")
+
+    monkeypatch.setattr(schema_downmigration, "_downmigration_barrier", crash)
+    with pytest.raises(RuntimeError, match="post-v3-commit"):
+        schema_downmigration.downmigrate_enrolled_v4_store(vault, now=now + 3)
+
+    assert _schema_version(vault) == 3
+    assert state_holder == [writer_lease.SchemaFenceState(True, 4, 11)]
+    assert transitions == []
+
+    def crash_after_fence(point: str) -> None:
+        if point == "after_schema_fence":
+            raise RuntimeError("injected fence-ack crash")
+
+    monkeypatch.setattr(schema_downmigration, "_downmigration_barrier", crash_after_fence)
+    with pytest.raises(RuntimeError, match="fence-ack"):
+        schema_downmigration.downmigrate_enrolled_v4_store(vault, now=now + 4)
+
+    assert state_holder == [writer_lease.SchemaFenceState(True, 3, 12)]
+    assert transitions == [(11, 3, 3)]
+    assert [item["phase"] for item in _receipt_records(vault)[-1:]] == ["intent"]
+
+    monkeypatch.setattr(schema_downmigration, "_downmigration_barrier", lambda _point: None)
+    replay = schema_downmigration.downmigrate_enrolled_v4_store(vault, now=now + 5)
+
+    assert replay.replayed is True
+    assert transitions == [(11, 3, 3)]
+    assert [item["phase"] for item in _receipt_records(vault)[-2:]] == [
+        "intent",
+        "committed",
+    ]
+
+
+def test_downmigration_refuses_external_fence_generation_drift_before_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _vault(tmp_path)
+    now = int(time.time())
+    _migrate(vault, now=now)
+    _set_pending_workspace(vault)
+    _drain_verified_membership(monkeypatch)
+    state_holder = [writer_lease.SchemaFenceState(True, 4, 21)]
+
+    class Client:
+        def schema_fence(self) -> writer_lease.SchemaFenceState:
+            return state_holder[0]
+
+        def transition_schema_fence(
+            self, *, expected_generation: int, schema_version: int
+        ) -> writer_lease.SchemaFenceState:
+            raise AssertionError((expected_generation, schema_version))
+
+    monkeypatch.setattr(
+        writer_lease,
+        "configured_schema_fence_operator_client",
+        lambda: Client(),
+    )
+
+    def drift(point: str) -> None:
+        if point == "after_workspace_mirror":
+            state_holder[0] = writer_lease.SchemaFenceState(True, 4, 23)
+
+    monkeypatch.setattr(schema_downmigration, "_downmigration_barrier", drift)
+    with pytest.raises(schema_downmigration.DownmigrationUnavailable):
+        schema_downmigration.downmigrate_enrolled_v4_store(vault, now=now + 3)
+
+    assert _schema_version(vault) == 4
+    assert [item["phase"] for item in _receipt_records(vault)[-1:]] == ["intent"]
+
+
 def test_offline_downmigration_reuses_intent_after_prepared_plan_was_not_written(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

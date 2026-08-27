@@ -871,6 +871,36 @@ class SchemaAdmission:
         }
 
 
+@dataclass(frozen=True)
+class SchemaFenceState:
+    governance_enrolled: bool
+    schema_version: int
+    generation: int
+
+    @classmethod
+    def from_json(cls, data: Mapping[str, Any]) -> SchemaFenceState:
+        if set(data) != {"governance_enrolled", "schema_version", "generation"}:
+            raise ValueError("schema fence response fields are invalid")
+        enrolled = data.get("governance_enrolled")
+        schema_version = data.get("schema_version")
+        generation = data.get("generation")
+        if enrolled is not True:
+            raise ValueError("schema fence enrollment is invalid")
+        if (
+            isinstance(schema_version, bool)
+            or not isinstance(schema_version, int)
+            or schema_version not in {3, 4}
+        ):
+            raise ValueError("schema fence version is invalid")
+        if (
+            isinstance(generation, bool)
+            or not isinstance(generation, int)
+            or generation < 1
+        ):
+            raise ValueError("schema fence generation is invalid")
+        return cls(enrolled, schema_version, generation)
+
+
 #: Statuses that mean the URL answered and does not implement the lease
 #: contract at this route: 404 (no such route or operation), 405 (route exists,
 #: wrong method), 501 (the server does not implement it). A real coordinator
@@ -1014,6 +1044,54 @@ class LeaseCoordinatorClient:
         except ValueError as exc:
             raise _coordinator_unavailable_error(exc) from None
 
+    def schema_fence(self) -> SchemaFenceState:
+        vault = urllib.parse.quote(str(self.config.vault_id), safe="")
+        payload = self._request_json(
+            "GET",
+            f"/v1/vaults/{vault}/schema-fence",
+            None,
+            contract_route="/v1/vaults/<id>/schema-fence",
+        )
+        try:
+            return SchemaFenceState.from_json(payload)
+        except ValueError as exc:
+            raise _coordinator_unavailable_error(exc) from None
+
+    def transition_schema_fence(
+        self,
+        *,
+        expected_generation: int,
+        schema_version: int,
+    ) -> SchemaFenceState:
+        if (
+            isinstance(expected_generation, bool)
+            or not isinstance(expected_generation, int)
+            or expected_generation < 1
+        ):
+            raise ValueError("expected_generation must be a positive integer")
+        if isinstance(schema_version, bool) or schema_version not in {3, 4}:
+            raise ValueError("schema_version must be 3 or 4")
+        vault = urllib.parse.quote(str(self.config.vault_id), safe="")
+        payload = self._request_json(
+            "PUT",
+            f"/v1/vaults/{vault}/schema-fence",
+            {
+                "expected_generation": expected_generation,
+                "schema_version": schema_version,
+            },
+            contract_route="/v1/vaults/<id>/schema-fence",
+        )
+        try:
+            state = SchemaFenceState.from_json(payload)
+            if (
+                state.schema_version != schema_version
+                or state.generation != expected_generation + 1
+            ):
+                raise ValueError("schema fence transition result is inconsistent")
+            return state
+        except ValueError as exc:
+            raise _coordinator_unavailable_error(exc) from None
+
     def _request(self, method: str, operation: str, body: dict | None) -> LeaseRecord:
         vault = urllib.parse.quote(str(self.config.vault_id), safe="")
         suffix = f"/{operation}" if operation else ""
@@ -1068,6 +1146,105 @@ class LeaseCoordinatorClient:
             ValueError,
         ) as exc:
             raise _coordinator_unavailable_error(exc) from None
+
+
+def configured_schema_fence_operator_client(
+    env: Mapping[str, str] | None = None,
+) -> LeaseCoordinatorClient | None:
+    """Return the protected rollout client when writer coordination is configured."""
+
+    values = os.environ if env is None else env
+    config = LeaseConfig.from_env(values)
+    if not config.enabled:
+        return None
+    operator_token = values.get(
+        "EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN", ""
+    ).strip()
+    if not operator_token:
+        raise OpError(
+            "SCHEMA_FENCE_OPERATOR_UNAVAILABLE",
+            "schema fence operator credential is unavailable",
+            "Set EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN only in the protected "
+            "offline rollout environment.",
+        )
+    if operator_token == config.token:
+        raise OpError(
+            "SCHEMA_FENCE_OPERATOR_UNAVAILABLE",
+            "schema fence operator credential must be distinct from the writer lease credential",
+            "Provision a separate operator credential before changing the schema fence.",
+        )
+    return LeaseCoordinatorClient(replace(config, token=operator_token))
+
+
+def require_configured_schema_fence(
+    schema_version: int,
+) -> SchemaFenceState | None:
+    """Verify an optional external rollout fence without widening its state."""
+
+    if isinstance(schema_version, bool) or schema_version not in {3, 4}:
+        raise ValueError("schema_version must be 3 or 4")
+    client = configured_schema_fence_operator_client()
+    if client is None:
+        return None
+    state = client.schema_fence()
+    if state.schema_version != schema_version:
+        raise OpError(
+            "SCHEMA_FENCE_CONFLICT",
+            f"external schema fence requires v{state.schema_version}, not v{schema_version}",
+            "Reconcile the durable store and schema-fence generation before retrying.",
+            details={
+                "required_schema_version": state.schema_version,
+                "schema_fence_generation": state.generation,
+            },
+        )
+    return state
+
+
+def advance_configured_schema_fence(
+    *,
+    source_schema_version: int,
+    target_schema_version: int,
+) -> SchemaFenceState | None:
+    """CAS an optional rollout fence, accepting an exact lost-ack replay."""
+
+    if (
+        isinstance(source_schema_version, bool)
+        or isinstance(target_schema_version, bool)
+        or source_schema_version not in {3, 4}
+        or target_schema_version not in {3, 4}
+        or source_schema_version == target_schema_version
+    ):
+        raise ValueError("schema fence transition must be between v3 and v4")
+    client = configured_schema_fence_operator_client()
+    if client is None:
+        return None
+    current = client.schema_fence()
+    if current.schema_version == target_schema_version:
+        return current
+    if current.schema_version != source_schema_version:
+        raise OpError(
+            "SCHEMA_FENCE_CONFLICT",
+            "external schema fence does not match the transition predecessor",
+            "Reconcile the durable store and schema-fence generation before retrying.",
+            details={
+                "required_schema_version": current.schema_version,
+                "schema_fence_generation": current.generation,
+            },
+        )
+    advanced = client.transition_schema_fence(
+        expected_generation=current.generation,
+        schema_version=target_schema_version,
+    )
+    if (
+        advanced.schema_version != target_schema_version
+        or advanced.generation != current.generation + 1
+    ):
+        raise OpError(
+            "SCHEMA_FENCE_CONFLICT",
+            "external schema fence returned an inconsistent transition terminal",
+            "Reconcile the durable store and schema-fence generation before retrying.",
+        )
+    return advanced
 
 
 def _mutation_outcome_unknown_error() -> OpError:

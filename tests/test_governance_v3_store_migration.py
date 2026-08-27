@@ -229,6 +229,105 @@ def test_store_migration_post_commit_crash_replays_exact_v4(
     assert custody.serving_membership.epoch == 2
 
 
+def test_store_migration_advances_external_fence_before_the_v4_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _vault(tmp_path)
+    now = int(time.time())
+    seed, target = _stage_and_enroll(vault, now=now)
+    state = writer_lease.SchemaFenceState(True, 3, 7)
+    transitions: list[tuple[int, int]] = []
+
+    class Client:
+        def schema_fence(self) -> writer_lease.SchemaFenceState:
+            return state_holder[0]
+
+        def transition_schema_fence(
+            self, *, expected_generation: int, schema_version: int
+        ) -> writer_lease.SchemaFenceState:
+            transitions.append((expected_generation, schema_version))
+            assert state_holder[0] == writer_lease.SchemaFenceState(
+                True, 3, expected_generation
+            )
+            state_holder[0] = writer_lease.SchemaFenceState(
+                True, schema_version, expected_generation + 1
+            )
+            return state_holder[0]
+
+    state_holder = [state]
+    monkeypatch.setattr(
+        writer_lease,
+        "configured_schema_fence_operator_client",
+        lambda: Client(),
+    )
+
+    def crash(point: str) -> None:
+        if point == "after_schema_fence":
+            raise RuntimeError("injected fence-first crash")
+
+    monkeypatch.setattr(store, "_schema_migration_barrier", crash)
+    with pytest.raises(RuntimeError, match="fence-first"):
+        store.migrate_enrolled_v3_store(vault, seed=seed, now=now + 2)
+
+    assert _schema_version(vault) == 3
+    assert state_holder == [writer_lease.SchemaFenceState(True, 4, 8)]
+    assert transitions == [(7, 4)]
+
+    monkeypatch.setattr(store, "_schema_migration_barrier", lambda _point: None)
+    assert store.migrate_enrolled_v3_store(vault, seed=seed, now=now + 3) == target
+    assert _schema_version(vault) == 4
+    assert transitions == [(7, 4)]
+
+
+def test_store_migration_refuses_fence_generation_drift_after_the_v4_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _vault(tmp_path)
+    now = int(time.time())
+    seed, target = _stage_and_enroll(vault, now=now)
+    state_holder = [writer_lease.SchemaFenceState(True, 3, 17)]
+
+    class Client:
+        def schema_fence(self) -> writer_lease.SchemaFenceState:
+            return state_holder[0]
+
+        def transition_schema_fence(
+            self, *, expected_generation: int, schema_version: int
+        ) -> writer_lease.SchemaFenceState:
+            state_holder[0] = writer_lease.SchemaFenceState(
+                True, schema_version, expected_generation + 1
+            )
+            return state_holder[0]
+
+    monkeypatch.setattr(
+        writer_lease,
+        "configured_schema_fence_operator_client",
+        lambda: Client(),
+    )
+
+    def drift(point: str) -> None:
+        if point == "after_store_commit":
+            state_holder[0] = writer_lease.SchemaFenceState(True, 4, 20)
+
+    monkeypatch.setattr(store, "_schema_migration_barrier", drift)
+    with pytest.raises(authorization_custody.AuthorizationCustodyUnavailable):
+        store.migrate_enrolled_v3_store(vault, seed=seed, now=now + 2)
+
+    assert _schema_version(vault) == 4
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 3)
+    assert custody.control.serving_membership_epoch == 1
+    assert custody.serving_membership is not None
+    assert custody.serving_membership.epoch == 1
+
+    monkeypatch.setattr(store, "_schema_migration_barrier", lambda _point: None)
+    assert store.migrate_enrolled_v3_store(vault, seed=seed, now=now + 3) == target
+    assert _schema_version(vault) == 4
+    recovered = authorization_custody.load_authorization_custody(vault, now=now + 4)
+    assert recovered.control.serving_membership_epoch == 2
+
+
 def test_store_migration_refuses_membership_without_complete_v3_drain(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
