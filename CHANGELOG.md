@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.64.0](https://github.com/Artexis10/exomem/compare/v0.63.1...v0.64.0) (2026-08-27)
+
+
+### ⚠ BREAKING CHANGES
+
+* require source capture and make structured items readable ([#852](https://github.com/Artexis10/exomem/issues/852))
+
+### Features
+
+* require source capture and make structured items readable ([#852](https://github.com/Artexis10/exomem/issues/852)) ([9b447b6](https://github.com/Artexis10/exomem/commit/9b447b6e63d95e0f5caed08d1514facd6c28127f))
+
+
+### Bug Fixes
+
+* **access:** fail closed on transient policy errors and bound graph startup ([#868](https://github.com/Artexis10/exomem/issues/868)) ([84838c0](https://github.com/Artexis10/exomem/commit/84838c0544f4cc3c8e458c4d3520afdfcae9c2ef))
+
 ## [0.63.1](https://github.com/Artexis10/exomem/compare/v0.63.0...v0.63.1) (2026-08-26)
 
 
