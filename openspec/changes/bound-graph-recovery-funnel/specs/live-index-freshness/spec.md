@@ -60,7 +60,7 @@ A service restart that finds a coherent durable graph checkpoint SHALL admit gra
 #### Scenario: Restart with a coherent graph admits without a full rebuild
 
 - **WHEN** the service restarts and the durable graph checkpoint matches the published sidecar's digest and generation
-- **THEN** graph reads are admitted after the O(1) validation
+- **THEN** graph reads are admitted after bounded validation that never suspends reads and never rebuilds
 - **AND** no whole-vault graph rebuild is scheduled by the startup pass
 
 #### Scenario: Genuine incoherence still rebuilds

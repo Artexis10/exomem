@@ -14,7 +14,7 @@
       graph-disabled-while-recovery-checkpoint-exists combination FAILs
       immediately, including when the kill switch comes from an unowned
       site-packages `.pth`.
-- [ ] 1.4 Startup-bound pin: a restart over a coherent durable graph
+- [x] 1.4 Startup-bound pin: a restart over a coherent durable graph
       checkpoint currently schedules a whole-vault rebuild in the watcher
       startup pass (measured: ~30 min of suspended reads per restart on a
       3.3k-file vault); after the fix it admits after O(1) validation, and
@@ -23,7 +23,7 @@
       service owns graph work refuses with the documented remediation
       instead of taking the claim.
 
-- [ ] 1.6 Access fail-open pin (red first): a transient OSError reading the
+- [x] 1.6 Access fail-open pin (red first): a transient OSError reading the
       access-policy file currently caches an EMPTY policy (nothing excluded)
       under the unchanged stat signature and flips the access fingerprint,
       widening visibility and flapping recall identity with zero writes.
@@ -33,7 +33,7 @@
 
 ## 2. Implementation
 
-- [ ] 2.0 Access-policy fail-closed loading per the recall-read-path delta
+- [x] 2.0 Access-policy fail-closed loading per the recall-read-path delta
       (precondition for trusting the projection-lag identity guard).
 - [ ] 2.1 Extend the `epistemic_graph` clause of `full_upsert_succeeded`
       with the durable-coverage carve-out (mirror of the embeddings
@@ -45,7 +45,7 @@
       absent projection (red-first pin: a single write currently flips
       semantic recall to RETRIEVAL_INDEX_WARMING until the graph republishes
       the projection - measured live as the flapping-admission duty cycle).
-- [ ] 2.5 Bounded startup validation: O(1) durable-checkpoint check in the
+- [x] 2.5 Bounded startup validation: O(1) durable-checkpoint check in the
       watcher startup pass; whole-vault rebuild only on incoherence.
 
 ## 3. Verification and delivery

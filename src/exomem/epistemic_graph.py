@@ -2744,6 +2744,65 @@ class EpistemicGraphIndex:
             if conn is not None:
                 conn.close()
 
+    def durable_checkpoint_is_coherent(self) -> bool:
+        """O(1) durable evidence that a whole-vault rebuild is unjustified.
+
+        Reads four `graph_meta` rows and the durable checkpoint file. It never
+        walks the vault, hashes a source, or opens the graph for reading, so a
+        startup pass can consult it without suspending reads.
+
+        This is a cheap CONSERVATIVE negative pre-filter, not a second
+        admission authority. `available()` remains the sole authority, and is
+        strictly stronger today: every state this accepts, `available()`
+        independently re-checks. The two are separate code paths and may drift,
+        but because the startup pass requires BOTH, the drift is bounded to a
+        spurious rebuild — this returning False where `available()` would have
+        admitted. It can never admit something `available()` would reject.
+
+        The classification tracks the graph_sync clause of
+        :meth:`_open_read_snapshot`:
+
+        - a malformed durable checkpoint is incoherent;
+        - a valid one must be acknowledged by matching generation AND digest;
+        - acknowledgement rows with no durable checkpoint are recovery state,
+          not a legacy sidecar;
+        - a persisted read barrier is a recorded crash marker.
+
+        True means only that the rebuild has no durable justification — it is
+        NOT a freshness claim. Every public read still passes
+        `_open_read_snapshot`, which independently proves source bytes and
+        resolver topology for a cold reader and fails closed, so a graph that
+        drifted from disk while the process was down is still caught there.
+        """
+        if not self.path.exists():
+            return False
+        graph_sync_state, required = graph_sync.checkpoint_state(self.vault_root)
+        if graph_sync_state == "malformed":
+            return False
+        conn: sqlite3.Connection | None = None
+        try:
+            conn = self._connect_existing(readonly=True)
+            values = dict(
+                conn.execute(
+                    "SELECT key, value FROM graph_meta WHERE key IN "
+                    "('read_barrier', 'graph_sync_generation', 'graph_sync_digest', "
+                    "'graph_sync_checkpoint')"
+                ).fetchall()
+            )
+        except sqlite3.Error:
+            return False
+        finally:
+            if conn is not None:
+                conn.close()
+        if values.get(_READ_BARRIER_KEY) is not None:
+            return False
+        if required is not None:
+            return _graph_sync_acknowledgement(values) == required
+        return (
+            values.get("graph_sync_generation") is None
+            and values.get("graph_sync_digest") is None
+        )
+
     def _publish_available_marker(
         self,
         identity: tuple[tuple[int, int, str], str, str],
