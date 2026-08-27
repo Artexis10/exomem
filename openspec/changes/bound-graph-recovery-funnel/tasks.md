@@ -23,8 +23,18 @@
       service owns graph work refuses with the documented remediation
       instead of taking the claim.
 
+- [ ] 1.6 Access fail-open pin (red first): a transient OSError reading the
+      access-policy file currently caches an EMPTY policy (nothing excluded)
+      under the unchanged stat signature and flips the access fingerprint,
+      widening visibility and flapping recall identity with zero writes.
+      After the fix: last-known-good policy retained, fingerprint stable,
+      no cache poisoning; with no prior successful load, everything is
+      excluded until a read succeeds.
+
 ## 2. Implementation
 
+- [ ] 2.0 Access-policy fail-closed loading per the recall-read-path delta
+      (precondition for trusting the projection-lag identity guard).
 - [ ] 2.1 Extend the `epistemic_graph` clause of `full_upsert_succeeded`
       with the durable-coverage carve-out (mirror of the embeddings
       warm-up carve-out from #850).
