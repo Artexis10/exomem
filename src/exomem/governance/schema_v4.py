@@ -162,6 +162,18 @@ class ProjectionNamespaceSeed:
 
 
 @dataclass(frozen=True, slots=True)
+class DependentGrantTransition:
+    """One exact active-grant successor bound to a policy publication."""
+
+    grant_id: str
+    expected_policy_fingerprint: str
+    expected_membership_manifest: str
+    target_status: str
+    target_policy_fingerprint: str
+    target_membership_manifest: str
+
+
+@dataclass(frozen=True, slots=True)
 class MigrationSeed:
     activation_store_id: str
     logical_vault_id: str
@@ -285,6 +297,87 @@ class ActivationRegistryAcknowledgement:
 RegistryAcknowledger = Callable[
     [VerifiedActiveGovernanceState], ActivationRegistryAcknowledgement
 ]
+
+
+def _canonical_membership_manifest(value: object, name: str) -> str:
+    if not isinstance(value, str):
+        raise SchemaV4Error(f"{name} must be canonical bounded JSON")
+    try:
+        encoded = value.encode("utf-8")
+        decoded = json.loads(value)
+    except (UnicodeEncodeError, json.JSONDecodeError) as exc:
+        raise SchemaV4Error(f"{name} must be canonical bounded JSON") from exc
+    if (
+        not isinstance(decoded, list)
+        or len(encoded) > _MAX_BLOB_BYTES
+        or json.dumps(
+            decoded,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        != value
+    ):
+        raise SchemaV4Error(f"{name} must be canonical bounded JSON")
+    return value
+
+
+def _dependent_grant_transitions(
+    value: tuple[DependentGrantTransition, ...] | None,
+    *,
+    expected_policy_fingerprint: str,
+    target_policy_fingerprint: str,
+) -> tuple[DependentGrantTransition, ...] | None:
+    if value is None:
+        return None
+    if not isinstance(value, tuple) or len(value) > 100_000:
+        raise SchemaV4Error("dependent_grants must be one bounded ordered tuple")
+    normalized: list[DependentGrantTransition] = []
+    seen: set[str] = set()
+    for ordinal, transition in enumerate(value):
+        if not isinstance(transition, DependentGrantTransition):
+            raise SchemaV4Error("dependent_grants contains an invalid transition")
+        grant_id = _text(transition.grant_id, f"dependent_grants[{ordinal}].grant_id")
+        if grant_id in seen:
+            raise SchemaV4Error("dependent_grants contains a duplicate grant")
+        seen.add(grant_id)
+        expected_fingerprint = _digest(
+            transition.expected_policy_fingerprint,
+            f"dependent_grants[{ordinal}].expected_policy_fingerprint",
+        )
+        target_fingerprint = _digest(
+            transition.target_policy_fingerprint,
+            f"dependent_grants[{ordinal}].target_policy_fingerprint",
+        )
+        if (
+            expected_fingerprint != expected_policy_fingerprint
+            or target_fingerprint != target_policy_fingerprint
+            or transition.target_status not in {"expired", "review"}
+        ):
+            raise SchemaV4Error(
+                "dependent grant transition does not match the policy publication"
+            )
+        normalized.append(
+            DependentGrantTransition(
+                grant_id=grant_id,
+                expected_policy_fingerprint=expected_fingerprint,
+                expected_membership_manifest=_canonical_membership_manifest(
+                    transition.expected_membership_manifest,
+                    f"dependent_grants[{ordinal}].expected_membership_manifest",
+                ),
+                target_status=transition.target_status,
+                target_policy_fingerprint=target_fingerprint,
+                target_membership_manifest=_canonical_membership_manifest(
+                    transition.target_membership_manifest,
+                    f"dependent_grants[{ordinal}].target_membership_manifest",
+                ),
+            )
+        )
+    ordered = tuple(sorted(normalized, key=lambda item: item.grant_id))
+    if tuple(normalized) != ordered:
+        raise SchemaV4Error("dependent_grants must be ordered by grant identity")
+    return ordered
 
 
 @dataclass(frozen=True, slots=True)
@@ -1918,6 +2011,68 @@ def load_active_policy(
     )
 
 
+def load_policy_generation(
+    connection: sqlite3.Connection,
+    generation_id: str,
+) -> PolicyGenerationSeed:
+    """Verify and return one immutable historical policy generation."""
+
+    identity = _text(generation_id, "policy.generation_id")
+    try:
+        row = connection.execute(
+            "SELECT generation_id, source_documents, source_fingerprint, "
+            "conflict_digest, compiled_policy, policy_fingerprint, "
+            "compiler_schema_version, projector_schema_version, "
+            "predecessor_generation_id, authoring_event_id, receipt_event_id, "
+            "immutable_row_digest, created_at FROM compiled_policy_generations "
+            "WHERE generation_id=?",
+            (identity,),
+        ).fetchone()
+        if row is None:
+            raise SchemaV4Error("policy generation is unavailable")
+        stored = tuple(row)
+        if not hmac.compare_digest(
+            _stored_policy_row_digest(stored),
+            _digest(stored[11], "policy.immutable_row_digest"),
+        ):
+            raise SchemaV4Error("policy generation digest does not verify")
+        seed = PolicyGenerationSeed(
+            generation_id=_text(stored[0], "policy.generation_id"),
+            source_documents=_decode_source_document_bytes(stored[1]),
+            source_fingerprint=_digest(
+                stored[2], "policy.source_fingerprint"
+            ),
+            conflict_digest=_digest(stored[3], "policy.conflict_digest"),
+            compiled_policy=_blob(
+                stored[4], "policy.compiled_policy", allow_empty=True
+            ),
+            policy_fingerprint=_digest(
+                stored[5], "policy.policy_fingerprint"
+            ),
+            compiler_schema_version=_integer(
+                stored[6], "policy.compiler_schema_version"
+            ),
+            projector_schema_version=_integer(
+                stored[7], "policy.projector_schema_version"
+            ),
+            predecessor_generation_id=(
+                None
+                if stored[8] is None
+                else _text(stored[8], "policy.predecessor_generation_id")
+            ),
+            authoring_event_id=_text(stored[9], "policy.authoring_event_id"),
+            receipt_event_id=_text(stored[10], "policy.receipt_event_id"),
+            created_at=_integer(stored[12], "policy.created_at"),
+        )
+        source_documents, row_digest = _validate_policy(seed)
+        if not hmac.compare_digest(row_digest, str(stored[11])):
+            raise SchemaV4Error("policy generation digest does not verify")
+        _verify_policy_source_parity(seed, source_documents)
+        return seed
+    except (IndexError, TypeError, ValueError, sqlite3.Error, SchemaV4Error):
+        raise SchemaV4Error("policy generation is unavailable") from None
+
+
 def _projection_namespace_id(value: object) -> str:
     if (
         not isinstance(value, str)
@@ -2123,8 +2278,15 @@ def publish_policy_generation(
     namespace: ProjectionNamespaceSeed,
     activated_at: int,
     acknowledge_registry: RegistryAcknowledger,
+    dependent_grants: tuple[DependentGrantTransition, ...] | None = None,
+    catalog: CatalogGenerationSeed | None = None,
 ) -> TuplePublicationResult:
-    """Insert and CAS one complete policy generation against its reviewed tuple."""
+    """Insert and CAS one complete policy/catalog generation successor.
+
+    Policy changes that alter selector membership supply ``catalog`` so the
+    immutable target catalog and its namespace enter the same tuple CAS.  A
+    policy-only change may reuse the reviewed catalog by passing ``None``.
+    """
 
     if not isinstance(expected, VerifiedActiveGovernanceState):
         raise SchemaV4Error("expected active tuple is invalid")
@@ -2145,6 +2307,44 @@ def publish_policy_generation(
     namespace_ready_at = _integer(namespace.ready_at, "namespace.ready_at")
     if namespace_ready_at > activated:
         raise SchemaV4Error("projection namespace is not ready at activation")
+    grant_transitions = _dependent_grant_transitions(
+        dependent_grants,
+        expected_policy_fingerprint=expected.policy_fingerprint,
+        target_policy_fingerprint=policy.policy_fingerprint,
+    )
+    if catalog is None:
+        target_catalog_generation = expected.catalog_generation
+        catalog_descriptor = None
+        catalog_artifact_count = None
+        catalog_created_at = None
+        catalog_descriptor_digest = None
+    else:
+        if not isinstance(catalog, CatalogGenerationSeed):
+            raise SchemaV4Error("catalog generation is invalid")
+        target_catalog_generation = _integer(
+            catalog.catalog_generation,
+            "catalog.catalog_generation",
+        )
+        if target_catalog_generation != expected.catalog_generation + 1:
+            raise ActiveTupleStale("catalog generation is not the reviewed successor")
+        catalog_descriptor = _blob(
+            catalog.descriptor,
+            "catalog.descriptor",
+            allow_empty=True,
+        )
+        catalog_artifact_count = _integer(
+            catalog.artifact_count,
+            "catalog.artifact_count",
+            minimum=0,
+        )
+        catalog_created_at = _integer(catalog.created_at, "catalog.created_at")
+        catalog_descriptor_digest = _framed_digest(
+            b"exomem.catalog-generation-descriptor.v1",
+            _ascii_integer(target_catalog_generation),
+            catalog_descriptor,
+            _ascii_integer(catalog_artifact_count),
+            _ascii_integer(catalog_created_at),
+        )
 
     _verify_policy_source_parity(policy, source_documents)
 
@@ -2166,21 +2366,22 @@ def publish_policy_generation(
             raise ActiveTupleStale(
                 "active tuple no longer matches the reviewed predecessor"
             )
-        catalog = connection.execute(
-            "SELECT descriptor_digest FROM catalog_generation_descriptors "
-            "WHERE catalog_generation=?",
-            (expected.catalog_generation,),
-        ).fetchone()
-        if catalog is None:
-            raise SchemaV4Error("reviewed catalog descriptor is unavailable")
-        catalog_descriptor_digest = _digest(
-            catalog[0], "catalog.descriptor_digest"
-        )
+        if catalog_descriptor_digest is None:
+            current_catalog = connection.execute(
+                "SELECT descriptor_digest FROM catalog_generation_descriptors "
+                "WHERE catalog_generation=?",
+                (expected.catalog_generation,),
+            ).fetchone()
+            if current_catalog is None:
+                raise SchemaV4Error("reviewed catalog descriptor is unavailable")
+            catalog_descriptor_digest = _digest(
+                current_catalog[0], "catalog.descriptor_digest"
+            )
         namespace_digest = _framed_digest(
             b"exomem.authorization-projection-namespace.v1",
             policy.policy_fingerprint.encode("ascii"),
             _ascii_integer(policy.projector_schema_version),
-            _ascii_integer(expected.catalog_generation),
+            _ascii_integer(target_catalog_generation),
             namespace_id.encode(),
             namespace_evidence,
             _ascii_integer(namespace_ready_at),
@@ -2197,10 +2398,51 @@ def publish_policy_generation(
             policy_fingerprint=policy.policy_fingerprint,
             policy_row_digest=policy_row_digest,
             projector_schema_version=policy.projector_schema_version,
-            catalog_generation=expected.catalog_generation,
+            catalog_generation=target_catalog_generation,
             catalog_descriptor_digest=catalog_descriptor_digest,
             projection_namespace_identity=namespace_digest,
         )
+        if grant_transitions is not None:
+            active_grants = connection.execute(
+                "SELECT grant_id, policy_fingerprint, membership_manifest, status, "
+                "prepared_event_id FROM governance_session_grants "
+                "WHERE status='active' ORDER BY grant_id"
+            ).fetchall()
+            expected_grants = [
+                (
+                    transition.grant_id,
+                    transition.expected_policy_fingerprint,
+                    transition.expected_membership_manifest,
+                    "active",
+                    None,
+                )
+                for transition in grant_transitions
+            ]
+            if active_grants != expected_grants:
+                raise ActiveTupleStale(
+                    "dependent grant manifest no longer matches the reviewed predecessor"
+                )
+            for transition in grant_transitions:
+                updated_grant = connection.execute(
+                    "UPDATE governance_session_grants SET status=?, "
+                    "policy_fingerprint=?, membership_manifest=?, "
+                    "prepared_event_id=NULL, revoked_at=? WHERE grant_id=? "
+                    "AND status='active' AND prepared_event_id IS NULL "
+                    "AND policy_fingerprint=? AND membership_manifest=?",
+                    (
+                        transition.target_status,
+                        transition.target_policy_fingerprint,
+                        transition.target_membership_manifest,
+                        activated,
+                        transition.grant_id,
+                        transition.expected_policy_fingerprint,
+                        transition.expected_membership_manifest,
+                    ),
+                )
+                if updated_grant.rowcount != 1:
+                    raise ActiveTupleStale(
+                        "dependent grant changed during policy publication"
+                    )
         connection.execute(
             "INSERT INTO compiled_policy_generations "
             "(generation_id, source_documents, source_fingerprint, conflict_digest, "
@@ -2224,30 +2466,62 @@ def publish_policy_generation(
                 policy.created_at,
             ),
         )
-        connection.execute(
-            "INSERT INTO governance_projection_namespaces "
-            "(policy_fingerprint, projector_schema_version, catalog_generation, "
-            "namespace_id, namespace_digest, evidence, ready_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        if catalog_descriptor is not None:
+            connection.execute(
+                "INSERT INTO catalog_generation_descriptors "
+                "(catalog_generation, descriptor, descriptor_digest, artifact_count, "
+                "created_at) VALUES (?, ?, ?, ?, ?)",
+                (
+                    target_catalog_generation,
+                    catalog_descriptor,
+                    catalog_descriptor_digest,
+                    catalog_artifact_count,
+                    catalog_created_at,
+                ),
+            )
+        namespace_row = connection.execute(
+            "SELECT namespace_id, namespace_digest, evidence, ready_at "
+            "FROM governance_projection_namespaces WHERE policy_fingerprint=? "
+            "AND projector_schema_version=? AND catalog_generation=?",
             (
                 policy.policy_fingerprint,
                 policy.projector_schema_version,
-                expected.catalog_generation,
-                namespace_id,
-                namespace_digest,
-                namespace_evidence,
-                namespace_ready_at,
+                target_catalog_generation,
             ),
+        ).fetchone()
+        expected_namespace_row = (
+            namespace_id,
+            namespace_digest,
+            namespace_evidence,
+            namespace_ready_at,
         )
+        if namespace_row is None:
+            connection.execute(
+                "INSERT INTO governance_projection_namespaces "
+                "(policy_fingerprint, projector_schema_version, catalog_generation, "
+                "namespace_id, namespace_digest, evidence, ready_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    policy.policy_fingerprint,
+                    policy.projector_schema_version,
+                    target_catalog_generation,
+                    *expected_namespace_row,
+                ),
+            )
+        elif tuple(namespace_row) != expected_namespace_row:
+            raise SchemaV4Error(
+                "existing projection namespace does not match the policy publication"
+            )
         active_update = connection.execute(
             "UPDATE active_governance_tuple SET policy_generation_id=?, "
-            "policy_fingerprint=?, projector_schema_version=? "
+            "policy_fingerprint=?, projector_schema_version=?, catalog_generation=? "
             "WHERE singleton=1 AND policy_generation_id=? AND policy_fingerprint=? "
             "AND projector_schema_version=? AND catalog_generation=?",
             (
                 policy.generation_id,
                 policy.policy_fingerprint,
                 policy.projector_schema_version,
+                target_catalog_generation,
                 expected.policy_generation_id,
                 expected.policy_fingerprint,
                 expected.projector_schema_version,
@@ -2285,7 +2559,7 @@ def publish_policy_generation(
                 policy.generation_id,
                 policy.policy_fingerprint,
                 policy.projector_schema_version,
-                expected.catalog_generation,
+                target_catalog_generation,
                 target_epoch,
                 activated,
             ),

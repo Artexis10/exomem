@@ -644,6 +644,47 @@ def test_commit_direction_is_proven_from_effective_rule_change(vault: Path) -> N
     )["direction"] == "narrowing"
 
 
+def test_proposal_direction_treats_equal_level_option_change_as_unknown(
+    vault: Path,
+) -> None:
+    from exomem.governance.tool import op_govern_memory
+
+    original = _proposal_documents(ceiling=1)
+    original["rules/confidential-patterns.yaml"] += (
+        "options:\n  notice: Original notice\n"
+    )
+    proposed = op_govern_memory(
+        vault,
+        operation="propose",
+        principal=owner_principal(),
+        intent="Install the original reviewed notice",
+        documents=original,
+        target_ceiling=1,
+    )
+    op_govern_memory(
+        vault,
+        operation="commit",
+        principal=owner_principal(),
+        proposal_id=proposed["proposal_id"],
+    )
+    changed = dict(original)
+    changed["rules/confidential-patterns.yaml"] = changed[
+        "rules/confidential-patterns.yaml"
+    ].replace("Original notice", "Different notice")
+
+    reviewed = op_govern_memory(
+        vault,
+        operation="propose",
+        principal=owner_principal(),
+        intent="Review a different notice at the same ceiling",
+        documents=changed,
+        target_ceiling=1,
+    )
+
+    assert reviewed["consequences"]["direction"] == "widening"
+    assert reviewed["consequences"]["widened"] > 0
+
+
 @pytest.mark.parametrize(
     ("before", "after", "expected"),
     [
@@ -657,6 +698,16 @@ def test_transition_direction_requires_pointwise_proof(before, after, expected) 
     from exomem.governance.tool import classify_transition_direction
 
     assert classify_transition_direction(before, after) == expected
+
+
+def test_transition_direction_requires_equal_disclosure_at_equal_level() -> None:
+    from exomem.governance.tool import classify_transition_direction
+
+    old = (2, "old-disclosure")
+    new = (2, "new-disclosure")
+    assert classify_transition_direction({"a": old}, {"a": old}) == "narrowing"
+    assert classify_transition_direction({"a": old}, {"a": new}) == "widening"
+    assert classify_transition_direction({"a": old}, {"a": (1, new[1])}) == "narrowing"
 
 
 def _external(session: str | None = "conversation-a") -> RequestPrincipal:
@@ -4006,6 +4057,35 @@ def test_adding_default_deny_is_classified_as_a_narrowing(vault: Path) -> None:
     )
 
     assert direction == "narrowing"
+
+
+def test_v4_proposal_analysis_never_calls_release_grant_change_narrowing(
+    vault: Path,
+) -> None:
+    from exomem.governance import policy
+    from exomem.governance.tool import _proposal_analysis
+
+    current = policy.Policy(fingerprint="a" * 64)
+    release = policy.ReleaseGrant(
+        id="01ARZ3NDEKTSV4RRFFQ69G5FZZ",
+        source="grants/release.yaml",
+        path="Knowledge Base/Notes/released.md",
+        ref="mem:01ARZ3NDEKTSV4RRFFQ69G5FZY",
+        content_hash="b" * 64,
+        to_audience="external",
+        released_at="2026-08-27T00:00:00Z",
+        why="reviewed release",
+        bridge_scope="exact",
+        bridge_of=(),
+        strip_provenance=(),
+    )
+    prospective = dataclasses.replace(
+        current,
+        fingerprint="c" * 64,
+        release_grants=(release,),
+    )
+
+    assert _proposal_analysis(vault, current, prospective, [])[2] == "widening"
 
 
 def test_a_proposal_removing_default_deny_counts_the_widened_audience(

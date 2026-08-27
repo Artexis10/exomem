@@ -1498,8 +1498,14 @@ def compile_prospective(
     documents: dict[str, str | None],
     *,
     _expected_pending_event_id: str | None = None,
+    _replace_document_set: bool = False,
 ) -> ProspectiveCompile | None:
-    """Compile an overlay only after a stable no-follow workspace acquisition."""
+    """Compile an exact target after a stable no-follow workspace acquisition.
+
+    Ordinary authoring proposals overlay reviewed edits onto the captured workspace.
+    Internal semantic operations may instead supply the complete immutable target;
+    their target must not inherit unrelated pending workspace YAML.
+    """
 
     vault_root = Path(vault_root)
     guard_before = _clear_guard_generation(
@@ -1547,7 +1553,7 @@ def compile_prospective(
         directory_identities=read.directory_identities,
         governance_root_identity=read.root_identity,
     )
-    target_documents = dict(current_documents)
+    target_documents = {} if _replace_document_set else dict(current_documents)
     for relative, content in documents.items():
         normalized = relative.replace("\\", "/")
         if content is None:

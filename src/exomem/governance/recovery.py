@@ -1204,6 +1204,24 @@ def _reconcile_orphan_reservations(vault_root: Path) -> tuple[int, bool]:
         ).fetchall()
     finally:
         conn.close()
+    legacy_rows = []
+    for row in rows:
+        try:
+            payload = json.loads(str(row[1]))
+        except (TypeError, ValueError):
+            legacy_rows.append(row)
+            continue
+        binding = payload.get("authority_binding") if isinstance(payload, dict) else None
+        if isinstance(binding, dict) and binding.get("schema") in {
+            "exomem.governance-policy-proposal/v3",
+            "exomem.governance-policy-proposal/v4",
+        }:
+            # Immutable-generation proposals own receipt reservation and recovery in
+            # the v4 policy publisher.  They intentionally have no legacy YAML
+            # operation journal and must not be classified as orphaned here.
+            continue
+        legacy_rows.append(row)
+    rows = legacy_rows
     if not rows:
         return 0, False
     if _marker_path(vault_root).exists():

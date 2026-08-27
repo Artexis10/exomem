@@ -774,6 +774,84 @@ def _delete_expired_except(
     return int(cursor.rowcount or 0)
 
 
+def _retained_v4_policy_components(
+    conn: sqlite3.Connection,
+) -> tuple[frozenset[str], frozenset[str]]:
+    """Return immutable policy-history rows that TTL sweeping cannot retire.
+
+    A spent v4 proposal is the retained semantic/publication history for its
+    compiled generation, and its reviewed dependent-grant targets remain part
+    of crash recovery evidence.  They are intentionally durable until a later
+    schema supplies an equivalent immutable history table.
+    """
+
+    proposal_ids: set[str] = set()
+    grant_ids: set[str] = set()
+
+    def retain_all_grants() -> None:
+        grant_ids.update(
+            str(row[0])
+            for row in conn.execute(
+                "SELECT grant_id FROM governance_session_grants"
+            ).fetchall()
+        )
+
+    rows = conn.execute(
+        "SELECT proposal_id, proposal_json, status, reserved_event_id "
+        "FROM governance_proposals WHERE status IN ('pending','spent') "
+        "ORDER BY proposal_id"
+    ).fetchall()
+    for proposal_id, proposal_json, status, reserved_event_id in rows:
+        if status == "pending" and reserved_event_id is None:
+            continue
+        try:
+            payload = json.loads(str(proposal_json))
+        except json.JSONDecodeError:
+            if "exomem.governance-policy-proposal/v" in str(proposal_json):
+                proposal_ids.add(str(proposal_id))
+                retain_all_grants()
+            continue
+        binding = payload.get("authority_binding") if isinstance(payload, dict) else None
+        schema = binding.get("schema") if isinstance(binding, dict) else None
+        if schema not in {
+            "exomem.governance-policy-proposal/v3",
+            "exomem.governance-policy-proposal/v4",
+        }:
+            continue
+        proposal_ids.add(str(proposal_id))
+        dependent = binding.get("dependent_grants", [])
+        if not isinstance(dependent, list):
+            retain_all_grants()
+            continue
+        seen_grants: set[str] = set()
+        malformed = False
+        expected_transition_keys = {
+            "grant_id",
+            "expected_policy_fingerprint",
+            "expected_membership_manifest",
+            "target_status",
+            "target_policy_fingerprint",
+            "target_membership_manifest",
+        }
+        for transition in dependent:
+            grant_id = transition.get("grant_id") if isinstance(transition, dict) else None
+            if (
+                not isinstance(transition, dict)
+                or set(transition) != expected_transition_keys
+                or not isinstance(grant_id, str)
+                or not grant_id
+                or grant_id in seen_grants
+            ):
+                malformed = True
+                break
+            seen_grants.add(grant_id)
+        if malformed:
+            retain_all_grants()
+        else:
+            grant_ids.update(seen_grants)
+    return frozenset(proposal_ids), frozenset(grant_ids)
+
+
 def sweep_authoring_state(vault_root: Path, *, now: float | None = None) -> int:
     """Physically retire expired tool state while pinning live composites."""
     if not sidecar_path(vault_root).exists():
@@ -784,17 +862,18 @@ def sweep_authoring_state(vault_root: Path, *, now: float | None = None) -> int:
     conn.execute("BEGIN IMMEDIATE")
     try:
         pinned = pinned_component_keys(vault_root, conn=conn)
+        retained_proposals, retained_grants = _retained_v4_policy_components(conn)
         removed = _delete_expired_except(
             conn,
             table="governance_proposals",
             key_column="proposal_id",
             expiry_column="expires_at",
             now=moment,
-            pinned=pinned.get("proposal", frozenset()),
+            pinned=pinned.get("proposal", frozenset()) | retained_proposals,
         )
         grant_pins = pinned.get("grant", frozenset()) | pinned.get(
             "dependent_grant", frozenset()
-        )
+        ) | retained_grants
         removed += _delete_expired_except(
             conn,
             table="governance_session_grants",

@@ -156,7 +156,7 @@ this reconciliation is `origin/main` at `9dc37201` plus stacked evidence PR #832
   source/catalog recheck; atomic initial tuple; stopped/running deletion and corrupt/
   missing/aliased registry/workspace/store/tuple/policy/catalog/namespace fail-closed;
   WAL-consistent restore and no last-good/OPEN/historical fallback.
-- [ ] 3.7 Add red `govern_memory` suspend/resume/undo matrices: semantic widening and
+- [x] 3.7 Add red `govern_memory` suspend/resume/undo matrices: semantic widening and
   narrowing; changed dependent scope/member identity/hash/set with deterministic expire/
   review state; exact policy generation + grant manifest + ready namespace identity;
   races against content create/edit/delete and companion publication; cooperatively fenced
