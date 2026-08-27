@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,6 +30,10 @@ class ForwardMigrationUnavailable(RuntimeError):
     """The exact v3 source cannot produce one reviewable migration target."""
 
 
+class ForwardMigrationPlanMismatch(ForwardMigrationUnavailable):
+    """The owner-confirmed plan is not the exact current migration plan."""
+
+
 @dataclass(frozen=True, slots=True)
 class ForwardMigrationPlan:
     """Private seed plus the content-free target an owner may review."""
@@ -39,6 +44,16 @@ class ForwardMigrationPlan:
     projection_rows_digest: str
     item_count: int
     plan_digest: str
+
+
+@dataclass(frozen=True, slots=True)
+class ForwardMigrationStageResult:
+    """Content-free terminal for one inert immutable namespace publication."""
+
+    plan_digest: str
+    projection_namespace_id: str
+    projection_rows_digest: str
+    item_count: int
 
 
 def _framed_digest(domain: bytes, *parts: bytes) -> str:
@@ -348,9 +363,105 @@ def plan_summary(plan: ForwardMigrationPlan) -> dict[str, object]:
     }
 
 
+def _stage_material(
+    vault_root: Path,
+    plan: ForwardMigrationPlan,
+) -> tuple[
+    projections.ProjectionNamespaceKey,
+    tuple[projection_store.ProjectionItemVariants, ...],
+    projection_store.VariantStoreManifest,
+]:
+    compiled = policy.compile_documents(dict(plan.seed.policy.source_documents))
+    key = projections.ProjectionNamespaceKey(
+        policy_fingerprint=plan.target.policy_fingerprint,
+        projector_schema_version=plan.target.projector_schema_version,
+        catalog_generation=plan.target.catalog_generation,
+    )
+    items = _catalog_items(vault_root, compiled=compiled, key=key)
+    manifest = projection_store.preview_variant_store(key=key, items=items)
+    if (
+        compiled.fingerprint != plan.target.policy_fingerprint
+        or projection_store.catalog_descriptor_bytes(key, items)
+        != plan.seed.catalog.descriptor
+        or projection_store.projection_namespace_evidence_bytes(manifest)
+        != plan.seed.namespace.evidence
+        or manifest.namespace_id != plan.target.projection_namespace_id
+        or manifest.rows_digest != plan.projection_rows_digest
+        or manifest.item_count != plan.item_count
+    ):
+        raise ForwardMigrationPlanMismatch
+    return key, items, manifest
+
+
+def stage_forward_migration(
+    vault_root: Path,
+    *,
+    expected_plan_digest: str,
+    now: int,
+) -> ForwardMigrationStageResult:
+    """Publish only the exact reviewed namespace while authority remains v3.
+
+    The immutable namespace is inert until a later coordinator enrolls and commits
+    its bound activation tuple.  A crash or late source drift can therefore leave
+    only an unreferenced, content-addressed store that an exact retry may reuse.
+    """
+
+    expected = str(expected_plan_digest)
+    if (
+        len(expected) != 64
+        or any(character not in "0123456789abcdef" for character in expected)
+    ):
+        raise ForwardMigrationPlanMismatch
+    root = Path(vault_root)
+    plan = prepare_forward_migration(root, now=now)
+    if not hmac.compare_digest(plan.plan_digest, expected):
+        raise ForwardMigrationPlanMismatch
+    try:
+        key, items, manifest = _stage_material(root, plan)
+        staged = projection_store.stage_variant_store(
+            root,
+            key=key,
+            items=items,
+        )
+        verified = projection_store.verify_variant_store(
+            root,
+            key=key,
+            expected_rows_digest=plan.projection_rows_digest,
+        )
+        current = prepare_forward_migration(root, now=now)
+    except ForwardMigrationPlanMismatch:
+        raise
+    except (
+        ForwardMigrationUnavailable,
+        projection_store.ProjectionStoreError,
+        projections.ProjectionError,
+        OSError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+    ) as error:
+        raise ForwardMigrationUnavailable from error
+    if (
+        staged != manifest
+        or verified != manifest
+        or not hmac.compare_digest(current.plan_digest, expected)
+        or current != plan
+    ):
+        raise ForwardMigrationPlanMismatch
+    return ForwardMigrationStageResult(
+        plan_digest=plan.plan_digest,
+        projection_namespace_id=manifest.namespace_id,
+        projection_rows_digest=manifest.rows_digest,
+        item_count=manifest.item_count,
+    )
+
+
 __all__ = [
     "ForwardMigrationPlan",
+    "ForwardMigrationPlanMismatch",
+    "ForwardMigrationStageResult",
     "ForwardMigrationUnavailable",
     "plan_summary",
     "prepare_forward_migration",
+    "stage_forward_migration",
 ]

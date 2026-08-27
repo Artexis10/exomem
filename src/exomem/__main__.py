@@ -16,7 +16,7 @@ Subcommands:
   (requires the optional `tui` extra; needs an interactive terminal)
 - `doctor` — read-only local install/setup preflight
 - `auth sessions|revoke` — operator-only durable MCP session administration
-- `governance-schema status|plan-migration|downmigrate` — offline schema control
+- `governance-schema status|plan-migration|stage-migration|downmigrate` — offline schema control
 - `status` — resource posture/residency diagnostics without loading models
 - `warm` — pre-download/load the search models (bge, reranker, CLIP) so the first
   server start doesn't pay the download in the background; optional `--vault`
@@ -1547,6 +1547,21 @@ def _governance_schema_main(argv: list[str]) -> int:
     plan_parser.add_argument("--vault", required=True, help="explicit absolute vault root")
     plan_parser.add_argument("--json", action="store_true", help="emit stable JSON")
 
+    stage_parser = subcommands.add_parser(
+        "stage-migration",
+        help="publish the exact reviewed immutable namespace without activating it",
+    )
+    stage_parser.add_argument("--vault", required=True, help="explicit absolute vault root")
+    stage_parser.add_argument(
+        "--expected-plan-digest",
+        required=True,
+        help="64-character digest copied from the reviewed migration plan",
+    )
+    stage_parser.add_argument(
+        "--yes", action="store_true", help="confirm the reviewed inert publication"
+    )
+    stage_parser.add_argument("--json", action="store_true", help="emit stable JSON")
+
     downmigrate_parser = subcommands.add_parser(
         "downmigrate",
         help="restore exact schema v3 after every v4 replica is drained",
@@ -1593,6 +1608,55 @@ def _governance_schema_main(argv: list[str]) -> int:
             print(json.dumps(summary))
         else:
             for key, value in summary.items():
+                print(f"{key}: {value}")
+        return 0
+
+    if args.command == "stage-migration":
+        expected_plan_digest = args.expected_plan_digest
+        if not args.yes:
+            confirmation = {
+                "staged": False,
+                "reason": "confirmation_required",
+                "plan_digest": expected_plan_digest,
+            }
+            if as_json:
+                print(json.dumps(confirmation))
+            else:
+                for key, value in confirmation.items():
+                    print(f"{key}: {value}")
+            return 2
+        try:
+            terminal = schema_migration.stage_forward_migration(
+                vault,
+                expected_plan_digest=expected_plan_digest,
+                now=moment,
+            )
+        except schema_migration.ForwardMigrationPlanMismatch:
+            _governance_schema_print_error(
+                "GOVERNANCE_SCHEMA_PLAN_MISMATCH",
+                "the reviewed migration plan changed; no activation was attempted",
+                as_json=as_json,
+            )
+            return 1
+        except schema_migration.ForwardMigrationUnavailable:
+            _governance_schema_print_error(
+                "GOVERNANCE_SCHEMA_MIGRATION_UNAVAILABLE",
+                "the exact v3 migration namespace could not be staged",
+                as_json=as_json,
+            )
+            return 1
+        result = {
+            "staged": True,
+            "schema_version": 3,
+            "plan_digest": terminal.plan_digest,
+            "projection_namespace_id": terminal.projection_namespace_id,
+            "projection_rows_digest": terminal.projection_rows_digest,
+            "item_count": terminal.item_count,
+        }
+        if as_json:
+            print(json.dumps(result))
+        else:
+            for key, value in result.items():
                 print(f"{key}: {value}")
         return 0
 

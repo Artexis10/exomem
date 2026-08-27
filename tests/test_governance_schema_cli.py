@@ -67,6 +67,126 @@ def test_governance_schema_plan_migration_emits_reviewable_target(
     assert json.loads(capsys.readouterr().out) == summary
 
 
+def test_governance_schema_stage_migration_requires_digest_bound_confirmation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    calls: list[object] = []
+    monkeypatch.setattr(
+        schema_migration,
+        "stage_forward_migration",
+        lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+
+    code = main(
+        [
+            "governance-schema",
+            "stage-migration",
+            "--vault",
+            str(vault),
+            "--expected-plan-digest",
+            "f" * 64,
+            "--json",
+        ]
+    )
+
+    assert code == 2
+    assert calls == []
+    assert json.loads(capsys.readouterr().out) == {
+        "staged": False,
+        "reason": "confirmation_required",
+        "plan_digest": "f" * 64,
+    }
+
+
+def test_governance_schema_stage_migration_returns_content_free_terminal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    terminal = schema_migration.ForwardMigrationStageResult(
+        plan_digest="f" * 64,
+        projection_namespace_id="c" * 64,
+        projection_rows_digest="d" * 64,
+        item_count=7,
+    )
+    calls: list[tuple[Path, str, int]] = []
+
+    def stage(root: Path, *, expected_plan_digest: str, now: int):
+        calls.append((root, expected_plan_digest, now))
+        return terminal
+
+    monkeypatch.setattr(schema_migration, "stage_forward_migration", stage)
+
+    assert (
+        main(
+            [
+                "governance-schema",
+                "stage-migration",
+                "--vault",
+                str(vault),
+                "--expected-plan-digest",
+                "f" * 64,
+                "--yes",
+                "--json",
+            ]
+        )
+        == 0
+    )
+
+    assert len(calls) == 1
+    assert calls[0][0] == vault and calls[0][1] == "f" * 64
+    assert isinstance(calls[0][2], int) and calls[0][2] > 0
+    assert json.loads(capsys.readouterr().out) == {
+        "staged": True,
+        "schema_version": 3,
+        "plan_digest": "f" * 64,
+        "projection_namespace_id": "c" * 64,
+        "projection_rows_digest": "d" * 64,
+        "item_count": 7,
+    }
+
+
+def test_governance_schema_stage_migration_refuses_a_stale_plan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    monkeypatch.setattr(
+        schema_migration,
+        "stage_forward_migration",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            schema_migration.ForwardMigrationPlanMismatch
+        ),
+    )
+
+    code = main(
+        [
+            "governance-schema",
+            "stage-migration",
+            "--vault",
+            str(vault),
+            "--expected-plan-digest",
+            "f" * 64,
+            "--yes",
+            "--json",
+        ]
+    )
+
+    assert code == 1
+    assert json.loads(capsys.readouterr().out) == {
+        "error": "GOVERNANCE_SCHEMA_PLAN_MISMATCH",
+        "message": "the reviewed migration plan changed; no activation was attempted",
+    }
+
+
 @pytest.fixture
 def schema_state(tmp_path, monkeypatch: pytest.MonkeyPatch):
     vault = tmp_path / "vault"

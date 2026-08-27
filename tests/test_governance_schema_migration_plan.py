@@ -186,3 +186,113 @@ def test_forward_migration_plan_summary_is_content_free(tmp_path: Path) -> None:
         "schema_version",
         "source_store_digest",
     }
+
+
+def test_forward_migration_stage_publishes_only_the_reviewed_namespace(
+    tmp_path: Path,
+) -> None:
+    vault = _vault(tmp_path)
+    now = int(time.time())
+    plan = schema_migration.prepare_forward_migration(vault, now=now)
+
+    result = schema_migration.stage_forward_migration(
+        vault,
+        expected_plan_digest=plan.plan_digest,
+        now=now + 1,
+    )
+
+    assert result.plan_digest == plan.plan_digest
+    assert result.projection_namespace_id == plan.target.projection_namespace_id
+    assert result.projection_rows_digest == plan.projection_rows_digest
+    assert result.item_count == plan.item_count
+    key = projections.ProjectionNamespaceKey(
+        policy_fingerprint=plan.target.policy_fingerprint,
+        projector_schema_version=plan.target.projector_schema_version,
+        catalog_generation=plan.target.catalog_generation,
+    )
+    assert projection_store.verify_variant_store(
+        vault,
+        key=key,
+        expected_rows_digest=plan.projection_rows_digest,
+    ).item_count == plan.item_count
+    assert _schema_version(vault) == 3
+    assert not Path(os.environ[authorization_custody.CONTROL_FILE_ENV]).exists()
+    assert not Path(os.environ[authorization_custody.MEMBERSHIP_FILE_ENV]).exists()
+
+
+def test_forward_migration_stage_replays_without_changing_the_terminal(
+    tmp_path: Path,
+) -> None:
+    vault = _vault(tmp_path)
+    now = int(time.time())
+    plan = schema_migration.prepare_forward_migration(vault, now=now)
+
+    first = schema_migration.stage_forward_migration(
+        vault,
+        expected_plan_digest=plan.plan_digest,
+        now=now + 1,
+    )
+    replay = schema_migration.stage_forward_migration(
+        vault,
+        expected_plan_digest=plan.plan_digest,
+        now=now + 2,
+    )
+
+    assert replay == first
+    assert _schema_version(vault) == 3
+
+
+def test_forward_migration_stage_refuses_stale_digest_before_publication(
+    tmp_path: Path,
+) -> None:
+    vault = _vault(tmp_path)
+    now = int(time.time())
+    plan = schema_migration.prepare_forward_migration(vault, now=now)
+    (vault / "Knowledge Base" / "Notes" / "governed.md").write_bytes(
+        NOTE_BYTES.replace(b"Visible text.", b"Changed text.")
+    )
+
+    with pytest.raises(schema_migration.ForwardMigrationPlanMismatch):
+        schema_migration.stage_forward_migration(
+            vault,
+            expected_plan_digest=plan.plan_digest,
+            now=now + 1,
+        )
+
+    key = projections.ProjectionNamespaceKey(
+        policy_fingerprint=plan.target.policy_fingerprint,
+        projector_schema_version=plan.target.projector_schema_version,
+        catalog_generation=plan.target.catalog_generation,
+    )
+    assert not projection_store.variant_store_path(vault, key).exists()
+    assert _schema_version(vault) == 3
+
+
+def test_forward_migration_stage_refuses_drift_after_inert_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _vault(tmp_path)
+    now = int(time.time())
+    plan = schema_migration.prepare_forward_migration(vault, now=now)
+    original = projection_store.stage_variant_store
+
+    def stage_then_drift(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        manifest = original(*args, **kwargs)
+        (vault / "Knowledge Base" / "Notes" / "governed.md").write_bytes(
+            NOTE_BYTES.replace(b"Visible text.", b"Changed during staging.")
+        )
+        return manifest
+
+    monkeypatch.setattr(projection_store, "stage_variant_store", stage_then_drift)
+
+    with pytest.raises(schema_migration.ForwardMigrationPlanMismatch):
+        schema_migration.stage_forward_migration(
+            vault,
+            expected_plan_digest=plan.plan_digest,
+            now=now + 1,
+        )
+
+    assert _schema_version(vault) == 3
+    assert not Path(os.environ[authorization_custody.CONTROL_FILE_ENV]).exists()
+    assert not Path(os.environ[authorization_custody.MEMBERSHIP_FILE_ENV]).exists()
