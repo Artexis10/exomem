@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from exomem import mutation_lock, writer_lease
+from exomem.__main__ import main as exomem_main
 from exomem.governance import (
     authorization_custody,
     policy,
@@ -198,6 +199,39 @@ def test_offline_downmigration_mirrors_active_source_and_commits_receipt(
     custody = authorization_custody.load_authorization_custody(vault, now=now + 3)
     assert custody.control.governance_enrolled is True
     assert custody.control.activation_state_digest == active.activation_state_digest
+
+
+def test_ops_cli_executes_the_real_digest_bound_offline_downmigration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    vault = _vault(tmp_path)
+    now = int(time.time()) - 10
+    active = _migrate(vault, now=now)
+    _set_pending_workspace(vault)
+    _drain_verified_membership(monkeypatch)
+
+    code = exomem_main(
+        [
+            "governance-schema",
+            "downmigrate",
+            "--vault",
+            str(vault),
+            "--expected-activation-state-digest",
+            active.activation_state_digest,
+            "--yes",
+            "--json",
+        ]
+    )
+
+    assert code == 0
+    terminal = json.loads(capsys.readouterr().out)
+    assert terminal["downmigrated"] is True
+    assert terminal["schema_version"] == 3
+    assert terminal["activation_state_digest"] == active.activation_state_digest
+    assert terminal["replayed"] is False
+    assert _schema_version(vault) == 3
 
 
 def test_offline_downmigration_refuses_until_every_replica_is_drained(
