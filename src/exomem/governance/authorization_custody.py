@@ -74,6 +74,7 @@ _ATTACHMENT_DOMAIN = b"exomem.authorization-session.attachment/v1"
 _DETACH_ACK_MAC_DOMAIN = b"exomem.authorization-session.detach-ack/v1"
 _HOST_REGISTRY_MAC_DOMAIN = b"exomem.authorization-session.host-registry/v1"
 _STANDALONE_STAGING_DOMAIN = b"exomem.authorization-session.standalone-staging/v1"
+_STANDALONE_CLONE_RECEIPT_DOMAIN = b"exomem.authorization-session.standalone-clone-receipt/v1"
 _SHA256_HEX = re.compile(r"[0-9a-f]{64}\Z")
 _STANDALONE_ATTACHMENT = re.compile(r"attachment-v1-[0-9a-f]{64}\Z")
 _DEFAULT_KEY_TTL_SECONDS = 366 * 24 * 60 * 60
@@ -3251,6 +3252,226 @@ def complete_standalone_attachment_transfer(
                 acknowledgement=acknowledgement,
                 now=now,
             )
+
+
+def _clone_publication_barrier(point: str) -> None:
+    """Crash-injection seam between durable exact-v4 clone effects."""
+
+    del point
+
+
+def _optional_custody_file(path: Path) -> _LoadedCustodyFile | None:
+    try:
+        return _load_file(path)
+    except AuthorizationCustodyUnavailable:
+        if os.path.lexists(path):
+            raise
+        return None
+
+
+def _clone_publication_event_id(
+    keyring: AuthorizationKeyring,
+    *,
+    attachment_id: str,
+) -> str:
+    return _standalone_staging_identifier(
+        "attachment-clone",
+        attachment_id=attachment_id,
+        key=keyring.active_key.key,
+    )
+
+
+def _clone_receipt_identity(
+    keyring: AuthorizationKeyring,
+    *,
+    attachment_id: str,
+) -> tuple[str, bytes]:
+    material = _framed(
+        _STANDALONE_CLONE_RECEIPT_DOMAIN,
+        (attachment_id.encode("ascii"),),
+    )
+    instance_id = hmac.new(
+        keyring.active_key.key,
+        material + b"\0instance",
+        hashlib.sha256,
+    ).hexdigest()[:32]
+    label_secret = hmac.new(
+        keyring.active_key.key,
+        material + b"\0label-hmac",
+        hashlib.sha256,
+    ).digest()
+    return instance_id, label_secret
+
+
+def _clone_standalone_exact_v4_custody(
+    vault_root: Path,
+    *,
+    now: int,
+) -> AuthorizationCustody:
+    root = Path(vault_root)
+    current_time = _bounded_time(now)
+    if current_time > _MAX_SIGNED_SQLITE_INTEGER - _DEFAULT_KEY_TTL_SECONDS:
+        raise AuthorizationCustodyUnavailable
+    attachment_id = standalone_attachment_id(root)
+    keyring_path = _configured_external_path(KEYRING_FILE_ENV, root)
+    control_path = _configured_external_path(CONTROL_FILE_ENV, root)
+    membership_path = _configured_external_path(MEMBERSHIP_FILE_ENV, root)
+    replica_id = _bounded_identifier(os.environ.get(REPLICA_ID_ENV, ""))
+    if len({keyring_path, control_path, membership_path}) != 3:
+        raise AuthorizationCustodyUnavailable
+
+    keyring_loaded = _optional_custody_file(keyring_path)
+    control_loaded = _optional_custody_file(control_path)
+    membership_loaded = _optional_custody_file(membership_path)
+    if (
+        (control_loaded is not None and keyring_loaded is None)
+        or (membership_loaded is not None and control_loaded is None)
+    ):
+        raise AuthorizationCustodyUnavailable
+
+    from . import schema_v4, store
+
+    if keyring_loaded is None:
+        try:
+            preflight = store.open_authorization_session_connection(root)
+            try:
+                schema_v4.require_exact_v4_connection(preflight)
+            finally:
+                preflight.close()
+        except (
+            OSError,
+            RuntimeError,
+            schema_v4.SchemaV4Error,
+            store.UnsupportedGovernanceSchema,
+        ):
+            raise AuthorizationCustodyUnavailable from None
+        keyring = _new_standalone_staging_keyring(
+            attachment_id=attachment_id,
+            current_time=current_time,
+        )
+        _publish_private_file(keyring_path, _keyring_bytes(keyring))
+    else:
+        keyring = parse_keyring(keyring_loaded.data)
+    _verify_standalone_staging_keyring(keyring, attachment_id=attachment_id)
+    if not keyring.active_key.not_before <= current_time < keyring.active_key.not_after:
+        raise AuthorizationCustodyUnavailable
+    _clone_publication_barrier("after-staged-keyring")
+
+    activation_store_id = _standalone_staging_identifier(
+        "activation-store",
+        attachment_id=attachment_id,
+        key=keyring.active_key.key,
+    )
+    receipt_instance_id, receipt_label_secret = _clone_receipt_identity(
+        keyring,
+        attachment_id=attachment_id,
+    )
+    try:
+        connection = store.open_authorization_session_connection(root)
+        try:
+            active = schema_v4.clone_attachment_identity(
+                connection,
+                logical_vault_id=keyring.logical_vault_id,
+                activation_store_id=activation_store_id,
+                publication_event_id=_clone_publication_event_id(
+                    keyring,
+                    attachment_id=attachment_id,
+                ),
+                receipt_instance_id=receipt_instance_id,
+                receipt_label_secret=receipt_label_secret,
+                activated_at=keyring.active_key.not_before,
+            )
+        finally:
+            connection.close()
+    except (
+        OSError,
+        RuntimeError,
+        schema_v4.SchemaV4Error,
+        store.UnsupportedGovernanceSchema,
+    ):
+        raise AuthorizationCustodyUnavailable from None
+    _clone_publication_barrier("after-clone-transaction")
+
+    provisional_control = AuthorizationControlRecord(
+        version=1,
+        keyring_id=keyring.keyring_id,
+        cell_id=keyring.cell_id,
+        logical_vault_id=keyring.logical_vault_id,
+        registry_attachment_id=attachment_id,
+        attachment_epoch=1,
+        governance_enrolled=True,
+        activation_store_id=active.activation_store_id,
+        activation_epoch=active.activation_epoch,
+        activation_state_digest=active.activation_state_digest,
+        serving_membership_epoch=1,
+        serving_membership_digest="0" * 64,
+        issued_at=keyring.active_key.not_before,
+        expires_at=keyring.active_key.not_after,
+        signing_key_id=keyring.active_key_id,
+    )
+    encoded_membership = _standalone_membership_bytes(
+        keyring=keyring,
+        control=provisional_control,
+        replica_id=replica_id,
+    )
+    control = replace(
+        provisional_control,
+        serving_membership_digest=(
+            authorization_serving_membership.serving_membership_digest(
+                encoded_membership
+            )
+        ),
+    )
+    encoded_control = _signed_control_bytes(
+        control,
+        signing_key=keyring.active_key.key,
+    )
+    if control_loaded is None:
+        _publish_private_file(control_path, encoded_control)
+    elif not hmac.compare_digest(control_loaded.data, encoded_control):
+        raise AuthorizationCustodyUnavailable
+    _clone_publication_barrier("after-control")
+    if membership_loaded is None:
+        _publish_private_file(membership_path, encoded_membership)
+    elif not hmac.compare_digest(membership_loaded.data, encoded_membership):
+        raise AuthorizationCustodyUnavailable
+    _clone_publication_barrier("after-membership")
+    _publish_initial_host_registry(control, now=current_time)
+    _clone_publication_barrier("after-registry")
+
+    verified = load_authorization_custody(root, now=current_time)
+    if verified.control != control or verified.serving_membership is None:
+        raise AuthorizationCustodyUnavailable
+    return verified
+
+
+def clone_standalone_exact_v4_custody(
+    vault_root: Path,
+    *,
+    now: int,
+) -> AuthorizationCustody:
+    """Give an unattached exact-v4 copy one fresh standalone identity."""
+
+    root = Path(vault_root)
+    from .. import reserved_paths, writer_lease
+    from . import receipts
+
+    with writer_lease.get_manager().mutation_guard(
+        root,
+        operation="authorization-attachment-clone",
+        holder_kind="authorization-attachment-control",
+        attachment_control=True,
+        attachment_now=now,
+    ):
+        with receipts._receipt_lock(root):  # noqa: SLF001
+            try:
+                receipt_report = receipts.verify_chain(root)
+            except (OSError, RuntimeError, TypeError, ValueError):
+                raise AuthorizationCustodyUnavailable from None
+            if receipt_report.get("valid") is not True:
+                raise AuthorizationCustodyUnavailable
+            with reserved_paths._identity_coordination_scope(root):
+                return _clone_standalone_exact_v4_custody(root, now=now)
 
 
 def provision_standalone_custody(

@@ -18,6 +18,7 @@ from exomem.governance import (
     authorization_custody,
     authorization_session_lifecycle,
     policy,
+    receipts,
     schema_v4,
     store,
 )
@@ -67,6 +68,20 @@ def _vault(tmp_path: Path, name: str = "vault") -> Path:
     vault = tmp_path / name
     (vault / "Knowledge Base").mkdir(parents=True)
     return vault
+
+
+def _select_custody_paths(
+    monkeypatch: pytest.MonkeyPatch,
+    root: Path,
+) -> tuple[Path, Path, Path]:
+    root.mkdir(mode=0o700)
+    keyring = root / "authorization-keyring.json"
+    control = root / "authorization-control.json"
+    membership = root / "authorization-serving-membership.json"
+    monkeypatch.setenv(authorization_custody.KEYRING_FILE_ENV, str(keyring))
+    monkeypatch.setenv(authorization_custody.CONTROL_FILE_ENV, str(control))
+    monkeypatch.setenv(authorization_custody.MEMBERSHIP_FILE_ENV, str(membership))
+    return keyring, control, membership
 
 
 def test_host_control_root_ignores_portable_runtime_path_environment(
@@ -1397,6 +1412,387 @@ def test_attachment_transfer_replay_preserves_new_target_session(
         connection.close()
 
     assert resumed.session_id == issued.context.session_id
+
+
+def test_exact_v4_clone_gets_fresh_activation_identity_and_closes_copied_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _vault(tmp_path)
+    target = tmp_path / "cloned-vault"
+    now = 1_800_000_000
+    source_paths = tuple(
+        Path(os.environ[name])
+        for name in (
+            authorization_custody.KEYRING_FILE_ENV,
+            authorization_custody.CONTROL_FILE_ENV,
+            authorization_custody.MEMBERSHIP_FILE_ENV,
+        )
+    )
+    source_custody, source_active = _enrolled_v4(source, now=now)
+    receipt_intent = receipts.begin_event(
+        source,
+        operation="clone-source-fixture",
+        prior="a" * 64,
+        target="b" * 64,
+    )
+    receipts.commit_event(source, str(receipt_intent["event_id"]))
+    receipts.label_digest(source, "source-receipt-label")
+    source_connection = store.open_authorization_session_connection(source)
+    try:
+        issued = authorization_session_lifecycle.open_session(
+            source_connection,
+            custody=source_custody,
+            principal_id="principal-owner",
+            issuer_family="cli",
+            now=now + 3,
+            ttl_seconds=120,
+        )
+        source_receipt_instance = str(
+            source_connection.execute(
+                "SELECT instance_id FROM receipt_instance WHERE singleton=1"
+            ).fetchone()[0]
+        )
+        source_receipt_secret = bytes(
+            source_connection.execute(
+                "SELECT value FROM receipt_secrets WHERE name='label_hmac'"
+            ).fetchone()[0]
+        )
+    finally:
+        source_connection.close()
+    shutil.copytree(source, target)
+    target_paths = _select_custody_paths(monkeypatch, tmp_path / "clone-external")
+
+    cloned = authorization_custody.clone_standalone_exact_v4_custody(
+        target,
+        now=now + 4,
+    )
+
+    assert cloned.control.governance_enrolled is True
+    assert cloned.control.cell_id != source_custody.control.cell_id
+    assert cloned.control.logical_vault_id != source_custody.control.logical_vault_id
+    assert cloned.control.keyring_id != source_custody.control.keyring_id
+    assert cloned.control.activation_store_id != source_active.activation_store_id
+    assert cloned.control.activation_epoch == source_active.activation_epoch + 1
+    assert cloned.control.registry_attachment_id == (
+        authorization_custody.standalone_attachment_id(target)
+    )
+    assert all(path.exists() for path in target_paths)
+
+    target_connection = store.open_authorization_session_connection(target)
+    try:
+        cloned_active = schema_v4.load_active_state(
+            target_connection,
+            expected_logical_vault_id=cloned.control.logical_vault_id,
+            expected_activation_store_id=str(cloned.control.activation_store_id),
+            expected_activation_epoch=int(cloned.control.activation_epoch or 0),
+            expected_activation_state_digest=str(
+                cloned.control.activation_state_digest
+            ),
+        )
+        publication = target_connection.execute(
+            "SELECT publication_kind, predecessor_activation_state_digest "
+            "FROM governance_tuple_publications "
+            "WHERE target_activation_state_digest=?",
+            (cloned_active.activation_state_digest,),
+        ).fetchone()
+        assert publication == ("attachment-clone", source_active.activation_state_digest)
+        target_receipt_instance = str(
+            target_connection.execute(
+                "SELECT instance_id FROM receipt_instance WHERE singleton=1"
+            ).fetchone()[0]
+        )
+        target_receipt_secret = bytes(
+            target_connection.execute(
+                "SELECT value FROM receipt_secrets WHERE name='label_hmac'"
+            ).fetchone()[0]
+        )
+        assert target_receipt_instance != source_receipt_instance
+        assert target_receipt_secret != source_receipt_secret
+        assert target_connection.execute(
+            "SELECT durable_seq, durable_hash, observed_seq, observed_hash, path, "
+            "byte_offset FROM receipts_head WHERE instance_id=?",
+            (target_receipt_instance,),
+        ).fetchone() == (0, "0" * 64, 0, "0" * 64, "", 0)
+        assert target_connection.execute(
+            "SELECT COUNT(*) FROM receipts_head WHERE instance_id=?",
+            (source_receipt_instance,),
+        ).fetchone() == (1,)
+        assert (
+            cloned_active.policy_generation_id,
+            cloned_active.policy_fingerprint,
+            cloned_active.projector_schema_version,
+            cloned_active.catalog_generation,
+            cloned_active.projection_namespace_id,
+        ) == (
+            source_active.policy_generation_id,
+            source_active.policy_fingerprint,
+            source_active.projector_schema_version,
+            source_active.catalog_generation,
+            source_active.projection_namespace_id,
+        )
+        assert target_connection.execute(
+            "SELECT status FROM governance_authorization_sessions WHERE session_id=?",
+            (issued.context.session_id,),
+        ).fetchone() == ("closed",)
+        with pytest.raises(
+            authorization_session_lifecycle.AuthorizationSessionUnavailable
+        ):
+            authorization_session_lifecycle.resume_session(
+                target_connection,
+                custody=cloned,
+                bearer=issued.bearer,
+                principal_id="principal-owner",
+                issuer_family="cli",
+                now=now + 5,
+            )
+    finally:
+        target_connection.close()
+
+    for name, path in zip(
+        (
+            authorization_custody.KEYRING_FILE_ENV,
+            authorization_custody.CONTROL_FILE_ENV,
+            authorization_custody.MEMBERSHIP_FILE_ENV,
+        ),
+        source_paths,
+        strict=True,
+    ):
+        monkeypatch.setenv(name, str(path))
+    assert authorization_custody.load_authorization_custody(
+        source,
+        now=now + 5,
+    ).control == source_custody.control
+
+
+@pytest.mark.parametrize(
+    "crash_point",
+    [
+        "after-staged-keyring",
+        "after-clone-transaction",
+        "after-control",
+        "after-membership",
+        "after-registry",
+    ],
+)
+def test_exact_v4_clone_retry_keeps_one_staged_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    crash_point: str,
+) -> None:
+    source = _vault(tmp_path)
+    target = tmp_path / "cloned-vault"
+    now = 1_800_000_000
+    _enrolled_v4(source, now=now)
+    shutil.copytree(source, target)
+    keyring_path, _control_path, _membership_path = _select_custody_paths(
+        monkeypatch,
+        tmp_path / "clone-external",
+    )
+    original = authorization_custody._clone_publication_barrier
+    raised = False
+
+    def crash(point: str) -> None:
+        nonlocal raised
+        if point == crash_point and not raised:
+            raised = True
+            raise RuntimeError("simulated clone crash")
+
+    monkeypatch.setattr(authorization_custody, "_clone_publication_barrier", crash)
+    with pytest.raises(RuntimeError, match="simulated clone crash"):
+        authorization_custody.clone_standalone_exact_v4_custody(
+            target,
+            now=now + 3,
+        )
+    staged = keyring_path.read_bytes()
+    staged_identity = authorization_custody.parse_keyring(staged)
+
+    monkeypatch.setattr(
+        authorization_custody,
+        "_clone_publication_barrier",
+        original,
+    )
+    recovered = authorization_custody.clone_standalone_exact_v4_custody(
+        target,
+        now=now + 4,
+    )
+    replay = authorization_custody.clone_standalone_exact_v4_custody(
+        target,
+        now=now + 5,
+    )
+
+    assert keyring_path.read_bytes() == staged
+    assert recovered.control == replay.control
+    assert recovered.control.cell_id == staged_identity.cell_id
+    assert recovered.control.logical_vault_id == staged_identity.logical_vault_id
+    assert recovered.control.keyring_id == staged_identity.keyring_id
+
+
+def test_exact_v4_clone_rolls_back_identity_session_and_receipt_together(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _vault(tmp_path)
+    target = tmp_path / "cloned-vault"
+    now = 1_800_000_000
+    source_custody, source_active = _enrolled_v4(source, now=now)
+    receipt_intent = receipts.begin_event(
+        source,
+        operation="clone-rollback-fixture",
+        prior="a" * 64,
+        target="b" * 64,
+    )
+    receipts.commit_event(source, str(receipt_intent["event_id"]))
+    source_connection = store.open_authorization_session_connection(source)
+    try:
+        issued = authorization_session_lifecycle.open_session(
+            source_connection,
+            custody=source_custody,
+            principal_id="principal-owner",
+            issuer_family="cli",
+            now=now + 3,
+            ttl_seconds=120,
+        )
+        source_receipt_instance = str(
+            source_connection.execute(
+                "SELECT instance_id FROM receipt_instance WHERE singleton=1"
+            ).fetchone()[0]
+        )
+    finally:
+        source_connection.close()
+    shutil.copytree(source, target)
+    _select_custody_paths(monkeypatch, tmp_path / "clone-external")
+    original = schema_v4._crash_point
+
+    def crash(point: str) -> None:
+        if point == "attachment-clone-before-commit":
+            raise RuntimeError("simulated transaction crash")
+
+    monkeypatch.setattr(schema_v4, "_crash_point", crash)
+    with pytest.raises(authorization_custody.AuthorizationCustodyUnavailable):
+        authorization_custody.clone_standalone_exact_v4_custody(
+            target,
+            now=now + 4,
+        )
+
+    target_connection = store.open_authorization_session_connection(target)
+    try:
+        assert schema_v4.load_active_state(
+            target_connection,
+            expected_logical_vault_id=source_active.logical_vault_id,
+            expected_activation_store_id=source_active.activation_store_id,
+            expected_activation_epoch=source_active.activation_epoch,
+            expected_activation_state_digest=source_active.activation_state_digest,
+        ) == source_active
+        assert target_connection.execute(
+            "SELECT status FROM governance_authorization_sessions WHERE session_id=?",
+            (issued.context.session_id,),
+        ).fetchone() == ("active",)
+        assert target_connection.execute(
+            "SELECT instance_id FROM receipt_instance WHERE singleton=1"
+        ).fetchone() == (source_receipt_instance,)
+        assert target_connection.execute(
+            "SELECT COUNT(*) FROM governance_tuple_publications "
+            "WHERE publication_kind='attachment-clone'"
+        ).fetchone() == (0,)
+    finally:
+        target_connection.close()
+
+    monkeypatch.setattr(schema_v4, "_crash_point", original)
+    cloned = authorization_custody.clone_standalone_exact_v4_custody(
+        target,
+        now=now + 5,
+    )
+    assert cloned.control.activation_epoch == source_active.activation_epoch + 1
+
+
+def test_exact_v4_clone_refuses_copied_external_custody(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _vault(tmp_path)
+    target = tmp_path / "cloned-vault"
+    now = 1_800_000_000
+    source_custody, source_active = _enrolled_v4(source, now=now)
+    source_files = tuple(
+        Path(os.environ[name]).read_bytes()
+        for name in (
+            authorization_custody.KEYRING_FILE_ENV,
+            authorization_custody.CONTROL_FILE_ENV,
+            authorization_custody.MEMBERSHIP_FILE_ENV,
+        )
+    )
+    shutil.copytree(source, target)
+    target_paths = _select_custody_paths(monkeypatch, tmp_path / "clone-external")
+    for path, data in zip(target_paths, source_files, strict=True):
+        path.write_bytes(data)
+        if os.name != "nt":
+            os.chmod(path, 0o600)
+
+    with pytest.raises(authorization_custody.AuthorizationCustodyUnavailable):
+        authorization_custody.clone_standalone_exact_v4_custody(
+            target,
+            now=now + 3,
+        )
+
+    connection = store.open_active_governance_read_connection(target)
+    try:
+        active = schema_v4.load_active_state(
+            connection,
+            expected_logical_vault_id=source_active.logical_vault_id,
+            expected_activation_store_id=source_active.activation_store_id,
+            expected_activation_epoch=source_active.activation_epoch,
+            expected_activation_state_digest=source_active.activation_state_digest,
+        )
+    finally:
+        connection.close()
+    assert active == source_active
+    assert source_custody.control.logical_vault_id == source_active.logical_vault_id
+
+
+def test_exact_v4_clone_refuses_a_forked_copied_receipt_chain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _vault(tmp_path)
+    target = tmp_path / "cloned-vault"
+    now = 1_800_000_000
+    _source_custody, source_active = _enrolled_v4(source, now=now)
+    receipt_intent = receipts.begin_event(
+        source,
+        operation="clone-corrupt-receipt-fixture",
+        prior="a" * 64,
+        target="b" * 64,
+    )
+    receipts.commit_event(source, str(receipt_intent["event_id"]))
+    shutil.copytree(source, target)
+    receipt_file = next(
+        (target / "Knowledge Base" / "_Governance" / "events").rglob("*.jsonl")
+    )
+    receipt_file.write_bytes(receipt_file.read_bytes() + b"not-json\n")
+    keyring_path, _control_path, _membership_path = _select_custody_paths(
+        monkeypatch,
+        tmp_path / "clone-external",
+    )
+
+    with pytest.raises(authorization_custody.AuthorizationCustodyUnavailable):
+        authorization_custody.clone_standalone_exact_v4_custody(
+            target,
+            now=now + 3,
+        )
+
+    assert not keyring_path.exists()
+    connection = store.open_active_governance_read_connection(target)
+    try:
+        assert schema_v4.load_active_state(
+            connection,
+            expected_logical_vault_id=source_active.logical_vault_id,
+            expected_activation_store_id=source_active.activation_store_id,
+            expected_activation_epoch=source_active.activation_epoch,
+            expected_activation_state_digest=source_active.activation_state_digest,
+        ) == source_active
+    finally:
+        connection.close()
 
 
 def test_enrolled_attachment_transfer_requires_exact_target_activation_store(

@@ -818,7 +818,7 @@ def _create_v4_schema(connection: sqlite3.Connection) -> None:
     connection.execute(
         "CREATE TABLE governance_tuple_publications ("
         "event_id TEXT PRIMARY KEY, publication_kind TEXT NOT NULL "
-        "CHECK(publication_kind IN ('migration','policy','catalog')), "
+        "CHECK(publication_kind IN ('migration','policy','catalog','attachment-clone')), "
         "predecessor_activation_state_digest TEXT, "
         "target_activation_state_digest TEXT NOT NULL UNIQUE "
         "CHECK(length(target_activation_state_digest)=64), "
@@ -1390,6 +1390,52 @@ def _close_downmigration_authority(
     return sessions, grants, purposes, tokens, proposals
 
 
+def _invalidate_attachment_session_authority_rows(
+    connection: sqlite3.Connection,
+    *,
+    invalidated_at: int,
+) -> tuple[int, int, int, int]:
+    moment = _integer(invalidated_at, "invalidated_at")
+    sessions = int(
+        connection.execute(
+            "UPDATE governance_authorization_sessions "
+            "SET status='closed', closed_at=? WHERE status='active'",
+            (moment,),
+        ).rowcount
+        or 0
+    )
+    grants = int(
+        connection.execute(
+            "UPDATE governance_session_grants SET status='revoked', "
+            "prepared_event_id=NULL, revoked_at=? WHERE status<>'revoked'",
+            (moment,),
+        ).rowcount
+        or 0
+    )
+    purposes = int(
+        connection.execute(
+            "UPDATE governance_session_purpose SET status='revoked', "
+            "prepared_event_id=NULL WHERE status<>'revoked'"
+        ).rowcount
+        or 0
+    )
+    purposes += int(
+        connection.execute(
+            "DELETE FROM governance_session_purpose_staging"
+        ).rowcount
+        or 0
+    )
+    tokens = int(
+        connection.execute(
+            "UPDATE withhold_tokens SET status='expired', prepared_event_id=NULL, "
+            "consumed_at=COALESCE(consumed_at, ?) WHERE status<>'expired'",
+            (moment,),
+        ).rowcount
+        or 0
+    )
+    return sessions, grants, purposes, tokens
+
+
 def invalidate_attachment_session_authority(
     connection: sqlite3.Connection,
     *,
@@ -1410,51 +1456,223 @@ def invalidate_attachment_session_authority(
     require_exact_v4_connection(connection)
     try:
         connection.execute("BEGIN IMMEDIATE")
-        sessions = int(
-            connection.execute(
-                "UPDATE governance_authorization_sessions "
-                "SET status='closed', closed_at=? WHERE status='active'",
-                (moment,),
-            ).rowcount
-            or 0
-        )
-        grants = int(
-            connection.execute(
-                "UPDATE governance_session_grants SET status='revoked', "
-                "prepared_event_id=NULL, revoked_at=? WHERE status<>'revoked'",
-                (moment,),
-            ).rowcount
-            or 0
-        )
-        purposes = int(
-            connection.execute(
-                "UPDATE governance_session_purpose SET status='revoked', "
-                "prepared_event_id=NULL WHERE status<>'revoked'"
-            ).rowcount
-            or 0
-        )
-        purposes += int(
-            connection.execute(
-                "DELETE FROM governance_session_purpose_staging"
-            ).rowcount
-            or 0
-        )
-        tokens = int(
-            connection.execute(
-                "UPDATE withhold_tokens SET status='expired', prepared_event_id=NULL, "
-                "consumed_at=COALESCE(consumed_at, ?) WHERE status<>'expired'",
-                (moment,),
-            ).rowcount
-            or 0
+        result = _invalidate_attachment_session_authority_rows(
+            connection,
+            invalidated_at=moment,
         )
         connection.commit()
-        return sessions, grants, purposes, tokens
+        return result
     except (sqlite3.Error, SchemaV4Error):
         connection.rollback()
         raise SchemaV4Error("attachment session invalidation failed") from None
     except BaseException:
         connection.rollback()
         raise
+
+
+def clone_attachment_identity(
+    connection: sqlite3.Connection,
+    *,
+    logical_vault_id: str,
+    activation_store_id: str,
+    publication_event_id: str,
+    receipt_instance_id: str,
+    receipt_label_secret: bytes,
+    activated_at: int,
+) -> VerifiedActiveGovernanceState:
+    """Commit one fresh activation identity for an unattached exact-v4 copy.
+
+    The policy, projector, catalog, namespace, and immutable publication history
+    remain unchanged. Copied session-derived authority is closed in the same
+    exclusive transaction that advances the activation identity.
+    """
+
+    target_vault = _text(logical_vault_id, "logical_vault_id")
+    target_store = _text(activation_store_id, "activation_store_id")
+    event_id = _text(publication_event_id, "publication_event_id")
+    target_receipt_instance = _text(
+        receipt_instance_id,
+        "receipt_instance_id",
+        maximum=32,
+    )
+    if len(target_receipt_instance) != 32 or any(
+        character not in _HEX_DIGITS for character in target_receipt_instance
+    ):
+        raise SchemaV4Error("receipt_instance_id must be lowercase hex")
+    if not isinstance(receipt_label_secret, bytes) or len(receipt_label_secret) != 32:
+        raise SchemaV4Error("receipt label secret must be 32 bytes")
+    target_receipt_secret = bytes(receipt_label_secret)
+    activated = _integer(activated_at, "activated_at")
+    if connection.in_transaction:
+        raise SchemaV4Error("attachment clone requires an idle connection")
+    require_exact_v4_connection(connection)
+    pointer = load_active_tuple_pointer(connection)
+    current = load_active_state(
+        connection,
+        expected_logical_vault_id=pointer.logical_vault_id,
+        expected_activation_store_id=pointer.activation_store_id,
+        expected_activation_epoch=pointer.activation_epoch,
+        expected_activation_state_digest=pointer.activation_state_digest,
+    )
+    if (
+        current.logical_vault_id == target_vault
+        and current.activation_store_id == target_store
+    ):
+        publication = connection.execute(
+            "SELECT event_id, publication_kind FROM governance_tuple_publications "
+            "WHERE target_activation_state_digest=?",
+            (current.activation_state_digest,),
+        ).fetchone()
+        if publication != (event_id, "attachment-clone"):
+            raise ActiveTupleStale("clone activation identity is already claimed")
+        receipt_instance = connection.execute(
+            "SELECT instance_id FROM receipt_instance WHERE singleton=1"
+        ).fetchone()
+        receipt_secret = connection.execute(
+            "SELECT value FROM receipt_secrets WHERE name='label_hmac'"
+        ).fetchone()
+        if receipt_instance != (target_receipt_instance,) or receipt_secret != (
+            target_receipt_secret,
+        ):
+            raise ActiveTupleStale("clone receipt identity is unavailable")
+        return current
+    if (
+        current.logical_vault_id == target_vault
+        or current.activation_store_id == target_store
+    ):
+        raise ActiveTupleStale("clone activation identity is only partially fresh")
+
+    material = _publication_result(connection, current)
+    target_epoch = _integer(
+        current.activation_epoch + 1,
+        "target_activation_epoch",
+    )
+    target_digest = activation_state_digest(
+        logical_vault_id=target_vault,
+        activation_store_id=target_store,
+        activation_epoch=target_epoch,
+        policy_generation_id=current.policy_generation_id,
+        policy_fingerprint=current.policy_fingerprint,
+        policy_row_digest=material.policy_row_digest,
+        projector_schema_version=current.projector_schema_version,
+        catalog_generation=current.catalog_generation,
+        catalog_descriptor_digest=material.catalog_descriptor_digest,
+        projection_namespace_identity=material.projection_namespace_digest,
+    )
+
+    try:
+        connection.execute("BEGIN EXCLUSIVE")
+        reviewed = load_active_state(
+            connection,
+            expected_logical_vault_id=current.logical_vault_id,
+            expected_activation_store_id=current.activation_store_id,
+            expected_activation_epoch=current.activation_epoch,
+            expected_activation_state_digest=current.activation_state_digest,
+        )
+        if reviewed != current:
+            raise ActiveTupleStale("copied activation tuple changed during clone")
+        _invalidate_attachment_session_authority_rows(
+            connection,
+            invalidated_at=activated,
+        )
+        receipt_instance = connection.execute(
+            "SELECT instance_id FROM receipt_instance WHERE singleton=1"
+        ).fetchone()
+        if receipt_instance is not None:
+            source_receipt_instance = _text(
+                receipt_instance[0],
+                "source_receipt_instance_id",
+                maximum=32,
+            )
+            if (
+                len(source_receipt_instance) != 32
+                or any(
+                    character not in _HEX_DIGITS
+                    for character in source_receipt_instance
+                )
+                or hmac.compare_digest(
+                    source_receipt_instance,
+                    target_receipt_instance,
+                )
+            ):
+                raise SchemaV4Error("copied receipt identity is invalid")
+            connection.execute(
+                "UPDATE receipt_instance SET instance_id=? WHERE singleton=1",
+                (target_receipt_instance,),
+            )
+        else:
+            connection.execute(
+                "INSERT INTO receipt_instance(singleton, instance_id) VALUES (1, ?)",
+                (target_receipt_instance,),
+            )
+        existing_target_head = connection.execute(
+            "SELECT 1 FROM receipts_head WHERE instance_id=?",
+            (target_receipt_instance,),
+        ).fetchone()
+        if existing_target_head is not None:
+            raise SchemaV4Error("clone receipt head already exists")
+        connection.execute(
+            "INSERT INTO receipts_head "
+            "(instance_id, durable_seq, durable_hash, observed_seq, observed_hash, "
+            "path, byte_offset) VALUES (?, 0, ?, 0, ?, '', 0)",
+            (target_receipt_instance, "0" * 64, "0" * 64),
+        )
+        connection.execute(
+            "INSERT INTO receipt_secrets(name, value) VALUES ('label_hmac', ?) "
+            "ON CONFLICT(name) DO UPDATE SET value=excluded.value",
+            (target_receipt_secret,),
+        )
+        updated = connection.execute(
+            "UPDATE governance_activation_store SET activation_store_id=?, "
+            "logical_vault_id=?, activation_epoch=?, activation_state_digest=? "
+            "WHERE singleton=1 AND activation_store_id=? AND logical_vault_id=? "
+            "AND activation_epoch=? AND activation_state_digest=?",
+            (
+                target_store,
+                target_vault,
+                target_epoch,
+                target_digest,
+                current.activation_store_id,
+                current.logical_vault_id,
+                current.activation_epoch,
+                current.activation_state_digest,
+            ),
+        )
+        if updated.rowcount != 1:
+            raise ActiveTupleStale("copied activation tuple changed during clone")
+        connection.execute(
+            "INSERT INTO governance_tuple_publications "
+            "(event_id, publication_kind, predecessor_activation_state_digest, "
+            "target_activation_state_digest, policy_generation_id, policy_fingerprint, "
+            "projector_schema_version, catalog_generation, activation_epoch, status, "
+            "activated_at) VALUES (?, 'attachment-clone', ?, ?, ?, ?, ?, ?, ?, "
+            "'committed', ?)",
+            (
+                event_id,
+                current.activation_state_digest,
+                target_digest,
+                current.policy_generation_id,
+                current.policy_fingerprint,
+                current.projector_schema_version,
+                current.catalog_generation,
+                target_epoch,
+                activated,
+            ),
+        )
+        _crash_point("attachment-clone-before-commit")
+        connection.commit()
+    except BaseException:
+        connection.rollback()
+        raise
+
+    _crash_point("attachment-clone-after-commit")
+    return load_active_state(
+        connection,
+        expected_logical_vault_id=target_vault,
+        expected_activation_store_id=target_store,
+        expected_activation_epoch=target_epoch,
+        expected_activation_state_digest=target_digest,
+    )
 
 
 def _downmigration_terminal(
@@ -1878,7 +2096,12 @@ def load_active_state(
         publication = tuple(publication_rows[0])
         publication_event_id = _text(publication[0], "publication.event_id")
         publication_kind = _text(publication[1], "publication.publication_kind")
-        if publication_kind not in {"migration", "policy", "catalog"}:
+        if publication_kind not in {
+            "migration",
+            "policy",
+            "catalog",
+            "attachment-clone",
+        }:
             raise SchemaV4Error("active tuple publication kind is invalid")
         predecessor_digest = publication[2]
         if publication_kind == "migration":
@@ -1896,6 +2119,24 @@ def load_active_state(
             ).fetchone()
             if predecessor_rows != (1,):
                 raise SchemaV4Error("active tuple publication predecessor is unavailable")
+            if publication_kind == "attachment-clone":
+                predecessor_tuple = connection.execute(
+                    "SELECT policy_generation_id, policy_fingerprint, "
+                    "projector_schema_version, catalog_generation, activation_epoch "
+                    "FROM governance_tuple_publications "
+                    "WHERE target_activation_state_digest=?",
+                    (predecessor,),
+                ).fetchone()
+                if predecessor_tuple != (
+                    generation_id,
+                    policy_fingerprint,
+                    projector_schema_version,
+                    catalog_generation,
+                    activation_epoch - 1,
+                ):
+                    raise SchemaV4Error(
+                        "attachment clone changed the active policy or catalog tuple"
+                    )
         if (
             (
                 publication_kind in {"migration", "policy"}
