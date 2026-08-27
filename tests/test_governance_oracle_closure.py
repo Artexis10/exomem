@@ -837,6 +837,65 @@ def test_projection_only_term_acquires_visible_rows_without_raw_text_or_l0_influ
     assert b"oracle-hidden" not in content
 
 
+def test_hot_runtime_reuse_keeps_principal_decisions_and_order_request_local(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
+    monkeypatch.setenv("EXOMEM_DISABLE_RANKING", "1")
+    runtime = _projection_only_runtime(
+        ("projectivequartz hidden owner-only source",)
+    )
+    external = principal.RequestPrincipal(
+        audience_id="oracle-external",
+        surface="rest",
+        resolved=True,
+        issuer_family="oracle-test",
+    )
+    call = {
+        "query": "projectivequartz",
+        "limit": 2,
+        "scope": "vault",
+        "mode": "keyword",
+        "graph": False,
+        "rerank": False,
+        "purpose": None,
+    }
+
+    first_external = projection_runtime.find_projected_hits(
+        tmp_path,
+        runtime,
+        principal=external,
+        **call,
+    )
+    owner = projection_runtime.find_projected_hits(
+        tmp_path,
+        runtime,
+        principal=principal.owner_principal(surface="library"),
+        **call,
+    )
+    second_external = projection_runtime.find_projected_hits(
+        tmp_path,
+        runtime,
+        principal=external,
+        **call,
+    )
+
+    assert first_external == second_external
+    assert [hit.path for hit in first_external.hits] == [
+        "Knowledge Base/oracle-visible-000.md",
+        "Knowledge Base/oracle-visible-001.md",
+    ]
+    assert [hit.decision.level for hit in first_external.hits] == [3, 3]
+    assert [hit.path for hit in owner.hits] == [
+        "Knowledge Base/private/oracle-hidden-000.md"
+    ]
+    assert owner.hits[0].decision.level == 6
+    assert all("raw-source-only" not in hit.excerpt for hit in first_external.hits)
+    assert "hidden owner-only source" in owner.hits[0].excerpt
+
+
 def test_hidden_document_frequency_cannot_change_visible_bm25_order(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

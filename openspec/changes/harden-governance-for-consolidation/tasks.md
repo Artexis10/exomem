@@ -479,12 +479,12 @@ made before both PRs and their combined verification are complete.
   governed envelope, not selected fields. Register one transport normalizer that may
   remove only echoed JSON-RPC id, HTTP Date/outer trace headers, and framing; application
   code/message/remediation/data, request ids, timings, warnings, and diagnostics remain.
-- [ ] 8.2 In that suite, cover high/middle/low hidden ranks, keyword/BM25 fusion,
+- [x] 8.2 In that suite, cover high/middle/low hidden ranks, keyword/BM25 fusion,
   raw-lane caps greater than visible top-k, projection-only query terms, projected-corpus
   DF/IDF, vector projection-only/raw-only relevance, reranking seams, top-k displacement,
   exhausted/non-exhausted sources, every pagination boundary, order, cursors, totals,
   facets, ambiguity counts, degraded diagnostics, and caller-visible candidate caps.
-- [ ] 8.3 Add red CLIP/non-text pairs where the highest hidden pixel/keyframe match would
+- [x] 8.3 Add red CLIP/non-text pairs where the highest hidden pixel/keyframe match would
   consume the cap. Assert authorization occurs inside CLIP before its cap, L6 visible
   visual top-k is exact, and L1-L5 media participates only through its authorized textual
   companion projection or is excluded from the binary lane. Bind each image to one
@@ -559,7 +559,7 @@ made before both PRs and their combined verification are complete.
 - [x] 8.13 Authorize graph vertices and edges before expansion and recompute all public
   graph reductions over the projected graph; absorb errors belonging only to L0 state as
   absence.
-- [ ] 8.14 Move fusion, final sort/top-k, pagination/cursor creation, counts/facets,
+- [x] 8.14 Move fusion, final sort/top-k, pagination/cursor creation, counts/facets,
   ambiguity, diagnostics, and error reduction after complete projected lane acquisition;
   add cross-principal hot-cache reuse tests proving decisions/order stay request-local.
   Governed find continuation SHALL use the exact bounded `pc1` visible-snapshot digest
