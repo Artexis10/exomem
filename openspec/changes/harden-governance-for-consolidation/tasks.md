@@ -327,7 +327,7 @@ made before both PRs and their combined verification are complete.
   idempotency/control-plane rows, and corpus projection for the exact raw bearer and find zero copies outside the
   exact typed successful issue field/protected request input; scan retry/validation/
   exception copies and assert issuance text retrieved from content stays inert.
-- [ ] 5.6 Freeze an exact current schema-v3 fixture from `store.SCHEMA_USER_VERSION == 3`
+- [x] 5.6 Freeze an exact current schema-v3 fixture from `store.SCHEMA_USER_VERSION == 3`
   containing legacy handles, grants, purposes, tokens, receipts, and live recovery
   journals/direct-source policy. Prove every ordinary v3/v4-capable opener leaves v3 with
   no v4 DDL/DML; add red explicit v3→v4 session + immutable policy/catalog/tuple migration
