@@ -1128,32 +1128,39 @@ def _standalone_membership_bytes(
     keyring: AuthorizationKeyring,
     control: AuthorizationControlRecord,
     replica_id: str,
+    state: str = "SERVING",
+    schema_version: int = 4,
+    issuance_stopped: bool = False,
+    no_in_flight: bool = False,
+    previous_epoch_digest: str | None = None,
+    attested_at: int | None = None,
 ) -> bytes:
     """Build the authenticated singleton form of the fleet record."""
 
-    if control.serving_membership_epoch != 1:
+    if control.serving_membership_epoch < 1:
         raise AuthorizationCustodyUnavailable
+    moment = control.issued_at if attested_at is None else _bounded_time(attested_at)
     accepted_key_ids = tuple(sorted(key.key_id for key in keyring.accepted_keys))
     attestation = authorization_serving_membership.ReplicaReadinessAttestation(
         version=1,
         epoch=control.serving_membership_epoch,
         replica_id=_bounded_identifier(replica_id),
-        state="SERVING",
+        state=state,
         software_version=runtime_software_version(),
-        schema_version=4,
+        schema_version=schema_version,
         cell_id=control.cell_id,
         active_key_id=keyring.active_key_id,
         accepted_key_ids=accepted_key_ids,
         control_digest=control_attestation_digest(control),
         keyring_digest=keyring_attestation_digest(keyring),
-        attested_at=control.issued_at,
+        attested_at=moment,
         expires_at=min(
             control.expires_at,
-            control.issued_at
+            moment
             + authorization_serving_membership.MAX_ATTESTATION_TTL_SECONDS,
         ),
-        issuance_stopped=False,
-        no_in_flight=False,
+        issuance_stopped=issuance_stopped,
+        no_in_flight=no_in_flight,
         signing_key_id=keyring.active_key_id,
     )
     record = authorization_serving_membership.ServingMembershipEpoch(
@@ -1161,11 +1168,11 @@ def _standalone_membership_bytes(
         epoch=control.serving_membership_epoch,
         cell_id=control.cell_id,
         logical_vault_id=control.logical_vault_id,
-        previous_epoch_digest=None,
-        issued_at=control.issued_at,
+        previous_epoch_digest=previous_epoch_digest,
+        issued_at=moment,
         expires_at=min(
             control.expires_at,
-            control.issued_at
+            moment
             + authorization_serving_membership.MAX_ATTESTATION_TTL_SECONDS,
         ),
         replicas=(attestation,),
@@ -1412,6 +1419,10 @@ def enroll_standalone_v3_migration(
                 keyring=keyring,
                 control=provisional_control,
                 replica_id=replica_id,
+                state="DRAINING",
+                schema_version=3,
+                issuance_stopped=True,
+                no_in_flight=True,
             )
             control = replace(
                 provisional_control,
@@ -1450,6 +1461,10 @@ def enroll_standalone_v3_migration(
                 keyring=keyring,
                 control=control,
                 replica_id=replica_id,
+                state="DRAINING",
+                schema_version=3,
+                issuance_stopped=True,
+                no_in_flight=True,
             )
             if (
                 authorization_serving_membership.serving_membership_digest(
@@ -1475,6 +1490,253 @@ def enroll_standalone_v3_migration(
     ):
         raise AuthorizationCustodyUnavailable
     return acknowledgement
+
+
+def _migration_membership_barrier(point: str) -> None:
+    """Test seam between the two fail-closed external publication effects."""
+
+    del point
+
+
+def _require_singleton_migration_membership(
+    record: ServingMembershipEpoch,
+    *,
+    keyring: AuthorizationKeyring,
+    control: AuthorizationControlRecord,
+    replica_id: str,
+    state: str,
+    schema_version: int,
+    issuance_stopped: bool,
+    no_in_flight: bool,
+) -> None:
+    expected_keys = tuple(sorted(item.key_id for item in keyring.accepted_keys))
+    if (
+        len(record.replicas) != 1
+        or record.cell_id != control.cell_id
+        or record.logical_vault_id != control.logical_vault_id
+    ):
+        raise AuthorizationCustodyUnavailable
+    replica = record.replicas[0]
+    if (
+        replica.replica_id != replica_id
+        or replica.state != state
+        or replica.schema_version != schema_version
+        or replica.issuance_stopped is not issuance_stopped
+        or replica.no_in_flight is not no_in_flight
+        or replica.active_key_id != keyring.active_key_id
+        or replica.accepted_key_ids != expected_keys
+        or replica.control_digest != control_attestation_digest(control)
+        or replica.keyring_digest != keyring_attestation_digest(keyring)
+    ):
+        raise AuthorizationCustodyUnavailable
+
+
+def _parse_migration_membership(
+    raw: bytes,
+    *,
+    keyring: AuthorizationKeyring,
+    control: AuthorizationControlRecord,
+    now: int,
+    epoch: int,
+    digest: str,
+) -> ServingMembershipEpoch:
+    try:
+        return authorization_serving_membership.parse_serving_membership(
+            raw,
+            verifier_keys={item.key_id: item.key for item in keyring.accepted_keys},
+            now=now,
+            expected_cell_id=control.cell_id,
+            expected_logical_vault_id=control.logical_vault_id,
+            expected_epoch=epoch,
+            expected_digest=digest,
+        )
+    except authorization_serving_membership.ServingMembershipUnavailable:
+        raise AuthorizationCustodyUnavailable from None
+
+
+def complete_standalone_v4_migration(
+    vault_root: Path,
+    *,
+    target: VerifiedActiveGovernanceState,
+    now: int,
+) -> AuthorizationCustody:
+    """Advance one drained standalone v3 membership to exact serving v4.
+
+    The membership successor is published before the signed control record.  The
+    interval between those two files is intentionally unavailable to loaders;
+    an exact retry recognizes the signed successor through its predecessor digest
+    and completes only the missing control compare-and-swap.
+    """
+
+    from . import schema_v4
+
+    if not isinstance(target, schema_v4.VerifiedActiveGovernanceState):
+        raise AuthorizationCustodyUnavailable
+    current_time = _bounded_time(now)
+    root = Path(vault_root)
+    external = load_external_custody(root)
+    keyring = parse_keyring(external.keyring)
+    control = parse_control_record(external.control, keyring=keyring, now=current_time)
+    _verify_registered_attachment(root, control.registry_attachment_id)
+    replica_id = _bounded_identifier(os.environ.get(REPLICA_ID_ENV, ""))
+    membership_path = _configured_external_path(MEMBERSHIP_FILE_ENV, root)
+    if membership_path in {external.keyring_path, external.control_path}:
+        raise AuthorizationCustodyUnavailable
+    membership_raw = _load_file(membership_path).data
+    if (
+        not control.governance_enrolled
+        or control.logical_vault_id != target.logical_vault_id
+        or control.activation_store_id != target.activation_store_id
+        or control.activation_epoch != target.activation_epoch
+        or control.activation_state_digest != target.activation_state_digest
+    ):
+        raise AuthorizationCustodyUnavailable
+
+    target_control: AuthorizationControlRecord
+    if control.serving_membership_epoch == 1:
+        try:
+            predecessor = _parse_migration_membership(
+                membership_raw,
+                keyring=keyring,
+                control=control,
+                now=current_time,
+                epoch=1,
+                digest=control.serving_membership_digest,
+            )
+        except AuthorizationCustodyUnavailable:
+            successor_digest = authorization_serving_membership.serving_membership_digest(
+                membership_raw
+            )
+            successor = _parse_migration_membership(
+                membership_raw,
+                keyring=keyring,
+                control=control,
+                now=current_time,
+                epoch=2,
+                digest=successor_digest,
+            )
+            if successor.previous_epoch_digest != control.serving_membership_digest:
+                raise AuthorizationCustodyUnavailable from None
+            _require_singleton_migration_membership(
+                successor,
+                keyring=keyring,
+                control=control,
+                replica_id=replica_id,
+                state="SERVING",
+                schema_version=4,
+                issuance_stopped=False,
+                no_in_flight=False,
+            )
+            target_membership = membership_raw
+        else:
+            if predecessor.previous_epoch_digest is not None:
+                raise AuthorizationCustodyUnavailable
+            _require_singleton_migration_membership(
+                predecessor,
+                keyring=keyring,
+                control=control,
+                replica_id=replica_id,
+                state="DRAINING",
+                schema_version=3,
+                issuance_stopped=True,
+                no_in_flight=True,
+            )
+            provisional = replace(
+                control,
+                serving_membership_epoch=2,
+                serving_membership_digest="0" * 64,
+            )
+            target_membership = _standalone_membership_bytes(
+                keyring=keyring,
+                control=provisional,
+                replica_id=replica_id,
+                previous_epoch_digest=predecessor.record_digest,
+                attested_at=current_time,
+            )
+            successor = _parse_migration_membership(
+                target_membership,
+                keyring=keyring,
+                control=provisional,
+                now=current_time,
+                epoch=2,
+                digest=(
+                    authorization_serving_membership.serving_membership_digest(
+                        target_membership
+                    )
+                ),
+            )
+            try:
+                authorization_serving_membership.validate_membership_successor(
+                    predecessor,
+                    successor,
+                    now=current_time,
+                )
+            except authorization_serving_membership.ServingMembershipUnavailable:
+                raise AuthorizationCustodyUnavailable from None
+            _replace_control_bytes(
+                membership_path,
+                expected=membership_raw,
+                target=target_membership,
+            )
+        target_control = replace(
+            control,
+            serving_membership_epoch=2,
+            serving_membership_digest=(
+                authorization_serving_membership.serving_membership_digest(
+                    target_membership
+                )
+            ),
+        )
+        _migration_membership_barrier("after_membership_publish")
+        signing_key = next(
+            (
+                item.key
+                for item in keyring.accepted_keys
+                if item.key_id == target_control.signing_key_id
+            ),
+            None,
+        )
+        if signing_key is None:
+            raise AuthorizationCustodyUnavailable
+        _replace_control_bytes(
+            external.control_path,
+            expected=external.control,
+            target=_signed_control_bytes(target_control, signing_key=signing_key),
+        )
+    elif control.serving_membership_epoch == 2:
+        successor = _parse_migration_membership(
+            membership_raw,
+            keyring=keyring,
+            control=control,
+            now=current_time,
+            epoch=2,
+            digest=control.serving_membership_digest,
+        )
+        if successor.previous_epoch_digest is None:
+            raise AuthorizationCustodyUnavailable
+        _require_singleton_migration_membership(
+            successor,
+            keyring=keyring,
+            control=control,
+            replica_id=replica_id,
+            state="SERVING",
+            schema_version=4,
+            issuance_stopped=False,
+            no_in_flight=False,
+        )
+        target_control = control
+    else:
+        raise AuthorizationCustodyUnavailable
+
+    verified = load_authorization_custody(root, now=current_time)
+    if (
+        verified.control != target_control
+        or verified.serving_membership is None
+        or verified.serving_membership.epoch != 2
+        or verified.local_replica_id != replica_id
+    ):
+        raise AuthorizationCustodyUnavailable
+    return verified
 
 
 def provision_standalone_custody(

@@ -4,6 +4,7 @@ import os
 import sqlite3
 import time
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -137,6 +138,22 @@ def test_enrolled_exact_v3_store_migrates_to_the_precommitted_target(
     now = int(time.time())
     seed, target = _stage_and_enroll(vault, now=now)
     assert policy.load(vault).blocked
+    enrolled = authorization_custody.load_authorization_custody(
+        vault,
+        now=now + 1,
+    )
+    assert enrolled.serving_membership is not None
+    assert enrolled.control.serving_membership_epoch == 1
+    assert enrolled.serving_membership.epoch == 1
+    assert [
+        (
+            item.state,
+            item.schema_version,
+            item.issuance_stopped,
+            item.no_in_flight,
+        )
+        for item in enrolled.serving_membership.replicas
+    ] == [("DRAINING", 3, True, True)]
 
     active = store.migrate_enrolled_v3_store(vault, seed=seed, now=now + 2)
 
@@ -150,6 +167,18 @@ def test_enrolled_exact_v3_store_migrates_to_the_precommitted_target(
     assert custody.control.activation_store_id == target.activation_store_id
     assert custody.control.activation_epoch == target.activation_epoch
     assert custody.control.activation_state_digest == target.activation_state_digest
+    assert custody.control.serving_membership_epoch == 2
+    assert custody.serving_membership is not None
+    assert custody.serving_membership.epoch == 2
+    assert [
+        (
+            item.state,
+            item.schema_version,
+            item.issuance_stopped,
+            item.no_in_flight,
+        )
+        for item in custody.serving_membership.replicas
+    ] == [("SERVING", 4, False, False)]
     connection = store.open_active_governance_read_connection(vault)
     try:
         snapshot = schema_v4.load_active_policy(
@@ -194,6 +223,88 @@ def test_store_migration_post_commit_crash_replays_exact_v4(
         seed=seed,
         now=now + 3,
     ) == target
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 4)
+    assert custody.control.serving_membership_epoch == 2
+    assert custody.serving_membership is not None
+    assert custody.serving_membership.epoch == 2
+
+
+def test_store_migration_refuses_membership_without_complete_v3_drain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _vault(tmp_path)
+    now = int(time.time())
+    seed, _target = _stage_and_enroll(vault, now=now)
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    assert custody.serving_membership is not None
+    replica = custody.serving_membership.replicas[0]
+    unsafe_membership = replace(
+        custody.serving_membership,
+        replicas=(
+            replace(
+                replica,
+                state="SERVING",
+                issuance_stopped=False,
+                no_in_flight=False,
+            ),
+        ),
+    )
+    unsafe_custody = replace(custody, serving_membership=unsafe_membership)
+    original_loader = authorization_custody.load_authorization_custody
+    monkeypatch.setattr(
+        authorization_custody,
+        "load_authorization_custody",
+        lambda *_args, **_kwargs: unsafe_custody,
+    )
+
+    with pytest.raises(authorization_custody.AuthorizationCustodyUnavailable):
+        store.migrate_enrolled_v3_store(vault, seed=seed, now=now + 2)
+
+    monkeypatch.setattr(
+        authorization_custody,
+        "load_authorization_custody",
+        original_loader,
+    )
+    assert _schema_version(vault) == 3
+
+
+def test_store_migration_recovers_membership_publish_before_control_ack(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _vault(tmp_path)
+    now = int(time.time())
+    seed, target = _stage_and_enroll(vault, now=now)
+    crashed = False
+
+    def crash(point: str) -> None:
+        nonlocal crashed
+        if point == "after_membership_publish" and not crashed:
+            crashed = True
+            raise RuntimeError("injected membership publication crash")
+
+    monkeypatch.setattr(authorization_custody, "_migration_membership_barrier", crash)
+    with pytest.raises(RuntimeError, match="membership publication"):
+        store.migrate_enrolled_v3_store(vault, seed=seed, now=now + 2)
+
+    assert _schema_version(vault) == 4
+    interrupted = authorization_custody.load_authorization_custody(vault, now=now + 3)
+    assert interrupted.serving_membership is None
+    monkeypatch.setattr(
+        authorization_custody,
+        "_migration_membership_barrier",
+        lambda _point: None,
+    )
+    assert store.migrate_enrolled_v3_store(
+        vault,
+        seed=seed,
+        now=now + 3,
+    ) == target
+    recovered = authorization_custody.load_authorization_custody(vault, now=now + 4)
+    assert recovered.control.serving_membership_epoch == 2
+    assert recovered.serving_membership is not None
+    assert recovered.serving_membership.epoch == 2
 
 
 @pytest.mark.parametrize("fault", ["not-enrolled", "target", "workspace", "schema"])

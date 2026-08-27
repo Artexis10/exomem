@@ -255,12 +255,13 @@ def migrate_enrolled_v3_store(
 ) -> VerifiedActiveGovernanceState:
     """Commit one pre-enrolled exact-v3 store to its exact v4 target.
 
-    This is the filesystem-backed database half of the offline migration.  Its
-    caller must already have drained old binaries and prepared the immutable
-    catalog/projection evidence.  The cooperative identity guard keeps current
-    Exomem writers out while the exact policy workspace is rechecked; external
-    direct OS mutation remains outside that guarantee and is detected by the
-    post-commit observation.
+    This is the filesystem-backed offline migration coordinator.  It verifies
+    the authenticated serving membership is wholly drained at schema v3 before
+    the first database effect, then advances the external membership to serving
+    v4 only after the exact store target commits.  The cooperative identity guard
+    keeps current Exomem writers out while the exact policy workspace is
+    rechecked; external direct OS mutation remains outside that guarantee and is
+    detected by the post-commit observation.
     """
 
     from . import authorization_custody, policy, schema_v4
@@ -317,8 +318,19 @@ def migrate_enrolled_v3_store(
                         or control.activation_state_digest
                         != target.activation_state_digest
                         or control.logical_vault_id != target.logical_vault_id
-                        or custody.serving_membership is None
+                    ):
+                        raise authorization_custody.AuthorizationCustodyUnavailable
+                    if version == SCHEMA_USER_VERSION and (
+                        custody.serving_membership is None
                         or custody.local_replica_id is None
+                        or not custody.serving_membership.replicas
+                        or any(
+                            replica.state != "DRAINING"
+                            or replica.schema_version != SCHEMA_USER_VERSION
+                            or not replica.issuance_stopped
+                            or not replica.no_in_flight
+                            for replica in custody.serving_membership.replicas
+                        )
                     ):
                         raise authorization_custody.AuthorizationCustodyUnavailable
 
@@ -345,7 +357,7 @@ def migrate_enrolled_v3_store(
                         connection,
                     )
                     _schema_migration_barrier("after_store_commit")
-                    active = schema_v4.load_active_state(
+                    active = schema_v4.load_active_policy(
                         connection,
                         expected_logical_vault_id=target.logical_vault_id,
                         expected_activation_store_id=target.activation_store_id,
@@ -353,7 +365,7 @@ def migrate_enrolled_v3_store(
                         expected_activation_state_digest=(
                             target.activation_state_digest
                         ),
-                    )
+                    ).active
                     if (
                         result.schema_version != schema_v4.SCHEMA_USER_VERSION
                         or result.activation_store_id != target.activation_store_id
@@ -373,15 +385,19 @@ def migrate_enrolled_v3_store(
                 finally:
                     connection.close()
 
-            verified = authorization_custody.load_authorization_custody(
+            verified = authorization_custody.complete_standalone_v4_migration(
                 root,
+                target=target,
                 now=now,
             )
             if (
                 verified.keyring != custody.keyring
-                or verified.control != custody.control
-                or verified.serving_membership != custody.serving_membership
-                or verified.local_replica_id != custody.local_replica_id
+                or verified.control.logical_vault_id != target.logical_vault_id
+                or verified.control.activation_store_id != target.activation_store_id
+                or verified.control.activation_epoch != target.activation_epoch
+                or verified.control.activation_state_digest
+                != target.activation_state_digest
+                or verified.control.serving_membership_epoch != 2
             ):
                 raise authorization_custody.AuthorizationCustodyUnavailable
     return active
