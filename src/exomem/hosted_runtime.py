@@ -140,6 +140,7 @@ class HostedCellConfig:
     enforce_transfer_v1_compatibility: bool = True
     records_reader_version: int = 2
     lifecycle_actions_enabled: bool = False
+    authorization_session_replica_id: str | None = None
 
     @classmethod
     def from_env(
@@ -286,6 +287,16 @@ class HostedCellConfig:
                 "HOSTED_RECORDS_READER_UNSUPPORTED",
                 "lifecycle actions require Records reader version 2",
             )
+        authorization_session_replica_id = (
+            str(values.get("EXOMEM_AUTH_SESSION_REPLICA_ID", "")).strip() or None
+        )
+        if authorization_session_replica_id is not None and not _CELL_ID.fullmatch(
+            authorization_session_replica_id
+        ):
+            raise HostedConfigError(
+                "HOSTED_AUTHORIZATION_REPLICA_INVALID",
+                "authorization-session replica identity is invalid",
+            )
         worker_policy_digest = (
             str(values.get("EXOMEM_HOSTED_WORKER_POLICY_DIGEST", "")).strip() or None
         )
@@ -346,6 +357,7 @@ class HostedCellConfig:
             enforce_transfer_v1_compatibility=True,
             records_reader_version=records_reader_version,
             lifecycle_actions_enabled=lifecycle_actions_enabled,
+            authorization_session_replica_id=authorization_session_replica_id,
         )
         if require_provisioned:
             config.validate_provisioned()

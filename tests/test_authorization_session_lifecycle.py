@@ -295,6 +295,32 @@ def _custody(
     )
 
 
+def _hosted_custody(
+    activation_digest: str,
+) -> authorization_custody.AuthorizationCustody:
+    custody = _custody(activation_digest)
+    control = replace(
+        custody.control,
+        registry_attachment_id="hosted-attachment-v1-" + "a" * 64,
+    )
+    assert custody.serving_membership is not None
+    replica = replace(
+        custody.serving_membership.replicas[0],
+        control_digest=authorization_custody.control_attestation_digest(control),
+    )
+    return replace(
+        custody,
+        keyring_path=authorization_custody.HOSTED_KEYRING_FILE,
+        control_path=authorization_custody.HOSTED_CONTROL_FILE,
+        control=control,
+        serving_membership=replace(
+            custody.serving_membership,
+            replicas=(replica,),
+        ),
+        membership_path=authorization_custody.HOSTED_MEMBERSHIP_FILE,
+    )
+
+
 def test_open_persists_only_a_bound_verifier_and_resume_returns_context() -> None:
     connection, migration = _connection()
     custody = _custody(migration.activation_state_digest)
@@ -368,6 +394,115 @@ def test_open_fails_closed_before_writing_when_membership_is_missing_or_stale(
     assert connection.execute(
         "SELECT COUNT(*) FROM governance_authorization_sessions"
     ).fetchone() == (0,)
+
+
+def test_hosted_readiness_binds_the_control_plane_cell_vault_and_replica(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_path = tmp_path / "governance.sqlite"
+    connection, migration = _file_connection(database_path)
+    connection.close()
+    custody = _hosted_custody(migration.activation_state_digest)
+    monkeypatch.setenv(
+        authorization_custody.KEYRING_FILE_ENV,
+        str(authorization_custody.HOSTED_KEYRING_FILE),
+    )
+    monkeypatch.setenv(
+        authorization_custody.CONTROL_FILE_ENV,
+        str(authorization_custody.HOSTED_CONTROL_FILE),
+    )
+    monkeypatch.setenv(
+        authorization_custody.MEMBERSHIP_FILE_ENV,
+        str(authorization_custody.HOSTED_MEMBERSHIP_FILE),
+    )
+    monkeypatch.setenv(authorization_custody.REPLICA_ID_ENV, "replica-7")
+    monkeypatch.setattr(
+        authorization_custody,
+        "load_authorization_custody",
+        lambda _root, *, now: custody,
+    )
+    monkeypatch.setattr(
+        store,
+        "open_authorization_session_connection",
+        lambda _root: sqlite3.connect(database_path),
+    )
+
+    ready = authorization_session_lifecycle.hosted_serving_membership_readiness(
+        tmp_path,
+        expected_cell_id="cell-7",
+        expected_logical_vault_id="logical-vault-7",
+        expected_replica_id="replica-7",
+        now=NOW,
+    )
+
+    assert ready.ready is True
+    for expected in (
+        {"expected_cell_id": "other-cell"},
+        {"expected_logical_vault_id": "other-vault"},
+        {"expected_replica_id": "other-replica"},
+    ):
+        arguments = {
+            "expected_cell_id": "cell-7",
+            "expected_logical_vault_id": "logical-vault-7",
+            "expected_replica_id": "replica-7",
+            **expected,
+        }
+        refused = authorization_session_lifecycle.hosted_serving_membership_readiness(
+            tmp_path,
+            now=NOW,
+            **arguments,
+        )
+        assert refused == authorization_serving_membership.unavailable_readiness()
+
+
+def test_hosted_readiness_rejects_a_standalone_attachment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_path = tmp_path / "governance.sqlite"
+    connection, migration = _file_connection(database_path)
+    connection.close()
+    custody = _custody(migration.activation_state_digest)
+    custody = replace(
+        custody,
+        keyring_path=authorization_custody.HOSTED_KEYRING_FILE,
+        control_path=authorization_custody.HOSTED_CONTROL_FILE,
+        membership_path=authorization_custody.HOSTED_MEMBERSHIP_FILE,
+    )
+    monkeypatch.setenv(
+        authorization_custody.KEYRING_FILE_ENV,
+        str(authorization_custody.HOSTED_KEYRING_FILE),
+    )
+    monkeypatch.setenv(
+        authorization_custody.CONTROL_FILE_ENV,
+        str(authorization_custody.HOSTED_CONTROL_FILE),
+    )
+    monkeypatch.setenv(
+        authorization_custody.MEMBERSHIP_FILE_ENV,
+        str(authorization_custody.HOSTED_MEMBERSHIP_FILE),
+    )
+    monkeypatch.setenv(authorization_custody.REPLICA_ID_ENV, "replica-7")
+    monkeypatch.setattr(
+        authorization_custody,
+        "load_authorization_custody",
+        lambda _root, *, now: custody,
+    )
+    monkeypatch.setattr(
+        store,
+        "open_authorization_session_connection",
+        lambda _root: sqlite3.connect(database_path),
+    )
+
+    refused = authorization_session_lifecycle.hosted_serving_membership_readiness(
+        tmp_path,
+        expected_cell_id="cell-7",
+        expected_logical_vault_id="logical-vault-7",
+        expected_replica_id="replica-7",
+        now=NOW,
+    )
+
+    assert refused == authorization_serving_membership.unavailable_readiness()
 
 
 def test_resume_fails_when_a_live_row_key_drops_from_the_serving_intersection() -> None:

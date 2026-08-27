@@ -1983,8 +1983,8 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
         "object.spec.containers[0].args == ['hosted', 'init', '--contract-version', '1', "
         "'--request-file', '/run/exomem/operator-requests/init.json']"
     ) in admission_text
-    assert "size(object.spec.volumes) == 2" in admission_text
-    assert "size(object.spec.containers[0].volumeMounts) == 4" in admission_text
+    assert "size(object.spec.volumes) == 4" in admission_text
+    assert "size(object.spec.containers[0].volumeMounts) == 5" in admission_text
     assert "seccompProfile.type == 'RuntimeDefault'" in admission_text
     assert "securityContext.seccompProfile" in admission_text
     assert "terminationMessagePath == '/dev/termination-log'" in admission_text
@@ -1994,7 +1994,7 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
         in admission_text
     )
     assert "batch.kubernetes.io/job-tracking" in admission_text
-    assert "size(object.spec.containers[0].env) == 24" in admission_text
+    assert "size(object.spec.containers[0].env) == 28" in admission_text
     normalized_admission = " ".join(
         "\n".join(
             validation["expression"] for validation in tenant_admission["spec"]["validations"]
@@ -2013,6 +2013,8 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
     assert "exomem.io/records-reader-version" in admission_text
     assert "EXOMEM_HOSTED_LIFECYCLE_ACTIONS_ENABLED" in admission_text
     assert "exomem.io/lifecycle-actions-enabled" in admission_text
+    assert "EXOMEM_AUTH_SESSION_REPLICA_ID" in admission_text
+    assert "exomem.io/authorization-session-secret-name" in admission_text
     assert "exact approved serving command and environment" in admission_text
     assert "exact approved serving ports, probes, and interactive surface" in admission_text
     for forbidden_surface in (
@@ -2061,6 +2063,7 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
         "exomem.io/approved-image",
         "exomem.io/pvc-name",
         "exomem.io/credentials-secret-name",
+        "exomem.io/authorization-session-secret-name",
         "exomem.io/init-request-configmap-name",
         "exomem.io/tenant-cell",
         "exomem.io/cell-resource",
@@ -2401,6 +2404,7 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
         "exomem.io/resource-name": "cell-alpha",
         "exomem.io/pvc-name": "cell-alpha-data",
         "exomem.io/credentials-secret-name": "exomem-cell-credentials",
+        "exomem.io/authorization-session-secret-name": "exomem-authorization-session",
         "exomem.io/init-request-configmap-name": "cell-alpha-init-request",
         "exomem.io/provision-mode": "serve",
         "exomem.io/vault-id": "vault-alpha-original",
@@ -2434,8 +2438,16 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
         pod = workload["spec"]["template"]["spec"]
         assert pod["restartPolicy"] == "Always"
         assert "runtimeClassName" not in pod
-        assert "fsGroup" not in pod.get("securityContext", {})
-        assert len(pod.get("initContainers", [])) == 0
+        assert pod["securityContext"]["fsGroup"] == 10001
+        assert pod["securityContext"]["fsGroupChangePolicy"] == "OnRootMismatch"
+        assert len(pod.get("initContainers", [])) == 1
+        custody_init = pod["initContainers"][0]
+        assert custody_init["name"] == "authorization-session-custody"
+        assert custody_init["args"] == [
+            "-m",
+            "exomem.governance.authorization_hosted_mount",
+        ]
+        assert custody_init["securityContext"]["runAsUser"] == 10001
         container = pod["containers"][0]
         security = container["securityContext"]
         assert "seccompProfile" not in security
@@ -2454,6 +2466,21 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
         assert env["EXOMEM_HOSTED_TRANSFER_BROWSER_ORIGIN"] == "https://substratesystems.io"
         assert env["EXOMEM_HOSTED_RECORDS_READER_VERSION"] == "2"
         assert env["EXOMEM_HOSTED_LIFECYCLE_ACTIONS_ENABLED"] == "false"
+        assert env["EXOMEM_AUTH_SESSION_KEYRING_FILE"] == (
+            "/run/exomem/authorization-session/keyring.json"
+        )
+        assert env["EXOMEM_AUTH_SESSION_CONTROL_FILE"] == (
+            "/run/exomem/authorization-session/control.json"
+        )
+        assert env["EXOMEM_AUTH_SESSION_MEMBERSHIP_FILE"] == (
+            "/run/exomem/authorization-session/serving-membership.json"
+        )
+        replica = next(
+            item
+            for item in container["env"]
+            if item["name"] == "EXOMEM_AUTH_SESSION_REPLICA_ID"
+        )
+        assert replica["valueFrom"] == {"fieldRef": {"fieldPath": "metadata.name"}}
         assert "EXOMEM_HOSTED_BROWSER_ORIGIN" not in env
         assert env["EXOMEM_HOSTED_STORAGE_LIMIT_BYTES"] == "5368709120"
         assert env["EXOMEM_HOSTED_UPLOAD_LIMIT_BYTES"] == "94371840"
@@ -2476,12 +2503,18 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
         assert container["resources"]["limits"]["memory"] == "1536Mi"
         assert container["resources"]["requests"]["memory"] == "1Gi"
         assert env["TMPDIR"] == "/var/lib/exomem/state/tmp/runtime"
-        assert {volume["name"] for volume in pod["volumes"]} == {"data", "credentials"}
+        assert {volume["name"] for volume in pod["volumes"]} == {
+            "authorization-session-custody",
+            "authorization-session-source",
+            "data",
+            "credentials",
+        }
         assert {mount["mountPath"] for mount in container["volumeMounts"]} == {
             "/var/lib/exomem/vault",
             "/var/lib/exomem/state",
             "/var/lib/exomem/logs",
             "/run/exomem/credentials",
+            "/run/exomem/authorization-session",
         }
         assert container["resources"]["limits"]["ephemeral-storage"] == "512Mi"
 

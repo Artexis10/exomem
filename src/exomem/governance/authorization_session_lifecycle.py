@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import re
 import secrets
 import sqlite3
 import time
@@ -19,6 +21,7 @@ from . import (
 
 MAX_SESSION_TTL_SECONDS: Final = 3_600
 _MAX_SQLITE_INTEGER: Final = (1 << 63) - 1
+_HOSTED_ATTACHMENT = re.compile(r"hosted-attachment-v1-[0-9a-f]{64}\Z")
 
 
 class AuthorizationSessionUnavailable(RuntimeError):
@@ -221,6 +224,80 @@ def serving_membership_readiness(
             Path(vault_root),
             now=current,
         )
+        from . import store
+
+        connection = store.open_authorization_session_connection(Path(vault_root))
+        _ready_custody(connection, custody, now=current)
+        membership = custody.serving_membership
+        if membership is None:
+            raise AuthorizationSessionUnavailable
+        return authorization_serving_membership.ServingMembershipReadiness(
+            ready=True,
+            code="AUTHORIZATION_MEMBERSHIP_READY",
+            epoch=membership.epoch,
+            serving_replicas=sum(
+                item.state == "SERVING" for item in membership.replicas
+            ),
+            draining_replicas=sum(
+                item.state == "DRAINING" for item in membership.replicas
+            ),
+        )
+    except (
+        OSError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+        sqlite3.Error,
+        AuthorizationSessionUnavailable,
+        authorization_custody.AuthorizationCustodyUnavailable,
+    ):
+        return authorization_serving_membership.unavailable_readiness()
+    finally:
+        if connection is not None:
+            connection.close()
+
+
+def hosted_serving_membership_readiness(
+    vault_root: Path,
+    *,
+    expected_cell_id: str,
+    expected_logical_vault_id: str,
+    expected_replica_id: str,
+    now: int | None = None,
+) -> authorization_serving_membership.ServingMembershipReadiness:
+    """Recheck provisioner-owned Hosted membership without a standalone fallback."""
+
+    connection: sqlite3.Connection | None = None
+    try:
+        current = int(time.time()) if now is None else _bounded_time(now)
+        cell_id = _bounded_identity(expected_cell_id)
+        logical_vault_id = _bounded_identity(expected_logical_vault_id)
+        replica_id = _bounded_identity(expected_replica_id)
+        fixed_paths = {
+            authorization_custody.KEYRING_FILE_ENV: authorization_custody.HOSTED_KEYRING_FILE,
+            authorization_custody.CONTROL_FILE_ENV: authorization_custody.HOSTED_CONTROL_FILE,
+            authorization_custody.MEMBERSHIP_FILE_ENV: authorization_custody.HOSTED_MEMBERSHIP_FILE,
+        }
+        if any(
+            os.environ.get(variable, "") != str(path)
+            for variable, path in fixed_paths.items()
+        ) or os.environ.get(authorization_custody.REPLICA_ID_ENV, "") != replica_id:
+            raise AuthorizationSessionUnavailable
+        custody = authorization_custody.load_authorization_custody(
+            Path(vault_root),
+            now=current,
+        )
+        if (
+            custody.keyring_path != authorization_custody.HOSTED_KEYRING_FILE
+            or custody.control_path != authorization_custody.HOSTED_CONTROL_FILE
+            or custody.membership_path != authorization_custody.HOSTED_MEMBERSHIP_FILE
+            or custody.control.cell_id != cell_id
+            or custody.control.logical_vault_id != logical_vault_id
+            or custody.local_replica_id != replica_id
+            or _HOSTED_ATTACHMENT.fullmatch(custody.control.registry_attachment_id)
+            is None
+        ):
+            raise AuthorizationSessionUnavailable
         from . import store
 
         connection = store.open_authorization_session_connection(Path(vault_root))
