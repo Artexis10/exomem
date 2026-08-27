@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import threading
 import time
 from collections.abc import Iterator
 from dataclasses import replace
@@ -13,8 +14,10 @@ import pytest
 from exomem import mutation_lock, writer_lease
 from exomem.governance import (
     authorization_custody,
+    authorization_session_lifecycle,
     projection_store,
     projections,
+    receipts,
     schema_migration,
     schema_v4,
     store,
@@ -307,6 +310,34 @@ def _stage_reviewed_migration(vault: Path, *, now: int):  # noqa: ANN202
         now=now + 1,
     )
     return plan
+
+
+def _drain_verified_membership(monkeypatch: pytest.MonkeyPatch) -> None:
+    original = authorization_custody.load_authorization_custody
+
+    def load(
+        vault_root: Path,
+        *,
+        now: int,
+    ) -> authorization_custody.AuthorizationCustody:
+        custody = original(vault_root, now=now)
+        membership_record = custody.serving_membership
+        assert membership_record is not None
+        replicas = tuple(
+            replace(
+                replica,
+                state="DRAINING",
+                issuance_stopped=True,
+                no_in_flight=True,
+            )
+            for replica in membership_record.replicas
+        )
+        return replace(
+            custody,
+            serving_membership=replace(membership_record, replicas=replicas),
+        )
+
+    monkeypatch.setattr(authorization_custody, "load_authorization_custody", load)
 
 
 def test_forward_migration_cutover_backs_up_v3_before_enrollment_and_replays(
@@ -653,3 +684,644 @@ def test_forward_migration_cutover_refuses_a_tampered_backup(
 
     assert _schema_version(vault) == 3
     assert not Path(os.environ[authorization_custody.CONTROL_FILE_ENV]).exists()
+
+
+def test_pre_migration_backup_restore_is_drained_receipt_first_and_replayable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _vault(tmp_path)
+    now = int(time.time())
+    plan = _stage_reviewed_migration(vault, now=now)
+    committed = schema_migration.commit_forward_migration(
+        vault,
+        expected_plan_digest=plan.plan_digest,
+        now=now + 2,
+    )
+    _drain_verified_membership(monkeypatch)
+
+    restored = schema_migration.restore_forward_migration_backup(
+        vault,
+        expected_plan_digest=plan.plan_digest,
+        expected_backup_reference=committed.backup_reference,
+        now=now + 3,
+    )
+
+    assert restored.schema_version == 3
+    assert restored.plan_digest == plan.plan_digest
+    assert restored.source_store_digest == plan.source_store_digest
+    assert restored.backup_reference == committed.backup_reference
+    assert restored.replayed is False
+    assert _schema_version(vault) == 3
+    connection = store.open_readonly_connection(vault)
+    assert connection is not None
+    try:
+        schema_v4.require_exact_v3_connection(connection)
+    finally:
+        connection.close()
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 4)
+    assert custody.control.governance_enrolled is True
+    records = receipts.event_records(vault)
+    assert [
+        (item["phase"], item.get("causation_id"))
+        for item in records
+        if item.get("operation") == "governance_schema_v3_backup_restore"
+        or item.get("causation_id") == restored.recovery_event_id
+    ] == [
+        ("intent", None),
+        ("committed", restored.recovery_event_id),
+    ]
+
+    replay = schema_migration.restore_forward_migration_backup(
+        vault,
+        expected_plan_digest=plan.plan_digest,
+        expected_backup_reference=committed.backup_reference,
+        now=now + 5,
+    )
+    assert replay == replace(restored, replayed=True)
+
+
+@pytest.mark.parametrize(
+    ("barrier", "crashed_schema_version"),
+    [
+        ("after_restore_receipt_intent", 4),
+        ("after_store_restore", 3),
+        ("after_restore_schema_fence", 3),
+        ("after_restore_receipt_commit", 3),
+    ],
+)
+def test_pre_migration_backup_restore_replays_every_durable_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    barrier: str,
+    crashed_schema_version: int,
+) -> None:
+    vault = _vault(tmp_path)
+    now = int(time.time())
+    plan = _stage_reviewed_migration(vault, now=now)
+    committed = schema_migration.commit_forward_migration(
+        vault,
+        expected_plan_digest=plan.plan_digest,
+        now=now + 2,
+    )
+    _drain_verified_membership(monkeypatch)
+
+    def crash(point: str) -> None:
+        if point == barrier:
+            raise schema_migration._ForwardMigrationCrash(barrier)
+
+    monkeypatch.setattr(schema_migration, "_forward_migration_barrier", crash)
+    with pytest.raises(schema_migration._ForwardMigrationCrash, match=barrier):
+        schema_migration.restore_forward_migration_backup(
+            vault,
+            expected_plan_digest=plan.plan_digest,
+            expected_backup_reference=committed.backup_reference,
+            now=now + 3,
+        )
+    assert _schema_version(vault) == crashed_schema_version
+
+    monkeypatch.setattr(schema_migration, "_forward_migration_barrier", lambda _point: None)
+    replay = schema_migration.restore_forward_migration_backup(
+        vault,
+        expected_plan_digest=plan.plan_digest,
+        expected_backup_reference=committed.backup_reference,
+        now=now + 4,
+    )
+
+    assert replay.replayed is True
+    assert _schema_version(vault) == 3
+    records = receipts.event_records(vault)
+    assert len(
+        [item for item in records if item.get("event_id") == replay.recovery_event_id]
+    ) == 1
+    assert len(
+        [item for item in records if item.get("causation_id") == replay.recovery_event_id]
+    ) == 1
+
+
+def test_pre_migration_backup_restore_refuses_until_v4_membership_is_drained(
+    tmp_path: Path,
+) -> None:
+    vault = _vault(tmp_path)
+    now = int(time.time())
+    plan = _stage_reviewed_migration(vault, now=now)
+    committed = schema_migration.commit_forward_migration(
+        vault,
+        expected_plan_digest=plan.plan_digest,
+        now=now + 2,
+    )
+
+    with pytest.raises(schema_migration.ForwardMigrationRestoreUnavailable):
+        schema_migration.restore_forward_migration_backup(
+            vault,
+            expected_plan_digest=plan.plan_digest,
+            expected_backup_reference=committed.backup_reference,
+            now=now + 3,
+        )
+
+    assert _schema_version(vault) == 4
+    assert not receipts.event_records(vault)
+
+
+def test_pre_migration_backup_restore_refuses_a_different_backup_reference(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _vault(tmp_path)
+    now = int(time.time())
+    plan = _stage_reviewed_migration(vault, now=now)
+    schema_migration.commit_forward_migration(
+        vault,
+        expected_plan_digest=plan.plan_digest,
+        now=now + 2,
+    )
+    _drain_verified_membership(monkeypatch)
+
+    with pytest.raises(schema_migration.ForwardMigrationRestoreUnavailable):
+        schema_migration.restore_forward_migration_backup(
+            vault,
+            expected_plan_digest=plan.plan_digest,
+            expected_backup_reference=(
+                "exomem-governance-v3-backup://sha256/" + "0" * 64
+            ),
+            now=now + 3,
+        )
+
+    assert _schema_version(vault) == 4
+    assert not receipts.event_records(vault)
+
+
+def test_pre_migration_backup_restore_refuses_later_source_or_receipt_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _vault(tmp_path)
+    note = vault / "Knowledge Base" / "Notes" / "governed.md"
+    now = int(time.time())
+    plan = _stage_reviewed_migration(vault, now=now)
+    committed = schema_migration.commit_forward_migration(
+        vault,
+        expected_plan_digest=plan.plan_digest,
+        now=now + 2,
+    )
+    _drain_verified_membership(monkeypatch)
+
+    note.write_bytes(NOTE_BYTES.replace(b"Visible text.", b"Later content."))
+    with pytest.raises(schema_migration.ForwardMigrationRestoreUnavailable):
+        schema_migration.restore_forward_migration_backup(
+            vault,
+            expected_plan_digest=plan.plan_digest,
+            expected_backup_reference=committed.backup_reference,
+            now=now + 3,
+        )
+    assert _schema_version(vault) == 4
+    assert not receipts.event_records(vault)
+
+    note.write_bytes(NOTE_BYTES)
+    event_id = receipts.critical_event_id({"later": "durable-evidence"})
+    receipts.begin_event(
+        vault,
+        operation="test_later_durable_evidence",
+        prior="a" * 64,
+        target="b" * 64,
+        event_id=event_id,
+    )
+    receipts.commit_event(vault, event_id, outcome="recorded")
+
+    with pytest.raises(schema_migration.ForwardMigrationRestoreUnavailable):
+        schema_migration.restore_forward_migration_backup(
+            vault,
+            expected_plan_digest=plan.plan_digest,
+            expected_backup_reference=committed.backup_reference,
+            now=now + 4,
+        )
+    assert _schema_version(vault) == 4
+
+
+def test_pre_migration_backup_restore_refuses_post_cutover_session_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _vault(tmp_path)
+    now = int(time.time())
+    plan = _stage_reviewed_migration(vault, now=now)
+    committed = schema_migration.commit_forward_migration(
+        vault,
+        expected_plan_digest=plan.plan_digest,
+        now=now + 2,
+    )
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 3)
+    connection = store.open_authorization_session_connection(vault)
+    try:
+        issued = authorization_session_lifecycle.open_session(
+            connection,
+            custody=custody,
+            principal_id="principal:owner:1000",
+            issuer_family="cli-local-owner",
+            now=now + 3,
+            ttl_seconds=60,
+        )
+    finally:
+        connection.close()
+    _drain_verified_membership(monkeypatch)
+    connection = sqlite3.connect(store.sidecar_path(vault))
+    try:
+        before_journal_mode = str(
+            connection.execute("PRAGMA journal_mode").fetchone()[0]
+        ).casefold()
+    finally:
+        connection.close()
+
+    with pytest.raises(schema_migration.ForwardMigrationRestoreUnavailable):
+        schema_migration.restore_forward_migration_backup(
+            vault,
+            expected_plan_digest=plan.plan_digest,
+            expected_backup_reference=committed.backup_reference,
+            now=now + 4,
+        )
+
+    assert _schema_version(vault) == 4
+    connection = sqlite3.connect(store.sidecar_path(vault))
+    try:
+        assert (
+            str(connection.execute("PRAGMA journal_mode").fetchone()[0]).casefold()
+            == before_journal_mode
+        )
+    finally:
+        connection.close()
+    connection = store.open_authorization_session_connection(vault)
+    try:
+        assert connection.execute(
+            "SELECT status FROM governance_authorization_sessions WHERE session_id=?",
+            (issued.context.session_id,),
+        ).fetchone() == ("active",)
+    finally:
+        connection.close()
+    assert not receipts.event_records(vault)
+
+
+def test_pre_migration_backup_restore_refuses_before_effect_with_live_v4_reader(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _vault(tmp_path)
+    now = int(time.time())
+    plan = _stage_reviewed_migration(vault, now=now)
+    committed = schema_migration.commit_forward_migration(
+        vault,
+        expected_plan_digest=plan.plan_digest,
+        now=now + 2,
+    )
+    _drain_verified_membership(monkeypatch)
+    reader = sqlite3.connect(store.sidecar_path(vault))
+    reader.execute("BEGIN")
+    assert reader.execute("PRAGMA user_version").fetchone() == (4,)
+
+    try:
+        with pytest.raises(schema_migration.ForwardMigrationRestoreUnavailable):
+            schema_migration.restore_forward_migration_backup(
+                vault,
+                expected_plan_digest=plan.plan_digest,
+                expected_backup_reference=committed.backup_reference,
+                now=now + 3,
+            )
+        assert _schema_version(vault) == 4
+        assert reader.execute("PRAGMA user_version").fetchone() == (4,)
+        assert not receipts.event_records(vault)
+    finally:
+        reader.close()
+
+
+def test_pre_migration_backup_restore_refuses_racing_v4_state_after_intent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _vault(tmp_path)
+    now = int(time.time())
+    plan = _stage_reviewed_migration(vault, now=now)
+    committed = schema_migration.commit_forward_migration(
+        vault,
+        expected_plan_digest=plan.plan_digest,
+        now=now + 2,
+    )
+    _drain_verified_membership(monkeypatch)
+    later_id = receipts.critical_event_id({"later": "racing-v4-state"})
+
+    def race(point: str) -> None:
+        if point != "after_restore_receipt_intent":
+            return
+        connection = sqlite3.connect(store.sidecar_path(vault))
+        try:
+            connection.execute(
+                "INSERT INTO governance_authorization_sessions "
+                "(session_id, locator_digest, verifier, verifier_key_id, "
+                "credential_generation, principal_id, issuer_family, cell_id, "
+                "logical_vault_id, keyring_id, status, created_at, rotated_at, "
+                "expires_at, closed_at) VALUES "
+                "('racing-session', ?, ?, 'racing-key', 1, 'racing-principal', "
+                "'racing-issuer', 'racing-cell', ?, 'racing-keyring', 'active', "
+                "?, NULL, ?, NULL)",
+                (
+                    b"l" * 32,
+                    b"v" * 32,
+                    plan.target.logical_vault_id,
+                    now + 3,
+                    now + 60,
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        receipts.begin_event(
+            vault,
+            operation="test_racing_v4_state",
+            prior="a" * 64,
+            target="b" * 64,
+            event_id=later_id,
+        )
+        receipts.commit_event(vault, later_id, outcome="recorded")
+
+    monkeypatch.setattr(schema_migration, "_forward_migration_barrier", race)
+    with pytest.raises(schema_migration.ForwardMigrationRestoreUnavailable):
+        schema_migration.restore_forward_migration_backup(
+            vault,
+            expected_plan_digest=plan.plan_digest,
+            expected_backup_reference=committed.backup_reference,
+            now=now + 3,
+        )
+
+    assert _schema_version(vault) == 4
+    connection = sqlite3.connect(store.sidecar_path(vault))
+    try:
+        assert connection.execute(
+            "SELECT status FROM governance_authorization_sessions "
+            "WHERE session_id='racing-session'"
+        ).fetchone() == ("active",)
+    finally:
+        connection.close()
+    assert any(item.get("event_id") == later_id for item in receipts.event_records(vault))
+
+
+def test_pre_migration_backup_restore_replays_with_later_sorted_inactive_chain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _vault(tmp_path)
+    now = int(time.time())
+    connection = store.open_connection(vault)
+    try:
+        connection.execute(
+            "INSERT OR REPLACE INTO receipt_instance(singleton, instance_id) VALUES (1, ?)",
+            ("f" * 32,),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    baseline_id = receipts.critical_event_id({"baseline": "inactive-chain"})
+    receipts.begin_event(
+        vault,
+        operation="test_inactive_baseline",
+        prior="a" * 64,
+        target="b" * 64,
+        event_id=baseline_id,
+    )
+    receipts.commit_event(vault, baseline_id, outcome="recorded")
+    receipts._close_receipt_connections()  # noqa: SLF001
+    connection = store.open_connection(vault)
+    try:
+        connection.execute(
+            "UPDATE receipt_instance SET instance_id=? WHERE singleton=1",
+            ("0" * 32,),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    plan = _stage_reviewed_migration(vault, now=now)
+    committed = schema_migration.commit_forward_migration(
+        vault,
+        expected_plan_digest=plan.plan_digest,
+        now=now + 2,
+    )
+    _drain_verified_membership(monkeypatch)
+
+    def crash(point: str) -> None:
+        if point == "after_restore_receipt_intent":
+            raise schema_migration._ForwardMigrationCrash(point)
+
+    monkeypatch.setattr(schema_migration, "_forward_migration_barrier", crash)
+    with pytest.raises(schema_migration._ForwardMigrationCrash):
+        schema_migration.restore_forward_migration_backup(
+            vault,
+            expected_plan_digest=plan.plan_digest,
+            expected_backup_reference=committed.backup_reference,
+            now=now + 3,
+        )
+    assert _schema_version(vault) == 4
+
+    monkeypatch.setattr(schema_migration, "_forward_migration_barrier", lambda _point: None)
+    replay = schema_migration.restore_forward_migration_backup(
+        vault,
+        expected_plan_digest=plan.plan_digest,
+        expected_backup_reference=committed.backup_reference,
+        now=now + 4,
+    )
+
+    assert replay.replayed is True
+    assert _schema_version(vault) == 3
+    restore_records = [
+        item
+        for item in receipts.event_records(vault)
+        if item.get("operation") == "governance_schema_v3_backup_restore"
+        or item.get("causation_id") == replay.recovery_event_id
+    ]
+    assert [item["phase"] for item in restore_records] == ["intent", "committed"]
+
+
+def test_pre_migration_backup_restore_serializes_receipts_through_store_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _vault(tmp_path)
+    now = int(time.time())
+    plan = _stage_reviewed_migration(vault, now=now)
+    committed = schema_migration.commit_forward_migration(
+        vault,
+        expected_plan_digest=plan.plan_digest,
+        now=now + 2,
+    )
+    _drain_verified_membership(monkeypatch)
+    attempted = threading.Event()
+    finished = threading.Event()
+    failures: list[BaseException] = []
+    later_id = receipts.critical_event_id({"later": "serialized"})
+
+    def append_later() -> None:
+        attempted.set()
+        try:
+            receipts.begin_event(
+                vault,
+                operation="test_serialized_later_receipt",
+                prior="a" * 64,
+                target="b" * 64,
+                event_id=later_id,
+            )
+            receipts.commit_event(vault, later_id, outcome="recorded")
+        except (
+            OSError,
+            RuntimeError,
+            sqlite3.Error,
+            receipts.ReceiptError,
+        ) as error:  # pragma: no cover - asserted below
+            failures.append(error)
+        finally:
+            finished.set()
+
+    worker = threading.Thread(target=append_later)
+
+    def start_writer(point: str) -> None:
+        if point != "after_restore_receipt_intent":
+            return
+        worker.start()
+        assert attempted.wait(timeout=2)
+        assert not finished.wait(timeout=0.05)
+
+    monkeypatch.setattr(schema_migration, "_forward_migration_barrier", start_writer)
+    restored = schema_migration.restore_forward_migration_backup(
+        vault,
+        expected_plan_digest=plan.plan_digest,
+        expected_backup_reference=committed.backup_reference,
+        now=now + 3,
+    )
+    worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert not failures
+    assert finished.is_set()
+    records = receipts.event_records(vault)
+    restore_terminal = next(
+        item for item in records if item.get("causation_id") == restored.recovery_event_id
+    )
+    later_intent = next(item for item in records if item.get("event_id") == later_id)
+    assert later_intent["instance_id"] == restore_terminal["instance_id"]
+    assert later_intent["seq"] > restore_terminal["seq"]
+    assert _schema_version(vault) == 3
+
+
+def test_pre_migration_backup_restore_rolls_back_an_in_transaction_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _vault(tmp_path)
+    now = int(time.time())
+    plan = _stage_reviewed_migration(vault, now=now)
+    committed = schema_migration.commit_forward_migration(
+        vault,
+        expected_plan_digest=plan.plan_digest,
+        now=now + 2,
+    )
+    _drain_verified_membership(monkeypatch)
+    replace_schema = schema_migration._replace_database_schema
+
+    def replace_then_fail(
+        destination: sqlite3.Connection,
+        source: sqlite3.Connection,
+    ) -> None:
+        replace_schema(destination, source)
+        raise RuntimeError("injected transactional restore failure")
+
+    monkeypatch.setattr(
+        schema_migration,
+        "_replace_database_schema",
+        replace_then_fail,
+    )
+    with pytest.raises(schema_migration.ForwardMigrationRestoreUnavailable):
+        schema_migration.restore_forward_migration_backup(
+            vault,
+            expected_plan_digest=plan.plan_digest,
+            expected_backup_reference=committed.backup_reference,
+            now=now + 3,
+        )
+
+    assert _schema_version(vault) == 4
+    connection = store.open_active_governance_read_connection(vault)
+    try:
+        assert schema_v4.load_active_policy(
+            connection,
+            expected_logical_vault_id=plan.target.logical_vault_id,
+            expected_activation_store_id=plan.target.activation_store_id,
+            expected_activation_epoch=plan.target.activation_epoch,
+            expected_activation_state_digest=plan.target.activation_state_digest,
+        ).active == plan.target
+    finally:
+        connection.close()
+
+
+def test_pre_migration_backup_restore_replays_store_commit_before_schema_fence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _vault(tmp_path)
+    now = int(time.time())
+    plan = _stage_reviewed_migration(vault, now=now)
+    committed = schema_migration.commit_forward_migration(
+        vault,
+        expected_plan_digest=plan.plan_digest,
+        now=now + 2,
+    )
+    _drain_verified_membership(monkeypatch)
+    state = [writer_lease.SchemaFenceState(True, 4, 17)]
+    transitions: list[tuple[int, int, int]] = []
+
+    class Client:
+        def schema_fence(self) -> writer_lease.SchemaFenceState:
+            return state[0]
+
+        def transition_schema_fence(
+            self,
+            *,
+            expected_generation: int,
+            schema_version: int,
+        ) -> writer_lease.SchemaFenceState:
+            transitions.append((expected_generation, schema_version, _schema_version(vault)))
+            state[0] = writer_lease.SchemaFenceState(
+                True,
+                schema_version,
+                expected_generation + 1,
+            )
+            return state[0]
+
+    monkeypatch.setattr(
+        writer_lease,
+        "configured_schema_fence_operator_client",
+        lambda: Client(),
+    )
+
+    def crash(point: str) -> None:
+        if point == "after_store_restore":
+            raise schema_migration._ForwardMigrationCrash("restore store crash")
+
+    monkeypatch.setattr(schema_migration, "_forward_migration_barrier", crash)
+    with pytest.raises(schema_migration._ForwardMigrationCrash, match="restore store"):
+        schema_migration.restore_forward_migration_backup(
+            vault,
+            expected_plan_digest=plan.plan_digest,
+            expected_backup_reference=committed.backup_reference,
+            now=now + 3,
+        )
+
+    assert _schema_version(vault) == 3
+    assert state == [writer_lease.SchemaFenceState(True, 4, 17)]
+    assert transitions == []
+
+    monkeypatch.setattr(schema_migration, "_forward_migration_barrier", lambda _point: None)
+    replay = schema_migration.restore_forward_migration_backup(
+        vault,
+        expected_plan_digest=plan.plan_digest,
+        expected_backup_reference=committed.backup_reference,
+        now=now + 4,
+    )
+
+    assert replay.replayed is True
+    assert state == [writer_lease.SchemaFenceState(True, 3, 18)]
+    assert transitions == [(17, 3, 3)]

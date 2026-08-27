@@ -150,7 +150,7 @@ this reconciliation is `origin/main` at `9dc37201` plus stacked evidence PR #832
   workspace mirror.
   Assert one full-tuple CAS winner, predecessor-or-target visibility,
   exact nonce recovery, append-only generations, and no stale policy/catalog projection.
-- [ ] 3.6 Add red startup/migration/backup tests for current direct-source v3 to v4:
+- [x] 3.6 Add red startup/migration/backup tests for current direct-source v3 to v4:
   ordinary v3 opener leaves exact v3 with no v4 DDL/DML; quiesced explicit migration;
   monotonic external `governance_enrolled` plus expected store id/epoch/digest; stable
   source/catalog recheck; atomic initial tuple; stopped/running deletion and corrupt/

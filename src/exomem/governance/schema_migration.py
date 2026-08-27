@@ -7,10 +7,11 @@ import hashlib
 import hmac
 import json
 import sqlite3
+import struct
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .. import find_corpus, reserved_paths
+from .. import find_corpus, reserved_paths, writer_lease
 from ..kbdir import kb_dirname
 from . import (
     authorization_custody,
@@ -29,7 +30,16 @@ _COMPILER_SCHEMA_VERSION = 1
 _BACKUP_SCHEMA = "exomem.governance-v3-backup/v1"
 _BACKUP_MAGIC = b"EXOMEM-GOVERNANCE-V3-BACKUP-V1\0"
 _BACKUP_DOMAIN = b"exomem.governance-v3-backup.v1"
+_RESTORE_OPERATION = "governance_schema_v3_backup_restore"
+_RESTORE_PLAN_SCHEMA = "exomem.governance-v3-backup-restore-plan/v1"
+_RESTORE_PLAN_DOMAIN = b"exomem.governance-v3-backup-restore-plan.v1"
+_RESTORE_TARGET_DOMAIN = b"exomem.governance-v3-backup-restore-target.v1"
 _MAX_BACKUP_BYTES = 512 * 1024 * 1024
+_RECEIPT_TABLES = (
+    "receipt_instance",
+    "receipts_head",
+    "receipt_secrets",
+)
 _PLAN_FIELDS = frozenset(
     {
         "schema_version",
@@ -56,6 +66,10 @@ class ForwardMigrationUnavailable(RuntimeError):
 
 class ForwardMigrationPlanMismatch(ForwardMigrationUnavailable):
     """The owner-confirmed plan is not the exact current migration plan."""
+
+
+class ForwardMigrationRestoreUnavailable(ForwardMigrationUnavailable):
+    """The private predecessor backup cannot be restored safely."""
 
 
 class _ForwardMigrationCrash(RuntimeError):
@@ -111,6 +125,32 @@ class ForwardMigrationResult:
     source_store_digest: str
     backup_reference: str
     replayed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ForwardMigrationRestoreResult:
+    """Content-free terminal for one immediate predecessor-backup restore."""
+
+    schema_version: int
+    plan_digest: str
+    source_store_digest: str
+    backup_reference: str
+    recovery_event_id: str
+    recovery_plan_digest: str
+    replayed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _ForwardMigrationRestorePlan:
+    backup: ForwardMigrationBackup
+    control_digest: str
+    keyring_digest: str
+    membership_epoch: int
+    membership_digest: str
+    schema_fence_generation: int | None
+    plan_digest: str
+    target_digest: str
+    event_id: str
 
 
 def _framed_digest(domain: bytes, *parts: bytes) -> str:
@@ -966,6 +1006,1016 @@ def _verify_live_source_material(
         raise ForwardMigrationUnavailable from error
 
 
+def _require_backup_reference(value: object) -> str:
+    prefix = "exomem-governance-v3-backup://sha256/"
+    if not isinstance(value, str) or not value.startswith(prefix):
+        raise ForwardMigrationRestoreUnavailable
+    _require_digest(value[len(prefix) :])
+    return value
+
+
+def _receipt_state(
+    connection: sqlite3.Connection,
+) -> tuple[tuple[str, tuple[str, ...], tuple[tuple[object, ...], ...]], ...]:
+    state: list[tuple[str, tuple[str, ...], tuple[tuple[object, ...], ...]]] = []
+    for table in _RECEIPT_TABLES:
+        columns = tuple(
+            str(row[1])
+            for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+        )
+        if not columns:
+            raise ForwardMigrationRestoreUnavailable
+        rows = tuple(
+            tuple(row)
+            for row in connection.execute(
+                f"SELECT * FROM {table} ORDER BY rowid"
+            ).fetchall()
+        )
+        state.append((table, columns, rows))
+    return tuple(state)
+
+
+def _replace_receipt_state(
+    connection: sqlite3.Connection,
+    state: tuple[tuple[str, tuple[str, ...], tuple[tuple[object, ...], ...]], ...],
+) -> None:
+    if tuple(table for table, _columns, _rows in state) != _RECEIPT_TABLES:
+        raise ForwardMigrationRestoreUnavailable
+    for table, columns, rows in state:
+        current_columns = tuple(
+            str(row[1])
+            for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+        )
+        if current_columns != columns:
+            raise ForwardMigrationRestoreUnavailable
+        connection.execute(f"DELETE FROM {table}")
+        if rows:
+            placeholders = ",".join("?" for _column in columns)
+            connection.executemany(
+                f"INSERT INTO {table} VALUES ({placeholders})",
+                rows,
+            )
+    connection.commit()
+
+
+def _backup_receipt_state(
+    backup: ForwardMigrationBackup,
+) -> tuple[tuple[str, tuple[str, ...], tuple[tuple[object, ...], ...]], ...]:
+    connection = sqlite3.connect(":memory:")
+    try:
+        connection.deserialize(backup.serialized_v3)
+        schema_v4.require_exact_v3_connection(connection)
+        return _receipt_state(connection)
+    finally:
+        connection.close()
+
+
+def _store_receipt_state(
+    vault_root: Path,
+    *,
+    schema_version: int,
+) -> tuple[tuple[str, tuple[str, ...], tuple[tuple[object, ...], ...]], ...]:
+    if schema_version == schema_v4.SCHEMA_USER_VERSION:
+        connection = store.open_active_governance_read_connection(vault_root)
+    elif schema_version == store.SCHEMA_USER_VERSION:
+        connection = store.open_readonly_connection(vault_root)
+        if connection is None:
+            raise ForwardMigrationRestoreUnavailable
+    else:
+        raise ForwardMigrationRestoreUnavailable
+    try:
+        return _receipt_state(connection)
+    finally:
+        connection.close()
+
+
+def _require_drained_restore_custody(
+    vault_root: Path,
+    *,
+    backup: ForwardMigrationBackup,
+    now: int,
+) -> authorization_custody.AuthorizationCustody:
+    custody = authorization_custody.load_authorization_custody(vault_root, now=now)
+    control = custody.control
+    membership_record = custody.serving_membership
+    if (
+        not control.governance_enrolled
+        or control.logical_vault_id != backup.target.logical_vault_id
+        or control.activation_store_id != backup.target.activation_store_id
+        or control.activation_epoch != backup.target.activation_epoch
+        or control.activation_state_digest != backup.target.activation_state_digest
+        or membership_record is None
+        or membership_record.epoch != control.serving_membership_epoch
+        or membership_record.record_digest != control.serving_membership_digest
+        or not membership_record.replicas
+        or any(
+            replica.state != "DRAINING"
+            or replica.schema_version != schema_v4.SCHEMA_USER_VERSION
+            or not replica.issuance_stopped
+            or not replica.no_in_flight
+            for replica in membership_record.replicas
+        )
+    ):
+        raise ForwardMigrationRestoreUnavailable
+    return custody
+
+
+def _restore_schema_fence_generation(*, schema_version: int) -> int | None:
+    client = writer_lease.configured_schema_fence_operator_client()
+    if client is None:
+        return None
+    current = client.schema_fence()
+    if not current.governance_enrolled:
+        raise ForwardMigrationRestoreUnavailable
+    if current.schema_version == schema_v4.SCHEMA_USER_VERSION:
+        if schema_version not in {
+            store.SCHEMA_USER_VERSION,
+            schema_v4.SCHEMA_USER_VERSION,
+        }:
+            raise ForwardMigrationRestoreUnavailable
+        return current.generation
+    if (
+        schema_version == store.SCHEMA_USER_VERSION
+        and current.schema_version == store.SCHEMA_USER_VERSION
+        and current.generation > 0
+    ):
+        return current.generation - 1
+    raise ForwardMigrationRestoreUnavailable
+
+
+def _restore_plan(
+    vault_root: Path,
+    *,
+    backup: ForwardMigrationBackup,
+    custody: authorization_custody.AuthorizationCustody,
+    schema_version: int,
+) -> _ForwardMigrationRestorePlan:
+    external = authorization_custody.load_external_custody(vault_root)
+    membership_record = custody.serving_membership
+    if membership_record is None:
+        raise ForwardMigrationRestoreUnavailable
+    control_digest = hashlib.sha256(external.control).hexdigest()
+    keyring_digest = hashlib.sha256(external.keyring).hexdigest()
+    fence_generation = _restore_schema_fence_generation(
+        schema_version=schema_version,
+    )
+    value = {
+        "schema": _RESTORE_PLAN_SCHEMA,
+        "migration_plan_digest": backup.plan_digest,
+        "backup_reference": backup.backup_reference,
+        "source_store_digest": backup.source_store_digest,
+        "logical_vault_id": backup.target.logical_vault_id,
+        "activation_store_id": backup.target.activation_store_id,
+        "activation_epoch": backup.target.activation_epoch,
+        "activation_state_digest": backup.target.activation_state_digest,
+        "control_digest": control_digest,
+        "keyring_digest": keyring_digest,
+        "membership_epoch": membership_record.epoch,
+        "membership_digest": membership_record.record_digest,
+        "schema_fence_generation": fence_generation,
+    }
+    plan_digest = _framed_digest(
+        _RESTORE_PLAN_DOMAIN,
+        projections.canonical_jcs(value),
+    )
+    target_digest = _framed_digest(
+        _RESTORE_TARGET_DOMAIN,
+        backup.source_store_digest.encode("ascii"),
+        plan_digest.encode("ascii"),
+    )
+    identity = {
+        "operation": _RESTORE_OPERATION,
+        "prior": backup.target.activation_state_digest,
+        "prepared": plan_digest,
+        "target": target_digest,
+        "affected_ids": sorted(
+            (
+                backup.target.activation_store_id,
+                backup.target.logical_vault_id,
+            )
+        ),
+    }
+    return _ForwardMigrationRestorePlan(
+        backup=backup,
+        control_digest=control_digest,
+        keyring_digest=keyring_digest,
+        membership_epoch=membership_record.epoch,
+        membership_digest=membership_record.record_digest,
+        schema_fence_generation=fence_generation,
+        plan_digest=plan_digest,
+        target_digest=target_digest,
+        event_id=receipts.critical_event_id(identity),
+    )
+
+
+def _restore_event_state(
+    vault_root: Path,
+    plan: _ForwardMigrationRestorePlan,
+) -> str:
+    records = receipts.event_records(vault_root)
+    affected = sorted(
+        (
+            plan.backup.target.activation_store_id,
+            plan.backup.target.logical_vault_id,
+        )
+    )
+    intents = [
+        item
+        for item in records
+        if item.get("event_type") == "critical"
+        and item.get("phase") == "intent"
+        and item.get("operation") == _RESTORE_OPERATION
+    ]
+    matching = [item for item in intents if item.get("event_id") == plan.event_id]
+    if len(intents) != len(matching) or len(matching) > 1:
+        raise ForwardMigrationRestoreUnavailable
+    if not matching:
+        return "absent"
+    intent = matching[0]
+    if (
+        intent.get("prior") != plan.backup.target.activation_state_digest
+        or intent.get("prepared") != plan.plan_digest
+        or intent.get("target") != plan.target_digest
+        or intent.get("affected_ids") != affected
+    ):
+        raise ForwardMigrationRestoreUnavailable
+    terminals = [
+        item
+        for item in records
+        if item.get("event_type") == "critical"
+        and item.get("causation_id") == plan.event_id
+        and item.get("phase") in {"committed", "aborted"}
+    ]
+    if len(terminals) > 1:
+        raise ForwardMigrationRestoreUnavailable
+    if terminals:
+        terminal = terminals[0]
+        if (
+            terminal.get("phase") != "committed"
+            or terminal.get("outcome") != "schema-v3-backup-restored"
+            or terminal.get("instance_id") != intent.get("instance_id")
+            or not isinstance(terminal.get("seq"), int)
+            or terminal["seq"] <= intent.get("seq", 0)
+        ):
+            raise ForwardMigrationRestoreUnavailable
+        return "committed"
+    same_instance_successors = [
+        item
+        for item in records
+        if item.get("instance_id") == intent.get("instance_id")
+        and isinstance(item.get("seq"), int)
+        and item["seq"] > intent.get("seq", 0)
+    ]
+    if same_instance_successors:
+        raise ForwardMigrationRestoreUnavailable
+    return "intent"
+
+
+def _ensure_restore_intent(
+    vault_root: Path,
+    plan: _ForwardMigrationRestorePlan,
+) -> str:
+    state = _restore_event_state(vault_root, plan)
+    if state != "absent":
+        return state
+    try:
+        record = receipts.begin_event(
+            vault_root,
+            operation=_RESTORE_OPERATION,
+            prior=plan.backup.target.activation_state_digest,
+            prepared=plan.plan_digest,
+            target=plan.target_digest,
+            affected_ids=sorted(
+                (
+                    plan.backup.target.activation_store_id,
+                    plan.backup.target.logical_vault_id,
+                )
+            ),
+            event_id=plan.event_id,
+        )
+    except receipts.ReceiptError as error:
+        raise ForwardMigrationRestoreUnavailable from error
+    if record.get("event_id") != plan.event_id or record.get("phase") != "intent":
+        raise ForwardMigrationRestoreUnavailable
+    return "intent"
+
+
+def _receipt_table(
+    state: tuple[tuple[str, tuple[str, ...], tuple[tuple[object, ...], ...]], ...],
+    name: str,
+) -> tuple[tuple[str, ...], tuple[tuple[object, ...], ...]]:
+    matches = [
+        (columns, rows)
+        for table, columns, rows in state
+        if table == name
+    ]
+    if len(matches) != 1:
+        raise ForwardMigrationRestoreUnavailable
+    return matches[0]
+
+
+def _require_restore_receipt_progress(
+    vault_root: Path,
+    plan: _ForwardMigrationRestorePlan,
+    *,
+    schema_version: int,
+    event_state: str,
+) -> None:
+    if event_state not in {"intent", "committed"}:
+        raise ForwardMigrationRestoreUnavailable
+    backup_state = _backup_receipt_state(plan.backup)
+    current_state = _store_receipt_state(
+        vault_root,
+        schema_version=schema_version,
+    )
+    if _receipt_table(current_state, "receipt_secrets") != _receipt_table(
+        backup_state,
+        "receipt_secrets",
+    ):
+        raise ForwardMigrationRestoreUnavailable
+
+    records = receipts.event_records(vault_root)
+    intents = [item for item in records if item.get("event_id") == plan.event_id]
+    if len(intents) != 1:
+        raise ForwardMigrationRestoreUnavailable
+    intent = intents[0]
+    endpoint = intent
+    if event_state == "committed":
+        terminals = [
+            item for item in records if item.get("causation_id") == plan.event_id
+        ]
+        if len(terminals) != 1:
+            raise ForwardMigrationRestoreUnavailable
+        endpoint = terminals[0]
+    instance_id = intent.get("instance_id")
+    intent_seq = intent.get("seq")
+    endpoint_seq = endpoint.get("seq")
+    if (
+        not isinstance(instance_id, str)
+        or not isinstance(intent_seq, int)
+        or isinstance(intent_seq, bool)
+        or not isinstance(endpoint_seq, int)
+        or isinstance(endpoint_seq, bool)
+        or intent_seq < 1
+        or endpoint_seq < intent_seq
+    ):
+        raise ForwardMigrationRestoreUnavailable
+
+    backup_instance = _receipt_table(backup_state, "receipt_instance")
+    current_instance = _receipt_table(current_state, "receipt_instance")
+    if backup_instance[0] != current_instance[0]:
+        raise ForwardMigrationRestoreUnavailable
+    if backup_instance[1]:
+        if current_instance != backup_instance:
+            raise ForwardMigrationRestoreUnavailable
+    elif current_instance[1] != ((1, instance_id),):
+        raise ForwardMigrationRestoreUnavailable
+
+    backup_columns, backup_rows = _receipt_table(backup_state, "receipts_head")
+    current_columns, current_rows = _receipt_table(current_state, "receipts_head")
+    required_columns = {
+        "instance_id",
+        "durable_seq",
+        "durable_hash",
+        "observed_seq",
+        "observed_hash",
+        "path",
+        "byte_offset",
+    }
+    if (
+        current_columns != backup_columns
+        or set(current_columns) != required_columns
+    ):
+        raise ForwardMigrationRestoreUnavailable
+    positions = {name: current_columns.index(name) for name in current_columns}
+    backup_heads = {
+        str(row[positions["instance_id"]]): row for row in backup_rows
+    }
+    current_heads = {
+        str(row[positions["instance_id"]]): row for row in current_rows
+    }
+    if (
+        len(backup_heads) != len(backup_rows)
+        or len(current_heads) != len(current_rows)
+        or set(current_heads) != set(backup_heads) | {instance_id}
+        or instance_id not in current_heads
+    ):
+        raise ForwardMigrationRestoreUnavailable
+    for current_instance, current_row in current_heads.items():
+        if current_instance != instance_id and current_row != backup_heads[current_instance]:
+            raise ForwardMigrationRestoreUnavailable
+    prior_row = backup_heads.get(instance_id)
+    current_row = current_heads[instance_id]
+    if prior_row is None:
+        prior_row = tuple(
+            {
+                "instance_id": instance_id,
+                "durable_seq": 0,
+                "durable_hash": receipts.GENESIS_HASH,
+                "observed_seq": 0,
+                "observed_hash": receipts.GENESIS_HASH,
+                "path": "",
+                "byte_offset": 0,
+            }[column]
+            for column in current_columns
+        )
+    if (
+        prior_row[positions["durable_seq"]] != intent_seq - 1
+        or prior_row[positions["observed_seq"]] != intent_seq - 1
+        or prior_row[positions["durable_hash"]] != intent.get("prev")
+        or prior_row[positions["observed_hash"]] != intent.get("prev")
+        or current_row[positions["durable_seq"]] != endpoint_seq
+        or current_row[positions["observed_seq"]] != endpoint_seq
+        or current_row[positions["durable_hash"]] != endpoint.get("hash")
+        or current_row[positions["observed_hash"]] != endpoint.get("hash")
+        or not current_row[positions["path"]]
+        or int(current_row[positions["byte_offset"]]) < 0
+    ):
+        raise ForwardMigrationRestoreUnavailable
+
+
+def _require_restore_schema_fence(plan: _ForwardMigrationRestorePlan) -> None:
+    client = writer_lease.configured_schema_fence_operator_client()
+    if plan.schema_fence_generation is None:
+        if client is not None:
+            raise ForwardMigrationRestoreUnavailable
+        return
+    if client is None:
+        raise ForwardMigrationRestoreUnavailable
+    current = client.schema_fence()
+    if (
+        not current.governance_enrolled
+        or current.schema_version != schema_v4.SCHEMA_USER_VERSION
+        or current.generation != plan.schema_fence_generation
+    ):
+        raise ForwardMigrationRestoreUnavailable
+
+
+def _complete_restore_schema_fence(plan: _ForwardMigrationRestorePlan) -> None:
+    client = writer_lease.configured_schema_fence_operator_client()
+    if plan.schema_fence_generation is None:
+        if client is not None:
+            raise ForwardMigrationRestoreUnavailable
+        return
+    if client is None:
+        raise ForwardMigrationRestoreUnavailable
+    current = client.schema_fence()
+    if (
+        current.governance_enrolled
+        and current.schema_version == store.SCHEMA_USER_VERSION
+        and current.generation == plan.schema_fence_generation + 1
+    ):
+        return
+    if (
+        not current.governance_enrolled
+        or current.schema_version != schema_v4.SCHEMA_USER_VERSION
+        or current.generation != plan.schema_fence_generation
+    ):
+        raise ForwardMigrationRestoreUnavailable
+    advanced = client.transition_schema_fence(
+        expected_generation=plan.schema_fence_generation,
+        schema_version=store.SCHEMA_USER_VERSION,
+    )
+    if (
+        not advanced.governance_enrolled
+        or advanced.schema_version != store.SCHEMA_USER_VERSION
+        or advanced.generation != plan.schema_fence_generation + 1
+    ):
+        raise ForwardMigrationRestoreUnavailable
+
+
+def _digest_part(digest: object, value: bytes) -> None:
+    digest.update(len(value).to_bytes(8, "big"))
+    digest.update(value)
+
+
+def _sqlite_value_bytes(value: object) -> bytes:
+    if value is None:
+        return b"n"
+    if isinstance(value, int):
+        return b"i" + str(value).encode("ascii")
+    if isinstance(value, float):
+        return b"f" + struct.pack(">d", value)
+    if isinstance(value, str):
+        return b"t" + value.encode("utf-8")
+    if isinstance(value, bytes):
+        return b"b" + value
+    raise ForwardMigrationRestoreUnavailable
+
+
+def _logical_store_digest(
+    connection: sqlite3.Connection,
+    *,
+    exclude_receipt_rows: bool,
+) -> str:
+    """Hash the complete logical database, independent of SQLite page layout."""
+
+    digest = hashlib.sha256(b"exomem.governance-logical-store.v1")
+    _digest_part(
+        digest,
+        str(int(connection.execute("PRAGMA user_version").fetchone()[0])).encode(
+            "ascii"
+        ),
+    )
+    master = tuple(
+        tuple(row)
+        for row in connection.execute(
+            "SELECT type, name, tbl_name, sql FROM sqlite_master "
+            "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name, tbl_name"
+        )
+    )
+    for row in master:
+        _digest_part(
+            digest,
+            b"".join(
+                len(encoded).to_bytes(8, "big") + encoded
+                for encoded in (_sqlite_value_bytes(value) for value in row)
+            ),
+        )
+    tables = tuple(
+        str(row[0])
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name NOT LIKE 'sqlite_%' ORDER BY name"
+        )
+    )
+    for table in tables:
+        _digest_part(digest, table.encode("utf-8"))
+        if exclude_receipt_rows and table in _RECEIPT_TABLES:
+            _digest_part(digest, b"receipt-rows-excluded")
+            continue
+        quoted = '"' + table.replace('"', '""') + '"'
+        rows = []
+        for row in connection.execute(f"SELECT * FROM {quoted}"):
+            rows.append(
+                b"".join(
+                    len(encoded).to_bytes(8, "big") + encoded
+                    for encoded in (_sqlite_value_bytes(value) for value in row)
+                )
+            )
+        for encoded in sorted(rows):
+            _digest_part(digest, encoded)
+    return digest.hexdigest()
+
+
+def _initial_migration_seed(
+    connection: sqlite3.Connection,
+    backup: ForwardMigrationBackup,
+) -> schema_v4.MigrationSeed:
+    policy_row = connection.execute(
+        "SELECT source_fingerprint, conflict_digest, compiled_policy, "
+        "policy_fingerprint, compiler_schema_version, projector_schema_version, "
+        "predecessor_generation_id, authoring_event_id, receipt_event_id, created_at "
+        "FROM compiled_policy_generations WHERE generation_id=?",
+        (backup.target.policy_generation_id,),
+    ).fetchone()
+    catalog_row = connection.execute(
+        "SELECT descriptor, artifact_count, created_at "
+        "FROM catalog_generation_descriptors WHERE catalog_generation=?",
+        (backup.target.catalog_generation,),
+    ).fetchone()
+    namespace_row = connection.execute(
+        "SELECT namespace_id, evidence, ready_at "
+        "FROM governance_projection_namespaces WHERE policy_fingerprint=? "
+        "AND projector_schema_version=? AND catalog_generation=?",
+        (
+            backup.target.policy_fingerprint,
+            backup.target.projector_schema_version,
+            backup.target.catalog_generation,
+        ),
+    ).fetchone()
+    migration_row = connection.execute(
+        "SELECT migrated_at FROM governance_schema_migrations "
+        "WHERE migration_id='v3-to-v4'"
+    ).fetchone()
+    if any(row is None for row in (policy_row, catalog_row, namespace_row, migration_row)):
+        raise ForwardMigrationRestoreUnavailable
+    seed = schema_v4.MigrationSeed(
+        activation_store_id=backup.target.activation_store_id,
+        logical_vault_id=backup.target.logical_vault_id,
+        activation_epoch=backup.target.activation_epoch,
+        policy=schema_v4.PolicyGenerationSeed(
+            generation_id=backup.target.policy_generation_id,
+            source_documents=backup.source_documents,
+            source_fingerprint=str(policy_row[0]),
+            conflict_digest=str(policy_row[1]),
+            compiled_policy=bytes(policy_row[2]),
+            policy_fingerprint=str(policy_row[3]),
+            compiler_schema_version=int(policy_row[4]),
+            projector_schema_version=int(policy_row[5]),
+            predecessor_generation_id=(
+                None if policy_row[6] is None else str(policy_row[6])
+            ),
+            authoring_event_id=str(policy_row[7]),
+            receipt_event_id=str(policy_row[8]),
+            created_at=int(policy_row[9]),
+        ),
+        catalog=schema_v4.CatalogGenerationSeed(
+            catalog_generation=backup.target.catalog_generation,
+            descriptor=bytes(catalog_row[0]),
+            artifact_count=int(catalog_row[1]),
+            created_at=int(catalog_row[2]),
+        ),
+        namespace=schema_v4.ProjectionNamespaceSeed(
+            namespace_id=str(namespace_row[0]),
+            evidence=bytes(namespace_row[1]),
+            ready_at=int(namespace_row[2]),
+        ),
+        migrated_at=int(migration_row[0]),
+    )
+    if (
+        schema_v4.migration_target(seed) != backup.target
+        or seed.catalog.descriptor != backup.catalog_descriptor
+        or seed.catalog.artifact_count != backup.item_count
+        or seed.namespace.namespace_id != backup.target.projection_namespace_id
+        or seed.namespace.evidence != backup.projection_namespace_evidence
+    ):
+        raise ForwardMigrationRestoreUnavailable
+    return seed
+
+
+def _require_pristine_v4_store(
+    connection: sqlite3.Connection,
+    backup: ForwardMigrationBackup,
+) -> None:
+    schema_v4.require_exact_v4_connection(connection)
+    seed = _initial_migration_seed(connection, backup)
+    expected = sqlite3.connect(":memory:")
+    try:
+        expected.deserialize(backup.serialized_v3)
+        schema_v4.require_exact_v3_connection(expected)
+        schema_v4.migrate_v3_connection(expected, seed)
+        schema_v4.require_exact_v4_connection(expected)
+        if not hmac.compare_digest(
+            _logical_store_digest(
+                connection,
+                exclude_receipt_rows=True,
+            ),
+            _logical_store_digest(
+                expected,
+                exclude_receipt_rows=True,
+            ),
+        ):
+            raise ForwardMigrationRestoreUnavailable
+    finally:
+        expected.close()
+
+
+def _quoted_identifier(value: str) -> str:
+    return '"' + value.replace('"', '""') + '"'
+
+
+def _replace_database_schema(
+    destination: sqlite3.Connection,
+    source: sqlite3.Connection,
+) -> None:
+    if not destination.in_transaction:
+        raise ForwardMigrationRestoreUnavailable
+    destination_objects = tuple(
+        (str(row[0]), str(row[1]))
+        for row in destination.execute(
+            "SELECT type, name FROM sqlite_master WHERE sql IS NOT NULL "
+            "AND name NOT LIKE 'sqlite_%'"
+        )
+    )
+    for kind in ("trigger", "view", "index", "table"):
+        for object_type, name in destination_objects:
+            if object_type == kind:
+                destination.execute(
+                    f"DROP {kind.upper()} {_quoted_identifier(name)}"
+                )
+
+    source_objects = tuple(
+        (str(row[0]), str(row[1]), str(row[2]))
+        for row in source.execute(
+            "SELECT type, name, sql FROM sqlite_master WHERE sql IS NOT NULL "
+            "AND name NOT LIKE 'sqlite_%' ORDER BY rowid"
+        )
+    )
+    for object_type, name, sql in source_objects:
+        destination.execute(sql)
+        if object_type != "table":
+            continue
+        quoted = _quoted_identifier(name)
+        columns = tuple(source.execute(f"PRAGMA table_info({quoted})"))
+        if not columns:
+            raise ForwardMigrationRestoreUnavailable
+        placeholders = ",".join("?" for _column in columns)
+        rows = source.execute(f"SELECT * FROM {quoted}").fetchall()
+        if rows:
+            destination.executemany(
+                f"INSERT INTO {quoted} VALUES ({placeholders})",
+                rows,
+            )
+    destination.execute(
+        f"PRAGMA user_version={int(source.execute('PRAGMA user_version').fetchone()[0])}"
+    )
+
+
+def _prepare_restore_destination(
+    destination: sqlite3.Connection,
+    backup: ForwardMigrationBackup,
+) -> None:
+    destination.execute("PRAGMA busy_timeout=0")
+    destination.execute("PRAGMA synchronous=FULL")
+    _require_pristine_v4_store(destination, backup)
+    checkpoint = destination.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+    if (
+        checkpoint is None
+        or len(checkpoint) != 3
+        or int(checkpoint[0]) != 0
+        or int(checkpoint[1]) != int(checkpoint[2])
+    ):
+        raise ForwardMigrationRestoreUnavailable
+    mode = destination.execute("PRAGMA journal_mode=DELETE").fetchone()
+    if mode is None or str(mode[0]).casefold() != "delete":
+        raise ForwardMigrationRestoreUnavailable
+    destination.execute("BEGIN EXCLUSIVE")
+    try:
+        _require_pristine_v4_store(destination, backup)
+    except BaseException:
+        destination.rollback()
+        raise
+
+
+def _preflight_v4_restore_database(
+    vault_root: Path,
+    backup: ForwardMigrationBackup,
+) -> None:
+    root = Path(vault_root)
+    path = store.sidecar_path(root)
+    try:
+        receipts._close_receipt_connections()  # noqa: SLF001
+    except receipts.ReceiptError as error:
+        raise ForwardMigrationRestoreUnavailable from error
+    with reserved_paths._subsystem_authority_scope("governance.store"):
+        with reserved_paths._sqlite_owner_target_scope(
+            root,
+            path,
+            "governance-store",
+            create=False,
+        ) as retained_path:
+            destination = sqlite3.connect(
+                f"{retained_path.as_uri()}?mode=rw",
+                uri=True,
+            )
+            try:
+                reserved_paths._publish_sqlite_owner_family(
+                    root,
+                    path,
+                    "governance-store",
+                    destination,
+                )
+                _prepare_restore_destination(destination, backup)
+                destination.rollback()
+            finally:
+                destination.close()
+
+
+def _restore_v3_database(
+    vault_root: Path,
+    plan: _ForwardMigrationRestorePlan,
+) -> None:
+    root = Path(vault_root)
+    path = store.sidecar_path(root)
+    try:
+        receipts._close_receipt_connections()  # noqa: SLF001
+    except receipts.ReceiptError as error:
+        raise ForwardMigrationRestoreUnavailable from error
+    source = sqlite3.connect(":memory:")
+    try:
+        source.deserialize(plan.backup.serialized_v3)
+        schema_v4.require_exact_v3_connection(source)
+        with reserved_paths._subsystem_authority_scope("governance.store"):
+            with reserved_paths._sqlite_owner_target_scope(
+                root,
+                path,
+                "governance-store",
+                create=False,
+            ) as retained_path:
+                destination = sqlite3.connect(
+                    f"{retained_path.as_uri()}?mode=rw",
+                    uri=True,
+                )
+                try:
+                    reserved_paths._publish_sqlite_owner_family(
+                        root,
+                        path,
+                        "governance-store",
+                        destination,
+                    )
+                    _prepare_restore_destination(destination, plan.backup)
+                    _replace_receipt_state(source, _receipt_state(destination))
+                    schema_v4.require_exact_v3_connection(source)
+                    _replace_database_schema(destination, source)
+                    schema_v4.require_exact_v3_connection(destination)
+                    destination.commit()
+                    reserved_paths._publish_sqlite_owner_family(
+                        root,
+                        path,
+                        "governance-store",
+                        destination,
+                    )
+                except BaseException:
+                    if destination.in_transaction:
+                        destination.rollback()
+                    raise
+                finally:
+                    destination.close()
+    finally:
+        source.close()
+
+
+def _normalized_v3_matches_backup(
+    vault_root: Path,
+    backup: ForwardMigrationBackup,
+) -> bool:
+    current = store.open_readonly_connection(vault_root)
+    if current is None:
+        return False
+    normalized = sqlite3.connect(":memory:")
+    original = sqlite3.connect(":memory:")
+    try:
+        schema_v4.require_exact_v3_connection(current)
+        current.backup(normalized)
+        original.deserialize(backup.serialized_v3)
+        schema_v4.require_exact_v3_connection(original)
+        _replace_receipt_state(normalized, _receipt_state(original))
+        normalized.execute("VACUUM")
+        schema_v4.require_exact_v3_connection(normalized)
+        digest = _framed_digest(
+            b"exomem.governance-v3-snapshot.v1",
+            normalized.serialize(),
+        )
+        return hmac.compare_digest(digest, backup.source_store_digest)
+    finally:
+        original.close()
+        normalized.close()
+        current.close()
+
+
+def restore_forward_migration_backup(
+    vault_root: Path,
+    *,
+    expected_plan_digest: str,
+    expected_backup_reference: str,
+    now: int,
+) -> ForwardMigrationRestoreResult:
+    """Restore the immediate pre-migration v3 backup under a drained v4 fence.
+
+    This deliberately narrow rollback accepts only an unchanged active tuple,
+    workspace/catalog, and receipt baseline.  Once later durable evidence exists,
+    operators must use the v4-to-v3 downmigration that preserves the current
+    generation instead of rewinding history.
+    """
+
+    root = Path(vault_root)
+    try:
+        moment = _bounded_integer(now, minimum=1)
+        expected_plan = _require_digest(expected_plan_digest)
+        expected_reference = _require_backup_reference(expected_backup_reference)
+        backup = verify_forward_migration_backup(
+            root,
+            expected_plan_digest=expected_plan,
+        )
+        if not hmac.compare_digest(backup.backup_reference, expected_reference):
+            raise ForwardMigrationRestoreUnavailable
+        with (
+            receipts._receipt_lock(root),  # noqa: SLF001
+            reserved_paths._identity_coordination_scope(
+                root,
+                identity_may_change=False,
+            ),
+        ):
+            version = store.authorization_session_schema_version(root)
+            if version not in {
+                store.SCHEMA_USER_VERSION,
+                schema_v4.SCHEMA_USER_VERSION,
+            }:
+                raise ForwardMigrationRestoreUnavailable
+            custody = _require_drained_restore_custody(
+                root,
+                backup=backup,
+                now=moment,
+            )
+            plan = _restore_plan(
+                root,
+                backup=backup,
+                custody=custody,
+                schema_version=version,
+            )
+            event_state = _restore_event_state(root, plan)
+            replayed = event_state != "absent"
+            if event_state != "absent":
+                _require_restore_receipt_progress(
+                    root,
+                    plan,
+                    schema_version=version,
+                    event_state=event_state,
+                )
+            if version == schema_v4.SCHEMA_USER_VERSION:
+                _verify_active_target(root, backup)
+                _verify_live_source_material(root, backup)
+                if event_state == "committed":
+                    raise ForwardMigrationRestoreUnavailable
+                if event_state == "absent" and _store_receipt_state(
+                    root,
+                    schema_version=version,
+                ) != _backup_receipt_state(backup):
+                    raise ForwardMigrationRestoreUnavailable
+                _preflight_v4_restore_database(root, backup)
+                event_state = _ensure_restore_intent(root, plan)
+                _require_restore_receipt_progress(
+                    root,
+                    plan,
+                    schema_version=version,
+                    event_state=event_state,
+                )
+                _forward_migration_barrier("after_restore_receipt_intent")
+                current_custody = _require_drained_restore_custody(
+                    root,
+                    backup=backup,
+                    now=moment,
+                )
+                current_plan = _restore_plan(
+                    root,
+                    backup=backup,
+                    custody=current_custody,
+                    schema_version=version,
+                )
+                if current_plan != plan:
+                    raise ForwardMigrationRestoreUnavailable
+                _verify_active_target(root, backup)
+                _verify_live_source_material(root, backup)
+                _require_restore_receipt_progress(
+                    root,
+                    plan,
+                    schema_version=version,
+                    event_state=event_state,
+                )
+                _require_restore_schema_fence(plan)
+                _restore_v3_database(root, plan)
+                _forward_migration_barrier("after_store_restore")
+            else:
+                if event_state not in {"intent", "committed"}:
+                    raise ForwardMigrationRestoreUnavailable
+                _verify_live_source_material(root, backup)
+                _require_restore_receipt_progress(
+                    root,
+                    plan,
+                    schema_version=version,
+                    event_state=event_state,
+                )
+            if not _normalized_v3_matches_backup(root, backup):
+                raise ForwardMigrationRestoreUnavailable
+            _complete_restore_schema_fence(plan)
+            _forward_migration_barrier("after_restore_schema_fence")
+            if event_state != "committed":
+                try:
+                    receipts.commit_event(
+                        root,
+                        plan.event_id,
+                        outcome="schema-v3-backup-restored",
+                    )
+                except receipts.ReceiptError as error:
+                    raise ForwardMigrationRestoreUnavailable from error
+                event_state = "committed"
+            _require_restore_receipt_progress(
+                root,
+                plan,
+                schema_version=store.SCHEMA_USER_VERSION,
+                event_state="committed",
+            )
+            _forward_migration_barrier("after_restore_receipt_commit")
+            if not _normalized_v3_matches_backup(root, backup):
+                raise ForwardMigrationRestoreUnavailable
+    except (_ForwardMigrationCrash, ForwardMigrationRestoreUnavailable):
+        raise
+    except (
+        ForwardMigrationUnavailable,
+        authorization_custody.AuthorizationCustodyUnavailable,
+        receipts.ReceiptError,
+        schema_v4.SchemaV4Error,
+        store.UnsupportedGovernanceSchema,
+        writer_lease.OpError,
+        OSError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+        sqlite3.Error,
+    ) as error:
+        raise ForwardMigrationRestoreUnavailable from error
+    return ForwardMigrationRestoreResult(
+        schema_version=store.SCHEMA_USER_VERSION,
+        plan_digest=backup.plan_digest,
+        source_store_digest=backup.source_store_digest,
+        backup_reference=backup.backup_reference,
+        recovery_event_id=plan.event_id,
+        recovery_plan_digest=plan.plan_digest,
+        replayed=replayed,
+    )
+
+
 def commit_forward_migration(
     vault_root: Path,
     *,
@@ -1091,6 +2141,8 @@ __all__ = [
     "ForwardMigrationBackup",
     "ForwardMigrationPlan",
     "ForwardMigrationPlanMismatch",
+    "ForwardMigrationRestoreResult",
+    "ForwardMigrationRestoreUnavailable",
     "ForwardMigrationResult",
     "ForwardMigrationStageResult",
     "ForwardMigrationUnavailable",
@@ -1098,6 +2150,7 @@ __all__ = [
     "forward_migration_backup_path",
     "plan_summary",
     "prepare_forward_migration",
+    "restore_forward_migration_backup",
     "stage_forward_migration",
     "verify_forward_migration_backup",
 ]

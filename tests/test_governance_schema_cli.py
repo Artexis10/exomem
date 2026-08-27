@@ -297,6 +297,154 @@ def test_governance_schema_commit_migration_returns_content_free_terminal(
     }
 
 
+def test_governance_schema_restore_migration_requires_digest_bound_confirmation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    calls: list[object] = []
+    monkeypatch.setattr(
+        schema_migration,
+        "restore_forward_migration_backup",
+        lambda *args, **kwargs: calls.append((args, kwargs)),
+        raising=False,
+    )
+
+    code = main(
+        [
+            "governance-schema",
+            "restore-migration-backup",
+            "--vault",
+            str(vault),
+            "--expected-plan-digest",
+            "f" * 64,
+            "--expected-backup-reference",
+            "exomem-governance-v3-backup://sha256/" + "d" * 64,
+            "--json",
+        ]
+    )
+
+    assert code == 2
+    assert calls == []
+    assert json.loads(capsys.readouterr().out) == {
+        "restored": False,
+        "reason": "confirmation_required",
+        "plan_digest": "f" * 64,
+        "backup_reference": "exomem-governance-v3-backup://sha256/" + "d" * 64,
+    }
+
+
+@pytest.mark.parametrize("replayed", [False, True])
+def test_governance_schema_restore_migration_returns_content_free_terminal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    replayed: bool,
+) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    result = schema_migration.ForwardMigrationRestoreResult(
+        schema_version=3,
+        plan_digest="f" * 64,
+        source_store_digest="e" * 64,
+        backup_reference="exomem-governance-v3-backup://sha256/" + "d" * 64,
+        recovery_event_id="c" * 64,
+        recovery_plan_digest="b" * 64,
+        replayed=replayed,
+    )
+    calls: list[tuple[Path, str, str, int]] = []
+
+    def restore(
+        root: Path,
+        *,
+        expected_plan_digest: str,
+        expected_backup_reference: str,
+        now: int,
+    ) -> schema_migration.ForwardMigrationRestoreResult:
+        calls.append((root, expected_plan_digest, expected_backup_reference, now))
+        return result
+
+    monkeypatch.setattr(schema_migration, "restore_forward_migration_backup", restore)
+
+    assert (
+        main(
+            [
+                "governance-schema",
+                "restore-migration-backup",
+                "--vault",
+                str(vault),
+                "--expected-plan-digest",
+                "f" * 64,
+                "--expected-backup-reference",
+                "exomem-governance-v3-backup://sha256/" + "d" * 64,
+                "--yes",
+                "--json",
+            ]
+        )
+        == 0
+    )
+
+    assert len(calls) == 1
+    assert calls[0][:3] == (
+        vault,
+        "f" * 64,
+        "exomem-governance-v3-backup://sha256/" + "d" * 64,
+    )
+    assert isinstance(calls[0][3], int) and calls[0][3] > 0
+    assert json.loads(capsys.readouterr().out) == {
+        "restored": True,
+        "schema_version": 3,
+        "plan_digest": "f" * 64,
+        "source_store_digest": "e" * 64,
+        "backup_reference": "exomem-governance-v3-backup://sha256/" + "d" * 64,
+        "recovery_event_id": "c" * 64,
+        "recovery_plan_digest": "b" * 64,
+        "replayed": replayed,
+    }
+
+
+def test_governance_schema_restore_migration_returns_content_free_refusal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+
+    def refuse(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise schema_migration.ForwardMigrationRestoreUnavailable
+
+    monkeypatch.setattr(schema_migration, "restore_forward_migration_backup", refuse)
+
+    assert (
+        main(
+            [
+                "governance-schema",
+                "restore-migration-backup",
+                "--vault",
+                str(vault),
+                "--expected-plan-digest",
+                "f" * 64,
+                "--expected-backup-reference",
+                "exomem-governance-v3-backup://sha256/" + "d" * 64,
+                "--yes",
+                "--json",
+            ]
+        )
+        == 1
+    )
+    assert json.loads(capsys.readouterr().out) == {
+        "error": "GOVERNANCE_SCHEMA_BACKUP_RESTORE_UNAVAILABLE",
+        "message": (
+            "the immediate predecessor backup could not be restored safely; "
+            "use reviewed v4-to-v3 downmigration after later durable changes"
+        ),
+    }
+
+
 @pytest.fixture
 def schema_state(tmp_path, monkeypatch: pytest.MonkeyPatch):
     vault = tmp_path / "vault"
