@@ -317,7 +317,14 @@ made before both PRs and their combined verification are complete.
   and stopped/warm deletion/corruption/mismatch BLOCKED. Cover concurrent
   vault+sidecar+keyring/control copies, copied external files without registry ownership,
   exact offline restore, clone with new ids, and detach-ack/attachment-epoch move; no
-  colliding pair may serve simultaneously or synthesize identity.
+  colliding pair may serve simultaneously or synthesize identity. For version 1, prove
+  restore uses the same drained/no-in-flight target-bound transfer protocol and
+  invalidates every imported session-derived authority before serving. For exact-v4
+  clone, prove one staged keyring fixes all fresh target ids across crash/retry, one
+  exclusive transaction preserves the active policy/projector/catalog plus immutable
+  history while committing session invalidation and a predecessor-bound
+  `attachment-clone` activation publication, and copied or contradictory external
+  custody files remain BLOCKED.
 - [x] 5.4 Add red lifecycle tests for exact typed `issued_credential` open/rotate,
   status, close, replay of the old bearer, restart/resume, and two v4 processes/replicas.
   Add malformed/extra-copy/raised issuance tests proving the terminal scrubber exception
@@ -352,11 +359,19 @@ made before both PRs and their combined verification are complete.
   cell/logical-vault/keyring ids, status, and lifecycle timestamps only, plus the shared
   immutable policy/catalog and active-tuple schema. Conservatively expire v3 arbitrary-handle/
   unscoped authority and add the explicit offline downmigration tool; drain v3 replicas
-  before first migration.
+  before first migration. Freeze the tuple-publication kind registry as exactly
+  `migration|policy|catalog|attachment-clone`; only the clone kind may atomically change
+  logical-vault/activation-store identity while retaining the exact active
+  policy/projector/catalog tuple and predecessor chain.
 - [ ] 5.11 Implement strict external keyring/control loading, authenticated owner/hosted
   provisioning, host/control-plane registry attachment with monotonic enrollment and
   activation-store tuple parity, copy collision, exclusive move/restore/clone rules, and
-  no automatic key/cell identity or OPEN inference.
+  no automatic key/cell identity or OPEN inference. Implement version-1 restore as the
+  conservative transfer protocol with unconditional imported-session invalidation.
+  Implement exact-v4 clone with an inert staged keyring, stable derived target ids, the
+  exclusive `attachment-clone` store transition, and control/membership/registry
+  publication only after that commit; every partial or conflicting state stays BLOCKED
+  and recovery never rotates the staged identity or modifies the source registry.
 - [ ] 5.12 Integrate the serving-membership epoch with the existing deployment control
   plane/readiness surface: provisioner/cell control owns the Hosted record,
   `hosted_runtime.control_plane_readiness()` verifies/exposes content-free readiness, and
@@ -378,7 +393,10 @@ made before both PRs and their combined verification are complete.
 - [ ] 5.17 Run session, keyring/control/registry, membership epoch, migration/downmigration,
   actual old-binary probe/fence, token, store, governance-tool, receipt, and crash-
   recovery suites and preserve exact red-before-green commands/results for standalone,
-  hosted, and both supported OS custody paths.
+  hosted, and both supported OS custody paths. Include restore-session invalidation and
+  clone crash barriers after staged keyring, exclusive store publication, control,
+  membership, and registry publication; prove retry keeps one identity and source and
+  clone serve independently only after distinct registry attachment.
 
 ## 6. Real MCP REST Hosted And CLI Principal Binding
 

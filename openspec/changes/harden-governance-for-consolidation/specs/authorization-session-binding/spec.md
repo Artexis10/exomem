@@ -252,9 +252,28 @@ SHALL fail content serving closed even when authorization-session issuance is di
 Hosted SHALL use its authenticated cell control plane. Concurrent copies presenting the same registration SHALL collide and fail; copied
 keyring/control files without registry ownership SHALL fail. A move SHALL quiesce and
 detach/ack the old attachment, advance the registry attachment epoch, then attach the
-same logical vault. Restore may preserve unexpired rows only for the exact coherent
-vault+sidecar+keyring+control identity after exclusive old-instance shutdown; cloning to
-a new logical vault SHALL provision new ids/keys and invalidate imported sessions.
+same logical vault. Version-1 exact offline restore SHALL use that same source-drain,
+`no_in_flight`, target-bound acknowledgement, and attachment-epoch protocol and SHALL
+invalidate every imported authorization session, grant, purpose, and token before the
+target becomes serving. Version 1 SHALL NOT preserve unexpired session authority across
+restore; copied bytes, process absence, or an ordinary detach acknowledgement SHALL NOT
+be upgraded into a preservation proof.
+
+Cloning/importing an exact-v4 copy into a new logical vault SHALL be a distinct
+authenticated offline operation. The target SHALL have no external custody files and no
+registry attachment. One staged random key SHALL deterministically bind fresh target
+cell, logical-vault, keyring, activation-store, and attachment identities across retries.
+Under the target writer/schema/receipt/held-filesystem fences, one exclusive SQLite
+transaction SHALL verify the copied active tuple and immutable publication chain, close
+all copied sessions and invalidate all session-derived grants/purposes/tokens, replace
+only activation-store/logical-vault identity, increment activation epoch, recompute the
+activation digest over the unchanged policy/projector/catalog tuple, and append an
+immutable `attachment-clone` tuple publication whose predecessor is the copied active
+digest. Only after commit may target control, serving membership, and the new host-
+registry attachment publish. Any intermediate mismatch SHALL remain BLOCKED; recovery
+SHALL use only the exact staged keyring plus committed clone publication and SHALL NOT
+rotate identity or accept copied external files. The source registry and authority SHALL
+remain unchanged and independent.
 
 The control plane SHALL publish an authoritative `serving_membership_epoch` enumerating
 every admitted replica and authenticated readiness attestation over epoch, replica id,
@@ -326,6 +345,32 @@ and no member or live verifier key may disappear merely because it is silent or 
 - **THEN** its authorization sessions are invalidated with the common credential refusal
   and no local first-use secret is generated
 
+#### Scenario: Version-one offline restore invalidates session authority
+
+- **WHEN** an exact copied vault and sidecar are attached after the source reaches
+  `DRAINING` plus `no_in_flight` and issues the target-bound acknowledgement
+- **THEN** the target keeps the same logical-vault/cell/keyring identity, advances the
+  attachment and serving-membership epochs, invalidates every imported session-derived
+  authority before serving, and the source attachment cannot resume
+
+#### Scenario: Exact-v4 clone gets a new activation identity
+
+- **WHEN** an authenticated owner clones an unattached exact-v4 copy with no target
+  external custody files
+- **THEN** one exclusive transaction retains the exact active policy/projector/catalog
+  and immutable history, closes copied session authority, commits a predecessor-bound
+  `attachment-clone` publication with fresh logical-vault/activation-store identity, and
+  the target publishes fresh cell/keyring/control/membership/registry custody only after
+  that transaction
+
+#### Scenario: Clone recovery never rotates staged identity
+
+- **WHEN** clone crashes after inert keyring publication, after the clone transaction, or
+  during control/membership/registry publication
+- **THEN** retry completes only the same staged-keyring-derived identity and publication,
+  while contradictory/copied external records or a different target make it remain
+  blocked
+
 #### Scenario: Standalone provisioning establishes external identity
 
 - **WHEN** an authenticated local owner provisions a never-registered standalone vault
@@ -368,7 +413,10 @@ keyring ids, status, created/rotated/expiry/closed timestamps, and no raw bearer
 v4 SHALL also add append-only `compiled_policy_generations`, immutable catalog
 descriptors, and singleton `active_governance_tuple` carrying exactly policy generation/
 fingerprint, projector version, and catalog generation as the atomic authority described
-by `governance-kernel`. Migration v3→v4 SHALL be monotonic,
+by `governance-kernel`. Its immutable publication-kind registry SHALL contain exactly
+`migration`, `policy`, `catalog`, and `attachment-clone`; the last kind may change only
+the activation-store/logical-vault identity and activation epoch/digest while retaining
+the exact active policy/projector/catalog tuple and predecessor digest. Migration v3→v4 SHALL be monotonic,
 transactional, crash-recoverable, and SHALL conservatively expire legacy unscoped grants
 or arbitrary-handle purpose/session rows that cannot prove exact new bindings. Unknown
 versions above v4 SHALL remain refused. Ordinary token/receipt/policy/session openers
