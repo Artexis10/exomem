@@ -1376,6 +1376,168 @@ def test_hidden_vertices_and_edges_cannot_change_public_graph_fusion_or_evidence
     assert b"oracle-hidden" not in responses["present"].content
 
 
+def _paginated_graph_runtime(
+    hidden_bodies: tuple[str, ...],
+) -> projection_runtime.ActiveProjectionRuntime:
+    visible = Scope(id="oracle-visible", source="scopes/oracle-visible.yaml")
+    hidden = Scope(
+        id="oracle-hidden",
+        source="scopes/oracle-hidden.yaml",
+        default_deny=True,
+    )
+    policy = Policy(
+        fingerprint="9" * 64,
+        scopes={visible.id: visible, hidden.id: hidden},
+    )
+    visible_paths = tuple(
+        f"Knowledge Base/oracle-visible-{index:03d}.md" for index in range(5)
+    )
+    hidden_identity = "Knowledge Base/private/oracle-hidden-000.md"
+    items = [
+        _projected_item(
+            policy,
+            path=path,
+            scope_id=visible.id,
+            body=(
+                "graphpagequartz visible seed"
+                if index == 0
+                else f"visible graph page target {index}"
+            ),
+        )
+        for index, path in enumerate(visible_paths)
+    ]
+    items.extend(
+        _projected_item(
+            policy,
+            path=f"Knowledge Base/private/oracle-hidden-{index:03d}.md",
+            scope_id=hidden.id,
+            body=body,
+        )
+        for index, body in enumerate(hidden_bodies)
+    )
+    hidden_present = bool(hidden_bodies)
+
+    def graph_edges_for_variant(
+        variant: projections.ProjectionVariant,
+    ) -> tuple[projected_graph.ProjectionGraphEdge, ...]:
+        if variant.decision_level < 6:
+            return ()
+        if variant.item_identity == visible_paths[0]:
+            targets = visible_paths[1:4]
+            if hidden_present:
+                targets += (hidden_identity,)
+            return tuple(
+                projected_graph.ProjectionGraphEdge(
+                    source_item_identity=variant.item_identity,
+                    target_item_identity=target,
+                    relation_type="supports",
+                )
+                for target in targets
+            )
+        if variant.item_identity == hidden_identity:
+            return (
+                projected_graph.ProjectionGraphEdge(
+                    source_item_identity=hidden_identity,
+                    target_item_identity=visible_paths[4],
+                    relation_type="contradicts",
+                ),
+            )
+        return ()
+
+    return _runtime_from_items(
+        policy,
+        tuple(items),
+        graph_edges_for_variant=graph_edges_for_variant,
+    )
+
+
+def test_hidden_graph_paths_cannot_change_graph_pagination_or_exhaustion(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    request = _request(query="graphpagequartz", limit=2)
+    request["graph"] = True
+    runtimes, pages = _wire_pages(
+        monkeypatch,
+        tmp_path,
+        hidden_bodies=("graphpagequartz hidden intermediary",),
+        runtime_factory=_paginated_graph_runtime,
+        request=request,
+        max_pages=3,
+    )
+
+    present_runtime = runtimes["present"]
+    external = projection_authorization.build_authorization_map(
+        present_runtime.namespace,
+        policy=present_runtime.snapshot.policy,
+        audience="oracle-external",
+        purpose=None,
+        verified_session_grants=(),
+        catalog=present_runtime.catalog,
+    )
+    owner = projection_authorization.build_authorization_map(
+        present_runtime.namespace,
+        policy=present_runtime.snapshot.policy,
+        audience=principal.OWNER_AUDIENCE,
+        purpose=None,
+        verified_session_grants=(),
+        catalog=present_runtime.catalog,
+    )
+    graph_index = present_runtime.graph_index
+    assert graph_index is not None
+    external_graph = graph_index.authorize(external)
+    owner_graph = graph_index.authorize(owner)
+    seed = "Knowledge Base/oracle-visible-000.md"
+    hidden = "Knowledge Base/private/oracle-hidden-000.md"
+    hidden_target = "Knowledge Base/oracle-visible-004.md"
+    assert external_graph.out_degree(seed) == 3
+    assert external_graph.in_degree(hidden_target) == 0
+    assert external_graph.reachable(seed, hidden_target) is False
+    assert external_graph.shortest_path(seed, hidden_target) is None
+    assert external_graph.relation_matches("contradicts") == ()
+    assert owner_graph.out_degree(seed) == 4
+    assert owner_graph.in_degree(hidden_target) == 1
+    assert owner_graph.reachable(seed, hidden_target) is True
+    assert owner_graph.shortest_path(seed, hidden_target) == (
+        seed,
+        hidden,
+        hidden_target,
+    )
+    assert owner_graph.relation_matches("contradicts") == (
+        projected_graph.ProjectionGraphEdge(
+            source_item_identity=hidden,
+            target_item_identity=hidden_target,
+            relation_type="contradicts",
+        ),
+    )
+
+    assert len(pages["absent"]) == 2
+    assert len(pages["present"]) == 2
+    for absent, present in zip(pages["absent"], pages["present"], strict=True):
+        assert absent.status_code == 200, absent.text
+        assert present.status_code == 200, present.text
+        assert _canonical_transport_envelope(
+            present, transport="http"
+        ) == _canonical_transport_envelope(absent, transport="http")
+
+    data = [response.json()["data"] for response in pages["present"]]
+    assert [[hit["path"] for hit in page["hits"]] for page in data] == [
+        [
+            "Knowledge Base/oracle-visible-000.md",
+            "Knowledge Base/oracle-visible-001.md",
+        ],
+        [
+            "Knowledge Base/oracle-visible-002.md",
+            "Knowledge Base/oracle-visible-003.md",
+        ],
+    ]
+    assert isinstance(data[0]["continuation"], str)
+    assert "continuation" not in data[1]
+    assert all(hit["signals"].get("graph_hop") for hit in data[1]["hits"])
+    assert b"oracle-hidden" not in pages["present"][0].content
+    assert b"oracle-hidden" not in pages["present"][1].content
+
+
 def _image_clip_runtime(
     hidden_bodies: tuple[str, ...],
 ) -> projection_runtime.ActiveProjectionRuntime:
