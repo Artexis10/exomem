@@ -513,7 +513,7 @@ made before both PRs and their combined verification are complete.
   bounded first-600-code-point whole-token `_excerpt_of`: one variant/model vector,
   query independence, no acquisition by later hidden terms, no query-centered hidden
   snippet, and correct projection-only top-k.
-- [ ] 8.9 Check in repository-owned constants `MAX_HIDDEN_CORPUS_WIRE_DELTA_MS=25`, ratio
+- [x] 8.9 Check in repository-owned constants `MAX_HIDDEN_CORPUS_WIRE_DELTA_MS=25`, ratio
   `0.10`, catalog items `16_384`, searchable bytes/item `1_048_576`, and graph edges
   `262_144`; make the release manifest lower-only. Add a red actual-wire harness with at
   least 200 predeclared randomized/interleaved samples at zero/one/exact capacity across
@@ -566,7 +566,7 @@ made before both PRs and their combined verification are complete.
   and retained-runtime registry specified in `release-gate`; add red first/next/exhausted,
   hidden-only catalog drift, authority drift, expiry/cap/restart, replay, cross-binding,
   and generated-surface parity tests before enabling the release fence.
-- [ ] 8.15 Implement stable payload timing suppression and fixed repository-registered
+- [x] 8.15 Implement stable payload timing suppression and fixed repository-registered
   public-request deadline/padding classes; fail if either bound exceeds any ceiling or
   maximum capacity cannot complete. Do not claim cryptographic constant time or pass by
   deleting timing fields; keep server-only aggregates content- and bearer-free.
@@ -575,13 +575,20 @@ made before both PRs and their combined verification are complete.
   active vector
   measurement family, refuse mixed/override configurations, and cap only vector-model
   query input with the fixed 600-code-point whole-token projection.
-- [ ] 8.16 Run the full no-model counterfactual and exact-capacity actual-wire suites, then optional live
+- [x] 8.16 Run the full no-model counterfactual and exact-capacity actual-wire suites, then optional live
   embedding/reranker and CLIP lanes behind their existing soft-fail/marker gates; no
   optional-model absence may skip keyword/graph or the declared timing security oracle.
-- [ ] 8.16a Check in and pass the separate `vectors-cpu-torch-v1` 12-route actual-wire
+- [x] 8.16a Check in and pass the separate `vectors-cpu-torch-v1` 12-route actual-wire
   manifest/matrix with 200 hidden-present and 200 physically-absent REST observations per
   route at zero/one/exact capacity. Keep reranker, CLIP, GPU, ONNX, and mixed profiles
   closed pending their own evidence.
+
+  Evidence: GitHub Actions run
+  [`33048555592`](https://github.com/Artexis10/exomem/actions/runs/33048555592)
+  completed successfully at `ec67c74ff8253229f1fd433382c518009bc0fc5b`: 58/58 jobs,
+  including 12/12 no-model wire routes, 12/12 `vectors-cpu-torch-v1` wire routes,
+  native Windows NTFS held-filesystem coverage, Python 3.11/3.13 shards,
+  installed-wheel E2E, Docker smoke, retrieval/semantic-write latency, and quality gates.
 
 ## 9. Integration Migration And Regression Gates
 
