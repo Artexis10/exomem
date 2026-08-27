@@ -30,7 +30,12 @@
       warm-up carve-out from #850).
 - [ ] 2.2 Recovery-age telemetry + health surfacing + doctor FAIL findings.
 - [ ] 2.3 Live-service ownership probe and refusal in the CLI index path.
-- [ ] 2.4 Bounded startup validation: O(1) durable-checkpoint check in the
+- [ ] 2.4 Projection-lag tolerance: serve semantic recall from the last
+      published projection during refresh; refuse only on identity change or
+      absent projection (red-first pin: a single write currently flips
+      semantic recall to RETRIEVAL_INDEX_WARMING until the graph republishes
+      the projection - measured live as the flapping-admission duty cycle).
+- [ ] 2.5 Bounded startup validation: O(1) durable-checkpoint check in the
       watcher startup pass; whole-vault rebuild only on incoherence.
 
 ## 3. Verification and delivery

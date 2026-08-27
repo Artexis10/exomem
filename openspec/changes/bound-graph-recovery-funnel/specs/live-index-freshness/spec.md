@@ -67,3 +67,18 @@ A service restart that finds a coherent durable graph checkpoint SHALL admit gra
 
 - **WHEN** the service restarts and the durable graph checkpoint is missing, malformed, or does not match the published sidecar
 - **THEN** the startup pass suspends reads and schedules the whole-vault rebuild
+
+### Requirement: Semantic recall admission tolerates bounded projection lag
+
+Semantic recall SHALL NOT refuse solely because the maintained recall projection lags current content by in-flight writes; it SHALL serve from the last published projection while the projection refresh is pending, disclosing bounded staleness, and SHALL refuse only when no published projection exists or the projection's identity (policy, access fingerprint, catalog identity) no longer matches. The write path SHALL refresh the projection proportionally to the delta, never by whole-vault work.
+
+#### Scenario: A write does not interrupt semantic recall
+
+- **WHEN** semantic recall arrives while writes have advanced content past the last published recall projection
+- **THEN** the recall serves from the last published projection with a bounded-staleness disclosure
+- **AND** the projection refresh proceeds proportionally to the delta
+
+#### Scenario: Identity changes still refuse
+
+- **WHEN** the recall policy, access fingerprint, or catalog identity changes
+- **THEN** semantic recall refuses until a projection published under the new identity exists
