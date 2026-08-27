@@ -49,9 +49,19 @@ _APPEND_ONLY = ("Sources", "Evidence")
 # (stat signature, byte fingerprint, parsed config) per config-file path. Find
 # refreshes the byte fingerprint once before its hot-cache lookup; page-level
 # access checks then reuse this parsed snapshot without rereading the policy.
+# ONLY a successful load is ever stored here: caching a degraded read would
+# install a policy more permissive than the real one under an unchanged stat
+# signature, which is a cached fail-open on a privacy boundary.
 _PolicySignature = tuple[int, int, int, int, int]
 _CACHE: dict[str, tuple[_PolicySignature, str, dict[str, list[str]]]] = {}
 PUBLICATION_POLICY_MAX_BYTES = 64 * 1024
+
+# Identity reported while the policy file exists but has never been read
+# successfully in this process. Deliberately stable rather than per-error-type:
+# a retry storm must not churn recall identity.
+UNAVAILABLE_POLICY_FINGERPRINT = "unavailable"
+# Identity of a genuinely absent policy file — a real state, not an error.
+MISSING_POLICY_FINGERPRINT = "missing"
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,19 +79,12 @@ def _load_config(vault_root: Path) -> dict[str, list[str]]:
     """Read ``_access.yaml`` → ``{"readonly": [...], "excluded": [...]}``.
 
     Missing/malformed → empty policy (never raises — a broken config must not
-    take down search). Live-reloaded on mtime change.
+    take down search). Live-reloaded on content change. A transient stat/read
+    error retains the last known-good policy instead of widening; callers that
+    ENFORCE tiers must go through :func:`access_tier`, which additionally
+    honors the fail-closed state this function cannot express.
     """
-    p = access_config_path(vault_root)
-    try:
-        signature = _policy_signature(p)
-    except OSError:
-        _CACHE.pop(str(p), None)
-        return {"readonly": [], "excluded": []}
-    key = str(p)
-    cached = _CACHE.get(key)
-    if cached is not None and cached[0] == signature:
-        return cached[2]
-    return _refresh_config(p, signature)[1]
+    return _policy_state(vault_root)[1]
 
 
 def policy_fingerprint(vault_root: Path) -> str:
@@ -90,14 +93,15 @@ def policy_fingerprint(vault_root: Path) -> str:
     This is intentionally content-based rather than mtime-based: access policy
     changes are security boundaries and must invalidate find's hot result cache
     even after a same-size or timestamp-preserving replacement.
+
+    A transient stat/read failure deliberately reports the LAST GOOD identity.
+    Moving it would flip ``recall_policy.recall_policy_identity``, which makes
+    ``live_recall_checkpoint`` fail closed and drives ``recall_checkpoint``
+    into its O(corpus) reprojection branch — advancing the recall generation
+    with zero writes and refusing semantic admission until the next
+    republication.
     """
-    path = access_config_path(vault_root)
-    try:
-        signature = _policy_signature(path)
-    except OSError:
-        _CACHE.pop(str(path), None)
-        return "missing"
-    return _refresh_config(path, signature)[0]
+    return _policy_state(vault_root)[0]
 
 
 def publication_policy_snapshot(vault_root: Path) -> PublicationPolicySnapshot | None:
@@ -111,7 +115,7 @@ def publication_policy_snapshot(vault_root: Path) -> PublicationPolicySnapshot |
     try:
         path.lstat()
     except FileNotFoundError:
-        return PublicationPolicySnapshot("missing")
+        return PublicationPolicySnapshot(MISSING_POLICY_FINGERPRINT)
     except OSError:
         return None
     try:
@@ -138,37 +142,84 @@ def _policy_signature(path: Path) -> _PolicySignature:
     )
 
 
-def _refresh_config(
-    path: Path,
-    signature: _PolicySignature,
-) -> tuple[str, dict[str, list[str]]]:
+def _empty_policy() -> dict[str, list[str]]:
+    return {"readonly": [], "excluded": []}
+
+
+def _degraded_state(key: str) -> tuple[str, dict[str, list[str]], bool]:
+    """Resolve a transient stat/read failure without ever widening visibility.
+
+    The last successful load stays in force under its own fingerprint — and it
+    is reused REGARDLESS of whether the stat signature moved. Reuse can only
+    hold visibility narrower or equal to the real policy, never wider, and
+    convergence to changed content happens at the next successful read. With no
+    successful load to fall back on there is nothing safe to serve, so every
+    path is excluded until a read succeeds.
+    """
+    cached = _CACHE.get(key)
+    if cached is not None:
+        return cached[1], cached[2], False
+    return UNAVAILABLE_POLICY_FINGERPRINT, _empty_policy(), True
+
+
+def _policy_state(vault_root: Path) -> tuple[str, dict[str, list[str]], bool]:
+    """Return ``(fingerprint, config, fail_closed)`` for the access policy.
+
+    An ABSENT file is a real state carrying the stable ``missing`` identity:
+    only the built-in defaults apply. A stat/read ERROR is not a state — it is
+    a transient failure, and is resolved by :func:`_degraded_state` rather than
+    by installing (or caching) an empty policy.
+    """
+    path = access_config_path(vault_root)
+    key = str(path)
+    try:
+        signature = _policy_signature(path)
+    except FileNotFoundError:
+        _CACHE.pop(key, None)
+        return MISSING_POLICY_FINGERPRINT, _empty_policy(), False
+    except OSError as error:
+        log.warning(
+            "could not stat %s (%s); retaining the last known-good access policy",
+            path.name,
+            error,
+        )
+        return _degraded_state(key)
+    cached = _CACHE.get(key)
+    if cached is not None and cached[0] == signature:
+        return cached[1], cached[2], False
     try:
         raw = path.read_bytes()
     except OSError as error:
-        log.warning("could not read %s (%s); treating as no access policy", path.name, error)
-        fingerprint = f"unavailable:{type(error).__name__}"
-        cfg: dict[str, list[str]] = {"readonly": [], "excluded": []}
-        _CACHE[str(path)] = (signature, fingerprint, cfg)
-        return fingerprint, cfg
+        # Deliberately no FileNotFoundError branch here. The file was present
+        # at stat, so its disappearance before the read is a RACE — a
+        # delete-then-write save from an editor or sync client — not a settled
+        # absence. Treating it as one both widened visibility and popped the
+        # last known-good entry, destroying the fallback every later transient
+        # error depends on. Only an absence seen at stat position (above) is
+        # the genuine missing-policy identity.
+        log.warning(
+            "could not read %s (%s); retaining the last known-good access policy",
+            path.name,
+            error,
+        )
+        return _degraded_state(key)
     fingerprint = hashlib.sha256(raw).hexdigest()
-    cached = _CACHE.get(str(path))
     if cached is not None and cached[1] == fingerprint:
-        if cached[0] != signature:
-            _CACHE[str(path)] = (signature, fingerprint, cached[2])
-        return fingerprint, cached[2]
+        _CACHE[key] = (signature, fingerprint, cached[2])
+        return fingerprint, cached[2], False
     try:
         data = yaml.safe_load(raw.decode("utf-8")) or {}
         if not isinstance(data, dict):
             data = {}
     except (UnicodeError, yaml.YAMLError) as error:
-        log.warning("could not read %s (%s); treating as no access policy", path.name, error)
+        log.warning("could not parse %s (%s); treating as no access policy", path.name, error)
         data = {}
     cfg = {
         "readonly": [str(x) for x in (data.get("readonly") or [])],
         "excluded": [str(x) for x in (data.get("excluded") or [])],
     }
-    _CACHE[str(path)] = (signature, fingerprint, cfg)
-    return fingerprint, cfg
+    _CACHE[key] = (signature, fingerprint, cfg)
+    return fingerprint, cfg, False
 
 
 def _kb_relative(rel_path: str) -> str:
@@ -197,10 +248,15 @@ def _matches(prefixes: list[str], kb_rel: str) -> bool:
 def access_tier(vault_root: Path, rel_path: str) -> str:
     """Return the tier governing `rel_path` (vault-relative, either prefix form).
 
-    Resolution order: excluded → readonly (config) → append-only
-    (Sources/Evidence) → read-write.
+    Resolution order: fail-closed → excluded → readonly (config) →
+    append-only (Sources/Evidence) → read-write.
     """
-    cfg = _load_config(vault_root)
+    _fingerprint, cfg, fail_closed = _policy_state(vault_root)
+    if fail_closed:
+        # The policy file exists but has never been read successfully in this
+        # process. Falling back to the built-in defaults here would publish
+        # every `excluded` tree, so refuse the whole vault until a read lands.
+        return TIER_EXCLUDED
     kb_rel = _kb_relative(rel_path)
     if _matches(cfg["excluded"], kb_rel):
         return TIER_EXCLUDED

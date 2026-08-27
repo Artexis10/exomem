@@ -734,13 +734,29 @@ class FileWatcher:
         epistemic_graph.recover_suspended_graph(self._vault_root)
 
     def _validate_existing_graph_on_seed(self) -> bool:
-        """Rebuild an existing graph after startup's exact disk baselines.
+        """Validate an existing graph after startup's exact disk baselines.
 
         A process can die before watchdog delivers an edit or while the event is
         still debouncing, before any in-memory epoch can persist a read barrier.
-        Filesystem metadata can also collide across such an edit. Rebuilding in
-        the watcher's background startup pass is the only complete proof of
-        source bytes and resolver topology across that crash boundary.
+        Filesystem metadata can also collide across such an edit, so the graph
+        does need a proof of source bytes and resolver topology across that
+        crash boundary — but a whole-vault REBUILD is not that proof, it is the
+        repair. Paying the repair unconditionally cost 12-30 minutes of
+        suspended reads on every restart of a 3.3k-file vault, turning every
+        restart into an outage.
+
+        Validation is therefore bounded and layered: an O(1) durable check
+        first, then a non-suspending source-bytes proof. The second step is
+        `available()`, which for a cold reader re-proves the sidecar against
+        canonical source bytes and resolver topology — O(corpus) hashing, but
+        it neither suspends reads nor rebuilds. Reads are suspended and the
+        graph rebuilt only when one of those proofs fails, which is the
+        genuine-incoherence case.
+
+        The O(1) check is a conservative negative pre-filter: when durable
+        state already proves a rebuild is needed, it short-circuits ahead of
+        the source-bytes proof so the expensive hashing is not paid before a
+        rebuild that was already certain.
         """
         from . import epistemic_graph, graph_sync
         from . import find as find_module
@@ -751,6 +767,9 @@ class FileWatcher:
         graph = epistemic_graph.EpistemicGraphIndex(self._vault_root)
         try:
             if not epistemic_graph.graph_enabled():
+                return True
+            if graph.durable_checkpoint_is_coherent() and graph.available():
+                log.info("file watcher: startup graph validation admitted a coherent graph")
                 return True
             graph.suspend_reads()
             find_module.evict_resolver_caches(self._vault_root)
