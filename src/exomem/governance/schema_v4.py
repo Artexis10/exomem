@@ -1339,6 +1339,89 @@ def load_active_policy(
     )
 
 
+def _projection_namespace_id(value: object) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in _HEX_DIGITS for character in value)
+    ):
+        raise SchemaV4Error("projection namespace pins cannot be verified")
+    return value
+
+
+def projection_namespace_ids(connection: sqlite3.Connection) -> frozenset[str]:
+    """Return every registered immutable namespace in one caller-held snapshot."""
+
+    try:
+        if int(connection.execute("PRAGMA user_version").fetchone()[0]) != 4:
+            raise SchemaV4Error("projection namespace inventory requires schema v4")
+        return frozenset(
+            _projection_namespace_id(row[0])
+            for row in connection.execute(
+                "SELECT namespace_id FROM governance_projection_namespaces"
+            )
+        )
+    except SchemaV4Error:
+        raise
+    except (IndexError, sqlite3.Error, TypeError) as error:
+        raise SchemaV4Error(
+            "projection namespace inventory cannot be verified"
+        ) from error
+
+
+def projection_namespace_pins(connection: sqlite3.Connection) -> frozenset[str]:
+    """Return active and recovery-bound namespaces in one caller-held snapshot."""
+
+    try:
+        if int(connection.execute("PRAGMA user_version").fetchone()[0]) != 4:
+            raise SchemaV4Error("projection namespace pins require schema v4")
+        active_rows = connection.execute(
+            "SELECT n.namespace_id FROM active_governance_tuple a "
+            "JOIN governance_projection_namespaces n "
+            "ON n.policy_fingerprint=a.policy_fingerprint "
+            "AND n.projector_schema_version=a.projector_schema_version "
+            "AND n.catalog_generation=a.catalog_generation "
+            "WHERE a.singleton=1"
+        ).fetchall()
+        if len(active_rows) != 1:
+            raise SchemaV4Error("projection namespace pins cannot be verified")
+        pins = {_projection_namespace_id(active_rows[0][0])}
+
+        for (proposal_json,) in connection.execute(
+            "SELECT proposal_json FROM governance_proposals WHERE status='pending'"
+        ):
+            try:
+                payload = json.loads(proposal_json)
+                binding = payload["authority_binding"]
+                reviewed = binding["reviewed_active_tuple"]
+                target = binding["target"]["projection_namespace"]
+                pins.add(_projection_namespace_id(reviewed["projection_namespace_id"]))
+                pins.add(_projection_namespace_id(target["namespace_id"]))
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+                raise SchemaV4Error(
+                    "projection namespace pins cannot be verified"
+                ) from error
+
+        for (value_json,) in connection.execute(
+            "SELECT c.value_json FROM governance_operation_components c "
+            "JOIN governance_operation_journals j ON j.event_id=c.event_id "
+            "WHERE j.phase IN ('allocating','pending') "
+            "AND c.component_kind='catalog'"
+        ):
+            try:
+                value = json.loads(value_json)
+                pins.add(_projection_namespace_id(value["projection_namespace_id"]))
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+                raise SchemaV4Error(
+                    "projection namespace pins cannot be verified"
+                ) from error
+        return frozenset(pins)
+    except SchemaV4Error:
+        raise
+    except (IndexError, sqlite3.Error, TypeError) as error:
+        raise SchemaV4Error("projection namespace pins cannot be verified") from error
+
+
 def _publication_result(
     connection: sqlite3.Connection,
     active: VerifiedActiveGovernanceState,

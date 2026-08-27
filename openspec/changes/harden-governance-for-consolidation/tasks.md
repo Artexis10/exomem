@@ -497,7 +497,7 @@ made before both PRs and their combined verification are complete.
   identifiers, ambiguous refs, parser failures, and candidate-safety boundaries; assert
   identical success/error code, text, shape, count, and remediation when hidden versus
   absent.
-- [ ] 8.6 Add red namespace tests proving its key is exactly `(policy_fingerprint,
+- [x] 8.6 Add red namespace tests proving its key is exactly `(policy_fingerprint,
   projector_schema_version, catalog_generation)`, immutable content identity is a row
   key, and extractor/model versions are measurement subkeys. Cover initial warming,
   complete build before active-tuple activation, atomic next-catalog generation, policy/
