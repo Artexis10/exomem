@@ -20,6 +20,7 @@ POLICY_FINGERPRINT = COMPILED_POLICY.fingerprint
 COMPILED_POLICY_BYTES = policy.canonical_compiled_bytes(COMPILED_POLICY)
 DOWNMIGRATION_EVENT_ID = "d" * 64
 DOWNMIGRATION_PLAN_DIGEST = "e" * 64
+DOWNMIGRATION_TARGET_DIGEST = "f" * 64
 
 
 def _v3_connection() -> sqlite3.Connection:
@@ -109,6 +110,7 @@ def _downmigrate(
     catalog_digest: str | None = None,
     recovery_event_id: str = DOWNMIGRATION_EVENT_ID,
     recovery_plan_digest: str = DOWNMIGRATION_PLAN_DIGEST,
+    recovery_target_digest: str = DOWNMIGRATION_TARGET_DIGEST,
 ) -> schema_v4.DownmigrationResult:
     return schema_v4.downmigrate_v4_connection(
         connection,
@@ -127,6 +129,7 @@ def _downmigrate(
         ),
         recovery_event_id=recovery_event_id,
         recovery_plan_digest=recovery_plan_digest,
+        recovery_target_digest=recovery_target_digest,
         downmigrated_at=1_800_000_100,
     )
 
@@ -740,6 +743,7 @@ def test_v4_downmigration_restores_exact_v3_and_expires_session_authority() -> N
         "projector_schema_version": 1,
         "recovery_event_id": DOWNMIGRATION_EVENT_ID,
         "recovery_plan_digest": DOWNMIGRATION_PLAN_DIGEST,
+        "recovery_target_digest": DOWNMIGRATION_TARGET_DIGEST,
         "schema": "exomem.governance-downmigration-terminal/v1",
         "workspace_digest": schema_v4.source_documents_digest(POLICY_DOCUMENTS),
     }
@@ -790,7 +794,11 @@ def test_v4_downmigration_refuses_unproved_workspace_or_catalog_parity(
 
 @pytest.mark.parametrize(
     ("field", "value"),
-    (("recovery_event_id", "not-a-digest"), ("recovery_plan_digest", "not-a-digest")),
+    (
+        ("recovery_event_id", "not-a-digest"),
+        ("recovery_plan_digest", "not-a-digest"),
+        ("recovery_target_digest", "not-a-digest"),
+    ),
 )
 def test_v4_downmigration_refuses_malformed_recovery_identity_before_writes(
     field: str,
@@ -830,6 +838,56 @@ def test_v4_downmigration_refuses_recovery_event_collision_without_writes() -> N
         _downmigrate(connection, active)
 
     assert tuple(connection.iterdump()) == before
+
+
+def test_v4_downmigration_closes_its_exact_prepared_recovery_journal() -> None:
+    connection, active = _migrated_v4()
+    affected = '["activation-store-7","logical-vault-7"]'
+    connection.execute(
+        "INSERT INTO governance_operation_journals "
+        "(event_id, operation, causation_id, principal_id, phase, direction, "
+        "prior_digest, prepared_digest, final_digest, affected_ids, "
+        "required_child_intents, required_child_terminals, attempt_no, marker_required, "
+        "created_at, updated_at) VALUES (?, 'governance_schema_v4_downmigration', ?, "
+        "'offline-schema-coordinator', 'pending', 'narrowing', ?, ?, ?, ?, '[]', '[]', "
+        "1, 0, 1800000050, 1800000050)",
+        (
+            DOWNMIGRATION_EVENT_ID,
+            DOWNMIGRATION_EVENT_ID,
+            active.activation_state_digest,
+            DOWNMIGRATION_PLAN_DIGEST,
+            DOWNMIGRATION_TARGET_DIGEST,
+            affected,
+        ),
+    )
+    connection.execute(
+        "INSERT INTO governance_operation_components "
+        "(event_id, phase, ordinal, component_kind, component_key, value_json, "
+        "value_hash, status) VALUES (?, 'prepared', 0, 'schema-downmigration-plan', ?, "
+        "'{}', ?, 'complete')",
+        (
+            DOWNMIGRATION_EVENT_ID,
+            DOWNMIGRATION_EVENT_ID,
+            DOWNMIGRATION_PLAN_DIGEST,
+        ),
+    )
+    connection.commit()
+
+    result = _downmigrate(connection, active)
+
+    assert connection.execute(
+        "SELECT phase, final_digest, updated_at FROM governance_operation_journals "
+        "WHERE event_id=?",
+        (DOWNMIGRATION_EVENT_ID,),
+    ).fetchone() == ("closed", result.recovery_terminal_digest, 1_800_000_100.0)
+    assert connection.execute(
+        "SELECT phase, component_kind, value_hash FROM governance_operation_components "
+        "WHERE event_id=? ORDER BY phase",
+        (DOWNMIGRATION_EVENT_ID,),
+    ).fetchall() == [
+        ("final", "schema-downmigration-terminal", result.recovery_terminal_digest),
+        ("prepared", "schema-downmigration-plan", DOWNMIGRATION_PLAN_DIGEST),
+    ]
 
 
 def test_v4_downmigration_refuses_open_recovery_journal_without_writes() -> None:
@@ -905,6 +963,7 @@ def test_v4_downmigration_refuses_non_v4_source_before_parsing_proofs() -> None:
             verified_catalog_digest="not-a-digest",
             recovery_event_id="not-an-event-id",
             recovery_plan_digest="not-a-plan-digest",
+            recovery_target_digest="not-a-target-digest",
             downmigrated_at=0,
         )
 

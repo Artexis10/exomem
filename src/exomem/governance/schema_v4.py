@@ -1301,6 +1301,7 @@ def _downmigration_terminal(
     *,
     event_id: str,
     plan_digest: str,
+    target_digest: str,
     expected: VerifiedActiveGovernanceState,
     workspace_digest: str,
     catalog_digest: str,
@@ -1311,6 +1312,7 @@ def _downmigration_terminal(
         "schema": "exomem.governance-downmigration-terminal/v1",
         "recovery_event_id": event_id,
         "recovery_plan_digest": plan_digest,
+        "recovery_target_digest": target_digest,
         "logical_vault_id": expected.logical_vault_id,
         "activation_store_id": expected.activation_store_id,
         "activation_epoch": expected.activation_epoch,
@@ -1353,6 +1355,7 @@ def downmigrate_v4_connection(
     verified_catalog_digest: str,
     recovery_event_id: str,
     recovery_plan_digest: str,
+    recovery_target_digest: str,
     downmigrated_at: int,
 ) -> DownmigrationResult:
     """Atomically return a fully verified, quiesced v4 store to exact schema v3.
@@ -1388,6 +1391,7 @@ def downmigrate_v4_connection(
     )
     event_id = _digest(recovery_event_id, "recovery_event_id")
     plan_digest = _digest(recovery_plan_digest, "recovery_plan_digest")
+    target_digest = _digest(recovery_target_digest, "recovery_target_digest")
     completed_at = _integer(downmigrated_at, "downmigrated_at")
     if not hmac.compare_digest(source_digest, workspace_digest):
         raise SchemaV4Error("downmigration workspace parity does not verify")
@@ -1399,15 +1403,63 @@ def downmigrate_v4_connection(
         _require_downmigration_schema(connection)
         pending = connection.execute(
             "SELECT event_id FROM governance_operation_journals "
-            "WHERE phase IN ('allocating','pending') ORDER BY event_id LIMIT 1"
+            "WHERE phase IN ('allocating','pending') AND event_id<>? "
+            "ORDER BY event_id LIMIT 1",
+            (event_id,),
         ).fetchone()
         if pending is not None:
             raise SchemaV4Error("downmigration cannot discard an open recovery journal")
-        if connection.execute(
-            "SELECT 1 FROM governance_operation_journals WHERE event_id=?",
+        recovery = connection.execute(
+            "SELECT operation, causation_id, authorization_session, principal_id, phase, "
+            "direction, prior_digest, prepared_digest, final_digest, affected_ids, "
+            "required_child_intents, required_child_terminals, proposal_id, attempt_no, "
+            "marker_required, blocked_reason FROM governance_operation_journals "
+            "WHERE event_id=?",
             (event_id,),
-        ).fetchone() is not None:
-            raise SchemaV4Error("downmigration recovery event already exists")
+        ).fetchone()
+        affected_ids = json.dumps(
+            sorted((expected.activation_store_id, expected.logical_vault_id)),
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        )
+        prepared_recovery = recovery is not None
+        if prepared_recovery:
+            if recovery != (
+                "governance_schema_v4_downmigration",
+                event_id,
+                None,
+                "offline-schema-coordinator",
+                "pending",
+                "narrowing",
+                expected.activation_state_digest,
+                plan_digest,
+                target_digest,
+                affected_ids,
+                "[]",
+                "[]",
+                None,
+                1,
+                0,
+                None,
+            ):
+                raise SchemaV4Error("downmigration recovery event already exists")
+            component = connection.execute(
+                "SELECT phase, ordinal, component_kind, component_key, value_hash, status "
+                "FROM governance_operation_components WHERE event_id=?",
+                (event_id,),
+            ).fetchall()
+            if component != [
+                (
+                    "prepared",
+                    0,
+                    "schema-downmigration-plan",
+                    event_id,
+                    plan_digest,
+                    "complete",
+                )
+            ]:
+                raise SchemaV4Error("downmigration recovery plan is unavailable")
         snapshot = load_active_policy(
             connection,
             expected_logical_vault_id=expected.logical_vault_id,
@@ -1428,38 +1480,49 @@ def downmigrate_v4_connection(
         terminal_json, terminal_digest = _downmigration_terminal(
             event_id=event_id,
             plan_digest=plan_digest,
+            target_digest=target_digest,
             expected=expected,
             workspace_digest=workspace_digest,
             catalog_digest=rebuild_digest,
             downmigrated_at=completed_at,
             closed=closed,
         )
-        affected_ids = json.dumps(
-            sorted((expected.activation_store_id, expected.logical_vault_id)),
-            ensure_ascii=False,
-            allow_nan=False,
-            separators=(",", ":"),
-        )
-        connection.execute(
-            "INSERT INTO governance_operation_journals "
-            "(event_id, operation, causation_id, authorization_session, principal_id, "
-            "phase, direction, prior_digest, prepared_digest, final_digest, affected_ids, "
-            "required_child_intents, required_child_terminals, proposal_id, attempt_no, "
-            "marker_required, created_at, updated_at, blocked_reason) "
-            "VALUES (?, 'governance_schema_v4_downmigration', ?, NULL, "
-            "'offline-schema-coordinator', 'closed', 'narrowing', ?, ?, ?, ?, '[]', "
-            "'[]', NULL, 1, 0, ?, ?, NULL)",
-            (
-                event_id,
-                event_id,
-                expected.activation_state_digest,
-                plan_digest,
-                terminal_digest,
-                affected_ids,
-                completed_at,
-                completed_at,
-            ),
-        )
+        if prepared_recovery:
+            updated = connection.execute(
+                "UPDATE governance_operation_journals SET phase='closed', final_digest=?, "
+                "updated_at=? WHERE event_id=? AND phase='pending' AND prepared_digest=? "
+                "AND final_digest=?",
+                (
+                    terminal_digest,
+                    completed_at,
+                    event_id,
+                    plan_digest,
+                    target_digest,
+                ),
+            )
+            if updated.rowcount != 1:
+                raise SchemaV4Error("downmigration recovery plan changed")
+        else:
+            connection.execute(
+                "INSERT INTO governance_operation_journals "
+                "(event_id, operation, causation_id, authorization_session, principal_id, "
+                "phase, direction, prior_digest, prepared_digest, final_digest, affected_ids, "
+                "required_child_intents, required_child_terminals, proposal_id, attempt_no, "
+                "marker_required, created_at, updated_at, blocked_reason) "
+                "VALUES (?, 'governance_schema_v4_downmigration', ?, NULL, "
+                "'offline-schema-coordinator', 'closed', 'narrowing', ?, ?, ?, ?, '[]', "
+                "'[]', NULL, 1, 0, ?, ?, NULL)",
+                (
+                    event_id,
+                    event_id,
+                    expected.activation_state_digest,
+                    plan_digest,
+                    terminal_digest,
+                    affected_ids,
+                    completed_at,
+                    completed_at,
+                ),
+            )
         connection.execute(
             "INSERT INTO governance_operation_components "
             "(event_id, phase, ordinal, component_kind, component_key, value_json, "
