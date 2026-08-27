@@ -8,6 +8,7 @@ gpu_mem) are exercised with a fake torch module. Proves the concurrency-safety c
 from __future__ import annotations
 
 import sys
+import threading
 import time
 import types
 
@@ -277,10 +278,21 @@ def test_default_cache_slots_reap_only_when_cpu_caches_are_evictable(
 
 def test_reaper_start_fires_then_stops() -> None:
     slot, un = _slot(inflight=0, last=0.0)  # always stale; is_loaded flips False after unload
-    model_reaper.start(threshold=0.0, tick=0.01, slots=[slot])
-    time.sleep(0.08)
+    fired = threading.Event()
+    original_unload = slot.unload
+
+    def unload() -> bool:
+        result = original_unload()
+        fired.set()
+        return result
+
+    slot.unload = unload
+
+    thread = model_reaper.start(threshold=0.0, tick=0.01, slots=[slot])
+    assert fired.wait(timeout=1.0)
     model_reaper.stop()
-    time.sleep(0.05)
+    thread.join(timeout=1.0)
+
     assert un == [1]  # unloaded exactly once (is_loaded False afterwards)
     assert not model_reaper.is_running()
 
