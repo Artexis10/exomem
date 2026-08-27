@@ -1316,6 +1316,167 @@ def stage_standalone_v3_custody(
     )
 
 
+def enroll_standalone_v3_migration(
+    vault_root: Path,
+    *,
+    target: VerifiedActiveGovernanceState,
+    now: int,
+) -> ActivationRegistryAcknowledgement:
+    """Bind staged exact-v3 custody to one irreversible initial v4 tuple.
+
+    The sidecar remains exact v3 throughout this operation.  Publishing the
+    enrolled control record first deliberately turns the crash interval into a
+    fail-closed state; an exact retry may then restore the precomputed serving
+    membership without rewriting identity or activation authority.  A later
+    offline coordinator owns the actual transactional v3-to-v4 migration.
+    """
+
+    from . import schema_v4
+
+    if (
+        not isinstance(target, schema_v4.VerifiedActiveGovernanceState)
+        or target.activation_epoch != 1
+    ):
+        raise AuthorizationCustodyUnavailable
+    _bounded_identifier(target.logical_vault_id)
+    _bounded_identifier(target.activation_store_id)
+    _sha256_hex(target.activation_state_digest)
+
+    root = Path(vault_root)
+    current_time = _bounded_time(now)
+    attachment_id = standalone_attachment_id(root)
+    keyring_path = _configured_external_path(KEYRING_FILE_ENV, root)
+    control_path = _configured_external_path(CONTROL_FILE_ENV, root)
+    membership_path = _configured_external_path(MEMBERSHIP_FILE_ENV, root)
+    replica_id = _bounded_identifier(os.environ.get(REPLICA_ID_ENV, ""))
+    if len({keyring_path, control_path, membership_path}) != 3:
+        raise AuthorizationCustodyUnavailable
+
+    acknowledgement = schema_v4.ActivationRegistryAcknowledgement(
+        activation_store_id=target.activation_store_id,
+        activation_epoch=target.activation_epoch,
+        activation_state_digest=target.activation_state_digest,
+    )
+
+    from .. import reserved_paths
+
+    with reserved_paths._identity_coordination_scope(root):
+        _require_exact_v3_authority(root)
+        keyring = parse_keyring(_load_file(keyring_path).data)
+        _verify_standalone_staging_keyring(
+            keyring,
+            attachment_id=attachment_id,
+        )
+        if (
+            target.logical_vault_id != keyring.logical_vault_id
+            or not keyring.active_key.not_before
+            <= current_time
+            < keyring.active_key.not_after
+        ):
+            raise AuthorizationCustodyUnavailable
+
+        control_loaded: _LoadedCustodyFile | None = None
+        membership_loaded: _LoadedCustodyFile | None = None
+        try:
+            control_loaded = _load_file(control_path)
+        except AuthorizationCustodyUnavailable:
+            if os.path.lexists(control_path):
+                raise
+        try:
+            membership_loaded = _load_file(membership_path)
+        except AuthorizationCustodyUnavailable:
+            if os.path.lexists(membership_path):
+                raise
+        if membership_loaded is not None and control_loaded is None:
+            raise AuthorizationCustodyUnavailable
+
+        if control_loaded is None:
+            provisional_control = AuthorizationControlRecord(
+                version=1,
+                keyring_id=keyring.keyring_id,
+                cell_id=keyring.cell_id,
+                logical_vault_id=keyring.logical_vault_id,
+                registry_attachment_id=attachment_id,
+                attachment_epoch=1,
+                governance_enrolled=True,
+                activation_store_id=target.activation_store_id,
+                activation_epoch=target.activation_epoch,
+                activation_state_digest=target.activation_state_digest,
+                serving_membership_epoch=1,
+                serving_membership_digest="0" * 64,
+                issued_at=current_time,
+                expires_at=keyring.active_key.not_after,
+                signing_key_id=keyring.active_key_id,
+            )
+            encoded_membership = _standalone_membership_bytes(
+                keyring=keyring,
+                control=provisional_control,
+                replica_id=replica_id,
+            )
+            control = replace(
+                provisional_control,
+                serving_membership_digest=(
+                    authorization_serving_membership.serving_membership_digest(
+                        encoded_membership
+                    )
+                ),
+            )
+            _require_exact_v3_authority(root)
+            _publish_private_file(
+                control_path,
+                _signed_control_bytes(
+                    control,
+                    signing_key=keyring.active_key.key,
+                ),
+            )
+        else:
+            control = parse_control_record(
+                control_loaded.data,
+                keyring=keyring,
+                now=current_time,
+            )
+            _verify_registered_attachment(root, control.registry_attachment_id)
+            if (
+                control.registry_attachment_id != attachment_id
+                or control.attachment_epoch != 1
+                or not control.governance_enrolled
+                or control.activation_store_id != target.activation_store_id
+                or control.activation_epoch != target.activation_epoch
+                or control.activation_state_digest != target.activation_state_digest
+                or control.serving_membership_epoch != 1
+            ):
+                raise AuthorizationCustodyUnavailable
+            encoded_membership = _standalone_membership_bytes(
+                keyring=keyring,
+                control=control,
+                replica_id=replica_id,
+            )
+            if (
+                authorization_serving_membership.serving_membership_digest(
+                    encoded_membership
+                )
+                != control.serving_membership_digest
+            ):
+                raise AuthorizationCustodyUnavailable
+
+        if membership_loaded is None:
+            _publish_private_file(membership_path, encoded_membership)
+        elif not hmac.compare_digest(membership_loaded.data, encoded_membership):
+            raise AuthorizationCustodyUnavailable
+        _require_exact_v3_authority(root)
+
+    verified = load_authorization_custody(root, now=current_time)
+    if (
+        not verified.control.governance_enrolled
+        or verified.control.activation_store_id != target.activation_store_id
+        or verified.control.activation_epoch != target.activation_epoch
+        or verified.control.activation_state_digest != target.activation_state_digest
+        or verified.serving_membership is None
+    ):
+        raise AuthorizationCustodyUnavailable
+    return acknowledgement
+
+
 def provision_standalone_custody(
     vault_root: Path,
     *,

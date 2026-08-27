@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import stat
+import time
 from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
@@ -10,7 +11,13 @@ from pathlib import Path
 import pytest
 
 from exomem import mutation_lock, writer_lease
-from exomem.governance import authorization_custody, policy, schema_v4, store
+from exomem.governance import (
+    authorization_custody,
+    authorization_session_lifecycle,
+    policy,
+    schema_v4,
+    store,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -73,6 +80,24 @@ def _exact_v3(vault: Path) -> Path:
     connection = store.open_connection(vault)
     connection.close()
     return store.sidecar_path(vault)
+
+
+def _staged_target(
+    staged: authorization_custody.StandaloneV3StagingResult,
+    *,
+    digest: str = "d" * 64,
+) -> schema_v4.VerifiedActiveGovernanceState:
+    return schema_v4.VerifiedActiveGovernanceState(
+        logical_vault_id=staged.logical_vault_id,
+        activation_store_id="activation-store-initial",
+        activation_epoch=1,
+        activation_state_digest=digest,
+        policy_generation_id="01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        policy_fingerprint="a" * 64,
+        projector_schema_version=1,
+        catalog_generation=1,
+        projection_namespace_id="projection-namespace-initial",
+    )
 
 
 def test_attachment_identity_is_stable_for_one_root_and_changes_for_a_copy(
@@ -615,3 +640,210 @@ def test_control_before_membership_interruption_retries_without_session_fail_ope
         vault,
         now=now + 1,
     ).serving_membership is not None
+
+
+def test_staged_v3_enrollment_is_irreversible_but_remains_fail_closed(
+    tmp_path: Path,
+) -> None:
+    vault = _vault(tmp_path)
+    now = int(time.time())
+    sidecar = _exact_v3(vault)
+    staged = authorization_custody.stage_standalone_v3_custody(vault, now=now)
+    target = _staged_target(staged)
+
+    acknowledgement = authorization_custody.enroll_standalone_v3_migration(
+        vault,
+        target=target,
+        now=now + 1,
+    )
+    custody = authorization_custody.load_authorization_custody(
+        vault,
+        now=now + 2,
+    )
+
+    assert acknowledgement == schema_v4.ActivationRegistryAcknowledgement(
+        activation_store_id=target.activation_store_id,
+        activation_epoch=1,
+        activation_state_digest=target.activation_state_digest,
+    )
+    assert custody.control.governance_enrolled is True
+    assert custody.control.activation_store_id == target.activation_store_id
+    assert custody.control.activation_epoch == target.activation_epoch
+    assert custody.control.activation_state_digest == target.activation_state_digest
+    assert custody.serving_membership is not None
+    assert custody.serving_membership.epoch == 1
+    assert custody.local_replica_id == "standalone"
+    assert sidecar.exists()
+    connection = sqlite3.connect(sidecar)
+    try:
+        assert connection.execute("PRAGMA user_version").fetchone() == (3,)
+    finally:
+        connection.close()
+    assert policy.load(vault).blocked
+    assert not authorization_session_lifecycle.serving_membership_readiness(
+        vault,
+        now=now + 2,
+    ).ready
+
+
+def test_staged_v3_enrollment_replay_recovers_missing_membership(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _vault(tmp_path)
+    now = int(time.time())
+    _exact_v3(vault)
+    staged = authorization_custody.stage_standalone_v3_custody(vault, now=now)
+    target = _staged_target(staged)
+    original = authorization_custody._publish_private_file
+    failed = False
+
+    def interrupt_membership(path: Path, data: bytes) -> bytes:
+        nonlocal failed
+        if path.name == "authorization-serving-membership.json" and not failed:
+            failed = True
+            raise authorization_custody.AuthorizationCustodyUnavailable
+        return original(path, data)
+
+    monkeypatch.setattr(
+        authorization_custody,
+        "_publish_private_file",
+        interrupt_membership,
+    )
+    with pytest.raises(authorization_custody.AuthorizationCustodyUnavailable):
+        authorization_custody.enroll_standalone_v3_migration(
+            vault,
+            target=target,
+            now=now + 1,
+        )
+
+    control_path = Path(os.environ[authorization_custody.CONTROL_FILE_ENV])
+    membership_path = Path(os.environ[authorization_custody.MEMBERSHIP_FILE_ENV])
+    control_before = control_path.read_bytes()
+    interrupted = authorization_custody.load_authorization_custody(
+        vault,
+        now=now + 2,
+    )
+    assert interrupted.control.governance_enrolled is True
+    assert interrupted.serving_membership is None
+    assert not membership_path.exists()
+    assert policy.load(vault).blocked
+
+    monkeypatch.setattr(authorization_custody, "_publish_private_file", original)
+    replay = authorization_custody.enroll_standalone_v3_migration(
+        vault,
+        target=target,
+        now=now + 3,
+    )
+
+    assert replay.activation_state_digest == target.activation_state_digest
+    assert control_path.read_bytes() == control_before
+    assert membership_path.exists()
+    assert authorization_custody.load_authorization_custody(
+        vault,
+        now=now + 4,
+    ).serving_membership is not None
+
+
+@pytest.mark.parametrize(
+    ("change", "target_change"),
+    [
+        (None, {"logical_vault_id": "wrong-vault"}),
+        (None, {"activation_epoch": 2}),
+        ("schema", {}),
+    ],
+)
+def test_staged_v3_enrollment_refuses_wrong_target_or_changed_schema(
+    tmp_path: Path,
+    change: str | None,
+    target_change: dict[str, object],
+) -> None:
+    vault = _vault(tmp_path)
+    now = 1_800_000_000
+    sidecar = _exact_v3(vault)
+    staged = authorization_custody.stage_standalone_v3_custody(vault, now=now)
+    target = replace(_staged_target(staged), **target_change)
+    if change == "schema":
+        connection = sqlite3.connect(sidecar)
+        try:
+            connection.execute("CREATE TABLE unexpected_enrollment_state(value TEXT)")
+            connection.commit()
+        finally:
+            connection.close()
+
+    with pytest.raises(authorization_custody.AuthorizationCustodyUnavailable):
+        authorization_custody.enroll_standalone_v3_migration(
+            vault,
+            target=target,
+            now=now + 1,
+        )
+
+    assert not Path(
+        os.environ[authorization_custody.CONTROL_FILE_ENV]
+    ).exists()
+    assert not Path(
+        os.environ[authorization_custody.MEMBERSHIP_FILE_ENV]
+    ).exists()
+
+
+def test_staged_v3_enrollment_refuses_copied_attachment_and_target_rewrite(
+    tmp_path: Path,
+) -> None:
+    vault = _vault(tmp_path)
+    copied = _vault(tmp_path, "copied-vault")
+    now = 1_800_000_000
+    _exact_v3(vault)
+    _exact_v3(copied)
+    staged = authorization_custody.stage_standalone_v3_custody(vault, now=now)
+    target = _staged_target(staged)
+
+    with pytest.raises(authorization_custody.AuthorizationCustodyUnavailable):
+        authorization_custody.enroll_standalone_v3_migration(
+            copied,
+            target=target,
+            now=now + 1,
+        )
+
+    authorization_custody.enroll_standalone_v3_migration(
+        vault,
+        target=target,
+        now=now + 1,
+    )
+    control_path = Path(os.environ[authorization_custody.CONTROL_FILE_ENV])
+    membership_path = Path(os.environ[authorization_custody.MEMBERSHIP_FILE_ENV])
+    control_before = control_path.read_bytes()
+    membership_before = membership_path.read_bytes()
+
+    with pytest.raises(authorization_custody.AuthorizationCustodyUnavailable):
+        authorization_custody.enroll_standalone_v3_migration(
+            vault,
+            target=_staged_target(staged, digest="e" * 64),
+            now=now + 2,
+        )
+
+    assert control_path.read_bytes() == control_before
+    assert membership_path.read_bytes() == membership_before
+
+
+def test_staged_v3_enrollment_refuses_corrupt_existing_membership(
+    tmp_path: Path,
+) -> None:
+    vault = _vault(tmp_path)
+    now = 1_800_000_000
+    _exact_v3(vault)
+    staged = authorization_custody.stage_standalone_v3_custody(vault, now=now)
+    target = _staged_target(staged)
+    authorization_custody.enroll_standalone_v3_migration(
+        vault,
+        target=target,
+        now=now + 1,
+    )
+    membership_path = Path(os.environ[authorization_custody.MEMBERSHIP_FILE_ENV])
+    membership_path.write_bytes(b"{}")
+
+    with pytest.raises(authorization_custody.AuthorizationCustodyUnavailable):
+        authorization_custody.enroll_standalone_v3_migration(
+            vault,
+            target=target,
+            now=now + 2,
+        )
