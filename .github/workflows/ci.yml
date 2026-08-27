@@ -558,6 +558,19 @@ jobs:
           enable-cache: true
       - name: Validate public build inputs before packaging
         run: python scripts/validate-public-artifacts.py --repository
+      - name: Prove the pinned pre-v4 binary is externally fenced
+        env:
+          EXOMEM_DISABLE_EMBEDDINGS: "1"
+          EXOMEM_DISABLE_MEDIA_EXTRACTION: "1"
+          EXOMEM_DISABLE_CLIP: "1"
+          EXOMEM_DISABLE_RANKING: "1"
+          EXOMEM_OLD_V3_PYTHON: ${{ runner.temp }}/exomem-old-v3/bin/python
+        run: |
+          uv venv "$RUNNER_TEMP/exomem-old-v3" --python 3.13
+          uv pip install --python "$EXOMEM_OLD_V3_PYTHON" "exomem==0.57.0"
+          uv run --frozen --python 3.13 python -m pytest -q \
+            tests/test_governance_old_v3_binary_fence.py \
+            --session-timeout=120
       - name: Build package
         run: uv build
       - name: Build generic standalone skill archives

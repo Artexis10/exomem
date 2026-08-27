@@ -32,6 +32,13 @@ class SQLiteLeaseStore:
                 "vault_id TEXT PRIMARY KEY, holder TEXT, expires_at REAL, "
                 "fencing_token INTEGER NOT NULL DEFAULT 0)"
             )
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS lease_schema_fences ("
+                "vault_id TEXT PRIMARY KEY, governance_enrolled INTEGER NOT NULL "
+                "CHECK(governance_enrolled=1), schema_version INTEGER NOT NULL "
+                "CHECK(schema_version IN (3,4)), generation INTEGER NOT NULL "
+                "CHECK(generation>0))"
+            )
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, timeout=10, isolation_level=None)
@@ -39,62 +46,112 @@ class SQLiteLeaseStore:
         return conn
 
     @staticmethod
-    def _record(row, *, granted: bool = False) -> dict:  # noqa: ANN001
-        return {
+    def _record(row, *, granted: bool = False, fence=None) -> dict:  # noqa: ANN001
+        record = {
             "holder": row[0] if row else None,
             "expires_at": row[1] if row and row[0] else None,
             "fencing_token": int(row[2]) if row else 0,
             "granted": granted,
         }
+        if fence is not None:
+            record.update(
+                required_schema_version=int(fence[0]),
+                schema_fence_generation=int(fence[1]),
+                governance_enrolled=True,
+            )
+        return record
 
-    def acquire(self, vault_id: str, replica_id: str, ttl_seconds: float) -> dict:
+    @staticmethod
+    def _schema_version(value: object) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or value not in {3, 4}:
+            raise ValueError("schema_version must be 3 or 4")
+        return value
+
+    @staticmethod
+    def _generation(value: object, *, minimum: int = 0) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+            raise ValueError("expected_generation is invalid")
+        return value
+
+    @staticmethod
+    def _fence_row(conn: sqlite3.Connection, vault_id: str):  # noqa: ANN205
+        return conn.execute(
+            "SELECT schema_version, generation FROM lease_schema_fences WHERE vault_id=?",
+            (vault_id,),
+        ).fetchone()
+
+    @staticmethod
+    def _client_schema(value: object | None) -> int:
+        # Released pre-v4 coordinators sent no schema field. Once a vault is
+        # enrolled, that exact legacy wire shape means schema 3; it must never
+        # be interpreted as "whatever the coordinator currently requires".
+        if value is None:
+            return 3
+        return SQLiteLeaseStore._schema_version(value)
+
+    def acquire(
+        self,
+        vault_id: str,
+        replica_id: str,
+        ttl_seconds: float,
+        *,
+        schema_version: object | None = None,
+    ) -> dict:
         now = self.clock()
         expires = now + ttl_seconds
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            fence = self._fence_row(conn, vault_id)
             row = conn.execute(
                 "SELECT holder, expires_at, fencing_token FROM leases WHERE vault_id = ?",
                 (vault_id,),
             ).fetchone()
+            if fence is not None and self._client_schema(schema_version) != int(fence[0]):
+                conn.execute("COMMIT")
+                return self._record(row, fence=fence)
             if row is None:
                 conn.execute(
                     "INSERT INTO leases(vault_id, holder, expires_at, fencing_token) VALUES (?, ?, ?, 1)",
                     (vault_id, replica_id, expires),
                 )
                 conn.execute("COMMIT")
-                return {
-                    "holder": replica_id,
-                    "expires_at": expires,
-                    "fencing_token": 1,
-                    "granted": True,
-                }
+                return self._record((replica_id, expires, 1), granted=True, fence=fence)
             holder, old_expiry, token = row
             active = holder is not None and old_expiry is not None and old_expiry > now
             if active and holder != replica_id:
                 conn.execute("COMMIT")
-                return self._record(row)
+                return self._record(row, fence=fence)
             new_token = token if active and holder == replica_id else token + 1
             conn.execute(
                 "UPDATE leases SET holder = ?, expires_at = ?, fencing_token = ? WHERE vault_id = ?",
                 (replica_id, expires, new_token, vault_id),
             )
             conn.execute("COMMIT")
-            return {
-                "holder": replica_id,
-                "expires_at": expires,
-                "fencing_token": new_token,
-                "granted": True,
-            }
+            return self._record(
+                (replica_id, expires, new_token), granted=True, fence=fence
+            )
 
-    def renew(self, vault_id: str, replica_id: str, fencing_token: int, ttl_seconds: float) -> dict:
+    def renew(
+        self,
+        vault_id: str,
+        replica_id: str,
+        fencing_token: int,
+        ttl_seconds: float,
+        *,
+        schema_version: object | None = None,
+    ) -> dict:
         now = self.clock()
         expires = now + ttl_seconds
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            fence = self._fence_row(conn, vault_id)
             row = conn.execute(
                 "SELECT holder, expires_at, fencing_token FROM leases WHERE vault_id = ?",
                 (vault_id,),
             ).fetchone()
+            if fence is not None and self._client_schema(schema_version) != int(fence[0]):
+                conn.execute("COMMIT")
+                return self._record(row, fence=fence)
             valid = bool(
                 row
                 and row[0] == replica_id
@@ -108,7 +165,7 @@ class SQLiteLeaseStore:
                 )
                 row = (replica_id, expires, fencing_token)
             conn.execute("COMMIT")
-            return self._record(row, granted=valid)
+            return self._record(row, granted=valid, fence=fence)
 
     def release(self, vault_id: str, replica_id: str, fencing_token: int) -> dict:
         with self._connect() as conn:
@@ -131,6 +188,7 @@ class SQLiteLeaseStore:
         now = self.clock()
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            fence = self._fence_row(conn, vault_id)
             row = conn.execute(
                 "SELECT holder, expires_at, fencing_token FROM leases WHERE vault_id = ?",
                 (vault_id,),
@@ -142,7 +200,102 @@ class SQLiteLeaseStore:
                 )
                 row = (None, None, row[2])
             conn.execute("COMMIT")
-            return self._record(row)
+            return self._record(row, fence=fence)
+
+    def schema_fence(self, vault_id: str) -> dict | None:
+        with self._connect() as conn:
+            row = self._fence_row(conn, vault_id)
+        if row is None:
+            return None
+        return {
+            "governance_enrolled": True,
+            "schema_version": int(row[0]),
+            "generation": int(row[1]),
+        }
+
+    def schema_admission(self, vault_id: str, *, schema_version: object) -> dict:
+        requested = self._schema_version(schema_version)
+        with self._connect() as conn:
+            row = self._fence_row(conn, vault_id)
+        if row is None:
+            return {
+                "admitted": False,
+                "governance_enrolled": False,
+                "required_schema_version": None,
+                "schema_fence_generation": None,
+            }
+        required, generation = int(row[0]), int(row[1])
+        return {
+            "admitted": requested == required,
+            "governance_enrolled": True,
+            "required_schema_version": required,
+            "schema_fence_generation": generation,
+        }
+
+    def transition_schema_fence(
+        self,
+        vault_id: str,
+        *,
+        expected_generation: object,
+        schema_version: object,
+    ) -> tuple[dict, bool]:
+        expected = self._generation(expected_generation)
+        target = self._schema_version(schema_version)
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = self._fence_row(conn, vault_id)
+            if current is None:
+                if expected != 0:
+                    conn.execute("COMMIT")
+                    return {}, False
+                generation = 1
+                conn.execute(
+                    "INSERT INTO lease_schema_fences"
+                    "(vault_id, governance_enrolled, schema_version, generation) "
+                    "VALUES (?, 1, ?, ?)",
+                    (vault_id, target, generation),
+                )
+            else:
+                current_schema, current_generation = int(current[0]), int(current[1])
+                # A lost acknowledgement replays the already-published target
+                # instead of advancing the generation a second time.
+                if current_schema == target and expected in {
+                    current_generation,
+                    current_generation - 1,
+                }:
+                    conn.execute("COMMIT")
+                    return {
+                        "governance_enrolled": True,
+                        "schema_version": current_schema,
+                        "generation": current_generation,
+                    }, True
+                if expected != current_generation:
+                    conn.execute("COMMIT")
+                    return {
+                        "governance_enrolled": True,
+                        "schema_version": current_schema,
+                        "generation": current_generation,
+                    }, False
+                generation = current_generation + 1
+                conn.execute(
+                    "UPDATE lease_schema_fences SET schema_version=?, generation=? "
+                    "WHERE vault_id=?",
+                    (target, generation, vault_id),
+                )
+            # The schema cut and writer cut are one coordinator transaction.
+            # Any holder from the predecessor generation is fenced before the
+            # new schema can admit a replacement.
+            conn.execute(
+                "UPDATE leases SET holder=NULL, expires_at=NULL, "
+                "fencing_token=fencing_token+1 WHERE vault_id=?",
+                (vault_id,),
+            )
+            conn.execute("COMMIT")
+        return {
+            "governance_enrolled": True,
+            "schema_version": target,
+            "generation": generation,
+        }, True
 
 
 class SQLiteStateStore:
@@ -267,7 +420,11 @@ class SQLiteStateStore:
 
 
 def create_app(
-    *, database: Path | None = None, bearer_token: str | None = None, clock=time.time
+    *,
+    database: Path | None = None,
+    bearer_token: str | None = None,
+    operator_token: str | None = None,
+    clock=time.time,
 ) -> Starlette:
     database = database or Path(
         os.environ.get("EXOMEM_LEASE_COORDINATOR_DB", "writer-leases.sqlite")
@@ -277,6 +434,17 @@ def create_app(
         if bearer_token is not None
         else (os.environ.get("EXOMEM_LEASE_COORDINATOR_TOKEN", "").strip() or None)
     )
+    operator_token = (
+        operator_token
+        if operator_token is not None
+        else (os.environ.get("EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN", "").strip() or None)
+    )
+    if (
+        bearer_token is not None
+        and operator_token is not None
+        and secrets.compare_digest(bearer_token, operator_token)
+    ):
+        raise ValueError("operator token must differ from the normal lease bearer")
     store = SQLiteLeaseStore(database, clock=clock)
     state_store = SQLiteStateStore(database, clock=clock)
 
@@ -286,6 +454,14 @@ def create_app(
         header = request.headers.get("authorization", "")
         return header.startswith("Bearer ") and secrets.compare_digest(
             header[7:].strip(), bearer_token
+        )
+
+    def operator_authorized(request: Request) -> bool:
+        if not operator_token:
+            return False
+        header = request.headers.get("authorization", "")
+        return header.startswith("Bearer ") and secrets.compare_digest(
+            header[7:].strip(), operator_token
         )
 
     async def lease(request: Request) -> JSONResponse:
@@ -299,14 +475,65 @@ def create_app(
             body = await request.json()
             replica_id = str(body["replica_id"])
             if operation == "acquire":
-                result = store.acquire(vault_id, replica_id, _ttl(body))
+                result = store.acquire(
+                    vault_id,
+                    replica_id,
+                    _ttl(body),
+                    schema_version=body.get("schema_version"),
+                )
             elif operation == "renew":
-                result = store.renew(vault_id, replica_id, int(body["fencing_token"]), _ttl(body))
+                result = store.renew(
+                    vault_id,
+                    replica_id,
+                    int(body["fencing_token"]),
+                    _ttl(body),
+                    schema_version=body.get("schema_version"),
+                )
             elif operation == "release":
                 result = store.release(vault_id, replica_id, int(body["fencing_token"]))
             else:
                 return JSONResponse({"error": "unknown operation"}, status_code=404)
         except (KeyError, TypeError, ValueError):
+            return JSONResponse({"error": "invalid request"}, status_code=400)
+        return JSONResponse(result)
+
+    async def schema_fence(request: Request) -> JSONResponse:
+        if not operator_authorized(request):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        vault_id = request.path_params["vault_id"]
+        if request.method == "GET":
+            result = store.schema_fence(vault_id)
+            if result is None:
+                return JSONResponse({"error": "not found"}, status_code=404)
+            return JSONResponse(result)
+        try:
+            body = await request.json()
+            result, accepted = store.transition_schema_fence(
+                vault_id,
+                expected_generation=body["expected_generation"],
+                schema_version=body["schema_version"],
+            )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return JSONResponse({"error": "invalid request"}, status_code=400)
+        if not accepted:
+            return JSONResponse(
+                {"error": "schema fence conflict", "current": result}, status_code=409
+            )
+        return JSONResponse(result)
+
+    async def schema_admission(request: Request) -> JSONResponse:
+        if not operator_authorized(request):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        try:
+            body = await request.json()
+            replica_id = body["replica_id"]
+            if not isinstance(replica_id, str) or not 1 <= len(replica_id) <= 512:
+                raise ValueError
+            result = store.schema_admission(
+                request.path_params["vault_id"],
+                schema_version=body["schema_version"],
+            )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
             return JSONResponse({"error": "invalid request"}, status_code=400)
         return JSONResponse(result)
 
@@ -364,6 +591,16 @@ def create_app(
         routes=[
             Route("/v1/vaults/{vault_id:str}/lease", lease, methods=["GET"]),
             Route("/v1/vaults/{vault_id:str}/lease/{operation:str}", lease, methods=["POST"]),
+            Route(
+                "/v1/vaults/{vault_id:str}/schema-fence",
+                schema_fence,
+                methods=["GET", "PUT"],
+            ),
+            Route(
+                "/v1/vaults/{vault_id:str}/schema-fence/admit",
+                schema_admission,
+                methods=["POST"],
+            ),
             Route("/v1/state/{namespace:str}/{operation:str}", state, methods=["POST"]),
         ]
     )

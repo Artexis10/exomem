@@ -35,6 +35,7 @@ import importlib.util
 import json
 import os
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 from .kbdir import kb_dirname, kb_prefix
@@ -1379,13 +1380,51 @@ def _lease_release_main(config, *, confirmed: bool, as_json: bool) -> int:  # no
     return 0
 
 
+def _lease_schema_admission_main(
+    config, *, schema_version: int, as_json: bool  # noqa: ANN001
+) -> int:
+    from . import writer_lease
+
+    operator_token = os.environ.get("EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN", "").strip()
+    if not operator_token:
+        _lease_print_error(
+            "schema admission requires EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN.",
+            as_json=as_json,
+        )
+        return 1
+    try:
+        admission = writer_lease.LeaseCoordinatorClient(
+            replace(config, token=operator_token)
+        ).schema_admission(schema_version)
+    except writer_lease.OpError as error:
+        _lease_print_error(f"{error.code}: {error.message}", as_json=as_json)
+        return 1
+    payload = admission.as_dict()
+    if as_json:
+        print(json.dumps(payload))
+    elif admission.admitted:
+        print(
+            f"schema {schema_version} is admitted by external fence generation "
+            f"{admission.schema_fence_generation}."
+        )
+    else:
+        required = admission.required_schema_version
+        print(
+            f"schema {schema_version} is refused; external fence requires "
+            f"{required if required is not None else 'an enrolled schema'}.",
+            file=sys.stderr,
+        )
+    return 0 if admission.admitted else 1
+
+
 def _lease_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="exomem lease",
         description=(
-            "Ops-only writer-lease inspection and manual release. Not an MCP or REST "
-            "product command; 'steal'/'force-acquire' are deliberately absent — release "
-            "plus preferred-writer reclaim already hands over within roughly one lease TTL."
+            "Ops-only writer-lease inspection, schema admission, and manual release. "
+            "Not an MCP or REST product command; 'steal'/'force-acquire' are deliberately "
+            "absent — release plus preferred-writer reclaim already hands over within "
+            "roughly one lease TTL."
         ),
     )
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -1403,6 +1442,19 @@ def _lease_main(argv: list[str]) -> int:
     )
     release_parser.add_argument("--json", action="store_true", help="emit stable JSON")
 
+    admission_parser = subcommands.add_parser(
+        "schema-admission",
+        help="fail unless a release schema may join the externally fenced cell",
+    )
+    admission_parser.add_argument(
+        "--schema-version",
+        type=int,
+        choices=(3, 4),
+        required=True,
+        help="schema contract declared by the release being admitted",
+    )
+    admission_parser.add_argument("--json", action="store_true", help="emit stable JSON")
+
     args = parser.parse_args(argv)
 
     from . import writer_lease
@@ -1417,6 +1469,12 @@ def _lease_main(argv: list[str]) -> int:
 
     if args.command == "status":
         return _lease_status_main(config, as_json=args.json)
+    if args.command == "schema-admission":
+        return _lease_schema_admission_main(
+            config,
+            schema_version=args.schema_version,
+            as_json=args.json,
+        )
     return _lease_release_main(config, confirmed=args.yes, as_json=args.json)
 
 

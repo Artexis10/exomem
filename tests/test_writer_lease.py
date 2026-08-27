@@ -30,10 +30,10 @@ from exomem.writer_lease import (
     LeaseConfig,
     LeaseManager,
     LeaseRecord,
+    SchemaAdmission,
     invoke_command,
     reset_managers_for_tests,
 )
-
 
 #: The wall-clock shape of every contention test in this file.
 #:
@@ -514,6 +514,7 @@ def _row(manager: LeaseManager, public_key: str) -> tuple[str, str, bytes | None
 
 def test_config_is_default_off_and_requires_identities() -> None:
     assert LeaseConfig.from_env({}).enabled is False
+    assert LeaseConfig.from_env({}).schema_version == 4
     with pytest.raises(ValueError, match="WRITER_LEASE_CONFIG"):
         LeaseConfig.from_env({"EXOMEM_WRITER_LEASE_URL": "https://lease.example"})
 
@@ -764,6 +765,188 @@ def test_coordinator_requests_use_cloudflare_compatible_user_agent(monkeypatch) 
     assert "Exomem-Coordinator" in seen["user_agent"]
 
 
+def test_coordinator_acquire_and_renew_attest_the_current_schema(monkeypatch) -> None:
+    from exomem.writer_lease import LeaseCoordinatorClient
+
+    bodies: list[dict] = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def read(self):
+            return b'{"holder":"desktop","expires_at":99,"fencing_token":7,"granted":true}'
+
+    def fake_urlopen(request, timeout):  # noqa: ANN001, ARG001
+        bodies.append(json.loads(request.data))
+        return Response()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    client = LeaseCoordinatorClient(
+        LeaseConfig(url="https://lease.example", vault_id="main", replica_id="desktop")
+    )
+
+    client.acquire()
+    client.renew(7)
+
+    assert bodies == [
+        {"replica_id": "desktop", "ttl_seconds": 30.0, "schema_version": 4},
+        {
+            "replica_id": "desktop",
+            "fencing_token": 7,
+            "ttl_seconds": 30.0,
+            "schema_version": 4,
+        },
+    ]
+
+
+def test_coordinator_schema_admission_uses_the_external_gate(monkeypatch) -> None:
+    from exomem.writer_lease import LeaseCoordinatorClient
+
+    seen: dict[str, object] = {}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def read(self):
+            return (
+                b'{"admitted":false,"governance_enrolled":true,'
+                b'"required_schema_version":4,"schema_fence_generation":8}'
+            )
+
+    def fake_urlopen(request, timeout):  # noqa: ANN001, ARG001
+        seen["url"] = request.full_url
+        seen["body"] = json.loads(request.data)
+        return Response()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    client = LeaseCoordinatorClient(
+        LeaseConfig(url="https://lease.example", vault_id="main", replica_id="old-v3")
+    )
+
+    result = client.schema_admission(3)
+
+    assert seen == {
+        "url": "https://lease.example/v1/vaults/main/schema-fence/admit",
+        "body": {"replica_id": "old-v3", "schema_version": 3},
+    }
+    assert result.admitted is False
+    assert result.required_schema_version == 4
+    assert result.schema_fence_generation == 8
+
+
+@pytest.mark.parametrize(
+    ("response", "operation"),
+    [
+        (
+            b'{"holder":"desktop","expires_at":99,"fencing_token":7,'
+            b'"granted":"true"}',
+            "acquire",
+        ),
+        (
+            b'{"admitted":true,"governance_enrolled":true,'
+            b'"required_schema_version":4,"schema_fence_generation":8}',
+            "schema_admission",
+        ),
+    ],
+)
+def test_coordinator_schema_responses_fail_closed_as_unavailable(
+    monkeypatch,
+    response: bytes,
+    operation: str,
+) -> None:
+    from exomem.writer_lease import LeaseCoordinatorClient
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def read(self):
+            return response
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda request, timeout: Response())
+    client = LeaseCoordinatorClient(
+        LeaseConfig(url="https://lease.example", vault_id="main", replica_id="desktop")
+    )
+
+    with pytest.raises(OpError) as raised:
+        if operation == "acquire":
+            client.acquire()
+        else:
+            client.schema_admission(3)
+
+    assert raised.value.code == "WRITER_COORDINATOR_UNAVAILABLE"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "admitted": False,
+            "governance_enrolled": True,
+            "required_schema_version": None,
+            "schema_fence_generation": None,
+        },
+        {
+            "admitted": False,
+            "governance_enrolled": False,
+            "required_schema_version": 4,
+            "schema_fence_generation": 8,
+        },
+        {
+            "admitted": True,
+            "governance_enrolled": True,
+            "required_schema_version": 4,
+            "schema_fence_generation": 8,
+            "unexpected": "field",
+        },
+    ],
+)
+def test_schema_admission_rejects_inconsistent_or_open_responses(
+    payload: dict[str, object],
+) -> None:
+    with pytest.raises(ValueError, match="schema admission"):
+        SchemaAdmission.from_json(payload)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "holder": None,
+            "expires_at": None,
+            "fencing_token": 9,
+            "granted": False,
+            "governance_enrolled": True,
+        },
+        {
+            "holder": None,
+            "expires_at": None,
+            "fencing_token": 9,
+            "granted": False,
+            "governance_enrolled": False,
+            "required_schema_version": 4,
+            "schema_fence_generation": 8,
+        },
+    ],
+)
+def test_lease_record_rejects_inconsistent_schema_fence_metadata(
+    payload: dict[str, object],
+) -> None:
+    with pytest.raises(ValueError, match="schema fence metadata"):
+        LeaseRecord.from_json(payload)
+
+
 def _coordinator_answering(monkeypatch, error: Exception):
     """Point the lease client at a URL that answers with `error`."""
 
@@ -940,6 +1123,40 @@ class StoreClient:
     def release(self, fencing_token: int) -> LeaseRecord:
         return LeaseRecord.from_json(self.store.release("main", self.replica_id, fencing_token))
 
+
+def test_manager_names_schema_fence_refusal_without_acquiring_writer(
+    tmp_path: Path,
+) -> None:
+    class RefusingClient:
+        def acquire(self) -> LeaseRecord:
+            return LeaseRecord(
+                None,
+                None,
+                9,
+                False,
+                required_schema_version=3,
+                schema_fence_generation=7,
+                governance_enrolled=True,
+            )
+
+    manager = LeaseManager(
+        LeaseConfig(
+            url="https://lease.example",
+            vault_id="main",
+            replica_id="current-v4",
+            state_dir=tmp_path,
+        ),
+        client=RefusingClient(),  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(OpError) as raised:
+        manager.ensure_writer()
+
+    assert raised.value.code == "WRITER_SCHEMA_FENCE_MISMATCH"
+    assert raised.value.details == {
+        "required_schema_version": 3,
+        "schema_fence_generation": 7,
+    }
 
 class BlockingRejectedRenewalClient(FakeClient):
     def __init__(self):
