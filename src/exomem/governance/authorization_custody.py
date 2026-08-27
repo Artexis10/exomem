@@ -71,15 +71,56 @@ _CONTROL_FIELDS = frozenset(
 )
 _CONTROL_MAC_DOMAIN = b"exomem.authorization-session.control/v1"
 _ATTACHMENT_DOMAIN = b"exomem.authorization-session.attachment/v1"
+_DETACH_ACK_MAC_DOMAIN = b"exomem.authorization-session.detach-ack/v1"
+_HOST_REGISTRY_MAC_DOMAIN = b"exomem.authorization-session.host-registry/v1"
 _STANDALONE_STAGING_DOMAIN = b"exomem.authorization-session.standalone-staging/v1"
 _SHA256_HEX = re.compile(r"[0-9a-f]{64}\Z")
 _STANDALONE_ATTACHMENT = re.compile(r"attachment-v1-[0-9a-f]{64}\Z")
 _DEFAULT_KEY_TTL_SECONDS = 366 * 24 * 60 * 60
+_HOST_REGISTRY_CLOCK_SKEW_SECONDS = 30
+_HOST_CONTROL_KEY_BYTES = 32
+_HOST_CONTROL_KEY_NAME = "authorization-attachment-host-key-v1"
 _GOVERNANCE_AUTHORITY_NAMES = (
     ".governance.sqlite",
     ".governance.sqlite-wal",
     ".governance.sqlite-shm",
     ".governance.sqlite-journal",
+)
+_DETACH_ACK_FIELDS = frozenset(
+    {
+        "version",
+        "cell_id",
+        "logical_vault_id",
+        "keyring_id",
+        "source_registry_attachment_id",
+        "target_registry_attachment_id",
+        "source_attachment_epoch",
+        "target_attachment_epoch",
+        "source_membership_epoch",
+        "source_membership_digest",
+        "source_control_digest",
+        "issued_at",
+        "expires_at",
+        "signing_key_id",
+        "mac",
+    }
+)
+_HOST_REGISTRY_FIELDS = frozenset(
+    {
+        "version",
+        "cell_id",
+        "logical_vault_id",
+        "keyring_id",
+        "registry_attachment_id",
+        "attachment_epoch",
+        "serving_membership_epoch",
+        "serving_membership_digest",
+        "state",
+        "no_in_flight",
+        "updated_at",
+        "signing_key_id",
+        "mac",
+    }
 )
 
 
@@ -181,6 +222,40 @@ class StandaloneV3StagingResult:
     registry_attachment_id: str
     attachment_epoch: int
     staged_at: int
+
+
+@dataclass(frozen=True, slots=True)
+class _StandaloneDetachAcknowledgement:
+    version: int
+    cell_id: str
+    logical_vault_id: str
+    keyring_id: str
+    source_registry_attachment_id: str
+    target_registry_attachment_id: str
+    source_attachment_epoch: int
+    target_attachment_epoch: int
+    source_membership_epoch: int
+    source_membership_digest: str
+    source_control_digest: str
+    issued_at: int
+    expires_at: int
+    signing_key_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class _StandaloneHostRegistryRecord:
+    version: int
+    cell_id: str
+    logical_vault_id: str
+    keyring_id: str
+    registry_attachment_id: str
+    attachment_epoch: int
+    serving_membership_epoch: int
+    serving_membership_digest: str
+    state: str
+    no_in_flight: bool
+    updated_at: int
+    signing_key_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -767,7 +842,7 @@ def load_authorization_custody(
             now=now,
         )
     )
-    return AuthorizationCustody(
+    custody = AuthorizationCustody(
         keyring_path=external.keyring_path,
         control_path=external.control_path,
         keyring=keyring,
@@ -776,6 +851,12 @@ def load_authorization_custody(
         local_replica_id=local_replica_id,
         membership_path=membership_path,
     )
+    require_current_standalone_registry(
+        custody,
+        now=now,
+        require_serving=False,
+    )
+    return custody
 
 
 def _load_optional_serving_membership(
@@ -870,6 +951,679 @@ def _signed_control_bytes(
     if not 1 <= len(encoded) <= MAX_CUSTODY_FILE_BYTES:
         raise AuthorizationCustodyUnavailable
     return encoded
+
+
+def _detach_ack_value(
+    acknowledgement: _StandaloneDetachAcknowledgement,
+) -> dict[str, object]:
+    return {
+        "version": acknowledgement.version,
+        "cell_id": acknowledgement.cell_id,
+        "logical_vault_id": acknowledgement.logical_vault_id,
+        "keyring_id": acknowledgement.keyring_id,
+        "source_registry_attachment_id": (
+            acknowledgement.source_registry_attachment_id
+        ),
+        "target_registry_attachment_id": (
+            acknowledgement.target_registry_attachment_id
+        ),
+        "source_attachment_epoch": acknowledgement.source_attachment_epoch,
+        "target_attachment_epoch": acknowledgement.target_attachment_epoch,
+        "source_membership_epoch": acknowledgement.source_membership_epoch,
+        "source_membership_digest": acknowledgement.source_membership_digest,
+        "source_control_digest": acknowledgement.source_control_digest,
+        "issued_at": acknowledgement.issued_at,
+        "expires_at": acknowledgement.expires_at,
+        "signing_key_id": acknowledgement.signing_key_id,
+    }
+
+
+def _detach_ack_mac_input(value: dict[str, object]) -> bytes:
+    return _framed(
+        _DETACH_ACK_MAC_DOMAIN,
+        tuple(
+            str(value[name]).encode("utf-8")
+            for name in (
+                "version",
+                "cell_id",
+                "logical_vault_id",
+                "keyring_id",
+                "source_registry_attachment_id",
+                "target_registry_attachment_id",
+                "source_attachment_epoch",
+                "target_attachment_epoch",
+                "source_membership_epoch",
+                "source_membership_digest",
+                "source_control_digest",
+                "issued_at",
+                "expires_at",
+                "signing_key_id",
+            )
+        ),
+    )
+
+
+def _signed_detach_ack_bytes(
+    acknowledgement: _StandaloneDetachAcknowledgement,
+    *,
+    signing_key: bytes,
+) -> bytes:
+    value = _detach_ack_value(acknowledgement)
+    value["mac"] = (
+        base64.urlsafe_b64encode(
+            hmac.new(
+                signing_key,
+                _detach_ack_mac_input(value),
+                hashlib.sha256,
+            ).digest()
+        )
+        .rstrip(b"=")
+        .decode("ascii")
+    )
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if not 1 <= len(encoded) <= MAX_CUSTODY_FILE_BYTES:
+        raise AuthorizationCustodyUnavailable
+    return encoded
+
+
+def _parse_detach_ack(
+    raw: bytes,
+    *,
+    keyring: AuthorizationKeyring,
+    now: int,
+) -> _StandaloneDetachAcknowledgement:
+    try:
+        if not isinstance(raw, bytes) or not 1 <= len(raw) <= MAX_CUSTODY_FILE_BYTES:
+            raise AuthorizationCustodyUnavailable
+        value = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=_closed_object,
+        )
+        if not isinstance(value, dict) or set(value) != _DETACH_ACK_FIELDS:
+            raise AuthorizationCustodyUnavailable
+        version = value["version"]
+        if version != 1 or isinstance(version, bool):
+            raise AuthorizationCustodyUnavailable
+        source_attachment = _bounded_identifier(
+            value["source_registry_attachment_id"]
+        )
+        target_attachment = _bounded_identifier(
+            value["target_registry_attachment_id"]
+        )
+        if (
+            _STANDALONE_ATTACHMENT.fullmatch(source_attachment) is None
+            or _STANDALONE_ATTACHMENT.fullmatch(target_attachment) is None
+            or hmac.compare_digest(source_attachment, target_attachment)
+        ):
+            raise AuthorizationCustodyUnavailable
+        source_attachment_epoch = _bounded_time(value["source_attachment_epoch"])
+        target_attachment_epoch = _bounded_time(value["target_attachment_epoch"])
+        source_membership_epoch = _bounded_time(value["source_membership_epoch"])
+        issued_at = _bounded_time(value["issued_at"])
+        expires_at = _bounded_time(value["expires_at"])
+        current_time = _bounded_time(now)
+        if (
+            target_attachment_epoch != source_attachment_epoch + 1
+            or not issued_at <= current_time < expires_at
+            or expires_at - issued_at
+            > authorization_serving_membership.MAX_ATTESTATION_TTL_SECONDS
+        ):
+            raise AuthorizationCustodyUnavailable
+        signing_key_id = _bounded_identifier(value["signing_key_id"])
+        signing_key = next(
+            (
+                item
+                for item in keyring.accepted_keys
+                if item.key_id == signing_key_id
+            ),
+            None,
+        )
+        if (
+            signing_key is None
+            or not signing_key.not_before <= current_time < signing_key.not_after
+            or not hmac.compare_digest(
+                _decode_key(value["mac"]),
+                hmac.new(
+                    signing_key.key,
+                    _detach_ack_mac_input(value),
+                    hashlib.sha256,
+                ).digest(),
+            )
+        ):
+            raise AuthorizationCustodyUnavailable
+        acknowledgement = _StandaloneDetachAcknowledgement(
+            version=1,
+            cell_id=_bounded_identifier(value["cell_id"]),
+            logical_vault_id=_bounded_identifier(value["logical_vault_id"]),
+            keyring_id=_bounded_identifier(value["keyring_id"]),
+            source_registry_attachment_id=source_attachment,
+            target_registry_attachment_id=target_attachment,
+            source_attachment_epoch=source_attachment_epoch,
+            target_attachment_epoch=target_attachment_epoch,
+            source_membership_epoch=source_membership_epoch,
+            source_membership_digest=_sha256_hex(value["source_membership_digest"]),
+            source_control_digest=_sha256_hex(value["source_control_digest"]),
+            issued_at=issued_at,
+            expires_at=expires_at,
+            signing_key_id=signing_key_id,
+        )
+        if not hmac.compare_digest(
+            _signed_detach_ack_bytes(
+                acknowledgement,
+                signing_key=signing_key.key,
+            ),
+            raw,
+        ):
+            raise AuthorizationCustodyUnavailable
+        return acknowledgement
+    except AuthorizationCustodyUnavailable:
+        raise
+    except (
+        AttributeError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        TypeError,
+        ValueError,
+    ):
+        raise AuthorizationCustodyUnavailable from None
+
+
+def _host_registry_value(
+    record: _StandaloneHostRegistryRecord,
+) -> dict[str, object]:
+    return {
+        "version": record.version,
+        "cell_id": record.cell_id,
+        "logical_vault_id": record.logical_vault_id,
+        "keyring_id": record.keyring_id,
+        "registry_attachment_id": record.registry_attachment_id,
+        "attachment_epoch": record.attachment_epoch,
+        "serving_membership_epoch": record.serving_membership_epoch,
+        "serving_membership_digest": record.serving_membership_digest,
+        "state": record.state,
+        "no_in_flight": record.no_in_flight,
+        "updated_at": record.updated_at,
+        "signing_key_id": record.signing_key_id,
+    }
+
+
+def _host_registry_mac_input(value: dict[str, object]) -> bytes:
+    return _framed(
+        _HOST_REGISTRY_MAC_DOMAIN,
+        tuple(
+            str(value[name]).encode("utf-8")
+            for name in (
+                "version",
+                "cell_id",
+                "logical_vault_id",
+                "keyring_id",
+                "registry_attachment_id",
+                "attachment_epoch",
+                "serving_membership_epoch",
+                "serving_membership_digest",
+                "state",
+                "no_in_flight",
+                "updated_at",
+                "signing_key_id",
+            )
+        ),
+    )
+
+
+def _signed_host_registry_bytes(
+    record: _StandaloneHostRegistryRecord,
+    *,
+    signing_key: bytes,
+) -> bytes:
+    value = _host_registry_value(record)
+    value["mac"] = (
+        base64.urlsafe_b64encode(
+            hmac.new(
+                signing_key,
+                _host_registry_mac_input(value),
+                hashlib.sha256,
+            ).digest()
+        )
+        .rstrip(b"=")
+        .decode("ascii")
+    )
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if not 1 <= len(encoded) <= MAX_CUSTODY_FILE_BYTES:
+        raise AuthorizationCustodyUnavailable
+    return encoded
+
+
+def _parse_host_registry(
+    raw: bytes,
+    *,
+    host_key: bytes,
+    now: int,
+) -> _StandaloneHostRegistryRecord:
+    try:
+        if not isinstance(raw, bytes) or not 1 <= len(raw) <= MAX_CUSTODY_FILE_BYTES:
+            raise AuthorizationCustodyUnavailable
+        value = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=_closed_object,
+        )
+        if not isinstance(value, dict) or set(value) != _HOST_REGISTRY_FIELDS:
+            raise AuthorizationCustodyUnavailable
+        version = value["version"]
+        if version != 1 or isinstance(version, bool):
+            raise AuthorizationCustodyUnavailable
+        state = value["state"]
+        no_in_flight = value["no_in_flight"]
+        if (
+            state not in {"SERVING", "DRAINING"}
+            or not isinstance(no_in_flight, bool)
+            or (state == "SERVING" and no_in_flight)
+        ):
+            raise AuthorizationCustodyUnavailable
+        updated_at = _bounded_time(value["updated_at"])
+        current_time = _bounded_time(now)
+        if updated_at > current_time + _HOST_REGISTRY_CLOCK_SKEW_SECONDS:
+            raise AuthorizationCustodyUnavailable
+        signing_key_id = _bounded_identifier(value["signing_key_id"])
+        if (
+            not isinstance(host_key, bytes)
+            or len(host_key) != _HOST_CONTROL_KEY_BYTES
+            or not hmac.compare_digest(signing_key_id, _host_control_key_id(host_key))
+            or not hmac.compare_digest(
+                _decode_key(value["mac"]),
+                hmac.new(
+                    host_key,
+                    _host_registry_mac_input(value),
+                    hashlib.sha256,
+                ).digest(),
+            )
+        ):
+            raise AuthorizationCustodyUnavailable
+        attachment_id = _bounded_identifier(value["registry_attachment_id"])
+        if _STANDALONE_ATTACHMENT.fullmatch(attachment_id) is None:
+            raise AuthorizationCustodyUnavailable
+        record = _StandaloneHostRegistryRecord(
+            version=1,
+            cell_id=_bounded_identifier(value["cell_id"]),
+            logical_vault_id=_bounded_identifier(value["logical_vault_id"]),
+            keyring_id=_bounded_identifier(value["keyring_id"]),
+            registry_attachment_id=attachment_id,
+            attachment_epoch=_bounded_time(value["attachment_epoch"]),
+            serving_membership_epoch=_bounded_time(
+                value["serving_membership_epoch"]
+            ),
+            serving_membership_digest=_sha256_hex(
+                value["serving_membership_digest"]
+            ),
+            state=str(state),
+            no_in_flight=no_in_flight,
+            updated_at=updated_at,
+            signing_key_id=signing_key_id,
+        )
+        if not hmac.compare_digest(
+            _signed_host_registry_bytes(record, signing_key=host_key),
+            raw,
+        ):
+            raise AuthorizationCustodyUnavailable
+        return record
+    except AuthorizationCustodyUnavailable:
+        raise
+    except (
+        AttributeError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        TypeError,
+        ValueError,
+    ):
+        raise AuthorizationCustodyUnavailable from None
+
+
+def _windows_program_data_root() -> Path:
+    """Resolve ProgramData from the OS known-folder service, never the environment."""
+
+    if os.name != "nt":
+        raise AuthorizationCustodyUnavailable
+    try:  # pragma: no cover - exercised by Windows CI
+        import ctypes
+        from ctypes import wintypes
+
+        class _Guid(ctypes.Structure):
+            _fields_ = (
+                ("data1", wintypes.DWORD),
+                ("data2", wintypes.WORD),
+                ("data3", wintypes.WORD),
+                ("data4", ctypes.c_ubyte * 8),
+            )
+
+        program_data = _Guid(
+            0x62AB5D82,
+            0xFDC1,
+            0x4DC3,
+            (ctypes.c_ubyte * 8)(0xA9, 0xDD, 0x07, 0x0D, 0x1D, 0x49, 0x5D, 0x97),
+        )
+        shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+        ole32 = ctypes.WinDLL("ole32", use_last_error=True)
+        shell32.SHGetKnownFolderPath.argtypes = (
+            ctypes.POINTER(_Guid),
+            wintypes.DWORD,
+            wintypes.HANDLE,
+            ctypes.POINTER(ctypes.c_wchar_p),
+        )
+        shell32.SHGetKnownFolderPath.restype = ctypes.c_long
+        ole32.CoTaskMemFree.argtypes = (ctypes.c_void_p,)
+        ole32.CoTaskMemFree.restype = None
+        resolved = ctypes.c_wchar_p()
+        result = shell32.SHGetKnownFolderPath(
+            ctypes.byref(program_data),
+            0,
+            None,
+            ctypes.byref(resolved),
+        )
+        try:
+            if result != 0 or not resolved.value:
+                raise AuthorizationCustodyUnavailable
+            root = Path(resolved.value)
+        finally:
+            if resolved:
+                ole32.CoTaskMemFree(ctypes.cast(resolved, ctypes.c_void_p))
+        if not root.is_absolute():
+            raise AuthorizationCustodyUnavailable
+        return root
+    except AuthorizationCustodyUnavailable:
+        raise
+    except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
+        raise AuthorizationCustodyUnavailable from None
+
+
+def _standalone_host_control_root() -> Path:
+    """Return the non-configurable OS account/machine host-control root."""
+
+    if os.name == "nt":  # pragma: no cover - exercised by Windows CI
+        return _windows_program_data_root() / "exomem" / "standalone-host-control-v1"
+    try:
+        import pwd
+
+        home = Path(pwd.getpwuid(os.geteuid()).pw_dir)
+    except (KeyError, OSError, RuntimeError, TypeError, ValueError):
+        raise AuthorizationCustodyUnavailable from None
+    if not home.is_absolute():
+        raise AuthorizationCustodyUnavailable
+    return home / ".local" / "state" / "exomem" / "standalone-host-control-v1"
+
+
+def _host_registry_path(logical_vault_id: str) -> Path:
+
+    identity = _bounded_identifier(logical_vault_id)
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    return (
+        _standalone_host_control_root()
+        / "authorization-attachment-registry"
+        / f"{digest}.json"
+    )
+
+
+def _prepare_private_directory(path: Path) -> None:
+    try:
+        if os.name == "nt":  # pragma: no cover - exercised by Windows CI
+            mutation_lock._prepare_windows_private_directory(path)
+        else:
+            existed = path.exists()
+            path.mkdir(parents=True, mode=0o700, exist_ok=True)
+            if not existed:
+                os.chmod(path, 0o700)
+        if not _private_parent_is_safe(path):
+            raise AuthorizationCustodyUnavailable
+    except AuthorizationCustodyUnavailable:
+        raise
+    except (OSError, RuntimeError, ValueError):
+        raise AuthorizationCustodyUnavailable from None
+
+
+def _prepare_host_registry_parent(path: Path) -> None:
+    root = _standalone_host_control_root()
+    if path.parent.parent != root:
+        raise AuthorizationCustodyUnavailable
+    _prepare_private_directory(root)
+    _prepare_private_directory(path.parent)
+
+
+def _host_control_key_path() -> Path:
+    return _standalone_host_control_root() / _HOST_CONTROL_KEY_NAME
+
+
+def _host_control_key_id(host_key: bytes) -> str:
+    if not isinstance(host_key, bytes) or len(host_key) != _HOST_CONTROL_KEY_BYTES:
+        raise AuthorizationCustodyUnavailable
+    return f"standalone-host-key-v1-{hashlib.sha256(host_key).hexdigest()}"
+
+
+def _load_host_control_key() -> bytes:
+    loaded = _load_private_artifact(
+        _host_control_key_path(),
+        maximum_bytes=_HOST_CONTROL_KEY_BYTES,
+    )
+    if len(loaded.data) != _HOST_CONTROL_KEY_BYTES:
+        raise AuthorizationCustodyUnavailable
+    return loaded.data
+
+
+def _ensure_host_control_key() -> bytes:
+    root = _standalone_host_control_root()
+    _prepare_private_directory(root)
+    path = _host_control_key_path()
+    try:
+        return _load_host_control_key()
+    except AuthorizationCustodyUnavailable:
+        if path.exists():
+            raise
+    candidate = secrets.token_bytes(_HOST_CONTROL_KEY_BYTES)
+    _publish_private_artifact(
+        path,
+        candidate,
+        maximum_bytes=_HOST_CONTROL_KEY_BYTES,
+    )
+    return _load_host_control_key()
+
+
+def _host_registry_record(
+    control: AuthorizationControlRecord,
+    *,
+    state: str,
+    no_in_flight: bool,
+    updated_at: int,
+    host_key_id: str,
+) -> _StandaloneHostRegistryRecord:
+    if (
+        _STANDALONE_ATTACHMENT.fullmatch(control.registry_attachment_id) is None
+        or state not in {"SERVING", "DRAINING"}
+        or not isinstance(no_in_flight, bool)
+        or (state == "SERVING" and no_in_flight)
+    ):
+        raise AuthorizationCustodyUnavailable
+    return _StandaloneHostRegistryRecord(
+        version=1,
+        cell_id=control.cell_id,
+        logical_vault_id=control.logical_vault_id,
+        keyring_id=control.keyring_id,
+        registry_attachment_id=control.registry_attachment_id,
+        attachment_epoch=control.attachment_epoch,
+        serving_membership_epoch=control.serving_membership_epoch,
+        serving_membership_digest=control.serving_membership_digest,
+        state=state,
+        no_in_flight=no_in_flight,
+        updated_at=_bounded_time(updated_at),
+        signing_key_id=_bounded_identifier(host_key_id),
+    )
+
+
+def _host_registry_matches_control(
+    record: _StandaloneHostRegistryRecord,
+    control: AuthorizationControlRecord,
+    *,
+    state: str | None = None,
+    no_in_flight: bool | None = None,
+) -> bool:
+    return (
+        record.cell_id == control.cell_id
+        and record.logical_vault_id == control.logical_vault_id
+        and record.keyring_id == control.keyring_id
+        and record.registry_attachment_id == control.registry_attachment_id
+        and record.attachment_epoch == control.attachment_epoch
+        and record.serving_membership_epoch == control.serving_membership_epoch
+        and record.serving_membership_digest == control.serving_membership_digest
+        and (state is None or record.state == state)
+        and (no_in_flight is None or record.no_in_flight is no_in_flight)
+    )
+
+
+def _load_host_registry(
+    control: AuthorizationControlRecord,
+    *,
+    now: int,
+) -> tuple[Path, bytes, _StandaloneHostRegistryRecord, bytes]:
+    path = _host_registry_path(control.logical_vault_id)
+    loaded = _load_file(path)
+    host_key = _load_host_control_key()
+    return (
+        path,
+        loaded.data,
+        _parse_host_registry(loaded.data, host_key=host_key, now=now),
+        host_key,
+    )
+
+
+def require_current_standalone_registry(
+    custody: AuthorizationCustody,
+    *,
+    now: int,
+    require_serving: bool,
+) -> None:
+    """Recheck the non-portable host attachment before session authority commits."""
+
+    if not isinstance(custody, AuthorizationCustody):
+        raise AuthorizationCustodyUnavailable
+    control = custody.control
+    if not control.registry_attachment_id.startswith("attachment-v1-"):
+        return
+    _path, _raw, record, _host_key = _load_host_registry(control, now=now)
+    if not _host_registry_matches_control(record, control) or (
+        require_serving and record.state != "SERVING"
+    ):
+        raise AuthorizationCustodyUnavailable
+
+
+def require_standalone_mutation_admission(
+    vault_root: Path,
+    *,
+    now: int,
+) -> None:
+    """Block ordinary mutations while the host attachment is draining."""
+
+    root = Path(vault_root)
+    if not root.is_absolute():
+        return
+    configured = (
+        os.environ.get(KEYRING_FILE_ENV, "").strip(),
+        os.environ.get(CONTROL_FILE_ENV, "").strip(),
+    )
+    if configured == ("", ""):
+        return
+    if not all(configured):
+        raise AuthorizationCustodyUnavailable
+    custody = load_authorization_custody(root, now=now)
+    require_current_standalone_registry(
+        custody,
+        now=now,
+        require_serving=True,
+    )
+
+
+def _publish_initial_host_registry(
+    control: AuthorizationControlRecord,
+    *,
+    now: int,
+    state: str = "SERVING",
+    no_in_flight: bool = False,
+) -> None:
+    path = _host_registry_path(control.logical_vault_id)
+    _prepare_host_registry_parent(path)
+    host_key = _ensure_host_control_key()
+    try:
+        _existing_path, _raw, existing, _existing_host_key = _load_host_registry(
+            control,
+            now=now,
+        )
+    except AuthorizationCustodyUnavailable:
+        if path.exists():
+            raise
+    else:
+        if not _host_registry_matches_control(
+            existing,
+            control,
+            state=state,
+            no_in_flight=no_in_flight,
+        ):
+            raise AuthorizationCustodyUnavailable
+        return
+    record = _host_registry_record(
+        control,
+        state=state,
+        no_in_flight=no_in_flight,
+        updated_at=now,
+        host_key_id=_host_control_key_id(host_key),
+    )
+    encoded = _signed_host_registry_bytes(record, signing_key=host_key)
+    _publish_private_file(path, encoded)
+
+
+def _advance_host_registry(
+    *,
+    source_control: AuthorizationControlRecord,
+    source_state: str,
+    source_no_in_flight: bool,
+    target_control: AuthorizationControlRecord,
+    target_state: str,
+    target_no_in_flight: bool,
+    now: int,
+) -> None:
+    path, raw, current, host_key = _load_host_registry(source_control, now=now)
+    if _host_registry_matches_control(
+        current,
+        target_control,
+        state=target_state,
+        no_in_flight=target_no_in_flight,
+    ):
+        return
+    if not _host_registry_matches_control(
+        current,
+        source_control,
+        state=source_state,
+        no_in_flight=source_no_in_flight,
+    ):
+        raise AuthorizationCustodyUnavailable
+    target = _host_registry_record(
+        target_control,
+        state=target_state,
+        no_in_flight=target_no_in_flight,
+        updated_at=now,
+        host_key_id=_host_control_key_id(host_key),
+    )
+    _replace_control_bytes(
+        path,
+        expected=raw,
+        target=_signed_host_registry_bytes(target, signing_key=host_key),
+    )
 
 
 def _prepare_private_stage(target_path: Path, staged: held_fs.HeldFile) -> None:
@@ -1527,6 +2281,12 @@ def enroll_standalone_v3_migration(
         elif not hmac.compare_digest(membership_loaded.data, encoded_membership):
             raise AuthorizationCustodyUnavailable
         _require_exact_v3_authority(root)
+        _publish_initial_host_registry(
+            control,
+            now=current_time,
+            state="DRAINING",
+            no_in_flight=True,
+        )
 
     verified = load_authorization_custody(root, now=current_time)
     if (
@@ -1776,6 +2536,21 @@ def complete_standalone_v4_migration(
     else:
         raise AuthorizationCustodyUnavailable
 
+    if successor.previous_epoch_digest is None:
+        raise AuthorizationCustodyUnavailable
+    _advance_host_registry(
+        source_control=replace(
+            target_control,
+            serving_membership_epoch=1,
+            serving_membership_digest=successor.previous_epoch_digest,
+        ),
+        source_state="DRAINING",
+        source_no_in_flight=True,
+        target_control=target_control,
+        target_state="SERVING",
+        target_no_in_flight=False,
+        now=current_time,
+    )
     verified = load_authorization_custody(root, now=current_time)
     if (
         verified.control != target_control
@@ -1785,6 +2560,697 @@ def complete_standalone_v4_migration(
     ):
         raise AuthorizationCustodyUnavailable
     return verified
+
+
+def _standalone_membership_file(
+    vault_root: Path,
+    *,
+    external: ExternalAuthorizationCustody,
+) -> tuple[Path, bytes, str]:
+    membership_path = _configured_external_path(MEMBERSHIP_FILE_ENV, vault_root)
+    replica_id = _bounded_identifier(os.environ.get(REPLICA_ID_ENV, ""))
+    if membership_path in {external.keyring_path, external.control_path}:
+        raise AuthorizationCustodyUnavailable
+    return membership_path, _load_file(membership_path).data, replica_id
+
+
+def _require_standalone_membership(
+    record: ServingMembershipEpoch,
+    *,
+    keyring: AuthorizationKeyring,
+    control: AuthorizationControlRecord,
+    replica_id: str,
+    state: str,
+    no_in_flight: bool,
+) -> None:
+    if (
+        len(record.replicas) != 1
+        or record.cell_id != control.cell_id
+        or record.logical_vault_id != control.logical_vault_id
+    ):
+        raise AuthorizationCustodyUnavailable
+    replica = record.replicas[0]
+    expected_keys = tuple(sorted(item.key_id for item in keyring.accepted_keys))
+    if (
+        replica.replica_id != replica_id
+        or replica.state != state
+        or replica.software_version != runtime_software_version()
+        or replica.schema_version != 4
+        or replica.issuance_stopped is not (state == "DRAINING")
+        or replica.no_in_flight is not no_in_flight
+        or replica.active_key_id != keyring.active_key_id
+        or replica.accepted_key_ids != expected_keys
+        or replica.control_digest != control_attestation_digest(control)
+        or replica.keyring_digest != keyring_attestation_digest(keyring)
+    ):
+        raise AuthorizationCustodyUnavailable
+
+
+def _standalone_membership_successor(
+    raw: bytes,
+    *,
+    keyring: AuthorizationKeyring,
+    expected_control: AuthorizationControlRecord,
+    target_control: AuthorizationControlRecord,
+    replica_id: str,
+    target_state: str,
+    target_no_in_flight: bool,
+    now: int,
+) -> ServingMembershipEpoch:
+    digest = authorization_serving_membership.serving_membership_digest(raw)
+    successor = _parse_migration_membership(
+        raw,
+        keyring=keyring,
+        control=target_control,
+        now=now,
+        epoch=expected_control.serving_membership_epoch + 1,
+        digest=digest,
+    )
+    if successor.previous_epoch_digest != expected_control.serving_membership_digest:
+        raise AuthorizationCustodyUnavailable
+    _require_standalone_membership(
+        successor,
+        keyring=keyring,
+        control=target_control,
+        replica_id=replica_id,
+        state=target_state,
+        no_in_flight=target_no_in_flight,
+    )
+    return successor
+
+
+def _standalone_transition_replay_control(
+    current: AuthorizationControlRecord,
+    *,
+    expected: AuthorizationControlRecord,
+) -> bool:
+    return (
+        current.serving_membership_epoch == expected.serving_membership_epoch + 1
+        and replace(
+            current,
+            serving_membership_epoch=expected.serving_membership_epoch,
+            serving_membership_digest=expected.serving_membership_digest,
+        )
+        == expected
+    )
+
+
+def _transition_standalone_attachment_membership(
+    vault_root: Path,
+    *,
+    expected_control: AuthorizationControlRecord,
+    source_state: str,
+    source_no_in_flight: bool,
+    target_state: str,
+    target_no_in_flight: bool,
+    now: int,
+) -> AuthorizationCustody:
+    if not isinstance(expected_control, AuthorizationControlRecord):
+        raise AuthorizationCustodyUnavailable
+    root = Path(vault_root)
+    current_time = _bounded_time(now)
+
+    from .. import reserved_paths
+
+    with reserved_paths._identity_coordination_scope(root):
+        external = load_external_custody(root)
+        keyring = parse_keyring(external.keyring)
+        current_control = parse_control_record(
+            external.control,
+            keyring=keyring,
+            now=current_time,
+        )
+        _verify_registered_attachment(root, current_control.registry_attachment_id)
+        membership_path, membership_raw, replica_id = _standalone_membership_file(
+            root,
+            external=external,
+        )
+
+        if current_control != expected_control:
+            if not _standalone_transition_replay_control(
+                current_control,
+                expected=expected_control,
+            ):
+                raise AuthorizationCustodyUnavailable
+            current_record = _parse_migration_membership(
+                membership_raw,
+                keyring=keyring,
+                control=current_control,
+                now=current_time,
+                epoch=current_control.serving_membership_epoch,
+                digest=current_control.serving_membership_digest,
+            )
+            _require_standalone_membership(
+                current_record,
+                keyring=keyring,
+                control=current_control,
+                replica_id=replica_id,
+                state=target_state,
+                no_in_flight=target_no_in_flight,
+            )
+            target_control = current_control
+        else:
+            source_record: ServingMembershipEpoch | None
+            try:
+                source_record = _parse_migration_membership(
+                    membership_raw,
+                    keyring=keyring,
+                    control=current_control,
+                    now=current_time,
+                    epoch=current_control.serving_membership_epoch,
+                    digest=current_control.serving_membership_digest,
+                )
+            except AuthorizationCustodyUnavailable:
+                source_record = None
+
+            provisional_target = replace(
+                current_control,
+                serving_membership_epoch=current_control.serving_membership_epoch + 1,
+                serving_membership_digest="0" * 64,
+            )
+            if source_record is None:
+                successor = _standalone_membership_successor(
+                    membership_raw,
+                    keyring=keyring,
+                    expected_control=current_control,
+                    target_control=provisional_target,
+                    replica_id=replica_id,
+                    target_state=target_state,
+                    target_no_in_flight=target_no_in_flight,
+                    now=current_time,
+                )
+                target_membership = membership_raw
+            else:
+                _require_standalone_membership(
+                    source_record,
+                    keyring=keyring,
+                    control=current_control,
+                    replica_id=replica_id,
+                    state=source_state,
+                    no_in_flight=source_no_in_flight,
+                )
+                target_membership = _standalone_membership_bytes(
+                    keyring=keyring,
+                    control=provisional_target,
+                    replica_id=replica_id,
+                    state=target_state,
+                    issuance_stopped=target_state == "DRAINING",
+                    no_in_flight=target_no_in_flight,
+                    previous_epoch_digest=source_record.record_digest,
+                    attested_at=current_time,
+                )
+                successor = _standalone_membership_successor(
+                    target_membership,
+                    keyring=keyring,
+                    expected_control=current_control,
+                    target_control=provisional_target,
+                    replica_id=replica_id,
+                    target_state=target_state,
+                    target_no_in_flight=target_no_in_flight,
+                    now=current_time,
+                )
+                try:
+                    authorization_serving_membership.validate_membership_successor(
+                        source_record,
+                        successor,
+                        now=current_time,
+                    )
+                except authorization_serving_membership.ServingMembershipUnavailable:
+                    raise AuthorizationCustodyUnavailable from None
+                _replace_control_bytes(
+                    membership_path,
+                    expected=membership_raw,
+                    target=target_membership,
+                )
+
+            target_control = replace(
+                provisional_target,
+                serving_membership_digest=successor.record_digest,
+            )
+            signing_key = next(
+                (
+                    item.key
+                    for item in keyring.accepted_keys
+                    if item.key_id == target_control.signing_key_id
+                ),
+                None,
+            )
+            if signing_key is None:
+                raise AuthorizationCustodyUnavailable
+            _replace_control_bytes(
+                external.control_path,
+                expected=external.control,
+                target=_signed_control_bytes(
+                    target_control,
+                    signing_key=signing_key,
+                ),
+            )
+        _advance_host_registry(
+            source_control=expected_control,
+            source_state=source_state,
+            source_no_in_flight=source_no_in_flight,
+            target_control=target_control,
+            target_state=target_state,
+            target_no_in_flight=target_no_in_flight,
+            now=current_time,
+        )
+
+    verified = load_authorization_custody(root, now=current_time)
+    if verified.serving_membership is None:
+        raise AuthorizationCustodyUnavailable
+    _require_standalone_membership(
+        verified.serving_membership,
+        keyring=verified.keyring,
+        control=verified.control,
+        replica_id=_bounded_identifier(os.environ.get(REPLICA_ID_ENV, "")),
+        state=target_state,
+        no_in_flight=target_no_in_flight,
+    )
+    return verified
+
+
+def begin_standalone_attachment_drain(
+    vault_root: Path,
+    *,
+    expected_control: AuthorizationControlRecord,
+    now: int,
+) -> AuthorizationCustody:
+    """Stop standalone session issuance before an attachment can detach."""
+
+    root = Path(vault_root)
+    from .. import writer_lease
+
+    with writer_lease.get_manager().mutation_guard(
+        root,
+        operation="authorization-attachment-drain",
+        holder_kind="authorization-attachment-control",
+        attachment_control=True,
+        attachment_now=now,
+    ):
+        return _transition_standalone_attachment_membership(
+            root,
+            expected_control=expected_control,
+            source_state="SERVING",
+            source_no_in_flight=False,
+            target_state="DRAINING",
+            target_no_in_flight=False,
+            now=now,
+        )
+
+
+def acknowledge_standalone_attachment_drain(
+    vault_root: Path,
+    *,
+    expected_control: AuthorizationControlRecord,
+    now: int,
+) -> AuthorizationCustody:
+    """Record the explicit no-in-flight acknowledgement for one drained root."""
+
+    root = Path(vault_root)
+    from .. import writer_lease
+
+    with writer_lease.get_manager().mutation_guard(
+        root,
+        operation="authorization-attachment-drain-acknowledgement",
+        holder_kind="authorization-attachment-control",
+        attachment_control=True,
+        attachment_now=now,
+    ):
+        return _transition_standalone_attachment_membership(
+            root,
+            expected_control=expected_control,
+            source_state="DRAINING",
+            source_no_in_flight=False,
+            target_state="DRAINING",
+            target_no_in_flight=True,
+            now=now,
+        )
+
+
+def prepare_standalone_attachment_transfer(
+    source_vault_root: Path,
+    target_vault_root: Path,
+    *,
+    expected_control: AuthorizationControlRecord,
+    now: int,
+) -> bytes:
+    """Mint a short-lived target-bound detach acknowledgement after drain."""
+
+    source = Path(source_vault_root)
+    current_time = _bounded_time(now)
+    custody = load_authorization_custody(source, now=current_time)
+    if custody.control != expected_control or custody.serving_membership is None:
+        raise AuthorizationCustodyUnavailable
+    replica_id = _bounded_identifier(os.environ.get(REPLICA_ID_ENV, ""))
+    _require_standalone_membership(
+        custody.serving_membership,
+        keyring=custody.keyring,
+        control=custody.control,
+        replica_id=replica_id,
+        state="DRAINING",
+        no_in_flight=True,
+    )
+    target_attachment = standalone_attachment_id(Path(target_vault_root))
+    if hmac.compare_digest(
+        custody.control.registry_attachment_id,
+        target_attachment,
+    ):
+        raise AuthorizationCustodyUnavailable
+    external = load_external_custody(source)
+    signing_key = next(
+        (
+            item
+            for item in custody.keyring.accepted_keys
+            if item.key_id == custody.control.signing_key_id
+        ),
+        None,
+    )
+    if signing_key is None:
+        raise AuthorizationCustodyUnavailable
+    acknowledgement = _StandaloneDetachAcknowledgement(
+        version=1,
+        cell_id=custody.control.cell_id,
+        logical_vault_id=custody.control.logical_vault_id,
+        keyring_id=custody.control.keyring_id,
+        source_registry_attachment_id=custody.control.registry_attachment_id,
+        target_registry_attachment_id=target_attachment,
+        source_attachment_epoch=custody.control.attachment_epoch,
+        target_attachment_epoch=custody.control.attachment_epoch + 1,
+        source_membership_epoch=custody.control.serving_membership_epoch,
+        source_membership_digest=custody.control.serving_membership_digest,
+        source_control_digest=hashlib.sha256(external.control).hexdigest(),
+        issued_at=current_time,
+        expires_at=min(
+            custody.control.expires_at,
+            current_time
+            + authorization_serving_membership.MAX_ATTESTATION_TTL_SECONDS,
+        ),
+        signing_key_id=custody.control.signing_key_id,
+    )
+    return _signed_detach_ack_bytes(
+        acknowledgement,
+        signing_key=signing_key.key,
+    )
+
+
+def _require_attachment_target_authority(
+    vault_root: Path,
+    *,
+    control: AuthorizationControlRecord,
+    now: int,
+    invalidate_sessions: bool,
+) -> None:
+    if not control.governance_enrolled:
+        _governance_negative_scan(vault_root)
+        return
+    if (
+        control.activation_store_id is None
+        or control.activation_epoch is None
+        or control.activation_state_digest is None
+    ):
+        raise AuthorizationCustodyUnavailable
+    from . import schema_v4, store
+
+    try:
+        connection = (
+            store.open_authorization_session_connection(vault_root)
+            if invalidate_sessions
+            else store.open_active_governance_read_connection(vault_root)
+        )
+    except (store.UnsupportedGovernanceSchema, OSError, RuntimeError):
+        raise AuthorizationCustodyUnavailable from None
+    try:
+        active = schema_v4.load_active_state(
+            connection,
+            expected_logical_vault_id=control.logical_vault_id,
+            expected_activation_store_id=control.activation_store_id,
+            expected_activation_epoch=control.activation_epoch,
+            expected_activation_state_digest=control.activation_state_digest,
+        )
+        if (
+            active.logical_vault_id != control.logical_vault_id
+            or active.activation_store_id != control.activation_store_id
+            or active.activation_epoch != control.activation_epoch
+            or active.activation_state_digest != control.activation_state_digest
+        ):
+            raise AuthorizationCustodyUnavailable
+        if invalidate_sessions:
+            schema_v4.invalidate_attachment_session_authority(
+                connection,
+                invalidated_at=now,
+            )
+            schema_v4.load_active_state(
+                connection,
+                expected_logical_vault_id=control.logical_vault_id,
+                expected_activation_store_id=control.activation_store_id,
+                expected_activation_epoch=control.activation_epoch,
+                expected_activation_state_digest=control.activation_state_digest,
+            )
+    except (schema_v4.SchemaV4Error, OSError, RuntimeError, TypeError, ValueError):
+        raise AuthorizationCustodyUnavailable from None
+    finally:
+        connection.close()
+
+
+def _complete_standalone_attachment_transfer(
+    target_vault_root: Path,
+    *,
+    acknowledgement: bytes,
+    now: int,
+) -> AuthorizationCustody:
+    """Consume one detach acknowledgement and move the exclusive attachment."""
+
+    target = Path(target_vault_root)
+    current_time = _bounded_time(now)
+    external = load_external_custody(target)
+    keyring = parse_keyring(external.keyring)
+    control = parse_control_record(
+        external.control,
+        keyring=keyring,
+        now=current_time,
+    )
+    detached = _parse_detach_ack(
+        acknowledgement,
+        keyring=keyring,
+        now=current_time,
+    )
+    target_attachment = standalone_attachment_id(target)
+    if (
+        detached.cell_id != keyring.cell_id
+        or detached.logical_vault_id != keyring.logical_vault_id
+        or detached.keyring_id != keyring.keyring_id
+        or detached.target_registry_attachment_id != target_attachment
+    ):
+        raise AuthorizationCustodyUnavailable
+    membership_path, membership_raw, replica_id = _standalone_membership_file(
+        target,
+        external=external,
+    )
+
+    if (
+        control.registry_attachment_id == detached.target_registry_attachment_id
+        and control.attachment_epoch == detached.target_attachment_epoch
+    ):
+        if (
+            control.serving_membership_epoch
+            != detached.source_membership_epoch + 1
+            or control.cell_id != detached.cell_id
+            or control.logical_vault_id != detached.logical_vault_id
+            or control.keyring_id != detached.keyring_id
+        ):
+            raise AuthorizationCustodyUnavailable
+        _require_attachment_target_authority(
+            target,
+            control=control,
+            now=current_time,
+            invalidate_sessions=False,
+        )
+        successor = _parse_migration_membership(
+            membership_raw,
+            keyring=keyring,
+            control=control,
+            now=current_time,
+            epoch=control.serving_membership_epoch,
+            digest=control.serving_membership_digest,
+        )
+        if successor.previous_epoch_digest != detached.source_membership_digest:
+            raise AuthorizationCustodyUnavailable
+        _require_standalone_membership(
+            successor,
+            keyring=keyring,
+            control=control,
+            replica_id=replica_id,
+            state="SERVING",
+            no_in_flight=False,
+        )
+        source_control = replace(
+            control,
+            registry_attachment_id=detached.source_registry_attachment_id,
+            attachment_epoch=detached.source_attachment_epoch,
+            serving_membership_epoch=detached.source_membership_epoch,
+            serving_membership_digest=detached.source_membership_digest,
+        )
+        _advance_host_registry(
+            source_control=source_control,
+            source_state="DRAINING",
+            source_no_in_flight=True,
+            target_control=control,
+            target_state="SERVING",
+            target_no_in_flight=False,
+            now=current_time,
+        )
+        return load_authorization_custody(target, now=current_time)
+
+    if (
+        control.registry_attachment_id
+        != detached.source_registry_attachment_id
+        or control.attachment_epoch != detached.source_attachment_epoch
+        or control.serving_membership_epoch != detached.source_membership_epoch
+        or control.serving_membership_digest != detached.source_membership_digest
+        or hashlib.sha256(external.control).hexdigest()
+        != detached.source_control_digest
+        or control.cell_id != detached.cell_id
+        or control.logical_vault_id != detached.logical_vault_id
+        or control.keyring_id != detached.keyring_id
+    ):
+        raise AuthorizationCustodyUnavailable
+    _require_attachment_target_authority(
+        target,
+        control=control,
+        now=current_time,
+        invalidate_sessions=True,
+    )
+
+    provisional_target = replace(
+        control,
+        registry_attachment_id=detached.target_registry_attachment_id,
+        attachment_epoch=detached.target_attachment_epoch,
+        serving_membership_epoch=control.serving_membership_epoch + 1,
+        serving_membership_digest="0" * 64,
+    )
+    source_record: ServingMembershipEpoch | None
+    try:
+        source_record = _parse_migration_membership(
+            membership_raw,
+            keyring=keyring,
+            control=control,
+            now=current_time,
+            epoch=control.serving_membership_epoch,
+            digest=control.serving_membership_digest,
+        )
+    except AuthorizationCustodyUnavailable:
+        source_record = None
+    if source_record is None:
+        successor = _standalone_membership_successor(
+            membership_raw,
+            keyring=keyring,
+            expected_control=control,
+            target_control=provisional_target,
+            replica_id=replica_id,
+            target_state="SERVING",
+            target_no_in_flight=False,
+            now=current_time,
+        )
+    else:
+        if source_record.record_digest != detached.source_membership_digest:
+            raise AuthorizationCustodyUnavailable
+        _require_standalone_membership(
+            source_record,
+            keyring=keyring,
+            control=control,
+            replica_id=replica_id,
+            state="DRAINING",
+            no_in_flight=True,
+        )
+        target_membership = _standalone_membership_bytes(
+            keyring=keyring,
+            control=provisional_target,
+            replica_id=replica_id,
+            previous_epoch_digest=source_record.record_digest,
+            attested_at=current_time,
+        )
+        successor = _standalone_membership_successor(
+            target_membership,
+            keyring=keyring,
+            expected_control=control,
+            target_control=provisional_target,
+            replica_id=replica_id,
+            target_state="SERVING",
+            target_no_in_flight=False,
+            now=current_time,
+        )
+        try:
+            authorization_serving_membership.validate_membership_successor(
+                source_record,
+                successor,
+                now=current_time,
+            )
+        except authorization_serving_membership.ServingMembershipUnavailable:
+            raise AuthorizationCustodyUnavailable from None
+        _replace_control_bytes(
+            membership_path,
+            expected=membership_raw,
+            target=target_membership,
+        )
+
+    target_control = replace(
+        provisional_target,
+        serving_membership_digest=successor.record_digest,
+    )
+    signing_key = next(
+        (
+            item.key
+            for item in keyring.accepted_keys
+            if item.key_id == target_control.signing_key_id
+        ),
+        None,
+    )
+    if signing_key is None:
+        raise AuthorizationCustodyUnavailable
+    _replace_control_bytes(
+        external.control_path,
+        expected=external.control,
+        target=_signed_control_bytes(target_control, signing_key=signing_key),
+    )
+    _advance_host_registry(
+        source_control=control,
+        source_state="DRAINING",
+        source_no_in_flight=True,
+        target_control=target_control,
+        target_state="SERVING",
+        target_no_in_flight=False,
+        now=current_time,
+    )
+    verified = load_authorization_custody(target, now=current_time)
+    if verified.control != target_control or verified.serving_membership is None:
+        raise AuthorizationCustodyUnavailable
+    return verified
+
+
+def complete_standalone_attachment_transfer(
+    target_vault_root: Path,
+    *,
+    acknowledgement: bytes,
+    now: int,
+) -> AuthorizationCustody:
+    """Consume one detach acknowledgement under the target identity fence."""
+
+    target = Path(target_vault_root)
+    from .. import reserved_paths, writer_lease
+
+    with writer_lease.get_manager().mutation_guard(
+        target,
+        operation="authorization-attachment-transfer",
+        holder_kind="authorization-attachment-control",
+        attachment_control=True,
+        attachment_now=now,
+    ):
+        with reserved_paths._identity_coordination_scope(target):
+            return _complete_standalone_attachment_transfer(
+                target,
+                acknowledgement=acknowledgement,
+                now=now,
+            )
 
 
 def provision_standalone_custody(
@@ -1929,6 +3395,7 @@ def provision_standalone_custody(
                 _publish_private_file(membership_path, encoded_membership)
             elif not hmac.compare_digest(membership_loaded.data, encoded_membership):
                 raise AuthorizationCustodyUnavailable
+        _publish_initial_host_registry(control, now=current_time)
 
     return _provisioning_result(load_authorization_custody(root, now=current_time))
 

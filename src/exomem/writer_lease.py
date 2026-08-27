@@ -2755,6 +2755,8 @@ class LeaseManager:
         request_id: str | None = None,
         operation: str | None = None,
         holder_kind: str = "command",
+        attachment_control: bool = False,
+        attachment_now: int | None = None,
     ) -> Iterator[VaultMutationCoordinator]:
         """Hold the shared vault mutation boundary and revalidate writer authority."""
         direct_boundary: tuple[str, Path] | None = None
@@ -2781,7 +2783,11 @@ class LeaseManager:
                 holder_kind=holder_kind,
             ) as mutation:
                 try:
-                    with self.writer_authority_guard():
+                    with self.writer_authority_guard(
+                        vault_root=vault_root,
+                        attachment_control=attachment_control,
+                        attachment_now=attachment_now,
+                    ):
                         yield mutation
                 finally:
                     # Bump while the boundary is still held, so the counter is
@@ -2827,7 +2833,13 @@ class LeaseManager:
                 )
 
     @contextmanager
-    def writer_authority_guard(self) -> Iterator[None]:
+    def writer_authority_guard(
+        self,
+        *,
+        vault_root: os.PathLike[str] | str | None = None,
+        attachment_control: bool = False,
+        attachment_now: int | None = None,
+    ) -> Iterator[None]:
         """Revalidate writer authority without holding the vault mutation lock.
 
         The single choke point for idle-release accounting (R5): this is the
@@ -2837,6 +2849,24 @@ class LeaseManager:
         """
         fence_context: Token[tuple[Any, int] | None] | None = None
         counted = False
+        if vault_root is not None and not attachment_control:
+            from .governance import authorization_custody
+
+            try:
+                authorization_custody.require_standalone_mutation_admission(
+                    Path(vault_root),
+                    now=(
+                        int(time.time())
+                        if attachment_now is None
+                        else attachment_now
+                    ),
+                )
+            except authorization_custody.AuthorizationCustodyUnavailable:
+                raise OpError(
+                    "ATTACHMENT_DRAINING",
+                    "the registered vault attachment is not serving mutations",
+                    "Complete or recover the authenticated attachment transition before retrying.",
+                ) from None
         if self.config.enabled:
             lease = self.ensure_writer()
             fence_context = _ACTIVE_WRITE_FENCE.set((self, lease.fencing_token))

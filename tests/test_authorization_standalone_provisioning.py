@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import os
+import shutil
 import sqlite3
 import stat
+import threading
 import time
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from exomem import mutation_lock, writer_lease
+from exomem import mutation_lock, sidecar_store, writer_lease
 from exomem.governance import (
     authorization_custody,
     authorization_session_lifecycle,
@@ -18,6 +21,8 @@ from exomem.governance import (
     schema_v4,
     store,
 )
+
+_PRODUCTION_HOST_CONTROL_ROOT = authorization_custody._standalone_host_control_root
 
 
 @pytest.fixture(autouse=True)
@@ -27,12 +32,18 @@ def _custody_paths(
 ) -> Iterator[None]:
     external = tmp_path / "external"
     external.mkdir(mode=0o700)
+    host_control = tmp_path / "host-control"
     lease_state = tmp_path / "lease-state"
     lease_state.mkdir(mode=0o700)
     if os.name == "nt":  # pragma: no cover - exercised by Windows CI
         sid = mutation_lock._windows_current_user_sid()
         mutation_lock._windows_apply_private_dacl(external, sid)
         mutation_lock._windows_apply_private_dacl(lease_state, sid)
+    monkeypatch.setattr(
+        authorization_custody,
+        "_standalone_host_control_root",
+        lambda: host_control,
+    )
     monkeypatch.setenv(
         authorization_custody.KEYRING_FILE_ENV,
         str(external / "authorization-keyring.json"),
@@ -58,6 +69,21 @@ def _vault(tmp_path: Path, name: str = "vault") -> Path:
     return vault
 
 
+def test_host_control_root_ignores_portable_runtime_path_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    before = _PRODUCTION_HOST_CONTROL_ROOT()
+    monkeypatch.setenv("HOME", str(tmp_path / "copied-home"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "copied-state"))
+    monkeypatch.setenv("PROGRAMDATA", str(tmp_path / "copied-program-data"))
+    monkeypatch.setenv("ALLUSERSPROFILE", str(tmp_path / "copied-profile"))
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "copied-lease"))
+
+    assert _PRODUCTION_HOST_CONTROL_ROOT() == before
+    assert before.is_absolute()
+
+
 def _target(
     custody: authorization_custody.AuthorizationCustody,
     *,
@@ -73,6 +99,92 @@ def _target(
         projector_schema_version=1,
         catalog_generation=1,
         projection_namespace_id="projection-namespace-initial",
+    )
+
+
+def _migration_seed(
+    *,
+    logical_vault_id: str,
+    now: int,
+) -> schema_v4.MigrationSeed:
+    documents = (
+        (
+            "scopes/transfer.yaml",
+            b"governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\n"
+            b"paths:\n  - Notes/**\n",
+        ),
+    )
+    compiled = policy.compile_documents(dict(documents))
+    assert not compiled.empty and not compiled.blocked
+    return schema_v4.MigrationSeed(
+        activation_store_id="activation-store-transfer",
+        logical_vault_id=logical_vault_id,
+        activation_epoch=1,
+        policy=schema_v4.PolicyGenerationSeed(
+            generation_id="01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            source_documents=documents,
+            source_fingerprint=compiled.fingerprint,
+            conflict_digest="2" * 64,
+            compiled_policy=policy.canonical_compiled_bytes(compiled),
+            policy_fingerprint=compiled.fingerprint,
+            compiler_schema_version=1,
+            projector_schema_version=1,
+            predecessor_generation_id=None,
+            authoring_event_id="event-transfer-policy",
+            receipt_event_id="receipt-transfer-policy",
+            created_at=now,
+        ),
+        catalog=schema_v4.CatalogGenerationSeed(
+            catalog_generation=1,
+            descriptor=b'{"artifacts":[]}',
+            artifact_count=0,
+            created_at=now,
+        ),
+        namespace=schema_v4.ProjectionNamespaceSeed(
+            namespace_id="projection-namespace-transfer",
+            evidence=b'{"ready":true}',
+            ready_at=now,
+        ),
+        migrated_at=now,
+    )
+
+
+def _enrolled_v4(
+    vault: Path,
+    *,
+    now: int,
+) -> tuple[
+    authorization_custody.AuthorizationCustody,
+    schema_v4.VerifiedActiveGovernanceState,
+]:
+    authorization_custody.provision_standalone_custody(vault, now=now)
+    registered = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    seed = _migration_seed(
+        logical_vault_id=registered.control.logical_vault_id,
+        now=now,
+    )
+    target = schema_v4.migration_target(seed)
+    authorization_custody.enroll_initial_activation_tuple(
+        vault,
+        expected_control=registered.control,
+        target=target,
+        now=now + 1,
+    )
+    connection = sqlite3.connect(store.sidecar_path(vault))
+    try:
+        store._migrate(connection)
+        sidecar_store.ensure_meta_table(
+            connection,
+            store.DATA_TABLE,
+            "governance-attachment-transfer-test",
+        )
+        connection.commit()
+        schema_v4.migrate_v3_connection(connection, seed)
+    finally:
+        connection.close()
+    return (
+        authorization_custody.load_authorization_custody(vault, now=now + 2),
+        target,
     )
 
 
@@ -150,6 +262,34 @@ def test_explicit_standalone_provisioning_is_private_idempotent_and_copy_bound(
     copied = _vault(tmp_path, "copied-vault")
     with pytest.raises(authorization_custody.AuthorizationCustodyUnavailable):
         authorization_custody.load_authorization_custody(copied, now=now + 1)
+
+
+def test_host_registry_rejects_record_forged_with_portable_vault_key(
+    tmp_path: Path,
+) -> None:
+    vault = _vault(tmp_path)
+    now = 1_800_000_000
+    authorization_custody.provision_standalone_custody(vault, now=now)
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    forged = authorization_custody._host_registry_record(
+        custody.control,
+        state="SERVING",
+        no_in_flight=False,
+        updated_at=now + 1,
+        host_key_id=custody.keyring.active_key_id,
+    )
+    registry_path = authorization_custody._host_registry_path(
+        custody.control.logical_vault_id
+    )
+    registry_path.write_bytes(
+        authorization_custody._signed_host_registry_bytes(
+            forged,
+            signing_key=custody.keyring.active_key.key,
+        )
+    )
+
+    with pytest.raises(authorization_custody.AuthorizationCustodyUnavailable):
+        authorization_custody.load_authorization_custody(vault, now=now + 1)
 
 
 def test_standalone_provisioning_refuses_opaque_hosted_attachment(
@@ -625,11 +765,11 @@ def test_control_before_membership_interruption_retries_without_session_fail_ope
     membership_path = Path(os.environ[authorization_custody.MEMBERSHIP_FILE_ENV])
     control_before = control_path.read_bytes()
     assert not membership_path.exists()
-    interrupted = authorization_custody.load_authorization_custody(
-        vault,
-        now=now + 1,
-    )
-    assert interrupted.serving_membership is None
+    with pytest.raises(authorization_custody.AuthorizationCustodyUnavailable):
+        authorization_custody.load_authorization_custody(
+            vault,
+            now=now + 1,
+        )
 
     monkeypatch.setattr(authorization_custody, "_publish_private_file", original)
     result = authorization_custody.provision_standalone_custody(vault, now=now)
@@ -640,6 +780,724 @@ def test_control_before_membership_interruption_retries_without_session_fail_ope
         vault,
         now=now + 1,
     ).serving_membership is not None
+
+
+def test_standalone_attachment_transfer_requires_drain_ack_and_moves_exclusively(
+    tmp_path: Path,
+) -> None:
+    vault = _vault(tmp_path)
+    copied = tmp_path / "copied-vault"
+    now = 1_800_000_000
+    authorization_custody.provision_standalone_custody(vault, now=now)
+    shutil.copytree(vault, copied)
+    serving = authorization_custody.load_authorization_custody(vault, now=now + 1)
+
+    with pytest.raises(authorization_custody.AuthorizationCustodyUnavailable):
+        authorization_custody.prepare_standalone_attachment_transfer(
+            vault,
+            copied,
+            expected_control=serving.control,
+            now=now + 1,
+        )
+
+    draining = authorization_custody.begin_standalone_attachment_drain(
+        vault,
+        expected_control=serving.control,
+        now=now + 2,
+    )
+    assert draining.serving_membership is not None
+    assert draining.serving_membership.replicas[0].state == "DRAINING"
+    assert draining.serving_membership.replicas[0].issuance_stopped is True
+    assert draining.serving_membership.replicas[0].no_in_flight is False
+
+    with pytest.raises(authorization_custody.AuthorizationCustodyUnavailable):
+        authorization_custody.prepare_standalone_attachment_transfer(
+            vault,
+            copied,
+            expected_control=draining.control,
+            now=now + 2,
+        )
+
+    drained = authorization_custody.acknowledge_standalone_attachment_drain(
+        vault,
+        expected_control=draining.control,
+        now=now + 3,
+    )
+    assert drained.serving_membership is not None
+    assert drained.serving_membership.replicas[0].no_in_flight is True
+
+    acknowledgement = authorization_custody.prepare_standalone_attachment_transfer(
+        vault,
+        copied,
+        expected_control=drained.control,
+        now=now + 3,
+    )
+    moved = authorization_custody.complete_standalone_attachment_transfer(
+        copied,
+        acknowledgement=acknowledgement,
+        now=now + 4,
+    )
+    replay = authorization_custody.complete_standalone_attachment_transfer(
+        copied,
+        acknowledgement=acknowledgement,
+        now=now + 4,
+    )
+
+    assert replay == moved
+    assert moved.control.attachment_epoch == drained.control.attachment_epoch + 1
+    assert moved.control.registry_attachment_id == (
+        authorization_custody.standalone_attachment_id(copied)
+    )
+    assert moved.keyring.cell_id == drained.keyring.cell_id
+    assert moved.keyring.logical_vault_id == drained.keyring.logical_vault_id
+    assert moved.keyring.keyring_id == drained.keyring.keyring_id
+    assert moved.serving_membership is not None
+    assert moved.serving_membership.epoch == drained.serving_membership.epoch + 1
+    assert moved.serving_membership.replicas[0].state == "SERVING"
+
+    with pytest.raises(authorization_custody.AuthorizationCustodyUnavailable):
+        authorization_custody.load_authorization_custody(vault, now=now + 4)
+
+
+def test_standalone_attachment_transfer_recovers_membership_first_crash(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _vault(tmp_path)
+    copied = tmp_path / "copied-vault"
+    now = 1_800_000_000
+    authorization_custody.provision_standalone_custody(vault, now=now)
+    shutil.copytree(vault, copied)
+    serving = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    draining = authorization_custody.begin_standalone_attachment_drain(
+        vault,
+        expected_control=serving.control,
+        now=now + 2,
+    )
+    drained = authorization_custody.acknowledge_standalone_attachment_drain(
+        vault,
+        expected_control=draining.control,
+        now=now + 3,
+    )
+    acknowledgement = authorization_custody.prepare_standalone_attachment_transfer(
+        vault,
+        copied,
+        expected_control=drained.control,
+        now=now + 3,
+    )
+    control_path = Path(os.environ[authorization_custody.CONTROL_FILE_ENV])
+    membership_path = Path(os.environ[authorization_custody.MEMBERSHIP_FILE_ENV])
+    control_before = control_path.read_bytes()
+    membership_before = membership_path.read_bytes()
+    original = authorization_custody._replace_control_bytes
+    interrupted = False
+
+    def stop_before_control(
+        path: Path,
+        *,
+        expected: bytes,
+        target: bytes,
+    ) -> None:
+        nonlocal interrupted
+        if path == control_path and not interrupted:
+            interrupted = True
+            raise authorization_custody.AuthorizationCustodyUnavailable
+        original(path, expected=expected, target=target)
+
+    monkeypatch.setattr(
+        authorization_custody,
+        "_replace_control_bytes",
+        stop_before_control,
+    )
+    with pytest.raises(authorization_custody.AuthorizationCustodyUnavailable):
+        authorization_custody.complete_standalone_attachment_transfer(
+            copied,
+            acknowledgement=acknowledgement,
+            now=now + 4,
+        )
+
+    assert control_path.read_bytes() == control_before
+    assert membership_path.read_bytes() != membership_before
+    assert authorization_custody.load_authorization_custody(
+        vault,
+        now=now + 4,
+    ).serving_membership is None
+    with pytest.raises(authorization_custody.AuthorizationCustodyUnavailable):
+        authorization_custody.load_authorization_custody(copied, now=now + 4)
+
+    monkeypatch.setattr(
+        authorization_custody,
+        "_replace_control_bytes",
+        original,
+    )
+    recovered = authorization_custody.complete_standalone_attachment_transfer(
+        copied,
+        acknowledgement=acknowledgement,
+        now=now + 4,
+    )
+
+    assert recovered.control.attachment_epoch == drained.control.attachment_epoch + 1
+    with pytest.raises(authorization_custody.AuthorizationCustodyUnavailable):
+        authorization_custody.load_authorization_custody(vault, now=now + 4)
+
+
+def test_standalone_attachment_transfer_rejects_tampered_acknowledgement(
+    tmp_path: Path,
+) -> None:
+    vault = _vault(tmp_path)
+    copied = tmp_path / "copied-vault"
+    now = 1_800_000_000
+    authorization_custody.provision_standalone_custody(vault, now=now)
+    shutil.copytree(vault, copied)
+    serving = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    draining = authorization_custody.begin_standalone_attachment_drain(
+        vault,
+        expected_control=serving.control,
+        now=now + 2,
+    )
+    drained = authorization_custody.acknowledge_standalone_attachment_drain(
+        vault,
+        expected_control=draining.control,
+        now=now + 3,
+    )
+    acknowledgement = authorization_custody.prepare_standalone_attachment_transfer(
+        vault,
+        copied,
+        expected_control=drained.control,
+        now=now + 3,
+    )
+    tampered = bytearray(acknowledgement)
+    tampered[-2] = ord("A") if tampered[-2] != ord("A") else ord("B")
+
+    with pytest.raises(authorization_custody.AuthorizationCustodyUnavailable):
+        authorization_custody.complete_standalone_attachment_transfer(
+            copied,
+            acknowledgement=bytes(tampered),
+            now=now + 4,
+        )
+
+    assert authorization_custody.load_authorization_custody(
+        vault,
+        now=now + 4,
+    ).control == drained.control
+
+
+def test_stale_external_bundle_cannot_reattach_source_after_transfer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _vault(tmp_path)
+    copied = tmp_path / "copied-vault"
+    copied_external = tmp_path / "copied-external"
+    copied_external.mkdir(mode=0o700)
+    now = 1_800_000_000
+    authorization_custody.provision_standalone_custody(vault, now=now)
+    shutil.copytree(vault, copied)
+    for variable in (
+        authorization_custody.KEYRING_FILE_ENV,
+        authorization_custody.CONTROL_FILE_ENV,
+        authorization_custody.MEMBERSHIP_FILE_ENV,
+    ):
+        source = Path(os.environ[variable])
+        shutil.copy2(source, copied_external / source.name)
+    serving = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    draining = authorization_custody.begin_standalone_attachment_drain(
+        vault,
+        expected_control=serving.control,
+        now=now + 2,
+    )
+    drained = authorization_custody.acknowledge_standalone_attachment_drain(
+        vault,
+        expected_control=draining.control,
+        now=now + 3,
+    )
+    acknowledgement = authorization_custody.prepare_standalone_attachment_transfer(
+        vault,
+        copied,
+        expected_control=drained.control,
+        now=now + 3,
+    )
+    authorization_custody.complete_standalone_attachment_transfer(
+        copied,
+        acknowledgement=acknowledgement,
+        now=now + 4,
+    )
+
+    for variable in (
+        authorization_custody.KEYRING_FILE_ENV,
+        authorization_custody.CONTROL_FILE_ENV,
+        authorization_custody.MEMBERSHIP_FILE_ENV,
+    ):
+        source = Path(os.environ[variable])
+        monkeypatch.setenv(variable, str(copied_external / source.name))
+
+    with pytest.raises(authorization_custody.AuthorizationCustodyUnavailable):
+        authorization_custody.load_authorization_custody(vault, now=now + 4)
+
+
+def test_predrain_writer_state_snapshot_cannot_revive_source_after_transfer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _vault(tmp_path)
+    copied = tmp_path / "copied-vault"
+    stale_external = tmp_path / "stale-external"
+    stale_writer_state = tmp_path / "stale-writer-state"
+    stale_external.mkdir(mode=0o700)
+    now = 1_800_000_000
+    authorization_custody.provision_standalone_custody(vault, now=now)
+    shutil.copytree(vault, copied)
+    for variable in (
+        authorization_custody.KEYRING_FILE_ENV,
+        authorization_custody.CONTROL_FILE_ENV,
+        authorization_custody.MEMBERSHIP_FILE_ENV,
+    ):
+        source = Path(os.environ[variable])
+        shutil.copy2(source, stale_external / source.name)
+    shutil.copytree(
+        writer_lease.get_manager().config.state_dir,
+        stale_writer_state,
+    )
+
+    serving = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    draining = authorization_custody.begin_standalone_attachment_drain(
+        vault,
+        expected_control=serving.control,
+        now=now + 2,
+    )
+    drained = authorization_custody.acknowledge_standalone_attachment_drain(
+        vault,
+        expected_control=draining.control,
+        now=now + 3,
+    )
+    acknowledgement = authorization_custody.prepare_standalone_attachment_transfer(
+        vault,
+        copied,
+        expected_control=drained.control,
+        now=now + 3,
+    )
+    moved = authorization_custody.complete_standalone_attachment_transfer(
+        copied,
+        acknowledgement=acknowledgement,
+        now=now + 4,
+    )
+    assert moved.control.attachment_epoch == serving.control.attachment_epoch + 1
+
+    for variable in (
+        authorization_custody.KEYRING_FILE_ENV,
+        authorization_custody.CONTROL_FILE_ENV,
+        authorization_custody.MEMBERSHIP_FILE_ENV,
+    ):
+        source = Path(os.environ[variable])
+        monkeypatch.setenv(variable, str(stale_external / source.name))
+    monkeypatch.setenv(
+        "EXOMEM_WRITER_LEASE_STATE_DIR",
+        str(stale_writer_state),
+    )
+    writer_lease.reset_managers_for_tests()
+
+    with pytest.raises(authorization_custody.AuthorizationCustodyUnavailable):
+        authorization_custody.load_authorization_custody(vault, now=now + 4)
+
+
+def test_stale_predrain_custody_cannot_issue_after_drain_begins(
+    tmp_path: Path,
+) -> None:
+    vault = _vault(tmp_path)
+    now = 1_800_000_000
+    serving, _target_state = _enrolled_v4(vault, now=now)
+    connection = store.open_authorization_session_connection(vault)
+    try:
+        authorization_custody.begin_standalone_attachment_drain(
+            vault,
+            expected_control=serving.control,
+            now=now + 3,
+        )
+
+        with pytest.raises(
+            authorization_session_lifecycle.AuthorizationSessionUnavailable
+        ):
+            authorization_session_lifecycle.open_session(
+                connection,
+                custody=serving,
+                principal_id="principal-owner",
+                issuer_family="cli",
+                now=now + 4,
+                ttl_seconds=60,
+            )
+    finally:
+        connection.close()
+
+
+def test_paused_session_issuance_rechecks_host_registry_before_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _vault(tmp_path)
+    now = 1_800_000_000
+    serving, _target_state = _enrolled_v4(vault, now=now)
+    connection = store.open_authorization_session_connection(
+        vault,
+        check_same_thread=False,
+    )
+    entered = threading.Event()
+    release = threading.Event()
+    original = authorization_session_lifecycle.authorization_sessions.issue_credential
+
+    def pause_after_first_readiness(*args: object, **kwargs: object) -> object:
+        issued = original(*args, **kwargs)
+        entered.set()
+        assert release.wait(5)
+        return issued
+
+    monkeypatch.setattr(
+        authorization_session_lifecycle.authorization_sessions,
+        "issue_credential",
+        pause_after_first_readiness,
+    )
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(
+                authorization_session_lifecycle.open_session,
+                connection,
+                custody=serving,
+                principal_id="principal-owner",
+                issuer_family="cli",
+                now=now + 3,
+                ttl_seconds=60,
+            )
+            assert entered.wait(5)
+            authorization_custody.begin_standalone_attachment_drain(
+                vault,
+                expected_control=serving.control,
+                now=now + 3,
+            )
+            release.set()
+            with pytest.raises(
+                authorization_session_lifecycle.AuthorizationSessionUnavailable
+            ):
+                future.result(timeout=5)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM governance_authorization_sessions"
+        ).fetchone() == (0,)
+    finally:
+        release.set()
+        connection.close()
+
+
+def test_drain_waits_for_mutation_boundary_and_blocks_new_mutations(
+    tmp_path: Path,
+) -> None:
+    vault = _vault(tmp_path)
+    now = 1_800_000_000
+    authorization_custody.provision_standalone_custody(vault, now=now)
+    serving = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    manager = writer_lease.get_manager()
+    entered = threading.Event()
+    release = threading.Event()
+
+    def hold_mutation() -> None:
+        with manager.mutation_guard(vault, attachment_now=now + 1):
+            entered.set()
+            assert release.wait(5)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        mutation = executor.submit(hold_mutation)
+        assert entered.wait(5)
+        drain = executor.submit(
+            authorization_custody.begin_standalone_attachment_drain,
+            vault,
+            expected_control=serving.control,
+            now=now + 2,
+        )
+        assert not drain.done()
+        release.set()
+        mutation.result(timeout=5)
+        draining = drain.result(timeout=5)
+
+    assert draining.serving_membership is not None
+    assert draining.serving_membership.replicas[0].state == "DRAINING"
+    with pytest.raises(writer_lease.OpError, match="registered vault attachment") as error:
+        with manager.mutation_guard(vault, attachment_now=now + 3):
+            pass
+    assert error.value.code == "ATTACHMENT_DRAINING"
+
+
+def test_attachment_transfer_invalidates_sessions_from_stale_copy(
+    tmp_path: Path,
+) -> None:
+    vault = _vault(tmp_path)
+    copied = tmp_path / "copied-vault"
+    now = 1_800_000_000
+    serving, target_state = _enrolled_v4(vault, now=now)
+    source_connection = store.open_authorization_session_connection(vault)
+    try:
+        issued = authorization_session_lifecycle.open_session(
+            source_connection,
+            custody=serving,
+            principal_id="principal-owner",
+            issuer_family="cli",
+            now=now + 3,
+            ttl_seconds=120,
+        )
+        common = (
+            issued.context.session_id,
+            issued.context.principal_id,
+            issued.context.issuer_family,
+            "external",
+        )
+        source_connection.execute(
+            "INSERT INTO governance_session_purpose "
+            "(authorization_session_id, principal_id, issuer_family, audience, purpose, "
+            "status, created_at, expires_at) "
+            "VALUES (?, ?, ?, ?, 'support', 'active', ?, ?)",
+            (*common, now + 3, now + 120),
+        )
+        source_connection.execute(
+            "INSERT INTO governance_session_grants "
+            "(grant_id, authorization_session_id, principal_id, issuer_family, audience, "
+            "purpose, ceiling, paths, fingerprints, scope_ids, membership_manifest, "
+            "policy_fingerprint, token_jti, status, created_at, expires_at) "
+            "VALUES ('grant-stale-copy', ?, ?, ?, ?, 'support', 5, '[]', '[]', '[]', "
+            "'[]', ?, 'token-stale-copy', 'active', ?, ?)",
+            (*common, target_state.policy_fingerprint, now + 3, now + 120),
+        )
+        source_connection.execute(
+            "INSERT INTO withhold_tokens "
+            "(jti, authorization_session_id, principal_id, issuer_family, audience, "
+            "max_level, fingerprints, paths, scope_ids, purpose, org_ceiling, status, "
+            "expires_at, minted_at) "
+            "VALUES ('token-stale-copy', ?, ?, ?, ?, 5, '[]', '[]', '[]', 'support', "
+            "6, 'active', ?, ?)",
+            (*common, now + 120, now + 3),
+        )
+        source_connection.commit()
+    finally:
+        source_connection.close()
+    shutil.copytree(vault, copied)
+    source_connection = store.open_authorization_session_connection(vault)
+    try:
+        authorization_session_lifecycle.close_session(
+            source_connection,
+            custody=serving,
+            bearer=issued.bearer,
+            principal_id="principal-owner",
+            issuer_family="cli",
+            now=now + 4,
+        )
+    finally:
+        source_connection.close()
+    draining = authorization_custody.begin_standalone_attachment_drain(
+        vault,
+        expected_control=serving.control,
+        now=now + 5,
+    )
+    drained = authorization_custody.acknowledge_standalone_attachment_drain(
+        vault,
+        expected_control=draining.control,
+        now=now + 6,
+    )
+    acknowledgement = authorization_custody.prepare_standalone_attachment_transfer(
+        vault,
+        copied,
+        expected_control=drained.control,
+        now=now + 6,
+    )
+    moved = authorization_custody.complete_standalone_attachment_transfer(
+        copied,
+        acknowledgement=acknowledgement,
+        now=now + 7,
+    )
+    target_connection = store.open_authorization_session_connection(copied)
+    try:
+        with pytest.raises(
+            authorization_session_lifecycle.AuthorizationSessionUnavailable
+        ):
+            authorization_session_lifecycle.resume_session(
+                target_connection,
+                custody=moved,
+                bearer=issued.bearer,
+                principal_id="principal-owner",
+                issuer_family="cli",
+                now=now + 7,
+            )
+        assert target_connection.execute(
+            "SELECT status FROM governance_authorization_sessions WHERE session_id=?",
+            (issued.context.session_id,),
+        ).fetchone() == ("closed",)
+        assert target_connection.execute(
+            "SELECT status FROM governance_session_purpose "
+            "WHERE authorization_session_id=?",
+            (issued.context.session_id,),
+        ).fetchone() == ("revoked",)
+        assert target_connection.execute(
+            "SELECT status FROM governance_session_grants "
+            "WHERE grant_id='grant-stale-copy'"
+        ).fetchone() == ("revoked",)
+        assert target_connection.execute(
+            "SELECT status FROM withhold_tokens WHERE jti='token-stale-copy'"
+        ).fetchone() == ("expired",)
+    finally:
+        target_connection.close()
+
+
+def test_attachment_transfer_replay_preserves_new_target_session(
+    tmp_path: Path,
+) -> None:
+    vault = _vault(tmp_path)
+    copied = tmp_path / "copied-vault"
+    now = 1_800_000_000
+    serving, _target_state = _enrolled_v4(vault, now=now)
+    draining = authorization_custody.begin_standalone_attachment_drain(
+        vault,
+        expected_control=serving.control,
+        now=now + 3,
+    )
+    drained = authorization_custody.acknowledge_standalone_attachment_drain(
+        vault,
+        expected_control=draining.control,
+        now=now + 4,
+    )
+    shutil.copytree(vault, copied)
+    acknowledgement = authorization_custody.prepare_standalone_attachment_transfer(
+        vault,
+        copied,
+        expected_control=drained.control,
+        now=now + 4,
+    )
+    moved = authorization_custody.complete_standalone_attachment_transfer(
+        copied,
+        acknowledgement=acknowledgement,
+        now=now + 5,
+    )
+    connection = store.open_authorization_session_connection(copied)
+    try:
+        issued = authorization_session_lifecycle.open_session(
+            connection,
+            custody=moved,
+            principal_id="principal-owner",
+            issuer_family="cli",
+            now=now + 6,
+            ttl_seconds=60,
+        )
+        replay = authorization_custody.complete_standalone_attachment_transfer(
+            copied,
+            acknowledgement=acknowledgement,
+            now=now + 7,
+        )
+        resumed = authorization_session_lifecycle.resume_session(
+            connection,
+            custody=replay,
+            bearer=issued.bearer,
+            principal_id="principal-owner",
+            issuer_family="cli",
+            now=now + 7,
+        )
+    finally:
+        connection.close()
+
+    assert resumed.session_id == issued.context.session_id
+
+
+def test_enrolled_attachment_transfer_requires_exact_target_activation_store(
+    tmp_path: Path,
+) -> None:
+    vault = _vault(tmp_path)
+    copied = tmp_path / "copied-vault"
+    now = 1_800_000_000
+    authorization_custody.provision_standalone_custody(vault, now=now)
+    registered = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    authorization_custody.enroll_initial_activation_tuple(
+        vault,
+        expected_control=registered.control,
+        target=_target(registered),
+        now=now + 1,
+    )
+    enrolled = authorization_custody.load_authorization_custody(vault, now=now + 2)
+    draining = authorization_custody.begin_standalone_attachment_drain(
+        vault,
+        expected_control=enrolled.control,
+        now=now + 2,
+    )
+    drained = authorization_custody.acknowledge_standalone_attachment_drain(
+        vault,
+        expected_control=draining.control,
+        now=now + 3,
+    )
+    shutil.copytree(vault, copied)
+    acknowledgement = authorization_custody.prepare_standalone_attachment_transfer(
+        vault,
+        copied,
+        expected_control=drained.control,
+        now=now + 3,
+    )
+    control_path = Path(os.environ[authorization_custody.CONTROL_FILE_ENV])
+    membership_path = Path(os.environ[authorization_custody.MEMBERSHIP_FILE_ENV])
+    control_before = control_path.read_bytes()
+    membership_before = membership_path.read_bytes()
+
+    with pytest.raises(authorization_custody.AuthorizationCustodyUnavailable):
+        authorization_custody.complete_standalone_attachment_transfer(
+            copied,
+            acknowledgement=acknowledgement,
+            now=now + 4,
+        )
+
+    assert control_path.read_bytes() == control_before
+    assert membership_path.read_bytes() == membership_before
+    assert authorization_custody.load_authorization_custody(
+        vault,
+        now=now + 4,
+    ).control == drained.control
+
+
+def test_enrolled_attachment_transfer_preserves_exact_active_store(
+    tmp_path: Path,
+) -> None:
+    vault = _vault(tmp_path)
+    copied = tmp_path / "copied-vault"
+    now = 1_800_000_000
+    enrolled, target = _enrolled_v4(vault, now=now)
+    draining = authorization_custody.begin_standalone_attachment_drain(
+        vault,
+        expected_control=enrolled.control,
+        now=now + 2,
+    )
+    drained = authorization_custody.acknowledge_standalone_attachment_drain(
+        vault,
+        expected_control=draining.control,
+        now=now + 3,
+    )
+    shutil.copytree(vault, copied)
+    acknowledgement = authorization_custody.prepare_standalone_attachment_transfer(
+        vault,
+        copied,
+        expected_control=drained.control,
+        now=now + 3,
+    )
+
+    moved = authorization_custody.complete_standalone_attachment_transfer(
+        copied,
+        acknowledgement=acknowledgement,
+        now=now + 4,
+    )
+    copied_connection = store.open_active_governance_read_connection(copied)
+    try:
+        active = schema_v4.load_active_state(
+            copied_connection,
+            expected_logical_vault_id=moved.control.logical_vault_id,
+            expected_activation_store_id=str(moved.control.activation_store_id),
+            expected_activation_epoch=int(moved.control.activation_epoch or 0),
+            expected_activation_state_digest=str(
+                moved.control.activation_state_digest
+            ),
+        )
+    finally:
+        copied_connection.close()
+
+    assert active == target
+    with pytest.raises(authorization_custody.AuthorizationCustodyUnavailable):
+        authorization_custody.load_authorization_custody(vault, now=now + 4)
 
 
 def test_staged_v3_enrollment_is_irreversible_but_remains_fail_closed(
@@ -720,12 +1578,11 @@ def test_staged_v3_enrollment_replay_recovers_missing_membership(
     control_path = Path(os.environ[authorization_custody.CONTROL_FILE_ENV])
     membership_path = Path(os.environ[authorization_custody.MEMBERSHIP_FILE_ENV])
     control_before = control_path.read_bytes()
-    interrupted = authorization_custody.load_authorization_custody(
-        vault,
-        now=now + 2,
-    )
-    assert interrupted.control.governance_enrolled is True
-    assert interrupted.serving_membership is None
+    with pytest.raises(authorization_custody.AuthorizationCustodyUnavailable):
+        authorization_custody.load_authorization_custody(
+            vault,
+            now=now + 2,
+        )
     assert not membership_path.exists()
     assert policy.load(vault).blocked
 

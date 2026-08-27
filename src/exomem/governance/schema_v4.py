@@ -1390,6 +1390,73 @@ def _close_downmigration_authority(
     return sessions, grants, purposes, tokens, proposals
 
 
+def invalidate_attachment_session_authority(
+    connection: sqlite3.Connection,
+    *,
+    invalidated_at: int,
+) -> tuple[int, int, int, int]:
+    """Invalidate every imported session-derived authority before attachment.
+
+    A copied activation store can be policy-current while its ephemeral session
+    rows predate a close or rotation on the source.  Attachment transfer is
+    therefore conservative: unless a later protocol proves an exact source
+    snapshot, the target closes all imported session authority transactionally
+    before the external host registry can make that target reachable.
+    """
+
+    moment = _integer(invalidated_at, "invalidated_at")
+    if connection.in_transaction:
+        raise SchemaV4Error("attachment invalidation requires an idle connection")
+    require_exact_v4_connection(connection)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        sessions = int(
+            connection.execute(
+                "UPDATE governance_authorization_sessions "
+                "SET status='closed', closed_at=? WHERE status='active'",
+                (moment,),
+            ).rowcount
+            or 0
+        )
+        grants = int(
+            connection.execute(
+                "UPDATE governance_session_grants SET status='revoked', "
+                "prepared_event_id=NULL, revoked_at=? WHERE status<>'revoked'",
+                (moment,),
+            ).rowcount
+            or 0
+        )
+        purposes = int(
+            connection.execute(
+                "UPDATE governance_session_purpose SET status='revoked', "
+                "prepared_event_id=NULL WHERE status<>'revoked'"
+            ).rowcount
+            or 0
+        )
+        purposes += int(
+            connection.execute(
+                "DELETE FROM governance_session_purpose_staging"
+            ).rowcount
+            or 0
+        )
+        tokens = int(
+            connection.execute(
+                "UPDATE withhold_tokens SET status='expired', prepared_event_id=NULL, "
+                "consumed_at=COALESCE(consumed_at, ?) WHERE status<>'expired'",
+                (moment,),
+            ).rowcount
+            or 0
+        )
+        connection.commit()
+        return sessions, grants, purposes, tokens
+    except (sqlite3.Error, SchemaV4Error):
+        connection.rollback()
+        raise SchemaV4Error("attachment session invalidation failed") from None
+    except BaseException:
+        connection.rollback()
+        raise
+
+
 def _downmigration_terminal(
     *,
     event_id: str,

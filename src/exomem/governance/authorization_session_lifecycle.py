@@ -117,6 +117,11 @@ def _ready_custody(
         current = _bounded_time(now)
         if not isinstance(custody, authorization_custody.AuthorizationCustody):
             raise AuthorizationSessionUnavailable
+        authorization_custody.require_current_standalone_registry(
+            custody,
+            now=current,
+            require_serving=True,
+        )
         keyring = custody.keyring
         control = custody.control
         if (
@@ -361,6 +366,7 @@ def open_session(
     )
     _begin_immediate(connection)
     try:
+        _ready_custody(connection, custody, now=now)
         schema_v4.insert_authorization_session(
             connection,
             issued.record,
@@ -710,6 +716,7 @@ def _rotate_resolved_session(
     )
     _begin_immediate(connection)
     try:
+        _ready_custody(connection, custody, now=now)
         updated = connection.execute(
             "UPDATE governance_authorization_sessions SET locator_digest=?, verifier=?, "
             "verifier_key_id=?, credential_generation=?, principal_id=?, issuer_family=?, "
