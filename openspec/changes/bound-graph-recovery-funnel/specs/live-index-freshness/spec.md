@@ -52,3 +52,33 @@ The out-of-process index drain SHALL detect that a live service owns graph work 
 - **WHEN** the out-of-process index drain is invoked for a vault whose running service currently performs graph work
 - **THEN** the drain exits without taking the graph claim
 - **AND** its message names the stop-window procedure as the remediation
+
+### Requirement: Graph startup validation is bounded
+
+A service restart that finds a coherent durable graph checkpoint SHALL admit graph reads without rebuilding the whole graph; the startup pass validates against durable state and reserves the whole-vault rebuild for genuine incoherence (missing or malformed checkpoint, digest mismatch, or a recorded crash marker). Read suspension during startup validation SHALL be bounded by the validation itself, not by a full rebuild.
+
+#### Scenario: Restart with a coherent graph admits without a full rebuild
+
+- **WHEN** the service restarts and the durable graph checkpoint matches the published sidecar's digest and generation
+- **THEN** graph reads are admitted after the O(1) validation
+- **AND** no whole-vault graph rebuild is scheduled by the startup pass
+
+#### Scenario: Genuine incoherence still rebuilds
+
+- **WHEN** the service restarts and the durable graph checkpoint is missing, malformed, or does not match the published sidecar
+- **THEN** the startup pass suspends reads and schedules the whole-vault rebuild
+
+### Requirement: Semantic recall admission tolerates bounded projection lag
+
+Semantic recall SHALL NOT refuse solely because the maintained recall projection lags current content by in-flight writes; it SHALL serve from the last published projection while the projection refresh is pending, disclosing bounded staleness, and SHALL refuse only when no published projection exists or the projection's identity (policy, access fingerprint, catalog identity) no longer matches. The write path SHALL refresh the projection proportionally to the delta, never by whole-vault work.
+
+#### Scenario: A write does not interrupt semantic recall
+
+- **WHEN** semantic recall arrives while writes have advanced content past the last published recall projection
+- **THEN** the recall serves from the last published projection with a bounded-staleness disclosure
+- **AND** the projection refresh proceeds proportionally to the delta
+
+#### Scenario: Identity changes still refuse
+
+- **WHEN** the recall policy, access fingerprint, or catalog identity changes
+- **THEN** semantic recall refuses until a projection published under the new identity exists
