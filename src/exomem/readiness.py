@@ -282,6 +282,26 @@ def warming_info() -> dict | None:
         }
 
 
+def graph_recovery_payload(vault_root) -> dict:
+    """Stable, content-free graph-recovery telemetry for the readiness payload.
+
+    Persistent `recovery_required` is the condition the 2026-08 incident ran on
+    for days unalarmed, so ELAPSED time is the signal, not a boolean. This
+    observes and records the condition, so whoever serves readiness keeps the
+    durable clock advancing. It names no path and no note — an age and a flag.
+    """
+    from . import graph_sync
+
+    try:
+        age = graph_sync.observe_recovery_state(vault_root)
+    except Exception:  # noqa: BLE001 - telemetry must never break readiness
+        return {"recovery_required": False, "recovery_age_s": None}
+    return {
+        "recovery_required": age is not None,
+        "recovery_age_s": None if age is None else round(age, 1),
+    }
+
+
 def wait(component: str, timeout: float | None = None) -> bool:
     _check(component)
     return _events[component].wait(timeout)

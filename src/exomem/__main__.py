@@ -617,6 +617,25 @@ def _index_main(argv: list[str]) -> int:
     if not args.vault:
         print("index: set --vault or EXOMEM_VAULT_PATH", file=sys.stderr)
         return 2
+    # Refuse BEFORE any graph claim is taken. Two processes contending for the
+    # same graph ownership is not slow, it soft-deadlocks: the 2026-08 incident
+    # had this CLI holding the claim at 0 CPU while the live service minted
+    # ~2,143 receipts in 40 minutes, of which draining re-embedded 3 files.
+    # Contending is never the right move, so make it unrepresentable.
+    from . import graph_sync as _graph_sync
+
+    owner = _graph_sync.live_graph_owner(Path(args.vault).expanduser())
+    if owner is not None:
+        print(
+            "index: refusing to start — a live service currently owns graph work "
+            f"for this vault (operation={owner.get('operation')!r}, "
+            f"held {owner.get('age_seconds')}s). Two processes contending for the "
+            "graph claim soft-deadlock rather than sharing it.\n"
+            "index: take a stop window — stop the exomem service, run this drain "
+            "to completion, then restart the service.",
+            file=sys.stderr,
+        )
+        return 2
     # Scope override flows through the env var the whole stack reads, so a single
     # source of truth governs the walk, the drift check, and freshness.
     if args.scope:

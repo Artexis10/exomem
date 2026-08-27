@@ -8,6 +8,7 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -34,6 +35,9 @@ _TEMP_PREFIX = ".graph-rebuild-"
 _CHECKPOINT_FILENAME = ".graph-sync.json"
 _FLOOR_FILENAME = ".graph-sync-floor.json"
 _RECEIPT_DIRNAME = ".graph-commit-receipts"
+#: Durable start instant of a continuous `recovery_required` condition. Durable
+#: on purpose: a restart loop must not keep resetting the alarm clock.
+_RECOVERY_MARKER_FILENAME = ".graph-sync-recovery.json"
 _RESET_PREFIX = ".graph-reset-"
 _RESET_MANIFEST = ".manifest.json"
 _RESET_MEMBERS = (
@@ -937,6 +941,147 @@ def floor_path(vault_root: Path) -> Path:
     return Path(vault_root) / kb_dirname() / _FLOOR_FILENAME
 
 
+def recovery_marker_path(vault_root: Path) -> Path:
+    from .kbdir import kb_dirname
+
+    return Path(vault_root) / kb_dirname() / _RECOVERY_MARKER_FILENAME
+
+
+def observe_recovery_state(vault_root: Path) -> float | None:
+    """Record and return how long recovery has CONTINUOUSLY been required.
+
+    `recovery_required` is correct for minutes and pathological for hours, so
+    the alarm needs elapsed time, not a boolean. The start instant is durable:
+    a restart must not reset the clock, because a restart loop is exactly the
+    shape the 2026-08 incident took.
+
+    Idempotent. Entering recovery stamps the marker; leaving it removes the
+    marker, so the condition can never be sticky. Returns None whenever
+    recovery is not currently required.
+    """
+    root = Path(vault_root)
+    marker = recovery_marker_path(root)
+    if status(root)["state"] != "recovery_required":
+        try:
+            marker.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            logger.warning("could not clear the graph recovery marker", exc_info=True)
+        return None
+    state, age = _recovery_clock(root)
+    if state == "valid":
+        # A well-formed clock is authoritative: leave it exactly as it is, or a
+        # restart loop would keep resetting the age and the bound could never
+        # be crossed.
+        return age
+    # Absent OR corrupt. A corrupt clock must be REPLACED, never accepted: read
+    # as "just now" it silences the alarm permanently, because the age can then
+    # never exceed the bound.
+    try:
+        _write_recovery_marker(root, time.time())
+    except Exception:  # noqa: BLE001 - an unwritable marker must not break writes
+        logger.warning("could not record the graph recovery marker", exc_info=True)
+    return 0.0
+
+
+def _recovery_clock(vault_root: Path) -> tuple[str, float | None]:
+    """Classify the durable recovery clock: absent, valid, or corrupt.
+
+    The three states are genuinely different, and collapsing them is what made
+    the alarm silenceable. Absent means the condition is not recorded. Valid
+    carries an age. Corrupt means the condition WAS recorded but its clock is
+    unreadable -- a fault in its own right, never an age of zero.
+    """
+    marker = recovery_marker_path(Path(vault_root))
+    try:
+        raw = marker.read_text(encoding="utf-8")
+    except (FileNotFoundError, NotADirectoryError):
+        return "absent", None
+    except OSError:
+        return "corrupt", None
+    try:
+        since = float(json.loads(raw)["since"])
+    except (ValueError, TypeError, KeyError, json.JSONDecodeError):
+        return "corrupt", None
+    if not math.isfinite(since):
+        return "corrupt", None
+    return "valid", max(0.0, time.time() - since)
+
+
+def recovery_clock_state(vault_root: Path) -> str:
+    """``absent``, ``valid`` or ``corrupt`` for the durable recovery clock."""
+    return _recovery_clock(vault_root)[0]
+
+
+def recovery_age_seconds(vault_root: Path) -> float | None:
+    """Seconds since recovery was first continuously required, else None.
+
+    A pure read: doctor and health call this without writing. It reports an age
+    ONLY for a well-formed clock. A corrupt clock returns None and is surfaced
+    through :func:`recovery_clock_state` instead, because answering 0.0 there
+    let a torn marker hold the age permanently below the alarm bound.
+    """
+    return _recovery_clock(vault_root)[1]
+
+
+def _write_recovery_marker(vault_root: Path, since: float) -> None:
+    """Publish the recovery clock atomically through the graph_sync owner path.
+
+    The same owner-bound publication as `.graph-sync.json`, and it matters more
+    here than for ordinary state: this marker is written during exactly the
+    crashes the subsystem monitors, so an in-place `write_text` could tear and
+    leave behind the corrupt clock that silences the alarm.
+    """
+    from . import reserved_paths
+
+    payload = json.dumps({"since": since}, separators=(",", ":")).encode("utf-8")
+    with reserved_paths._subsystem_authority_scope("graph_sync"):
+        reserved_paths._publish_owner_bytes(
+            vault_root,
+            recovery_marker_path(vault_root),
+            "graph-handoff",
+            payload,
+        )
+
+
+#: Mutation-boundary holder kind used by every epistemic-graph operation.
+_GRAPH_HOLDER_KIND = "graph"
+
+
+def live_graph_owner(vault_root: Path) -> dict[str, object] | None:
+    """The cross-process holder currently doing GRAPH work for this vault.
+
+    A pure probe of the mutation boundary that takes NO graph claim, so a
+    caller can decide whether to start before contending for one. That ordering
+    is the whole point: the 2026-08 soft-deadlock was an out-of-process drain
+    holding the graph claim at 0 CPU while the live service minted receipts
+    behind it.
+
+    Deliberately narrow. Only a holder whose kind is `graph` counts — refusing
+    on ANY holder would make the drain unusable on a vault that merely has
+    write traffic. Returns None when nothing holds the boundary, when the
+    holder is doing something else, or when the boundary cannot be probed at
+    all: a drain must not be blocked by an unreadable runtime root.
+    """
+    try:
+        from . import mutation_lock
+        from .writer_lease import active_manager
+
+        coordinator = mutation_lock.VaultMutationCoordinator(
+            active_manager().config.state_dir, vault_root
+        )
+        snapshot = coordinator.snapshot()
+    except Exception:  # noqa: BLE001 - an unprobeable boundary is not a refusal
+        logger.debug("could not probe the graph mutation boundary", exc_info=True)
+        return None
+    if snapshot.get("state") != "held":
+        return None
+    if str(snapshot.get("holder_kind")) != _GRAPH_HOLDER_KIND:
+        return None
+    return snapshot
+
+
 def graph_commit_receipt_path(vault_root: Path, commit_token: str) -> Path:
     """Return the hidden portable receipt location for one opaque claim token."""
     if _MUTATION_ID.fullmatch(commit_token) is None:
@@ -1019,7 +1164,13 @@ def checkpoint_state(vault_root: Path) -> tuple[str, GraphSyncCheckpoint | None]
 def is_graph_input_path(relative_path: str) -> bool:
     normalized = relative_path.replace("\\", "/")
     return (
-        not normalized.endswith((f"/{_CHECKPOINT_FILENAME}", f"/{_FLOOR_FILENAME}"))
+        not normalized.endswith(
+            (
+                f"/{_CHECKPOINT_FILENAME}",
+                f"/{_FLOOR_FILENAME}",
+                f"/{_RECOVERY_MARKER_FILENAME}",
+            )
+        )
         and f"/{_RECEIPT_DIRNAME}/" not in f"/{normalized.lstrip('/')}"
     )
 

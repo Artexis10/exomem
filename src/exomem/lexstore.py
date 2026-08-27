@@ -605,6 +605,88 @@ def runtime_retrieval_catalog_proof(
     return checkpoints
 
 
+@dataclass(frozen=True, slots=True)
+class RecallProjectionAdmission:
+    """Request-path admission for maintained semantic recall.
+
+    ``checkpoints`` is the projection each scope is answered at.
+    ``lagging_scopes`` names the scopes served from the catalog's published
+    projection rather than an exactly-current live one — the bounded staleness
+    a caller must disclose. Empty means the answer is exactly current.
+    """
+
+    checkpoints: dict[str, object]
+    lagging_scopes: tuple[str, ...]
+
+    @property
+    def stale(self) -> bool:
+        return bool(self.lagging_scopes)
+
+
+def runtime_retrieval_catalog_admission(
+    vault_root: Path,
+    *,
+    schedule_repair: bool = True,
+) -> RecallProjectionAdmission | None:
+    """Admit maintained recall, tolerating bounded projection lag.
+
+    :func:`runtime_retrieval_catalog_proof` answers a stricter question — "is
+    the catalog exactly at the LIVE projection" — and health, warm-up and the
+    repair worker all need that strictness. A request does not. Refusing a
+    request whenever the live registry has no projection for a scope turns
+    every cold, restarted or reprojection-evicted registry window into a total
+    semantic-recall outage, even though the sidecar holds a perfectly good
+    published projection (measured: `live_ckpt=None` while `stored_gen=2/4`).
+
+    So: take the strict proof when it binds, and otherwise fall back to the
+    catalog's own published checkpoint per scope. The fallback is admitted only
+    when every scope has a well-formed published projection whose policy
+    version and access fingerprint still equal this vault's current identity,
+    and whose semantic catalog identity still matches — the exact conditions
+    under which those rows still describe what this process may serve. Anything
+    else returns None and the caller refuses as before.
+    """
+    from . import freshness as freshness_module
+    from . import recall_policy
+
+    # Call shape matters, not just the result: the request path has always
+    # proved with the vault root alone, and that seam is pinned by callers who
+    # substitute their own proof. Only the side-effect-free probe passes the
+    # keyword.
+    strict = (
+        runtime_retrieval_catalog_proof(vault_root)
+        if schedule_repair
+        else runtime_retrieval_catalog_proof(vault_root, schedule_repair=False)
+    )
+    if strict is not None:
+        return RecallProjectionAdmission(dict(strict), ())
+
+    root = Path(vault_root)
+    store = get_store(root)
+    identity = recall_policy.recall_policy_identity(root)
+    checkpoints: dict[str, object] = {}
+    lagging: list[str] = []
+    for scope in ("kb", "vault"):
+        published = store.published_recall_checkpoint(scope)
+        if published is None or published.triple is None:
+            return None
+        if (published.policy_version, published.access_policy_fingerprint) != identity:
+            # The projection was published under an access identity this
+            # process no longer has; serving it could disclose pages the
+            # current policy hides. Refuse until republication.
+            return None
+        live = freshness_module.live_recall_checkpoint(root, scope)
+        if live is not None and live == published:
+            checkpoints[scope] = live
+            continue
+        checkpoints[scope] = published
+        lagging.append(scope)
+    if schedule_repair:
+        # Serving stale is a bridge, not a resting state: keep converging.
+        _schedule_runtime_catalog_repair(root)
+    return RecallProjectionAdmission(checkpoints, tuple(lagging))
+
+
 def runtime_retrieval_catalog_current(
     vault_root: Path,
     *,
@@ -2590,6 +2672,34 @@ class LexicalStore:
         self._write_checkpoint(
             conn, scope, freshness_module.recall_checkpoint(self.vault_root, scope)
         )
+
+    def published_recall_checkpoint(self, scope: str):
+        """This sidecar's own published recall checkpoint for `scope`, or None.
+
+        Read-only and O(1): a schema probe, the catalog identity row and one
+        checkpoint row. It never walks the vault, applies a delta, or schedules
+        repair. A checkpoint is returned ONLY when the sidecar is structurally
+        usable and its semantic catalog identity still matches the vault's, so
+        the rows it describes are still the ones this process would serve.
+
+        This is deliberately weaker than `catalog_readiness`: it answers "what
+        projection is published here", not "is that projection current".
+        """
+        if backend() == "python" or self._failed or not self.path.exists():
+            return None
+        conn: sqlite3.Connection | None = None
+        try:
+            conn = self._connect()
+            if not self._schema_is_current(conn):
+                return None
+            if self._meta_catalog_identity(conn) != catalog_semantic_identity(self.vault_root):
+                return None
+            return self._meta_checkpoint(conn, scope)
+        except sqlite3.Error:
+            return None
+        finally:
+            if conn is not None:
+                conn.close()
 
     def _meta_checkpoint(self, conn: sqlite3.Connection, scope: str):
         """The projected recall checkpoint stored for `scope`, or None.

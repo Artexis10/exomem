@@ -67,6 +67,12 @@ _DEFERRAL_TELEMETRY_KEYS = (
 _DEFERRAL_TELEMETRY: dict[str, int] = dict.fromkeys(_DEFERRAL_TELEMETRY_KEYS, 0)
 _DEFERRAL_TELEMETRY_LOCK = threading.Lock()
 
+#: Graph deferral codes that CLAIM durable per-path coverage. `graph_repair_queued`
+#: is emitted only on the branch that proved the durable queue holds the affected
+#: paths. The disabled codes record nothing and are deliberately absent, so a
+#: stale queue entry naming the same path can never bless them.
+_GRAPH_COVERAGE_CODES = frozenset({"graph_repair_queued"})
+
 
 def _note_deferral(reason: str) -> None:
     """Count one stable deferral-accounting outcome (never content).
@@ -631,6 +637,7 @@ def full_upsert_succeeded(vault_root: Path, replaced: list[Path], report: object
     ):
         return False
     receipt_rels: set[str] | None = None
+    graph_receipt_rels: set[str] | None = None
     replaced_rels: set[str] = set()
     root = Path(vault_root).resolve()
     for path in replaced:
@@ -659,6 +666,32 @@ def full_upsert_succeeded(vault_root: Path, replaced: list[Path], report: object
                 and graph_sync.registered_checkpoint(vault_root) == checkpoint
             ):
                 continue
+            if component.outcome == "deferred" and component.code in _GRAPH_COVERAGE_CODES:
+                # Mirror of the embeddings warm-up carve-out above: per-path
+                # graph receipts ARE the exact durable demand for those paths,
+                # so minting a whole-component refresh on top is the same
+                # double-accounting. This matters most precisely where it used
+                # to hurt: during `recovery_required` the registered checkpoint
+                # never equals the live one, so the clause above never fires and
+                # EVERY write minted — backlog feeding the backlog.
+                #
+                # Only a code that means "durably queued" may be blessed;
+                # `graph_index_disabled`/`graph_scheduling_disabled` record
+                # nothing, so a stale queue entry can never launder them.
+                graph_rels = {
+                    rel for rel in replaced_rels if graph_sync.is_graph_input_path(rel)
+                }
+                if graph_rels:
+                    if graph_receipt_rels is None:
+                        graph_receipt_rels = {
+                            receipt.rel_path
+                            for receipt in deferred_index.snapshot_graph(vault_root)
+                        }
+                    if graph_rels <= graph_receipt_rels:
+                        _note_deferral("covered_deferral_accepted")
+                        continue
+                _note_deferral("uncovered_deferral_escalated")
+                return False
         if component.component == "embeddings" and component.outcome == "deferred":
             # A deferral that is already durably queued path-by-path is not a
             # batch failure — declaring it one is what escalated an O(1) cause

@@ -383,7 +383,15 @@ _REGISTRY = (
     InternalStateDescriptor(
         "graph-handoff",
         "graph_sync",
-        exact=(".graph-sync.json", ".graph-sync-floor.json"),
+        exact=(
+            ".graph-sync.json",
+            ".graph-sync-floor.json",
+            # The durable recovery clock, reserved for the same reason as its
+            # siblings: graph_sync-owned state whose corruption silences an
+            # alarm, so it is published atomically through the owner path
+            # rather than written in place.
+            ".graph-sync-recovery.json",
+        ),
     ),
     InternalStateDescriptor(
         "graph-receipts", "graph_sync", trees=(".graph-commit-receipts",)
