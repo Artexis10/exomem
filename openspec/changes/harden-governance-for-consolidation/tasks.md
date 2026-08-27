@@ -3,14 +3,14 @@
 This checklist is an end-state acceptance ledger, not a percentage-complete meter. A
 checkbox is complete only when its whole obligation is evidenced; several broad open
 tasks therefore contain substantial merged foundations. The implementation baseline for
-this reconciliation is `origin/main` at `9dc37201` plus stacked evidence PR #832
-(`fd77c5b3`).
+this reconciliation is `origin/main` at `c8ba4be7` plus cumulative stacked evidence PR
+#887 (`7852a5f9`).
 
 | Area | Merged implementation evidence | Remaining end-state obligation |
 | --- | --- | --- |
 | Per-scope disclosure | Conservative lattice, option meet, unconditional scrubber, and session-bound scope enforcement are merged. | Exact v3 grant migration and receipt-first v4 scope-bound recovery are implemented and evidenced in this stacked change; no section 1 obligation remains. Merge stays behind the Personal stability hold. |
 | Non-Markdown membership | Descriptor binding, owner backfill, fail-closed propagation, structured-read preflight, and the combined regression matrix are complete through #723, #724, #727, and green PR #832 CI. | No section 2 obligation remains. |
-| Policy authority | Prospective snapshots, exact proposal authority binding, atomic policy publication, the held workspace mirror, and policy/content/companion/measurement/graph writer successors are merged through #729, #740, and #800-#830. | Direct workspace pending-vs-blocked authority and deterministic policy/content/companion tuple-race evidence are complete in the stacked changes. Remaining migration, recovery, suspend/resume/undo, and combined evidence closure is in 3.6-3.7 and 3.12-3.13. |
+| Policy authority | Prospective snapshots, exact proposal authority binding, atomic publication, writer successors, irreversible enrollment, forward migration, downmigration, predecessor-backup recovery, and semantic suspend/resume/undo are complete through #729, #740, #800-#830, and #869-#887. | No section 3 obligation remains: every slice retains its red/green barrier evidence, independent rechecks are green, and cumulative #887 CI passed the complete stacked implementation. Merge stays behind the Personal stability hold and whole-change closeout. |
 | Reserved state | Held filesystem substrate and the closed reserved-path monopoly are merged and complete. | Final whole-change review/verification only. |
 | Authorization sessions | Credential verification, external custody, schema-v4 authority, transport binding, standalone attachment, and serving-membership verification are merged in #728, #732, #734, #737, #741, #772, #775, and #778. | Hosted membership publisher, complete move/restore and v3 migration/downmigration, hygiene, and combined lifecycle evidence in the remaining section 5 tasks. |
 | Direct reads | Markdown and structured-direct gates are merged in #730/#731; the full L0-L6 and registry-proven never-enrolled matrix is complete in stacked PR #832. | No section 7 implementation obligation remains; merge stays behind the Personal stability hold. |
@@ -181,12 +181,12 @@ this reconciliation is `origin/main` at `9dc37201` plus stacked evidence PR #832
   workspace mirror with held-parent/descriptor-identity checks. Refuse observable drift,
   record exact mirror result and pending divergence, and allow an already-exact tuple
   transaction to stand; direct OS-owner mutation is outside the filesystem guarantee.
-- [ ] 3.12 Restrict recovery/doctor/backup/rebuild/downmigration compiles to immutable
+- [x] 3.12 Restrict recovery/doctor/backup/rebuild/downmigration compiles to immutable
   generation/journal/receipt bytes. Implement irreversible registry enrollment, initial
   direct-source/catalog migration, exact active-source mirroring for v4→v3 under the
   cooperative fence, and external expected-tuple restore/rebuild CAS. Preserve enrollment
   history and treat a reviewed empty generation as governed, never OPEN.
-- [ ] 3.13 Run policy, govern-tool, activation-store, suspend/resume/undo dependent-grant,
+- [x] 3.13 Run policy, govern-tool, activation-store, suspend/resume/undo dependent-grant,
   recovery, receipt, conflict-copy, proposal concurrency, migration/rollback,
   backup/restore, and cross-process reader tests; retain red/green evidence for every
   barrier.
