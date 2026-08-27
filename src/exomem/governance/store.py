@@ -17,8 +17,12 @@ import sqlite3
 import threading
 from collections import OrderedDict
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .. import index_paths, reserved_paths, sidecar_store
+
+if TYPE_CHECKING:
+    from .schema_v4 import MigrationSeed, VerifiedActiveGovernanceState
 
 SCHEMA_USER_VERSION = 3
 DATA_TABLE = "compiled_policy"
@@ -235,6 +239,152 @@ def authorization_session_schema_version(vault_root: Path) -> int | None:
     finally:
         if connection is not None:
             connection.close()
+
+
+def _schema_migration_barrier(point: str) -> None:
+    """Test seam after the only durable database effect."""
+
+    del point
+
+
+def migrate_enrolled_v3_store(
+    vault_root: Path,
+    *,
+    seed: MigrationSeed,
+    now: int,
+) -> VerifiedActiveGovernanceState:
+    """Commit one pre-enrolled exact-v3 store to its exact v4 target.
+
+    This is the filesystem-backed database half of the offline migration.  Its
+    caller must already have drained old binaries and prepared the immutable
+    catalog/projection evidence.  The cooperative identity guard keeps current
+    Exomem writers out while the exact policy workspace is rechecked; external
+    direct OS mutation remains outside that guarantee and is detected by the
+    post-commit observation.
+    """
+
+    from . import authorization_custody, policy, schema_v4
+
+    root = Path(vault_root)
+    path = sidecar_path(root)
+    with reserved_paths._subsystem_authority_scope("governance.store"):
+        with reserved_paths._identity_coordination_scope(
+            root,
+            descriptor_ids=("governance-store",),
+            identity_may_change=False,
+        ):
+            with reserved_paths._sqlite_owner_target_scope(
+                root,
+                path,
+                "governance-store",
+                create=False,
+            ) as retained_path:
+                connection = sqlite3.connect(
+                    f"{retained_path.as_uri()}?mode=rw",
+                    uri=True,
+                )
+                try:
+                    connection.execute("PRAGMA synchronous=FULL")
+                    connection.execute("PRAGMA busy_timeout=0")
+                    reserved_paths._publish_sqlite_owner_family(
+                        root,
+                        path,
+                        "governance-store",
+                        connection,
+                    )
+                    version = int(
+                        connection.execute("PRAGMA user_version").fetchone()[0]
+                    )
+                    if version == SCHEMA_USER_VERSION:
+                        schema_v4.require_exact_v3_connection(connection)
+                    elif version == schema_v4.SCHEMA_USER_VERSION:
+                        schema_v4.require_exact_v4_connection(connection)
+                    else:
+                        raise UnsupportedGovernanceSchema(
+                            "explicit governance migration requires exact schema v3 or v4"
+                        )
+
+                    target = schema_v4.migration_target(seed)
+                    custody = authorization_custody.load_authorization_custody(
+                        root,
+                        now=now,
+                    )
+                    control = custody.control
+                    if (
+                        not control.governance_enrolled
+                        or control.activation_store_id != target.activation_store_id
+                        or control.activation_epoch != target.activation_epoch
+                        or control.activation_state_digest
+                        != target.activation_state_digest
+                        or control.logical_vault_id != target.logical_vault_id
+                        or custody.serving_membership is None
+                        or custody.local_replica_id is None
+                    ):
+                        raise authorization_custody.AuthorizationCustodyUnavailable
+
+                    before = None
+                    if version == SCHEMA_USER_VERSION:
+                        before = policy.observe_authoring_snapshot(root)
+                        if (
+                            before is None
+                            or before.documents != seed.policy.source_documents
+                            or before.source_fingerprint
+                            != seed.policy.source_fingerprint
+                            or before.conflict_set_digest
+                            != seed.policy.conflict_digest
+                        ):
+                            raise schema_v4.SchemaV4Error(
+                                "migration policy workspace does not match the reviewed seed"
+                            )
+
+                    result = schema_v4.migrate_v3_connection(connection, seed)
+                    reserved_paths._publish_sqlite_owner_family(
+                        root,
+                        path,
+                        "governance-store",
+                        connection,
+                    )
+                    _schema_migration_barrier("after_store_commit")
+                    active = schema_v4.load_active_state(
+                        connection,
+                        expected_logical_vault_id=target.logical_vault_id,
+                        expected_activation_store_id=target.activation_store_id,
+                        expected_activation_epoch=target.activation_epoch,
+                        expected_activation_state_digest=(
+                            target.activation_state_digest
+                        ),
+                    )
+                    if (
+                        result.schema_version != schema_v4.SCHEMA_USER_VERSION
+                        or result.activation_store_id != target.activation_store_id
+                        or result.activation_state_digest
+                        != target.activation_state_digest
+                        or active != target
+                    ):
+                        raise schema_v4.SchemaV4Error(
+                            "migration result does not match the enrolled target"
+                        )
+                    if before is not None:
+                        after = policy.observe_authoring_snapshot(root)
+                        if after != before:
+                            raise schema_v4.SchemaV4Error(
+                                "migration policy workspace changed during commit"
+                            )
+                finally:
+                    connection.close()
+
+            verified = authorization_custody.load_authorization_custody(
+                root,
+                now=now,
+            )
+            if (
+                verified.keyring != custody.keyring
+                or verified.control != custody.control
+                or verified.serving_membership != custody.serving_membership
+                or verified.local_replica_id != custody.local_replica_id
+            ):
+                raise authorization_custody.AuthorizationCustodyUnavailable
+    return active
 
 
 def _open_connection_owned(

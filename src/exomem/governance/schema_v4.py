@@ -599,6 +599,23 @@ def _seed_material(seed: MigrationSeed) -> _SeedMaterial:
     )
 
 
+def migration_target(seed: MigrationSeed) -> VerifiedActiveGovernanceState:
+    """Derive the exact initial active tuple before irreversible enrollment."""
+
+    material = _seed_material(seed)
+    return VerifiedActiveGovernanceState(
+        logical_vault_id=seed.logical_vault_id,
+        activation_store_id=seed.activation_store_id,
+        activation_epoch=seed.activation_epoch,
+        activation_state_digest=material.activation_digest,
+        policy_generation_id=seed.policy.generation_id,
+        policy_fingerprint=seed.policy.policy_fingerprint,
+        projector_schema_version=seed.policy.projector_schema_version,
+        catalog_generation=seed.catalog.catalog_generation,
+        projection_namespace_id=seed.namespace.namespace_id,
+    )
+
+
 def _json_archive_value(value: object) -> object:
     if value is None or isinstance(value, (str, int, float)):
         return value
@@ -1146,6 +1163,85 @@ def _require_downmigration_schema(connection: sqlite3.Connection) -> None:
         raise SchemaV4Error("schema v4 downmigration source has unknown state")
     if _versioned_schema_signature(connection) != _expected_versioned_schema_signature():
         raise SchemaV4Error("schema v4 downmigration source is not exact")
+
+
+@functools.cache
+def _expected_v4_schema_signature() -> tuple[tuple[object, ...], ...]:
+    from .. import sidecar_store
+    from . import policy as policy_module
+    from . import store
+
+    documents = (
+        (
+            "scopes/reference.yaml",
+            b"governance_version: 1\n"
+            b"id: 01ARZ3NDEKTSV4RRFFQ69G5FAV\n"
+            b"paths:\n"
+            b"  - Notes/**\n",
+        ),
+    )
+    compiled = policy_module.compile_documents(dict(documents))
+    seed = MigrationSeed(
+        activation_store_id="activation-store-reference",
+        logical_vault_id="logical-vault-reference",
+        activation_epoch=1,
+        policy=PolicyGenerationSeed(
+            generation_id="01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            source_documents=documents,
+            source_fingerprint=compiled.fingerprint,
+            conflict_digest="0" * 64,
+            compiled_policy=policy_module.canonical_compiled_bytes(compiled),
+            policy_fingerprint=compiled.fingerprint,
+            compiler_schema_version=1,
+            projector_schema_version=1,
+            predecessor_generation_id=None,
+            authoring_event_id="event-schema-reference",
+            receipt_event_id="receipt-schema-reference",
+            created_at=1,
+        ),
+        catalog=CatalogGenerationSeed(
+            catalog_generation=1,
+            descriptor=b"",
+            artifact_count=0,
+            created_at=1,
+        ),
+        namespace=ProjectionNamespaceSeed(
+            namespace_id="projection-namespace-reference",
+            evidence=b"",
+            ready_at=1,
+        ),
+        migrated_at=1,
+    )
+    reference = sqlite3.connect(":memory:")
+    try:
+        store._migrate(reference)
+        sidecar_store.ensure_meta_table(
+            reference,
+            store.DATA_TABLE,
+            "governance-v4-reference",
+        )
+        reference.commit()
+        migrate_v3_connection(reference, seed)
+        return _complete_schema_signature(reference)
+    finally:
+        reference.close()
+
+
+def require_exact_v4_connection(connection: sqlite3.Connection) -> None:
+    """Refuse any incomplete, corrupt, or extended schema-v4 authority."""
+
+    try:
+        version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+        quick_check = tuple(connection.execute("PRAGMA quick_check(1)"))
+        signature = _complete_schema_signature(connection)
+    except (AttributeError, TypeError, ValueError, sqlite3.Error) as exc:
+        raise SchemaV4Error("schema v4 authority is unavailable") from exc
+    if version != SCHEMA_USER_VERSION:
+        raise SchemaV4Error(
+            f"schema v4 authority requires exact schema v4, found v{version}"
+        )
+    if quick_check != (("ok",),) or signature != _expected_v4_schema_signature():
+        raise SchemaV4Error("schema v4 authority is not exact")
 
 
 def _close_downmigration_authority(
