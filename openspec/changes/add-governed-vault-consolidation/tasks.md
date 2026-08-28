@@ -160,17 +160,17 @@
   Pin the exact framed JCS domains
   `exomem.consolidation-source-fingerprint/v1` and
   `exomem.consolidation-destination-snapshot/v1` and their closed field sets.
-- [ ] 2.5 Implement the structurally reserved durable run store and local/Hosted
+- [x] 2.5 Implement the structurally reserved durable run store and local/Hosted
   private artifact abstraction with opaque references, content-addressed manifests,
   ownership/mode/no-follow checks, resource admission, atomic state revisions, and
   explicit missing/mismatched-artifact state. Reuse the Adoption run-store pattern
   and `batch_atomic_write` where compatible without storing source bodies in the
   canonical run.
-- [ ] 2.6 Implement the canonical census/fingerprint builders as pure functions with
+- [x] 2.6 Implement the canonical census/fingerprint builders as pure functions with
   domain separation, normalized relative paths, deterministic sorting, explicit
   entry types/sizes/SHA-256, and fixed exclusions. Re-read state under guarded
   acquisition rather than trusting caller inventory.
-- [ ] 2.7 Run
+- [x] 2.7 Run
   `uv run python -m pytest -q tests/test_consolidation_run_state.py tests/test_reserved_admin_paths.py tests/test_adoption_run_state_not_knowledge.py tests/test_adoption_run.py tests/test_vault.py`.
 
 ## 3. Exhaustive C1-C8 inventory and reconciliation

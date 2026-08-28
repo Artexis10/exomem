@@ -80,6 +80,7 @@ _IDENTITY_FIELDS = frozenset(
         "destination_generation",
         "destination_identity_binding_digest",
         "destination_installation_id",
+        "destination_snapshot_fingerprint",
         "destination_vault_id",
         "manifest_sha256",
         "run_id",
@@ -87,6 +88,7 @@ _IDENTITY_FIELDS = frozenset(
         "source_artifact_ref",
         "source_attestation_ref",
         "source_census_sha256",
+        "source_fingerprint",
         "source_proof_digest",
         "start_operation_id",
     }
@@ -111,12 +113,14 @@ class ConsolidationRunIdentity:
     destination_generation: int
     destination_fence_digest: str
     destination_identity_binding_digest: str
+    destination_snapshot_fingerprint: str
     source_artifact_ref: str
     source_attestation_ref: str
     archive_sha256: str
     manifest_sha256: str
     source_census_sha256: str
     source_proof_digest: str
+    source_fingerprint: str
     created_at: str
 
 
@@ -216,6 +220,7 @@ def _validated_identity(value: object) -> ConsolidationRunIdentity:
     _integer(value.destination_generation, minimum=1)
     _digest(value.destination_fence_digest)
     _digest(value.destination_identity_binding_digest)
+    _digest(value.destination_snapshot_fingerprint)
     archive = (
         _EXPORT_REF.fullmatch(value.source_artifact_ref)
         if isinstance(value.source_artifact_ref, str)
@@ -237,6 +242,7 @@ def _validated_identity(value: object) -> ConsolidationRunIdentity:
         value.manifest_sha256,
         value.source_census_sha256,
         value.source_proof_digest,
+        value.source_fingerprint,
     ):
         _digest(digest)
     _timestamp(value.created_at)
@@ -253,6 +259,7 @@ def _identity_dict(identity: ConsolidationRunIdentity) -> dict[str, str | int]:
             identity.destination_identity_binding_digest
         ),
         "destination_installation_id": identity.destination_installation_id,
+        "destination_snapshot_fingerprint": identity.destination_snapshot_fingerprint,
         "destination_vault_id": identity.destination_vault_id,
         "manifest_sha256": identity.manifest_sha256,
         "run_id": identity.run_id,
@@ -260,6 +267,7 @@ def _identity_dict(identity: ConsolidationRunIdentity) -> dict[str, str | int]:
         "source_artifact_ref": identity.source_artifact_ref,
         "source_attestation_ref": identity.source_attestation_ref,
         "source_census_sha256": identity.source_census_sha256,
+        "source_fingerprint": identity.source_fingerprint,
         "source_proof_digest": identity.source_proof_digest,
         "start_operation_id": identity.start_operation_id,
     }
