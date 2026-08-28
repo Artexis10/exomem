@@ -96,7 +96,7 @@
   Prove caller-supplied verifier keys, source identity claims, and expected hashes
   do not establish authority and that failures echo no secret, source existence,
   or private path.
-- [ ] 1.8 Add red property/fuzz coverage around the existing portability parser for
+- [x] 1.8 Add red property/fuzz coverage around the existing portability parser for
   version/resource bounds, absolute/traversal paths, slash variants, unsafe links,
   duplicate normalized paths, case collisions, unsupported entries, source
   runtime/credential/lifecycle/lease/idempotency/log state, and source-derived

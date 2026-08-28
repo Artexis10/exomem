@@ -112,6 +112,11 @@ def _rewrite_export_manifest(
         manifest["overall_digest"]["value"] = portability._manifest_digest(digest_payload)
     elif unknown_at == "overall_digest":
         manifest["overall_digest"]["unsupported_extension"] = "not-covered-by-digest"
+    elif unknown_at == "classification_version":
+        manifest["classification_version"] = 999
+        digest_payload = dict(manifest)
+        digest_payload.pop("overall_digest")
+        manifest["overall_digest"]["value"] = portability._manifest_digest(digest_payload)
     else:  # pragma: no cover - test helper misuse
         raise AssertionError(f"unknown mutation target: {unknown_at}")
     entries[manifest_index] = (
@@ -120,6 +125,78 @@ def _rewrite_export_manifest(
         None,
     )
     _raw_zip(destination, entries)
+
+
+def _forge_export_with_payload(
+    source: Path,
+    destination: Path,
+    *,
+    payload_path: str,
+    payload: bytes = b"forged runtime state",
+) -> None:
+    with zipfile.ZipFile(source, "r") as archive:
+        entries = [(info.filename, archive.read(info), None) for info in archive.infolist()]
+    manifest_index = next(
+        index
+        for index, (name, _body, _mode) in enumerate(entries)
+        if name == portability.MANIFEST_NAME
+    )
+    manifest = json.loads(entries[manifest_index][1])
+    manifest["files"].append(
+        {
+            "path": payload_path,
+            "size": len(payload),
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "classification": "disposable-runtime",
+        }
+    )
+    manifest["files"].sort(key=lambda record: record["path"])
+    digest_payload = dict(manifest)
+    digest_payload.pop("overall_digest")
+    manifest["overall_digest"]["value"] = portability._manifest_digest(digest_payload)
+    entries[manifest_index] = (
+        portability.MANIFEST_NAME,
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("utf-8"),
+        None,
+    )
+    entries.append((payload_path, payload, None))
+    _raw_zip(destination, entries)
+
+
+def _snapshot_files(root: Path) -> dict[str, bytes]:
+    return {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+
+
+def _assert_restore_refusal_is_nonmutating(
+    tmp_path: Path,
+    archive: Path,
+    *,
+    code: str | set[str],
+    limits: portability.PortabilityLimits | None = None,
+) -> None:
+    archive_before = archive.read_bytes()
+    restore_parent = tmp_path / "restore-parent"
+    _write(restore_parent / "sentinel.txt", "must remain unchanged\n")
+    parent_before = _snapshot_files(restore_parent)
+    destination = restore_parent / "candidate"
+
+    with pytest.raises(portability.PortabilityError) as exc:
+        portability.prepare_restore(
+            archive,
+            destination,
+            context=_context(lifecycle_state="restore-staging"),
+            limits=limits,
+        )
+
+    expected_codes = {code} if isinstance(code, str) else code
+    assert _error_code(exc) in expected_codes
+    assert archive.read_bytes() == archive_before
+    assert not destination.exists()
+    assert _snapshot_files(restore_parent) == parent_before
 
 
 @pytest.mark.parametrize(
@@ -463,10 +540,11 @@ def test_archive_verification_rejects_tampering(tmp_path: Path) -> None:
     ]
     _raw_zip(tampered, entries)
 
-    with pytest.raises(portability.PortabilityError) as exc:
-        portability.verify_export_archive(tampered)
-
-    assert _error_code(exc) in {"ARCHIVE_DIGEST_MISMATCH", "ARCHIVE_SIZE_MISMATCH"}
+    _assert_restore_refusal_is_nonmutating(
+        tmp_path,
+        tampered,
+        code={"ARCHIVE_DIGEST_MISMATCH", "ARCHIVE_SIZE_MISMATCH"},
+    )
 
 
 @pytest.mark.parametrize(
@@ -475,6 +553,10 @@ def test_archive_verification_rejects_tampering(tmp_path: Path) -> None:
         ([("../escape.md", b"x", None)], "UNSAFE_ARCHIVE_PATH"),
         ([("/absolute.md", b"x", None)], "UNSAFE_ARCHIVE_PATH"),
         ([("C:" + "/drive.md", b"x", None)], "UNSAFE_ARCHIVE_PATH"),
+        ([("Knowledge Base\\backslash.md", b"x", None)], "UNSAFE_ARCHIVE_PATH"),
+        ([("Knowledge Base//double.md", b"x", None)], "UNSAFE_ARCHIVE_PATH"),
+        ([("Knowledge Base/./dot.md", b"x", None)], "UNSAFE_ARCHIVE_PATH"),
+        ([("Knowledge Base/Cafe\u0301.md", b"x", None)], "UNSAFE_ARCHIVE_PATH"),
         (
             [("Knowledge Base/link.md", b"outside", stat.S_IFLNK | 0o777)],
             "UNSAFE_ARCHIVE_ENTRY",
@@ -522,10 +604,7 @@ def test_archive_verification_rejects_unsafe_entry_shapes(
     entries.insert(0, (portability.MANIFEST_NAME, b"{}", None))
     _raw_zip(archive, entries)
 
-    with pytest.raises(portability.PortabilityError) as exc:
-        portability.verify_export_archive(archive)
-
-    assert _error_code(exc) == code
+    _assert_restore_refusal_is_nonmutating(tmp_path, archive, code=code)
 
 
 @pytest.mark.parametrize(
@@ -553,10 +632,11 @@ def test_archive_verification_rejects_windows_unsafe_path_components(
         ],
     )
 
-    with pytest.raises(portability.PortabilityError) as exc:
-        portability.verify_export_archive(archive)
-
-    assert _error_code(exc) == "UNSAFE_ARCHIVE_PATH"
+    _assert_restore_refusal_is_nonmutating(
+        tmp_path,
+        archive,
+        code="UNSAFE_ARCHIVE_PATH",
+    )
 
 
 def test_archive_verification_rejects_unmanifested_entry_comments(tmp_path: Path) -> None:
@@ -566,10 +646,11 @@ def test_archive_verification_rejects_unmanifested_entry_comments(tmp_path: Path
         manifest.comment = b"unmanifested metadata"
         archive.writestr(manifest, b"{}")
 
-    with pytest.raises(portability.PortabilityError) as exc:
-        portability.verify_export_archive(archive_path)
-
-    assert _error_code(exc) == "UNSAFE_ARCHIVE_ENTRY"
+    _assert_restore_refusal_is_nonmutating(
+        tmp_path,
+        archive_path,
+        code="UNSAFE_ARCHIVE_ENTRY",
+    )
 
 
 def test_archive_verification_rejects_unsupported_manifest_version(tmp_path: Path) -> None:
@@ -580,10 +661,11 @@ def test_archive_verification_rejects_unsupported_manifest_version(tmp_path: Pat
         [(portability.MANIFEST_NAME, json.dumps(manifest).encode(), None)],
     )
 
-    with pytest.raises(portability.PortabilityError) as exc:
-        portability.verify_export_archive(archive)
-
-    assert _error_code(exc) == "UNSUPPORTED_MANIFEST_VERSION"
+    _assert_restore_refusal_is_nonmutating(
+        tmp_path,
+        archive,
+        code="UNSUPPORTED_MANIFEST_VERSION",
+    )
 
 
 @pytest.mark.parametrize("unknown_at", ["manifest", "overall_digest"])
@@ -600,31 +682,82 @@ def test_restore_rejects_unknown_manifest_fields_without_mutating_inputs(
     )
     archive = tmp_path / f"unknown-{unknown_at}.zip"
     _rewrite_export_manifest(exported.archive_path, archive, unknown_at=unknown_at)
-    archive_before = archive.read_bytes()
-    restore_parent = tmp_path / "restore-parent"
-    _write(restore_parent / "sentinel.txt", "must remain unchanged\n")
-    destination = restore_parent / "candidate"
-    parent_before = {
-        path.relative_to(restore_parent).as_posix(): path.read_bytes()
-        for path in restore_parent.rglob("*")
-        if path.is_file()
-    }
+    _assert_restore_refusal_is_nonmutating(tmp_path, archive, code="INVALID_MANIFEST")
 
-    with pytest.raises(portability.PortabilityError) as exc:
-        portability.prepare_restore(
-            archive,
-            destination,
-            context=_context(lifecycle_state="restore-staging"),
-        )
 
-    assert _error_code(exc) == "INVALID_MANIFEST"
-    assert archive.read_bytes() == archive_before
-    assert not destination.exists()
-    assert {
-        path.relative_to(restore_parent).as_posix(): path.read_bytes()
-        for path in restore_parent.rglob("*")
-        if path.is_file()
-    } == parent_before
+def test_restore_rejects_unsupported_classification_version_without_mutation(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    _seed_vault(source, "classification version")
+    exported = portability.export_quiesced_vault(
+        source,
+        tmp_path / "artifacts",
+        context=_context(),
+    )
+    archive = tmp_path / "future-classification.zip"
+    _rewrite_export_manifest(
+        exported.archive_path,
+        archive,
+        unknown_at="classification_version",
+    )
+    _assert_restore_refusal_is_nonmutating(
+        tmp_path,
+        archive,
+        code="UNSUPPORTED_CLASSIFICATION_VERSION",
+    )
+
+
+@pytest.mark.parametrize(
+    "payload_path",
+    [
+        ".exomem-hosted-cell.json",
+        "hosted-security.sqlite",
+        "hosted-lifecycle-state.json",
+        "writer-leases.sqlite",
+        "idempotency-hosted.sqlite",
+        "restore-journal/operation.json",
+        "tmp/transfers-v2/upload.partial",
+        "logs/queries.jsonl",
+        "Secrets/service.key",
+        "Knowledge Base/.governance.sqlite",
+        "Knowledge Base/.embeddings.sqlite",
+        "Knowledge Base/.lexical.sqlite",
+        "Knowledge Base/.graph.sqlite",
+        "Knowledge Base/.refs.sqlite",
+        "Knowledge Base/.clip.sqlite",
+        "Knowledge Base/.freshness.sqlite",
+        "Knowledge Base/Evidence/video.mp4.frames/frame-0001.jpg",
+        "Knowledge Base/.voice_profiles.json",
+    ],
+)
+def test_restore_rejects_self_consistent_source_runtime_payloads_without_mutation(
+    tmp_path: Path,
+    payload_path: str,
+) -> None:
+    source = tmp_path / "source"
+    _seed_vault(source, "runtime refusal")
+    exported = portability.export_quiesced_vault(
+        source,
+        tmp_path / "artifacts",
+        context=_context(),
+    )
+    archive = tmp_path / "forged-runtime.zip"
+    _forge_export_with_payload(
+        exported.archive_path,
+        archive,
+        payload_path=payload_path,
+    )
+
+    assert (
+        portability.classify_artifact(payload_path).artifact_class
+        is portability.ArtifactClass.DISPOSABLE_RUNTIME
+    )
+    _assert_restore_refusal_is_nonmutating(
+        tmp_path,
+        archive,
+        code="DISALLOWED_ARTIFACT",
+    )
 
 
 def test_manifest_rejects_a_non_null_signature_algorithm_even_without_value(
@@ -661,13 +794,27 @@ def test_archive_verification_rejects_unix_hardlink_extension_metadata(tmp_path:
         hardlink.extra = struct.pack("<HH", 0x756E, 0)
         archive.writestr(hardlink, b"linked")
 
-    with pytest.raises(portability.PortabilityError) as exc:
-        portability.verify_export_archive(archive_path)
+    _assert_restore_refusal_is_nonmutating(
+        tmp_path,
+        archive_path,
+        code="UNSAFE_ARCHIVE_ENTRY",
+    )
 
-    assert _error_code(exc) == "UNSAFE_ARCHIVE_ENTRY"
 
-
-def test_archive_verification_enforces_configured_resource_limits(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "limits",
+    [
+        portability.PortabilityLimits(max_files=1),
+        portability.PortabilityLimits(max_total_bytes=1),
+        portability.PortabilityLimits(max_file_bytes=1),
+        portability.PortabilityLimits(max_manifest_bytes=1),
+        portability.PortabilityLimits(max_path_bytes=4),
+    ],
+)
+def test_archive_verification_enforces_configured_resource_limits(
+    tmp_path: Path,
+    limits: portability.PortabilityLimits,
+) -> None:
     source = tmp_path / "source"
     _seed_vault(source, "bounded")
     exported = portability.export_quiesced_vault(
@@ -676,13 +823,12 @@ def test_archive_verification_enforces_configured_resource_limits(tmp_path: Path
         context=_context(),
     )
 
-    with pytest.raises(portability.PortabilityError) as exc:
-        portability.verify_export_archive(
-            exported.archive_path,
-            limits=portability.PortabilityLimits(max_files=1),
-        )
-
-    assert _error_code(exc) == "RESOURCE_LIMIT_EXCEEDED"
+    _assert_restore_refusal_is_nonmutating(
+        tmp_path,
+        exported.archive_path,
+        code="RESOURCE_LIMIT_EXCEEDED",
+        limits=limits,
+    )
 
 
 def test_canonical_vault_fingerprint_ignores_disposable_runtime_state(

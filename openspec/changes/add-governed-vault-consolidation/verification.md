@@ -230,3 +230,29 @@ completion does not authorize rehearsal, cutover, or retirement.
   text payloads`), and `git diff --check` are green. This is another bounded
   part of task 1.8; the full forged-runtime and resource-refusal matrix remains
   explicit and no live vault is touched.
+
+## Portability refusal-matrix stack
+
+- Task 1.8 is complete across this stack. The deterministic mutation corpus now
+  covers supported manifest/classification versions; configured file, total,
+  manifest, and path bounds; absolute, traversal, backslash, repeated-slash,
+  dot-component, non-NFC, and Windows-unsafe paths; symbolic/device/hard-link
+  and unmanifested-metadata entries; duplicate, case, and prefix collisions;
+  payload tampering; and self-consistent forged source runtime state.
+- The forged runtime corpus includes source binding, security/credential,
+  lifecycle, writer lease, idempotency, restore journal, transfer temporary,
+  provider log, governance, embeddings, lexical, graph, references, CLIP,
+  freshness, generated frame, and voice-profile paths. Every record carries a
+  recomputed file and manifest digest, so refusal proves the classification
+  boundary rather than incidental corruption.
+- Every archive-admission refusal in the matrix enters through
+  `prepare_restore` and proves the input archive, absent destination, and
+  pre-existing destination-parent bytes remain unchanged. The focused
+  portability file passes `125` cases on Python 3.13. No live vault or artifact
+  store is touched.
+- Final Python 3.13 focused/adjoining gate:
+  `tests/test_hosted_portability.py` and `tests/test_consolidation_intake.py` ->
+  `168 passed`. Touched-file Ruff, repository `F` lint, `uv lock --check`, strict
+  change validation, all OpenSpec validation (`168 passed, 0 failed`), public
+  repository artifact validation (`3396 files, 3464 text payloads`), and
+  `git diff --check` are green.
