@@ -22,7 +22,7 @@ from pathlib import Path, PurePosixPath
 from typing import Protocol
 
 from .. import hosted_portability
-from . import authorization_custody, consolidation_attestation
+from . import authorization_custody, consolidation_attestation, consolidation_fingerprints
 
 _ARCHIVE_REF = re.compile(r"exomem-export://sha256/([0-9a-f]{64})\Z")
 _SOURCE_PROOF_REF = re.compile(r"exomem-source-attestation://sha256/([0-9a-f]{64})\Z")
@@ -97,6 +97,7 @@ class ConsolidationIntakeResult:
     source_proof_artifact_ref: str
     source_proof_digest: str
     source_claims_digest: str
+    source_fingerprint: str
     object_count: int
     total_bytes: int
     inventory: tuple[ConsolidationInventoryItem, ...]
@@ -110,6 +111,7 @@ class ConsolidationIntakeResult:
             "source_proof_artifact_ref": self.source_proof_artifact_ref,
             "source_proof_digest": self.source_proof_digest,
             "source_claims_digest": self.source_claims_digest,
+            "source_fingerprint": self.source_fingerprint,
             "object_count": self.object_count,
             "total_bytes": self.total_bytes,
             "inventory": [item.to_bounded_dict() for item in self.inventory],
@@ -401,7 +403,9 @@ def intake_source_export(
             expected_vault_id=proof.expectation.source_vault_id,
             limits=limits,
         )
-        census = hosted_portability.canonical_source_census_sha256(verified.manifest)
+        census = consolidation_fingerprints.source_content_census_from_manifest(
+            verified.manifest
+        ).digest
         if (
             verified.archive_sha256 != archive_match.group(1)
             or verified.archive_sha256 != proof.expectation.archive_sha256
@@ -455,6 +459,10 @@ def intake_source_export(
 
         proof_bytes = _proof_bytes(proof.claim_bytes, proof.signature)
         proof_digest = hashlib.sha256(proof_bytes).hexdigest()
+        source_fingerprint = consolidation_fingerprints.source_fingerprint(
+            dict(trusted.claims),
+            authentication_proof_digest=proof_digest,
+        ).digest
         proof_path = transaction / "proof.json"
         proof_path.write_bytes(proof_bytes)
         os.chmod(proof_path, 0o600)
@@ -501,6 +509,7 @@ def intake_source_export(
             ),
             source_proof_digest=proof_digest,
             source_claims_digest=trusted.claims_sha256,
+            source_fingerprint=source_fingerprint,
             object_count=len(inventory),
             total_bytes=sum(item.size for item in inventory),
             inventory=tuple(inventory),

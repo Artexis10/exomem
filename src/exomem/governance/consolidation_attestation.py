@@ -66,6 +66,7 @@ _REQUIRED_CLAIMS = frozenset(
         "source_installation_id",
         "source_installation_generation",
         "source_active_fence_digest",
+        "source_identity_binding_digest",
         "export_operation_id",
         "quiescence_checkpoint_digest",
         "archive_sha256",
@@ -94,6 +95,7 @@ class SourceExportExpectation:
     source_installation_id: str
     source_installation_generation: int
     source_active_fence_digest: str
+    source_identity_binding_digest: str
     export_operation_id: str
     quiescence_checkpoint_digest: str
     archive_sha256: str
@@ -242,6 +244,9 @@ def _normalize_claims(claims: Mapping[str, object]) -> dict[str, str | int]:
         "source_installation_id": _identifier(normalized["source_installation_id"]),
         "source_installation_generation": _generation(normalized["source_installation_generation"]),
         "source_active_fence_digest": _digest(normalized["source_active_fence_digest"]),
+        "source_identity_binding_digest": _digest(
+            normalized["source_identity_binding_digest"]
+        ),
         "export_operation_id": _identifier(normalized["export_operation_id"]),
         "quiescence_checkpoint_digest": _digest(normalized["quiescence_checkpoint_digest"]),
         "archive_sha256": _digest(normalized["archive_sha256"]),
@@ -383,6 +388,9 @@ def _verify_expected_claims(
         "source_installation_id": _identifier(expectation.source_installation_id),
         "source_installation_generation": _generation(expectation.source_installation_generation),
         "source_active_fence_digest": _digest(expectation.source_active_fence_digest),
+        "source_identity_binding_digest": _digest(
+            expectation.source_identity_binding_digest
+        ),
         "export_operation_id": _identifier(expectation.export_operation_id),
         "quiescence_checkpoint_digest": _digest(expectation.quiescence_checkpoint_digest),
         "archive_sha256": _digest(expectation.archive_sha256),

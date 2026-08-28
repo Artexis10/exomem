@@ -78,7 +78,7 @@ class _ClassificationRule:
 
 
 def _is_review_state(path: str, _parts: tuple[str, ...]) -> bool:
-    return path == "Knowledge Base/.review-state.json"
+    return path == f"{kb_dirname()}/.review-state.json"
 
 
 def _is_graph_commit_receipt(path: str, _parts: tuple[str, ...]) -> bool:

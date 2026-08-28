@@ -519,7 +519,8 @@ requires either:
 2. a detached Ed25519 `source-export-attestation/v1`.
 
 Both bind the source logical vault identity, source installation id/generation
-and active-fence digest, export operation, quiescence checkpoint, archive SHA-256, manifest SHA-256,
+and active-fence digest, authenticated identity/root-binding fingerprint, export
+operation, quiescence checkpoint, archive SHA-256, manifest SHA-256,
 canonical source-census SHA-256, issue/expiry times, and signer key id. These
 claims are outside the unsigned archive, so an attacker cannot recompute an
 archive and its manifest and thereby invent source authority. For Ed25519, the

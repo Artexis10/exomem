@@ -14,7 +14,8 @@ also require either an authenticated transport receipt from a configured trusted
 source/control-plane channel with an equally exact issuer record or a detached
 Ed25519 `source-export-attestation/v1` verified by configured destination trust.
 Either proof SHALL bind the source logical vault identity, source installation
-id/generation and active-fence digest, export operation identity, quiescence checkpoint,
+id/generation and active-fence digest, authenticated identity/root-binding
+fingerprint, export operation identity, quiescence checkpoint,
 archive SHA-256, manifest SHA-256, canonical source-census SHA-256, issued time,
 expiry time, and signer key identifier. Caller-supplied verifier keys or expected
 identity claims SHALL NOT create trust.

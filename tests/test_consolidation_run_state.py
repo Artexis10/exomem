@@ -48,12 +48,14 @@ def _identity(module):
         destination_generation=3,
         destination_fence_digest="1" * 64,
         destination_identity_binding_digest="2" * 64,
+        destination_snapshot_fingerprint="7" * 64,
         source_artifact_ref="exomem-export://sha256/" + "3" * 64,
         source_attestation_ref="exomem-source-attestation://sha256/" + "4" * 64,
         archive_sha256="3" * 64,
         manifest_sha256="5" * 64,
         source_census_sha256="6" * 64,
         source_proof_digest="4" * 64,
+        source_fingerprint="8" * 64,
         created_at=CREATED_AT,
     )
 
@@ -88,12 +90,14 @@ def test_run_identity_schema_has_no_caller_or_private_body_fields() -> None:
         "destination_generation",
         "destination_fence_digest",
         "destination_identity_binding_digest",
+        "destination_snapshot_fingerprint",
         "source_artifact_ref",
         "source_attestation_ref",
         "archive_sha256",
         "manifest_sha256",
         "source_census_sha256",
         "source_proof_digest",
+        "source_fingerprint",
         "created_at",
     )
     for forbidden in (
@@ -144,6 +148,8 @@ def test_create_is_idempotent_but_conflicting_identity_or_inventory_refuses(
     assert store.create(identity, tuple(reversed(_inventory()))) == first
     for conflicting_identity, inventory in (
         (replace(identity, source_census_sha256="8" * 64), _inventory()),
+        (replace(identity, source_fingerprint="9" * 64), _inventory()),
+        (replace(identity, destination_snapshot_fingerprint="9" * 64), _inventory()),
         (identity, _inventory(6)),
     ):
         with pytest.raises(module.ConsolidationRunUnavailable) as caught:

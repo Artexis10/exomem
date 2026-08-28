@@ -14,6 +14,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from exomem import hosted_portability
+from exomem.governance import consolidation_fingerprints
 
 _SEED = bytes.fromhex("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60")
 _PUBLIC = bytes.fromhex("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a")
@@ -23,7 +24,7 @@ _D3 = "3" * 64
 _D4 = "4" * 64
 _D5 = "5" * 64
 _EXOMEM_VECTOR_SIGNATURE = (
-    "1aMkuhdSdAvQJ7ev9a_7iEbyBij-xirVgiRjuq5hub2U-Bth8zjuoPic-ktDqjrb00h0z7wS7TuNSC-DZD--Dw"
+    "8KW3d2q2F5x_j8iJdSiTkym-JfMBg12uHrx_9ajssZGreqVHmUa10GTLXslUYMijOSQYv1A2vTT_Te_wmfm5Cg"
 )
 
 
@@ -41,6 +42,7 @@ def _claims(*, source_cell_id: str | None = None) -> dict[str, object]:
         "source_installation_id": "installation-source-01",
         "source_installation_generation": 7,
         "source_active_fence_digest": _D1,
+        "source_identity_binding_digest": _D2,
         "export_operation_id": "export-operation-01",
         "quiescence_checkpoint_digest": _D2,
         "archive_sha256": _D3,
@@ -61,6 +63,7 @@ def _expectation(attestation, *, source_cell_id: str | None = None):
         source_installation_id="installation-source-01",
         source_installation_generation=7,
         source_active_fence_digest=_D1,
+        source_identity_binding_digest=_D2,
         export_operation_id="export-operation-01",
         quiescence_checkpoint_digest=_D2,
         archive_sha256=_D3,
@@ -180,6 +183,7 @@ def test_source_export_attestation_verifies_independently_at_every_gate(gate: st
         ("source_installation_id", "installation-other-01"),
         ("source_installation_generation", 8),
         ("source_active_fence_digest", "a" * 64),
+        ("source_identity_binding_digest", "f" * 64),
         ("export_operation_id", "export-operation-other"),
         ("quiescence_checkpoint_digest", "b" * 64),
         ("archive_sha256", "c" * 64),
@@ -499,11 +503,14 @@ def _export(root: Path):
 
 def _resolved_proof(intake, exported):
     attestation = _attestation_module()
+    consolidation_census = consolidation_fingerprints.source_content_census_from_manifest(
+        exported.manifest
+    ).digest
     claims = _claims(source_cell_id="cell-source-01")
     claims.update(
         archive_sha256=exported.archive_sha256,
         manifest_sha256=exported.manifest_sha256,
-        source_census_sha256=exported.source_census_sha256,
+        source_census_sha256=consolidation_census,
     )
     claim_bytes, signature = attestation.sign_source_export_attestation(
         claims,
@@ -513,7 +520,7 @@ def _resolved_proof(intake, exported):
         _expectation(attestation, source_cell_id="cell-source-01"),
         archive_sha256=exported.archive_sha256,
         manifest_sha256=exported.manifest_sha256,
-        source_census_sha256=exported.source_census_sha256,
+        source_census_sha256=consolidation_census,
     )
     proof = intake.ResolvedSourceExportProof(
         claim_bytes=claim_bytes,
@@ -694,7 +701,9 @@ def test_intake_extracts_only_private_content_addressed_objects(
 ) -> None:
     intake, _vault, exported, request, resolver, store = _intake_fixture(tmp_path)
     archive_before = exported.archive_path.read_bytes()
-    census_before = exported.source_census_sha256
+    census_before = consolidation_fingerprints.source_content_census_from_manifest(
+        exported.manifest
+    ).digest
 
     monkeypatch.setattr(
         hosted_portability,
@@ -715,6 +724,10 @@ def test_intake_extracts_only_private_content_addressed_objects(
     assert result.archive_sha256 == exported.archive_sha256
     assert result.manifest_sha256 == exported.manifest_sha256
     assert result.source_census_sha256 == census_before
+    assert result.source_fingerprint == consolidation_fingerprints.source_fingerprint(
+        json.loads(resolver.proof.claim_bytes),
+        authentication_proof_digest=result.source_proof_digest,
+    ).digest
     assert result.object_count == len(exported.manifest["files"])
     assert result.total_bytes == sum(item["size"] for item in exported.manifest["files"])
     assert result.archive_artifact_ref.startswith("exomem-consolidation-archive://sha256/")
@@ -738,7 +751,12 @@ def test_intake_extracts_only_private_content_addressed_objects(
     assert str(tmp_path) not in rendered
     assert "archive_path" not in rendered
     assert exported.archive_path.read_bytes() == archive_before
-    assert hosted_portability.canonical_source_census_sha256(exported.manifest) == census_before
+    assert (
+        consolidation_fingerprints.source_content_census_from_manifest(
+            exported.manifest
+        ).digest
+        == census_before
+    )
 
 
 def test_intake_is_idempotent_and_deduplicates_equal_content(tmp_path: Path) -> None:
