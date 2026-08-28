@@ -17,8 +17,10 @@ from typing import NoReturn
 from . import consolidation_plan, consolidation_review
 
 _CLAIM_SCHEMA = "exomem.consolidation-approval-token/v1"
+_CONFIRMATION_SCHEMA = "exomem.consolidation-owner-confirmation/v1"
 _WIRE_VERSION = "cap1"
 _DOMAIN = _CLAIM_SCHEMA.encode("ascii")
+_CONFIRMATION_DOMAIN = _CONFIRMATION_SCHEMA.encode("ascii")
 _CLAIM_FIELDS = frozenset(
     {
         "schema",
@@ -29,6 +31,23 @@ _CLAIM_FIELDS = frozenset(
         "jti",
         "expires_at",
         "signing_key_id",
+    }
+)
+_CONFIRMATION_FIELDS = frozenset(
+    {
+        "schema",
+        "owner_binding_digest",
+        "owner_principal_digest",
+        "authorization_session_digest",
+        "issuer",
+        "surface",
+        "action",
+        "run_id",
+        "plan_kind",
+        "plan_digest",
+        "rendering_completeness_digest",
+        "confirmed_at",
+        "nonce",
     }
 )
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
@@ -70,6 +89,14 @@ class TrustedOwnerConfirmation:
 
 @dataclass(frozen=True, slots=True)
 class CanonicalApprovalClaim:
+    preimage: Mapping[str, object]
+    canonical_bytes: bytes
+    framed_bytes: bytes
+    digest: str
+
+
+@dataclass(frozen=True, slots=True)
+class CanonicalOwnerConfirmation:
     preimage: Mapping[str, object]
     canonical_bytes: bytes
     framed_bytes: bytes
@@ -135,6 +162,10 @@ def _key(value: object) -> bytes:
 
 def _framed(raw: bytes) -> bytes:
     return len(_DOMAIN).to_bytes(4, "big") + _DOMAIN + len(raw).to_bytes(8, "big") + raw
+
+
+def _frame(domain: bytes, raw: bytes) -> bytes:
+    return len(domain).to_bytes(4, "big") + domain + len(raw).to_bytes(8, "big") + raw
 
 
 def _claim(value: Mapping[str, object]) -> CanonicalApprovalClaim:
@@ -240,6 +271,42 @@ def _checked_confirmation(
     )
 
 
+def canonical_confirmation(
+    confirmation: TrustedOwnerConfirmation,
+) -> CanonicalOwnerConfirmation:
+    """Canonicalize only a trusted surface's exact owner-confirmation context."""
+
+    checked = _checked_confirmation(confirmation)
+    value = {
+        "schema": _CONFIRMATION_SCHEMA,
+        "owner_binding_digest": checked.owner_binding_digest,
+        "owner_principal_digest": checked.owner_principal_digest,
+        "authorization_session_digest": checked.authorization_session_digest,
+        "issuer": checked.issuer,
+        "surface": checked.surface,
+        "action": checked.action,
+        "run_id": checked.run_id,
+        "plan_kind": checked.plan_kind,
+        "plan_digest": checked.plan_digest,
+        "rendering_completeness_digest": checked.rendering_completeness_digest,
+        "confirmed_at": checked.confirmed_at,
+        "nonce": checked.nonce,
+    }
+    if frozenset(value) != _CONFIRMATION_FIELDS:
+        _fail()
+    try:
+        raw = consolidation_plan.canonical_closed_jcs(value)
+    except consolidation_plan.ConsolidationPlanUnavailable:
+        _fail()
+    framed = _frame(_CONFIRMATION_DOMAIN, raw)
+    return CanonicalOwnerConfirmation(
+        preimage=MappingProxyType(value),
+        canonical_bytes=raw,
+        framed_bytes=framed,
+        digest=hashlib.sha256(framed).hexdigest(),
+    )
+
+
 def mint_approval(
     *,
     plan: consolidation_plan.CanonicalConsolidationPlan,
@@ -329,24 +396,7 @@ def verify_approval(
 ) -> ConsolidationApprovalToken:
     """Verify one canonical token against its exact plan and completeness proof."""
 
-    text = _text(wire, maximum=_MAX_WIRE_BYTES)
-    parts = text.split(".")
-    if len(parts) != 3 or parts[0] != _WIRE_VERSION:
-        _fail()
-    raw = _decode(parts[1])
-    authentication = _decode(parts[2])
-    if len(authentication) != hashlib.sha256().digest_size:
-        _fail()
-    try:
-        parsed = consolidation_plan._parse_canonical_mapping(  # noqa: SLF001
-            raw,
-            maximum=4 * 1024,
-        )
-    except consolidation_plan.ConsolidationPlanUnavailable:
-        _fail()
-    claim = _claim(parsed)
-    if claim.canonical_bytes != raw:
-        _fail()
+    text, claim, authentication = _parse_wire(wire)
     key_id = _identifier(claim.preimage["signing_key_id"])
     key = verifier_keys.get(key_id) if isinstance(verifier_keys, Mapping) else None
     if key is None:
@@ -378,11 +428,35 @@ def verify_approval(
     )
 
 
+def _parse_wire(wire: str) -> tuple[str, CanonicalApprovalClaim, bytes]:
+    text = _text(wire, maximum=_MAX_WIRE_BYTES)
+    parts = text.split(".")
+    if len(parts) != 3 or parts[0] != _WIRE_VERSION:
+        _fail()
+    raw = _decode(parts[1])
+    authentication = _decode(parts[2])
+    if len(authentication) != hashlib.sha256().digest_size:
+        _fail()
+    try:
+        parsed = consolidation_plan._parse_canonical_mapping(  # noqa: SLF001
+            raw,
+            maximum=4 * 1024,
+        )
+    except consolidation_plan.ConsolidationPlanUnavailable:
+        _fail()
+    claim = _claim(parsed)
+    if claim.canonical_bytes != raw:
+        _fail()
+    return text, claim, authentication
+
+
 __all__ = [
     "CanonicalApprovalClaim",
+    "CanonicalOwnerConfirmation",
     "ConsolidationApprovalToken",
     "ConsolidationApprovalUnavailable",
     "TrustedOwnerConfirmation",
+    "canonical_confirmation",
     "mint_approval",
     "verify_approval",
 ]
