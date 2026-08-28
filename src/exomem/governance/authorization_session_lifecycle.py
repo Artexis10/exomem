@@ -427,7 +427,6 @@ def mint_hosted_replica_readiness_attestation(
             raise AuthorizationSessionUnavailable
         expires_at = min(
             current + ttl_seconds,
-            control.expires_at,
             active_key.not_after,
         )
         if expires_at <= current:

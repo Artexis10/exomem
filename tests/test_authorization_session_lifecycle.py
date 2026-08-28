@@ -631,6 +631,64 @@ def test_hosted_runtime_attestation_refuses_caller_claims_and_incomplete_drain(
         )
 
 
+def test_hosted_runtime_attestation_can_extend_the_next_control_epoch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    custody = _hosted_custody("1" * 64)
+    assert custody.serving_membership is not None
+    custody = replace(
+        custody,
+        control=replace(custody.control, expires_at=NOW + 300),
+        serving_membership=replace(
+            custody.serving_membership,
+            expires_at=NOW + 300,
+            replicas=(
+                replace(
+                    custody.serving_membership.replicas[0],
+                    expires_at=NOW + 300,
+                ),
+            ),
+        ),
+    )
+    for variable, path in {
+        authorization_custody.KEYRING_FILE_ENV: authorization_custody.HOSTED_KEYRING_FILE,
+        authorization_custody.CONTROL_FILE_ENV: authorization_custody.HOSTED_CONTROL_FILE,
+        authorization_custody.MEMBERSHIP_FILE_ENV: authorization_custody.HOSTED_MEMBERSHIP_FILE,
+    }.items():
+        monkeypatch.setenv(variable, str(path))
+    monkeypatch.setenv(authorization_custody.REPLICA_ID_ENV, "replica-7")
+    monkeypatch.setattr(
+        authorization_custody,
+        "load_authorization_custody",
+        lambda _root, *, now: custody,
+    )
+
+    raw = authorization_session_lifecycle.mint_hosted_replica_readiness_attestation(
+        tmp_path,
+        expected_cell_id="cell-7",
+        expected_logical_vault_id="logical-vault-7",
+        expected_replica_id="replica-7",
+        lifecycle_phase="active",
+        active_reads=0,
+        active_mutations=0,
+        active_transfers=0,
+        target_epoch=2,
+        previous_epoch_digest="a" * 64,
+        ttl_seconds=300,
+        now=NOW + 200,
+    )
+    parsed = authorization_serving_membership.parse_replica_readiness_attestation(
+        raw,
+        verifier_keys={item.key_id: item.key for item in custody.keyring.accepted_keys},
+        now=NOW + 200,
+        expected_epoch=2,
+        expected_cell_id="cell-7",
+    )
+
+    assert parsed.expires_at == NOW + 500
+
+
 def test_resume_fails_when_a_live_row_key_drops_from_the_serving_intersection() -> None:
     connection, migration = _connection()
     old_key = _key("auth-key-old", b"o" * 32)

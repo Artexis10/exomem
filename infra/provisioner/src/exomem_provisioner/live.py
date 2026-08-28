@@ -23,6 +23,7 @@ from .adapters import (
 )
 from .authorization_membership import (
     AUTHORIZATION_SESSION_SCHEMA_VERSION,
+    DEFAULT_ATTESTATION_TTL_SECONDS,
     build_initial_hosted_authorization_bundle,
     inspect_hosted_authorization_bundle,
     transition_hosted_authorization_bundle,
@@ -677,6 +678,9 @@ class LiveLifecyclePlane:
         target_state: str,
         target_no_in_flight: bool,
         target_software_version: str | None = None,
+        require_runtime_attestation: bool = False,
+        runtime_credential: str | None = None,
+        runtime_protocol_version: str | None = None,
     ) -> str:
         """Commit one authenticated successor under the lifecycle maintenance lease."""
 
@@ -709,6 +713,20 @@ class LiveLifecyclePlane:
             now=current,
             _require_fresh=False,
         )
+        runtime_attestation = None
+        if require_runtime_attestation:
+            if not runtime_credential or not runtime_protocol_version:
+                raise MetadataConflict("runtime attestation authority is unavailable")
+            runtime_attestation = (
+                await self._runtime.attest_authorization_session_membership(
+                    owned,
+                    credential=runtime_credential,
+                    protocol_version=runtime_protocol_version,
+                    target_epoch=source.epoch + 1,
+                    previous_epoch_digest=source.membership_digest,
+                    ttl_seconds=DEFAULT_ATTESTATION_TTL_SECONDS,
+                )
+            )
         successor = transition_hosted_authorization_bundle(
             files,
             expected_cell_id=owned.subject_id,
@@ -721,6 +739,7 @@ class LiveLifecyclePlane:
             target_no_in_flight=target_no_in_flight,
             target_software_version=target_software_version,
             now=current,
+            runtime_attestation=runtime_attestation,
         )
         if successor.revision != source.revision:
             await self._cell.write_authorization_session_bundle(
@@ -1031,6 +1050,9 @@ class LiveLifecyclePlane:
             metadata,
             target_state="DRAINING",
             target_no_in_flight=True,
+            require_runtime_attestation=True,
+            runtime_credential=str(request["serviceCredential"]),
+            runtime_protocol_version=str(target["protocolVersion"]),
         )
 
     async def scale(self, metadata: OpaqueProviderMetadata, replicas: int) -> None:

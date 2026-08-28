@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from exomem.governance import authorization_custody, authorization_serving_membership
 from pydantic import ValidationError
 
 from exomem_provisioner.authorization_membership import (
@@ -147,6 +148,47 @@ def _capacity_contract(path: Path) -> Path:
 
 def _metadata() -> OpaqueProviderMetadata:
     return OpaqueProviderMetadata("tenant-alpha", "cell-alpha", "operation-alpha", 7)
+
+
+def _signed_runtime_attestation(
+    files: dict[str, bytes],
+    *,
+    cell_id: str,
+    replica_id: str,
+    software_version: str,
+    epoch: int,
+    now: int,
+    ttl_seconds: int,
+    state: str = "DRAINING",
+) -> bytes:
+    keyring = authorization_custody.parse_keyring(files["keyring.json"])
+    control = authorization_custody.parse_control_record(
+        files["control.json"],
+        keyring=keyring,
+        now=now,
+    )
+    attestation = authorization_serving_membership.ReplicaReadinessAttestation(
+        version=1,
+        epoch=epoch,
+        replica_id=replica_id,
+        state=state,
+        software_version=software_version,
+        schema_version=4,
+        cell_id=cell_id,
+        active_key_id=keyring.active_key_id,
+        accepted_key_ids=tuple(item.key_id for item in keyring.accepted_keys),
+        control_digest=authorization_custody.control_attestation_digest(control),
+        keyring_digest=authorization_custody.keyring_attestation_digest(keyring),
+        attested_at=now,
+        expires_at=now + ttl_seconds,
+        issuance_stopped=state == "DRAINING",
+        no_in_flight=state == "DRAINING",
+        signing_key_id=keyring.active_key_id,
+    )
+    return authorization_serving_membership.encode_replica_readiness_attestation(
+        attestation,
+        verifier_keys={item.key_id: item.key for item in keyring.accepted_keys},
+    )
 
 
 def _settings(**overrides: object) -> ProviderWorkerSettings:
@@ -593,6 +635,44 @@ async def test_live_rollforward_uses_target_fingerprint_and_original_helm_author
                 "reason_code": "HOSTED_QUIESCED",
             }
 
+        async def attest_authorization_session_membership(
+            self,
+            metadata,
+            *,
+            credential,
+            protocol_version,
+            target_epoch,
+            previous_epoch_digest,
+            ttl_seconds,
+        ):
+            assert metadata == owner
+            assert credential == "credential-current"
+            assert protocol_version == "legacy-protocol"
+            inspected = inspect_hosted_authorization_bundle(
+                Cell.files,
+                expected_cell_id=owner.subject_id,
+                expected_logical_vault_id=owner.tenant_id,
+                expected_replica_id=owner.resource_name + "-0",
+                expected_software_version=None,
+                expected_schema_version=4,
+                expected_recovery_envelope=original_request["_providerRecoveryEnvelopes"][
+                    "authorizationSessionSecret"
+                ],
+                now=1_900_000_030,
+                _require_fresh=False,
+            )
+            assert target_epoch == inspected.epoch + 1
+            assert previous_epoch_digest == inspected.membership_digest
+            return _signed_runtime_attestation(
+                Cell.files,
+                cell_id=owner.subject_id,
+                replica_id=owner.resource_name + "-0",
+                software_version=inspected.software_version,
+                epoch=target_epoch,
+                now=1_900_000_030,
+                ttl_seconds=ttl_seconds,
+            )
+
     class Cell:
         files = build_initial_hosted_authorization_bundle(
             cell_id=owner.subject_id,
@@ -725,6 +805,49 @@ async def test_membership_drain_requires_zero_runtime_snapshot_and_rejoin_preced
                 "reason_code": "HOSTED_QUIESCED",
             }
 
+        async def attest_authorization_session_membership(
+            self,
+            _metadata,
+            *,
+            credential,
+            protocol_version,
+            target_epoch,
+            previous_epoch_digest,
+            ttl_seconds,
+        ):
+            assert credential == "credential-current"
+            assert protocol_version == "1"
+            keyring = authorization_custody.parse_keyring(cell.files["keyring.json"])
+            control = authorization_custody.parse_control_record(
+                cell.files["control.json"],
+                keyring=keyring,
+                now=now + 30,
+            )
+            attestation = authorization_serving_membership.ReplicaReadinessAttestation(
+                version=1,
+                epoch=target_epoch,
+                replica_id=metadata.resource_name + "-0",
+                state="DRAINING",
+                software_version="0.48.0",
+                schema_version=4,
+                cell_id=metadata.subject_id,
+                active_key_id=keyring.active_key_id,
+                accepted_key_ids=tuple(item.key_id for item in keyring.accepted_keys),
+                control_digest=authorization_custody.control_attestation_digest(control),
+                keyring_digest=authorization_custody.keyring_attestation_digest(keyring),
+                attested_at=now + 30,
+                expires_at=now + 30 + ttl_seconds,
+                issuance_stopped=True,
+                no_in_flight=True,
+                signing_key_id=keyring.active_key_id,
+            )
+            raw = authorization_serving_membership.encode_replica_readiness_attestation(
+                attestation,
+                verifier_keys={item.key_id: item.key for item in keyring.accepted_keys},
+            )
+            events.append(("attest", target_epoch, previous_epoch_digest))
+            return raw
+
     class Cell:
         files = initial.files
 
@@ -798,7 +921,14 @@ async def test_membership_drain_requires_zero_runtime_snapshot_and_rejoin_preced
         now=now + 30,
     )
     assert (serving.epoch, serving.replica_state) == (3, "SERVING")
-    assert [event[0] for event in events] == ["write", "write", "stage", "scale"]
+    assert [event[0] for event in events] == [
+        "attest",
+        "write",
+        "write",
+        "stage",
+        "scale",
+    ]
+    assert events[0][1:] == (2, initial.membership_digest)
     assert events[-2][1] == serving.revision
 
 

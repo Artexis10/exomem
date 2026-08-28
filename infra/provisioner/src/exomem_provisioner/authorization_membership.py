@@ -631,6 +631,7 @@ def transition_hosted_authorization_bundle(
     now: int,
     ttl_seconds: int = DEFAULT_ATTESTATION_TTL_SECONDS,
     renew: bool = False,
+    runtime_attestation: bytes | None = None,
 ) -> HostedAuthorizationBundle:
     """Publish one authenticated singleton successor, never a liveness inference."""
 
@@ -639,6 +640,7 @@ def transition_hosted_authorization_bundle(
         or not isinstance(target_no_in_flight, bool)
         or (target_state == "SERVING" and target_no_in_flight)
         or not isinstance(renew, bool)
+        or (runtime_attestation is not None and not isinstance(runtime_attestation, bytes))
         or not 1 <= ttl_seconds <= MAX_ATTESTATION_TTL_SECONDS
     ):
         raise MetadataConflict("authorization membership transition is invalid")
@@ -731,39 +733,98 @@ def transition_hosted_authorization_bundle(
     )
     control.pop("mac")
     epoch = source.epoch + 1
-    expires_at = current + ttl_seconds
     key_id = _required_identifier(keyring["active_key_id"])
     accepted_key_ids = sorted(
         _required_identifier(item["key_id"]) for item in entries if isinstance(item, dict)
     )
     if accepted_key_ids != [key_id]:
         raise MetadataConflict("authorization keyring is invalid")
-    attestation: dict[str, object] = {
-        "version": 1,
-        "epoch": epoch,
-        "replica_id": _required_identifier(expected_replica_id),
-        "state": target_state,
-        "software_version": target_release,
-        "schema_version": _required_time(expected_schema_version),
-        "cell_id": _required_identifier(expected_cell_id),
-        "active_key_id": key_id,
-        "accepted_key_ids": accepted_key_ids,
-        "control_digest": _control_basis_digest(control),
-        "keyring_digest": _keyring_digest(keyring),
-        "attested_at": current,
-        "expires_at": expires_at,
-        "issuance_stopped": target_state == "DRAINING",
-        "no_in_flight": target_no_in_flight,
-        "signing_key_id": key_id,
-    }
-    attestation["mac"] = _mac(key, _attestation_mac_input(attestation))
+    if runtime_attestation is None:
+        expires_at = current + ttl_seconds
+        attestation: dict[str, object] = {
+            "version": 1,
+            "epoch": epoch,
+            "replica_id": _required_identifier(expected_replica_id),
+            "state": target_state,
+            "software_version": target_release,
+            "schema_version": _required_time(expected_schema_version),
+            "cell_id": _required_identifier(expected_cell_id),
+            "active_key_id": key_id,
+            "accepted_key_ids": accepted_key_ids,
+            "control_digest": _control_basis_digest(control),
+            "keyring_digest": _keyring_digest(keyring),
+            "attested_at": current,
+            "expires_at": expires_at,
+            "issuance_stopped": target_state == "DRAINING",
+            "no_in_flight": target_no_in_flight,
+            "signing_key_id": key_id,
+        }
+        attestation["mac"] = _mac(key, _attestation_mac_input(attestation))
+    else:
+        attestation = _closed_json(
+            runtime_attestation,
+            frozenset(
+                {
+                    "version",
+                    "epoch",
+                    "replica_id",
+                    "state",
+                    "software_version",
+                    "schema_version",
+                    "cell_id",
+                    "active_key_id",
+                    "accepted_key_ids",
+                    "control_digest",
+                    "keyring_digest",
+                    "attested_at",
+                    "expires_at",
+                    "issuance_stopped",
+                    "no_in_flight",
+                    "signing_key_id",
+                    "mac",
+                }
+            ),
+            label="runtime attestation",
+        )
+        try:
+            attested_at = _required_time(attestation["attested_at"])
+            expires_at = _required_time(attestation["expires_at"])
+            supplied_mac = attestation["mac"]
+            if (
+                attestation["version"] != 1
+                or attestation["epoch"] != epoch
+                or attestation["replica_id"] != _required_identifier(expected_replica_id)
+                or attestation["state"] != target_state
+                or attestation["software_version"] != target_release
+                or attestation["schema_version"] != _required_time(expected_schema_version)
+                or attestation["cell_id"] != _required_identifier(expected_cell_id)
+                or attestation["active_key_id"] != key_id
+                or attestation["accepted_key_ids"] != accepted_key_ids
+                or attestation["control_digest"] != _control_basis_digest(control)
+                or attestation["keyring_digest"] != _keyring_digest(keyring)
+                or not attested_at <= current < expires_at
+                or expires_at - attested_at > ttl_seconds
+                or expires_at - attested_at > MAX_ATTESTATION_TTL_SECONDS
+                or expires_at > _required_time(entry["not_after"])
+                or attestation["issuance_stopped"] is not (target_state == "DRAINING")
+                or attestation["no_in_flight"] is not target_no_in_flight
+                or attestation["signing_key_id"] != key_id
+                or not isinstance(supplied_mac, str)
+                or not hmac.compare_digest(
+                    supplied_mac,
+                    _mac(key, _attestation_mac_input(attestation)),
+                )
+            ):
+                raise MetadataConflict("authorization runtime attestation is invalid")
+        except (KeyError, TypeError, ValueError):
+            raise MetadataConflict("authorization runtime attestation is invalid") from None
     membership: dict[str, object] = {
         "version": 1,
         "epoch": epoch,
         "cell_id": expected_cell_id,
         "logical_vault_id": expected_logical_vault_id,
         "previous_epoch_digest": source.membership_digest,
-        "issued_at": current,
+        "issued_at": attestation["attested_at"],
         "expires_at": expires_at,
         "replicas": [attestation],
         "signing_key_id": key_id,
@@ -775,7 +836,7 @@ def transition_hosted_authorization_bundle(
         {
             "serving_membership_epoch": epoch,
             "serving_membership_digest": membership_digest,
-            "issued_at": current,
+            "issued_at": attestation["attested_at"],
             "expires_at": expires_at,
         }
     )
