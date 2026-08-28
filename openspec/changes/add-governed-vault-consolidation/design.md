@@ -108,17 +108,17 @@ cross-installation, cross-session, or cross-issuer contexts are equivalent
 content-free denials.
 
 Hosted exposure is additive rather than a mutation of a closed surface. A new
-`hosted-alpha-agent-v3` profile contains the exact v2 command sequence plus
-`consolidate_memory`; v1 and v2 descriptors, hashes, generated plugin/manifest
-fixtures, locks, clients, and registered evidence remain byte-identical. The v3
+`hosted-alpha-agent-v5` profile contains the exact v4 command sequence plus
+`consolidate_memory`; v1 through v4 descriptors, hashes, generated plugin/manifest
+fixtures, locks, clients, and registered evidence remain byte-identical. The v5
 profile has its own descriptor/hash, generated fixtures, compatibility and
 promotion evidence, and explicit deployment selection. A cell not explicitly
-configured for v3 does not advertise or admit consolidation, and creation of v3
+configured for v5 does not advertise or admit consolidation, and creation of v5
 does not auto-promote any deployment. Private artifact delivery and trusted
-confirmation remain operator/control-plane seams beneath the registered v3
+confirmation remain operator/control-plane seams beneath the registered v5
 product command rather than public request fields.
 
-V3 selection is authorized only by a closed private
+V5 selection is authorized only by a closed private
 `HostedProfileSelection/v1` record from the deployment/control plane. It binds
 typed cell and logical vault identities, installation id/generation/active fence,
 profile id and descriptor hash, release and
@@ -131,9 +131,9 @@ exact-cell transport-supervisor readiness fingerprint, rollback/recovery closure
 digest, operation id,
 issue/expiry, and control-plane signature/record digest. Startup validates the
 whole tuple against the running image and private dependencies before advertising
-or admitting v3. Missing, unknown, partial, stale, incompatible, or caller-made
-selection keeps existing explicitly selected v1/v2 behavior byte-identical; it
-never infers v3 from a lifecycle flag or capability presence and never promotes
+or admitting v5. Missing, unknown, partial, stale, incompatible, or caller-made
+selection keeps existing explicitly selected v1 through v4 behavior byte-identical; it
+never infers v5 from a lifecycle flag or capability presence and never promotes
 it automatically.
 
 The closed field names are `schema`, `cell_id`, `vault_id`, `installation_id`,
@@ -165,14 +165,14 @@ Private `HostedProfileSelectionVerifierRecord/v1` trust records contain exactly
 `registry_generation`, and `revoked_at`/`revocation_reason_digest` exactly for
 revoked records. They bind the raw 32-byte unpadded-base64url Ed25519 public key
 and derived key id, purpose `hosted-profile-selection`, issuer/control-plane
-identity, deployment audience, allowed `hosted-alpha-agent-v3` profile, status
+identity, deployment audience, allowed `hosted-alpha-agent-v5` profile, status
 `active|inactive|revoked`, bounded integer registry generation, and ordered
 validity interval. Startup verifies record
 validity at the selection issue time and current startup time. Rotation permits
 only an explicitly bounded two-key overlap; unknown, inactive, premature,
 expired, revoked, wrong-purpose/issuer/audience/profile, or caller-supplied keys
 fail. Fixed signing/rotation/revocation vectors are shared across runtimes.
-Unknown fields, a mismatched digest/signature, or a non-v3 profile in this
+Unknown fields, a mismatched digest/signature, or a non-v5 profile in this
 schema fails closed.
 
 The command accepts opaque artifact references and structured facts, never an
@@ -1451,9 +1451,9 @@ runs and does not justify calling a real consolidation complete.
    batches, recovery, rollback, and receipts behind crash-seam tests.
 4. Add `consolidate_memory` to the command registry and regenerate MCP, REST,
    OpenAPI, CLI, scaffold/bootstrap, and connector contracts. Add the exact
-   v2-plus-command `hosted-alpha-agent-v3` descriptor and its own generated
+   v4-plus-command `hosted-alpha-agent-v5` descriptor and its own generated
    plugin/manifest, compatibility, selection, and promotion artifacts without
-   changing or auto-promoting v1/v2.
+   changing or auto-promoting v1 through v4.
 5. Run installed-wheel local and Hosted E2E, an adversarial security review, and
    the full release gates. Ship the capability without touching real vaults.
 6. In a later operation, make verified clones and run the full rehearsal plus
