@@ -98,3 +98,21 @@ completion does not authorize rehearsal, cutover, or retirement.
 - OpenSpec archive discipline: green.
 - Public repository artifact validation: `3394 files, 3462 text payloads`, green.
 - `git diff --check`: green.
+
+## Rehearsal-clone stack
+
+- Red: explicit rehearsal-clone regression -> `1 failed`; no product operation
+  could derive fresh active identity plus authenticated clone lineage without
+  accepting those ids from input.
+- Green: the same regression passes after adding an owner-only clone operation
+  that discovers the source through the machine-authenticated root registry,
+  requires byte-identical canonical source/clone snapshots, and generates fresh
+  logical and installation ids for the target.
+- Focused identity gate: `23 passed`. It also proves snapshot drift and copied
+  identity bindings are refused and two clones share lineage evidence without
+  sharing either active id.
+- Python 3.13 focused/adjoining gate: `97 passed, 1 skipped` (privileged device
+  node only).
+- Touched-file Ruff, `uv lock --check`, strict change validation, public
+  repository artifact validation (`3394 files, 3462 text payloads`), and
+  `git diff --check`: green.
