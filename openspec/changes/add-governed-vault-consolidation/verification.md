@@ -212,3 +212,21 @@ completion does not authorize rehearsal, cutover, or retirement.
   change validation, all OpenSpec validation (`168 passed, 0 failed`), public
   repository artifact validation (`3396 files, 3464 text payloads`), and
   `git diff --check` are green.
+
+## Portable archive-metadata stack
+
+- Red: five Windows-unsafe component forms and an unmanifested per-entry ZIP
+  comment all reached manifest parsing. The path corpus included alternate-data-
+  stream syntax, reserved device names, trailing dot/space aliases, and a control
+  byte.
+- Green: normalized archive paths now reject the closed Windows-invalid
+  character/device/ending set on every host, and preflight rejects any per-entry
+  comment as metadata outside the export format. Existing POSIX path, link,
+  collision, compression, and resource checks remain unchanged.
+- Python 3.13 focused/adjoining gate:
+  `tests/test_hosted_portability.py` and `tests/test_consolidation_intake.py` ->
+  `141 passed`. Touched-file Ruff, repository `F` lint, `uv lock --check`, strict
+  change validation, public repository artifact validation (`3396 files, 3464
+  text payloads`), and `git diff --check` are green. This is another bounded
+  part of task 1.8; the full forged-runtime and resource-refusal matrix remains
+  explicit and no live vault is touched.
