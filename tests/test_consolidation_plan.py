@@ -1208,3 +1208,196 @@ def test_review_store_recovers_snapshot_before_active_pointer(
         )
         == pending
     )
+
+
+def _completed_review() -> tuple[
+    consolidation_plan.CanonicalConsolidationPlan,
+    consolidation_review.CanonicalRenderReview,
+]:
+    plan = _plan()
+    review = _review()
+    for ordinal in range(6):
+        review, page = consolidation_review.serve_page(
+            review,
+            plan=plan,
+            identity=_trusted_renderer(),
+            page_ordinal=ordinal,
+            served_at=f"2026-08-28T12:00:{ordinal:02d}.500Z",
+        )
+        acknowledgement = consolidation_review.build_acknowledgement(
+            review,
+            page=page,
+            identity=_trusted_renderer(),
+            issued_at=f"2026-08-28T12:00:{ordinal + 1:02d}.000Z",
+            nonce=f"render-ack-{ordinal:020d}",
+        )
+        review = consolidation_review.acknowledge_page(
+            review,
+            plan=plan,
+            acknowledgement=acknowledgement,
+        )
+    completed, _completeness = consolidation_review.complete_review(
+        review,
+        plan=plan,
+        identity=_trusted_renderer(),
+        issued_at="2026-08-28T12:10:00.000Z",
+        expires_at=VALID_UNTIL,
+        nonce="completeness-000000000001",
+    )
+    return plan, completed
+
+
+def test_approval_token_binds_exact_plan_completeness_and_confirmation() -> None:
+    from exomem.governance import consolidation_approval
+
+    plan, review = _completed_review()
+    confirmation = consolidation_approval.TrustedOwnerConfirmation(
+        owner_binding_digest=_trusted_renderer().owner_binding_digest,
+        owner_principal_digest=_trusted_renderer().owner_principal_digest,
+        authorization_session_digest=_trusted_renderer().authorization_session_digest,
+        issuer=_trusted_renderer().issuer,
+        surface=_trusted_renderer().surface,
+        action="approve",
+        run_id=RUN_ID,
+        plan_kind="cutover",
+        plan_digest=plan.digest,
+        rendering_completeness_digest=review.completeness.digest,
+        confirmed_at="2026-08-28T12:11:00.000Z",
+        nonce="owner-confirmation-00000001",
+    )
+    token = consolidation_approval.mint_approval(
+        plan=plan,
+        review=review,
+        identity=_trusted_renderer(),
+        confirmation=confirmation,
+        jti="0123456789abcdef0123456789abcdef",
+        expires_at="2026-08-28T12:30:00.000Z",
+        signing_key_id="approval-key-01",
+        signing_key=b"k" * 32,
+    )
+
+    assert token.claim.preimage == {
+        "schema": "exomem.consolidation-approval-token/v1",
+        "plan_kind": "cutover",
+        "run_id": RUN_ID,
+        "plan_digest": plan.digest,
+        "rendering_completeness_digest": review.completeness.digest,
+        "jti": "0123456789abcdef0123456789abcdef",
+        "expires_at": "2026-08-28T12:30:00.000Z",
+        "signing_key_id": "approval-key-01",
+    }
+    assert token.digest == "49fe7fa8efb483f4eaee44a24bbad09ed8139dac1ee17da3ba9edca00393d522"
+    assert (
+        consolidation_approval.verify_approval(
+            token.wire,
+            plan=plan,
+            review=review,
+            now="2026-08-28T12:12:00.000Z",
+            verifier_keys={"approval-key-01": b"k" * 32},
+        )
+        == token
+    )
+    assert token.wire.encode() not in token.claim.canonical_bytes
+    assert b"kkkkkkkk" not in token.claim.canonical_bytes
+
+
+def test_approval_refuses_incomplete_cross_session_or_body_confirmation() -> None:
+    from exomem.governance import consolidation_approval
+
+    plan, completed = _completed_review()
+    confirmation = consolidation_approval.TrustedOwnerConfirmation(
+        owner_binding_digest=_trusted_renderer().owner_binding_digest,
+        owner_principal_digest=_trusted_renderer().owner_principal_digest,
+        authorization_session_digest=_trusted_renderer().authorization_session_digest,
+        issuer=_trusted_renderer().issuer,
+        surface=_trusted_renderer().surface,
+        action="approve",
+        run_id=RUN_ID,
+        plan_kind="cutover",
+        plan_digest=plan.digest,
+        rendering_completeness_digest=completed.completeness.digest,
+        confirmed_at="2026-08-28T12:11:00.000Z",
+        nonce="owner-confirmation-00000001",
+    )
+    arguments = {
+        "plan": plan,
+        "review": completed,
+        "identity": _trusted_renderer(),
+        "confirmation": confirmation,
+        "jti": "0123456789abcdef0123456789abcdef",
+        "expires_at": "2026-08-28T12:30:00.000Z",
+        "signing_key_id": "approval-key-01",
+        "signing_key": b"k" * 32,
+    }
+    for changed in (
+        {**arguments, "review": _review()},
+        {
+            **arguments,
+            "identity": replace(_trusted_renderer(), surface="hosted"),
+        },
+        {**arguments, "confirmation": {"approved": True}},
+        {
+            **arguments,
+            "confirmation": replace(confirmation, action="apply"),
+        },
+        {
+            **arguments,
+            "confirmation": replace(
+                confirmation,
+                confirmed_at="2026-08-28T12:09:59.999Z",
+            ),
+        },
+    ):
+        with pytest.raises(consolidation_approval.ConsolidationApprovalUnavailable):
+            consolidation_approval.mint_approval(**changed)
+
+
+def test_approval_refuses_expiry_tamper_and_changed_plan() -> None:
+    from exomem.governance import consolidation_approval
+
+    plan, review = _completed_review()
+    confirmation = consolidation_approval.TrustedOwnerConfirmation(
+        owner_binding_digest=_trusted_renderer().owner_binding_digest,
+        owner_principal_digest=_trusted_renderer().owner_principal_digest,
+        authorization_session_digest=_trusted_renderer().authorization_session_digest,
+        issuer=_trusted_renderer().issuer,
+        surface=_trusted_renderer().surface,
+        action="approve",
+        run_id=RUN_ID,
+        plan_kind="cutover",
+        plan_digest=plan.digest,
+        rendering_completeness_digest=review.completeness.digest,
+        confirmed_at="2026-08-28T12:11:00.000Z",
+        nonce="owner-confirmation-00000001",
+    )
+    token = consolidation_approval.mint_approval(
+        plan=plan,
+        review=review,
+        identity=_trusted_renderer(),
+        confirmation=confirmation,
+        jti="0123456789abcdef0123456789abcdef",
+        expires_at="2026-08-28T12:30:00.000Z",
+        signing_key_id="approval-key-01",
+        signing_key=b"k" * 32,
+    )
+    changed_plan = consolidation_plan.materialize_plan(
+        {**_plan_input(), "nonce": "plan-00000000000000000002"},
+        materialization=_materialization(),
+    )
+    for wire, candidate_plan, now in (
+        (
+            token.wire[:-1] + ("A" if token.wire[-1] != "A" else "B"),
+            plan,
+            "2026-08-28T12:12:00.000Z",
+        ),
+        (token.wire, changed_plan, "2026-08-28T12:12:00.000Z"),
+        (token.wire, plan, "2026-08-28T12:30:00.000Z"),
+    ):
+        with pytest.raises(consolidation_approval.ConsolidationApprovalUnavailable):
+            consolidation_approval.verify_approval(
+                wire,
+                plan=candidate_plan,
+                review=review,
+                now=now,
+                verifier_keys={"approval-key-01": b"k" * 32},
+            )
