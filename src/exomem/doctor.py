@@ -181,6 +181,147 @@ def _check(
     )
 
 
+#: Graph kill switches. Either one, held while a durable recovery checkpoint
+#: exists, makes recovery provably impossible rather than merely slow.
+_GRAPH_KILL_SWITCHES = ("EXOMEM_DISABLE_GRAPH_INDEX", "EXOMEM_DISABLE_GRAPH_SCHEDULING")
+
+#: How long `recovery_required` may hold before it stops being normal. Recovery
+#: is minutes of work; the 2026-08 incident held it for days while every write
+#: minted a durable full-index receipt behind it.
+RECOVERY_AGE_FAIL_SECONDS = 6 * 60 * 60.0
+
+
+def _site_package_dirs() -> list[Path]:
+    """Interpreter site directories to scan for startup-file kill switches."""
+    import site
+
+    candidates: list[Path] = []
+    for getter in ("getsitepackages", "getusersitepackages"):
+        try:
+            found = getattr(site, getter)()
+        except (AttributeError, TypeError):
+            continue
+        if isinstance(found, str):
+            found = [found]
+        candidates.extend(Path(item) for item in found)
+    return candidates
+
+
+def graph_kill_switch_sources() -> list[str]:
+    """Startup files that inject a graph kill switch into every interpreter.
+
+    A `.pth` in site-packages executes at interpreter start, so one left behind
+    by an old install disables the graph in a process whose ENVIRONMENT looks
+    clean. That is why the incident's root cause stayed invisible: `env` showed
+    nothing. Reports the file paths, never their contents.
+    """
+    sources: list[str] = []
+    seen: set[str] = set()
+    for directory in _site_package_dirs():
+        try:
+            entries = sorted(directory.glob("*.pth"))
+        except OSError:
+            continue
+        for entry in entries:
+            key = str(entry)
+            if key in seen:
+                continue
+            try:
+                text = entry.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if any(switch in text for switch in _GRAPH_KILL_SWITCHES):
+                seen.add(key)
+                sources.append(key)
+    return sources
+
+
+def check_graph_recovery_age(vault_root: Path | None) -> DoctorCheck:
+    """Persistent graph recovery is an alarmed, bounded condition.
+
+    Two FAILURES, not warnings. Graph work disabled while a durable recovery
+    checkpoint exists is provably unrecoverable and fails immediately, naming
+    the disabling source including a site-packages `.pth`. Recovery merely
+    required beyond its bound fails on elapsed time.
+    """
+    from . import graph_sync
+
+    details: dict[str, object] = {}
+    if vault_root is None:
+        return _check(
+            "write_path.graph_recovery",
+            "pass",
+            "No vault selected; graph recovery state not evaluated.",
+            details=details,
+        )
+    checkpoint = graph_sync.read_checkpoint(vault_root)
+    age = graph_sync.recovery_age_seconds(vault_root)
+    clock_state = graph_sync.recovery_clock_state(vault_root)
+    env_switches = [name for name in _GRAPH_KILL_SWITCHES if os.environ.get(name, "").strip()]
+    details["recovery_checkpoint"] = checkpoint is not None
+    details["recovery_age_s"] = None if age is None else round(age, 1)
+    details["recovery_clock"] = clock_state
+    details["graph_kill_switches"] = env_switches
+
+    if checkpoint is not None and env_switches:
+        pth_sources = graph_kill_switch_sources()
+        details["graph_kill_switch_files"] = pth_sources
+        origin = ", ".join(env_switches)
+        if pth_sources:
+            origin += f" (injected by {', '.join(pth_sources)})"
+        return _check(
+            "write_path.graph_recovery",
+            "fail",
+            "A durable graph recovery checkpoint exists while graph work is "
+            f"disabled by {origin}. Recovery cannot complete in this "
+            "configuration, and every batch write keeps minting durable refresh "
+            "demand behind it.",
+            "Unset the kill switch (and delete the .pth that injects it, if any), "
+            "then let the graph drain complete.",
+            details=details,
+        )
+    if clock_state == "corrupt":
+        # An unreadable clock is its own failure, never a zero-age warning.
+        # Reported as "just now" it would hold the age permanently below the
+        # bound below, so the alarm could never fire again.
+        return _check(
+            "write_path.graph_recovery",
+            "fail",
+            "Graph synchronization recorded a recovery condition but its "
+            "durable clock is unreadable, so how long recovery has been "
+            "required cannot be measured and the age bound cannot fire.",
+            "Run `exomem index --scope vault` during a stop window; the next "
+            "observation republishes the clock atomically.",
+            details=details,
+        )
+    if age is not None and age > RECOVERY_AGE_FAIL_SECONDS:
+        return _check(
+            "write_path.graph_recovery",
+            "fail",
+            "Graph synchronization has continuously required recovery for "
+            f"{age / 3600.0:.1f}h, beyond the "
+            f"{RECOVERY_AGE_FAIL_SECONDS / 3600.0:.0f}h bound. Recovery is "
+            "minutes of work; this long means it is blocked.",
+            "Run `exomem index --scope vault` during a stop window, then confirm "
+            "graph_sync status returns to current.",
+            details=details,
+        )
+    if age is not None:
+        return _check(
+            "write_path.graph_recovery",
+            "warn",
+            f"Graph synchronization requires recovery ({age / 60.0:.1f} min so far).",
+            "Normal for a short window; investigate if it persists.",
+            details=details,
+        )
+    return _check(
+        "write_path.graph_recovery",
+        "pass",
+        "Graph synchronization does not require recovery.",
+        details=details,
+    )
+
+
 def _module_available(module: str) -> bool:
     return importlib.util.find_spec(module) is not None
 
@@ -2761,6 +2902,7 @@ def doctor(
         _check_graph_sync_state(vault_root),
         _check_rebuild_temp_orphans(vault_root),
         _check_write_path_env_flags(vault_root),
+        check_graph_recovery_age(vault_root),
     ]
     runtime_processes = _check_runtime_processes()
     if runtime_processes is not None:

@@ -68,9 +68,7 @@ class RestJSONResponse(JSONResponse):
     """JSONResponse that renders frontmatter dates as ISO-like strings."""
 
     def render(self, content) -> bytes:  # noqa: ANN001
-        return json.dumps(
-            content, ensure_ascii=False, allow_nan=False, default=str
-        ).encode("utf-8")
+        return json.dumps(content, ensure_ascii=False, allow_nan=False, default=str).encode("utf-8")
 
 
 _OPENAPI_TYPES = {
@@ -141,6 +139,22 @@ _OPENAPI_MUTATION_HOLDER_SCHEMA = {
     ],
     "additionalProperties": False,
 }
+def _retrieval_warming_sites() -> tuple[str, ...]:
+    """The refusal-site vocabulary, read from its single source of truth.
+
+    The `find` import is deferred out of the module's top-level import block,
+    but the schema below calls this while the module loads, so `find` is
+    still imported at process start — deliberately: the schema must be
+    correct at import time, and any process serving recall pays for `find`
+    on its first request anyway. Deriving the enum here rather than
+    transcribing the list is the point — a hand-copied enum goes stale
+    silently, which is the drift the vocabulary exists to prevent.
+    """
+    from .find import RETRIEVAL_WARMING_SITES
+
+    return RETRIEVAL_WARMING_SITES
+
+
 _OPENAPI_ERROR_SCHEMA = {
     "type": "object",
     "properties": {
@@ -157,6 +171,19 @@ _OPENAPI_ERROR_SCHEMA = {
         "complete": {"type": "boolean"},
         "committed": {"type": ["boolean", "null"]},
         "retry_after_ms": {"type": "integer", "minimum": 0},
+        # Which gate declined a RETRIEVAL_INDEX_WARMING, and how long it waited
+        # before giving up, so a client can attribute a refusal from the
+        # response alone rather than from the server's logs. The enum is
+        # DERIVED from the single source of truth, never transcribed.
+        "site": {"type": "string", "enum": list(_retrieval_warming_sites())},
+        "waited_ms": {"type": "integer", "minimum": 0},
+        "unresolved_sources": {
+            "type": "array",
+            "items": {"type": "string", "maxLength": 256},
+            "maxItems": 8,
+        },
+        "unresolved_source_count": {"type": "integer", "minimum": 0},
+        "unresolved_sources_truncated": {"type": "boolean"},
         "holder": _OPENAPI_MUTATION_HOLDER_SCHEMA,
         "request_id": {"type": "string", "format": "uuid"},
         "receipt_id": {"type": ["string", "null"]},
@@ -180,9 +207,7 @@ _OPENAPI_ERROR_RESPONSE = {
     "description": (
         "{success: false, error: {code, message, remediation, terminal-state fields?}}"
     ),
-    "content": {
-        "application/json": {"schema": {"$ref": "#/components/schemas/ErrorEnvelope"}}
-    },
+    "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorEnvelope"}}},
 }
 
 
@@ -193,16 +218,12 @@ def _openapi_success_schema(
     try:
         annotation = typing.get_type_hints(command.leaf).get("return", Any)
         result_schema = TypeAdapter(annotation).json_schema(
-            ref_template=(
-                f"#/components/schemas/{command.name}_" + "{model}"
-            )
+            ref_template=(f"#/components/schemas/{command.name}_" + "{model}")
         )
     except Exception:  # noqa: BLE001 - undocumented legacy returns stay generic
         result_schema = {}
     definitions = result_schema.pop("$defs", {})
-    components = {
-        f"{command.name}_{name}": schema for name, schema in definitions.items()
-    }
+    components = {f"{command.name}_{name}": schema for name, schema in definitions.items()}
     return (
         {
             "type": "object",
@@ -303,9 +324,7 @@ def register_rest_facade(
 
     def _register_rest(cmd: commands_module.Command) -> None:
         @mcp_app.custom_route(f"/api/{cmd.name}", methods=["POST"])
-        async def _handler(
-            request: Request, _cmd: commands_module.Command = cmd
-        ) -> JSONResponse:
+        async def _handler(request: Request, _cmd: commands_module.Command = cmd) -> JSONResponse:
             gate, principal_scope = _rest_gate(request)
             if gate is not None:
                 return gate
@@ -322,9 +341,7 @@ def register_rest_facade(
                     "authorization session is unavailable",
                     400,
                 )
-            request_carrier = (
-                authorization_transport.current_request_authorization_carrier()
-            )
+            request_carrier = authorization_transport.current_request_authorization_carrier()
             if request_carrier is None or request_carrier.is_invalid:
                 return _rest_err(
                     "AUTHORIZATION_SESSION_UNAVAILABLE",
@@ -348,9 +365,7 @@ def register_rest_facade(
                 )
                 body = await _rest_body(request)
                 if body is None:
-                    raise cli_ops.OpError(
-                        "INVALID_BODY", "request body must be a JSON object"
-                    )
+                    raise cli_ops.OpError("INVALID_BODY", "request body must be a JSON object")
                 forbidden_identity_fields = {
                     "authorization_session_credential",
                     "principal",
@@ -379,10 +394,9 @@ def register_rest_facade(
                     # Canonical audience at the REST boundary (design D5): a
                     # `None` scope is the vault's own shared key (owner); a
                     # CF-Access scope folds into the shared OAuth id space.
-                    with capabilities.active_surface(
-                        surface_descriptor
-                    ), principal_module.request_scope(
-                        bound_principal
+                    with (
+                        capabilities.active_surface(surface_descriptor),
+                        principal_module.request_scope(bound_principal),
                     ):
                         return invoke_command(
                             _cmd,
@@ -447,11 +461,7 @@ def register_rest_facade(
             if cmd.name == "edit_memory":
                 operation_schema = edit_operations.public_edit_operation_schema()
                 operation_help = next(
-                    (
-                        parameter.help
-                        for parameter in cmd.params
-                        if parameter.name == "operation"
-                    ),
+                    (parameter.help for parameter in cmd.params if parameter.name == "operation"),
                     "",
                 )
                 if operation_help:
@@ -475,9 +485,7 @@ def register_rest_facade(
                     "security": [{"bearerAuth": []}],
                     "parameters": [
                         {
-                            "name": (
-                                authorization_transport.AUTHORIZATION_SESSION_HEADER_NAME
-                            ),
+                            "name": (authorization_transport.AUTHORIZATION_SESSION_HEADER_NAME),
                             "in": "header",
                             "required": False,
                             "description": (
@@ -491,15 +499,11 @@ def register_rest_facade(
                             },
                         }
                     ],
-                    "requestBody": {
-                        "content": {"application/json": {"schema": request_schema}}
-                    },
+                    "requestBody": {"content": {"application/json": {"schema": request_schema}}},
                     "responses": {
                         "200": {
                             "description": "{success: true, data: ...}",
-                            "content": {
-                                "application/json": {"schema": success_schema}
-                            },
+                            "content": {"application/json": {"schema": success_schema}},
                         },
                         "400": _OPENAPI_ERROR_RESPONSE,
                         "409": _OPENAPI_ERROR_RESPONSE,
@@ -519,9 +523,7 @@ def register_rest_facade(
                 "openapi": "3.1.0",
                 "info": {"title": "exomem personal REST facade", "version": "1.0.0"},
                 "components": {
-                    "securitySchemes": {
-                        "bearerAuth": {"type": "http", "scheme": "bearer"}
-                    },
+                    "securitySchemes": {"bearerAuth": {"type": "http", "scheme": "bearer"}},
                     "schemas": {
                         "Error": _OPENAPI_ERROR_SCHEMA,
                         "ErrorEnvelope": _OPENAPI_ERROR_ENVELOPE_SCHEMA,

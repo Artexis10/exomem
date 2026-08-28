@@ -155,7 +155,15 @@ Use this loop whenever a durable conclusion should enter Exomem:
 
 1. `ask_memory` for relevant prior notes and sources.
 2. `read_memory` for chosen pages, or use `ask_memory(deep=true)` when synthesis needs bounded context.
-3. Identify the provenance: which `Sources/` or `Evidence/` pages this conclusion draws from. Those become `sources:` on the write call. If it came from live work with nothing captured, that is an honest empty list.
+3. Identify the provenance: which governed `Sources/` or `Evidence/` pages this
+   conclusion draws from. Those become `sources:` on the write call. Capture
+   external material first: a URL, connector/message ID, remote file ID, working
+   script, excerpt, or derivative summary is not itself a source citation. Use
+   `capture_source` or the Evidence lane for the original, then cite the returned
+   path or stable ref. If the original cannot be recovered, remove the unsupported
+   claim explicitly; never recreate an "original" from the derivative. If the
+   conclusion came from live work with nothing external captured, `sources: []`
+   is honest and valid.
 4. Draft the typed page at the right layer: `capture_source` for raw source, `remember` for a compiled conclusion, `connect_memory` for entity/link work, `edit_memory` for small correction, `replace_memory` for supersession.
 5. Run `connect_memory(operation="suggest-links")` on the draft before writing;
    use `suggest-relations` when directional meaning matters. Accept only links
@@ -342,7 +350,7 @@ experiments, proof-bearing records, review, and supersession.
 | `relations` | "review suggested relations," "pay down relation debt," "accept/reject suggested links" | `review_memory(mode="relation-queue")` for the batched read; accept one reviewed candidate via `connect_memory(operation="accept-relation")` (requires the queue fingerprint, target `expected_hash`, and an audit reason); reject via `triage_memory` |
 | `connect` | "connect these ideas," "suggest relations," "show the surrounding context" | `connect_memory`; use `operation="context"` for bounded graph, provenance, evidence, and history |
 | `adopt` | "what does this existing vault contain," "import/adopt this vault safely" | `adopt_vault(mode="scan-only")` first; explicit modes for manifest/copy/compile planning |
-| `maintain` | "check vault health," "fix safe drift" | Remote tools may use `maintain_memory(mode="audit")` or explicit dry runs. Actual `fix`/`reconcile` writes are host-operator work via `exomem maintain --fix` / `--reconcile` |
+| `maintain` | "check vault health," "fix safe drift," "make Planning/Records files readable" | Remote tools may use `maintain_memory(mode="audit")` or preview one collection with `mode="structured-files"`. Structured-file apply requires its exact preview plan; ordinary `fix`/`reconcile` writes remain host-operator work via `exomem maintain --fix` / `--reconcile` |
 | `schema` | "what structure or relation vocabulary recurs," "validate this graph lens" | `schema_memory`; infer before saving, and keep governance optional |
 
 Records routing is semantic: use it for durable observed events or current state
@@ -353,15 +361,20 @@ when collections compete or identity, date, provenance, or ownership is unclear.
 When no collection fits, use `record_memory(action="describe")` and propose a
 concise collection; the agent must not silently create a long-lived schema.
 
-For a Records collection stored as Markdown items, YAML frontmatter is the sole
-canonical value source. A manifest may opt into `record_presentation` to add a
-generated, readable body block for selected nested child values. Treat that
-block as derived: never edit it as data or read values back from it. If a person
-directly edits selected frontmatter, inspect and rebaseline the audit gap, then
-use guarded `record_memory(action="update", refresh_presentation=true, ...)`
-to refresh the block. Query a declared child table with `expand_child`; use the
-older `expand_children=true` only when the collection has one unambiguous child
-container.
+For a Planning or Records collection stored as Markdown items, YAML frontmatter
+is the sole canonical value source and the UUID remains durable identity. A
+manifest may declare `item_filename` and `item_presentation` (or the compatible
+Records presentation recipe) so the file tree and page read naturally. Prefer
+stable descriptive fields such as title for filenames; keep status, priority,
+horizon, and other mutable state in frontmatter so ordinary updates do not cause
+renames. Treat every managed body block as derived: never edit it as data or read
+values back from it. A guarded item update can refresh one block. For an existing
+UUID-named collection, call
+`maintain_memory(mode="structured-files", collection=...)` to preview every
+rename, body change, collision, and inbound-link blocker; apply only with the
+returned `plan_id`, `source_snapshot`, and reason. Query a declared Records child
+table with `expand_child`; use `expand_children=true` only when the collection
+has one unambiguous child container.
 
 Examples:
 
@@ -383,9 +396,11 @@ Examples:
   observed Record, not a compiled conclusion. If none fits, propose a collection
   rather than creating one silently.
 - "Show my last three months" -> `record_memory(action="query")` with a bounded date/query shape; use a compiled Note only for an explicit conclusion from that history.
-- "The second one is done, the rest can wait" -> one landing, two consequences: `record_memory(action="append")` for the produced deliverable, then `plan_memory(action="triage")` to complete that work item; the others stay queued and nothing else moves. Report it once: "<deliverable> is done and logged; the rest stay queued." Read the Planning inventory with `plan_memory(action="inspect")` when no collection is named yet, and resolve the item with `plan_memory(action="query")` filtered on the title or a natural-key field plus `lifecycle` and `status`.
+- "The second one is done, the rest can wait" -> one landing, two consequences: `record_memory(action="append")` for the produced deliverable, then `plan_memory(action="triage")` to complete that work item; the others stay queued and nothing else moves. Report it once: "<deliverable> is done and logged; the rest stay queued." Discover the collection with `browse_memory` when none is named, inspect that exact collection with `plan_memory(action="inspect", collection=...)`, then resolve the item with `plan_memory(action="query")` filtered on the title or a natural-key field plus `lifecycle` and `status`.
 - "Save this feature idea" -> `plan_memory(action="add")`; use explicit `triage` for a horizon or hierarchy change, never infer it from elapsed time — a stated outcome is evidence, the clock is not.
-- "Compile these three sources" -> draft a sourced note with
+- "Compile these three sources" -> ensure the three originals are already
+  captured as Source/Evidence pages (capture any missing originals first), then
+  draft a sourced note with
   `remember(suggestions=true, response_detail="full")` link suggestions, then
   write after the applicable approval rule.
 - "Show stale conclusions" -> run the review path and present candidates for

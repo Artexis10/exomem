@@ -137,9 +137,11 @@ def create_collection(
     record_governance.require_candidate_manifest_visibility(root, manifest_path)
     manifest = collections.parse_manifest_bytes(root, manifest_path, manifest_text.encode("utf-8"))
     require_planning_profile(manifest)
-    if scaffold and not manifest.views:
-        manifest_text = _with_default_views(manifest_text)
-        manifest = collections.parse_manifest_bytes(root, manifest_path, manifest_text.encode("utf-8"))
+    if scaffold:
+        manifest_text = _with_default_scaffold(manifest_text, manifest)
+        manifest = collections.parse_manifest_bytes(
+            root, manifest_path, manifest_text.encode("utf-8")
+        )
         require_planning_profile(manifest)
     record_governance.require_proposed_manifest_visibility(root, manifest)
     return records.create_collection(
@@ -147,28 +149,180 @@ def create_collection(
     )
 
 
-def _with_default_views(manifest_text: str) -> str:
+def validate(
+    vault_root: Path,
+    *,
+    mode: str,
+    manifest_text: str,
+    manifest_path: str | None = None,
+    collection: str | collections.CollectionManifest | None = None,
+    scaffold: bool = True,
+) -> dict[str, Any]:
+    """Validate a complete Planning manifest in create or revision mode."""
+    root = Path(vault_root)
+    if mode == "create" and manifest_path is not None and collection is None:
+        records._validate_collection_create_for_profile(
+            root,
+            manifest_path,
+            manifest_text,
+            semantic_profile="planning",
+            scaffold=scaffold,
+        )
+        manifest = require_planning_profile(
+            collections.parse_manifest_bytes(
+                root, root / manifest_path, manifest_text.encode("utf-8")
+            )
+        )
+        effective_text = (
+            _with_default_scaffold(manifest_text, manifest) if scaffold else manifest_text
+        )
+        result = records._validate_collection_create_for_profile(
+            root,
+            manifest_path,
+            effective_text,
+            semantic_profile="planning",
+            scaffold=scaffold,
+        )
+        require_planning_profile(
+            collections.parse_manifest_bytes(
+                root, root / manifest_path, effective_text.encode("utf-8")
+            )
+        )
+        return result
+    if mode == "revision" and collection is not None and manifest_path is None:
+        result = records._validate_collection_revision_for_profile(
+            root,
+            collection,
+            manifest_text,
+            semantic_profile="planning",
+        )
+        current = record_governance.resolve_collection(root, collection)
+        require_planning_profile(
+            collections.parse_manifest_bytes(
+                root, root / current.path, manifest_text.encode("utf-8")
+            )
+        )
+        return result
+    raise CollectionError(
+        "INVALID_PLAN_ARGUMENTS", "Planning validation mode and selector are invalid"
+    )
+
+
+def revise(
+    vault_root: Path,
+    collection: str | collections.CollectionManifest,
+    *,
+    manifest_text: str,
+    expected_manifest_hash: str,
+    expected_container_hash: str,
+    why: str,
+) -> dict[str, Any]:
+    """Publish one guarded complete Planning manifest revision."""
+    return records._lifecycle_mutation(
+        vault_root,
+        collection,
+        action="revise",
+        manifest_text=manifest_text,
+        expected_manifest_hash=expected_manifest_hash,
+        expected_container_hash=expected_container_hash,
+        acknowledged_gap_codes=(),
+        why=why,
+        semantic_profile="planning",
+    )
+
+
+def rebaseline(
+    vault_root: Path,
+    collection: str | collections.CollectionManifest,
+    *,
+    expected_manifest_hash: str,
+    expected_container_hash: str,
+    acknowledged_gap_codes: tuple[str, ...] | list[str],
+    why: str,
+) -> dict[str, Any]:
+    """Acknowledge the exact currently inspected Planning audit gaps."""
+    if not isinstance(acknowledged_gap_codes, (tuple, list)) or not all(
+        isinstance(code, str) for code in acknowledged_gap_codes
+    ):
+        raise CollectionError("INVALID_PLAN_GAPS", "gap acknowledgement is invalid")
+    return records._lifecycle_mutation(
+        vault_root,
+        collection,
+        action="rebaseline",
+        manifest_text=None,
+        expected_manifest_hash=expected_manifest_hash,
+        expected_container_hash=expected_container_hash,
+        acknowledged_gap_codes=tuple(acknowledged_gap_codes),
+        why=why,
+        semantic_profile="planning",
+    )
+
+
+def _with_default_scaffold(
+    manifest_text: str,
+    manifest: collections.CollectionManifest,
+) -> str:
     newline = "\r\n" if "\r\n" in manifest_text else "\n"
     closing = list(re.finditer(r"(?m)^---\r?$", manifest_text))
     if len(closing) < 2:
         raise CollectionError("INVALID_COLLECTION_MANIFEST", "manifest requires frontmatter")
-    # Kept explicit so the ordinary YAML remains obvious to a human editor.
-    views = ["views:"]
-    for horizon in ("inbox", "week", "month", "quarter", "year", "multi-year"):
-        views.extend(
+    additions: list[str] = []
+    if manifest.item_filename is None and manifest.schema.natural_key == ("title",):
+        additions.extend(("item_filename:", "  version: 1", "  fields: [title]"))
+    if manifest.item_presentation is None:
+        summary = [
+            name
+            for name in (
+                "kind",
+                "status",
+                "lifecycle",
+                "priority",
+                "commitment",
+                "horizon",
+                "health",
+            )
+            if name in manifest.schema.fields
+        ]
+        long_text = [
+            name
+            for name in ("context", "description", "success_criteria", "notes")
+            if (name in manifest.schema.fields and manifest.schema.fields[name].type == "string")
+        ]
+        relationships = [
+            name for name, field in manifest.schema.fields.items() if field.type == "link"
+        ][:4]
+        additions.extend(
             (
-                f"  {horizon}:",
-                "    query:",
-                "      filters:",
-                "        - column: lifecycle",
-                "          op: eq",
-                "          value: active",
-                "        - column: horizon",
-                "          op: eq",
-                f"          value: {horizon}",
+                "item_presentation:",
+                "  version: 1",
+                "  title: title",
+                f"  summary: [{', '.join(summary)}]",
             )
         )
-    insertion = newline.join(views) + newline
+        if long_text:
+            additions.append(f"  long_text: [{', '.join(long_text)}]")
+        if relationships:
+            additions.append(f"  relationships: [{', '.join(relationships)}]")
+    if not manifest.views:
+        # Kept explicit so the ordinary YAML remains obvious to a human editor.
+        additions.append("views:")
+        for horizon in ("inbox", "week", "month", "quarter", "year", "multi-year"):
+            additions.extend(
+                (
+                    f"  {horizon}:",
+                    "    query:",
+                    "      filters:",
+                    "        - column: lifecycle",
+                    "          op: eq",
+                    "          value: active",
+                    "        - column: horizon",
+                    "          op: eq",
+                    f"          value: {horizon}",
+                )
+            )
+    if not additions:
+        return manifest_text
+    insertion = newline.join(additions) + newline
     index = closing[1].start()
     return manifest_text[:index] + insertion + manifest_text[index:]
 
@@ -368,14 +522,18 @@ def query(
     )
 
 
-def _project_query(payload: Mapping[str, Any], manifest: collections.CollectionManifest) -> dict[str, Any]:
+def _project_query(
+    payload: Mapping[str, Any], manifest: collections.CollectionManifest
+) -> dict[str, Any]:
     if not _valid_query_payload(payload, manifest):
-        raise CollectionError("PLAN_RESPONSE_TOO_LARGE", "Planning response is not safely representable")
-    projected = egress.project(
-        _PlanningEnvelope(payload), egress.LEVEL_FULL, kind="planning_query"
+        raise CollectionError(
+            "PLAN_RESPONSE_TOO_LARGE", "Planning response is not safely representable"
     )
+    projected = egress.project(_PlanningEnvelope(payload), egress.LEVEL_FULL, kind="planning_query")
     if projected is None or projected.get("withheld"):
-        raise CollectionError("PLAN_RESPONSE_TOO_LARGE", "Planning response is not safely representable")
+        raise CollectionError(
+            "PLAN_RESPONSE_TOO_LARGE", "Planning response is not safely representable"
+        )
     return projected
 
 
@@ -422,7 +580,9 @@ _PLANNING_SYSTEM_FIELDS = frozenset(
 )
 
 
-def _valid_query_payload(payload: Mapping[str, Any], manifest: collections.CollectionManifest) -> bool:
+def _valid_query_payload(
+    payload: Mapping[str, Any], manifest: collections.CollectionManifest
+) -> bool:
     if set(payload) != _QUERY_EGRESS_KEYS:
         return False
     if (
@@ -455,7 +615,10 @@ def _valid_query_payload(payload: Mapping[str, Any], manifest: collections.Colle
     ):
         return False
     try:
-        return len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) <= 64 * 1024
+        return (
+            len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+            <= 64 * 1024
+        )
     except (TypeError, ValueError, UnicodeEncodeError):
         return False
 
@@ -474,7 +637,21 @@ def _valid_query_descriptor(value: Any, manifest: collections.CollectionManifest
             or set(filter_value) - {"column", "op", "value"}
             or filter_value.get("column") not in fields
             or filter_value.get("op")
-            not in {"eq", "ne", "gt", "gte", "lt", "lte", "contains", "icontains", "startswith", "in", "nin", "exists", "missing"}
+            not in {
+                "eq",
+                "ne",
+                "gt",
+                "gte",
+                "lt",
+                "lte",
+                "contains",
+                "icontains",
+                "startswith",
+                "in",
+                "nin",
+                "exists",
+                "missing",
+            }
             or not _json_value(filter_value.get("value"))
         ):
             return False
@@ -484,7 +661,9 @@ def _valid_query_descriptor(value: Any, manifest: collections.CollectionManifest
         or any(type(column) is not str or column not in fields for column in columns)
     ):
         return False
-    if any(value[name] is not None and value[name] not in fields for name in ("sort_by", "date_column")):
+    if any(
+        value[name] is not None and value[name] not in fields for name in ("sort_by", "date_column")
+    ):
         return False
     return (
         type(value["descending"]) is bool
@@ -495,12 +674,18 @@ def _valid_query_descriptor(value: Any, manifest: collections.CollectionManifest
         and 0 <= value["hierarchy_depth"] <= 8
         and type(value["hierarchy_limit"]) is int
         and 1 <= value["hierarchy_limit"] <= 500
-        and all(value[name] is None or type(value[name]) is str for name in ("aggregate", "date_from", "date_to"))
+        and all(
+            value[name] is None or type(value[name]) is str
+            for name in ("aggregate", "date_from", "date_to")
+        )
     )
 
 
 def _valid_plan_row(value: Any, manifest: collections.CollectionManifest) -> bool:
-    if not isinstance(value, Mapping) or set(value) - set(manifest.schema.fields) - _PLANNING_SYSTEM_FIELDS:
+    if (
+        not isinstance(value, Mapping)
+        or set(value) - set(manifest.schema.fields) - _PLANNING_SYSTEM_FIELDS
+    ):
         return False
     if not {"collection_id", "plan_id", "item_version", "inferred", "ambiguous"} <= set(value):
         return False
@@ -550,7 +735,13 @@ def _valid_hierarchy(value: Any, manifest: collections.CollectionManifest) -> bo
     if value is None:
         return True
     if not isinstance(value, Mapping) or set(value) != {
-        "mode", "roots", "nodes", "edges", "max_depth", "max_nodes", "truncated"
+        "mode",
+        "roots",
+        "nodes",
+        "edges",
+        "max_depth",
+        "max_nodes",
+        "truncated",
     }:
         return False
     return (
@@ -584,7 +775,8 @@ def _valid_hierarchy_node(value: Any, manifest: collections.CollectionManifest) 
         return False
     try:
         normalize_item(
-            value, apply_defaults=False,
+            value,
+            apply_defaults=False,
             validate_motivation=motivation_is_governed(manifest),
         )
         for name, field_value in value.items():
@@ -598,7 +790,12 @@ def _valid_hierarchy_node(value: Any, manifest: collections.CollectionManifest) 
 def _valid_agent_history(value: Any) -> bool:
     if value is None:
         return True
-    if not isinstance(value, Mapping) or set(value) != {"status", "complete", "truncated", "events"}:
+    if not isinstance(value, Mapping) or set(value) != {
+        "status",
+        "complete",
+        "truncated",
+        "events",
+    }:
         return False
     if value["status"] not in {"baseline", "ok", "gap", "history_incomplete"}:
         return False
@@ -608,9 +805,18 @@ def _valid_agent_history(value: Any) -> bool:
     if not isinstance(events, list) or len(events) > 50:
         return False
     keys = {
-        "transition_id", "parent_id", "operation", "item_key", "canonical_path", "before_manifest_hash",
-        "after_manifest_hash", "before_item_hash", "after_item_hash", "before_container_hash",
-        "after_container_hash", "rationale",
+        "transition_id",
+        "parent_id",
+        "operation",
+        "item_key",
+        "canonical_path",
+        "before_manifest_hash",
+        "after_manifest_hash",
+        "before_item_hash",
+        "after_item_hash",
+        "before_container_hash",
+        "after_container_hash",
+        "rationale",
     }
     for event in events:
         if not isinstance(event, Mapping) or set(event) != keys:
@@ -619,13 +825,23 @@ def _valid_agent_history(value: Any) -> bool:
             not isinstance(event["transition_id"], str)
             or re.fullmatch(r"[0-9a-f]{24}", event["transition_id"]) is None
             or event["parent_id"] not in {"baseline", "absent"}
-            and (not isinstance(event["parent_id"], str) or re.fullmatch(r"[0-9a-f]{24}", event["parent_id"]) is None)
+            and (
+                not isinstance(event["parent_id"], str)
+                or re.fullmatch(r"[0-9a-f]{24}", event["parent_id"]) is None
+            )
             or event["operation"] not in {"plan_create", "plan_add", "plan_update", "plan_triage"}
-            or (event["item_key"] is not None and memory_refs.normalize_id(event["item_key"]) != event["item_key"])
+            or (
+                event["item_key"] is not None
+                and memory_refs.normalize_id(event["item_key"]) != event["item_key"]
+            )
             or not _safe_path(event["canonical_path"])
             or not isinstance(event["rationale"], str)
             or len(event["rationale"].encode("utf-8")) > 512
-            or any(event[name] is not None and not _hash(event[name]) for name in keys if name.endswith("hash"))
+            or any(
+                event[name] is not None and not _hash(event[name])
+                for name in keys
+                if name.endswith("hash")
+            )
         ):
             return False
     return True
@@ -662,7 +878,8 @@ def _json_value(value: Any, *, depth: int = 0, nodes: list[int] | None = None) -
         return all(_json_value(item, depth=depth + 1, nodes=nodes) for item in value)
     if isinstance(value, Mapping):
         return all(
-            type(key) is str and len(key.encode("utf-8")) <= 512
+            type(key) is str
+            and len(key.encode("utf-8")) <= 512
             and _json_value(item, depth=depth + 1, nodes=nodes)
             for key, item in value.items()
         )
@@ -721,7 +938,11 @@ def _hierarchy(
                 if other not in seen and len(seen) >= limit:
                     truncated = True
                     break
-                edge = {"parent": other, "child": node} if mode == "ancestors" else {"parent": node, "child": other}
+                edge = (
+                    {"parent": other, "child": node}
+                    if mode == "ancestors"
+                    else {"parent": node, "child": other}
+                )
                 if edge not in edges:
                     edges.append(edge)
                 if other in seen:
@@ -762,13 +983,13 @@ def _validate_authorized_snapshot(
         _validate_relationships(manifest, snapshot.records, None, None)
 
 
-def inspect(
-    vault_root: Path, collection: str | collections.CollectionManifest
-) -> dict[str, Any]:
+def inspect(vault_root: Path, collection: str | collections.CollectionManifest) -> dict[str, Any]:
     """Report the current Planning contract without repairing canonical files."""
     manifest = record_governance.resolve_collection(vault_root, collection)
     if manifest.semantic_profile != "planning":
-        raise CollectionError("PLANNING_PROFILE_REQUIRED", "Planning actions require a planning semantic profile")
+        raise CollectionError(
+            "PLANNING_PROFILE_REQUIRED", "Planning actions require a planning semantic profile"
+        )
     authorize_path = record_governance.full_release_filter(vault_root)
     result = record_governance.inspect_collection(vault_root, manifest)
     diagnostics = result["diagnostics"]
@@ -777,12 +998,29 @@ def inspect(
         require_planning_profile(manifest)
     except CollectionError as error:
         diagnostics.append({"code": error.code, "reason": error.reason})
-        return _project_inspection({
-            "kind": result.get("kind"), "report_only": result.get("report_only"),
-            "contract": {key: result["contract"].get(key) for key in ("collection_id", "path", "title", "semantic_profile", "schema_version", "storage")},
-            "snapshot": result.get("snapshot"), "source_versions": result.get("source_versions"),
-            "diagnostics": diagnostics[:64], "audit": result.get("audit"), "saved_views": result.get("saved_views"),
-        }, manifest)
+        return _project_inspection(
+            {
+                "kind": result.get("kind"),
+                "report_only": result.get("report_only"),
+                "contract": {
+                    key: result["contract"].get(key)
+                    for key in (
+                        "collection_id",
+                        "path",
+                        "title",
+                        "semantic_profile",
+                        "schema_version",
+                        "storage",
+                    )
+                },
+                "snapshot": result.get("snapshot"),
+                "source_versions": result.get("source_versions"),
+                "diagnostics": diagnostics[:64],
+                "audit": result.get("audit"),
+                "saved_views": result.get("saved_views"),
+            },
+            manifest,
+        )
     if len(diagnostics) < 64:
         try:
             _validate_authorized_snapshot(vault_root, manifest, authorize_path)
@@ -790,7 +1028,9 @@ def inspect(
             diagnostics.append({"code": error.code, "reason": error.reason})
     contract = result.get("contract")
     if not isinstance(contract, Mapping):
-        raise CollectionError("PLAN_RESPONSE_TOO_LARGE", "Planning inspection is not safely representable")
+        raise CollectionError(
+            "PLAN_RESPONSE_TOO_LARGE", "Planning inspection is not safely representable"
+        )
     payload = {
         "kind": result.get("kind"),
         "report_only": result.get("report_only"),
@@ -810,6 +1050,10 @@ def inspect(
         "diagnostics": diagnostics,
         "audit": result.get("audit"),
         "saved_views": result.get("saved_views"),
+        **(
+            {"lifecycle_guards": result["lifecycle_guards"]} if "lifecycle_guards" in result else {}
+        ),
+        **({"presentation": result["presentation"]} if "presentation" in result else {}),
     }
     return _project_inspection(payload, manifest)
 
@@ -818,23 +1062,41 @@ def _project_inspection(
     payload: Mapping[str, Any], manifest: collections.CollectionManifest
 ) -> dict[str, Any]:
     if not _valid_inspection(payload, manifest):
-        raise CollectionError("PLAN_RESPONSE_TOO_LARGE", "Planning inspection is not safely representable")
+        raise CollectionError(
+            "PLAN_RESPONSE_TOO_LARGE", "Planning inspection is not safely representable"
+        )
     projected = egress.project(
         _PlanningEnvelope(payload), egress.LEVEL_FULL, kind="planning_inspection"
     )
     if projected is None or projected.get("withheld"):
-        raise CollectionError("PLAN_RESPONSE_TOO_LARGE", "Planning inspection is not safely representable")
+        raise CollectionError(
+            "PLAN_RESPONSE_TOO_LARGE", "Planning inspection is not safely representable"
+        )
     return projected
 
 
 def _valid_inspection(payload: Mapping[str, Any], manifest: collections.CollectionManifest) -> bool:
-    if set(payload) != {
-        "kind", "report_only", "contract", "snapshot", "source_versions", "diagnostics", "audit", "saved_views"
-    }:
+    required = {
+        "kind",
+        "report_only",
+        "contract",
+        "snapshot",
+        "source_versions",
+        "diagnostics",
+        "audit",
+        "saved_views",
+    }
+    optional = {name for name in ("presentation", "lifecycle_guards") if name in payload}
+    if not required <= set(payload) or set(payload) - required != optional:
         return False
     contract = payload["contract"]
     if not isinstance(contract, Mapping) or set(contract) != {
-        "collection_id", "path", "title", "semantic_profile", "schema_version", "storage"
+        "collection_id",
+        "path",
+        "title",
+        "semantic_profile",
+        "schema_version",
+        "storage",
     }:
         return False
     storage = contract["storage"]
@@ -868,13 +1130,63 @@ def _valid_inspection(payload: Mapping[str, Any], manifest: collections.Collecti
         or not isinstance(payload["saved_views"], list)
         or len(payload["saved_views"]) > 64
         or not all(_valid_view(view) for view in payload["saved_views"])
+        or (
+            "presentation" in payload
+            and not _valid_presentation_inspection(payload["presentation"])
+        )
+        or (
+            "lifecycle_guards" in payload
+            and (
+                not isinstance(payload["lifecycle_guards"], Mapping)
+                or set(payload["lifecycle_guards"])
+                != {"expected_manifest_hash", "expected_container_hash"}
+                or not all(_hash(value) for value in payload["lifecycle_guards"].values())
+            )
+        )
         or not _json_value(payload)
     ):
         return False
     try:
-        return len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) <= 64 * 1024
+        return (
+            len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+            <= 64 * 1024
+        )
     except (TypeError, ValueError, UnicodeEncodeError):
         return False
+
+
+def _valid_presentation_inspection(value: Any) -> bool:
+    if (
+        not isinstance(value, Mapping)
+        or set(value) != {"items", "counts", "truncated"}
+        or not isinstance(value["items"], list)
+        or len(value["items"]) > 128
+        or not isinstance(value["counts"], Mapping)
+        or len(value["counts"]) > 16
+        or type(value["truncated"]) is not bool
+    ):
+        return False
+    if any(
+        type(state) is not str
+        or len(state.encode("utf-8")) > 64
+        or type(count) is not int
+        or count < 0
+        for state, count in value["counts"].items()
+    ):
+        return False
+    for item in value["items"]:
+        if (
+            not isinstance(item, Mapping)
+            or not {"item_key", "path", "version", "state", "remedy"} <= set(item)
+            or set(item) - {"item_key", "path", "version", "state", "remedy", "location"}
+            or any(
+                type(item[name]) is not str or len(item[name].encode("utf-8")) > 1024
+                for name in ("item_key", "path", "version", "state", "remedy")
+            )
+            or item["state"] not in value["counts"]
+        ):
+            return False
+    return True
 
 
 def _valid_inspection_audit(value: Any) -> bool:
@@ -894,17 +1206,45 @@ def _validate_query_egress(value: Mapping[str, Any]) -> dict[str, Any] | None:
     hierarchy = value.get("hierarchy")
     if hierarchy is not None and (
         not isinstance(hierarchy, Mapping)
-        or set(hierarchy) != {"mode", "roots", "nodes", "edges", "max_depth", "max_nodes", "truncated"}
+        or set(hierarchy)
+        != {"mode", "roots", "nodes", "edges", "max_depth", "max_nodes", "truncated"}
     ):
         return None
-    if not _valid_source_versions(value.get("source_versions")) or not _valid_view(value.get("view")):
+    if not _valid_source_versions(value.get("source_versions")) or not _valid_view(
+        value.get("view")
+    ):
         return None
     return dict(value)
 
 
 def _validate_inspection_egress(value: Mapping[str, Any]) -> dict[str, Any] | None:
-    expected = {"kind", "report_only", "contract", "snapshot", "source_versions", "diagnostics", "audit", "saved_views"}
-    if set(value) != expected or not _json_value(value) or not _valid_source_versions(value.get("source_versions")):
+    expected = {
+        "kind",
+        "report_only",
+        "contract",
+        "snapshot",
+        "source_versions",
+        "diagnostics",
+        "audit",
+        "saved_views",
+    }
+    optional = {name for name in ("presentation", "lifecycle_guards") if name in value}
+    if (
+        not expected <= set(value)
+        or set(value) - expected != optional
+        or not _json_value(value)
+        or not _valid_source_versions(value.get("source_versions"))
+        or ("presentation" in value and not _valid_presentation_inspection(value["presentation"]))
+        or (
+            "lifecycle_guards" in value
+            and (
+                not isinstance(value["lifecycle_guards"], Mapping)
+                or set(value["lifecycle_guards"])
+                != {"expected_manifest_hash", "expected_container_hash"}
+                or not all(_hash(item) for item in value["lifecycle_guards"].values())
+            )
+        )
+    ):
         return None
     return dict(value)
 
@@ -946,7 +1286,8 @@ def update(
         raise CollectionError("INVALID_PLAN", "Planning update does not change authored state")
     _require_same_area_side(matches[0].values, final)
     normalize_item(
-        final, apply_defaults=False,
+        final,
+        apply_defaults=False,
         validate_motivation=motivation_is_governed(manifest),
     )
     _validate_declared_text(manifest, final)
@@ -1007,7 +1348,8 @@ def triage(
         raise CollectionError("INVALID_PLAN", "Planning triage does not change authored state")
     _require_same_area_side(matches[0].values, final)
     normalize_item(
-        final, apply_defaults=False,
+        final,
+        apply_defaults=False,
         validate_motivation=motivation_is_governed(manifest),
     )
     _validate_declared_text(manifest, final)
@@ -1093,7 +1435,8 @@ def _validate_relationships(
             _relation_error()
         values = dict(record.values)
         normalize_item(
-            values, apply_defaults=False,
+            values,
+            apply_defaults=False,
             validate_motivation=motivation_is_governed(manifest),
         )
         plans[record.identity.key] = values
@@ -1111,14 +1454,14 @@ def _validate_relationships(
             continue
         if area is not None:
             target = plans.get(area)
-            if target is None or target["kind"] != "area" or (
-                active and target["lifecycle"] != "active"
+            if (
+                target is None
+                or target["kind"] != "area"
+                or (active and target["lifecycle"] != "active")
             ):
                 _relation_error()
         required_parent = (
-            active
-            and values["commitment"] == "committed"
-            and kind in {"initiative", "work-item"}
+            active and values["commitment"] == "committed" and kind in {"initiative", "work-item"}
         )
         if kind == "outcome":
             if parent is not None:
@@ -1129,8 +1472,10 @@ def _validate_relationships(
         else:
             target = plans.get(parent)
             expected = "outcome" if kind == "initiative" else "initiative"
-            if target is None or target["kind"] != expected or (
-                active and target["lifecycle"] != "active"
+            if (
+                target is None
+                or target["kind"] != expected
+                or (active and target["lifecycle"] != "active")
             ):
                 _relation_error()
             if (
@@ -1177,7 +1522,8 @@ def _validate_final_relationships(
     )
     _require_same_area_side(before, values)
     normalize_item(
-        values, apply_defaults=False,
+        values,
+        apply_defaults=False,
         validate_motivation=motivation_is_governed(manifest),
     )
     _validate_declared_text(manifest, values)
@@ -1225,9 +1571,7 @@ def _relation_error() -> Never:
     raise CollectionError("INVALID_PLAN_RELATION", "Planning relationship is not available")
 
 
-def _validate_optional(
-    values: Mapping[str, Any], *, validate_motivation: bool = True
-) -> None:
+def _validate_optional(values: Mapping[str, Any], *, validate_motivation: bool = True) -> None:
     for name in ("health",):
         if name in values:
             _enum(values[name], _HEALTH, name)
@@ -1351,6 +1695,17 @@ def _invalid(reason: str) -> Never:
 egress.register_projector("planning_query", _QUERY_EGRESS_KEYS, validator=_validate_query_egress)
 egress.register_projector(
     "planning_inspection",
-    ("kind", "report_only", "contract", "snapshot", "source_versions", "diagnostics", "audit", "saved_views"),
+    (
+        "kind",
+        "report_only",
+        "contract",
+        "snapshot",
+        "source_versions",
+        "diagnostics",
+        "audit",
+        "saved_views",
+        "presentation",
+        "lifecycle_guards",
+    ),
     validator=_validate_inspection_egress,
 )

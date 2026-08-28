@@ -72,6 +72,9 @@ _HOSTED_MUTATION_DETAIL_FIELDS = (
     "request_id",
     "receipt_id",
     "idempotency_key",
+    "unresolved_sources",
+    "unresolved_source_count",
+    "unresolved_sources_truncated",
 )
 _HOSTED_MUTATION_ERROR_SHAPES = {
     "MAINTENANCE_REQUIRES_CLI": ("terminal", False),
@@ -175,7 +178,7 @@ def _hosted_refusal_guidance() -> dict[str, tuple[str, str]]:
     A code absent from this table degrades to the generic message and a null
     remediation — the safe direction for anything unrecognised.
     """
-    from . import semantic_authoring
+    from . import semantic_authoring, source_closure
 
     findings = semantic_authoring.AUTHORING_CONTRACT.findings
     unit = findings["missing_semantic_unit"]
@@ -211,6 +214,10 @@ def _hosted_refusal_guidance() -> dict[str, tuple[str, str]]:
         "RELATION_DISPOSITION_STALE": (
             "the memory's relation review is out of date",
             disposition,
+        ),
+        source_closure.UNRESOLVED_CODE: (
+            source_closure.UNRESOLVED_MESSAGE,
+            source_closure.UNRESOLVED_REMEDIATION,
         ),
     }
 
@@ -405,6 +412,27 @@ def _hosted_mutation_error_details(
     context: gateway.TrustedGatewayContext,
 ) -> dict[str, Any]:
     code = error.get("code")
+    if code == "UNRESOLVED_SOURCE_CITATION":
+        values = error.get("unresolved_sources")
+        count = error.get("unresolved_source_count")
+        truncated = error.get("unresolved_sources_truncated")
+        if (
+            isinstance(values, list)
+            and len(values) <= 8
+            and all(
+                isinstance(value, str) and len(value.encode("utf-8")) <= 256 for value in values
+            )
+            and type(count) is int
+            and count >= len(values)
+            and type(truncated) is bool
+            and truncated is (count > len(values))
+        ):
+            return {
+                "unresolved_sources": list(values),
+                "unresolved_source_count": count,
+                "unresolved_sources_truncated": truncated,
+            }
+        return {}
     expected_shape = _HOSTED_MUTATION_ERROR_SHAPES.get(code) if isinstance(code, str) else None
     if expected_shape is None:
         return {}
@@ -1068,9 +1096,7 @@ def register_hosted_routes(
             context = _trusted_context(request, config, private_authenticator)
             if "authorization_session_credential" in request.query_params:
                 raise authorization_request.AuthorizationContextUnavailable
-            request_carrier = (
-                authorization_transport.current_request_authorization_carrier()
-            )
+            request_carrier = authorization_transport.current_request_authorization_carrier()
             if request_carrier is None:
                 _headers, request_carrier = (
                     authorization_transport.strip_sensitive_authorization_header(
@@ -1086,9 +1112,7 @@ def register_hosted_routes(
             operation = command.name
             from .governance import principal as principal_module
 
-            principal = principal_module.resolve_hosted_principal(
-                context.principal_scope
-            )
+            principal = principal_module.resolve_hosted_principal(context.principal_scope)
             admission = await run_in_threadpool(
                 authorization_request.verify_authorization_context,
                 config.vault_root,
@@ -1156,9 +1180,7 @@ def register_hosted_routes(
             # service credential rather than by a tenant's agent; widening or
             # narrowing that trust boundary is a separate question.
             protected_argument = (
-                gateway.protected_tree_argument(
-                    command.name, kwargs, vault_root=config.vault_root
-                )
+                gateway.protected_tree_argument(command.name, kwargs, vault_root=config.vault_root)
                 if descriptor.profile in commands_module.PRODUCT_SURFACE_PROFILES
                 else None
             )
@@ -1177,10 +1199,9 @@ def register_hosted_routes(
                 # Canonical audience at the hosted-cell boundary (design D5).
                 # A cell is reached only through the gateway, so a missing
                 # principal scope fails closed rather than resolving to owner.
-                with capabilities.active_surface(
-                    descriptor
-                ), principal_module.request_scope(
-                    bound_principal
+                with (
+                    capabilities.active_surface(descriptor),
+                    principal_module.request_scope(bound_principal),
                 ):
                     selector_error: SelectorCoverageError | None = None
                     try:
@@ -1884,9 +1905,7 @@ def register_hosted_routes(
                 egress_module.release_allows_download,
                 config.vault_root,
                 requested_path,
-                principal=principal_module.resolve_hosted_principal(
-                    context.principal_scope
-                ),
+                principal=principal_module.resolve_hosted_principal(context.principal_scope),
             )
             if not allowed:
                 raise VaultPathError("NOT_FOUND", "file does not exist")

@@ -10,6 +10,8 @@ Checks (all read-only; no writes ever):
 - `orphan_entity`: file under `Entities/` with no inbound wikilinks from
   anywhere in `Knowledge Base/`
 - `unprocessed_source`: `type: source` page whose `ingested_into:` is empty
+- `unresolved_source_citation`: compiled page whose explicit `sources:` claim
+  does not resolve to authorized governed Source or Evidence material
 - `index_drift`: top-level `index.md` Counts disagree with on-disk counts
 - `tag_inconsistency`: case/separator variants of the same tag
 - `frontmatter_compliance`: per-page-type required-field gaps,
@@ -100,6 +102,7 @@ from . import (
     reserved_paths,
     semantic_language_registry,
     semantic_units,
+    source_closure,
     temporal,
 )
 from . import entity_types as entity_types_module
@@ -118,14 +121,31 @@ from .vault import (
 log = logging.getLogger(__name__)
 
 ALL_CATEGORIES: tuple[str, ...] = (
-    "broken_wikilink", "forward_reference", "orphan_entity", "unprocessed_source",
-    "index_drift", "tag_inconsistency", "frontmatter_compliance",
-    "unregistered_project_key", "embedding_drift", "graph_drift", "reference_identity",
-    "relevance_pairs_pending", "stale_review", "corpus_contradictions",
-    "relation_debt", "governance_receipts", "bridge_review",
-    "duplicated_sidecar", "semantic_recall_isolation",
-    "unfinished_experiments", "prediction_window",
-    "question_aging", "supersession_integrity", "entity_type_unregistered",
+    "broken_wikilink",
+    "forward_reference",
+    "orphan_entity",
+    "unprocessed_source",
+    "unresolved_source_citation",
+    "index_drift",
+    "tag_inconsistency",
+    "frontmatter_compliance",
+    "unregistered_project_key",
+    "embedding_drift",
+    "graph_drift",
+    "reference_identity",
+    "relevance_pairs_pending",
+    "stale_review",
+    "corpus_contradictions",
+    "relation_debt",
+    "governance_receipts",
+    "bridge_review",
+    "duplicated_sidecar",
+    "semantic_recall_isolation",
+    "unfinished_experiments",
+    "prediction_window",
+    "question_aging",
+    "supersession_integrity",
+    "entity_type_unregistered",
     "unreflected_outcomes",
 )
 OPTIONAL_CATEGORIES: tuple[str, ...] = (
@@ -173,9 +193,7 @@ EPISTEMIC_REVIEW_CATEGORIES: tuple[str, ...] = (
     # admitting one would let a tuning decision quietly displace authored work.
     "question_aging",
 )
-_SEMANTIC_AUDIT_CATEGORIES = frozenset(
-    {"semantic_contract_drift", *TYPED_SEMANTIC_CATEGORIES}
-)
+_SEMANTIC_AUDIT_CATEGORIES = frozenset({"semantic_contract_drift", *TYPED_SEMANTIC_CATEGORIES})
 _LEGACY_BACKLOG_CODE = "RELATION_DISPOSITION_MISSING"
 DEFAULT_LEGACY_SAMPLE_LIMIT = 5
 MAX_LEGACY_SAMPLE_LIMIT = 50
@@ -195,9 +213,16 @@ _RELEVANCE_GOLDEN = _REPO_ROOT / "tests" / "golden" / "queries.yaml"
 WIKILINK_PATTERN = re.compile(r"\[\[([^\]\|\n]+?)(?:\|[^\]\n]*)?\]\]")
 
 # When walking the full vault to build the wikilink-resolution set, skip these.
-VAULT_WALK_SKIP_DIRS = frozenset({
-    ".obsidian", ".git", ".trash", "_attachments", "_archive", "_trash",
-})
+VAULT_WALK_SKIP_DIRS = frozenset(
+    {
+        ".obsidian",
+        ".git",
+        ".trash",
+        "_attachments",
+        "_archive",
+        "_trash",
+    }
+)
 
 # Counts row in index.md. Captures (label, optional-subcategory, count).
 # Matches lines like:
@@ -292,9 +317,7 @@ class AuditReport:
             "findings": [finding.as_dict() for finding in actionable],
             "summary": public_summary,
         }
-        observed_count = upstream["summary"].get(
-            _LEGACY_BACKLOG_CODE, len(legacy)
-        )
+        observed_count = upstream["summary"].get(_LEGACY_BACKLOG_CODE, len(legacy))
         if observed_count:
             samples = []
             for finding in legacy[:legacy_sample_limit]:
@@ -329,9 +352,7 @@ class AuditReport:
 
 def validate_presentation_controls(detail: str, legacy_sample_limit: int) -> None:
     if detail not in {"actionable", "full"}:
-        raise ValueError(
-            "INVALID_AUDIT_DETAIL: detail must be 'actionable' or 'full'"
-        )
+        raise ValueError("INVALID_AUDIT_DETAIL: detail must be 'actionable' or 'full'")
     if (
         isinstance(legacy_sample_limit, bool)
         or not isinstance(legacy_sample_limit, int)
@@ -352,21 +373,14 @@ def _semantic_upstream_facts(metadata: dict | None) -> dict[str, Any]:
         "summary": dict(semantic.get("semantic_contract_summary") or {}),
         "category_summary": dict(semantic.get("semantic_category_summary") or {}),
         "omitted_count": omitted_count,
-        "observation_complete": bool(
-            truncation.get("observation_complete", omitted_count == 0)
-        ),
-        "findings_complete": bool(
-            truncation.get("findings_complete", omitted_count == 0)
-        ),
+        "observation_complete": bool(truncation.get("observation_complete", omitted_count == 0)),
+        "findings_complete": bool(truncation.get("findings_complete", omitted_count == 0)),
     }
 
 
 def _is_legacy_backlog(finding: AuditFinding) -> bool:
     meta = finding.meta or {}
-    return bool(
-        meta.get("code") == _LEGACY_BACKLOG_CODE
-        and meta.get("grandfathered") is True
-    )
+    return bool(meta.get("code") == _LEGACY_BACKLOG_CODE and meta.get("grandfathered") is True)
 
 
 def _finding_identity(finding: AuditFinding) -> str:
@@ -438,8 +452,7 @@ def audit(
     invalid = selected - valid_categories
     if invalid:
         raise ValueError(
-            f"unknown audit categories: {sorted(invalid)}. "
-            f"Valid: {sorted(valid_categories)}"
+            f"unknown audit categories: {sorted(invalid)}. Valid: {sorted(valid_categories)}"
         )
 
     kb = kb_root(vault_root)
@@ -454,6 +467,8 @@ def audit(
         findings.extend(_check_orphan_entities(vault_root, pages))
     if "unprocessed_source" in selected:
         findings.extend(_check_unprocessed_sources(vault_root, pages, today=today))
+    if "unresolved_source_citation" in selected:
+        findings.extend(_check_unresolved_source_citations(vault_root, pages))
     if "index_drift" in selected:
         findings.extend(_check_index_drift(vault_root))
     if "tag_inconsistency" in selected:
@@ -521,7 +536,9 @@ def audit(
 
     log.info(
         "audit complete: categories=%s findings=%d summary=%s",
-        sorted(selected), len(findings), summary,
+        sorted(selected),
+        len(findings),
+        summary,
     )
     return AuditReport(
         findings=findings,
@@ -552,9 +569,7 @@ def _check_bridge_review(
         )
         if signal is None:
             continue
-        partition = hashlib.sha256(
-            f"{grant.id}\0{grant.to_audience}".encode()
-        ).hexdigest()[:24]
+        partition = hashlib.sha256(f"{grant.id}\0{grant.to_audience}".encode()).hexdigest()[:24]
         findings.append(
             AuditFinding(
                 category="bridge_review",
@@ -603,10 +618,7 @@ def _check_duplicated_sidecars(vault_root: Path) -> list[AuditFinding]:
         if damage is None:
             continue
         rel = sidecar.relative_to(vault_root).as_posix()
-        detail = (
-            f"{damage.depth} nested copies; "
-            f"{damage.duplicate_chars:,} duplicate chars"
-        )
+        detail = f"{damage.depth} nested copies; {damage.duplicate_chars:,} duplicate chars"
         if damage.recovery_only:
             detail += "; extraction survives ONLY in a nested copy"
         elif damage.distinct_extractions > 1:
@@ -618,8 +630,7 @@ def _check_duplicated_sidecars(vault_root: Path) -> list[AuditFinding]:
                 path=rel,
                 detail=detail,
                 proposed_fix=(
-                    "maintain_memory(mode='fix') keeps the longest extraction and "
-                    "drops the nesting"
+                    "maintain_memory(mode='fix') keeps the longest extraction and drops the nesting"
                 ),
             )
         )
@@ -715,8 +726,7 @@ def _no_follow_regular_markdown_path(vault_root: Path, rel: str) -> Path | None:
 def _is_reparse_point(info: os.stat_result) -> bool:
     """Platform-neutral seam for Windows reparse-point rejection."""
     return bool(
-        getattr(info, "st_file_attributes", 0)
-        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+        getattr(info, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
     )
 
 
@@ -954,7 +964,10 @@ def _bind_posix_sidecar(path: Path, *, writable: bool) -> tuple[str, _BoundSidec
             return "invalid", None
         checks.append((kb_fd, path.name, (leaf_info.st_dev, leaf_info.st_ino), False))
         signatures.append(
-            (path.name, (leaf_info.st_dev, leaf_info.st_ino, leaf_info.st_size, leaf_info.st_mtime_ns))
+            (
+                path.name,
+                (leaf_info.st_dev, leaf_info.st_ino, leaf_info.st_size, leaf_info.st_mtime_ns),
+            )
         )
         for suffix in ("-wal", "-shm", "-journal"):
             name = path.name + suffix
@@ -971,9 +984,7 @@ def _bind_posix_sidecar(path: Path, *, writable: bool) -> tuple[str, _BoundSidec
         pinned = _pinned_descriptor_path(leaf_fd, writable=writable)
         if pinned is None:
             return "unsupported", None
-        bound = _BoundSidecarRepair(
-            tuple(fds), pinned, tuple(checks), tuple(signatures)
-        )
+        bound = _BoundSidecarRepair(tuple(fds), pinned, tuple(checks), tuple(signatures))
         return "regular", bound
     except FileNotFoundError:
         return "absent", None
@@ -1024,12 +1035,8 @@ def _bind_windows_sidecar(path: Path, *, writable: bool) -> tuple[str, _BoundSid
                 companion_handle = open_entry(companion, directory=False, parent_index=1)
             except FileNotFoundError:
                 continue
-            signatures.append(
-                (companion.name, _windows_handle_signature(companion_handle))
-            )
-        bound = _BoundSidecarRepair(
-            (), path, (), tuple(signatures), tuple(handles), tuple(checks)
-        )
+            signatures.append((companion.name, _windows_handle_signature(companion_handle)))
+        bound = _BoundSidecarRepair((), path, (), tuple(signatures), tuple(handles), tuple(checks))
         return "regular", bound
     except FileNotFoundError:
         return "absent", None
@@ -1117,9 +1124,7 @@ def _sidecar_rows(
         cursor = conn.execute(query, (after,))
         rows: list[tuple[object, ...]] = []
         while len(rows) < limit:
-            batch = cursor.fetchmany(
-                min(_SEMANTIC_ISOLATION_CENSUS_FETCH, limit - len(rows))
-            )
+            batch = cursor.fetchmany(min(_SEMANTIC_ISOLATION_CENSUS_FETCH, limit - len(rows)))
             if not batch:
                 break
             rows.extend(batch)
@@ -1166,9 +1171,7 @@ def _deferred_sidecar_signature(vault_root: Path, path: Path) -> str | None:
     if state != "regular" or binding is None:
         return None
     try:
-        return deferred_index.semantic_isolation_signature(
-            vault_root, connection_path=binding.path
-        )
+        return deferred_index.semantic_isolation_signature(vault_root, connection_path=binding.path)
     finally:
         binding.close()
 
@@ -1189,20 +1192,36 @@ def semantic_recall_isolation_census(
 
     cursors = after or {}
     sources = (
-        ("lexical", lexstore.lexical_path(vault_root), "SELECT DISTINCT path FROM pages WHERE path > ? ORDER BY path"),
+        (
+            "lexical",
+            lexstore.lexical_path(vault_root),
+            "SELECT DISTINCT path FROM pages WHERE path > ? ORDER BY path",
+        ),
         (
             "lexical_units",
             lexstore.lexical_path(vault_root),
             "SELECT DISTINCT parent_path FROM semantic_units WHERE parent_path > ? ORDER BY parent_path",
         ),
-        ("vector", index_paths.sidecar_path(vault_root), "SELECT DISTINCT file_path FROM chunks WHERE file_path > ? ORDER BY file_path"),
+        (
+            "vector",
+            index_paths.sidecar_path(vault_root),
+            "SELECT DISTINCT file_path FROM chunks WHERE file_path > ? ORDER BY file_path",
+        ),
         (
             "vector_units",
             index_paths.sidecar_path(vault_root),
             "SELECT DISTINCT parent_path FROM semantic_unit_vectors WHERE parent_path > ? ORDER BY parent_path",
         ),
-        ("graph", epistemic_graph.sidecar_path(vault_root), "SELECT DISTINCT path FROM graph_nodes WHERE path > ? ORDER BY path"),
-        ("claims", claims.sidecar_path(vault_root), "SELECT DISTINCT file_path FROM claims WHERE file_path > ? ORDER BY file_path"),
+        (
+            "graph",
+            epistemic_graph.sidecar_path(vault_root),
+            "SELECT DISTINCT path FROM graph_nodes WHERE path > ? ORDER BY path",
+        ),
+        (
+            "claims",
+            claims.sidecar_path(vault_root),
+            "SELECT DISTINCT file_path FROM claims WHERE file_path > ? ORDER BY file_path",
+        ),
         (
             "deferred_semantic",
             deferred_index.store_path(vault_root),
@@ -1220,11 +1239,7 @@ def semantic_recall_isolation_census(
             else _sidecar_signature(vault_root, sidecar)
         )
         stored = cursors.get(component, {})
-        cursor = (
-            stored.get("cursor", "")
-            if stored.get("signature") == signature
-            else ""
-        )
+        cursor = stored.get("cursor", "") if stored.get("signature") == signature else ""
         values, truncated, last, failure = _sidecar_rows(
             vault_root, sidecar, query, after=cursor, limit=limit
         )
@@ -1281,8 +1296,20 @@ def semantic_recall_isolation_census(
     for _edge_key, source_path, src_key, dst_key in values:
         for raw, identity, edge_column in (
             (source_path, source_path, "source_path"),
-            (src_key, src_key.removeprefix("file:") if isinstance(src_key, str) and src_key.startswith("file:") else None, "src_key"),
-            (dst_key, dst_key.removeprefix("file:") if isinstance(dst_key, str) and dst_key.startswith("file:") else None, "dst_key"),
+            (
+                src_key,
+                src_key.removeprefix("file:")
+                if isinstance(src_key, str) and src_key.startswith("file:")
+                else None,
+                "src_key",
+            ),
+            (
+                dst_key,
+                dst_key.removeprefix("file:")
+                if isinstance(dst_key, str) and dst_key.startswith("file:")
+                else None,
+                "dst_key",
+            ),
         ):
             if identity is None:
                 continue
@@ -1351,7 +1378,9 @@ def purge_corrupt_semantic_recall_isolation_rows(
     purge(
         "vector",
         index_paths.sidecar_path(vault_root),
-        lambda connection_path: embeddings.get_embedding_index(vault_root).purge_exact_persisted_rows(
+        lambda connection_path: embeddings.get_embedding_index(
+            vault_root
+        ).purge_exact_persisted_rows(
             sorted(grouped.get("vector", set()) | grouped.get("vector_units", set())),
             connection_path=connection_path,
         ),
@@ -1383,7 +1412,9 @@ def purge_corrupt_semantic_recall_isolation_rows(
     purge(
         "graph",
         epistemic_graph.sidecar_path(vault_root),
-        lambda connection_path: epistemic_graph.EpistemicGraphIndex(vault_root).purge_exact_persisted_rows(
+        lambda connection_path: epistemic_graph.EpistemicGraphIndex(
+            vault_root
+        ).purge_exact_persisted_rows(
             sorted(grouped.get("graph", set())),
             graph_values,
             connection_path=connection_path,
@@ -1402,9 +1433,7 @@ def _check_semantic_recall_isolation(vault_root: Path) -> list[AuditFinding]:
                 category="semantic_recall_isolation",
                 severity="warn",
                 path=item["path"],
-                detail=(
-                    f"live suppressed Markdown remains in the {component} semantic sidecar"
-                ),
+                detail=(f"live suppressed Markdown remains in the {component} semantic sidecar"),
                 proposed_fix="Run `reconcile` to purge the stale semantic row.",
                 meta={"component": component},
             )
@@ -1439,7 +1468,11 @@ def _check_semantic_recall_isolation(vault_root: Path) -> list[AuditFinding]:
                 path=kb_prefix(),
                 detail=f"{component} census capped; at least {remaining} persisted row remains",
                 proposed_fix="Run `reconcile` again to continue bounded semantic cleanup.",
-                meta={"component": component, "state": "truncated", "remaining_at_least": remaining},
+                meta={
+                    "component": component,
+                    "state": "truncated",
+                    "remaining_at_least": remaining,
+                },
             )
         )
     for component, code in census.incomplete.items():
@@ -1523,9 +1556,7 @@ def _check_semantic_contract_drift(
                         "finding_key": key,
                         "signal_version": signal_version,
                         "code": item["code"],
-                        "governed_element_identity": item[
-                            "governed_element_identity"
-                        ],
+                        "governed_element_identity": item["governed_element_identity"],
                         "resolved_rule": item["resolved_rule"],
                         "relation_disposition": item["relation_disposition"],
                         "actions": actions,
@@ -1560,9 +1591,7 @@ def semantic_finding_group(item: dict) -> str | None:
         return "semantic_relation_disposition"
     if rule == "syntax":
         return "semantic_malformed_unit"
-    if namespace in {"categories", "kinds"} and (
-        rule == "registry" or "REGISTRY" in code.upper()
-    ):
+    if namespace in {"categories", "kinds"} and (rule == "registry" or "REGISTRY" in code.upper()):
         return "semantic_category_governance"
     if code.startswith("CONTRACT_") and item.get("severity") == "error":
         return "semantic_strict_schema_drift"
@@ -1712,9 +1741,7 @@ def _check_unregistered_entity_types(
             }
             if parent is not None:
                 candidate_entry["parent"] = parent
-            definition = {
-                key: value for key, value in candidate_entry.items() if key != "id"
-            }
+            definition = {key: value for key, value in candidate_entry.items() if key != "id"}
             definition["capture_guidance"] = (
                 f"A stable {label.lower()} identity with reusable context."
             )
@@ -1728,14 +1755,9 @@ def _check_unregistered_entity_types(
                 result = dict(candidate_entry)
                 result["page_count"] = page_count
                 return result, proposal, None
-            if all(
-                finding["path"].endswith(f".{type_id}.folder")
-                for finding in validation
-            ):
+            if all(finding["path"].endswith(f".{type_id}.folder") for finding in validation):
                 continue
-            reason = "; ".join(
-                f"{finding['path']}: {finding['detail']}" for finding in validation
-            )
+            reason = "; ".join(f"{finding['path']}: {finding['detail']}" for finding in validation)
             proposal_cache[cache_key] = (None, None, reason)
             return None, None, reason
         reason = "No collision-free entity folder could be derived."
@@ -1786,9 +1808,7 @@ def _check_unregistered_entity_types(
 
     carrier_path_by_type_folder: dict[tuple[str, str], str] = {}
     for page, folder, type_id in unknown_entities:
-        carrier_path_by_type_folder.setdefault(
-            (type_id, folder.casefold()), page.rel_path
-        )
+        carrier_path_by_type_folder.setdefault((type_id, folder.casefold()), page.rel_path)
 
     def proposal_meta(
         *,
@@ -1816,7 +1836,7 @@ def _check_unregistered_entity_types(
             return (
                 meta,
                 "Save `meta.proposal` — the full registry with this entry merged — "
-                "via `schema_memory(operation=\"save-entity-types\", "
+                'via `schema_memory(operation="save-entity-types", '
                 "proposal=meta.proposal, why=..., "
                 "expected_hash=meta.expected_hash)`. Do not save "
                 "`proposed_entry` on its own; it is a description, not a registry.",
@@ -1852,9 +1872,7 @@ def _check_unregistered_entity_types(
                 category="entity_type_unregistered",
                 severity="warn",
                 path=page.rel_path,
-                detail=(
-                    f"Entity type {raw_type!r} is not in the active entity registry."
-                ),
+                detail=(f"Entity type {raw_type!r} is not in the active entity registry."),
                 proposed_fix=proposed_fix,
                 meta=meta,
             )
@@ -1897,9 +1915,7 @@ def _check_unregistered_entity_types(
                 severity="info",
                 path=paths[0],
                 paths=paths,
-                detail=(
-                    f"{len(paths)} entity pages live under unregistered folder {folder!r}."
-                ),
+                detail=(f"{len(paths)} entity pages live under unregistered folder {folder!r}."),
                 proposed_fix=proposed_fix,
                 meta=meta,
             )
@@ -1994,12 +2010,9 @@ def _check_wikilinks(
                 ):
                     continue
 
-            non_markdown_collision = (
-                not suffix
-                and _has_non_markdown_collision(
+            non_markdown_collision = not suffix and _has_non_markdown_collision(
                     vault_root, target_for_resolve.lstrip("/"), normalized
                 )
-            )
             broken = bool(
                 (suffix and suffix != ".md")
                 or ambiguous_stem
@@ -2012,12 +2025,11 @@ def _check_wikilinks(
 
             immutable = in_append_only_tree(str(page.rel_path)) is not None
             if not broken:
-                meta: dict[str, Any] = {
-                    "signal_version": _page_signal_version(page)
-                }
+                meta: dict[str, Any] = {"signal_version": _page_signal_version(page)}
                 if immutable:
                     meta["immutable"] = True
-                findings.append(AuditFinding(
+                findings.append(
+                    AuditFinding(
                     category="forward_reference",
                     severity="info",
                     path=str(page.rel_path),
@@ -2030,12 +2042,14 @@ def _check_wikilinks(
                         "typo or obsolete, correct or remove the link."
                     ),
                     meta=meta,
-                ))
+                    )
+                )
                 continue
 
             # A broken link inside an append-only tree (Sources/, Evidence/)
             # can't be repaired in place — the containing file is immutable.
-            findings.append(AuditFinding(
+            findings.append(
+                AuditFinding(
                 category="broken_wikilink",
                 severity="info" if immutable else "warn",
                 path=str(page.rel_path),
@@ -2047,18 +2061,80 @@ def _check_wikilinks(
                     "Append-only file (Sources/Evidence): the link can't be edited "
                     "in place. Correct it in the source body desk-side, or accept it "
                     "as a stray reference in captured material."
-                    if immutable else
-                    "Update the link to the correct target, or remove if obsolete. "
+                        if immutable
+                        else "Update the link to the correct target, or remove if obsolete. "
                     "Common cause: target was renamed or moved without supersession."
                 ),
                 meta={"immutable": True} if immutable else None,
-            ))
+                )
+            )
     return findings
 
 
-def _has_non_markdown_collision(
-    vault_root: Path, vault_relative: str, kb_relative: str
-) -> bool:
+def _check_unresolved_source_citations(
+    vault_root: Path,
+    pages: list[find_module.ParsedPage],
+) -> list[AuditFinding]:
+    """Report explicit compiled source claims through the writer's validator."""
+    from . import record_governance
+
+    root = Path(vault_root)
+    authorize = record_governance.full_release_filter(root)
+    resolver = find_module.writer_resolver_snapshot(root)
+    findings: list[AuditFinding] = []
+    for page in sorted(pages, key=lambda item: item.rel_path.encode("utf-8")):
+        if page.page_type not in {
+            "research-note",
+            "insight",
+            "failure",
+            "pattern",
+            "experiment",
+            "production-log",
+        } or not page.frontmatter.get("sources"):
+            continue
+        try:
+            markdown, _guard = vault_module.read_guarded_text(root, page.path)
+        except (OSError, UnicodeError, vault_module.PathGuardError):
+            continue
+        inspection = source_closure.inspect_source_closure(
+            root,
+            markdown,
+            authorize_path=authorize,
+            resolver=resolver,
+        )
+        if inspection.closed:
+            continue
+        details = inspection.public_details()
+        identity = str(page.frontmatter.get("exomem_id") or page.rel_path)
+        finding_material = json.dumps(
+            [identity, *inspection.unresolved_values],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        details["finding_id"] = hashlib.sha256(finding_material.encode("utf-8")).hexdigest()
+        count = details["unresolved_source_count"]
+        findings.append(
+            AuditFinding(
+                category="unresolved_source_citation",
+                severity="warn",
+                path=page.rel_path,
+                detail=(
+                    f"{count} explicit source citation"
+                    + (" does" if count == 1 else "s do")
+                    + " not resolve to captured material."
+                ),
+                proposed_fix=(
+                    "Capture the original material as governed Source or Evidence "
+                    "and update the citation, or explicitly remove the unsupported "
+                    "citation. Do not reconstruct an original from this derivative."
+                ),
+                meta=details,
+            )
+        )
+    return findings
+
+
+def _has_non_markdown_collision(vault_root: Path, vault_relative: str, kb_relative: str) -> bool:
     """Whether an extensionless note link names an existing non-note file."""
     for candidate in (
         vault_root / vault_relative,
@@ -2139,7 +2215,8 @@ def _check_orphan_entities(
         self_key = _rel_kb_path_no_ext(page.path, vault_root)
         if self_key in referenced:
             continue
-        findings.append(AuditFinding(
+        findings.append(
+            AuditFinding(
             category="orphan_entity",
             severity="info",
             path=page.rel_path,
@@ -2148,7 +2225,8 @@ def _check_orphan_entities(
                 "Either link to it from a relevant page (research-note, insight, etc.) "
                 "or archive it if no longer relevant."
             ),
-        ))
+            )
+        )
     return findings
 
 
@@ -2200,9 +2278,7 @@ def _check_unprocessed_sources(
         age_days: int | None = None
         if captured is not None:
             age_days = max(0, (today - captured).days)
-            bucket = (
-                "fresh" if age_days < 30 else "aging" if age_days < 90 else "stale"
-            )
+            bucket = "fresh" if age_days < 30 else "aging" if age_days < 90 else "stale"
             meta.update(
                 {
                     "age_days": age_days,
@@ -2217,7 +2293,8 @@ def _check_unprocessed_sources(
             severity = "info"
             age_phrase = " (capture date unknown)"
 
-        rows.append((
+        rows.append(
+            (
             age_days if age_days is not None else -1,
             AuditFinding(
                 category="unprocessed_source",
@@ -2234,7 +2311,8 @@ def _check_unprocessed_sources(
                 ),
                 meta=meta,
             ),
-        ))
+            )
+        )
 
     # Oldest first — drain the worst rot first. Capture-unknown (-1) sinks last.
     rows.sort(key=lambda t: t[0], reverse=True)
@@ -2288,7 +2366,8 @@ def _check_index_drift(vault_root: Path) -> list[AuditFinding]:
     for key, declared_count in declared.items():
         actual_count = actual.get(key)
         if actual_count is None:
-            findings.append(AuditFinding(
+            findings.append(
+                AuditFinding(
                 category="index_drift",
                 severity="warn",
                 path=f"{kb_prefix()}index.md",
@@ -2297,10 +2376,12 @@ def _check_index_drift(vault_root: Path) -> list[AuditFinding]:
                     "folder doesn't exist"
                 ),
                 proposed_fix="Remove the row or create the missing folder.",
-            ))
+                )
+            )
             continue
         if actual_count != declared_count:
-            findings.append(AuditFinding(
+            findings.append(
+                AuditFinding(
                 category="index_drift",
                 severity="warn",
                 path=f"{kb_prefix()}index.md",
@@ -2311,7 +2392,8 @@ def _check_index_drift(vault_root: Path) -> list[AuditFinding]:
                     "Update the Counts line manually (or run an `audit --fix` once "
                     "auto-fix is supported)."
                 ),
-            ))
+                )
+            )
     return findings
 
 
@@ -2382,7 +2464,8 @@ def _check_tag_inconsistency(
             if raw == canonical:
                 continue
             using_pages = raw_to_pages[raw]
-            findings.append(AuditFinding(
+            findings.append(
+                AuditFinding(
                 category="tag_inconsistency",
                 severity="info",
                 path=using_pages[0],  # representative; full list in detail
@@ -2397,7 +2480,8 @@ def _check_tag_inconsistency(
                     "SKILL.md rule 2; normalize forward via downstream compiled "
                     "pages that cite them."
                 ),
-            ))
+                )
+            )
 
     return findings
 
@@ -2437,13 +2521,15 @@ def _check_frontmatter_compliance(
         excluded = vault_module.first_excluded_field(fm)
         if excluded is not None:
             field, _reason = excluded
-            findings.append(AuditFinding(
+            findings.append(
+                AuditFinding(
                 category="frontmatter_compliance",
                 severity="warn",
                 path=page.rel_path,
                 detail=f"{field!r} is a schema-excluded frontmatter field.",
                 proposed_fix=f"Remove the {field!r} frontmatter field.",
-            ))
+                )
+            )
         page_type = fm.get("type")
         if not isinstance(page_type, str):
             continue
@@ -2452,14 +2538,11 @@ def _check_frontmatter_compliance(
             if nested_excluded is not None:
                 field, _reason = nested_excluded
                 item_schema = fm.get("item_schema")
-                schema_fields = (
-                    item_schema.get("fields") if isinstance(item_schema, dict) else None
-                )
+                schema_fields = item_schema.get("fields") if isinstance(item_schema, dict) else None
                 in_schema = isinstance(schema_fields, dict) and field in schema_fields
                 if in_schema:
                     detail = (
-                        f"Collection item_schema.fields declares schema-excluded "
-                        f"field {field!r}."
+                        f"Collection item_schema.fields declares schema-excluded field {field!r}."
                     )
                     proposed_fix = (
                         f"Delete {field!r} from every item first, then revise the "
@@ -2478,34 +2561,38 @@ def _check_frontmatter_compliance(
                         "collection whose note field uses a permitted name — the "
                         "storage descriptor is immutable, so revise cannot remove it."
                     )
-                findings.append(AuditFinding(
+                findings.append(
+                    AuditFinding(
                     category="frontmatter_compliance",
                     severity="warn",
                     path=page.rel_path,
                     detail=detail,
                     proposed_fix=proposed_fix,
-                ))
+                    )
+                )
         required = _REQUIRED_FIELDS_BY_TYPE.get(page_type)
         if required:
             missing = [k for k in required if not fm.get(k)]
             if missing:
-                findings.append(AuditFinding(
+                findings.append(
+                    AuditFinding(
                     category="frontmatter_compliance",
                     severity="warn",
                     path=page.rel_path,
                     detail=(
-                        f"{page_type!r} page missing required frontmatter "
-                        f"field(s): {missing}"
+                            f"{page_type!r} page missing required frontmatter field(s): {missing}"
                     ),
                     proposed_fix=(
                         "Add the missing field(s) via `set_frontmatter_field` "
                         "or `edit`. See `_Schema/references/frontmatter.md` "
                         "for the per-type required set."
                     ),
-                ))
+                    )
+                )
         # tenant: is Q-only.
         if fm.get("tenant") and fm.get("project") != "q":
-            findings.append(AuditFinding(
+            findings.append(
+                AuditFinding(
                 category="frontmatter_compliance",
                 severity="warn",
                 path=page.rel_path,
@@ -2518,10 +2605,12 @@ def _check_frontmatter_compliance(
                     "Either set `project: q` (if this is a Q-tenant note) "
                     "or remove the `tenant:` field."
                 ),
-            ))
+                )
+            )
         # Patterns should use plural `projects:`, not singular `project:`.
         if page_type == "pattern" and fm.get("project") and not fm.get("projects"):
-            findings.append(AuditFinding(
+            findings.append(
+                AuditFinding(
                 category="frontmatter_compliance",
                 severity="info",
                 path=page.rel_path,
@@ -2533,7 +2622,8 @@ def _check_frontmatter_compliance(
                     "Rename to `projects: [<key>]` (plural list form) via "
                     "`set_frontmatter_field`."
                 ),
-            ))
+                )
+            )
     return findings
 
 
@@ -2570,7 +2660,8 @@ def _check_unregistered_project_keys(
         for field, key in seen:
             if key in valid:
                 continue
-            findings.append(AuditFinding(
+            findings.append(
+                AuditFinding(
                 category="unregistered_project_key",
                 severity="warn",
                 path=page.rel_path,
@@ -2585,7 +2676,8 @@ def _check_unregistered_project_keys(
                     f"the intended key). If it's a real new key, hand-add "
                     f"it to _Schema/project-keys.yaml."
                 ),
-            ))
+                )
+            )
     return findings
 
 
@@ -2600,7 +2692,8 @@ def _check_reference_identity(vault_root: Path) -> list[AuditFinding]:
     for item in memory_refs.scan_issues(vault_root):
         kind = item["kind"]
         value = item["value"]
-        findings.append(AuditFinding(
+        findings.append(
+            AuditFinding(
             category="reference_identity",
             severity="error",
             path=item["path"],
@@ -2610,16 +2703,19 @@ def _check_reference_identity(vault_root: Path) -> list[AuditFinding]:
                 "with mode `reconcile`."
             ),
             meta=item,
-        ))
+            )
+        )
     for item in memory_refs.drift(vault_root):
-        findings.append(AuditFinding(
+        findings.append(
+            AuditFinding(
             category="reference_identity",
             severity="info",
             path=item["path"],
             detail=item["reason"],
             proposed_fix="Run `maintain_memory` with mode `reconcile`.",
             meta=item,
-        ))
+            )
+        )
     return findings
 
 
@@ -2635,17 +2731,21 @@ def _check_graph_drift(vault_root: Path) -> list[AuditFinding]:
             if safe_path is None:
                 continue
             candidate = _no_follow_regular_markdown_path(vault_root, safe_path)
-            if candidate is not None and not recall_policy.is_recall_candidate(vault_root, candidate):
+            if candidate is not None and not recall_policy.is_recall_candidate(
+                vault_root, candidate
+            ):
                 continue
         reason = str(item.get("reason") or "graph drift")
-        findings.append(AuditFinding(
+        findings.append(
+            AuditFinding(
             category="graph_drift",
             severity="info",
             path=path,
             detail=reason,
             proposed_fix="Run `reconcile` to refresh the derived graph sidecar.",
             meta=item,
-        ))
+            )
+        )
     return findings
 
 
@@ -2656,7 +2756,8 @@ def _check_relation_registry(vault_root: Path) -> list[AuditFinding]:
     report = memory_schema.validate_relation_registry(vault_root)
     findings: list[AuditFinding] = []
     for item in report["findings"]:
-        findings.append(AuditFinding(
+        findings.append(
+            AuditFinding(
             category="relation_registry",
             severity=str(item.get("severity") or "warning"),
             path=str(item.get("path") or kb_prefix()),
@@ -2666,8 +2767,10 @@ def _check_relation_registry(vault_root: Path) -> list[AuditFinding]:
                 "a complete, hash-guarded proposal."
             ),
             meta=item,
-        ))
+            )
+        )
     return findings
+
 
 # ---------------- check: embedding_drift ----------------
 
@@ -2691,6 +2794,7 @@ def _check_embedding_drift(vault_root: Path) -> list[AuditFinding]:
     import sqlite3
 
     from . import recall_policy
+
     try:
         conn = sqlite3.connect(sidecar)
     except sqlite3.Error:
@@ -2719,15 +2823,15 @@ def _check_embedding_drift(vault_root: Path) -> list[AuditFinding]:
             if not missing:
                 continue
             # File removed in vault but still in sidecar: surface that too.
-            findings.append(AuditFinding(
+            findings.append(
+                AuditFinding(
                 category="embedding_drift",
                 severity="info",
                 path=safe_rel,
                 detail="sidecar row for file no longer on disk",
-                proposed_fix=(
-                    "Run `audit_fix(rebuild_embeddings=true)` to drop stale rows."
-                ),
-            ))
+                    proposed_fix=("Run `audit_fix(rebuild_embeddings=true)` to drop stale rows."),
+                )
+            )
             continue
         try:
             disk_mtime = abs_path.stat().st_mtime
@@ -2736,7 +2840,8 @@ def _check_embedding_drift(vault_root: Path) -> list[AuditFinding]:
         if not recall_policy.is_recall_candidate(vault_root, abs_path):
             continue
         if disk_mtime > (row_mtime or 0) + 1.0:  # 1s slack for FS jitter
-            findings.append(AuditFinding(
+            findings.append(
+                AuditFinding(
                 category="embedding_drift",
                 severity="info",
                 path=safe_rel,
@@ -2747,7 +2852,8 @@ def _check_embedding_drift(vault_root: Path) -> list[AuditFinding]:
                 proposed_fix=(
                     "Run `reconcile` (or `audit_fix(rebuild_embeddings=true)`) to refresh."
                 ),
-            ))
+                )
+            )
 
     # Files on disk that were NEVER embedded — no sidecar row at all. The scan
     # above only compares existing rows, so out-of-band *creates* (Obsidian /
@@ -2784,13 +2890,15 @@ def _check_embedding_drift(vault_root: Path) -> list[AuditFinding]:
         page = find_module._CACHE.get(md, vault_root)
         if page is None or not embeddings_module.chunk_text(page.title, page.body):
             continue  # empty / no-chunk file — the embedder skips it too
-        findings.append(AuditFinding(
+        findings.append(
+            AuditFinding(
             category="embedding_drift",
             severity="info",
             path=rel,
             detail="file has no sidecar row — never embedded (out-of-band create).",
             proposed_fix="Run `reconcile` to embed it incrementally.",
-        ))
+            )
+        )
     return findings
 
 
@@ -2800,12 +2908,14 @@ def _check_embedding_drift(vault_root: Path) -> list[AuditFinding]:
 def _relevance_canon(path: str) -> str:
     """Delegates to the shared usage primitives (see `usage.py`)."""
     from . import usage
+
     return usage.canon(path)
 
 
 def _relevance_read_jsonl(path: Path) -> list[dict]:
     """Delegates to the shared usage primitives (see `usage.py`)."""
     from . import usage
+
     return usage.read_jsonl(path)
 
 
@@ -2816,11 +2926,7 @@ def _relevance_golden_queries(path: Path) -> set[str]:
         raw = yaml.safe_load(path.read_text(encoding="utf-8")) or []
     except yaml.YAMLError:
         return set()
-    return {
-        e["query"].strip().lower()
-        for e in raw
-        if isinstance(e, dict) and e.get("query")
-    }
+    return {e["query"].strip().lower() for e in raw if isinstance(e, dict) and e.get("query")}
 
 
 def _check_relevance_pairs_pending(
@@ -2873,9 +2979,7 @@ def _check_relevance_pairs_pending(
             if not (0 <= delta <= window_seconds):
                 continue
             ranked = {
-                _relevance_canon(t.get("path", ""))
-                for t in (q.get("top_k") or [])
-                if t.get("path")
+                _relevance_canon(t.get("path", "")) for t in (q.get("top_k") or []) if t.get("path")
             }
             if cited & ranked:
                 pairs_in_window += 1
@@ -2885,7 +2989,8 @@ def _check_relevance_pairs_pending(
 
     if not new_queries:
         return []
-    return [AuditFinding(
+    return [
+        AuditFinding(
         category="relevance_pairs_pending",
         severity="info",
         path="logs/queries.jsonl",
@@ -2899,7 +3004,8 @@ def _check_relevance_pairs_pending(
             "tests/golden/queries.yaml, then re-run `scripts/eval_retrieval.py`."
         ),
         meta={"new_queries": len(new_queries), "pairs_in_window": pairs_in_window},
-    )]
+        )
+    ]
 
 
 # ---------------- check: relation_debt ----------------
@@ -3006,9 +3112,7 @@ def _check_relation_debt(
 # it would swamp `frontmatter_compliance` — whose job is structural integrity —
 # with hundreds of findings, and `audit_fix` iterates it to backfill inferable
 # values. Provenance is exactly the field that must never be inferred.
-_SOURCES_REQUIRED_TYPES = frozenset(
-    {"research-note", "insight", "failure", "pattern"}
-)
+_SOURCES_REQUIRED_TYPES = frozenset({"research-note", "insight", "failure", "pattern"})
 
 
 def _check_missing_sources(
@@ -3331,9 +3435,7 @@ def _check_derivation_double_counting(
                 meta={
                     "kind": "cycle",
                     "cycle": cycle_display,
-                    "signal_version": (
-                        _page_signal_version(origin_page) if origin_page else None
-                    ),
+                    "signal_version": (_page_signal_version(origin_page) if origin_page else None),
                 },
             )
         )
@@ -3453,9 +3555,7 @@ def _check_derivation_double_counting(
 # The set matches what `_check_relation_debt`, `activation.py`, and
 # `semantic_contract.py` already treat as inactive; it previously claimed to
 # mirror that discipline while omitting `dropped` and `planned`.
-_EXPERIMENT_PARKED_STATUSES = frozenset(
-    {"archived", "superseded", "draft", "dropped", "planned"}
-)
+_EXPERIMENT_PARKED_STATUSES = frozenset({"archived", "superseded", "draft", "dropped", "planned"})
 
 # `duration:` is free text by contract ("30 days", "2 weeks", "ongoing"), so the
 # span parser is deliberately small and fails CLOSED: anything it does not
@@ -3467,9 +3567,7 @@ _DURATION_UNIT_DAYS: dict[str, int] = {
     "month": 30,
     "year": 365,
 }
-_DURATION_PATTERN = re.compile(
-    r"^(\d+(?:\.\d+)?)\s*(day|week|month|year)s?$", re.IGNORECASE
-)
+_DURATION_PATTERN = re.compile(r"^(\d+(?:\.\d+)?)\s*(day|week|month|year)s?$", re.IGNORECASE)
 
 
 def _experiment_duration_days(value: Any) -> int | None:
@@ -3545,7 +3643,8 @@ def _check_unfinished_experiments(
             continue  # the result is recorded — the loop is closed
 
         overdue_days = elapsed_days - duration_days
-        rows.append((
+        rows.append(
+            (
             elapsed_days,
             page.rel_path,
             AuditFinding(
@@ -3573,7 +3672,8 @@ def _check_unfinished_experiments(
                     "status": page.status,
                 },
             ),
-        ))
+            )
+        )
 
     # Oldest-first: elapsed age DESCENDING, path ascending as the deterministic
     # tiebreak. Age rather than overdue-ness, because a 30d experiment 300d late
@@ -3587,9 +3687,7 @@ def _check_unfinished_experiments(
 # Authoring one of these on the unit is the signal that SOMEBODY ENGAGED with the
 # prediction. Deliberately not a judgment of which way it went — concluding is
 # `verdict`'s job; this queue only measures whether anyone looked.
-_PREDICTION_RESOLVING_RELATIONS = frozenset(
-    {"supports", "contradicts", "resolves", "evidenced_by"}
-)
+_PREDICTION_RESOLVING_RELATIONS = frozenset({"supports", "contradicts", "resolves", "evidenced_by"})
 # The prefilter that decides whether a page is worth parsing. It MUST NOT be
 # narrower than `semantic_blocks.normalize_label`, which lowercases a metadata
 # key and collapses `[\s-]+` to `_` — so `- Check By:`, `- check by:` and
@@ -3603,9 +3701,7 @@ _CHECK_BY_PREFILTER = re.compile(r"check[\s_-]*by", re.IGNORECASE)
 # due prediction on a parked page is not outstanding work. Same inactive set the
 # rest of the codebase uses — `dropped` and `planned` included, because a
 # prediction on a note the author dropped is not an obligation anyone still owes.
-_PREDICTION_PARKED_STATUSES = frozenset(
-    {"superseded", "archived", "draft", "dropped", "planned"}
-)
+_PREDICTION_PARKED_STATUSES = frozenset({"superseded", "archived", "draft", "dropped", "planned"})
 
 
 def _check_prediction_window(
@@ -3683,9 +3779,8 @@ def _check_prediction_window(
             if unit.verdict:
                 continue
             if any(
-                relations.resolve(
-                    relation.kind, origin="semantic_relation"
-                ).canonical in _PREDICTION_RESOLVING_RELATIONS
+                relations.resolve(relation.kind, origin="semantic_relation").canonical
+                in _PREDICTION_RESOLVING_RELATIONS
                 for relation in unit.relations
             ):
                 continue
@@ -3693,7 +3788,8 @@ def _check_prediction_window(
             overdue_days = (today - due).days
             fingerprint = unit.fingerprint or ""
             label = unit.title or unit.anchor or unit.kind
-            rows.append((
+            rows.append(
+                (
                 overdue_days,
                 page.rel_path,
                 fingerprint,
@@ -3731,7 +3827,8 @@ def _check_prediction_window(
                         "overdue_days": overdue_days,
                     },
                 ),
-            ))
+                )
+            )
 
     # Most-overdue-first. Unlike an experiment — where the decaying write-up
     # context makes raw age the right signal — `check_by` is an explicitly
@@ -3811,9 +3908,7 @@ def _outcome_bindings(
         if manifest.semantic_profile == "planning"
     }
     planning_by_path = {
-        manifest.path: manifest
-        for manifest in manifests
-        if manifest.semantic_profile == "planning"
+        manifest.path: manifest for manifest in manifests if manifest.semantic_profile == "planning"
     }
     bindings: list[_OutcomeBinding] = []
     unevaluated: list[dict[str, Any]] = []
@@ -3924,9 +4019,9 @@ def declared_bindings(vault_root: Path, manifest: Any) -> list[dict[str, Any]]:
                 target = str(paths[0])
         elif str(link.reference).lower().startswith(("exomem://vault/", "exomem://source/")):
             try:
-                target = str(memory_refs.resolve_identifier_read_only(
-                    vault_root, str(link.reference)
-                ))
+                target = str(
+                    memory_refs.resolve_identifier_read_only(vault_root, str(link.reference))
+                )
             except Exception:  # noqa: BLE001
                 target = None
         if not target:
@@ -4019,9 +4114,7 @@ def _outcome_snapshot(vault_root: Path, manifest: Any, authorize: Any) -> Any | 
     from . import structured_collections as collections_module
 
     try:
-        return record_formats.load_adapter(
-            vault_root, manifest, authorize_path=authorize
-        ).read()
+        return record_formats.load_adapter(vault_root, manifest, authorize_path=authorize).read()
     except (collections_module.CollectionError, OSError, ValueError):
         return None
 
@@ -4126,7 +4219,7 @@ def unreflected_component(
         proposed_fix=(
             "Surfaced for REVIEW only -- nothing is judged, written, or "
             "transitioned. Read the joined events and, if they settle the item, "
-            "move it yourself with plan_memory(action=\"triage\"); remove the "
+            'move it yourself with plan_memory(action="triage"); remove the '
             "manifest binding if these events are not about this work."
         ),
         paths=paths[:_UNREFLECTED_REF_LIMIT],
@@ -4295,16 +4388,16 @@ def _check_question_aging(
             if unit.verdict:
                 continue
             if any(
-                relations.resolve(
-                    relation.kind, origin="semantic_relation"
-                ).canonical in _QUESTION_ANSWERING_RELATIONS
+                relations.resolve(relation.kind, origin="semantic_relation").canonical
+                in _QUESTION_ANSWERING_RELATIONS
                 for relation in unit.relations
             ):
                 continue
 
             fingerprint = unit.fingerprint or ""
             label = unit.title or unit.anchor or unit.kind
-            rows.append((
+            rows.append(
+                (
                 age_days,
                 page.rel_path,
                 fingerprint,
@@ -4347,7 +4440,8 @@ def _check_question_aging(
                         ).isoformat(),
                     },
                 ),
-            ))
+                )
+            )
 
     # Oldest-first: the context a question needs to be answered decays with time,
     # so raw age is the right signal here (as with experiments) rather than
@@ -4561,20 +4655,15 @@ def _multi_headed_chain_findings(
                     "different things."
                 ),
                 meta={
-                    "signal_version": (
-                        _page_signal_version(page) if page is not None else ""
-                    ),
-                    "review_partition": content_hash(
-                        "multi_head\0" + "\0".join(heads)
-                    )[:16],
+                    "signal_version": (_page_signal_version(page) if page is not None else ""),
+                    "review_partition": content_hash("multi_head\0" + "\0".join(heads))[:16],
                     "defect": "multi_headed_chain",
                     "heads": heads,
                     "members": sorted(members),
                     "due_since": (
                         (
                             _parse_fm_date(
-                                page.frontmatter.get("updated")
-                                or page.frontmatter.get("created")
+                                page.frontmatter.get("updated") or page.frontmatter.get("created")
                             )
                             if page is not None
                             else None
@@ -4597,9 +4686,7 @@ def _multi_headed_chain_findings(
 # "unfinished production lifecycles" entry is still an unbacked claim; closing it
 # is filed as a named follow-up in
 # `openspec/changes/close-experiment-lifecycle/design.md`.)
-_STALE_REVIEW_TYPES = frozenset(
-    {"research-note", "insight", "pattern", "failure", "entity"}
-)
+_STALE_REVIEW_TYPES = frozenset({"research-note", "insight", "pattern", "failure", "entity"})
 # Convention-named hubs/snapshots are EXPECTED to drift (SKILL.md) — never flag.
 _STALE_SKIP_SLUG_SUFFIXES = ("-architecture", "-snapshot", "-catalog-snapshot")
 _STALE_SKIP_TAGS = frozenset({"hub", "snapshot"})
@@ -4612,6 +4699,7 @@ def _stale_thresholds() -> tuple[int, int, int]:
     gate edges, not weights — the check is a filter, never a score (no
     confidence concept; see SKILL.md rule 5).
     """
+
     def _int_env(name: str, default: int) -> int:
         raw = os.environ.get(name)
         if raw is None:
@@ -4653,9 +4741,7 @@ def _inbound_degree(pages: list[find_module.ParsedPage]) -> dict[str, int]:
                 targets.add(_relevance_canon(target))
         for value in page.frontmatter.values():
             for link in _extract_wikilinks_from_value(value):
-                targets.add(
-                    _relevance_canon(link.removeprefix(kb_prefix()).lstrip("/"))
-                )
+                targets.add(_relevance_canon(link.removeprefix(kb_prefix()).lstrip("/")))
         for target in targets:
             if target == self_key:
                 continue
@@ -4700,6 +4786,7 @@ def _stale_activation_params() -> tuple[float, float, float, float]:
     exception: it consumes the same shared primitives via `usage.py` with its
     own RankingConfig weights — notably w_surfaced=0 — never these.)
     """
+
     def _float_env(name: str, default: float) -> float:
         raw = os.environ.get(name)
         if raw is None:
@@ -4738,10 +4825,14 @@ def _stale_access_events(
     env-tunable weights and NO horizon.
     """
     from . import usage
+
     _, w_surfaced, w_read, w_cited = _stale_activation_params()
     return usage.access_events(
-        logs_dir or _RELEVANCE_LOGS_DIR, today,
-        w_surfaced=w_surfaced, w_read=w_read, w_cited=w_cited,
+        logs_dir or _RELEVANCE_LOGS_DIR,
+        today,
+        w_surfaced=w_surfaced,
+        w_read=w_read,
+        w_cited=w_cited,
     )
 
 
@@ -4751,6 +4842,7 @@ def _activation(events: list[tuple[float, float]] | None, d: float) -> float | N
     when there are no events (never accessed) — the caller sorts those to the TOP
     (most dormant). Delegates to `usage.activation`."""
     from . import usage
+
     return usage.activation(events, d)
 
 
@@ -4805,9 +4897,7 @@ def _check_stale_review(
         if _STALE_SKIP_TAGS & set(page.tags):
             continue
 
-        updated = _parse_fm_date(
-            page.frontmatter.get("updated") or page.frontmatter.get("created")
-        )
+        updated = _parse_fm_date(page.frontmatter.get("updated") or page.frontmatter.get("created"))
         if updated is None:
             continue  # no date → can't judge age; don't fabricate one
         age_days = max(0, (today - updated).days)
@@ -4824,9 +4914,7 @@ def _check_stale_review(
             continue
 
         bucket = "aging" if age_days < 2 * min_age_days else "stale"
-        access_phrase = (
-            "" if access_count is None else f", surfaced {access_count}x in find"
-        )
+        access_phrase = "" if access_count is None else f", surfaced {access_count}x in find"
         acts = _activation(events_map.get(page_key) if events_map else None, d)
         finding = AuditFinding(
             category="stale_review",
@@ -4849,9 +4937,7 @@ def _check_stale_review(
                 "inbound_count": inbound,
                 "access_count": access_count,  # null when the signal is gated/absent
                 "activation": round(acts, 4) if acts is not None else None,
-                "access_observations": (
-                    len(events_map.get(page_key, [])) if events_map else None
-                ),
+                "access_observations": (len(events_map.get(page_key, [])) if events_map else None),
             },
         )
         # Most-dormant first: activation ASCENDING (never-accessed → -inf at the
@@ -4938,6 +5024,7 @@ def _pair_dormancy(
     pair takes the MAX over its two notes — one forgotten endpoint is the review
     trigger ("did I forget I already concluded the opposite?").
     """
+
     def _one(rel: str) -> float:
         events = events_map.get(_relevance_canon(rel)) if events_map else None
         b = _activation(events, d)
@@ -5031,7 +5118,8 @@ def _asserted_contradictions(
         if a not in eligible or b not in eligible:
             continue
         keys.add((a, b))
-        findings.append(AuditFinding(
+        findings.append(
+            AuditFinding(
             category="corpus_contradictions",
             severity="info",
             path=a,
@@ -5054,7 +5142,8 @@ def _asserted_contradictions(
                 "provenance": "asserted",
                 "relation_type": "contradicts",
             },
-        ))
+            )
+        )
     return findings, keys
 
 
@@ -5083,9 +5172,7 @@ def _check_corpus_contradictions(
         # the eligibility walk this category used to skip entirely.
         return []
     eligible: dict[str, find_module.ParsedPage] = {
-        page.rel_path: page
-        for page in pages
-        if _is_active_compiled_rw(vault_root, page)
+        page.rel_path: page for page in pages if _is_active_compiled_rw(vault_root, page)
     }
     asserted, asserted_keys = _asserted_contradictions(eligible, pairs)
     return asserted + _proximity_contradictions(
@@ -5143,7 +5230,8 @@ def _proximity_contradictions(
         log.warning(
             "contradiction floor (%s) >= dup ceiling (%s); corpus_contradictions "
             "sweep disabled this run",
-            floor, ceiling,
+            floor,
+            ceiling,
         )
         return []
     try:
@@ -5202,10 +5290,9 @@ def _proximity_contradictions(
 
     scored: list[tuple[bool, float, str, str, float, float]] = []
     for (a, b), cos in pair_cos.items():
-        same_family = (
-            _contradiction_family(a) is not None
-            and _contradiction_family(a) == _contradiction_family(b)
-        )
+        same_family = _contradiction_family(a) is not None and _contradiction_family(
+            a
+        ) == _contradiction_family(b)
         dormancy = _pair_dormancy(a, b, events_map, d)
         priority = cos + w_dormancy * dormancy
         scored.append((same_family, priority, a, b, cos, dormancy))
@@ -5226,19 +5313,18 @@ def _proximity_contradictions(
     for same_family, priority, a, b, cos, dormancy in shown:
         family_note = (
             " Same-family adjacency (likely architecture-cluster noise) — demoted."
-            if same_family else ""
+            if same_family
+            else ""
         )
         polarity = _pair_polarity(vault_root, a, b) if claim_level else None
         polarity_note = (
-            f" Claim-level check: likely {polarity['label'].upper()}"
-            f" (via {polarity['method']})."
-            if polarity else ""
+            f" Claim-level check: likely {polarity['label'].upper()} (via {polarity['method']})."
+            if polarity
+            else ""
         )
         meta = {
             "signal_version": content_hash(
-                _page_signal_version(eligible[a])
-                + "\n"
-                + _page_signal_version(eligible[b])
+                _page_signal_version(eligible[a]) + "\n" + _page_signal_version(eligible[b])
             )[:16],
             "cosine": round(cos, 4),
             "priority": round(priority, 4),
@@ -5250,7 +5336,8 @@ def _proximity_contradictions(
             meta["polarity"] = polarity["label"]
             meta["polarity_score"] = polarity["score"]
             meta["polarity_method"] = polarity["method"]
-        findings.append(AuditFinding(
+        findings.append(
+            AuditFinding(
             category="corpus_contradictions",
             severity="info",
             path=a,
@@ -5267,11 +5354,13 @@ def _proximity_contradictions(
             ),
             paths=[a, b],
             meta=meta,
-        ))
+            )
+        )
 
     if capped:
         omitted = len(scored) - top_n
-        findings.append(AuditFinding(
+        findings.append(
+            AuditFinding(
             category="corpus_contradictions",
             severity="info",
             path=kb_prefix(),
@@ -5286,7 +5375,8 @@ def _proximity_contradictions(
                 "measurement-only — nothing is mutated or auto-acted."
             ),
             meta={"truncated": omitted, "shown": top_n, "total": len(scored)},
-        ))
+            )
+        )
     return findings
 
 

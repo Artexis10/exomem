@@ -2,9 +2,7 @@
 
 ## Purpose
 TBD - created by archiving change preserve-client-artifacts. Update Purpose after archive.
-
 ## Requirements
-
 ### Requirement: Canonical batch artifact preservation command
 
 The system SHALL expose a client-neutral `preserve_artifacts` mutation command across MCP, REST, OpenAPI, and CLI. The command SHALL require `scope`, `category`, and a non-empty ordered `files` array supporting at least eight items. Each file object SHALL declare string properties `download_url`, `file_id`, `mime_type`, and `file_name`, require only `download_url` and `file_id`, and permit the two latter metadata values to be omitted. The same command leaf SHALL serve every generated surface.
@@ -23,7 +21,7 @@ The system SHALL expose a client-neutral `preserve_artifacts` mutation command a
 
 ### Requirement: Safe bounded server-side retrieval
 
-The system SHALL treat every `download_url` as hostile input. It MUST accept HTTPS only; reject userinfo, fragments, and any initial or redirected destination that resolves to a non-global IPv4 or IPv6 address; connect only to a validated resolved address while preserving the original hostname for TLS verification; send no Exomem credentials, cookies, or caller headers; and keep full URLs and query strings out of logs and results. It SHALL enforce bounded redirects, timeouts, item count, per-file bytes, and aggregate bytes while streaming to private temporary storage, with the streaming byte count authoritative over response headers.
+The system SHALL treat every `download_url` as hostile input. It MUST accept HTTPS only; reject userinfo, fragments, and any initial or redirected destination that resolves to a non-global IPv4 or IPv6 address; connect only to a validated resolved address while preserving the original hostname for TLS verification; send no Exomem credentials, cookies, or caller headers; and keep full URLs and query strings out of logs and results. It SHALL enforce bounded redirects, timeouts, item count, per-file bytes, and aggregate bytes while streaming to private temporary storage, with the streaming byte count authoritative over response headers. Retrieval SHALL complete before the canonical vault mutation boundary is acquired, for every command that stages client file handles and not only for the Evidence lane, so that no remote latency is served while the vault mutation lock is held.
 
 #### Scenario: Public HTTPS attachment is staged
 
@@ -40,6 +38,18 @@ The system SHALL treat every `download_url` as hostile input. It MUST accept HTT
 
 - **WHEN** the response header declares an oversized body or the streamed bytes exceed a per-file or aggregate cap
 - **THEN** retrieval stops, temporary bytes are removed, the file reports a stable too-large failure, and no partial final artifact is published
+
+#### Scenario: Source-lane retrieval runs outside the mutation lock
+
+- **WHEN** a caller invokes `capture_source` with file handles rather than text
+- **THEN** every handle is staged before the vault mutation boundary is acquired
+- **AND** each staged file is committed under its own acquisition of that boundary
+- **AND** a `capture_source` invocation carrying text instead of handles still runs under the boundary held across its whole leaf
+
+#### Scenario: The wide-boundary kill switch still applies
+
+- **WHEN** `EXOMEM_WIDE_MUTATION_BOUNDARY` is set and a caller stages file handles through either lane
+- **THEN** the vault mutation boundary is acquired before retrieval begins
 
 ### Requirement: Governed append-only persistence and truthful outcomes
 
@@ -83,3 +93,4 @@ The system SHALL retain `transfer_artifact(operation="upload")` and `/upload` fo
 - **WHEN** an attached transcript, article, or screenshot is being kept as material for later compilation
 - **THEN** guidance selects the Sources lane before considering which transport the client supports
 - **AND** the artifact is not routed to Evidence merely because the file-handle path was convenient
+

@@ -51,6 +51,7 @@ from .mutation_terminal import (
     replayed_terminal,
     split_response_detail,
     valid_collection_receipt,
+    valid_structured_files_receipt,
 )
 from .privacy_log import content_private_logging_enabled
 
@@ -65,9 +66,7 @@ _COORDINATOR_USER_AGENT = (
 # human noticing the timeout, checking state, and retrying.
 _IMPLICIT_RETRY_TTL_SECONDS = 600.0
 
-_REQUEST_BOUND_REMOTE_SURFACES = frozenset(
-    {"mcp", "rest", "hosted", "hosted-agent"}
-)
+_REQUEST_BOUND_REMOTE_SURFACES = frozenset({"mcp", "rest", "hosted", "hosted-agent"})
 REMOTE_MAINTENANCE_MESSAGE = (
     "write-mode maintenance is unavailable through request-bound remote commands"
 )
@@ -165,7 +164,11 @@ _ACTIVE_DIRECT_MUTATION_GUARDS: ContextVar[tuple[tuple[str, Path], ...]] = Conte
 def _direct_mutation_boundary(
     vault_root: os.PathLike[str] | str, state_root: Path
 ) -> tuple[str, Path]:
-    root = Path(vault_root) if isinstance(vault_root, str) and Path(vault_root).is_absolute() else vault_root
+    root = (
+        Path(vault_root)
+        if isinstance(vault_root, str) and Path(vault_root).is_absolute()
+        else vault_root
+    )
     return (
         canonical_mutation_identity(root),
         state_root.expanduser().resolve(strict=False),
@@ -333,23 +336,43 @@ class _WindowsDPAPISecretProtector:
         if protect:
             routine = crypt32.CryptProtectData
             routine.argtypes = [
-                ctypes.POINTER(_DataBlob), wintypes.LPCWSTR, ctypes.POINTER(_DataBlob),
-                wintypes.LPVOID, wintypes.LPVOID, wintypes.DWORD, ctypes.POINTER(_DataBlob),
+                ctypes.POINTER(_DataBlob),
+                wintypes.LPCWSTR,
+                ctypes.POINTER(_DataBlob),
+                wintypes.LPVOID,
+                wintypes.LPVOID,
+                wintypes.DWORD,
+                ctypes.POINTER(_DataBlob),
             ]
             ok = routine(
-                ctypes.byref(source), None, ctypes.byref(entropy_blob), None, None, 0x1,
+                ctypes.byref(source),
+                None,
+                ctypes.byref(entropy_blob),
+                None,
+                None,
+                0x1,
                 ctypes.byref(output),
             )
         else:
             routine = crypt32.CryptUnprotectData
             description = wintypes.LPWSTR()
             routine.argtypes = [
-                ctypes.POINTER(_DataBlob), ctypes.POINTER(wintypes.LPWSTR), ctypes.POINTER(_DataBlob),
-                wintypes.LPVOID, wintypes.LPVOID, wintypes.DWORD, ctypes.POINTER(_DataBlob),
+                ctypes.POINTER(_DataBlob),
+                ctypes.POINTER(wintypes.LPWSTR),
+                ctypes.POINTER(_DataBlob),
+                wintypes.LPVOID,
+                wintypes.LPVOID,
+                wintypes.DWORD,
+                ctypes.POINTER(_DataBlob),
             ]
             ok = routine(
-                ctypes.byref(source), ctypes.byref(description), ctypes.byref(entropy_blob), None,
-                None, 0x1, ctypes.byref(output),
+                ctypes.byref(source),
+                ctypes.byref(description),
+                ctypes.byref(entropy_blob),
+                None,
+                None,
+                0x1,
+                ctypes.byref(output),
             )
             if description:
                 _windows_library(ctypes, "kernel32").LocalFree(description)
@@ -558,7 +581,11 @@ def _receipt_result_summary(value: Any, *, depth: int = 0) -> dict[str, Any]:
                 )
             items.sort(
                 key=lambda item: json.dumps(
-                    item[0], allow_nan=False, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                    item[0],
+                    allow_nan=False,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
                 )
             )
         except Exception:  # noqa: BLE001 - an arbitrary mapping is summarized closed
@@ -935,8 +962,7 @@ def _coordinator_unavailable_error(exc: BaseException) -> OpError:
     return OpError(
         "WRITER_COORDINATOR_UNAVAILABLE",
         f"writer coordinator could not confirm authority: {exc}",
-        "Check the coordinator URL, credentials, and service health; "
-        "reads remain available.",
+        "Check the coordinator URL, credentials, and service health; reads remain available.",
     )
 
 
@@ -1355,7 +1381,9 @@ class IdempotencyStore:
         self._secret_protector = (
             secret_protector
             if secret_protector is not None
-            else _WindowsDPAPISecretProtector() if os.name == "nt" else None
+            else _WindowsDPAPISecretProtector()
+            if os.name == "nt"
+            else None
         )
         self._condition = threading.Condition()
         self._attempts: dict[str, _ExecutionAttempt] = {}
@@ -1363,7 +1391,11 @@ class IdempotencyStore:
         state_dir_existed = path.parent.exists()
         owners_dir = _owner_lock_path(path.parent, "bootstrap").parent
         owners_dir_existed = owners_dir.exists()
-        private_paths = (path, path.with_name(f"{path.name}-wal"), path.with_name(f"{path.name}-shm"))
+        private_paths = (
+            path,
+            path.with_name(f"{path.name}-wal"),
+            path.with_name(f"{path.name}-shm"),
+        )
         preexisting_private_paths = {item for item in private_paths if item.exists()}
         if os.name != "nt":
             path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
@@ -1566,8 +1598,13 @@ class IdempotencyStore:
         protector = self._secret_protector
         if protector is None:
             return attempt.commit_secret
-        ciphertext = protector.protect(attempt.commit_secret, self._commit_secret_entropy(digest, attempt))
-        if not isinstance(ciphertext, bytes) or not 1 <= len(ciphertext) <= _WINDOWS_SECRET_ENVELOPE_MAX_CIPHERTEXT:
+        ciphertext = protector.protect(
+            attempt.commit_secret, self._commit_secret_entropy(digest, attempt)
+        )
+        if (
+            not isinstance(ciphertext, bytes)
+            or not 1 <= len(ciphertext) <= _WINDOWS_SECRET_ENVELOPE_MAX_CIPHERTEXT
+        ):
             raise RuntimeError("idempotency secret protector returned an invalid ciphertext")
         provider = getattr(protector, "provider", None)
         if type(provider) is not int or not 1 <= provider <= 255:
@@ -1658,9 +1695,7 @@ class IdempotencyStore:
                     # fabricated success: retain the stable fail-closed
                     # terminal for every exact replay.
                     try:
-                        self._persist_completed_from_canonical(
-                            key, digest, terminal_result
-                        )
+                        self._persist_completed_from_canonical(key, digest, terminal_result)
                     except Exception as storage_error:
                         raise _PostCommitOutcomeUncertain() from storage_error
                     self._notify_waiters()
@@ -1668,9 +1703,7 @@ class IdempotencyStore:
                     raise _mutation_outcome_unknown_error()
                 if isinstance(terminal_result, _CanonicalCommittedFailure):
                     try:
-                        self._persist_committed_failure(
-                            key, digest, terminal_result.payload
-                        )
+                        self._persist_committed_failure(key, digest, terminal_result.payload)
                     except Exception as storage_error:
                         raise _PostCommitOutcomeUncertain() from storage_error
                     self._notify_waiters()
@@ -1744,9 +1777,7 @@ class IdempotencyStore:
                     canonical_result = result
                     if committed_handoff:
                         assert committed_failure is not None
-                        canonical_result = _CanonicalCommittedFailure(
-                            result, committed_failure
-                        )
+                        canonical_result = _CanonicalCommittedFailure(result, committed_failure)
                     try:
                         self._persist_canonically_committed(
                             key,
@@ -2024,7 +2055,16 @@ class IdempotencyStore:
             except sqlite3.Error:
                 # A broken retry store cannot authorize a replay. Classify this
                 # observation fail-closed even when its durable marker cannot advance.
-                return (row[0], "completed", _OUTCOME_UNKNOWN_PAYLOAD, now, None, row[5], row[6], row[7])
+                return (
+                    row[0],
+                    "completed",
+                    _OUTCOME_UNKNOWN_PAYLOAD,
+                    now,
+                    None,
+                    row[5],
+                    row[6],
+                    row[7],
+                )
         if cursor.rowcount != 1:
             # Raced with another abandon/terminal transition; re-read rather
             # than assume which one won.
@@ -2034,9 +2074,7 @@ class IdempotencyStore:
                 (key,),
             ).fetchone()
             return refreshed if refreshed is not None else row
-        _log_mutation_event(
-            "abandoned", level=logging.WARNING, receipt=_receipt_tag(key)
-        )
+        _log_mutation_event("abandoned", level=logging.WARNING, receipt=_receipt_tag(key))
         self._notify_waiters()
         return (row[0], "completed", _OUTCOME_UNKNOWN_PAYLOAD, now, None, row[5], row[6], row[7])
 
@@ -2115,7 +2153,11 @@ class IdempotencyStore:
         return updated_at <= now - expires_after
 
     def _decode_disposition(
-        self, row: tuple[Any, ...], digest: str, *, commit_evidence=None  # noqa: ANN001
+        self,
+        row: tuple[Any, ...],
+        digest: str,
+        *,
+        commit_evidence=None,  # noqa: ANN001
     ) -> tuple[str, Any]:
         if row[0] != digest:
             raise OpError(
@@ -2128,7 +2170,9 @@ class IdempotencyStore:
                 completed = pickle.loads(row[2])  # noqa: S301 - trusted runtime state
             except Exception:
                 try:
-                    failure = _CachedCommittedFailure(_deserialize_committed_failure_payload(row[2]))
+                    failure = _CachedCommittedFailure(
+                        _deserialize_committed_failure_payload(row[2])
+                    )
                 except Exception:  # noqa: BLE001 - corrupt state blocks mutation
                     raise self._reconciliation_error("cached completed mutation state") from None
                 return "committed_failure", failure
@@ -2222,9 +2266,17 @@ class IdempotencyStore:
                     stored_request_id = stored.get("request_id")
                     return replayed_terminal(
                         leaf,
-                        request_id=(stored_request_id if isinstance(stored_request_id, str) else str(uuid.uuid4())),
-                        receipt_id=stored.get("receipt_id") if isinstance(stored.get("receipt_id"), str) else None,
-                        idempotency_key=stored.get("idempotency_key") if isinstance(stored.get("idempotency_key"), str) else None,
+                        request_id=(
+                            stored_request_id
+                            if isinstance(stored_request_id, str)
+                            else str(uuid.uuid4())
+                        ),
+                        receipt_id=stored.get("receipt_id")
+                        if isinstance(stored.get("receipt_id"), str)
+                        else None,
+                        idempotency_key=stored.get("idempotency_key")
+                        if isinstance(stored.get("idempotency_key"), str)
+                        else None,
                     )
             return stored
         if disposition == "committed_failure":
@@ -2352,20 +2404,14 @@ class IdempotencyStore:
     def _read_exact_evidence(
         self, commit_evidence: Any, digest: str, attempt: _ExecutionAttempt
     ) -> Any:
-        if (
-            commit_evidence is None
-            or not attempt.attempt_id
-            or not attempt.commit_token
-        ):
+        if commit_evidence is None or not attempt.attempt_id or not attempt.commit_token:
             return None
         self._ensure_private_runtime_state()
         secret = self._unprotected_commit_secret(digest, attempt)
         if secret is None:
             return None
         try:
-            return commit_evidence(
-                digest, attempt.attempt_id, attempt.commit_token, secret
-            )
+            return commit_evidence(digest, attempt.attempt_id, attempt.commit_token, secret)
         except TypeError:
             try:
                 # Generic IdempotencyStore users may still provide their own
@@ -2375,7 +2421,9 @@ class IdempotencyStore:
             except TypeError:
                 return commit_evidence()
 
-    def _exact_evidence(self, commit_evidence: Any, digest: str, attempt: _ExecutionAttempt) -> bool:
+    def _exact_evidence(
+        self, commit_evidence: Any, digest: str, attempt: _ExecutionAttempt
+    ) -> bool:
         return bool(self._read_exact_evidence(commit_evidence, digest, attempt))
 
     def _notify_waiters(self) -> None:
@@ -2414,9 +2462,7 @@ class IdempotencyStore:
                     (_OUTCOME_UNKNOWN_PAYLOAD,),
                 ).fetchone()[0]
             oldest_pending_age_seconds = (
-                round(max(0.0, now - min(pending_updated_at)), 3)
-                if pending_updated_at
-                else None
+                round(max(0.0, now - min(pending_updated_at)), 3) if pending_updated_at else None
             )
             return {
                 "pending": len(pending_updated_at),
@@ -2686,16 +2732,13 @@ class LeaseManager:
 
         ordered_domains = tuple(sorted(set(domains)))
         if not ordered_domains or any(
-            type(domain) is not str
-            or re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", domain) is None
+            type(domain) is not str or re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", domain) is None
             for domain in ordered_domains
         ):
             raise ValueError("reserved identity domains must be registered labels")
         vault_identity = canonical_mutation_identity(vault_root)
         deadline = time.monotonic() + self._mutation_timeout_seconds
-        gate = self._mutation_coordinator_for(
-            f"reserved-identity-v1:gate:{vault_identity}"
-        )
+        gate = self._mutation_coordinator_for(f"reserved-identity-v1:gate:{vault_identity}")
 
         def enter(
             stack: ExitStack,
@@ -2726,9 +2769,7 @@ class LeaseManager:
                 enter(gate_stack, gate, operation_label=gate_label)
                 with ExitStack() as domains_stack:
                     enter_domains(domains_stack)
-                    yield _read_reserved_identity_generation(
-                        self.config.state_dir, vault_root
-                    )
+                    yield _read_reserved_identity_generation(self.config.state_dir, vault_root)
             return
 
         with ExitStack() as domains_stack:
@@ -2771,9 +2812,7 @@ class LeaseManager:
             direct_boundary = _direct_mutation_boundary(vault_root, self.config.state_dir)
             active_direct = _ACTIVE_DIRECT_MUTATION_GUARDS.get()
             outer_direct_boundary = direct_boundary not in active_direct
-            direct_token = _ACTIVE_DIRECT_MUTATION_GUARDS.set(
-                (*active_direct, direct_boundary)
-            )
+            direct_token = _ACTIVE_DIRECT_MUTATION_GUARDS.set((*active_direct, direct_boundary))
         manager_token = _ACTIVE_LEASE_MANAGER.set(self)
         try:
             with self.consistency_guard(
@@ -2905,9 +2944,7 @@ class LeaseManager:
             if configured_response_detail in {"compact", "full", "legacy"}
             else "compact"
         )
-        kwargs, response_detail = split_response_detail(
-            kwargs, default=response_detail_default
-        )
+        kwargs, response_detail = split_response_detail(kwargs, default=response_detail_default)
         if public_idempotency_key is _PUBLIC_IDEMPOTENCY_KEY_UNSET:
             effective_public_idempotency_key = idempotency_key
         else:
@@ -3011,8 +3048,10 @@ class LeaseManager:
                 if (
                     command.name in {"record_memory", "plan_memory"}
                     and valid_collection_receipt(leaf_result)
-                    and leaf_result.get("outcome") == "replayed"
-                ):
+                    or command.name == "maintain_memory"
+                    and kwargs.get("mode") == "structured-files"
+                    and valid_structured_files_receipt(leaf_result)
+                ) and leaf_result.get("outcome") == "replayed":
                     return replayed_terminal(
                         leaf_result,
                         request_id=request_id,
@@ -3104,9 +3143,7 @@ class LeaseManager:
                 root = receipt_vault_root
                 if root is None:
                     return terminal_result
-                required = graph_sync.registered_checkpoint(
-                    root, state_root=self.config.state_dir
-                )
+                required = graph_sync.registered_checkpoint(root, state_root=self.config.state_dir)
                 if required is None and not has_reconcile_handoff:
                     durable = _durable_graph_outcome(root)
                     if durable is not None:
@@ -3123,17 +3160,12 @@ class LeaseManager:
                     joins_unbounded = (
                         has_reconcile_handoff
                         or command.name == "reconcile"
-                        or (
-                            command.name == "maintain_memory"
-                            and kwargs.get("mode") == "reconcile"
-                        )
+                        or (command.name == "maintain_memory" and kwargs.get("mode") == "reconcile")
                     )
                     if joins_unbounded:
                         # graph-join: unbounded by design (reconcile proves the
                         # graph is readable in its own terminal).
-                        graph_sync.wait_for_registered(
-                            root, state_root=self.config.state_dir
-                        )
+                        graph_sync.wait_for_registered(root, state_root=self.config.state_dir)
                     elif not graph_sync.join_registered_if_settled(
                         root, state_root=self.config.state_dir
                     ):
@@ -3145,9 +3177,7 @@ class LeaseManager:
                             terminal_result, graph_sync.committed_graph_pending(required)
                         )
             except Exception as error:  # noqa: BLE001 - canonical commit remains terminal
-                terminal_result = finish_reconcile_graph_status(
-                    terminal_result, current=False
-                )
+                terminal_result = finish_reconcile_graph_status(terminal_result, current=False)
                 if has_reconcile_handoff and isinstance(terminal_result, Mapping):
                     if root is None:
                         return terminal_result
@@ -3165,9 +3195,7 @@ class LeaseManager:
                         root, terminal_result, state_root=self.config.state_dir
                     )
                 if isinstance(result, Mapping) and required is not None:
-                    return with_graph_outcome(
-                        terminal_result, graph_failure(required, error)
-                    )
+                    return with_graph_outcome(terminal_result, graph_failure(required, error))
                 return terminal_result
             if command.name == "reconcile" or (
                 command.name == "maintain_memory" and kwargs.get("mode") == "reconcile"
@@ -3233,14 +3261,9 @@ class LeaseManager:
                 root = receipt_vault_root
                 if root is None or not _is_receipt_vault_root(root):
                     raise _PostCommitOutcomeUncertain()
-                required = graph_sync.registered_checkpoint(
-                    root, state_root=self.config.state_dir
-                )
+                required = graph_sync.registered_checkpoint(root, state_root=self.config.state_dir)
                 current = graph_sync.read_checkpoint(root)
-                if (
-                    current is not None
-                    and current.mutation_id == attempt.commit_token
-                ):
+                if current is not None and current.mutation_id == attempt.commit_token:
                     required = current
                 projection = {
                     name: result.get(name)
@@ -3271,7 +3294,9 @@ class LeaseManager:
                     canonical_disposition=canonical_disposition,
                     terminal_projection=projection,
                     checkpoint_generation=(required.generation if required is not None else None),
-                    checkpoint_sha256=(required.checkpoint_sha256 if required is not None else None),
+                    checkpoint_sha256=(
+                        required.checkpoint_sha256 if required is not None else None
+                    ),
                     commit_secret=attempt.commit_secret,
                 )
                 graph_sync.write_graph_commit_receipt(root, evidence)
@@ -3370,9 +3395,7 @@ class LeaseManager:
                     # establish what crossed the multi-store cut.  A cleanup
                     # crash may leave the row but lose that trusted material;
                     # derived recovery cannot fabricate a success from it.
-                    if result is None and not isinstance(
-                        evidence, graph_sync.GraphCommitReceipt
-                    ):
+                    if result is None and not isinstance(evidence, graph_sync.GraphCommitReceipt):
                         return _OUTCOME_UNKNOWN_TERMINAL
                 if isinstance(result, _CanonicalCommittedFailure):
                     committed_failure = result.payload
@@ -3385,22 +3408,25 @@ class LeaseManager:
                     # paths/content. Keep the public terminal envelope valid
                     # with an empty local diagnostics projection.
                     terminal["leaf_result"] = {}
-                    receipt_only_failure = (
-                        evidence.canonical_disposition == "committed_failure"
-                    )
+                    receipt_only_failure = evidence.canonical_disposition == "committed_failure"
                     if terminal.get("_terminal") == "exomem.mutation-terminal":
                         if effective_public_idempotency_key is not None:
                             terminal["idempotency_key"] = effective_public_idempotency_key
                     if root is None or not _is_receipt_vault_root(root):
                         if receipt_only_failure:
                             return _OUTCOME_UNKNOWN_TERMINAL
-                        return retain_failure(with_graph_outcome(terminal, {
+                        return retain_failure(
+                            with_graph_outcome(
+                                terminal,
+                                {
                             "graph_sync": "failed",
                             "graph_sync_code": "GRAPH_SYNC_VAULT_AUTHORITY_MISSING",
                             "graph_sync_remediation": (
                                 "Configure the vault mount and run reconcile to recover the derived graph."
                             ),
-                        }))
+                                },
+                            )
+                        )
                     required = graph_sync.read_checkpoint(root)
                     if (evidence.checkpoint_generation, evidence.checkpoint_sha256) != (
                         required.generation if required is not None else None,
@@ -3409,23 +3435,34 @@ class LeaseManager:
                         if receipt_only_failure:
                             return _OUTCOME_UNKNOWN_TERMINAL
                         if required is not None:
-                            return retain_failure(with_graph_outcome(terminal, graph_failure(required)))
-                        return retain_failure(with_graph_outcome(terminal, {
+                            return retain_failure(
+                                with_graph_outcome(terminal, graph_failure(required))
+                            )
+                        return retain_failure(
+                            with_graph_outcome(
+                                terminal,
+                                {
                             "graph_sync": "failed",
                             "graph_sync_code": "GRAPH_SYNC_CHECKPOINT_MISSING",
                             "graph_sync_remediation": "Run reconcile to recover the derived graph.",
-                        }))
+                                },
+                            )
+                        )
                     if required is None:
                         if receipt_only_failure:
                             return _OUTCOME_UNKNOWN_TERMINAL
-                        return retain_failure(with_graph_outcome(terminal, {"graph_sync": "completed"}))
+                        return retain_failure(
+                            with_graph_outcome(terminal, {"graph_sync": "completed"})
+                        )
                     EpistemicGraphIndex(
                         root, mutation_coordinator=self._mutation_coordinator_for(root)
                     ).rebuild_all()
                     if graph_sync.status(root)["state"] == "current":
                         if receipt_only_failure:
                             return _OUTCOME_UNKNOWN_TERMINAL
-                        return retain_failure(with_graph_outcome(terminal, {"graph_sync": "completed"}))
+                        return retain_failure(
+                            with_graph_outcome(terminal, {"graph_sync": "completed"})
+                        )
                     if receipt_only_failure:
                         return _OUTCOME_UNKNOWN_TERMINAL
                     return retain_failure(with_graph_outcome(terminal, graph_failure(required)))
@@ -3433,15 +3470,22 @@ class LeaseManager:
                     return retain_failure(result)
                 if root is None or not _is_receipt_vault_root(root):
                     terminal = {
-                        key: value for key, value in result.items() if key != "_graph_sync_checkpoint"
+                        key: value
+                        for key, value in result.items()
+                        if key != "_graph_sync_checkpoint"
                     }
-                    return retain_failure(with_graph_outcome(terminal, {
+                    return retain_failure(
+                        with_graph_outcome(
+                            terminal,
+                            {
                         "graph_sync": "failed",
                         "graph_sync_code": "GRAPH_SYNC_VAULT_AUTHORITY_MISSING",
                         "graph_sync_remediation": (
                             "Configure the vault mount and run reconcile to recover the derived graph."
                         ),
-                    }))
+                            },
+                        )
+                    )
                 payload = result.get("_graph_sync_checkpoint")
                 if payload is None:
                     return retain_failure(result)
@@ -3453,22 +3497,28 @@ class LeaseManager:
                 if stored is None:
                     raise ValueError("graph-pending checkpoint payload is invalid")
                 required = graph_sync.read_checkpoint(root)
-                if (
-                    required is None
-                    or stored != required
-                ):
+                if required is None or stored != required:
                     terminal = {
-                        key: value for key, value in result.items() if key != "_graph_sync_checkpoint"
+                        key: value
+                        for key, value in result.items()
+                        if key != "_graph_sync_checkpoint"
                     }
                     if required is not None:
-                        return retain_failure(with_graph_outcome(
+                        return retain_failure(
+                            with_graph_outcome(
                             terminal, graph_sync.committed_graph_failure(required)
-                        ))
-                    return retain_failure(with_graph_outcome(terminal, {
+                            )
+                        )
+                    return retain_failure(
+                        with_graph_outcome(
+                            terminal,
+                            {
                         "graph_sync": "failed",
                         "graph_sync_code": "GRAPH_SYNC_CHECKPOINT_MISSING",
                         "graph_sync_remediation": "Run reconcile to recover the derived graph.",
-                    }))
+                            },
+                        )
+                    )
                 EpistemicGraphIndex(
                     root, mutation_coordinator=self._mutation_coordinator_for(root)
                 ).rebuild_all()
@@ -3478,7 +3528,9 @@ class LeaseManager:
                 if graph_sync.status(root)["state"] == "current":
                     terminal = finalize_graph_rebuild_handoff(terminal)
                     return retain_failure(with_graph_outcome(terminal, {"graph_sync": "completed"}))
-                return retain_failure(with_graph_outcome(terminal, graph_sync.committed_graph_failure(required)))
+                return retain_failure(
+                    with_graph_outcome(terminal, graph_sync.committed_graph_failure(required))
+                )
             except Exception as error:  # noqa: BLE001 - canonical commit remains terminal
                 if terminal is None:
                     if isinstance(result, Mapping):
@@ -3492,12 +3544,19 @@ class LeaseManager:
                     else:
                         terminal = {}
                 if required is not None:
-                    return retain_failure(with_graph_outcome(terminal, graph_failure(required, error)))
-                return retain_failure(with_graph_outcome(terminal, {
+                    return retain_failure(
+                        with_graph_outcome(terminal, graph_failure(required, error))
+                    )
+                return retain_failure(
+                    with_graph_outcome(
+                        terminal,
+                        {
                     "graph_sync": "failed",
                     "graph_sync_code": "GRAPH_SYNC_RESUME_FAILED",
                     "graph_sync_remediation": "Run reconcile to recover the derived graph.",
-                }))
+                        },
+                    )
+                )
 
         narrow_media_commit = command.name == "process_media" and kwargs.get(
             "operation", "process"
@@ -3770,10 +3829,13 @@ class LeaseManager:
 
                 vault_root = Path(vault_or_cell)
                 graph_status = graph_sync.status(vault_root)
-                if graph_status["state"] == "current" and not epistemic_graph.EpistemicGraphIndex(
+                if (
+                    graph_status["state"] == "current"
+                    and not epistemic_graph.EpistemicGraphIndex(
                     vault_root,
                     mutation_coordinator=self._mutation_coordinator_for(vault_root),
-                ).available():
+                    ).available()
+                ):
                     graph_status = {
                         "state": "unavailable",
                         "generation": graph_status["generation"],
@@ -3958,23 +4020,21 @@ def get_manager() -> LeaseManager:
         return manager
 
 
-def _commit_generation_path(
-    state_dir: Path, vault_or_cell: os.PathLike[str] | str
-) -> Path:
+def _commit_generation_path(state_dir: Path, vault_or_cell: os.PathLike[str] | str) -> Path:
     from .mutation_lock import canonical_mutation_identity
 
-    digest = hashlib.sha256(
-        canonical_mutation_identity(vault_or_cell).encode("utf-8")
-    ).hexdigest()[:20]
+    digest = hashlib.sha256(canonical_mutation_identity(vault_or_cell).encode("utf-8")).hexdigest()[
+        :20
+    ]
     return Path(state_dir) / "commit-generations" / f"{digest}.txt"
 
 
 def _reserved_identity_generation_path(
     state_dir: Path, vault_or_cell: os.PathLike[str] | str
 ) -> Path:
-    digest = hashlib.sha256(
-        canonical_mutation_identity(vault_or_cell).encode("utf-8")
-    ).hexdigest()[:20]
+    digest = hashlib.sha256(canonical_mutation_identity(vault_or_cell).encode("utf-8")).hexdigest()[
+        :20
+    ]
     return Path(state_dir) / "reserved-identity-generations" / f"{digest}.txt"
 
 
@@ -4030,9 +4090,7 @@ def read_commit_generation(vault_or_cell: os.PathLike[str] | str) -> int | None:
     fail closed: an unreadable counter must disable reuse, never admit it.
     """
     try:
-        path = _commit_generation_path(
-            active_manager().config.state_dir, vault_or_cell
-        )
+        path = _commit_generation_path(active_manager().config.state_dir, vault_or_cell)
     except Exception:  # noqa: BLE001 - unresolvable identity disables reuse
         return None
     try:
@@ -4043,9 +4101,7 @@ def read_commit_generation(vault_or_cell: os.PathLike[str] | str) -> int | None:
         return None
 
 
-def _bump_commit_generation(
-    state_dir: Path, vault_or_cell: os.PathLike[str] | str
-) -> None:
+def _bump_commit_generation(state_dir: Path, vault_or_cell: os.PathLike[str] | str) -> None:
     """Advance the counter; called while the mutation boundary is held."""
     try:
         path = _commit_generation_path(state_dir, vault_or_cell)
@@ -4071,9 +4127,7 @@ def active_mutation_request_id() -> str | None:
     return trace[0] if trace is not None else None
 
 
-def active_direct_mutation_guard(
-    vault_root: os.PathLike[str] | str, *, state_root: Path
-) -> bool:
+def active_direct_mutation_guard(vault_root: os.PathLike[str] | str, *, state_root: Path) -> bool:
     """Return whether this thread owns this manager-root boundary directly."""
     boundary = _direct_mutation_boundary(vault_root, state_root)
     return boundary in _ACTIVE_DIRECT_MUTATION_GUARDS.get()
@@ -4115,9 +4169,7 @@ def _fixed_projected_command_completion(
             return invoke()
         started_at = time.perf_counter()
         vault_root = Path(injected[0])
-        preactivated = projection_runtime.has_preactivated_projection_runtime(
-            vault_root
-        )
+        preactivated = projection_runtime.has_preactivated_projection_runtime(vault_root)
         completion_required = (
             preactivated
             or projection_runtime.requires_fixed_projected_completion(vault_root)
@@ -4198,6 +4250,7 @@ def invoke_command(
     active_surface = capabilities_module.current_active_surface()
     if (
         command.name == "maintain_memory"
+        and kwargs.get("mode") != "structured-files"
         and not read_only
         and selector_error is None
         and active_surface is not None
@@ -4268,9 +4321,7 @@ def invoke_command(
         try:
             return postfilter(command.name, _invoke(), injected[0])
         except BaseException as error:
-            postfilter_error(
-                command.name, error, injected[0], request_kwargs=kwargs
-            )
+            postfilter_error(command.name, error, injected[0], request_kwargs=kwargs)
             raise
     # The try lives INSIDE the boundary so `collector` is still bound when the
     # filter runs: `disclosure_boundary`'s `finally` resets the contextvar on
@@ -4281,9 +4332,7 @@ def invoke_command(
         try:
             result = postfilter(command.name, _invoke(), injected[0])
         except BaseException as error:
-            postfilter_error(
-                command.name, error, injected[0], request_kwargs=kwargs
-            )
+            postfilter_error(command.name, error, injected[0], request_kwargs=kwargs)
             emit_boundary_receipt(collector)
             raise
         emit_boundary_receipt(collector)

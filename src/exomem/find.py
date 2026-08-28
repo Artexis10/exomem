@@ -85,6 +85,13 @@ _collapse = find_results.collapse
 _DEGRADATION_LOCK = threading.Lock()
 _DEGRADATION_COUNTS: dict[str, int] = {}
 
+# Bounded-staleness disclosure. A request answered from the catalog's last
+# published recall projection — rather than one proven exactly current — rides
+# the existing `warming.components` envelope under this name, so a caller can
+# tell "these hits may not include the newest writes" from a fully current
+# answer without a new envelope field.
+_RECALL_PROJECTION_STALE_COMPONENT = "recall_projection"
+
 
 def _record_degradation(lane: str) -> None:
     """Increment the process-lifetime silent-degradation counter for `lane`."""
@@ -430,11 +437,17 @@ class FreshnessSnapshot:
             str, freshness.RecallFreshnessCheckpoint
         ]
         | None = None,
+        stale_recall_scopes: frozenset[str] = frozenset(),
     ) -> None:
         self._root = vault_root
         self._require_live_recall = require_live_recall
         self._timings = timings
         self._expected_recall_checkpoints = expected_recall_checkpoints or {}
+        # Scopes admitted at the catalog's published projection rather than an
+        # exactly-current live one. For those the live registry has no
+        # checkpoint to require, so liveness is not a precondition and the
+        # published projection is the answer.
+        self._stale_recall_scopes = stale_recall_scopes
         self._kb: tuple[int, int, str] | None = None
         self._vault: tuple[int, int, str] | None = None
         self._recall: dict[str, freshness.RecallFreshnessCheckpoint] = {}
@@ -510,20 +523,30 @@ class FreshnessSnapshot:
             try:
                 root = self._root.absolute()
                 cache_key = (root, scope)
+                # A scope admitted as stale is answered from the published
+                # projection the admission already identity-checked, so it does
+                # not additionally require a live registry.
+                stale = scope in self._stale_recall_scopes
+                require_live = self._require_live_recall and not stale
                 projection_live = freshness.recall_is_live(self._root, scope)
                 checkpoint = (
                     freshness.live_recall_checkpoint(self._root, scope)
-                    if self._require_live_recall
+                    if require_live
                     else freshness.recall_checkpoint(self._root, scope)
                     if projection_live
                     else None
                 )
-                if checkpoint is None and self._require_live_recall:
+                if checkpoint is None and require_live:
                     raise freshness.RecallProjectionUnavailable(
                         f"maintained recall projection is not live for scope={scope!r}"
                     )
                 expected = self._expected_recall_checkpoints.get(scope)
-                if checkpoint is not None and expected is not None and checkpoint != expected:
+                if (
+                    not stale
+                    and checkpoint is not None
+                    and expected is not None
+                    and checkpoint != expected
+                ):
                     raise freshness.RecallProjectionUnavailable(
                         f"maintained recall projection advanced for scope={scope!r}"
                     )
@@ -536,11 +559,16 @@ class FreshnessSnapshot:
                             self._recall_paths[scope] = cached[1]
                             _set_recall_projection_timing_outcome(
                                 self._timings,
-                                "live_cache" if self._require_live_recall else "cache",
+                                # `require_live`, not the request-wide flag: a
+                                # stale-admitted scope is served from the
+                                # published projection, so labelling its cache
+                                # hit `live_cache` would misreport it as an
+                                # exactly-current answer.
+                                "live_cache" if require_live else "cache",
                             )
                             return
 
-                if self._require_live_recall:
+                if require_live:
                     checkpoint, entries = freshness.recall_projection_snapshot(
                         self._root,
                         scope,
@@ -559,7 +587,7 @@ class FreshnessSnapshot:
                         self._vault = scope_triple
                     else:
                         self._kb = scope_triple
-                if expected is not None and checkpoint != expected:
+                if not stale and expected is not None and checkpoint != expected:
                     raise freshness.RecallProjectionUnavailable(
                         f"maintained recall projection advanced for scope={scope!r}"
                     )
@@ -590,7 +618,10 @@ class FreshnessSnapshot:
                 )
             except freshness.RecallProjectionUnavailable as exc:
                 _set_recall_projection_timing_outcome(self._timings, "unavailable")
-                raise RetrievalIndexWarming(status="temporarily_unavailable") from exc
+                raise RetrievalIndexWarming(
+                    site="projection_unavailable",
+                    status="temporarily_unavailable",
+                ) from exc
 
 
 def _freshness_key(
@@ -889,9 +920,16 @@ def find(
     state = str(admission["state"]) if managed_runtime else "unverified"
     require_live_recall = managed_runtime and freshness.event_indexes_enabled()
     catalog_proof: dict[str, freshness.RecallFreshnessCheckpoint] | None = None
+    stale_recall_scopes: frozenset[str] = frozenset()
     with _span(timings, "recall_projection"):
         if state == "ready" and require_live_recall:
-            raw_proof = lexstore.runtime_retrieval_catalog_proof(vault_root)
+            # Bounded projection lag is served, not refused. `admission` takes
+            # the strict proof when it binds and otherwise falls back to the
+            # catalog's own published projection under an unchanged identity —
+            # so a cold or reprojection-evicted registry answers from the last
+            # published projection instead of blanking semantic recall.
+            admitted = lexstore.runtime_retrieval_catalog_admission(vault_root)
+            raw_proof = admitted.checkpoints if admitted is not None else None
             if raw_proof is None:
                 readiness.mark_unready("retrieval_catalog")
                 state = "unavailable"
@@ -905,18 +943,26 @@ def find(
                     readiness.mark_unready("retrieval_catalog")
                     catalog_proof = None
                     state = "unavailable"
-                elif catalog_proof_out is not None:
-                    catalog_proof_out.update(catalog_proof)
+                else:
+                    stale_recall_scopes = frozenset(admitted.lagging_scopes)
+                    if stale_recall_scopes and degraded_out is not None:
+                        # Rides the existing warming disclosure: the envelope
+                        # already projects `warming.components`, so a stale
+                        # answer is disclosed without a new envelope field.
+                        degraded_out.append(_RECALL_PROJECTION_STALE_COMPONENT)
+                    if catalog_proof_out is not None:
+                        catalog_proof_out.update(catalog_proof)
         if state in {"warming", "unavailable"}:
             if state == "unavailable":
                 lexstore.request_repair(vault_root)
             _set_recall_projection_timing_outcome(timings, state)
             raise RetrievalIndexWarming(
+                site="catalog_proof_incomplete",
                 status=(
                     "temporarily_unavailable"
                     if state == "unavailable"
                     else "warming"
-                )
+                ),
             )
         _set_recall_projection_timing_outcome(
             timings,
@@ -1017,6 +1063,7 @@ def find(
         require_live_recall=require_live_recall,
         timings=timings,
         expected_recall_checkpoints=catalog_proof,
+        stale_recall_scopes=stale_recall_scopes,
     )
     page_memo: dict[str, ParsedPage | None] = {}
 
@@ -2025,7 +2072,7 @@ def _find_semantic_units(
                 # scheduled the single-flight repair, so raise the typed,
                 # non-cacheable warming outcome (page-level eligibility parity).
                 if algebra.status == "complete":
-                    raise RetrievalIndexWarming()
+                    raise RetrievalIndexWarming(site="semantic_unit_index")
                 if failed_out is not None:
                     failed_out.append("semantic_units_lexical")
                 _record_degradation("semantic_units_lexical")
@@ -2515,6 +2562,23 @@ def _eligible_filter_paths(
 
 _RETRIEVAL_WARMING_RETRY_MS = 250
 
+#: Closed, content-free vocabulary of retrieval-refusal sites. Each names ONE
+#: gate that can decline a maintained recall, so a live refusal is attributable
+#: from its envelope alone instead of by reading the server source.
+RETRIEVAL_WARMING_SITES = (
+    "projection_unavailable",
+    "catalog_proof_incomplete",
+    "semantic_unit_index",
+    "semantic_unit_seed",
+    "catalog_outcome",
+    "relation_graph",
+    "relation_graph_rebuilding",
+    "resolver_checkpoint_stale",
+    "resolver_checkpoint_absent",
+    "resolver_entries_unavailable",
+    "resolver_build_wait",
+)
+
 
 class RetrievalIndexWarming(cli_ops.OpError):
     """Typed, non-cacheable outcome for a safe exact recall plan the maintained
@@ -2528,24 +2592,46 @@ class RetrievalIndexWarming(cli_ops.OpError):
     def __init__(
         self,
         *,
+        site: str,
         status: str = "warming",
         retry_after_ms: int = _RETRIEVAL_WARMING_RETRY_MS,
+        waited_ms: int | None = None,
         message: str = (
             "the maintained semantic recall index is still warming; retry the exact recall shortly"
         ),
     ) -> None:
+        # The vocabulary is enforced HERE, not by a test reading source shapes.
+        # This envelope reaches REST and MCP verbatim, so a site built from an
+        # f-string could publish a vault path to every client; a single-quoted
+        # literal or a construct-then-raise is invisible to any source scan.
+        # No call shape can evade a constructor.
+        if site not in RETRIEVAL_WARMING_SITES:
+            raise ValueError(f"unknown retrieval refusal site: {site!r}")
         self.complete = False
         self.status = status
         self.retry_after_ms = retry_after_ms
-        super().__init__(
-            "RETRIEVAL_INDEX_WARMING",
-            message,
-            details={
-                "complete": False,
-                "status": status,
-                "retry_after_ms": retry_after_ms,
-            },
+        self.site = site
+        self.waited_ms = waited_ms
+        details: dict[str, object] = {
+            "complete": False,
+            "status": status,
+            "retry_after_ms": retry_after_ms,
+            # WHICH gate refused. Every site produced a byte-identical envelope
+            # before this, so a live refusal could not be attributed without
+            # reading the server's own source alongside its logs.
+            "site": site,
+        }
+        if waited_ms is not None:
+            details["waited_ms"] = waited_ms
+        # Exactly one content-free line per refusal: the decision trail this
+        # path never had. Names the gate, never the query or any path.
+        log.info(
+            "retrieval refusal: site=%s status=%s waited_ms=%s",
+            site,
+            status,
+            "n/a" if waited_ms is None else waited_ms,
         )
+        super().__init__("RETRIEVAL_INDEX_WARMING", message, details=details)
 
 
 def _raise_catalog_outcome(readiness: object) -> None:
@@ -2553,7 +2639,7 @@ def _raise_catalog_outcome(readiness: object) -> None:
     public_status = (
         "temporarily_unavailable" if outcome in {"transient_failure", "unsupported"} else "warming"
     )
-    raise RetrievalIndexWarming(status=public_status)
+    raise RetrievalIndexWarming(site="catalog_outcome", status=public_status)
 
 
 _RELATION_DIRECTIONS = ("any", "outbound", "inbound")
@@ -2649,12 +2735,15 @@ def _resolve_relation_filter(
         canonical, anchor=relation_of, direction=relation_direction
     )
     if result.status == "temporarily_unavailable":
-        raise RetrievalIndexWarming(status="temporarily_unavailable")
+        raise RetrievalIndexWarming(
+            site="relation_graph",
+            status="temporarily_unavailable",
+        )
     if result.status == "warming":
         epistemic_graph.schedule_background_rebuild(
             vault_root, mutation_coordinator=graph_index._canonical_mutation_coordinator()
         )
-        raise RetrievalIndexWarming(status="warming")
+        raise RetrievalIndexWarming(site="relation_graph_rebuilding", status="warming")
     return result.paths, dict(result.provenance), tuple(findings)
 
 
@@ -2696,7 +2785,7 @@ def _resolve_eligible_filter_paths(
         # has already scheduled the single-flight repair, so the honest outcome
         # is a typed, non-cacheable warming signal — not a false empty or a
         # divergent full-scan ranking.
-        raise RetrievalIndexWarming()
+        raise RetrievalIndexWarming(site="semantic_unit_seed")
     return _indexed_eligible_filter_paths(
         vault_root,
         plan=plan,
@@ -4024,8 +4113,45 @@ _RECALL_REBUILD_LOCK = threading.Lock()
 #: Long enough that a follower waits out a real build on a large vault rather
 #: than duplicating it, short enough that a wedged leader cannot hold a reader
 #: indefinitely -- the follower simply builds its own after this.
+#:
+#: Applies to callers that may FALL BACK to building their own resolver (CLI,
+#: cold, warm-up paths). A managed request cannot use it: see the follower
+#: bound below.
 _RECALL_RESOLVER_BUILD_WAIT_SECONDS = 120.0
+
+#: The bound for a MANAGED request, which cannot fall back.
+#:
+#: The leader's build is a full vault walk plus a parse per admitted page, so
+#: on a 3.3k-file vault it runs for tens of seconds. Letting a request wait the
+#: full 120s above is not an optimisation: it is longer than any client
+#: timeout, and it is how a warm, converged cell produced hybrid refusals at
+#: exactly the 60s client deadline with the server never answering, while
+#: keyword (which needs no projected resolver) served in 2.1s.
+#:
+#: A refusal has to come back fast enough to BE a refusal, so a managed
+#: follower waits briefly, then declines with `retry_after_ms` instead of
+#: either blocking or duplicating the leader's whole-vault walk.
+_RECALL_RESOLVER_FOLLOWER_WAIT_SECONDS = 3.0
 _RECALL_RESOLVER_REBUILDS: set[Path] = set()
+
+
+def _follower_wait_seconds(*, allow_fallback: bool) -> float:
+    """How long this caller may wait on the single-flight resolver leader.
+
+    A managed request cannot fall back to its own whole-vault build, so it gets
+    the short bound and declines afterwards. A caller that MAY fall back keeps
+    the long wait, because for it waiting really is cheaper than duplicating
+    the walk.
+
+    Its own function so the choice is assertable without having to sit through
+    the wait it selects — a guard that can only be tested by hanging is a guard
+    nobody tests.
+    """
+    return (
+        _RECALL_RESOLVER_BUILD_WAIT_SECONDS
+        if allow_fallback
+        else _RECALL_RESOLVER_FOLLOWER_WAIT_SECONDS
+    )
 
 
 def _recall_checkpoint_identity(
@@ -4232,7 +4358,10 @@ def recall_resolver_snapshot(
     if candidate is not None and not allow_fallback:
         if not freshness_module.recall_checkpoint_is_current(root, "vault", candidate):
             lexstore.request_repair(root)
-            raise RetrievalIndexWarming(status="temporarily_unavailable")
+            raise RetrievalIndexWarming(
+                site="resolver_checkpoint_stale",
+                status="temporarily_unavailable",
+            )
     if candidate is None:
         candidate = freshness_module.live_recall_checkpoint(root, "vault")
     if candidate is None and allow_fallback:
@@ -4241,7 +4370,10 @@ def recall_resolver_snapshot(
         checkpoint = candidate
     if not allow_fallback and checkpoint is None:
         lexstore.request_repair(root)
-        raise RetrievalIndexWarming(status="temporarily_unavailable")
+        raise RetrievalIndexWarming(
+            site="resolver_checkpoint_absent",
+            status="temporarily_unavailable",
+        )
     with _RESOLVER_LOCK:
         cached = _RECALL_RESOLVER_CACHE.get(root)
         if cached and cached[0] == identity:
@@ -4258,6 +4390,8 @@ def recall_resolver_snapshot(
     # behaviour and it stays correct; the wait is an optimisation, never a
     # dependency.
     leader = False
+    follower_wait = _follower_wait_seconds(allow_fallback=allow_fallback)
+    waited_started = time.monotonic()
     while True:
         with _RECALL_REBUILD_LOCK:
             building = _RECALL_RESOLVER_BUILDS.get(root)
@@ -4267,7 +4401,17 @@ def recall_resolver_snapshot(
                 leader = True
         if leader:
             break
-        if not building.wait(_RECALL_RESOLVER_BUILD_WAIT_SECONDS):
+        if not building.wait(follower_wait):
+            if not allow_fallback:
+                # Declining beats both alternatives: blocking past the client's
+                # deadline answers nobody, and building our own here would pay
+                # the same whole-vault walk the leader is already paying.
+                lexstore.request_repair(root)
+                raise RetrievalIndexWarming(
+                    site="resolver_build_wait",
+                    status="temporarily_unavailable",
+                    waited_ms=int((time.monotonic() - waited_started) * 1000),
+                )
             break
         with _RESOLVER_LOCK:
             cached = _RECALL_RESOLVER_CACHE.get(root)
@@ -4286,7 +4430,10 @@ def recall_resolver_snapshot(
         if entries is None:
             if not allow_fallback:
                 lexstore.request_repair(root)
-                raise RetrievalIndexWarming(status="temporarily_unavailable")
+                raise RetrievalIndexWarming(
+                    site="resolver_entries_unavailable",
+                    status="temporarily_unavailable",
+                )
             entries = []
             for path in walk_vault_md(root):
                 if not recall_policy.is_recall_candidate(root, path):

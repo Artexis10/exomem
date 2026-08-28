@@ -2012,3 +2012,270 @@ def test_reconcile_delta_dual_form_collapse_missing_file_routes_as_deleted_only(
 
     assert ups == []
     assert dels == [[rel]]
+
+
+# --- Graph startup validation is bounded (task 1.4) -------------------------
+#
+# The startup pass suspended reads and rebuilt the WHOLE graph on every process
+# start whenever the sidecar existed (measured: ~30 min of suspended reads per
+# restart on a 3.3k-file vault). Durable evidence that the published sidecar
+# already acknowledges the graph_sync checkpoint must admit instead.
+
+
+def _startup_rebuild_spy(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record whole-graph rebuilds without suppressing them."""
+    calls: list[str] = []
+    real = epistemic_graph.EpistemicGraphIndex._rebuild_all_locked
+
+    def spy(self: epistemic_graph.EpistemicGraphIndex, *args: object, **kwargs: object) -> object:
+        calls.append("rebuild_all")
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(epistemic_graph.EpistemicGraphIndex, "_rebuild_all_locked", spy)
+    return calls
+
+
+def _suspend_spy(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    calls: list[str] = []
+    real = epistemic_graph.EpistemicGraphIndex.suspend_reads
+
+    def spy(self: epistemic_graph.EpistemicGraphIndex) -> object:
+        calls.append("suspend_reads")
+        return real(self)
+
+    monkeypatch.setattr(epistemic_graph.EpistemicGraphIndex, "suspend_reads", spy)
+    return calls
+
+
+def test_startup_over_a_coherent_graph_admits_without_a_rebuild(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A restart over a coherent durable checkpoint must not rebuild."""
+    watcher = file_watcher.FileWatcher(vault)
+    watcher._reconcile_once(seed=True)
+    graph = epistemic_graph.EpistemicGraphIndex(vault)
+    graph.rebuild_all()
+    assert graph.available() is True
+
+    freshness.clear()  # process restart: the in-memory epoch is gone
+    restarted = file_watcher.FileWatcher(vault)
+    restarted._reconcile_once(seed=True)
+
+    rebuilds = _startup_rebuild_spy(monkeypatch)
+    suspensions = _suspend_spy(monkeypatch)
+    restarted.finish_startup_recovery()
+
+    assert rebuilds == [], "a coherent restart rebuilt the whole graph"
+    assert suspensions == [], "a coherent restart suspended reads"
+    assert graph.available() is True
+    assert graph.reads_suspended() is False
+
+
+def test_startup_over_an_unacknowledged_checkpoint_still_rebuilds(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Genuine incoherence (unacknowledged checkpoint) still rebuilds.
+
+    The published sidecar carries no graph_sync acknowledgement, so a durable
+    checkpoint written behind it is exactly the digest-mismatch class: the
+    graph has not been built up to the handoff that checkpoint records.
+    """
+    from exomem import graph_sync
+
+    watcher = file_watcher.FileWatcher(vault)
+    watcher._reconcile_once(seed=True)
+    graph = epistemic_graph.EpistemicGraphIndex(vault)
+    graph.rebuild_all()
+    assert graph.available() is True
+
+    checkpoint = graph_sync.GraphSyncCheckpoint.create(
+        generation=1,
+        mutation_id="a1b2c3d4e5f6a7b8c9d0e1f2",
+        paths=(("Knowledge Base/Notes/startup-incoherent.md", "0" * 64),),
+        created_paths=("Knowledge Base/Notes/startup-incoherent.md",),
+    )
+    graph_sync._write_checkpoint(vault, checkpoint)
+    assert graph_sync.read_checkpoint(vault) == checkpoint
+
+    freshness.clear()
+    restarted = file_watcher.FileWatcher(vault)
+    restarted._reconcile_once(seed=True)
+
+    rebuilds = _startup_rebuild_spy(monkeypatch)
+    restarted.finish_startup_recovery()
+
+    assert rebuilds, "an unacknowledged durable checkpoint did not rebuild"
+
+
+def test_startup_over_a_persisted_barrier_still_rebuilds(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A recorded crash marker is genuine incoherence and still rebuilds."""
+    watcher = file_watcher.FileWatcher(vault)
+    watcher._reconcile_once(seed=True)
+    graph = epistemic_graph.EpistemicGraphIndex(vault)
+    graph.rebuild_all()
+    graph.suspend_reads()
+    assert graph.reads_suspended() is True
+
+    freshness.clear()
+    restarted = file_watcher.FileWatcher(vault)
+    restarted._reconcile_once(seed=True)
+
+    rebuilds = _startup_rebuild_spy(monkeypatch)
+    restarted.finish_startup_recovery()
+
+    assert rebuilds, "a persisted read barrier did not rebuild"
+    assert graph.available() is True
+
+
+def test_durable_coherence_classifies_each_incoherence_class(vault: Path) -> None:
+    """Pin the O(1) predicate directly.
+
+    `available()` independently rejects every one of these, so the predicate
+    changes no startup OUTCOME — its job is to reach that verdict without the
+    O(corpus) source-bytes proof, and only these four classes may do so.
+    """
+    from exomem import graph_sync
+
+    watcher = file_watcher.FileWatcher(vault)
+    watcher._reconcile_once(seed=True)
+    graph = epistemic_graph.EpistemicGraphIndex(vault)
+    graph.rebuild_all()
+
+    # Legacy: no durable checkpoint and no acknowledgement rows.
+    assert graph_sync.checkpoint_state(vault)[0] == "absent"
+    assert graph.durable_checkpoint_is_coherent() is True
+
+    # A recorded crash marker.
+    graph.suspend_reads()
+    assert graph.durable_checkpoint_is_coherent() is False
+    graph.rebuild_all()
+    assert graph.durable_checkpoint_is_coherent() is True
+
+    # Acknowledgement rows with no durable checkpoint are recovery state.
+    conn = graph._connect_existing(readonly=False)
+    try:
+        with conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
+                ("graph_sync_generation", "7"),
+            )
+    finally:
+        conn.close()
+    assert graph.durable_checkpoint_is_coherent() is False
+    conn = graph._connect_existing(readonly=False)
+    try:
+        with conn:
+            conn.execute("DELETE FROM graph_meta WHERE key = ?", ("graph_sync_generation",))
+    finally:
+        conn.close()
+    assert graph.durable_checkpoint_is_coherent() is True
+
+    # A durable checkpoint this sidecar never acknowledged.
+    checkpoint = graph_sync.GraphSyncCheckpoint.create(
+        generation=1,
+        mutation_id="a1b2c3d4e5f6a7b8c9d0e1f2",
+        paths=(("Knowledge Base/Notes/unacknowledged.md", "0" * 64),),
+        created_paths=("Knowledge Base/Notes/unacknowledged.md",),
+    )
+    graph_sync._write_checkpoint(vault, checkpoint)
+    assert graph.durable_checkpoint_is_coherent() is False
+
+    # A malformed durable checkpoint.
+    graph_sync.checkpoint_path(vault).write_bytes(b"{not a checkpoint")
+    assert graph_sync.checkpoint_state(vault)[0] == "malformed"
+    assert graph.durable_checkpoint_is_coherent() is False
+
+
+def test_access_policy_blip_does_not_withdraw_graph_availability(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pin the in-process availability wedge to its real cause.
+
+    `_open_read_snapshot` compares the sidecar's stored
+    `recall_access_fingerprint` against `recall_policy.recall_policy_identity`.
+    A transient read error on `_access.yaml` used to move that fingerprint, so
+    `available()` went False while the durable sidecar metadata was complete
+    and barrier-free — reported live, and misattributed to a stale retained
+    owner-leaf connection. It is the access loader, not the connection.
+    """
+    from exomem import access
+
+    config = vault / "Knowledge Base" / "_access.yaml"
+    config.write_text("excluded:\n  - Private\n", encoding="utf-8")
+
+    watcher = file_watcher.FileWatcher(vault)
+    watcher._reconcile_once(seed=True)
+    graph = epistemic_graph.EpistemicGraphIndex(vault)
+    graph.rebuild_all()
+    assert graph.available() is True
+    assert graph.reads_suspended() is False
+    assert graph.durable_checkpoint_is_coherent() is True
+    good = access.policy_fingerprint(vault)
+
+    real_read_bytes = Path.read_bytes
+    target = os.path.normcase(str(config))
+
+    def blipping(self: Path) -> bytes:
+        if os.path.normcase(str(self)) == target:
+            raise PermissionError(13, "The process cannot access the file")
+        return real_read_bytes(self)
+
+    stamp = config.stat().st_mtime + 10
+    os.utime(config, (stamp, stamp))
+    monkeypatch.setattr(Path, "read_bytes", blipping)
+
+    assert access.policy_fingerprint(vault) == good
+    assert graph.available() is True, "an access-policy blip withdrew graph availability"
+
+
+def test_incoherent_startup_short_circuits_before_the_source_proof(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pin the call site, not just the predicate.
+
+    `durable_checkpoint_is_coherent()` earns its place only as a cheap
+    NEGATIVE pre-filter: when durable state already proves a rebuild is
+    needed, the startup pass must reach that verdict without paying
+    `available()`'s O(corpus) source-bytes proof first. Dropping the conjunct
+    leaves behaviour identical and costs a full corpus hash before every
+    rebuild, so only call ORDER can pin it.
+    """
+    watcher = file_watcher.FileWatcher(vault)
+    watcher._reconcile_once(seed=True)
+    graph = epistemic_graph.EpistemicGraphIndex(vault)
+    graph.rebuild_all()
+    graph.suspend_reads()  # a recorded crash marker: durably incoherent
+    assert graph.durable_checkpoint_is_coherent() is False
+
+    freshness.clear()
+    restarted = file_watcher.FileWatcher(vault)
+    restarted._reconcile_once(seed=True)
+
+    events: list[str] = []
+    real_available = epistemic_graph.EpistemicGraphIndex.available
+    real_suspend = epistemic_graph.EpistemicGraphIndex.suspend_reads
+
+    def spy_available(self: epistemic_graph.EpistemicGraphIndex) -> bool:
+        events.append("available")
+        return real_available(self)
+
+    def spy_suspend(self: epistemic_graph.EpistemicGraphIndex) -> None:
+        events.append("suspend_reads")
+        return real_suspend(self)
+
+    monkeypatch.setattr(epistemic_graph.EpistemicGraphIndex, "available", spy_available)
+    monkeypatch.setattr(epistemic_graph.EpistemicGraphIndex, "suspend_reads", spy_suspend)
+    restarted.finish_startup_recovery()
+
+    assert events, "the startup pass took neither branch"
+    assert events[0] == "suspend_reads", (
+        "durable incoherence must short-circuit ahead of the O(corpus) source proof; "
+        f"observed call order: {events}"
+    )

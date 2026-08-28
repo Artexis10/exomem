@@ -5,6 +5,9 @@ from pathlib import Path
 
 import pytest
 from record_fixtures import copy_dataset_fixture, copy_vehicle_maintenance_fixture, copy_x3_fixture
+from record_presentation_fixtures import manifest_text as presentation_manifest_text
+from record_presentation_fixtures import setup_collection as setup_presentation_collection
+from record_presentation_fixtures import values as presentation_values
 
 from exomem import record_formats
 from exomem import structured_collections as collections
@@ -18,6 +21,22 @@ def _activity_log(vault: Path) -> None:
 
 def _manifest(vault: Path, fixture: Path) -> collections.CollectionManifest:
     return collections.load_manifest(vault, fixture / "_collection.md")
+
+
+def _human_record_manifest() -> str:
+    source = presentation_manifest_text(presentation=False).replace(
+        "natural_key: [observed_on]", "natural_key: [observed_on, subject]"
+    )
+    recipe = """item_filename:
+  version: 1
+  fields: [observed_on, subject]
+item_presentation:
+  version: 1
+  title: subject
+  summary: [observed_on]
+  long_text: [note, provenance]
+"""
+    return source.removesuffix("---\n") + recipe + "---\n"
 
 
 def test_log_append_is_exact_splice_and_replay_is_idempotent(tmp_path: Path) -> None:
@@ -177,6 +196,87 @@ def test_item_append_creates_only_one_deterministic_file(tmp_path: Path) -> None
     assert result["affected_paths"] == [path.relative_to(tmp_path).as_posix()]
     assert "Ordinary readable body." in path.read_text(encoding="utf-8")
     assert len(record_formats.load_adapter(tmp_path, manifest).read().records) == 4
+
+
+def test_record_human_representation_is_written_atomically_and_path_stays_stable(
+    tmp_path: Path,
+) -> None:
+    from exomem import records
+
+    setup_presentation_collection(tmp_path, presentation=False)
+    manifest_path = tmp_path / "Knowledge Base/Records/Observed/_collection.md"
+    manifest_path.write_text(_human_record_manifest(), encoding="utf-8")
+    manifest = collections.load_manifest(tmp_path, manifest_path)
+    snapshot = record_formats.load_adapter(tmp_path, manifest).read()
+
+    added = records.append_record(
+        tmp_path,
+        manifest.path,
+        item=presentation_values(),
+        item_key="11111111-1111-4111-8111-111111111111",
+        expected_container_hash=snapshot.snapshot,
+        why="preserve one readable observation",
+        body="Authored observation context.\n",
+    )
+    path = manifest_path.parent / "Items" / "2026-08-13 — Sample A.md"
+    first = path.read_text(encoding="utf-8")
+    assert added["affected_paths"] == [path.relative_to(tmp_path).as_posix()]
+    assert "# Sample &lt;A&gt;" in first
+    assert "**Observed On:** 2026-08-13" in first
+    assert "Authored observation context.\n" in first
+
+    current = record_formats.load_adapter(tmp_path, manifest).read().records[0]
+    changed = records.update_record(
+        tmp_path,
+        manifest.path,
+        item_key=current.identity.key,
+        changes={"observed_on": "2026-08-14"},
+        expected_container_hash=added["after_container_hash"],
+        expected_item_version=current.source.hash,
+        why="correct the observed date without moving the stable item",
+    )
+
+    assert changed["affected_paths"] == [path.relative_to(tmp_path).as_posix()]
+    assert path.is_file()
+    assert not path.with_name("2026-08-14 — Sample A.md").exists()
+    second = path.read_text(encoding="utf-8")
+    assert "**Observed On:** 2026-08-14" in second
+    assert "Authored observation context.\n" in second
+
+
+def test_shared_presentation_render_failure_rolls_back_the_complete_append(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import records
+
+    setup_presentation_collection(tmp_path, presentation=False)
+    manifest_path = tmp_path / "Knowledge Base/Records/Observed/_collection.md"
+    manifest_path.write_text(_human_record_manifest(), encoding="utf-8")
+    manifest = collections.load_manifest(tmp_path, manifest_path)
+    snapshot = record_formats.load_adapter(tmp_path, manifest).read()
+    manifest_before = manifest_path.read_bytes()
+    log_path = tmp_path / "Knowledge Base/log.md"
+    log_before = log_path.read_bytes()
+
+    def fail_render(*_args: object, **_kwargs: object) -> str:
+        raise collections.CollectionError(
+            "UNRENDERABLE_ITEM_PRESENTATION", "selected value cannot render"
+        )
+
+    monkeypatch.setattr(record_formats, "splice_item_presentation", fail_render)
+    with pytest.raises(collections.CollectionError, match="UNRENDERABLE_ITEM_PRESENTATION"):
+        records.append_record(
+            tmp_path,
+            manifest.path,
+            item=presentation_values(),
+            item_key="11111111-1111-4111-8111-111111111111",
+            expected_container_hash=snapshot.snapshot,
+            why="attempt one readable observation",
+        )
+
+    assert list((manifest_path.parent / "Items").glob("*.md")) == []
+    assert manifest_path.read_bytes() == manifest_before
+    assert log_path.read_bytes() == log_before
 
 
 def test_log_update_replaces_only_target_block_and_direct_edit_is_stale(tmp_path: Path) -> None:
@@ -697,11 +797,16 @@ def test_a_re_stated_append_replays_instead_of_duplicating(tmp_path: Path) -> No
     before = len(parsed.records)
 
     first = records.append_record(
-        tmp_path, manifest.path, item=_service(),
-        expected_container_hash=parsed.snapshot, why="log the completed service",
+        tmp_path,
+        manifest.path,
+        item=_service(),
+        expected_container_hash=parsed.snapshot,
+        why="log the completed service",
     )
     replay = records.append_record(
-        tmp_path, manifest.path, item=_service(),
+        tmp_path,
+        manifest.path,
+        item=_service(),
         expected_container_hash=first["after_container_hash"],
         why="log the completed service",
     )
@@ -719,13 +824,18 @@ def test_the_same_natural_key_with_different_content_refuses(tmp_path: Path) -> 
     manifest = _manifest(tmp_path, fixture)
     parsed = record_formats.load_adapter(tmp_path, manifest).read()
     first = records.append_record(
-        tmp_path, manifest.path, item=_service(),
-        expected_container_hash=parsed.snapshot, why="log the completed service",
+        tmp_path,
+        manifest.path,
+        item=_service(),
+        expected_container_hash=parsed.snapshot,
+        why="log the completed service",
     )
 
     with pytest.raises(collections.CollectionError, match="RECORD_ID_CONFLICT"):
         records.append_record(
-            tmp_path, manifest.path, item=_service(odometer=44_500),
+            tmp_path,
+            manifest.path,
+            item=_service(odometer=44_500),
             expected_container_hash=first["after_container_hash"],
             why="log a different odometer for the same service",
         )
@@ -747,11 +857,16 @@ def test_a_missing_natural_key_field_still_mints_a_random_identity(tmp_path: Pat
     partial.pop("provider")
 
     first = records.append_record(
-        tmp_path, manifest.path, item=partial,
-        expected_container_hash=parsed.snapshot, why="log a service with no provider",
+        tmp_path,
+        manifest.path,
+        item=partial,
+        expected_container_hash=parsed.snapshot,
+        why="log a service with no provider",
     )
     second = records.append_record(
-        tmp_path, manifest.path, item={**partial, "occurred_on": "2026-07-02"},
+        tmp_path,
+        manifest.path,
+        item={**partial, "occurred_on": "2026-07-02"},
         expected_container_hash=first["after_container_hash"],
         why="log another service with no provider",
     )
@@ -775,7 +890,9 @@ def test_an_explicit_item_key_still_wins(tmp_path: Path) -> None:
     explicit = "33333333-3333-4333-8333-333333333333"
 
     result = records.append_record(
-        tmp_path, manifest.path, item=_service(),
+        tmp_path,
+        manifest.path,
+        item=_service(),
         item_key=explicit,
         expected_container_hash=parsed.snapshot,
         why="log the completed service under an explicit identity",
@@ -802,7 +919,8 @@ def test_a_derived_twin_of_a_uuid4_keyed_item_refuses(tmp_path: Path) -> None:
     manifest = _manifest(tmp_path, fixture)
     parsed = record_formats.load_adapter(tmp_path, manifest).read()
     existing = next(
-        record for record in parsed.records
+        record
+        for record in parsed.records
         if record.identity.key == "a8d391a5-c2dc-4e79-b57b-6b2bbcaefd64"
     )
 
@@ -1024,11 +1142,15 @@ def test_a_collection_keyed_on_a_triage_field_refuses_the_same_way(
     )
     shape = {"kind": "outcome", "commitment": "committed", "horizon": "quarter"}
     first = planning.add(
-        tmp_path, keyed, item={"title": "Alpha", "status": "planned", **shape},
+        tmp_path,
+        keyed,
+        item={"title": "Alpha", "status": "planned", **shape},
         why="one planned outcome",
     )
     second = planning.add(
-        tmp_path, keyed, item={"title": "Beta", "status": "active", **shape},
+        tmp_path,
+        keyed,
+        item={"title": "Beta", "status": "active", **shape},
         why="one outcome already moving",
     )
     manifest = collections.load_manifest(tmp_path, tmp_path / keyed)

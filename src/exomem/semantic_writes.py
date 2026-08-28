@@ -31,6 +31,7 @@ from . import (
     semantic_contract,
     semantic_index,
     semantic_language_registry,
+    source_closure,
     temporal,
     vault,
 )
@@ -338,12 +339,21 @@ class SemanticWriteError(ValueError):
     code: str
     reason: str
     validation_findings: tuple[semantic_contract.ContractFinding, ...] = ()
+    details: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         ValueError.__init__(self, f"{self.code}: {self.reason}")
 
     def as_semantic_validation_error(self) -> dict[str, Any] | None:
         """Project only canonical semantic-authoring refusals for public facades."""
+        if self.code == source_closure.UNRESOLVED_CODE:
+            return {
+                "code": self.code,
+                "message": self.reason,
+                "remediation": source_closure.UNRESOLVED_REMEDIATION,
+                **dict(self.details or {}),
+                "mutated": False,
+            }
         canonical = semantic_authoring.AUTHORING_CONTRACT.findings
         authored = tuple(
             finding for finding in self.validation_findings if finding.code in canonical
@@ -785,12 +795,11 @@ class DraftToken:
         # The frozen stamp must be canonical, or committing the same token
         # twice could still produce different bytes.
         stamp_moment = temporal.parse(value["render_stamp"])
-        if stamp_moment is None or temporal.stamp(
-            stamp_moment.instant or stamp_moment.day
-        ) != value["render_stamp"]:
-            raise SemanticWriteError(
-                "INVALID_DRAFT_TOKEN", "draft token has invalid render stamp"
-            )
+        if (
+            stamp_moment is None
+            or temporal.stamp(stamp_moment.instant or stamp_moment.day) != value["render_stamp"]
+        ):
+            raise SemanticWriteError("INVALID_DRAFT_TOKEN", "draft token has invalid render stamp")
         # `render_date` is the author's local day while `render_stamp` folds to
         # UTC (see `temporal`), so on any host with a non-zero offset the two
         # legitimately land on different days -- demanding equality rejected
@@ -852,6 +861,7 @@ class CreationPreflight:
     #: the *before* corpus and so excludes the page being created, which is correct:
     #: a page is never its own destination.
     corpus: semantic_contract.SemanticCorpusContext | None = None
+    source_closure_plan: source_closure.SourceClosurePlan | None = None
 
     @property
     def draft_hash(self) -> str | None:
@@ -950,6 +960,7 @@ class ExistingPreflight:
     primary_guard: vault.PathGuard
     committed_replay: bool
     census_token: tuple | None = None
+    source_closure_plan: source_closure.SourceClosurePlan | None = None
 
     def as_dict(self) -> dict[str, Any]:
         value = {
@@ -1710,6 +1721,25 @@ def _preflight_existing(
     }:
         raise SemanticWriteError("STALE_SEMANTIC_WRITE", "page changed before semantic preflight")
 
+    closure_required = bool(
+        operation == "tier2_overwrite"
+        or source_closure.source_claims(before_source)
+        != source_closure.source_claims(after_source)
+    )
+    closure_plan = source_closure.prepare_source_closure(
+        root,
+        after_source,
+        destination=path,
+        prior_markdown=before_source,
+        required=closure_required,
+    )
+    if closure_required and not closure_plan.inspection.closed:
+        raise SemanticWriteError(
+            source_closure.UNRESOLVED_CODE,
+            source_closure.UNRESOLVED_MESSAGE,
+            details=closure_plan.inspection.public_details(),
+        )
+
     with mutation_timing_span(timings, "preflight.registries"):
         registry = relation_registry.load_registry(root)
         language = semantic_language_registry.load_registry(root)
@@ -1895,6 +1925,7 @@ def _preflight_existing(
         primary_guard,
         committed_replay,
         census_token,
+        closure_plan,
     )
 
 
@@ -2276,7 +2307,28 @@ def _commit_existing(
             preflight.contract_result.blocking_findings,
         )
 
-    auxiliaries = tuple(auxiliary_writes)
+    try:
+        closure_plan = preflight.source_closure_plan or source_closure.prepare_source_closure(
+            root,
+            preflight.after_source,
+            destination=preflight.path,
+            prior_markdown=preflight.before_source,
+            required=bool(
+                preflight.operation == "tier2_overwrite"
+                or source_closure.source_claims(preflight.before_source)
+                != source_closure.source_claims(preflight.after_source)
+            ),
+        )
+        auxiliaries = source_closure.merge_backref_writes(
+            auxiliary_writes,
+            closure_plan.backref_writes,
+        )
+    except source_closure.SourceClosureViolation as error:
+        raise SemanticWriteError(
+            error.code,
+            error.reason,
+            details=error.details,
+        ) from error
     with mutation_timing_span(timings, "commit.embedding_prewarm"):
         _prewarm_embeddings()
     from .writer_lease import active_manager, active_mutation_request_id, log_active_mutation_phase
@@ -2321,6 +2373,21 @@ def _commit_existing(
                 )
         elif timings is not None:
             timings.skipped("commit.revalidate")
+
+        try:
+            source_closure.enforce_source_closure(
+                root,
+                preflight.after_source,
+                destination=preflight.path,
+                prior_markdown=preflight.before_source,
+                prepared=closure_plan,
+            )
+        except source_closure.SourceClosureViolation as error:
+            raise SemanticWriteError(
+                error.code,
+                error.reason,
+                details=error.details,
+            ) from error
 
         result = preflight.contract_result
         if preflight.manifest_install_required:
@@ -2371,8 +2438,7 @@ def _commit_existing(
             # staleness instead of a raw internal error.
             raise SemanticWriteError(
                 "STALE_SEMANTIC_WRITE",
-                "a concurrent write updated a shared auxiliary during commit; "
-                "retry the operation",
+                "a concurrent write updated a shared auxiliary during commit; retry the operation",
             ) from error
         except vault.VaultLockTimeout as error:
             raise SemanticWriteError(
@@ -3364,9 +3430,7 @@ def commit_recovery(
                     preflight.entries, destination_guards, strict=True
                 )
             )
-            semantic_states = {
-                item.after.path: item.after for item in preflight.evaluations
-            }
+            semantic_states = {item.after.path: item.after for item in preflight.evaluations}
 
             def graph_replacement_provider():
                 return graph_producer.replacements_for_semantic_transition(
@@ -3525,6 +3589,17 @@ def preflight_creation(
         vault.parse_frontmatter(source, strict=True)
     except vault.FrontmatterError as error:
         raise SemanticWriteError(error.code, "draft frontmatter is invalid") from error
+    closure_plan = source_closure.prepare_source_closure(
+        root,
+        source,
+        destination=path,
+    )
+    if not closure_plan.inspection.closed:
+        raise SemanticWriteError(
+            source_closure.UNRESOLVED_CODE,
+            source_closure.UNRESOLVED_MESSAGE,
+            details=closure_plan.inspection.public_details(),
+        )
     entry_generation = _entry_commit_generation(root)
     result, state, corpus_census, before_corpus = _evaluate_structural(
         root, destination=path, source=source, operation=operation
@@ -3543,9 +3618,7 @@ def preflight_creation(
             predecessor_path=predecessor_path,
             predecessor_content_hash=predecessor_content_hash,
         )
-        census_token = _capture_validity_stamp(
-            root, entry_generation, corpus_census=corpus_census
-        )
+        census_token = _capture_validity_stamp(root, entry_generation, corpus_census=corpus_census)
         return CreationPreflight(
             "full",
             path,
@@ -3558,6 +3631,7 @@ def preflight_creation(
             state,
             census_token,
             before_corpus,
+            closure_plan,
         )
     applicability: Literal["structural", "not_semantic"] = (
         "structural"
@@ -3577,6 +3651,7 @@ def preflight_creation(
         state,
         census_token,
         before_corpus,
+        closure_plan,
     )
 
 
@@ -3737,6 +3812,22 @@ def _commit_creation(
             _blocking_reason(preflight.contract_result),
             preflight.contract_result.blocking_findings,
         )
+    try:
+        closure_plan = preflight.source_closure_plan or source_closure.prepare_source_closure(
+            root,
+            preflight.source,
+            destination=preflight.destination,
+        )
+        auxiliaries = source_closure.merge_backref_writes(
+            auxiliary_writes,
+            closure_plan.backref_writes,
+        )
+    except source_closure.SourceClosureViolation as error:
+        raise SemanticWriteError(
+            error.code,
+            error.reason,
+            details=error.details,
+        ) from error
     prepared: relation_review._PreparedCreationDraft | None = None
     if preflight.applicability == "full":
         assert preflight.draft_id is not None
@@ -3752,7 +3843,7 @@ def _commit_creation(
             relation_disposition=relation_disposition,
             relation_review_hash=relation_review_hash,
             relation_review_reason=relation_review_reason,
-            auxiliary_writes=auxiliary_writes,
+            auxiliary_writes=auxiliaries,
             draft_token=preflight.draft_token,
             predecessor_path=predecessor_path,
             predecessor_content_hash=predecessor_content_hash,
@@ -3766,6 +3857,19 @@ def _commit_creation(
         operation=f"semantic_creation_{operation}_commit",
         holder_kind="command",
     ):
+        try:
+            source_closure.enforce_source_closure(
+                root,
+                preflight.source,
+                destination=preflight.destination,
+                prepared=closure_plan,
+            )
+        except source_closure.SourceClosureViolation as error:
+            raise SemanticWriteError(
+                error.code,
+                error.reason,
+                details=error.details,
+            ) from error
         if prepared is not None:
             from .governance import catalog_publication
 
@@ -3844,7 +3948,7 @@ def _commit_creation(
             relation_review._record_prevalidated_commit_outcome("reused")
         from .governance import catalog_publication
 
-        writes = [*auxiliary_writes]
+        writes = [*auxiliaries]
         writes.append(
             vault.PlannedWrite(
                 root / preflight.destination,
@@ -3878,8 +3982,7 @@ def _commit_creation(
         except vault.PathGuardError as error:
             raise SemanticWriteError(
                 "STALE_SEMANTIC_WRITE",
-                "a concurrent write updated a shared auxiliary during commit; "
-                "retry the operation",
+                "a concurrent write updated a shared auxiliary during commit; retry the operation",
             ) from error
         finally:
             semantic_index.reset_parent_states(token)

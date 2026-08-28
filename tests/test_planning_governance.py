@@ -28,6 +28,7 @@ def _write_planning_rule(vault: Path, ceiling: int) -> None:
         encoding="utf-8",
     )
 
+
 def test_planning_authorizes_manifest_before_loading_its_identity(tmp_path: Path) -> None:
     from exomem.planning import query
     from exomem.structured_collections import CollectionError
@@ -97,7 +98,7 @@ def test_withheld_duplicate_plan_id_cannot_create_public_ambiguity(tmp_path: Pat
     collection = "Knowledge Base/Planning/Work/_collection.md"
     create_collection(tmp_path, collection, _manifest(), why="create planning collection")
     visible = add(tmp_path, collection, item={"title": "visible"}, why="capture intent")
-    original = tmp_path / "Knowledge Base" / "Planning" / "Work" / "Items" / f"{visible['plan_id']}.md"
+    original = tmp_path / "Knowledge Base" / "Planning" / "Work" / "Items" / "visible.md"
     duplicate_name = "5c252e6f-2639-4ee4-819a-fc9099200e1a"
     duplicate = original.with_name(f"{duplicate_name}.md")
     duplicate.write_text(original.read_text(encoding="utf-8"), encoding="utf-8")
@@ -147,7 +148,7 @@ def test_withheld_item_cannot_shape_planning_totals_order_or_provenance(tmp_path
     add(tmp_path, collection, item={"title": "Alpha visible"}, why="capture intent")
 
     def allow_visible(path: str) -> bool:
-        return hidden["plan_id"] not in path
+        return not path.endswith("/000 private.md")
 
     result = query(
         tmp_path,
@@ -183,15 +184,17 @@ def test_hidden_only_edit_preserves_a_released_planning_continuation(tmp_path: P
     collection = "Knowledge Base/Planning/Work/_collection.md"
     create_collection(tmp_path, collection, _manifest(), why="create planning collection")
     first = add(tmp_path, collection, item={"title": "first"}, why="capture intent")
-    hidden = add(tmp_path, collection, item={"title": "hidden"}, why="capture intent")
+    add(tmp_path, collection, item={"title": "hidden"}, why="capture intent")
     second = add(tmp_path, collection, item={"title": "second"}, why="capture intent")
 
     def allow_visible(path: str) -> bool:
-        return hidden["plan_id"] not in path
+        return not path.endswith("/hidden.md")
 
     page = query(tmp_path, collection, limit=1, sort_by="title", authorize_path=allow_visible)
-    hidden_path = tmp_path / "Knowledge Base" / "Planning" / "Work" / "Items" / f"{hidden['plan_id']}.md"
-    hidden_path.write_text(hidden_path.read_text(encoding="utf-8").replace("hidden", "changed"), encoding="utf-8")
+    hidden_path = tmp_path / "Knowledge Base" / "Planning" / "Work" / "Items" / "hidden.md"
+    hidden_path.write_text(
+        hidden_path.read_text(encoding="utf-8").replace("hidden", "changed"), encoding="utf-8"
+    )
     continued = query(
         tmp_path,
         collection,
@@ -240,7 +243,7 @@ def test_withheld_item_does_not_disclose_evidence_execution_or_history(tmp_path:
         tmp_path,
         collection,
         include_agent_history=True,
-        authorize_path=lambda path: hidden["plan_id"] not in path,
+        authorize_path=lambda path: not path.endswith("/hidden.md"),
     )
 
     serialized = str(result)
@@ -258,7 +261,7 @@ def test_partial_planning_view_refuses_mutation_before_publication(tmp_path: Pat
     collection = "Knowledge Base/Planning/Work/_collection.md"
     create_collection(tmp_path, collection, _manifest(), why="create planning collection")
     visible = add(tmp_path, collection, item={"title": "visible"}, why="capture intent")
-    hidden = add(tmp_path, collection, item={"title": "hidden"}, why="capture intent")
+    add(tmp_path, collection, item={"title": "hidden"}, why="capture intent")
     current = query(tmp_path, collection)
     _write_planning_rule(tmp_path, 6)
     root = tmp_path / "Knowledge Base" / "_Governance"
@@ -266,7 +269,7 @@ def test_partial_planning_view_refuses_mutation_before_publication(tmp_path: Pat
         "governance_version: 1\n"
         "id: 01ARZ3NDEKTSV4RRFFQ69G5F03\n"
         "name: hidden\n"
-        f'paths: ["Planning/Work/Items/{hidden["plan_id"]}.md"]\n',
+        'paths: ["Planning/Work/Items/hidden.md"]\n',
         encoding="utf-8",
     )
     (root / "rules" / "hidden.yaml").write_text(
@@ -286,7 +289,9 @@ def test_partial_planning_view_refuses_mutation_before_publication(tmp_path: Pat
                 changes={"title": "changed"},
                 expected_container_hash=current["snapshot"],
                 expected_item_version=next(
-                    row["item_version"] for row in current["rows"] if row["plan_id"] == visible["plan_id"]
+                    row["item_version"]
+                    for row in current["rows"]
+                    if row["plan_id"] == visible["plan_id"]
                 ),
                 why="change visible intent",
             )
@@ -344,7 +349,7 @@ def test_withheld_parent_does_not_shape_authorized_hierarchy(tmp_path: Path) -> 
         manifest_path,
         filters=[{"column": "plan_id", "op": "eq", "value": initiative_id}],
         hierarchy_mode="ancestors",
-        authorize_path=lambda path: outcome_id not in path,
+        authorize_path=lambda path: not path.endswith("/withheld outcome.md"),
     )
 
     assert [node["plan_id"] for node in result["hierarchy"]["nodes"]] == [initiative_id]
@@ -359,8 +364,8 @@ def test_query_refuses_an_authorized_semantically_invalid_direct_edit(tmp_path: 
     (tmp_path / "Knowledge Base" / "log.md").write_text("# Log\n", encoding="utf-8")
     collection = "Knowledge Base/Planning/Work/_collection.md"
     create_collection(tmp_path, collection, _manifest(), why="create planning collection")
-    added = add(tmp_path, collection, item={"title": "candidate"}, why="capture intent")
-    item = tmp_path / "Knowledge Base" / "Planning" / "Work" / "Items" / f"{added['plan_id']}.md"
+    add(tmp_path, collection, item={"title": "candidate"}, why="capture intent")
+    item = tmp_path / "Knowledge Base" / "Planning" / "Work" / "Items" / "candidate.md"
     item.write_text(
         item.read_text(encoding="utf-8").replace("status: candidate", "status: active"),
         encoding="utf-8",
@@ -389,6 +394,8 @@ def test_planning_inspection_uses_its_exact_typed_egress_envelope(tmp_path: Path
         "diagnostics",
         "audit",
         "saved_views",
+        "presentation",
+        "lifecycle_guards",
     }
     assert set(result["contract"]) == {
         "collection_id",

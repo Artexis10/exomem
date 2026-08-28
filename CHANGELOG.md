@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.64.2](https://github.com/Artexis10/exomem/compare/v0.64.1...v0.64.2) (2026-08-27)
+
+
+### Bug Fixes
+
+* **find:** bound the recall follower wait and name every refusal site ([#881](https://github.com/Artexis10/exomem/issues/881)) ([649132e](https://github.com/Artexis10/exomem/commit/649132ee9ceb35d54b6b5bc92929edc2407bf1b2))
+
+## [0.64.1](https://github.com/Artexis10/exomem/compare/v0.64.0...v0.64.1) (2026-08-27)
+
+
+### Bug Fixes
+
+* **graph:** harden the recovery funnel and tolerate cold-registry recall ([#876](https://github.com/Artexis10/exomem/issues/876)) ([ddd4f42](https://github.com/Artexis10/exomem/commit/ddd4f42ad90c7034d1bf4d3a4befcec0a96364df))
+
+## [0.64.0](https://github.com/Artexis10/exomem/compare/v0.63.1...v0.64.0) (2026-08-27)
+
+
+### ⚠ BREAKING CHANGES
+
+* require source capture and make structured items readable ([#852](https://github.com/Artexis10/exomem/issues/852))
+
+### Features
+
+* require source capture and make structured items readable ([#852](https://github.com/Artexis10/exomem/issues/852)) ([9b447b6](https://github.com/Artexis10/exomem/commit/9b447b6e63d95e0f5caed08d1514facd6c28127f))
+
+
+### Bug Fixes
+
+* **access:** fail closed on transient policy errors and bound graph startup ([#868](https://github.com/Artexis10/exomem/issues/868)) ([84838c0](https://github.com/Artexis10/exomem/commit/84838c0544f4cc3c8e458c4d3520afdfcae9c2ef))
+
+## [0.63.1](https://github.com/Artexis10/exomem/compare/v0.63.0...v0.63.1) (2026-08-26)
+
+
+### Bug Fixes
+
+* **index:** accept durably covered warm-up deferrals in batch reports ([#850](https://github.com/Artexis10/exomem/issues/850)) ([95faf25](https://github.com/Artexis10/exomem/commit/95faf25f60e812b2882e5911b202263750fcad39))
+
 ## [0.63.0](https://github.com/Artexis10/exomem/compare/v0.62.0...v0.63.0) (2026-08-26)
 
 

@@ -1462,7 +1462,10 @@ def test_warm_defer_stays_in_memory_when_durable_receipt_creation_fails(
 
     status = embeddings.upsert_after_write_status(tmp_path, [path])
 
-    assert status.code == "deferred_warmup"
+    # The deferral still parks in memory, but the code names the missing
+    # durable coverage so the batch report cannot treat it as covered
+    # (bound-contended-write-index-refresh).
+    assert status.code == "deferred_warmup_volatile"
     [(item_vault, item_paths, receipts)] = readiness.mark_ready("embeddings")
     assert item_vault == tmp_path
     assert list(item_paths) == [path]

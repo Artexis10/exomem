@@ -103,6 +103,11 @@ _REMEDIATION: dict[str, str] = {
     "STALE_PLAN_CONTAINER": "Re-read the collection and retry with its current container hash.",
     "STALE_PLAN_ITEM": "Re-read the exact plan and retry with its current item version.",
     "INVALID_PLAN_RELATION": "Use valid authorized same-collection Planning relationships.",
+    "UNRESOLVED_SOURCE_CITATION": (
+        "Capture the original material as governed Source or Evidence, then retry the "
+        "unchanged derived write with that governed reference; otherwise remove the "
+        "unsupported citation explicitly."
+    ),
     "INVALID_PLAN_CONTINUATION": "Restart the Planning query without this continuation.",
     "INVALID_CONTINUATION": "Restart governed recall without this continuation.",
     "STALE_PLAN_SNAPSHOT": "Re-run the Planning query against the current snapshot.",
@@ -481,14 +486,15 @@ def _coerce_client_artifact_files(value: Any, name: str, *, cli: bool) -> list[d
     from .commands import _ClientArtifactFiles
 
     try:
-        files = TypeAdapter(_ClientArtifactFiles).validate_python(_coerce_json(value, name, cli=cli))
+        files = TypeAdapter(_ClientArtifactFiles).validate_python(
+            _coerce_json(value, name, cli=cli)
+        )
         if any(
             not isinstance(file, dict)
             or not isinstance(file.get("download_url"), str)
             or not isinstance(file.get("file_id"), str)
             or any(
-                key in file and not isinstance(file[key], str)
-                for key in ("mime_type", "file_name")
+                key in file and not isinstance(file[key], str) for key in ("mime_type", "file_name")
             )
             for file in files
         ):

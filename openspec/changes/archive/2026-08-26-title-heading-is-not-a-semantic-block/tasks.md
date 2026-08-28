@@ -18,4 +18,4 @@
 
 ## 4. Closure
 
-- [ ] 4.1 Once merged, sync the delta into `openspec/specs/` and archive with `openspec archive`, re-running `openspec validate --all --strict` before and after.
+- [x] 4.1 Once merged, sync the delta into `openspec/specs/` and archive with `openspec archive`, re-running `openspec validate --all --strict` before and after.
