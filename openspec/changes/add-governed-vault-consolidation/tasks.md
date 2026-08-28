@@ -215,32 +215,32 @@
 
 ## 4. Fresh destination principals and prospective policy
 
-- [ ] 4.1 Add red tests in `tests/test_consolidation_policy.py` proving source policy,
+- [x] 4.1 Add red tests in `tests/test_consolidation_policy.py` proving source policy,
   audience ids, grants, credentials, escalation tokens, authorization sessions,
   release approvals, receipts, runtime bindings, and review authority never become
   live destination authority. Include coincident-looking source/destination ids and
   prove provenance retention cannot make them executable.
-- [ ] 4.2 Add fixed-vector tests for
+- [x] 4.2 Add fixed-vector tests for
   `destination-principal-attestation/v1`: trusted destination issuer/surface,
   resolved canonical principal, destination vault, purposes, issued/expiry,
   authentication/session binding, nonce, and attestation fingerprint. Cover
   missing/expired/stale/cross-vault/cross-session/cross-issuer/copied/replayed
   attestations and caller-selected principal/audience fields; every invalid case
   must fail before approval/apply without consuming authority.
-- [ ] 4.3 Add red prospective-compile tests for the exact newly authored destination
+- [x] 4.3 Add red prospective-compile tests for the exact newly authored destination
   scope/rule/bridge/exact-release documents, using the hardening change's stable
   conflict-bound acquisition. Cover per-scope grant crossover, default deny, deny
   dominance, overlapping conservative options, non-Markdown unresolved membership,
   pending-policy guard drift, and document/conflict changes between planning and
   apply.
-- [ ] 4.4 Implement the trusted destination attestation verifier on top of the common
+- [x] 4.4 Implement the trusted destination attestation verifier on top of the common
   per-surface authorization context. The surface resolves principal and issuer;
   request data may declare intended purpose but cannot select identity or trust.
-- [ ] 4.5 Implement policy translation inputs as newly authored destination
+- [x] 4.5 Implement policy translation inputs as newly authored destination
   documents compiled through existing governance authoring/bridge/exact-release
   primitives. Store source policy only as authenticated review input/digests and
   reject any copied live-authority artifact.
-- [ ] 4.6 Run
+- [x] 4.6 Run
   `uv run python -m pytest -q tests/test_consolidation_policy.py tests/test_governance_decisions.py tests/test_governance_membership.py tests/test_governance_policy.py tests/test_governance_bridges.py tests/test_governance_tokens.py tests/test_authorization_session_binding.py`.
 
 ## 5. Canonical joint plan and single-use owner confirmation
