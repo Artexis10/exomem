@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Exomem vs built-in assistant memory
 
 Built-in assistant memory and Exomem solve different problems. They work best

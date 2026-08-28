@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 <!-- authority:implementation-reference -->
 
 # Substrate companion control-plane implementation reference

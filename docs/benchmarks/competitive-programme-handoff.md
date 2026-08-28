@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 <!-- authority:implementation-reference -->
 
 # Competitive benchmark programme — full continuation handoff (2026-08-09)

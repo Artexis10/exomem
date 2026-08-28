@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Epistemic Review Studio
 
 The Review Studio is Exomem's browser control plane for the daily epistemic

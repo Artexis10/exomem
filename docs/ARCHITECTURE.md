@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Exomem Architecture
 
 Exomem is an owned-vault memory layer. Markdown files, binary evidence, governed

@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Exomem assistant guide
 
 This guide is for agents using Exomem after the MCP server or connector is

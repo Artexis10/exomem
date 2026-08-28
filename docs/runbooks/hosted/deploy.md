@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Reviewed hosted deployment
 
 ## Preconditions

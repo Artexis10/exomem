@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Exomem product model
 
 Exomem is durable memory with sources, proof, history, and review for MCP-capable agents.

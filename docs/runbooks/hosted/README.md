@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Hosted operations runbooks
 
 Draft operator runbooks cover backend bootstrap, reviewed deploy, secret

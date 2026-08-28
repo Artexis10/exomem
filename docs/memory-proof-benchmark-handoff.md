@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 <!-- authority:implementation-reference -->
 
 # Memory-proof benchmark — full continuation handoff (2026-08-07)

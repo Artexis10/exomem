@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # exomem vs engraph
 
 Point-in-time comparison, inspected 2026-07-01.

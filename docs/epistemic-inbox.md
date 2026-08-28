@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Epistemic Inbox
 
 The Epistemic Inbox is Exomem's daily, review-only answer to "what deserves my

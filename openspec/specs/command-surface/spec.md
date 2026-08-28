@@ -163,8 +163,8 @@ REST binary-blob guard for text fields SHALL be preserved.
 ### Requirement: Connector-encoded batch edits preserve canonical validation
 
 The public `edit_memory` tool SHALL advertise batch items as an object array.
-At runtime, its typed pre-validation adapter MAY also accept connector-supplied
-JSON-object strings for individual items. Each such string SHALL be decoded
+At runtime, its typed pre-validation adapter SHALL also accept connector-supplied JSON-object strings
+for individual items. Each such string SHALL be decoded
 before canonical edit validation; malformed JSON, non-object JSON, missing
 fields, and all other unsupported item types SHALL be rejected through the
 existing `INVALID_EDIT` path. Encoding SHALL NOT relax content safety: decoded text still passes the binary-blob guard in both middleware and the edit leaf.

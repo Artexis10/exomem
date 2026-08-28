@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 <!-- authority:implementation-reference -->
 
 # Handoff — second-granularity timestamps for note knowledge-time

@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Memory-proof benchmark — methodology and audit baseline
 
 > **Rescope (2026-08-09).** An independent adversarial audit (2026-08-08)

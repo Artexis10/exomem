@@ -1,8 +1,12 @@
+<!-- authority:non-specification -->
+
 # Hosted cell operations
 
-This is the operator contract for Exomem's managed hosted profile. It does not
-replace the personal local or remote profiles: ordinary MCP, REST, CLI, and
-single-user deployment remain unchanged.
+This is the operator runbook and implementation reference for Exomem's managed
+hosted profile. OpenSpec and the generated machine contracts are the durable
+specification authority. This guide does not replace the personal local or
+remote profiles: ordinary MCP, REST, CLI, and single-user deployment remain
+unchanged.
 
 The unit of isolation is one single-vault Exomem cell. Substrate is the shared
 control plane and public product. The detailed handoff is in
