@@ -142,7 +142,7 @@ def _classification(path: str) -> str | None:
     lowered = tuple(part.casefold() for part in parts)
     basename = lowered[-1] if lowered else ""
     kb_dir = os.environ.get("EXOMEM_KB_DIRNAME", "").strip().strip("/") or "Knowledge Base"
-    if path == "Knowledge Base/.review-state.json":
+    if path == f"{kb_dir}/.review-state.json":
         return "portable-derived"
     if re.fullmatch(rf"{re.escape(kb_dir)}/\.graph-commit-receipts/[0-9a-f]{{24}}\.json", path):
         return "portable-derived"
