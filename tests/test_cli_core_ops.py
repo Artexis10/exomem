@@ -744,7 +744,7 @@ def test_reserved_path_cli_outcomes_are_presence_independent(
     vault: Path,
     capsys,
 ) -> None:
-    read_argv = ["read_memory", "Knowledge Base/.governance.sqlite", "--json"]
+    read_argv = ["read_memory", "Knowledge Base/_Consolidation/runs/run.json", "--json"]
     write_argv = [
         "manage_memory_file",
         "--operation",
@@ -758,7 +758,6 @@ def test_reserved_path_cli_outcomes_are_presence_independent(
 
     absent_read_code, absent_read_out, _ = _run(read_argv, capsys)
     absent_write_code, absent_write_out, _ = _run(write_argv, capsys)
-    (vault / "Knowledge Base" / ".governance.sqlite").write_bytes(b"private")
     private_run = vault / "Knowledge Base" / "_Consolidation" / "runs" / "run.json"
     private_run.parent.mkdir(parents=True)
     private_run.write_text("private", encoding="utf-8")

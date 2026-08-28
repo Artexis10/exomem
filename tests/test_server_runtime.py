@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from conftest import initialize_vault_state_offline
 
 from exomem import media_processing, readiness, server_runtime
 from exomem.governance import projection_runtime
@@ -17,6 +18,7 @@ def test_initialize_runtime_loads_dotenv_from_service_working_directory(
     monkeypatch.chdir(tmp_path)
     vault = tmp_path / "vault"
     vault.mkdir()
+    initialize_vault_state_offline(vault, source="server runtime dotenv fixture")
     calls: list[tuple[object, bool]] = []
 
     def load_dotenv(*, dotenv_path, override):
@@ -44,6 +46,7 @@ def test_initialize_runtime_does_not_start_workers_before_transport(
 ) -> None:
     vault = tmp_path / "vault"
     vault.mkdir()
+    initialize_vault_state_offline(vault, source="server runtime transport fixture")
     events: list[str] = []
 
     monkeypatch.setattr(server_runtime, "resolve_vault", lambda: vault)

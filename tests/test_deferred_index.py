@@ -6,11 +6,11 @@ import subprocess
 import sys
 from pathlib import Path
 
-from exomem import deferred_index
+from exomem import deferred_index, index_paths
 
 
 def _embedding_sidecar(vault: Path) -> Path:
-    return vault / "Knowledge Base" / ".embeddings.sqlite"
+    return index_paths.sidecar_path(vault)
 
 
 def _seed_embedding_rows(vault: Path, rows: list[tuple[str, float]]) -> None:
@@ -108,6 +108,7 @@ def test_embedding_freshness_uses_percent_safe_uri_and_live_wal_without_changes(
     note.write_text("# current\n", encoding="utf-8")
     rel = note.relative_to(vault).as_posix()
     sidecar = _embedding_sidecar(vault)
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
     writer = sqlite3.connect(sidecar)
     real_connect = sqlite3.connect
     try:

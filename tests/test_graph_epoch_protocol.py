@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import graph_sync, vault, writer_lease
+from exomem import epistemic_graph, graph_sync, vault, writer_lease
 from exomem import hosted_portability as portability
 
 
@@ -785,7 +785,7 @@ def test_acknowledgement_readers_close_the_sidecar_they_open(
         opened.append(conn)
         return conn
 
-    monkeypatch.setattr(sqlite3, "connect", recording_connect)
+    monkeypatch.setattr(epistemic_graph, "_sqlite_connect_owned", recording_connect)
     read_acknowledgement(tmp_path)  # type: ignore[operator]
 
     assert opened, "the acknowledgement reader never opened the sidecar"

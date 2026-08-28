@@ -26,9 +26,14 @@ from exomem import (
     delete_directory,
     delete_file,
     embeddings,
+    epistemic_graph,
+    index_paths,
     index_sync,
+    lexstore,
+    memory_refs,
     recover_from_trash,
     reserved_paths,
+    state_paths,
 )
 from exomem import reconcile as reconcile_module
 from exomem.governance import egress, receipts, store
@@ -71,6 +76,20 @@ def _lifecycle_payload() -> dict[str, object]:
         "exact_state_digest": "c" * 64,
         "causation_id": _OPERATION_ID,
     }
+
+
+def _low_level_sidecar_path(vault: Path, component: str) -> Path:
+    if component in {"lexical", "semantic_units"}:
+        return lexstore.lexical_path(vault)
+    if component == "refs":
+        return memory_refs.sidecar_path(vault)
+    if component == "graph":
+        return epistemic_graph.sidecar_path(vault)
+    if component == "embeddings":
+        return index_paths.sidecar_path(vault)
+    if component == "clip":
+        return index_paths.clip_sidecar_path(vault)
+    raise AssertionError(f"unknown low-level sidecar component: {component}")
 
 
 def _write_restricting_policy(vault: Path, pattern: str) -> None:
@@ -2077,7 +2096,8 @@ def test_direct_residue_probe_blocks_terminal_even_when_fanout_claims_success(
     target = vault / rel
     target.write_text("# Indexed secret\n", encoding="utf-8")
     _write_restricting_policy(vault, "Notes/Insights/stale-row.md")
-    lexical = vault / "Knowledge Base" / ".lexical.sqlite"
+    state_paths.ensure_vault_state_dir(vault)
+    lexical = lexstore.lexical_path(vault)
     conn = sqlite3.connect(lexical)
     conn.execute("CREATE TABLE pages(path TEXT PRIMARY KEY)")
     conn.execute("CREATE TABLE semantic_units(parent_path TEXT)")
@@ -2162,7 +2182,10 @@ def test_direct_residue_probes_each_low_level_sidecar(
 
     rel = "Knowledge Base/Notes/Insights/probe.md"
     item = lifecycle.ManifestItem(rel, "Knowledge Base/_trash/probe.md", "a" * 64, 1, "file", f"sha256:{'a' * 64}")
-    conn = sqlite3.connect(vault / "Knowledge Base" / sidecar)
+    state_paths.ensure_vault_state_dir(vault)
+    database = _low_level_sidecar_path(vault, component)
+    assert database.name == sidecar
+    conn = sqlite3.connect(database)
     conn.executescript(schema)
     conn.execute(insert, (rel,))
     conn.commit()
@@ -3084,7 +3107,9 @@ def test_video_deletion_proves_scene_child_sidecar_residue_absent(
         encoding="utf-8",
     )
     sidecar_rel = sidecar.relative_to(vault).as_posix()
-    lexical = sqlite3.connect(vault / "Knowledge Base" / ".lexical.sqlite")
+    state_paths.ensure_vault_state_dir(vault)
+    lexical_path = lexstore.lexical_path(vault)
+    lexical = sqlite3.connect(lexical_path)
     lexical.executescript(
         "CREATE TABLE pages(path TEXT PRIMARY KEY);"
         "CREATE TABLE semantic_units(parent_path TEXT)"

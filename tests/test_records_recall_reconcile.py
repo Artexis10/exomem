@@ -336,14 +336,13 @@ def test_census_rejects_symlinked_kb_parent_without_mutating_external_database(
 ) -> None:
     from exomem import claims
 
-    external_root = tmp_path / "external-root"
-    external = claims.ClaimIndex(external_root)
+    external = claims.ClaimIndex(tmp_path)
     with _committed(external._connect()) as conn:
         conn.execute(
             "INSERT INTO claims(file_path, claim_text, checksum, vector, file_mtime) "
             "VALUES ('../../external.md', 'private', 'checksum', X'00', 0)"
         )
-    sidecar = claims.sidecar_path(external_root)
+    sidecar = claims.sidecar_path(tmp_path)
     with _sqlite(sidecar) as conn:
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     kb = tmp_path / "Knowledge Base"

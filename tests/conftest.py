@@ -35,11 +35,17 @@ FIXTURE_VAULT = REPO_ROOT / "tests" / "fixtures"
 
 
 def initialize_vault_state_offline(vault_root: Path, *, source: str) -> None:
-    """Initialize isolated fixture state through the production offline seam."""
+    """Initialize one explicitly constructed fixture through the offline seam.
+
+    This is deliberately opt-in rather than an autouse repair: tests that
+    exercise legacy or unready placement must retain the production refusal.
+    """
     from exomem import state_migration
 
     authority = state_migration.assert_offline_migration_authority(source=source)
     state_migration.migrate_vault_state_offline(vault_root, authority=authority)
+    state_migration.reset_state_resolution_cache_for_tests()
+    state_migration.require_vault_state_ready(vault_root)
 
 
 # The benchmark package (benchmarks/membench) deliberately lives outside src/

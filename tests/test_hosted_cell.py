@@ -1100,6 +1100,23 @@ def test_provisioning_is_idempotent_machine_readable_and_non_destructive(
     assert not conflict.log_root.exists()
 
 
+def test_provisioning_publishes_bound_external_state_before_return(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A provisioned cell may be started without another state-creation path."""
+    from exomem import state_migration
+
+    values = _env(tmp_path)
+    config = HostedCellConfig.from_env(values, require_provisioned=False)
+    monkeypatch.setenv("EXOMEM_HOSTED_STATE_ROOT", str(config.state_root))
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(config.state_root / "vault-state"))
+
+    provision_hosted_cell(config)
+
+    resolution = state_migration.require_vault_state_ready(config.vault_root)
+    assert resolution.state_dir.parent == config.state_root / "vault-state"
+
+
 def test_provisioning_converges_after_interrupted_staged_publication(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

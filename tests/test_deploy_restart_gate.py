@@ -226,6 +226,7 @@ _FAILED_START_RECEIPT_DRIVER = """
         [int]$OriginalPort,
         [int]$TargetPort,
         [int]$TargetWorkerPid,
+        [int]$TargetListenerPid,
         [ValidateSet(
             "publish",
             "enumeration-unavailable",
@@ -239,7 +240,13 @@ _FAILED_START_RECEIPT_DRIVER = """
     $ErrorActionPreference = "Stop"
     $env:EXOMEM_TRANSITION_RECEIPT_ROOT = $ReceiptRoot
     . $Common
-    if ($Mode -eq "enumeration-unavailable") {
+    if ($Mode -eq "publish") {
+        function Get-ExomemListenerPidsForPort {
+            param([int]$Port)
+            if ($Port -eq $TargetPort) { return @($TargetListenerPid) }
+            return @()
+        }
+    } elseif ($Mode -eq "enumeration-unavailable") {
         function Get-ExomemListenerPidsForPort {
             throw "injected listener enumeration unavailable"
         }
@@ -1210,6 +1217,8 @@ class TestStoppedGate:
                 str(original_port),
                 "-TargetWorkerPid",
                 str(target_worker_pid),
+                "-TargetListenerPid",
+                str(child.pid),
                 "-Mode",
                 "publish",
             )
@@ -1218,6 +1227,9 @@ class TestStoppedGate:
             assert payload["phase"] == "failed"
             assert target_worker_pid in payload["observed_pids"]
             assert child.pid in payload["observed_pids"]
+            proof_pids = set(payload["captured_pids"] + payload["observed_pids"])
+            assert target_worker_pid in proof_pids
+            assert child.pid in proof_pids
 
             child.stdin.write("close\n")
             child.stdin.flush()

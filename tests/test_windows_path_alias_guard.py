@@ -16,6 +16,7 @@ from exomem import (
     graph_sync,
     mutation_lock,
     reserved_paths,
+    state_paths,
     writer_lease,
 )
 from exomem import vault as vault_module
@@ -25,15 +26,16 @@ from exomem.vault import PlannedWrite
 def test_epoch_writes_preserve_the_caller_vault_spelling(
     vault: Path,
 ) -> None:
-    """Internal graph artifacts must share an alias caller's namespace spelling."""
+    """Graph artifacts derive from the alias caller's canonical state identity."""
     alias = vault / ".." / vault.name
     note = alias / "Knowledge Base" / "Notes" / "alias-planning.md"
     writes = graph_sync.epoch_writes(alias, (PlannedWrite(note, "# Alias\n"),))
 
     assert writes is not None
     floor, checkpoint = writes
-    assert floor.path.parent == alias / "Knowledge Base"
-    assert checkpoint.path.parent == alias / "Knowledge Base"
+    expected_state_dir = state_paths.vault_state_dir(alias)
+    assert floor.path.parent == expected_state_dir
+    assert checkpoint.path.parent == expected_state_dir
 
 
 def test_census_accepts_epoch_artifacts_from_an_alias_root(vault: Path) -> None:

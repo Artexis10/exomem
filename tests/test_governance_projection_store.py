@@ -362,9 +362,9 @@ def test_publishing_a_next_namespace_keeps_prior_namespace_identities(tmp_path: 
 
     assert {
         projection_store.variant_store_path(tmp_path, first_key)
-        .relative_to(tmp_path)
+        .relative_to(state_paths.vault_state_dir(tmp_path))
         .as_posix(),
         projection_store.variant_store_path(tmp_path, second_key)
-        .relative_to(tmp_path)
+        .relative_to(state_paths.vault_state_dir(tmp_path))
         .as_posix(),
     } <= set(published)

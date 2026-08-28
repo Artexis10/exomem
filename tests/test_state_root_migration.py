@@ -1037,16 +1037,22 @@ def test_dual_state_without_marker_refuses_to_guess(tmp_path: Path) -> None:
     assert (state_dir / ".graph-sync.json").read_bytes() == b'{"epoch": "fresh-build"}'
     assert (vault / kb_dirname() / ".graph-sync.json").is_file()
     # And the refusal is wholesale: an external root of unknown provenance is
-    # never merged into — no family was partially migrated, no migration
-    # bookkeeping was created beside the unrecognized state.
-    for name in members:
-        assert (vault / kb_dirname() / Path(name)).is_file(), (
-            f"{name} left the vault although the placement was refused"
-        )
+    # never merged into — no family was partially migrated and no manifest
+    # bookkeeping was created beside the unrecognized state. The held offline
+    # attempt may leave its regular, bounded coordination lock behind.
+    for name, expected_bytes in members.items():
+        source = vault / kb_dirname() / Path(name)
+        assert source.is_file(), f"{name} left the vault although the placement was refused"
+        assert source.read_bytes() == expected_bytes
     external_entries = {entry.name for entry in os.scandir(state_dir)}
-    assert external_entries == {".graph-sync.json"}, (
+    assert external_entries == {".graph-sync.json", state_migration._LOCK_NAME}, (
         f"the refused external root was written to: {sorted(external_entries)}"
     )
+    lock = state_dir / state_migration._LOCK_NAME  # noqa: SLF001 - migration fixture
+    assert lock.is_file()
+    assert not lock.is_symlink()
+    assert lock.stat().st_size <= 4096
+    assert not (state_dir / state_migration.MANIFEST_NAME).exists()
 
 
 def test_a_vault_with_neither_builds_fresh(tmp_path: Path) -> None:
@@ -1069,6 +1075,25 @@ def test_a_vault_with_neither_builds_fresh(tmp_path: Path) -> None:
     )
     assert manifest["state"] == "complete"
     assert manifest["vault_identity"] == state_paths.vault_state_key(vault)
+
+
+def test_fresh_migration_caches_the_canonical_ready_resolution(tmp_path: Path) -> None:
+    """A fresh root moves no bytes but is immediately admissible for startup."""
+    from exomem import state_migration, state_paths
+    from exomem.kbdir import kb_dirname
+
+    vault = tmp_path / "vault"
+    (vault / kb_dirname()).mkdir(parents=True)
+    _reset_resolution_cache()
+
+    migration = _migrate(vault)
+
+    assert migration == state_migration.StateResolution(
+        state_paths.vault_state_dir(vault), migrated=False, dual_state=False
+    )
+    assert state_migration.require_vault_state_ready(vault) == state_migration.StateResolution(
+        state_paths.vault_state_dir(vault), migrated=True, dual_state=False
+    )
 
 
 def test_doctor_placement_is_ok_after_a_clean_migration(tmp_path: Path) -> None:

@@ -36,6 +36,7 @@ from exomem import (
     scene_frames,
     semantic_contract,
     semantic_writes,
+    state_paths,
     writer_lease,
 )
 from exomem import (
@@ -3824,11 +3825,12 @@ def test_never_enrolled_refuses_broken_activation_or_workspace_aliases(
         governance_enrolled=False,
         now=now,
     )
-    (kb / ".governance.sqlite").symlink_to(tmp_path / "missing-store")
+    state_dir = state_paths.ensure_vault_state_dir(vault)
+    (state_dir / ".governance.sqlite").symlink_to(tmp_path / "missing-store")
 
     assert policy.load(vault).blocked
 
-    (kb / ".governance.sqlite").unlink()
+    (state_dir / ".governance.sqlite").unlink()
     (kb / "_Governance").symlink_to(tmp_path / "missing-workspace", target_is_directory=True)
 
     assert policy.load(vault).blocked
@@ -3852,7 +3854,10 @@ def test_never_enrolled_refuses_orphaned_activation_store_family(
         governance_enrolled=False,
         now=now,
     )
-    (kb / f".governance.sqlite{suffix}").write_bytes(b"orphaned activation state")
+    state_dir = state_paths.ensure_vault_state_dir(vault)
+    (state_dir / f".governance.sqlite{suffix}").write_bytes(
+        b"orphaned activation state"
+    )
 
     assert policy.load(vault).blocked
 

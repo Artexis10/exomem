@@ -53,6 +53,18 @@ def _fake_python(path: Path) -> None:
             sys.argv = sys.argv[1:]
             runpy.run_path(script, run_name="__main__")
 
+        if len(sys.argv) == 4 and sys.argv[1] == "-":
+            _, _, source_raw, destination_raw = sys.argv
+            source = Path(source_raw)
+            destination = Path(destination_raw)
+            temporary = destination.with_name(f".{destination.name}.fake-tmp")
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            temporary.write_bytes(source.read_bytes())
+            temporary.chmod(stat.S_IRUSR | stat.S_IWUSR)
+            temporary.replace(destination)
+            log("durably publish service env")
+            raise SystemExit(0)
+
         if len(sys.argv) == 6 and sys.argv[1] == "-":
             _, _, unit_raw, platform, preferred, mode = sys.argv
             unit = Path(unit_raw)
@@ -95,6 +107,7 @@ def _fake_python(path: Path) -> None:
 
         if len(sys.argv) > 1 and sys.argv[1] == "-" and len(sys.argv) == 8:
             _, _, env_path, systemd_path, process_path, xml_path, log_dir, legacy = sys.argv
+            assert Path(systemd_path) != Path(os.environ["FAKE_SERVICE_ENV_FILE"])
             values = {}
             for raw in Path(env_path).read_text(encoding="utf-8").splitlines():
                 line = raw.strip()
@@ -229,7 +242,16 @@ def _fixture(tmp_path: Path, *, os_name: str = "Linux", arch: str = "x86_64") ->
         bin_dir / "uv",
         '''
         #!/bin/sh
+        if [ -n "${FAKE_EXPECT_STATE_ROOT:-}" ]; then
+            expected="EXOMEM_STATE_ROOT=\"${FAKE_EXPECT_STATE_ROOT}\""
+            grep -Fx "$expected" "$FAKE_SERVICE_ENV_FILE" >/dev/null || exit 1
+        fi
         printf 'uv %s\n' "$*" >> "$TRACE_FILE"
+        if [ -n "${FAKE_UV_FAIL_ONCE_MARKER:-}" ] \
+            && [ ! -e "$FAKE_UV_FAIL_ONCE_MARKER" ]; then
+            : > "$FAKE_UV_FAIL_ONCE_MARKER"
+            exit 1
+        fi
         exit 0
         ''',
     )
@@ -368,6 +390,7 @@ def _fixture(tmp_path: Path, *, os_name: str = "Linux", arch: str = "x86_64") ->
             "FAKE_LIVE_VERSION": "9.9.9",
             "XDG_CONFIG_HOME": str(tmp_path / "config"),
             "XDG_DATA_HOME": str(tmp_path / "data"),
+            "FAKE_SERVICE_ENV_FILE": str(tmp_path / "config" / "exomem" / "service.env"),
         }
     )
     return env, service_root, env_file
@@ -449,6 +472,52 @@ def test_linux_release_install_renders_env_gates_then_verifies(tmp_path: Path) -
     assert stat.S_IMODE(service_env.stat().st_mode) == 0o600
     assert "-> 401 (healthy, OAuth enforced)" in result.stdout
     assert "version:    9.9.9" in result.stdout
+
+
+def test_linux_fresh_install_persists_the_state_root_before_target_install(
+    tmp_path: Path,
+) -> None:
+    env, service_root, env_file = _fixture(tmp_path)
+    expected_state_root = tmp_path / "home" / ".local" / "state" / "exomem" / "state"
+    env["FAKE_EXPECT_STATE_ROOT"] = str(expected_state_root)
+
+    result = _invoke(env, service_root, env_file, "--profile", "lean")
+
+    assert result.returncode == 0, result.stderr
+    service_env = Path(env["FAKE_SERVICE_ENV_FILE"])
+    assert f'EXOMEM_STATE_ROOT="{expected_state_root}"' in service_env.read_text(
+        encoding="utf-8"
+    )
+
+
+def test_linux_fresh_install_retry_keeps_its_persisted_state_root(tmp_path: Path) -> None:
+    env, service_root, env_file = _fixture(tmp_path)
+    initial_state_root = tmp_path / "first-state-root"
+    env["EXOMEM_STATE_ROOT"] = str(initial_state_root)
+    env["FAKE_EXPECT_STATE_ROOT"] = str(initial_state_root)
+    env["FAKE_UV_FAIL_ONCE_MARKER"] = str(tmp_path / "uv-failed-once")
+
+    failed = _invoke(env, service_root, env_file, "--profile", "lean")
+
+    assert failed.returncode != 0
+    env["EXOMEM_STATE_ROOT"] = str(tmp_path / "different-state-root")
+    resumed = _invoke(env, service_root, env_file, "--profile", "lean")
+
+    assert resumed.returncode == 0, resumed.stderr
+    service_env = Path(env["FAKE_SERVICE_ENV_FILE"])
+    assert f'EXOMEM_STATE_ROOT="{initial_state_root}"' in service_env.read_text(
+        encoding="utf-8"
+    )
+
+
+def test_posix_service_env_publication_flushes_and_replaces_a_staged_file() -> None:
+    text = INSTALL_SH.read_text(encoding="utf-8")
+
+    assert 'durable_publish_service_env "$SERVICE_ENV_STAGING_FILE"' in text
+    assert "os.fsync(handle.fileno())" in text
+    assert "os.replace(temporary, destination)" in text
+    assert "os.fsync(directory_fd)" in text
+    assert "Path(systemd_path).write_text" not in text
 
 
 def test_default_release_profile_is_standard_multimodal(tmp_path: Path) -> None:

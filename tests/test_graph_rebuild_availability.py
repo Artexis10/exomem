@@ -510,7 +510,7 @@ def test_rebuild_graph_dry_run_previews_unavailable_reset_without_mutating(
     live.parent.mkdir(parents=True, exist_ok=True)
     live.write_bytes(b"old graph")
     before = {
-        path.relative_to(tmp_path).as_posix(): path.read_bytes()
+        path.relative_to(live.parent).as_posix(): path.read_bytes()
         for path in (graph_sync.floor_path(tmp_path), graph_sync.checkpoint_path(tmp_path), live)
     }
 
@@ -522,7 +522,7 @@ def test_rebuild_graph_dry_run_previews_unavailable_reset_without_mutating(
     assert report.graph_quarantine_id is None
     assert graph_sync.registered_checkpoint(tmp_path) is None
     assert {
-        path.relative_to(tmp_path).as_posix(): path.read_bytes()
+        path.relative_to(live.parent).as_posix(): path.read_bytes()
         for path in (graph_sync.floor_path(tmp_path), graph_sync.checkpoint_path(tmp_path), live)
     } == before
 
@@ -532,8 +532,9 @@ def test_dry_run_census_never_recovers_an_interrupted_reset(
 ) -> None:
     graph_sync._write_checkpoint(tmp_path, _checkpoint(1))
     graph_sync._write_floor(tmp_path, graph_sync.GraphSyncGenerationFloor.create(2))
-    kb = tmp_path / "Knowledge Base"
-    (kb / ".graph.sqlite").write_bytes(b"graph")
+    live = epistemic_graph.sidecar_path(tmp_path)
+    live.parent.mkdir(parents=True)
+    live.write_bytes(b"graph")
 
     monkeypatch.setattr(
         graph_sync,
@@ -552,9 +553,9 @@ def test_recovered_isolated_reset_requires_exact_quarantine_identity(
     tmp_path: Path,
 ) -> None:
     reset = graph_sync.GraphReset("a" * 24, (".graph.sqlite",), "isolated")
-    kb = tmp_path / "Knowledge Base"
-    kb.mkdir()
-    quarantine = kb / f".graph-reset-{'a' * 24}"
+    state_dir = epistemic_graph.sidecar_path(tmp_path).parent
+    state_dir.mkdir(parents=True)
+    quarantine = state_dir / f".graph-reset-{'a' * 24}"
     quarantine.mkdir()
     graph = quarantine / ".graph.sqlite"
     graph.write_bytes(b"quarantined")
@@ -574,11 +575,12 @@ def test_recovered_isolated_reset_requires_exact_quarantine_identity(
 def test_unavailable_reset_quarantines_only_the_live_graph_set(tmp_path: Path) -> None:
     graph_sync._write_checkpoint(tmp_path, _checkpoint(1))
     graph_sync._write_floor(tmp_path, graph_sync.GraphSyncGenerationFloor.create(2))
-    kb = tmp_path / "Knowledge Base"
-    live = kb / ".graph.sqlite"
-    companion = kb / ".graph.sqlite-wal"
-    receipt = kb / ".graph-commit-receipts" / "receipt.json"
-    note = kb / "Notes/unchanged.md"
+    live = epistemic_graph.sidecar_path(tmp_path)
+    state_dir = live.parent
+    state_dir.mkdir(parents=True)
+    companion = live.with_name(".graph.sqlite-wal")
+    receipt = state_dir / ".graph-commit-receipts" / "receipt.json"
+    note = tmp_path / "Knowledge Base/Notes/unchanged.md"
     live.write_bytes(b"main")
     companion.write_bytes(b"wal")
     receipt.parent.mkdir()
@@ -589,7 +591,7 @@ def test_unavailable_reset_quarantines_only_the_live_graph_set(tmp_path: Path) -
     reset = graph_sync.isolate_unavailable_graph_lineage(tmp_path)
 
     assert reset is not None
-    quarantine = kb / f".graph-reset-{reset.operation_id}"
+    quarantine = state_dir / f".graph-reset-{reset.operation_id}"
     assert (quarantine / ".graph.sqlite").read_bytes() == b"main"
     assert (quarantine / ".graph.sqlite-wal").read_bytes() == b"wal"
     assert receipt.read_bytes() == b"receipt"
@@ -682,9 +684,10 @@ def test_unavailable_reset_rolls_back_a_partial_move(tmp_path: Path, monkeypatch
 
     graph_sync._write_checkpoint(tmp_path, _checkpoint(1))
     graph_sync._write_floor(tmp_path, graph_sync.GraphSyncGenerationFloor.create(2))
-    kb = tmp_path / "Knowledge Base"
-    (kb / ".graph.sqlite").write_bytes(b"main")
-    (kb / ".graph.sqlite-wal").write_bytes(b"wal")
+    live = epistemic_graph.sidecar_path(tmp_path)
+    live.parent.mkdir(parents=True)
+    live.write_bytes(b"main")
+    live.with_name(".graph.sqlite-wal").write_bytes(b"wal")
     original = mutation_lock.rename_retained_regular_file
     calls = 0
 
@@ -704,8 +707,8 @@ def test_unavailable_reset_rolls_back_a_partial_move(tmp_path: Path, monkeypatch
         graph_sync.isolate_unavailable_graph_lineage(tmp_path)
 
     assert calls == 3
-    assert (kb / ".graph.sqlite").read_bytes() == b"main"
-    assert (kb / ".graph.sqlite-wal").read_bytes() == b"wal"
+    assert live.read_bytes() == b"main"
+    assert live.with_name(".graph.sqlite-wal").read_bytes() == b"wal"
 
 
 def test_nonlegacy_malformed_floor_cannot_be_overwritten_by_a_new_write(tmp_path: Path) -> None:

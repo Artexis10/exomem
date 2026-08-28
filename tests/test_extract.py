@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import extract, speaker_attribution, voice_embed, voice_profiles
+from exomem import extract, speaker_attribution, state_paths, voice_embed, voice_profiles
 
 
 @pytest.mark.parametrize(
@@ -392,8 +392,16 @@ def test_speaker_verification_uses_resolver_match_metadata_not_label_shape(
     monkeypatch.setattr(
         extract, "_run_diarization", lambda _path: [(0.0, 1.0, "SPEAKER_00")]
     )
-    monkeypatch.setattr(voice_profiles, "voice_profiles_path", lambda root: root / "profiles")
-    monkeypatch.setattr(voice_profiles, "load_profiles", lambda _path: {"profile": object()})
+    monkeypatch.setattr(
+        voice_profiles,
+        "voice_profiles_path",
+        lambda root: state_paths.vault_state_dir(root) / "profiles",
+    )
+    monkeypatch.setattr(
+        voice_profiles,
+        "load_profiles",
+        lambda _path, **_kwargs: {"profile": object()},
+    )
     monkeypatch.setattr(voice_embed, "embed_spans", lambda *_a, **_kw: object())
     monkeypatch.setattr(
         speaker_attribution,
@@ -630,7 +638,11 @@ def test_readiness_healthy_logs_info_with_profiles(
     monkeypatch.setenv("EXOMEM_DIARIZE", "1")
     monkeypatch.setenv("HUGGINGFACE_TOKEN", "hf_secret_value_123")
     monkeypatch.setattr(extract, "_diarizer_sidecar_python", lambda: Path(sys.executable))
-    monkeypatch.setattr(voice_profiles, "load_profiles", lambda p: {"Hugo": object(), "Maria": object()})
+    monkeypatch.setattr(
+        voice_profiles,
+        "load_profiles",
+        lambda _path, **_kwargs: {"Hugo": object(), "Maria": object()},
+    )
     with caplog.at_level(logging.INFO, logger="exomem.extract"):
         extract.log_diarization_readiness(tmp_path)
     rec = _readiness_record(caplog)
@@ -715,10 +727,10 @@ def test_resolve_named_labels_prefers_explicit_vault_root(
 
     def _spy_path(root):
         seen.append(root)
-        return root / "Knowledge Base" / ".voice_profiles.json"
+        return state_paths.vault_state_dir(root) / ".voice_profiles.json"
 
     monkeypatch.setattr(voice_profiles, "voice_profiles_path", _spy_path)
-    monkeypatch.setattr(voice_profiles, "load_profiles", lambda p: {})
+    monkeypatch.setattr(voice_profiles, "load_profiles", lambda _path, **_kwargs: {})
     out = extract._resolve_named_labels(
         Path("x.wav"), [(0.0, 1.0, "SPEAKER_00")], vault_root=tmp_path
     )

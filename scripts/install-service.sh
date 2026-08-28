@@ -254,6 +254,13 @@ VAULT="$(exomem_dotenv_file_value "$ENV_FILE" EXOMEM_VAULT_PATH)"
 [[ -n "$VAULT" ]] || die "EXOMEM_VAULT_PATH is required in $ENV_FILE"
 DOTENV_STATE_ROOT="$(exomem_dotenv_file_value "$ENV_FILE" EXOMEM_STATE_ROOT)"
 PREFERRED_STATE_ROOT="${EXOMEM_STATE_ROOT:-${DOTENV_STATE_ROOT:-$(exomem_platform_state_root)}}"
+[[ "$PREFERRED_STATE_ROOT" == /* ]] \
+    || die "managed EXOMEM_STATE_ROOT must be absolute"
+PERSISTED_STATE_ROOT="$(exomem_dotenv_file_value "$SERVICE_ENV_FILE" EXOMEM_STATE_ROOT)"
+if [[ -n "$PERSISTED_STATE_ROOT" ]]; then
+    [[ "$PERSISTED_STATE_ROOT" == /* ]] \
+        || die "managed EXOMEM_STATE_ROOT must be absolute"
+fi
 WORKER_BEFORE=0
 WORKER_AFTER=0
 RESUMING=0
@@ -282,20 +289,66 @@ if [[ "$EXISTING_SERVICE" == 1 ]]; then
         die "existing service must be running with a capturable worker for first entry; use --resume-stopped-transition only after a failed transition"
     fi
 else
-    MANAGED_STATE_ROOT="$PREFERRED_STATE_ROOT"
-    [[ "$MANAGED_STATE_ROOT" == /* ]] \
-        || die "managed EXOMEM_STATE_ROOT must be absolute"
+    MANAGED_STATE_ROOT="${PERSISTED_STATE_ROOT:-$PREFERRED_STATE_ROOT}"
     exomem_assert_listener_unbound "$PORT" \
         || die "fresh install cannot prove its listener is unbound"
 fi
 
+durable_publish_service_env() {
+    local source="$1"
+    "$VENV_PYTHON" - "$source" "$SERVICE_ENV_FILE" <<'PY'
+from __future__ import annotations
+
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+source = Path(sys.argv[1])
+destination = Path(sys.argv[2])
+payload = source.read_bytes()
+destination.parent.mkdir(parents=True, exist_ok=True)
+descriptor, temporary_name = tempfile.mkstemp(
+    prefix=f".{destination.name}.", dir=destination.parent
+)
+temporary = Path(temporary_name)
+try:
+    with os.fdopen(descriptor, "wb") as handle:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, destination)
+    directory_fd = os.open(destination.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+except BaseException:
+    temporary.unlink(missing_ok=True)
+    raise
+PY
+}
+
+persist_fresh_state_root_binding() {
+    local staged rendered
+    staged="$(mktemp "$CONFIG_ROOT/installer-state-root.XXXXXX")"
+    rendered="${MANAGED_STATE_ROOT//\\/\\\\}"
+    rendered="${rendered//\"/\\\"}"
+    printf 'EXOMEM_STATE_ROOT="%s"\n' "$rendered" > "$staged"
+    durable_publish_service_env "$staged"
+    rm -f "$staged"
+}
+
 TRANSITION_BEGAN=0
 TRANSITION_SUCCEEDED=0
 PROCESS_ENV_FILE=""
+SERVICE_ENV_STAGING_FILE=""
 cleanup() {
     local status=$?
     trap - EXIT
     [[ -z "$PROCESS_ENV_FILE" ]] || rm -f "$PROCESS_ENV_FILE"
+    [[ -z "$SERVICE_ENV_STAGING_FILE" ]] || rm -f "$SERVICE_ENV_STAGING_FILE"
     if [[ "$TRANSITION_BEGAN" == 1 && "$TRANSITION_SUCCEEDED" == 0 ]]; then
         local observed proof_ok=1
         observed="$(exomem_service_worker_pid "$SERVICE_ID")"
@@ -369,6 +422,11 @@ if [[ "$EXISTING_SERVICE" == 1 ]]; then
     exomem_update_transition_receipt \
         "$VENV_PYTHON" "$TRANSITION_RECEIPT" "$SERVICE_ID" "$BINDING_PATH" \
         "$MANAGED_STATE_ROOT" "$VAULT" "$PORT" bound
+elif [[ -z "$PERSISTED_STATE_ROOT" ]]; then
+    # A first install has no unit to bind yet, so create the durable env-file
+    # binding before replacing package bytes. Later rendering keeps this exact
+    # root while adding the rest of the parsed dotenv environment.
+    persist_fresh_state_root_binding
 fi
 export EXOMEM_STATE_ROOT="$MANAGED_STATE_ROOT"
 
@@ -383,14 +441,15 @@ if [[ "$EXISTING_SERVICE" == 1 ]]; then
 fi
 
 PROCESS_ENV_FILE="$(mktemp "$CONFIG_ROOT/installer-env.XXXXXX")"
+SERVICE_ENV_STAGING_FILE="$(mktemp "$CONFIG_ROOT/service.env-rendered.XXXXXX")"
 
 # Parse dotenv with the package's own dependency, render systemd/launchd-safe
 # forms, and create a shell-quoted temporary export file for doctor.
 EXOMEM_MANAGED_STATE_ROOT_DEFAULT="${EXOMEM_STATE_ROOT:-$(exomem_platform_state_root)}" \
 EXOMEM_PROFILE_EMBED_BACKEND="$EMBED_BACKEND" \
-"$VENV_PYTHON" - \
+    "$VENV_PYTHON" - \
     "$ENV_FILE" \
-    "$SERVICE_ENV_FILE" \
+    "$SERVICE_ENV_STAGING_FILE" \
     "$PROCESS_ENV_FILE" \
     "$LAUNCHD_ENV_FILE" \
     "$LOG_DIR" \
@@ -443,9 +502,10 @@ if legacy == "1":
 def systemd_quote(value: str) -> str:
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
-Path(systemd_path).write_text(
-    "".join(f"{key}={systemd_quote(value)}\n" for key, value in values.items()),
-    encoding="utf-8",
+Path(systemd_path).write_bytes(
+    "".join(f"{key}={systemd_quote(value)}\n" for key, value in values.items()).encode(
+        "utf-8"
+    )
 )
 Path(process_path).write_text(
     "".join(f"export {key}={shlex.quote(value)}\n" for key, value in values.items()),
@@ -461,6 +521,10 @@ Path(xml_path).write_text("\n".join(xml_lines) + "\n", encoding="utf-8")
 for path in (systemd_path, process_path, xml_path):
     os.chmod(path, 0o600)
 PY
+
+durable_publish_service_env "$SERVICE_ENV_STAGING_FILE"
+rm -f "$SERVICE_ENV_STAGING_FILE"
+SERVICE_ENV_STAGING_FILE=""
 
 # This file is generated from parsed values with shlex quoting; it contains no
 # caller-provided shell syntax.

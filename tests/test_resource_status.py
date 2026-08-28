@@ -6,6 +6,8 @@ import sys
 import types
 from pathlib import Path
 
+from conftest import initialize_vault_state_offline
+
 from exomem import resource_status
 
 
@@ -103,6 +105,7 @@ def test_collect_reports_already_loaded_modules_without_loading_missing_ones(
 def test_status_cli_json_is_resource_status(monkeypatch, capsys, tmp_path: Path) -> None:
     _forbid_torch_import(monkeypatch)
     monkeypatch.setenv("EXOMEM_MODE", "normal")
+    initialize_vault_state_offline(tmp_path, source="resource status CLI fixture")
 
     from exomem.__main__ import main
 

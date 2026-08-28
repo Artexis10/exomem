@@ -57,6 +57,7 @@ def test_init_scaffolds_a_fresh_vault(tmp_path: Path) -> None:
     assert not activation_manifest.is_grandfathered(tmp_path, later, manifest=manifest)
     resolution = state_migration.require_vault_state_ready(tmp_path)
     assert resolution.migrated is True
+    assert resolution.dual_state is False
 
 
 def test_force_overlay_of_existing_vault_does_not_assert_fresh_state_authority(

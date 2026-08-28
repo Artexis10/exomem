@@ -107,6 +107,7 @@ def test_health_uses_cached_or_manifest_only_migration_status_without_enumeratio
             source="favicon endpoint test setup"
         ),
     )
+    client = _client(vault, monkeypatch)
     monkeypatch.setattr(
         state_migration,
         "scan_vault_state",
@@ -118,7 +119,7 @@ def test_health_uses_cached_or_manifest_only_migration_status_without_enumeratio
         lambda _root: pytest.fail("health enumerated the external state root"),
     )
 
-    response = _client(vault, monkeypatch).get("/health")
+    response = client.get("/health")
 
     assert response.status_code == 200
     assert response.json()["state"]["migration"] == "complete"

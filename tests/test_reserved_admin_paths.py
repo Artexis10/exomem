@@ -22,6 +22,7 @@ from exomem import (
     find_corpus,
     media_processing,
     reserved_paths,
+    state_paths,
     structured_collections,
     vault,
     video_frames,
@@ -2364,9 +2365,10 @@ def test_owner_publication_refuses_parent_exchange_after_precreate_probe(
 ) -> None:
     from exomem import held_fs
 
-    target = tmp_path / relative
-    target.parent.mkdir(parents=True)
-    acquired = held_fs.acquire(tmp_path)
+    state_dir = state_paths.ensure_vault_state_dir(tmp_path)
+    target = state_dir / Path(relative).relative_to("Knowledge Base")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    acquired = held_fs.acquire(state_dir)
     assert acquired.ok
     filesystem_type = type(acquired.require())
     acquired.require().close()
@@ -2549,24 +2551,20 @@ def test_graph_epoch_restore_uses_exact_handoff_owner_operations(
     ]
 
 
-def test_private_owner_unlink_closes_file_before_parent_flush(
+def test_private_owner_unlink_closes_file_before_return(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A delete-pending handle must close before its namespace deletion is flushed."""
+    """An external-state delete closes its delete-pending handle before return."""
     from exomem import held_fs
 
-    # A pre-relocation leftover: the vault-anchored removal path keeps the
-    # full durability ordering (the external state root deliberately skips
-    # the anchor-root flush, which is pinned separately).
-    target = tmp_path / "Knowledge Base" / ".graph-sync-floor.json"
-    target.parent.mkdir(parents=True)
+    target = state_paths.ensure_vault_state_dir(tmp_path) / ".graph-sync-floor.json"
     target.write_bytes(b"floor")
 
-    acquired = held_fs.acquire(tmp_path)
+    acquired = held_fs.acquire(target.parent)
     assert acquired.ok
     with acquired.require() as filesystem:
-        parent_result = filesystem.parent("Knowledge Base", access="mutate")
+        parent_result = filesystem.parent(".", access="read")
         assert parent_result.ok
         with parent_result.require() as parent:
             file_result = filesystem.file(parent, target.name, access="mutate")
@@ -2603,7 +2601,7 @@ def test_private_owner_unlink_closes_file_before_parent_flush(
             "graph-handoff",
         )
 
-    assert events == ["unlink", "close", "flush"]
+    assert events == ["unlink", "close"]
     assert not target.exists()
 
 
@@ -2789,8 +2787,7 @@ def test_owner_byte_read_requires_exact_named_authority(tmp_path: Path) -> None:
 
 
 def test_owner_move_and_remove_require_exact_named_authority(tmp_path: Path) -> None:
-    kb = tmp_path / "Knowledge Base"
-    kb.mkdir()
+    kb = state_paths.ensure_vault_state_dir(tmp_path)
     token = "7" * 32
     staged = kb / f".lexical.sqlite.rebuild-{token}.tmp"
     live = kb / ".lexical.sqlite"
@@ -2933,8 +2930,7 @@ def test_lexical_publication_refuses_parent_exchange_after_destination_probe(
 ) -> None:
     from exomem import held_fs
 
-    kb = tmp_path / "Knowledge Base"
-    kb.mkdir()
+    kb = state_paths.ensure_vault_state_dir(tmp_path)
     token = "8" * 32
     staged = kb / f".lexical.sqlite.rebuild-{token}.tmp"
     live = kb / ".lexical.sqlite"
@@ -3546,7 +3542,7 @@ def test_contending_graph_writer_does_not_hold_global_identity_coordination(
     )
     live = graph._connect()
     live.close()
-    temporary = tmp_path / "Knowledge Base" / (
+    temporary = graph.path.with_name(
         f".graph-rebuild-{'a' * 64}-{'b' * 24}.sqlite"
     )
     rebuild = graph._connect(temporary)
@@ -3606,8 +3602,7 @@ def test_sqlite_owner_target_scope_rejects_symlink_and_hardlink_aliases(
     scope_factory = getattr(reserved_paths, "_sqlite_owner_target_scope", None)
     assert scope_factory is not None
 
-    kb = tmp_path / "Knowledge Base"
-    kb.mkdir()
+    kb = state_paths.ensure_vault_state_dir(tmp_path)
     ordinary = kb / "ordinary.sqlite"
     ordinary.write_bytes(b"ordinary")
     private = kb / ".embeddings.sqlite"
@@ -3650,8 +3645,7 @@ def test_sqlite_owner_target_scope_retains_identity_without_delete_access(
 ) -> None:
     from exomem import held_fs
 
-    database = tmp_path / "Knowledge Base" / ".embeddings.sqlite"
-    database.parent.mkdir()
+    database = state_paths.ensure_vault_state_dir(tmp_path) / ".embeddings.sqlite"
     database.write_bytes(b"existing")
     manager = writer_lease.LeaseManager(
         writer_lease.LeaseConfig(state_dir=tmp_path / "state")
@@ -3710,7 +3704,7 @@ def test_graph_live_store_uses_wal_but_rebuild_stays_single_file(
     finally:
         live.close()
 
-    temporary = tmp_path / "Knowledge Base" / (
+    temporary = index.path.with_name(
         f".graph-rebuild-{'a' * 64}-{'b' * 24}.sqlite"
     )
     rebuild = index._connect(temporary)

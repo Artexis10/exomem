@@ -1120,6 +1120,7 @@ def provision_hosted_cell(config: HostedCellConfig) -> HostedProvisionResult:
     _preflight_provisioning(config)
     existing = _is_complete_provisioning(config)
     if existing:
+        _initialize_provisioned_machine_state_offline(config)
         return _provision_result(config, "existing")
 
     _ensure_owned_root(config.state_root, "state", config)
@@ -1129,6 +1130,7 @@ def provision_hosted_cell(config: HostedCellConfig) -> HostedProvisionResult:
         _validate_binding_marker(config.vault_root, "vault", config)
         if _valid_vault_scaffold(config.vault_root):
             config.validate_provisioned()
+            _initialize_provisioned_machine_state_offline(config)
             return _provision_result(config, "existing")
 
     stage = _staging_root(config)
@@ -1148,7 +1150,44 @@ def provision_hosted_cell(config: HostedCellConfig) -> HostedProvisionResult:
     _promote_staged_vault(stage, config.vault_root)
     _sync_directory(config.vault_root.parent)
     config.validate_provisioned()
+    _initialize_provisioned_machine_state_offline(config)
     return _provision_result(config, "provisioned")
+
+
+def _initialize_provisioned_machine_state_offline(config: HostedCellConfig) -> None:
+    """Publish the state manifest while the provisioner still owns startup.
+
+    ``provision_hosted_cell`` is an explicit, offline lifecycle boundary. The
+    canonical vault is already published here, so state migration binds its
+    final identity and hosted state root; service startup stays read-only.
+    """
+    from . import state_migration
+
+    overrides = {
+        "EXOMEM_HOSTED_CELL": "1",
+        "EXOMEM_HOSTED_CELL_ID": config.cell_id,
+        "EXOMEM_VAULT_PATH": str(config.vault_root),
+        "EXOMEM_HOSTED_STATE_ROOT": str(config.state_root),
+        "EXOMEM_STATE_ROOT": str(config.state_root / "vault-state"),
+        "EXOMEM_WRITER_LEASE_STATE_DIR": str(config.state_root),
+        "EXOMEM_LOG_DIR": str(config.log_root),
+    }
+    previous = {name: os.environ.get(name) for name in overrides}
+    os.environ.update(overrides)
+    try:
+        authority = state_migration.assert_offline_migration_authority(
+            source="hosted cell provisioning",
+        )
+        state_migration.migrate_vault_state_offline(
+            config.vault_root,
+            authority=authority,
+        )
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
 
 def _promote_staged_vault(stage: Path, destination: Path) -> None:

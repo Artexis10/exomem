@@ -72,14 +72,14 @@ def _vault(tmp_path: Path) -> Path:
     notes = vault / "Knowledge Base" / "Notes"
     notes.mkdir()
     (notes / "governed.md").write_bytes(NOTE_BYTES)
-    connection = store.open_connection(vault)
-    connection.close()
     state_migration.migrate_vault_state_offline(
         vault,
         authority=state_migration.assert_offline_migration_authority(
             source="governance schema migration fixture",
         ),
     )
+    connection = store.open_connection(vault)
+    connection.close()
     return vault
 
 

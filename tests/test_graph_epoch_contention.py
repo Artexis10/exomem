@@ -40,6 +40,7 @@ from exomem.kbdir import kb_dirname
 def _kb(tmp_path: Path) -> Path:
     root = tmp_path / "vault"
     (root / kb_dirname()).mkdir(parents=True)
+    epistemic_graph.sidecar_path(root).parent.mkdir(parents=True)
     return root
 
 

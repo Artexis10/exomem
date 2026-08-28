@@ -4696,14 +4696,30 @@ def _batch_atomic_write_locked(
                     "PATH_GUARD_INVALID", "batch content type is unsupported"
                 )
             staged.append((write.path, workspace, artifact))
-        for final, _workspace, _artifact in staged:
+        for write, (final, _workspace, _artifact) in zip(writes, staged, strict=True):
             if not os.path.lexists(final):
                 snapshots.append(None)
                 source_guards.append(None)
+                if (
+                    write.expected_hash is not None
+                    and write.expected_hash != MISSING_CONTENT_HASH
+                ):
+                    raise ContentHashMismatchError(final, write.expected_hash, None)
                 continue
             snapshot, source_guard = _capture_batch_snapshot(final)
             snapshots.append(snapshot)
             source_guards.append(source_guard)
+            if not (
+                write.create_only and write.expected_hash == MISSING_CONTENT_HASH
+            ) and write.expected_hash is not None:
+                actual_hash = content_hash(
+                    snapshot.content.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+                )
+                if (
+                    write.expected_hash == MISSING_CONTENT_HASH
+                    or actual_hash != write.expected_hash
+                ):
+                    raise ContentHashMismatchError(final, write.expected_hash, actual_hash)
     except BaseException as stage_error:
         if not isinstance(stage_error, Exception):
             _cleanup_batch_workspaces(workspace_by_parent.values())

@@ -13,7 +13,13 @@ from pathlib import Path
 
 import pytest
 
-from exomem import mutation_lock, sidecar_store, writer_lease
+from exomem import (
+    mutation_lock,
+    sidecar_store,
+    state_migration,
+    state_paths,
+    writer_lease,
+)
 from exomem.governance import (
     authorization_custody,
     authorization_session_lifecycle,
@@ -68,6 +74,30 @@ def _vault(tmp_path: Path, name: str = "vault") -> Path:
     vault = tmp_path / name
     (vault / "Knowledge Base").mkdir(parents=True)
     return vault
+
+
+def _copy_exact_v4_fixture(source: Path, target: Path) -> None:
+    """Clone portable bytes and adopt exact-v4 state for the target vault."""
+
+    shutil.copytree(source, target)
+    shutil.copytree(
+        state_paths.vault_state_dir(source),
+        state_paths.vault_state_dir(target),
+        ignore=shutil.ignore_patterns(
+            state_migration.MANIFEST_NAME,
+            state_migration._LOCK_NAME,  # noqa: SLF001 - migration lock is source-local
+        ),
+    )
+    state_migration.migrate_vault_state_offline(
+        target,
+        authority=state_migration.assert_offline_migration_authority(
+            source="authorization exact-v4 fixture clone"
+        ),
+        adopt="external",
+    )
+    assert state_migration.require_vault_state_ready(target).state_dir == (
+        state_paths.vault_state_dir(target)
+    )
 
 
 def _select_custody_paths(
@@ -185,7 +215,7 @@ def _enrolled_v4(
         target=target,
         now=now + 1,
     )
-    connection = sqlite3.connect(store.sidecar_path(vault))
+    connection = store.open_connection(vault)
     try:
         store._migrate(connection)
         sidecar_store.ensure_meta_table(
@@ -201,6 +231,34 @@ def _enrolled_v4(
         authorization_custody.load_authorization_custody(vault, now=now + 2),
         target,
     )
+
+
+def test_exact_v4_fixture_adopts_target_bound_external_state(
+    tmp_path: Path,
+) -> None:
+    source = _vault(tmp_path, "source")
+    target = tmp_path / "target"
+    _enrolled_v4(source, now=1_800_000_000)
+
+    _copy_exact_v4_fixture(source, target)
+
+    ready = state_migration.require_vault_state_ready(target)
+    target_manifest = state_migration._load_manifest(  # noqa: SLF001 - fixture authority
+        ready.state_dir,
+        vault_root=target,
+    )
+    assert target_manifest is not None
+    assert target_manifest["vault_identity"] == state_paths.vault_state_key(target)
+    assert target_manifest["vault_identity"] != state_paths.vault_state_key(source)
+
+    target_manifest["vault_identity"] = state_paths.vault_state_key(source)
+    state_migration._write_manifest(  # noqa: SLF001 - exercise the readiness boundary
+        ready.state_dir,
+        target_manifest,
+    )
+    state_migration.reset_state_resolution_cache_for_tests()
+    with pytest.raises(state_migration.StateMigrationManifestError):
+        state_migration.require_vault_state_ready(target)
 
 
 def _exact_v3(vault: Path) -> Path:
@@ -1289,7 +1347,7 @@ def test_attachment_transfer_invalidates_sessions_from_stale_copy(
         source_connection.commit()
     finally:
         source_connection.close()
-    shutil.copytree(vault, copied)
+    _copy_exact_v4_fixture(vault, copied)
     source_connection = store.open_authorization_session_connection(vault)
     try:
         authorization_session_lifecycle.close_session(
@@ -1373,7 +1431,7 @@ def test_attachment_transfer_replay_preserves_new_target_session(
         expected_control=draining.control,
         now=now + 4,
     )
-    shutil.copytree(vault, copied)
+    _copy_exact_v4_fixture(vault, copied)
     acknowledgement = authorization_custody.prepare_standalone_attachment_transfer(
         vault,
         copied,
@@ -1460,7 +1518,7 @@ def test_exact_v4_clone_gets_fresh_activation_identity_and_closes_copied_session
         )
     finally:
         source_connection.close()
-    shutil.copytree(source, target)
+    _copy_exact_v4_fixture(source, target)
     target_paths = _select_custody_paths(monkeypatch, tmp_path / "clone-external")
 
     cloned = authorization_custody.clone_standalone_exact_v4_custody(
@@ -1584,7 +1642,7 @@ def test_exact_v4_clone_retry_keeps_one_staged_identity(
     target = tmp_path / "cloned-vault"
     now = 1_800_000_000
     _enrolled_v4(source, now=now)
-    shutil.copytree(source, target)
+    _copy_exact_v4_fixture(source, target)
     keyring_path, _control_path, _membership_path = _select_custody_paths(
         monkeypatch,
         tmp_path / "clone-external",
@@ -1660,7 +1718,7 @@ def test_exact_v4_clone_rolls_back_identity_session_and_receipt_together(
         )
     finally:
         source_connection.close()
-    shutil.copytree(source, target)
+    _copy_exact_v4_fixture(source, target)
     _select_custody_paths(monkeypatch, tmp_path / "clone-external")
     original = schema_v4._crash_point
 
@@ -1722,7 +1780,7 @@ def test_exact_v4_clone_refuses_copied_external_custody(
             authorization_custody.MEMBERSHIP_FILE_ENV,
         )
     )
-    shutil.copytree(source, target)
+    _copy_exact_v4_fixture(source, target)
     target_paths = _select_custody_paths(monkeypatch, tmp_path / "clone-external")
     for path, data in zip(target_paths, source_files, strict=True):
         path.write_bytes(data)
@@ -1765,7 +1823,7 @@ def test_exact_v4_clone_refuses_a_forked_copied_receipt_chain(
         target="b" * 64,
     )
     receipts.commit_event(source, str(receipt_intent["event_id"]))
-    shutil.copytree(source, target)
+    _copy_exact_v4_fixture(source, target)
     receipt_file = next(
         (target / "Knowledge Base" / "_Governance" / "events").rglob("*.jsonl")
     )
@@ -1864,7 +1922,7 @@ def test_enrolled_attachment_transfer_preserves_exact_active_store(
         expected_control=draining.control,
         now=now + 3,
     )
-    shutil.copytree(vault, copied)
+    _copy_exact_v4_fixture(vault, copied)
     acknowledgement = authorization_custody.prepare_standalone_attachment_transfer(
         vault,
         copied,

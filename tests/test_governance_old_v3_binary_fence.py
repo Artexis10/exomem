@@ -143,10 +143,9 @@ def _v3_vault(
         ),
     )
 
-    connection = sqlite3.connect(store.sidecar_path(vault))
+    connection = store.open_connection(vault)
     try:
-        store._migrate(connection)
-        connection.commit()
+        schema_v4.require_exact_v3_connection(connection)
     finally:
         connection.close()
     return vault

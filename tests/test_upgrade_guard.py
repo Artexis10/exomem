@@ -549,12 +549,16 @@ def test_unix_target_resolution_falls_back_to_the_installed_version(tmp_path: Pa
     assert result.stdout.strip() == "0.52.3"
 
 
-def test_unix_upgrade_wires_the_gate_between_install_and_preflight() -> None:
-    """Ordering matters: a failed assertion must stop the run BEFORE the restart."""
+def test_unix_upgrade_wires_the_stopped_transition_before_cli_sync() -> None:
+    """The target only reaches CLI synchronization after a complete stopped transition."""
     upgrade = (ROOT / "scripts" / "upgrade.sh").read_text(encoding="utf-8")
 
     assert "exomem_resolve_target_version" in upgrade
     assert "exomem_assert_install_applied" in upgrade
     assert upgrade.index("exomem_resolve_target_version") < upgrade.index("Installing $REQUIREMENT")
     assert upgrade.index("Installed version:") < upgrade.index("exomem_assert_install_applied")
-    assert upgrade.index("exomem_assert_install_applied") < upgrade.index("Restarting $SERVICE_NAME")
+    assert upgrade.index("exomem_assert_install_applied") < upgrade.index("Offline state migration...")
+    assert upgrade.index("Offline state migration...") < upgrade.index("Preflight: exomem doctor")
+    assert upgrade.index("Preflight: exomem doctor") < upgrade.index("Starting $SERVICE_ID...")
+    assert upgrade.index("Starting $SERVICE_ID...") < upgrade.index("Serving version:")
+    assert upgrade.index("Serving version:") < upgrade.index('exomem_sync_uv_cli "$CLI_SYNC" "$SERVED"')

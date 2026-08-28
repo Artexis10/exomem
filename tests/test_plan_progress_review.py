@@ -20,6 +20,7 @@ from typing import Any
 
 import pytest
 from canonical_snapshot import canonical_digests
+from conftest import initialize_vault_state_offline
 
 RECORDS_ID = "49622075-9ff4-4660-9ab7-414854b5bca2"
 PLANNING_ID = "2db90f18-70df-4e41-986e-2d7d7db1caca"
@@ -1168,6 +1169,7 @@ def test_plan_progress_round_trips_over_rest(
         Path(__file__).parent / "fixtures" / "Knowledge Base" / "_Schema",
         tmp_path / "Knowledge Base" / "_Schema",
     )
+    initialize_vault_state_offline(tmp_path, source="plan progress REST fixture")
 
     monkeypatch.setattr(server, "load_dotenv", lambda *a, **k: None)
     monkeypatch.setenv("EXOMEM_REST_API_KEY", "plan-progress-key")

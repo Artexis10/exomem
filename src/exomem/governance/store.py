@@ -275,7 +275,20 @@ def canonical_uncommitted_v3_digest(connection: sqlite3.Connection) -> str:
     source = sqlite3.connect(":memory:")
     snapshot = sqlite3.connect(":memory:")
     try:
-        source.deserialize(connection.serialize())
+        serialized_source = connection.serialize()
+        if (
+            len(serialized_source) < 100
+            or serialized_source[:16] != b"SQLite format 3\x00"
+        ):
+            raise schema_v4.SchemaV4Error("schema v3 migration source is unavailable")
+        journal_versions = serialized_source[18:20]
+        if journal_versions == b"\x02\x02":
+            serialized_source = (
+                serialized_source[:18] + b"\x01\x01" + serialized_source[20:]
+            )
+        elif journal_versions != b"\x01\x01":
+            raise schema_v4.SchemaV4Error("schema v3 migration source is unavailable")
+        source.deserialize(serialized_source)
         schema_v4.require_exact_v3_connection(source)
         source.backup(snapshot)
         snapshot.execute("VACUUM")

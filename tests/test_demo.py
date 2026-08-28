@@ -204,6 +204,12 @@ def test_corrupted_vault_missing_target_path_fails_at_find(tmp_path: Path) -> No
     corrupted = tmp_path / "corrupted"
     shutil.copytree(demo.SAMPLE_VAULT / "Knowledge Base", corrupted / "Knowledge Base")
     (corrupted / demo.TARGET_PATH).unlink()
+    state_migration.migrate_vault_state_offline(
+        corrupted,
+        authority=state_migration.assert_offline_migration_authority(
+            source="corrupted demo vault setup"
+        ),
+    )
     lines: list[str] = []
 
     code = demo.run_demo(vault=corrupted, echo=lines.append)

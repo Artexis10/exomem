@@ -101,6 +101,25 @@ def _binding(tmp_path: Path, *, runtime_uid: int | None = None) -> HostedBinding
     )
 
 
+def _require_bound_state_ready(binding: HostedBindingV2):
+    """Read the restore proof through the exact bound external state root."""
+    overrides = {
+        "EXOMEM_HOSTED_STATE_ROOT": str(binding.state_root),
+        "EXOMEM_STATE_ROOT": str(binding.state_root / "vault-state"),
+    }
+    previous = {name: os.environ.get(name) for name in overrides}
+    os.environ.update(overrides)
+    try:
+        state_migration.reset_state_resolution_cache_for_tests()
+        return state_migration.require_vault_state_ready(binding.vault_root)
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
 def _configure_hosted_server(
     monkeypatch: pytest.MonkeyPatch,
     binding: HostedBindingV2,
@@ -166,8 +185,7 @@ def test_fresh_initialize_workload_creates_state_manifest_before_server_start(
     )
 
     assert code == "HOSTED_CELL_INITIALIZED"
-    state_migration.reset_state_resolution_cache_for_tests()
-    state_migration.require_vault_state_ready(binding.vault_root)
+    _require_bound_state_ready(binding)
     _configure_hosted_server(monkeypatch, binding)
     runtime = server_runtime.initialize_runtime(load_dotenv_func=lambda **_kwargs: None)
     try:
@@ -217,8 +235,7 @@ def test_restore_candidate_pins_archive_identity_and_publishes_fresh_target_bind
         runtime_gid=os.getgid(),
     )
     validate_hosted_binding_v2(binding, require_scaffold=True)
-    state_migration.reset_state_resolution_cache_for_tests()
-    state_migration.require_vault_state_ready(binding.vault_root)
+    _require_bound_state_ready(binding)
     assert (
         binding.vault_root / "Knowledge Base/Notes/restore-proof.md"
     ).read_text(encoding="utf-8").endswith("canonical-sentinel\n")
@@ -236,8 +253,7 @@ def test_restore_candidate_migrates_portable_state_before_server_start(
     restore_candidate(request, bootstrap_security=_bootstrap)
 
     binding = _binding(tmp_path)
-    state_migration.reset_state_resolution_cache_for_tests()
-    resolution = state_migration.require_vault_state_ready(binding.vault_root)
+    resolution = _require_bound_state_ready(binding)
     assert (resolution.state_dir / ".review-state.json").read_text(
         encoding="utf-8"
     ) == '{"restored":true}\n'
@@ -676,7 +692,7 @@ def test_restore_candidate_resumes_exact_request_at_every_durable_boundary(
     canonical = tmp_path / "target-vault/Knowledge Base/Notes/restore-proof.md"
     assert canonical.read_text(encoding="utf-8").endswith("canonical-sentinel\n")
     binding = _binding(tmp_path)
-    resolution = state_migration.require_vault_state_ready(binding.vault_root)
+    resolution = _require_bound_state_ready(binding)
     assert (resolution.state_dir / ".review-state.json").is_file()
     assert not (binding.vault_root / "Knowledge Base/.review-state.json").exists()
     staging = list(tmp_path.glob(".target-vault.restore-*"))

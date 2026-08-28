@@ -379,9 +379,7 @@ def migrate_vault_state_offline(
             state_dir,
             "a complete manifest has legacy in-vault duplicates",
         )
-    key = _cache_key(vault_root, state_dir)
-    with _RESOLUTION_LOCK:
-        _RESOLUTION_CACHE[key] = resolution
+    require_vault_state_ready(vault_root)
     return resolution
 
 

@@ -10,7 +10,13 @@ from pathlib import Path
 
 import pytest
 
-from exomem import mutation_lock, state_migration, state_paths, writer_lease
+from exomem import (
+    mutation_lock,
+    sidecar_store,
+    state_migration,
+    state_paths,
+    writer_lease,
+)
 from exomem.__main__ import main as exomem_main
 from exomem.governance import (
     authorization_custody,
@@ -82,7 +88,10 @@ def _vault(tmp_path: Path) -> Path:
         ),
     )
     connection = store.open_connection(vault)
-    connection.close()
+    try:
+        schema_v4.require_exact_v3_connection(connection)
+    finally:
+        connection.close()
     return vault
 
 
@@ -710,3 +719,32 @@ def test_v3_replay_never_backfills_a_missing_receipt_intent(
         schema_downmigration.downmigrate_enrolled_v4_store(vault, now=now + 4)
 
     assert not _receipt_records(vault)
+
+
+def test_canonical_uncommitted_digest_handles_wal_retained_transaction(
+    tmp_path: Path,
+) -> None:
+    connection = sqlite3.connect(tmp_path / "governance.sqlite")
+    try:
+        store._migrate(connection)  # noqa: SLF001 - exact v3 retained transaction
+        sidecar_store.ensure_meta_table(connection, store.DATA_TABLE, "governance")
+        connection.commit()
+        schema_v4.require_exact_v3_connection(connection)
+        assert connection.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",)
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "INSERT INTO compiled_policy (fingerprint, snapshot, compiled_at) VALUES (?, ?, ?)",
+            ("pending-v3-transform", "{}", 1.0),
+        )
+        assert connection.serialize()[18:20] == b"\x02\x02"
+
+        published_digest = store.canonical_uncommitted_v3_digest(connection)
+
+        assert connection.serialize()[18:20] == b"\x02\x02"
+        connection.commit()
+        assert connection.execute("PRAGMA journal_mode").fetchone() == ("wal",)
+        assert published_digest == store._v3_snapshot_digest(connection)  # noqa: SLF001
+    finally:
+        if connection.in_transaction:
+            connection.rollback()
+        connection.close()
