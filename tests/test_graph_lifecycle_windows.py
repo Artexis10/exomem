@@ -15,6 +15,7 @@ from exomem import (
     recall_policy,
     recover_from_trash,
     reserved_paths,
+    state_paths,
 )
 from exomem.governance import lifecycle
 
@@ -87,6 +88,15 @@ def _held_directory_probe(
         assert retained.ok
         with retained.require() as directory:
             return type(filesystem), directory.identity
+
+
+def _held_root_probe(
+    root: Path,
+) -> tuple[type[held_fs.HeldFilesystem], held_fs.StableIdentity]:
+    acquired = held_fs.acquire(root)
+    assert acquired.ok
+    with acquired.require() as filesystem:
+        return type(filesystem), filesystem.root_identity
 
 
 def test_windows_private_unlink_closes_delete_pending_handle_before_flush(
@@ -162,7 +172,9 @@ def test_windows_epoch_abort_flushes_removed_floor_and_preserves_lifecycle_refus
     flushed: list[Path] = []
     armed = False
     original_open = graph_sync.os.open
-    filesystem_type, kb_identity = _held_directory_probe(tmp_path, "Knowledge Base")
+    state_dir = state_paths.ensure_vault_state_dir(tmp_path)
+    assert state_dir == graph_sync.floor_path(tmp_path).parent
+    filesystem_type, state_dir_identity = _held_root_probe(state_dir)
     original_flush = filesystem_type.flush_directory
 
     def reject_crt_epoch_directory(path, *args, **kwargs):  # noqa: ANN001
@@ -174,8 +186,8 @@ def test_windows_epoch_abort_flushes_removed_floor_and_preserves_lifecycle_refus
 
     def flush_epoch_directory(filesystem, directory):  # noqa: ANN001
         result = original_flush(filesystem, directory)
-        if armed and directory.identity == kb_identity:
-            flushed.append(graph_sync.floor_path(tmp_path).parent)
+        if armed and directory.identity == state_dir_identity:
+            flushed.append(state_dir)
         return result
 
     monkeypatch.setattr(filesystem_type, "flush_directory", flush_epoch_directory)
@@ -215,7 +227,7 @@ def test_windows_epoch_abort_flushes_removed_floor_and_preserves_lifecycle_refus
     else:
         assert source.read_text(encoding="utf-8") == "# changed after manifest\n"
         assert _marker_snapshot(tmp_path)
-    assert graph_sync.floor_path(tmp_path).parent in flushed
+    assert state_dir in flushed
 
 
 def test_windows_epoch_restore_flush_failure_remains_graph_rollback_failed(
@@ -226,12 +238,14 @@ def test_windows_epoch_restore_flush_failure_remains_graph_rollback_failed(
     _govern(tmp_path, relative)
     flushed: list[Path] = []
     armed = False
-    filesystem_type, kb_identity = _held_directory_probe(tmp_path, "Knowledge Base")
+    state_dir = state_paths.ensure_vault_state_dir(tmp_path)
+    assert state_dir == graph_sync.floor_path(tmp_path).parent
+    filesystem_type, state_dir_identity = _held_root_probe(state_dir)
     original_flush = filesystem_type.flush_directory
 
     def refuse_epoch_flush(filesystem, directory):  # noqa: ANN001
-        if armed and directory.identity == kb_identity:
-            flushed.append(graph_sync.floor_path(tmp_path).parent)
+        if armed and directory.identity == state_dir_identity:
+            flushed.append(state_dir)
             return held_fs.HeldResult(
                 error=held_fs.HeldFsError(
                     "IO_REFUSED", "injected epoch flush refusal"
@@ -259,7 +273,7 @@ def test_windows_epoch_restore_flush_failure_remains_graph_rollback_failed(
     assert source.exists()
     assert graph_sync.floor_path(tmp_path).exists() is False
     assert _marker_snapshot(tmp_path)
-    assert flushed == [graph_sync.floor_path(tmp_path).parent]
+    assert flushed == [state_dir]
 
 
 def _fail_first_post_rename_flush(
