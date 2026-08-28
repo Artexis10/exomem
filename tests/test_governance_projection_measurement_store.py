@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from governance_projection_support import verified_namespace
 
+from exomem import state_paths
 from exomem.governance import (
     projected_graph,
     projected_retrieval,
@@ -174,8 +175,8 @@ def test_vector_family_stages_replays_and_loads_exact_rows(tmp_path: Path) -> No
     assert projection_measurement_store.measurement_store_path(
         tmp_path,
         family,
-    ).relative_to(tmp_path) == Path(
-        "Knowledge Base/.authorization-projections",
+    ).relative_to(state_paths.vault_state_dir(tmp_path)) == Path(
+        ".authorization-projections",
         family.namespace_key.namespace_id,
         "measurements/vector",
         family.family_id,

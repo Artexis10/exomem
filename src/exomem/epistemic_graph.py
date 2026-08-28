@@ -310,7 +310,9 @@ def graph_scheduling_enabled() -> bool:
 
 
 def sidecar_path(vault_root: Path) -> Path:
-    return vault_root / kb_dirname() / ".graph.sqlite"
+    from . import state_paths
+
+    return state_paths.vault_state_dir(vault_root) / ".graph.sqlite"
 
 
 def _connect_existing_owner_target(
@@ -324,11 +326,7 @@ def _connect_existing_owner_target(
 
     root = Path(vault_root)
     target = Path(path)
-    try:
-        relative = target.absolute().relative_to(root.absolute())
-    except ValueError as error:
-        raise RuntimeError("graph SQLite target is outside the vault") from error
-    descriptor_id = reserved_paths.classify_logical(relative.as_posix()).descriptor_id
+    descriptor_id = reserved_paths.state_target_descriptor_id(root, target)
     if descriptor_id not in {"graph-store", "graph-rebuild"}:
         raise RuntimeError("graph SQLite target is not owner-bound")
     with reserved_paths._subsystem_authority_scope("epistemic_graph"):
@@ -429,6 +427,15 @@ def _prepare_live_graph_wal_family(
         "graph-store",
         connection,
     )
+    if reserved_paths.state_target_is_external(vault_root, target):
+        # Identity publication defends KB-relative generic reads against
+        # aliases of private state; a store in the external state root has no
+        # KB-relative spelling to defend, so the publication above validated
+        # authority and coordination and no-opped, and the WAL-companion
+        # reservation with its completeness verification has nothing left to
+        # establish. The publish-before-schema ordering stays pinned either
+        # way.
+        return
     if _published_live_graph_wal_family_complete(vault_root, target):
         return
 
@@ -1411,14 +1418,9 @@ class EpistemicGraphIndex:
 
     def _connect_owned(self, path: Path | None = None) -> sqlite3.Connection:
         target = path if path is not None else self.path
-        try:
-            relative = target.absolute().relative_to(self.vault_root.absolute())
-        except ValueError:
-            descriptor_id = None
-        else:
-            descriptor_id = reserved_paths.classify_logical(
-                relative.as_posix()
-            ).descriptor_id
+        descriptor_id = reserved_paths.state_target_descriptor_id(
+            self.vault_root, target
+        )
         if descriptor_id == "graph-store":
             connection: sqlite3.Connection | None = None
             try:

@@ -79,8 +79,8 @@ exomem review reopen exomem://review/0123456789abcdef01234567
 ```
 
 Agents call `triage_memory` with the same `dismiss`, `snooze`, or `reopen`
-action. Decisions live in `Knowledge Base/.review-state.json`. The file is
-portable JSON and stores no note content.
+action. Decisions live in `.review-state.json` under the external per-vault
+machine-local state root. The file is portable JSON and stores no note content.
 
 A decision binds to the exact signal fingerprint reviewed. Ranking changes and
 age counters do not change that fingerprint. A material note edit, new review
@@ -164,9 +164,9 @@ you had already dismissed by hand before quieting it.
 
 ## What the review store records, and how it stays small
 
-`Knowledge Base/.review-state.json` holds three things: the triage decisions,
-the family dispositions, and a first-surfaced ledger recording when each signal
-first reached a served surface — the review list, a due-state carrier, or a
+The external per-vault `.review-state.json` holds three things: the triage
+decisions, the family dispositions, and a first-surfaced ledger recording when
+each signal first reached a served surface — the review list, a due-state carrier, or a
 write advisory. "Reached" means DELIVERED, not produced: a carrier block that a
 batch, the change-only rule, or a `legacy` response dropped was shown to nobody
 and is not recorded. Neither is anything withheld by governance, filtered by a
@@ -204,9 +204,9 @@ report so a compaction is never silent.
 
 ## Emission counters
 
-`Knowledge Base/.due-state.json` carries the maintained due-state projection and
-an `emission` section: `writes` counts the governed writes the projection has
-absorbed and `emissions` counts the due-state blocks actually delivered. A
+The external per-vault `.due-state.json` carries the maintained due-state
+projection and an `emission` section: `writes` counts the governed writes the
+projection has absorbed and `emissions` counts the due-state blocks actually delivered. A
 command that writes many pages at once is one batch, and a batch delivers at
 most one block rather than one per write — the counters are how that is
 checkable rather than merely claimed, and checking it is the point of writing

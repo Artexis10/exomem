@@ -32,10 +32,6 @@ class EnrollmentError(RuntimeError):
     """Enrollment could not produce a voiceprint (missing dep/model, or unreadable audio)."""
 
 
-def _store_path(vault_root: Path | None) -> Path:
-    return voice_profiles.voice_profiles_path(vault_root or resolve_vault())
-
-
 def enroll_speaker(
     audio_path: str | Path,
     name: str,
@@ -58,16 +54,28 @@ def enroll_speaker(
             f"could not compute a voiceprint for {path.name} — is the [diarization] extra "
             f"(speechbrain) installed and the audio readable?"
         )
+    root = vault_root or resolve_vault()
     return voice_profiles.save_profile(
-        _store_path(vault_root), name, centroid, threshold=threshold, is_self=is_self
+        voice_profiles.voice_profiles_path(root),
+        name,
+        centroid,
+        threshold=threshold,
+        is_self=is_self,
+        vault_root=root,
     )
 
 
 def list_speakers(vault_root: Path | None = None) -> list[dict[str, Any]]:
     """Enrolled-profile summaries (no centroid), sorted by name."""
-    return voice_profiles.list_profiles(_store_path(vault_root))
+    root = vault_root or resolve_vault()
+    return voice_profiles.list_profiles(
+        voice_profiles.voice_profiles_path(root), vault_root=root
+    )
 
 
 def remove_speaker(name: str, vault_root: Path | None = None) -> bool:
     """Delete the `name` profile. Returns True if it existed."""
-    return voice_profiles.remove_profile(_store_path(vault_root), name)
+    root = vault_root or resolve_vault()
+    return voice_profiles.remove_profile(
+        voice_profiles.voice_profiles_path(root), name, vault_root=root
+    )

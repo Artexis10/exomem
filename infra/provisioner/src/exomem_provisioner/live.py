@@ -54,6 +54,8 @@ class KubernetesProviderSnapshot:
     serving: bool
     runtime_admitted: bool
     routes: tuple[bool, bool]
+    runtime_desired_replicas: int = 0
+    runtime_pods: int = 0
 
 
 class KubernetesProviderRegistry:
@@ -331,6 +333,19 @@ class KubernetesProviderRegistry:
         )
         if stateful_set is not None:
             self._require_not_terminating(stateful_set)
+        desired_replicas = int(
+            getattr(getattr(stateful_set, "spec", None), "replicas", 0) or 0
+        )
+        runtime_pod_list = await asyncio.to_thread(
+            self._core.list_namespaced_pod,
+            current.resource_name,
+            label_selector=(
+                "app.kubernetes.io/name=exomem-cell,"
+                f"exomem.io/cell={current.resource_name},"
+                "!exomem.io/storage-init,!exomem.io/vault-fingerprint"
+            ),
+        )
+        runtime_pods = len(tuple(getattr(runtime_pod_list, "items", ()) or ()))
         routes: list[bool] = []
         for suffix in ("control", "transfer"):
             route = await exists(
@@ -372,6 +387,8 @@ class KubernetesProviderRegistry:
             stateful_set is not None,
             annotations.get("exomem.io/runtime-admitted") == "true",
             (routes[0], routes[1]),
+            desired_replicas,
+            runtime_pods,
         )
 
     async def ensure_namespace(
@@ -861,6 +878,10 @@ class LiveLifecyclePlane:
     async def scale(self, metadata: OpaqueProviderMetadata, replicas: int) -> None:
         await self._cell.scale(self._owner(metadata), replicas)
 
+    async def runtime_stopped(self, metadata: OpaqueProviderMetadata) -> bool:
+        snapshot = await self._refresh(metadata)
+        return snapshot.runtime_desired_replicas == 0 and snapshot.runtime_pods == 0
+
     async def resume(
         self,
         metadata: OpaqueProviderMetadata,
@@ -919,7 +940,7 @@ class LiveLifecyclePlane:
         config: LifecycleConfig,
         operation_id: str,
     ) -> None:
-        if config.migration_mode != "binding-v1-to-v2":
+        if config.migration_mode not in {"binding-v1-to-v2", "state-root-v1"}:
             raise MetadataConflict("runtime migration was not declared by the deployment lock")
         values = self._rollforward_helm_values(metadata, request, config)
         values["workloadMode"] = "migrate"

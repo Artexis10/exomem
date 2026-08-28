@@ -334,10 +334,16 @@ async def test_rollforward_preserves_same_cell_volume_and_vault_before_reopening
     assert final.result["beforeVaultSha256"] == before_fingerprint
     assert final.result["afterVaultSha256"] == before_fingerprint
     assert len(final.result["evidenceSha256"]) == 64
-    assert checkpoints[:3] == ["maintenance-acquired", "routes-closed", "runtime-drained"]
-    assert checkpoints[3].startswith("vault-fingerprinted-")
-    assert checkpoints[4].startswith("migration-skipped-")
-    assert checkpoints[5].startswith("target-confirmed-")
+    assert checkpoints[:5] == [
+        "maintenance-acquired",
+        "routes-closed",
+        "runtime-drained",
+        "runtime-stop-wait",
+        "runtime-stopped",
+    ]
+    assert checkpoints[5].startswith("vault-fingerprinted-")
+    assert checkpoints[6].startswith("migration-skipped-")
+    assert checkpoints[7].startswith("target-confirmed-")
     assert plane.bound_handle(_metadata()) == before_volume
     assert plane.vault_fingerprint(_metadata()) == before_fingerprint
     assert plane.helm_values(_metadata())["image"] == config.image
@@ -409,6 +415,123 @@ async def test_rollforward_restores_prior_runtime_when_vault_preservation_fails(
 
 
 @pytest.mark.asyncio
+async def test_rollforward_never_restores_old_image_after_offline_migration() -> None:
+    class MigratedFailurePlane(HighFidelityProviderPlane):
+        rollback_calls = 0
+
+        async def rollback_runtime(self, metadata, operation_id):
+            self.rollback_calls += 1
+            await super().rollback_runtime(metadata, operation_id)
+
+    plane = MigratedFailurePlane(location="fsn1")
+    await plane.seed_ready_cell(_metadata(), _request(), _config())
+    plane.mutate_vault_on_upgrade_once()
+    target = _runtime_target(releaseVersion="0.57.2", gatewayContractDigest="e" * 64)
+    config = replace(
+        _config(),
+        image="registry.invalid/exomem@sha256:" + "f" * 64,
+        release_version="0.57.2",
+        contract_digest="e" * 64,
+        runtime_target=target,
+        compatibility_digest="9" * 64,
+        migration_mode="state-root-v1",
+    )
+    request = _v2_request(
+        operationId="rollforward-migrated-corrupt",
+        fenceGeneration=8,
+        runtimeTarget=target,
+        compatibilityDigest="9" * 64,
+    )
+    driver = CellLifecycleDriver(plane=plane, volume_worker=None, config=config)
+    context = _context(
+        operation_id="database-rollforward-migrated-corrupt",
+        provider_operation_id="rollforward-migrated-corrupt",
+        fence_generation=8,
+        wire_protocol=WIRE_PROTOCOL_V2,
+    )
+
+    with pytest.raises(DriverTerminal, match="PROVISIONER_VAULT_PRESERVATION_MISMATCH"):
+        for _ in range(8):
+            outcome = await driver.execute("rollforward", request, context)
+            assert isinstance(outcome, DriverPending)
+            context = replace(context, checkpoint=outcome.checkpoint)
+
+    assert context.checkpoint.startswith("migration-complete-")
+    assert plane.rollback_calls == 0
+    assert plane.helm_values(_metadata())["image"] == config.image
+    assert plane.routes_enabled(_metadata()) == (False, False)
+    assert plane.replicas(_metadata()) == 0
+
+
+@pytest.mark.asyncio
+async def test_rollforward_waits_for_zero_runtime_proof_before_fingerprint_and_migration() -> None:
+    class DelayedStopPlane(HighFidelityProviderPlane):
+        stop_observations = 0
+        events: list[str] = []
+
+        async def scale(self, metadata, replicas):
+            self.events.append(f"scale:{replicas}")
+            await super().scale(metadata, replicas)
+
+        async def runtime_stopped(self, metadata):
+            self.stop_observations += 1
+            self.events.append(f"stopped:{self.stop_observations}")
+            if self.stop_observations == 1:
+                return False
+            return await super().runtime_stopped(metadata)
+
+        async def canonical_vault_fingerprint(
+            self, metadata, request, operation_id, *, phase
+        ):
+            self.events.append(f"fingerprint:{phase}")
+            return await super().canonical_vault_fingerprint(
+                metadata, request, operation_id, phase=phase
+            )
+
+        async def run_runtime_migration(self, metadata, request, config, operation_id):
+            self.events.append("migration")
+            await super().run_runtime_migration(metadata, request, config, operation_id)
+
+    plane = DelayedStopPlane(location="fsn1")
+    await plane.seed_ready_cell(_metadata(), _request(), _config())
+    target = _runtime_target(releaseVersion="0.57.2", gatewayContractDigest="e" * 64)
+    config = replace(
+        _config(),
+        image="registry.invalid/exomem@sha256:" + "f" * 64,
+        release_version="0.57.2",
+        contract_digest="e" * 64,
+        runtime_target=target,
+        compatibility_digest="9" * 64,
+        migration_mode="state-root-v1",
+    )
+    request = _v2_request(
+        operationId="rollforward-zero-proof",
+        fenceGeneration=8,
+        runtimeTarget=target,
+        compatibilityDigest="9" * 64,
+    )
+    driver = CellLifecycleDriver(plane=plane, volume_worker=None, config=config)
+
+    final, checkpoints = await _run_action(
+        driver,
+        "rollforward",
+        request,
+        _context(
+            operation_id="database-rollforward-zero-proof",
+            provider_operation_id="rollforward-zero-proof",
+            fence_generation=8,
+            wire_protocol=WIRE_PROTOCOL_V2,
+        ),
+    )
+
+    assert final.result["code"] == "rollforward_preserved"
+    assert checkpoints.count("runtime-stop-wait") == 2
+    assert plane.events[0] == "scale:0"
+    assert plane.events.index("stopped:3") < plane.events.index("fingerprint:before")
+    assert plane.events.index("stopped:4") < plane.events.index("migration")
+
+
+@pytest.mark.asyncio
 async def test_rollforward_does_not_downgrade_after_target_confirmation_failure() -> None:
     class PostConfirmationFailurePlane(HighFidelityProviderPlane):
         rollback_calls = 0
@@ -416,6 +539,7 @@ async def test_rollforward_does_not_downgrade_after_target_confirmation_failure(
 
         async def enable_routes(self, metadata, request):
             if self.fail_route_enable:
+                self._require_cell(metadata).control_route = True
                 raise MetadataConflict("route publication failed after target confirmation")
             await super().enable_routes(metadata, request)
 
@@ -434,7 +558,7 @@ async def test_rollforward_does_not_downgrade_after_target_confirmation_failure(
         contract_digest="e" * 64,
         runtime_target=target,
         compatibility_digest="9" * 64,
-        migration_mode="none",
+        migration_mode="state-root-v1",
     )
     request = _v2_request(
         operationId="rollforward-post-confirmation",
@@ -461,6 +585,60 @@ async def test_rollforward_does_not_downgrade_after_target_confirmation_failure(
     assert plane.rollback_calls == 0
     assert plane.helm_values(_metadata())["image"] == config.image
     assert plane.routes_enabled(_metadata()) == (False, False)
+    assert plane.replicas(_metadata()) == 0
+
+
+@pytest.mark.asyncio
+async def test_rollforward_commit_failure_keeps_target_image_stopped_and_zero_routed() -> None:
+    class CommitFailurePlane(HighFidelityProviderPlane):
+        rollback_calls = 0
+
+        async def rollback_runtime(self, metadata, operation_id):
+            self.rollback_calls += 1
+            await super().rollback_runtime(metadata, operation_id)
+
+        async def commit_runtime_upgrade(self, metadata, operation_id):
+            del metadata, operation_id
+            raise MetadataConflict("runtime upgrade commit failed")
+
+    plane = CommitFailurePlane(location="fsn1")
+    await plane.seed_ready_cell(_metadata(), _request(), _config())
+    target = _runtime_target(releaseVersion="0.57.2", gatewayContractDigest="e" * 64)
+    config = replace(
+        _config(),
+        image="registry.invalid/exomem@sha256:" + "f" * 64,
+        release_version="0.57.2",
+        contract_digest="e" * 64,
+        runtime_target=target,
+        compatibility_digest="9" * 64,
+        migration_mode="state-root-v1",
+    )
+    request = _v2_request(
+        operationId="rollforward-commit-failure",
+        fenceGeneration=8,
+        runtimeTarget=target,
+        compatibilityDigest="9" * 64,
+    )
+    driver = CellLifecycleDriver(plane=plane, volume_worker=None, config=config)
+    context = _context(
+        operation_id="database-rollforward-commit-failure",
+        provider_operation_id="rollforward-commit-failure",
+        fence_generation=8,
+        wire_protocol=WIRE_PROTOCOL_V2,
+    )
+
+    while not context.checkpoint.startswith("target-confirmed-"):
+        outcome = await driver.execute("rollforward", request, context)
+        assert isinstance(outcome, DriverPending)
+        context = replace(context, checkpoint=outcome.checkpoint)
+
+    with pytest.raises(DriverTerminal, match="PROVISIONER_PROVIDER_METADATA_CONFLICT"):
+        await driver.execute("rollforward", request, context)
+
+    assert plane.rollback_calls == 0
+    assert plane.helm_values(_metadata())["image"] == config.image
+    assert plane.routes_enabled(_metadata()) == (False, False)
+    assert plane.replicas(_metadata()) == 0
 
 
 @pytest.mark.asyncio

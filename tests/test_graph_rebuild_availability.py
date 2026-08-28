@@ -16,7 +16,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from exomem import deferred_index, freshness, graph_sync, runtime_readiness
+from exomem import (
+    deferred_index,
+    epistemic_graph,
+    freshness,
+    graph_sync,
+    runtime_readiness,
+)
 from exomem import mutation_lock as mutation_lock_module
 from exomem import reconcile as reconcile_module
 from exomem import vault as vault_module
@@ -500,7 +506,7 @@ def test_rebuild_graph_dry_run_previews_unavailable_reset_without_mutating(
     checkpoint = _checkpoint(1)
     graph_sync._write_floor(tmp_path, graph_sync.GraphSyncGenerationFloor.create(2))
     graph_sync._write_checkpoint(tmp_path, checkpoint)
-    live = tmp_path / "Knowledge Base/.graph.sqlite"
+    live = epistemic_graph.sidecar_path(tmp_path)
     live.parent.mkdir(parents=True, exist_ok=True)
     live.write_bytes(b"old graph")
     before = {
@@ -594,7 +600,7 @@ def test_unavailable_companion_only_lineage_is_previewed_and_quarantined(tmp_pat
     """A missing primary database does not make a safe retained companion invisible."""
     graph_sync._write_checkpoint(tmp_path, _checkpoint(2))
     graph_sync._write_floor(tmp_path, graph_sync.GraphSyncGenerationFloor.create(1))
-    companion = tmp_path / "Knowledge Base/.graph.sqlite-wal"
+    companion = epistemic_graph.sidecar_path(tmp_path).with_name(".graph.sqlite-wal")
     companion.parent.mkdir(exist_ok=True)
     companion.write_bytes(b"wal")
 
@@ -646,7 +652,7 @@ def test_post_publication_cleanup_requires_a_current_covered_checkpoint(
     """Only a covered rebuild may remove its exact isolated reset evidence."""
     graph_sync._write_checkpoint(tmp_path, _checkpoint(1))
     graph_sync._write_floor(tmp_path, graph_sync.GraphSyncGenerationFloor.create(2))
-    live = tmp_path / "Knowledge Base/.graph.sqlite"
+    live = epistemic_graph.sidecar_path(tmp_path)
     live.parent.mkdir(parents=True, exist_ok=True)
     live.write_bytes(b"old")
 
@@ -2030,7 +2036,7 @@ def test_single_flight_caps_waiter_registration(tmp_path: Path, monkeypatch: pyt
 def test_temp_sidecar_is_private_until_atomic_publication_and_reconcile_sweeps_abandoned(
     tmp_path: Path,
 ) -> None:
-    live = tmp_path / "Knowledge Base/.graph.sqlite"
+    live = epistemic_graph.sidecar_path(tmp_path)
     live.parent.mkdir(parents=True)
     live.write_bytes(b"old")
     temporary = graph_sync.temporary_sidecar_path(live, _checkpoint(1))
@@ -2043,7 +2049,7 @@ def test_temp_sidecar_is_private_until_atomic_publication_and_reconcile_sweeps_a
 
 
 def test_temp_sweep_is_proof_scoped_to_well_formed_graph_rebuild_artifacts(tmp_path: Path) -> None:
-    live = tmp_path / "Knowledge Base/.graph.sqlite"
+    live = epistemic_graph.sidecar_path(tmp_path)
     live.parent.mkdir(parents=True)
     abandoned = graph_sync.temporary_sidecar_path(live, _checkpoint(1))
     unrelated = live.with_name(".graph-rebuild-user-copy.sqlite")
@@ -2055,7 +2061,7 @@ def test_temp_sweep_is_proof_scoped_to_well_formed_graph_rebuild_artifacts(tmp_p
 
 
 def test_temp_sweep_preserves_a_live_owner_from_another_process(tmp_path: Path) -> None:
-    live = tmp_path / "Knowledge Base/.graph.sqlite"
+    live = epistemic_graph.sidecar_path(tmp_path)
     live.parent.mkdir(parents=True)
     temporary = graph_sync.temporary_sidecar_path(live, _checkpoint(1))
     temporary.write_bytes(b"building")
@@ -2068,7 +2074,7 @@ def test_temp_sweep_preserves_a_live_owner_from_another_process(tmp_path: Path) 
 
 
 def test_cross_process_rebuild_lock_rejects_a_second_builder(tmp_path: Path) -> None:
-    live = tmp_path / "Knowledge Base/.graph.sqlite"
+    live = epistemic_graph.sidecar_path(tmp_path)
     live.parent.mkdir(parents=True)
     first = graph_sync.temporary_sidecar_path(live, _checkpoint(1))
     second = graph_sync.temporary_sidecar_path(live, _checkpoint(1))
@@ -2142,7 +2148,7 @@ def test_standalone_write_joins_rebuild_and_exits_without_live_temporary(tmp_pat
 
 @pytest.mark.skipif(os.name == "nt", reason="fork descriptor inheritance is POSIX-only")
 def test_fork_child_drops_inherited_graph_lock_without_unlocking_parent(tmp_path: Path) -> None:
-    live = tmp_path / "Knowledge Base/.graph.sqlite"
+    live = epistemic_graph.sidecar_path(tmp_path)
     live.parent.mkdir(parents=True)
     parent_temporary = graph_sync.temporary_sidecar_path(live, _checkpoint(1))
     child_temporary = graph_sync.temporary_sidecar_path(live, _checkpoint(1))
@@ -2176,7 +2182,7 @@ def test_fork_child_drops_inherited_graph_lock_without_unlocking_parent(tmp_path
 
 
 def test_rebuild_lock_release_is_idempotent(tmp_path: Path) -> None:
-    live = tmp_path / "Knowledge Base/.graph.sqlite"
+    live = epistemic_graph.sidecar_path(tmp_path)
     live.parent.mkdir(parents=True)
     temporary = graph_sync.temporary_sidecar_path(live, _checkpoint(1))
 
@@ -2192,7 +2198,7 @@ def test_windows_rebuild_lock_claims_persists_and_refuses_parent_replacement(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "runtime-state"))
-    live = tmp_path / "Knowledge Base/.graph.sqlite"
+    live = epistemic_graph.sidecar_path(tmp_path)
     live.parent.mkdir(parents=True)
     temporary = graph_sync.temporary_sidecar_path(live, _checkpoint(1))
     lock = graph_sync._rebuild_lock_path(tmp_path)
@@ -2427,7 +2433,7 @@ def test_manager_rebuild_graph_finalizes_unavailable_reset_after_publication(
     )
     graph_sync._write_checkpoint(tmp_path, _checkpoint(1))
     graph_sync._write_floor(tmp_path, graph_sync.GraphSyncGenerationFloor.create(2))
-    stale_graph = tmp_path / "Knowledge Base/.graph.sqlite"
+    stale_graph = epistemic_graph.sidecar_path(tmp_path)
     stale_graph.write_bytes(b"unavailable graph")
     cleaned: list[tuple[Path, str, graph_sync.GraphSyncCheckpoint]] = []
     original_cleanup = graph_sync.cleanup_published_graph_lineage_reset
@@ -2474,7 +2480,7 @@ def test_manager_rebuild_graph_resumes_canonical_handoff_after_restart_without_w
     )
     graph_sync._write_checkpoint(tmp_path, _checkpoint(1))
     graph_sync._write_floor(tmp_path, graph_sync.GraphSyncGenerationFloor.create(2))
-    (tmp_path / "Knowledge Base/.graph.sqlite").write_bytes(b"unavailable graph")
+    epistemic_graph.sidecar_path(tmp_path).write_bytes(b"unavailable graph")
     command = next(command for command in commands_for("mcp") if command.name == "reconcile")
     manager = LeaseManager(LeaseConfig(state_dir=tmp_path / "state"))
     original_wait = graph_sync.wait_for_registered
@@ -2703,7 +2709,7 @@ def test_reconcile_does_not_claim_current_when_the_generation_floor_is_malformed
 
 
 def test_reconcile_sweeps_only_abandoned_reserved_graph_temporaries(tmp_path: Path) -> None:
-    live = tmp_path / "Knowledge Base/.graph.sqlite"
+    live = epistemic_graph.sidecar_path(tmp_path)
     live.parent.mkdir(parents=True)
     abandoned = graph_sync.temporary_sidecar_path(live, _checkpoint(1))
     abandoned.write_bytes(b"abandoned")
@@ -2905,7 +2911,7 @@ def test_wal_publication_keeps_an_open_reader_on_the_previous_snapshot(
 ) -> None:
     import sqlite3
 
-    live = tmp_path / "Knowledge Base/.graph.sqlite"
+    live = epistemic_graph.sidecar_path(tmp_path)
     live.parent.mkdir(parents=True)
     with closing(sqlite3.connect(live)) as conn:
         assert conn.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",)
@@ -2935,7 +2941,7 @@ def test_live_wal_publication_does_not_replay_the_predecessor_wal(
 ) -> None:
     import sqlite3
 
-    live = tmp_path / "Knowledge Base/.graph.sqlite"
+    live = epistemic_graph.sidecar_path(tmp_path)
     live.parent.mkdir(parents=True)
     predecessor = sqlite3.connect(live)
     try:
@@ -2966,7 +2972,7 @@ def test_existing_live_publication_refusal_keeps_the_previous_complete_sidecar(
 
     from exomem import epistemic_graph
 
-    live = tmp_path / "Knowledge Base/.graph.sqlite"
+    live = epistemic_graph.sidecar_path(tmp_path)
     live.parent.mkdir(parents=True)
     with closing(sqlite3.connect(live)) as conn:
         conn.execute("CREATE TABLE value (item TEXT)")
@@ -3004,7 +3010,7 @@ def test_replacement_refusal_names_what_it_observed(
     the retry count and elapsed evidence distinguish it from an immediate
     permission or malformed-store failure without guessing at the holder.
     """
-    live = tmp_path / "Knowledge Base/.graph.sqlite"
+    live = epistemic_graph.sidecar_path(tmp_path)
     live.parent.mkdir(parents=True)
     with closing(sqlite3.connect(live)) as conn:
         conn.execute("CREATE TABLE value (item TEXT)")
@@ -3042,7 +3048,7 @@ def test_replacement_refusal_says_when_there_was_nothing_to_publish_into(
     from exomem import epistemic_graph
 
     """An absent live sidecar is a different failure and must read as one."""
-    live = tmp_path / "Knowledge Base/.graph.sqlite"
+    live = epistemic_graph.sidecar_path(tmp_path)
     live.parent.mkdir(parents=True)
     temporary = graph_sync.temporary_sidecar_path(live, _checkpoint(1))
     temporary.write_bytes(b"new")
@@ -3113,7 +3119,7 @@ def test_temp_sweep_preserves_a_sharing_refused_abandoned_temporary(
 ) -> None:
     from exomem import epistemic_graph
 
-    live = tmp_path / "Knowledge Base/.graph.sqlite"
+    live = epistemic_graph.sidecar_path(tmp_path)
     live.parent.mkdir(parents=True)
     temporary = graph_sync.temporary_sidecar_path(live, _checkpoint(1))
     temporary.write_bytes(b"complete")
@@ -3142,7 +3148,7 @@ def test_temp_sweep_preserves_a_sharing_refused_abandoned_temporary(
 def test_temp_sweep_removes_abandoned_sqlite_companions_but_keeps_active_set(
     tmp_path: Path,
 ) -> None:
-    live = tmp_path / "Knowledge Base/.graph.sqlite"
+    live = epistemic_graph.sidecar_path(tmp_path)
     live.parent.mkdir(parents=True)
     abandoned = graph_sync.temporary_sidecar_path(live, _checkpoint(1))
     active = graph_sync.temporary_sidecar_path(live, _checkpoint(1))

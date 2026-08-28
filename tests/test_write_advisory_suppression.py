@@ -263,7 +263,8 @@ def test_triage_write_advisory_isolated_from_other_namespaces_and_note(
     assert result["ref"] == advisory.ref
     assert advisory.review_id not in {attention_id, activation_id}
     assert all(key.startswith(f"{advisory.review_id}:") for key in payload["records"])
-    assert changed == {"Knowledge Base/.review-state.json"}
+    assert changed == set()
+    assert review_state.state_path(vault).is_file()
     assert (vault / path).read_bytes() == target_before
 
 

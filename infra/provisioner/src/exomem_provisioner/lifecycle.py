@@ -194,7 +194,7 @@ class LifecycleConfig:
     records_reader_version: int | None = None
     lifecycle_actions_enabled: bool = False
     compatibility_digest: str | None = None
-    migration_mode: Literal["none", "binding-v1-to-v2"] = "none"
+    migration_mode: Literal["none", "binding-v1-to-v2", "state-root-v1"] = "none"
 
     def runtime_target_for(self, request: dict[str, Any], *, v2: bool) -> dict[str, str]:
         if v2:
@@ -697,6 +697,7 @@ class LifecyclePlane(Protocol):
         operation_id: str,
     ) -> None: ...
     async def scale(self, metadata: OpaqueProviderMetadata, replicas: int) -> None: ...
+    async def runtime_stopped(self, metadata: OpaqueProviderMetadata) -> bool: ...
     async def resume(
         self,
         metadata: OpaqueProviderMetadata,
@@ -1062,9 +1063,12 @@ class HighFidelityProviderPlane:
 
     async def scale(self, metadata: OpaqueProviderMetadata, replicas: int) -> None:
         cell = self._require_cell(metadata)
-        if replicas == 0 and not cell.quiesced:
+        if replicas == 0 and not cell.quiesced and (cell.control_route or cell.transfer_route):
             raise MetadataConflict("compute cannot stop before runtime drain")
         cell.replicas = replicas
+
+    async def runtime_stopped(self, metadata: OpaqueProviderMetadata) -> bool:
+        return self._require_cell(metadata).replicas == 0
 
     async def resume(
         self,
@@ -1107,7 +1111,8 @@ class HighFidelityProviderPlane:
         del request, operation_id
         if config.migration_mode == "none":
             raise MetadataConflict("runtime migration was not declared")
-        if not self._require_cell(metadata).quiesced:
+        cell = self._require_cell(metadata)
+        if not cell.quiesced or cell.replicas != 0:
             raise MetadataConflict("runtime migration requires a quiesced cell")
 
     async def upgrade_runtime(
@@ -1138,6 +1143,7 @@ class HighFidelityProviderPlane:
         cell.helm_values = _fixed_helm_values(cell.metadata, request, config)
         cell.helm_values["workloadMode"] = "serve"
         cell.helm_values["routes"]["enabled"] = False
+        cell.replicas = 1
         cell.health = HealthObservation.ready_for(cell.metadata, cell.request_shape, config)
         if self._mutate_vault_on_upgrade:
             self._mutate_vault_on_upgrade = False
@@ -1698,6 +1704,7 @@ def _fixed_helm_values(
         ),
         "initOperationId": metadata.operation_id,
         "initRequestId": _deterministic_uuid4(metadata.operation_id + ":init"),
+        "migrationMode": config.migration_mode,
         "pvcSize": "10Gi",
         "provisionMode": request["provisionMode"],
         "providerIdentity": {
@@ -1786,6 +1793,23 @@ class CellLifecycleDriver:
             and self.runtime_target_matches(request, context)
         )
 
+    async def _stop_failed_rollforward(self, metadata: OpaqueProviderMetadata) -> None:
+        try:
+            await self._plane.disable_routes(metadata)
+            if self._plane.routes_enabled(metadata) != (False, False):
+                raise DriverTerminal("PROVISIONER_ROUTE_CLOSURE_UNPROVEN")
+            await self._plane.scale(metadata, 0)
+            for attempt in range(30):
+                if await self._plane.runtime_stopped(metadata):
+                    return
+                if attempt < 29:
+                    await asyncio.sleep(1)
+        except DriverTerminal:
+            raise
+        except MetadataConflict as error:
+            raise DriverTerminal("PROVISIONER_RUNTIME_STOP_UNPROVEN") from error
+        raise DriverTerminal("PROVISIONER_RUNTIME_STOP_UNPROVEN")
+
     async def execute(
         self,
         action: str,
@@ -1852,6 +1876,8 @@ class CellLifecycleDriver:
             "maintenance-acquired",
             "routes-closed",
             "runtime-drained",
+            "runtime-stop-wait",
+            "runtime-stopped",
         }
         if fingerprint is not None:
             known.add(context.checkpoint)
@@ -1869,6 +1895,15 @@ class CellLifecycleDriver:
             await self._plane.quiesce(metadata, request, operation_id)
             return DriverPending("runtime-drained", 1)
         if context.checkpoint == "runtime-drained":
+            await self._plane.scale(metadata, 0)
+            return DriverPending("runtime-stop-wait", 1)
+        if context.checkpoint == "runtime-stop-wait":
+            if not await self._plane.runtime_stopped(metadata):
+                return DriverPending("runtime-stop-wait", 1)
+            return DriverPending("runtime-stopped", 1)
+        if context.checkpoint == "runtime-stopped":
+            if not await self._plane.runtime_stopped(metadata):
+                return DriverPending("runtime-stop-wait", 1)
             before = await self._plane.canonical_vault_fingerprint(
                 metadata, request, operation_id, phase="before"
             )
@@ -1876,6 +1911,8 @@ class CellLifecycleDriver:
                 raise DriverTerminal("PROVISIONER_VAULT_FINGERPRINT_INVALID")
             return DriverPending(f"vault-fingerprinted-{before}", 1)
         if context.checkpoint.startswith("vault-fingerprinted-") and fingerprint is not None:
+            if not await self._plane.runtime_stopped(metadata):
+                return DriverPending("runtime-stop-wait", 1)
             if self._config.migration_mode == "none":
                 return DriverPending(f"migration-skipped-{fingerprint}", 1)
             await self._plane.run_runtime_migration(metadata, request, self._config, operation_id)
@@ -1892,14 +1929,25 @@ class CellLifecycleDriver:
                 await self._exact_health(metadata, request, context)
                 return DriverPending(f"target-confirmed-{fingerprint}", 1)
             except (DriverTerminal, MetadataConflict):
-                await self._plane.rollback_runtime(metadata, operation_id)
+                # A completed target-image migration may have changed durable
+                # machine-local state. Reinstalling the old image after that
+                # checkpoint would let a legacy writer reopen the migrated
+                # volume. Only the explicitly migration-skipped path retains
+                # old-image rollback authority.
+                if context.checkpoint.startswith("migration-skipped-"):
+                    await self._plane.rollback_runtime(metadata, operation_id)
+                await self._stop_failed_rollforward(metadata)
                 raise
         if context.checkpoint.startswith("target-confirmed-") and fingerprint is not None:
-            await self._plane.enable_routes(metadata, request)
-            if self._plane.routes_enabled(metadata) != (True, True):
-                raise DriverTerminal("PROVISIONER_ROUTE_REOPEN_FAILED")
-            await self._plane.commit_runtime_upgrade(metadata, operation_id)
-            await self._plane.release_maintenance(metadata, operation_id)
+            try:
+                await self._plane.enable_routes(metadata, request)
+                if self._plane.routes_enabled(metadata) != (True, True):
+                    raise DriverTerminal("PROVISIONER_ROUTE_REOPEN_FAILED")
+                await self._plane.commit_runtime_upgrade(metadata, operation_id)
+                await self._plane.release_maintenance(metadata, operation_id)
+            except (DriverTerminal, MetadataConflict):
+                await self._stop_failed_rollforward(metadata)
+                raise
             evidence = hashlib.sha256(
                 (
                     json.dumps(

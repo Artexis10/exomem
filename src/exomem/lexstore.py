@@ -425,7 +425,9 @@ def classify_sqlite_error(error: BaseException) -> str:
 
 
 def lexical_path(vault_root: Path) -> Path:
-    return vault_root / kb_dirname() / ".lexical.sqlite"
+    from . import state_paths
+
+    return state_paths.vault_state_dir(vault_root) / ".lexical.sqlite"
 
 
 def _remove_lexical_rebuild_artifact(
@@ -1797,20 +1799,15 @@ class LexicalStore:
         live sidecar.
         """
         target = path if path is not None else self.path
-        try:
-            relative = target.absolute().relative_to(self.vault_root.absolute())
-        except ValueError:
-            descriptor_ids = None
-        else:
-            descriptor_id = reserved_paths.classify_logical(
-                relative.as_posix()
-            ).descriptor_id
-            descriptor_ids = (
-                (descriptor_id,)
-                if descriptor_id
-                in {"lexical-store", "lexical-rebuild", "lexical-quarantine"}
-                else None
-            )
+        descriptor_id = reserved_paths.state_target_descriptor_id(
+            self.vault_root, target
+        )
+        descriptor_ids = (
+            (descriptor_id,)
+            if descriptor_id
+            in {"lexical-store", "lexical-rebuild", "lexical-quarantine"}
+            else None
+        )
         with reserved_paths._subsystem_authority_scope("lexstore"):
             with reserved_paths._identity_coordination_scope(
                 self.vault_root,
@@ -1825,14 +1822,9 @@ class LexicalStore:
         publish: bool = True,
     ) -> sqlite3.Connection:
         target = path if path is not None else self.path
-        try:
-            relative = target.absolute().relative_to(self.vault_root.absolute())
-        except ValueError:
-            descriptor_id = None
-        else:
-            descriptor_id = reserved_paths.classify_logical(
-                relative.as_posix()
-            ).descriptor_id
+        descriptor_id = reserved_paths.state_target_descriptor_id(
+            self.vault_root, target
+        )
         if descriptor_id in {
             "lexical-store",
             "lexical-rebuild",
@@ -1889,10 +1881,9 @@ class LexicalStore:
         a failed negotiation is logged and ignored.
         """
         target = path if path is not None else self.path
-        classification = reserved_paths.classify_logical(
-            target.relative_to(self.vault_root).as_posix()
+        descriptor_id = reserved_paths.state_target_descriptor_id(
+            self.vault_root, target
         )
-        descriptor_id = classification.descriptor_id
         if descriptor_id not in {"lexical-store", "lexical-rebuild"}:
             raise RuntimeError("lexical SQLite target is not owner-bound")
         with reserved_paths._subsystem_authority_scope("lexstore"):

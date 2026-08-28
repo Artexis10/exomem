@@ -2563,8 +2563,8 @@ def op_audit_fix(vault_root: Path, dry_run: bool = False, rebuild_embeddings: bo
         dry_run: If true, compute what would change without writing.
             Default false.
         rebuild_embeddings: If true, wipe and rebuild the vector sidecar
-            at `<vault>/Knowledge Base/.embeddings.sqlite` after the fix
-            sweep. Use on first run, after a machine swap, or when the
+            (`.embeddings.sqlite` in the machine-local state root) after
+            the fix sweep. Use on first run, after a machine swap, or when the
             sidecar has drifted from disk. Ignored when `dry_run=true`.
 
     Returns:

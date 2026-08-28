@@ -207,6 +207,7 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         "governance-store",
         "governance-tree",
         "graph-handoff",
+        "graph-coordination",
         "graph-rebuild",
         "graph-receipts",
         "graph-reset",
@@ -293,12 +294,16 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
 
     seen: set[str] = set()
     for owned_path, descriptor_id in claims_from_owners:
-        relative = owned_path.relative_to(root).as_posix()
-        assert relative not in seen
-        seen.add(relative)
-        classified = reserved_paths.classify_logical(relative)
-        assert classified.disposition is reserved_paths.PathDisposition.RESERVED, relative
-        assert classified.descriptor_id == descriptor_id, relative
+        key = str(owned_path)
+        assert key not in seen
+        seen.add(key)
+        # Classification is placement-aware now: machine-local families anchor
+        # at the external state root, the rest stay vault-relative, and both
+        # route through the same closed registry.
+        assert (
+            reserved_paths.state_target_descriptor_id(root, owned_path)
+            == descriptor_id
+        ), key
 
 
 def test_identity_catalogue_enumerates_only_from_the_held_kb_anchor(
@@ -1711,7 +1716,10 @@ def test_due_state_projection_and_its_temporaries_are_not_reachable_vault_conten
     notes = tmp_path / "Knowledge Base" / "Notes"
     notes.mkdir(parents=True)
     (notes / "ordinary.md").write_text("ordinary", encoding="utf-8")
-    projection = due_state.state_path(tmp_path)
+    # The live projection moved to the external state root; what the vault can
+    # still carry is a pre-relocation LEFTOVER, and the quarantine
+    # classification must keep it unreachable as content.
+    projection = tmp_path / "Knowledge Base" / due_state.STATE_FILENAME
     projection.write_text('{"categories":{},"version":1}\n', encoding="utf-8")
     temporary = projection.with_name(f".{due_state.STATE_FILENAME}.abc123_4.tmp")
     temporary.write_text("DUE-STATE-SENTINEL-9c1a\n", encoding="utf-8")
@@ -2449,6 +2457,7 @@ def test_json_and_graph_private_owners_publish_through_their_named_authority(
     voice_profiles._write_store(
         voice_profiles.voice_profiles_path(tmp_path),
         {},
+        vault_root=tmp_path,
     )
     graph_sync._write_floor(
         tmp_path,
@@ -2545,9 +2554,12 @@ def test_private_owner_unlink_closes_file_before_parent_flush(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A delete-pending handle must close before its namespace deletion is flushed."""
-    from exomem import graph_sync, held_fs
+    from exomem import held_fs
 
-    target = graph_sync.floor_path(tmp_path)
+    # A pre-relocation leftover: the vault-anchored removal path keeps the
+    # full durability ordering (the external state root deliberately skips
+    # the anchor-root flush, which is pinned separately).
+    target = tmp_path / "Knowledge Base" / ".graph-sync-floor.json"
     target.parent.mkdir(parents=True)
     target.write_bytes(b"floor")
 
@@ -2741,7 +2753,9 @@ def test_json_and_graph_private_owners_read_through_their_named_authority(
     monkeypatch.setattr(Path, "exists", lambda _path: True)
 
     assert review_state.ReviewStateStore(tmp_path).load()["records"] == {}
-    assert voice_profiles.load_store(voice_profiles.voice_profiles_path(tmp_path)) == {}
+    assert voice_profiles.load_store(
+        voice_profiles.voice_profiles_path(tmp_path), vault_root=tmp_path
+    ) == {}
     assert graph_sync.read_floor(tmp_path) is not None
 
     assert [(descriptor, name) for descriptor, name, _limit in observed] == [
@@ -2866,12 +2880,22 @@ def test_owner_child_file_mutations_retain_parent_without_delete_access(
             "graph-handoff",
         )
 
+    # The graph handoff artifacts live in the external state root; their
+    # parent is the state-dir anchor itself ("."), which child mutations
+    # retain without DELETE access. Root deletion durability uses the separate
+    # no-follow anchor flush, so no retained parent access may exceed "read".
+    state_parent_accesses = [
+        access for relative, access in parent_accesses if relative == "."
+    ]
+    assert state_parent_accesses
+    assert set(state_parent_accesses) == {"read"}
+    # The generic publication into the vault keeps its ordinary parent
+    # discipline untouched.
     knowledge_base_accesses = [
         access for relative, access in parent_accesses if relative == "Knowledge Base"
     ]
     assert knowledge_base_accesses
     assert "mutate" not in knowledge_base_accesses
-    assert knowledge_base_accesses[-1] == "flush"
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX retained-directory durability probe")
@@ -3238,11 +3262,7 @@ def test_primary_sqlite_connections_retain_their_owner_target_through_open(
         descriptor_id for descriptor_id, _connect in cases
     ]
     assert all(create for _descriptor_id, _name, create in observed)
-    assert published == [
-        descriptor_id
-        for descriptor_id, _connect in cases
-        for _attempt in range(2 if descriptor_id == "graph-store" else 1)
-    ]
+    assert published == [descriptor_id for descriptor_id, _connect in cases]
 
 
 def test_live_graph_publishes_identity_before_schema_initialization(
@@ -3314,20 +3334,22 @@ def test_fresh_live_graph_publishes_complete_wal_family_and_refuses_alias(
     )
     connection = graph._connect()
     try:
+        live = epistemic_graph.sidecar_path(tmp_path)
         family = tuple(
-            tmp_path / "Knowledge Base" / f".graph.sqlite{suffix}"
-            for suffix in ("", "-wal", "-shm")
+            live.with_name(f"{live.name}{suffix}") for suffix in ("", "-wal", "-shm")
         )
         catalogue = reserved_paths._published_identity_catalogue(tmp_path)
         assert all(path.exists() for path in family)
+        # The live store is machine-local now: its WAL family exists in the
+        # external state root and is deliberately absent from the published
+        # identity catalogue (no KB-relative alias can reach it).
         assert all(
-            catalogue.descriptor_for(reserved_paths._lstat_identity(path))
-            == "graph-store"
+            catalogue.descriptor_for(reserved_paths._lstat_identity(path)) is None
             for path in family
         )
 
         notes = tmp_path / "Knowledge Base" / "Notes"
-        notes.mkdir()
+        notes.mkdir(parents=True)
         alias = notes / "ordinary.bin"
         try:
             os.link(family[1], alias)
@@ -3414,7 +3436,7 @@ def test_graph_rebuild_backup_releases_identity_lock_after_complete_publication(
     )
     live = graph._connect()
     live.close()
-    temporary = tmp_path / "Knowledge Base" / (
+    temporary = graph.path.with_name(
         f".graph-rebuild-{'a' * 64}-{'b' * 24}.sqlite"
     )
     rebuild = graph._connect(temporary)
@@ -3454,7 +3476,7 @@ def test_graph_rebuild_backup_releases_identity_lock_after_complete_publication(
 
         def backup(self, destination: ObservedConnection) -> None:
             family = tuple(
-                tmp_path / "Knowledge Base" / f".graph.sqlite{suffix}"
+                graph.path.with_name(f"{graph.path.name}{suffix}")
                 for suffix in ("", "-wal", "-shm")
             )
             catalogue = reserved_paths._published_identity_catalogue(tmp_path)
@@ -3464,17 +3486,19 @@ def test_graph_rebuild_backup_releases_identity_lock_after_complete_publication(
                         tmp_path,
                         "graph-store",
                     ),
+                    # Machine-local placement: nothing about this external
+                    # family is published for KB-alias refusal.
                     all(
                         catalogue.descriptor_for(
                             reserved_paths._lstat_identity(path)
                         )
-                        == "graph-store"
+                        is None
                         for path in family
                     )
                     and catalogue.descriptor_for(
                         reserved_paths._lstat_identity(temporary)
                     )
-                    == "graph-rebuild",
+                    is None,
                     frozenset(retained),
                 )
             )
@@ -3837,8 +3861,8 @@ def test_reference_drift_reports_a_late_retained_target_refusal(
 ) -> None:
     from exomem import memory_refs
 
-    sidecar = tmp_path / "Knowledge Base" / ".refs.sqlite"
-    sidecar.parent.mkdir()
+    sidecar = memory_refs.sidecar_path(tmp_path)
+    sidecar.parent.mkdir(parents=True)
     sidecar.touch()
     monkeypatch.setattr(memory_refs.ReferenceIndex, "available", lambda _self: True)
     monkeypatch.setattr(
@@ -4028,7 +4052,7 @@ def test_sqlite_owner_publication_retries_a_transient_wal_family_change(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from exomem import held_fs, media_jobs
+    from exomem import held_fs
 
     publish_sqlite_identities = held_fs.publish_sqlite_identities
     attempts = 0
@@ -4050,13 +4074,33 @@ def test_sqlite_owner_publication_retries_a_transient_wal_family_change(
             )
         return publish_sqlite_identities(filesystem, parent, primary, publish)
 
-    monkeypatch.setattr(
-        held_fs,
-        "publish_sqlite_identities",
-        transient_family_change,
-    )
+    from exomem import claims
 
-    media_jobs.MediaJobStore(tmp_path)
+    index = claims.ClaimIndex(tmp_path)
+    connection = index._connect()
+    try:
+        # Guarantee reachable WAL companions before the publication attempt.
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("BEGIN IMMEDIATE")
+        connection.rollback()
+
+        monkeypatch.setattr(
+            held_fs,
+            "publish_sqlite_identities",
+            transient_family_change,
+        )
+        with reserved_paths._subsystem_authority_scope("claims"):
+            with reserved_paths._identity_coordination_scope(
+                tmp_path, descriptor_ids=("claims-store",)
+            ):
+                reserved_paths._publish_sqlite_owner_family(
+                    tmp_path,
+                    claims.sidecar_path(tmp_path),
+                    "claims-store",
+                    connection,
+                )
+    finally:
+        connection.close()
 
     assert attempts == 2
 
@@ -4085,9 +4129,14 @@ def test_primary_sqlite_owners_publish_under_exact_authority_and_coordination(
         descriptor_id: str,
         connection: object,
     ) -> None:
+        from exomem import state_paths
+
         assert reserved_paths.owner_authorized(descriptor_id)
         assert reserved_paths._identity_coordination_active(vault_root)
-        assert database.parent == tmp_path / "Knowledge Base"
+        # Every machine-local SQLite owner, including claims, lives in the
+        # external per-vault state root. Authority and coordination stay exact.
+        expected_parent = state_paths.vault_state_dir(tmp_path)
+        assert database.parent == expected_parent
         observed.append((descriptor_id, database.name))
         publish_owner_family(vault_root, database, descriptor_id, connection)
 
@@ -4120,10 +4169,11 @@ def test_primary_sqlite_owners_publish_under_exact_authority_and_coordination(
         connection.close()
         assert observed[-1][0] == descriptor_id
 
+    # Exactly one publication per open: the live graph's WAL-companion
+    # republish only exists for an in-vault store, whose family must stay
+    # consumable at KB-relative aliases.
     assert [descriptor_id for descriptor_id, _name in observed] == [
-        descriptor_id
-        for descriptor_id, _connect in cases
-        for _attempt in range(2 if descriptor_id == "graph-store" else 1)
+        descriptor_id for descriptor_id, _connect in cases
     ]
 
 
@@ -4146,45 +4196,47 @@ def test_primary_sqlite_owner_publications_are_consumable_by_stable_identity(
         tmp_path,
         mutation_coordinator=SimpleNamespace(),
     )
+    from exomem import index_paths
+
     cases = (
         (
             "embeddings-store",
-            tmp_path / "Knowledge Base" / ".embeddings.sqlite",
+            index_paths.sidecar_path(tmp_path),
             lambda: embedding_index.EmbeddingIndex(tmp_path)._connect(),
         ),
         (
             "clip-store",
-            tmp_path / "Knowledge Base" / ".clip.sqlite",
+            index_paths.clip_sidecar_path(tmp_path),
             lambda: clip_index.ClipIndex(tmp_path)._connect(),
         ),
         (
             "claims-store",
-            tmp_path / "Knowledge Base" / ".claims.sqlite",
+            claims.sidecar_path(tmp_path),
             lambda: claims.ClaimIndex(tmp_path)._connect(),
         ),
         (
             "graph-store",
-            tmp_path / "Knowledge Base" / ".graph.sqlite",
+            epistemic_graph.sidecar_path(tmp_path),
             graph._connect,
         ),
         (
             "deferred-index-store",
-            tmp_path / "Knowledge Base" / ".deferred-index.sqlite",
+            deferred_index.store_path(tmp_path),
             lambda: deferred_index._connect(tmp_path, create=True),
         ),
         (
             "refs-store",
-            tmp_path / "Knowledge Base" / ".refs.sqlite",
+            memory_refs.sidecar_path(tmp_path),
             lambda: memory_refs.ReferenceIndex(tmp_path)._connect(),
         ),
         (
             "lexical-store",
-            tmp_path / "Knowledge Base" / ".lexical.sqlite",
+            lexstore.lexical_path(tmp_path),
             lambda: lexstore.LexicalStore(tmp_path)._connect_setup(),
         ),
         (
             "governance-store",
-            tmp_path / "Knowledge Base" / ".governance.sqlite",
+            index_paths.governance_sidecar_path(tmp_path),
             lambda: governance_store.open_connection(tmp_path),
         ),
     )
@@ -4193,16 +4245,19 @@ def test_primary_sqlite_owner_publications_are_consumable_by_stable_identity(
         connection = connect()
         try:
             catalogue = reserved_paths._published_identity_catalogue(tmp_path)
-            assert catalogue.descriptor_for(reserved_paths._lstat_identity(path)) == descriptor_id
+            observed = catalogue.descriptor_for(reserved_paths._lstat_identity(path))
+            # Machine-local stores live in the external state root: no
+            # KB-relative spelling can reach them, their identities are
+            # deliberately NOT published, and one appearing here would be
+            # new unreviewed surface.
+            assert observed is None, (descriptor_id, observed)
         finally:
             connection.close()
 
     media_jobs.MediaJobStore(tmp_path)
-    media_path = tmp_path / "Knowledge Base" / ".media-jobs.sqlite"
+    media_path = media_jobs.job_store_path(tmp_path)
     catalogue = reserved_paths._published_identity_catalogue(tmp_path)
-    assert catalogue.descriptor_for(reserved_paths._lstat_identity(media_path)) == (
-        "media-jobs-store"
-    )
+    assert catalogue.descriptor_for(reserved_paths._lstat_identity(media_path)) is None
 
 
 def test_governance_leaf_refuses_without_dispatcher_owner_authority(

@@ -2788,7 +2788,9 @@ def _check_embedding_drift(vault_root: Path) -> list[AuditFinding]:
     one wipe-and-rebuild.
     """
     findings: list[AuditFinding] = []
-    sidecar = vault_root / kb_dirname() / ".embeddings.sqlite"
+    from . import index_paths
+
+    sidecar = index_paths.sidecar_path(vault_root)
     if not sidecar.exists():
         return findings
     import sqlite3

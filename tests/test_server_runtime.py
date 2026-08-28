@@ -85,6 +85,51 @@ def test_initialize_runtime_does_not_start_workers_before_transport(
     assert events == [f"projection:{vault}"]
 
 
+def test_initialize_runtime_requires_ready_state_before_any_state_consumer(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import state_migration
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    events: list[str] = []
+    monkeypatch.setattr(server_runtime, "resolve_vault", lambda: vault)
+    monkeypatch.setattr(
+        state_migration,
+        "require_vault_state_ready",
+        lambda root: events.append(f"ready:{root}"),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        server_runtime.schema,
+        "load_source_schema",
+        lambda root: (
+            events.append(f"schema:{root}"),
+            SimpleNamespace(source_types=("session",)),
+        )[1],
+    )
+    monkeypatch.setattr(
+        server_runtime.project_keys,
+        "keys_hint",
+        lambda root: (events.append(f"keys:{root}"), "")[1],
+    )
+    monkeypatch.setattr(
+        projection_runtime,
+        "preactivate_projection_runtime",
+        lambda root: events.append(f"projection:{root}"),
+    )
+    monkeypatch.setattr(server_runtime, "_start_metrics_persistence", lambda: None)
+
+    server_runtime.initialize_runtime(load_dotenv_func=lambda **_kwargs: None)
+
+    assert events == [
+        f"ready:{vault}",
+        f"schema:{vault}",
+        f"keys:{vault}",
+        f"projection:{vault}",
+    ]
+
+
 def test_local_runtime_activation_waits_for_liveness_and_starts_once(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

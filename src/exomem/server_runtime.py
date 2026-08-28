@@ -75,6 +75,9 @@ def initialize_runtime(*, load_dotenv_func: Callable[..., object]) -> ServerRunt
     env_compat.promote_legacy()
 
     vault_root = resolve_vault()
+    from . import state_migration
+
+    state_migration.require_vault_state_ready(vault_root)
     source_schema = schema.load_source_schema(vault_root)
     log.info("vault=%s source_types=%s", vault_root, source_schema.source_types)
 
@@ -284,6 +287,9 @@ def _initialize_locked_hosted_runtime(
     """Finish hosted startup while retaining exclusive target-root ownership."""
 
     config.apply_process_environment()
+    from . import state_migration
+
+    state_migration.require_vault_state_ready(config.vault_root)
     _start_metrics_persistence()
     lifecycle = HostedCellLifecycle(
         config,

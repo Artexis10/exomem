@@ -416,7 +416,7 @@ def audit_fix(
     """Run audit + auto-apply safe fixes. Read-only if dry_run=True.
 
     When `rebuild_embeddings=True`, wipes and rebuilds the vector sidecar
-    at `<vault>/Knowledge Base/.embeddings.sqlite` from the current
+    (`.embeddings.sqlite` in the machine-local state root) from the current
     markdown state of every compiled page. Use on first run, after a
     machine swap, or whenever the sidecar drifts from disk.
     """

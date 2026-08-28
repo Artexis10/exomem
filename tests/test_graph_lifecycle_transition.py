@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -11,9 +12,11 @@ from exomem import (
     delete_directory,
     delete_file,
     graph_sync,
+    held_fs,
     index_sync,
     recall_policy,
     recover_from_trash,
+    state_paths,
     writer_lease,
 )
 from exomem.governance import lifecycle
@@ -29,6 +32,84 @@ def _note(vault: Path, name: str = "transition.md") -> tuple[str, Path]:
 
 def _synthetic_windows_path(*parts: str) -> str:
     return "\\".join(("C:", "example", *parts))
+
+
+@pytest.fixture
+def _isolated_graph_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[Path]:
+    """Give graph artifacts and receipts separate machine-local test roots."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "external-state"))
+    lease_state = tmp_path / "writer-lease-state"
+    lease_state.mkdir()
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(lease_state))
+    writer_lease.reset_managers_for_tests()
+    yield vault
+    writer_lease.reset_managers_for_tests()
+
+
+def test_relocated_deletion_epoch_uses_the_canonical_content_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+    _isolated_graph_state: Path,
+) -> None:
+    relative, _source = _note(_isolated_graph_state, "relocated-delete.md")
+    outside = "Machine State/relocated-delete.md"
+    monkeypatch.setattr(recall_policy, "is_recall_candidate", lambda *_args: True)
+
+    epoch = graph_sync.prepare_deletion_epoch(
+        _isolated_graph_state, [outside, relative]
+    )
+
+    assert epoch is not None
+    assert epoch.checkpoint.paths == ((relative, None),)
+    graph_sync.restore_deletion_epoch(epoch)
+
+
+def test_relocated_recovery_epoch_uses_the_canonical_content_prefix(
+    _isolated_graph_state: Path,
+) -> None:
+    relative, _source = _note(_isolated_graph_state, "relocated-recovery.md")
+    outside = "Machine State/relocated-recovery.md"
+
+    epoch = graph_sync.prepare_recovery_epoch(
+        _isolated_graph_state,
+        [(outside, "b" * 64), (relative, "a" * 64)],
+    )
+
+    assert epoch is not None
+    assert epoch.checkpoint.paths == ((relative, "a" * 64),)
+    assert epoch.checkpoint.created_paths == (relative,)
+    graph_sync.restore_deletion_epoch(epoch)
+
+
+def test_initially_absent_epoch_rollback_durably_flushes_external_deletions(
+    monkeypatch: pytest.MonkeyPatch,
+    _isolated_graph_state: Path,
+) -> None:
+    relative, _source = _note(_isolated_graph_state, "external-rollback.md")
+    flushed: list[Path] = []
+    monkeypatch.setattr(
+        held_fs,
+        "flush_directory_path",
+        lambda path: flushed.append(Path(path)) or held_fs.HeldResult(value=None),
+        raising=False,
+    )
+
+    epoch = graph_sync.prepare_deletion_epoch(_isolated_graph_state, [relative])
+    assert epoch is not None
+    graph_sync.commit_deletion_epoch(epoch)
+    assert graph_sync.checkpoint_path(_isolated_graph_state).is_file()
+    assert graph_sync.floor_path(_isolated_graph_state).is_file()
+
+    graph_sync.restore_deletion_epoch(epoch)
+
+    state_dir = state_paths.vault_state_dir(_isolated_graph_state)
+    assert graph_sync.checkpoint_path(_isolated_graph_state).exists() is False
+    assert graph_sync.floor_path(_isolated_graph_state).exists() is False
+    assert flushed == [state_dir, state_dir]
 
 
 def test_lifecycle_epoch_staging_never_marks_an_active_mutation_committed(
@@ -84,9 +165,8 @@ def test_lifecycle_checkpoints_bind_active_lease_claims_for_delete_and_recovery(
         idempotency_key="lease-claim-delete",
     )
     delete_checkpoint = graph_sync.read_checkpoint(tmp_path)
-    delete_receipts = list(
-        (tmp_path / "Knowledge Base/.graph-commit-receipts").glob("*.json")
-    )
+    receipt_dir = graph_sync.graph_commit_receipt_path(tmp_path, "0" * 24).parent
+    delete_receipts = list(receipt_dir.glob("*.json"))
     assert delete_checkpoint is not None
     assert len(delete_receipts) == 1
     delete_receipt = graph_sync.GraphCommitReceipt.parse(delete_receipts[0].read_bytes())
@@ -108,9 +188,7 @@ def test_lifecycle_checkpoints_bind_active_lease_claims_for_delete_and_recovery(
         idempotency_key="lease-claim-recovery",
     )
     recovery_checkpoint = graph_sync.read_checkpoint(tmp_path)
-    recovery_receipts = list(
-        (tmp_path / "Knowledge Base/.graph-commit-receipts").glob("*.json")
-    )
+    recovery_receipts = list(receipt_dir.glob("*.json"))
     assert recovery_checkpoint is not None
     assert len(recovery_receipts) == 2
     recovery_receipt = max(

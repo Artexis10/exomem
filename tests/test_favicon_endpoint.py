@@ -6,6 +6,8 @@ authenticated MCP session, so a 401 here would leave the connector unbranded.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from starlette.testclient import TestClient
 
@@ -76,8 +78,50 @@ def test_health_omits_host_identifying_detail(vault, monkeypatch: pytest.MonkeyP
     assert "interpreter" not in body
     assert "package_path" not in body
     assert "checkout" not in body
+    assert body["state"]["placement"] == "external-state"
+    assert body["state"]["migration"] in {
+        "absent",
+        "in-progress",
+        "complete",
+        "conflict",
+        "invalid",
+        "stale",
+        "unavailable",
+    }
+    assert "state_root" not in body
+    assert "path" not in body["state"]
+    assert str(vault) not in r.text
+    assert str(Path(__file__).resolve().parents[1]) not in r.text
     assert "C:" + r"\Users" not in r.text
     assert "/home/" not in r.text
+
+
+def test_health_uses_cached_or_manifest_only_migration_status_without_enumeration(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import state_migration
+
+    state_migration.migrate_vault_state_offline(
+        vault,
+        authority=state_migration.assert_offline_migration_authority(
+            source="favicon endpoint test setup"
+        ),
+    )
+    monkeypatch.setattr(
+        state_migration,
+        "scan_vault_state",
+        lambda _root: pytest.fail("health enumerated the knowledge base"),
+    )
+    monkeypatch.setattr(
+        state_migration,
+        "_external_state_present",
+        lambda _root: pytest.fail("health enumerated the external state root"),
+    )
+
+    response = _client(vault, monkeypatch).get("/health")
+
+    assert response.status_code == 200
+    assert response.json()["state"]["migration"] == "complete"
 
 
 def test_health_survives_provenance_failure(vault, monkeypatch: pytest.MonkeyPatch) -> None:

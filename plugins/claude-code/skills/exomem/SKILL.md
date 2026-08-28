@@ -833,8 +833,9 @@ data files aren't `find`-searchable. To make a dataset findable, write a
 `query_dataset(aggregate="profile")` emits a ready-to-write card; pull exact rows
 from the `data_file` with `query_dataset`.
 
-Vector embeddings live in a per-machine sidecar at
-`<vault>/Knowledge Base/.embeddings.sqlite` (a dotfile that file-sync tools like Obsidian Sync ignore).
+Vector embeddings live in a per-machine sidecar under the configured external
+state root (`EXOMEM_STATE_ROOT`, or the platform default), keyed by vault identity.
+The machine-local sidecar stays outside synced vault content.
 Writers refresh it incrementally after every atomic batch. To bootstrap or after
 drift, call `audit_fix(rebuild_embeddings=true)`.
 

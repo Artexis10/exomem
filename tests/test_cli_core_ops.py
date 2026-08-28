@@ -22,6 +22,7 @@ from exomem import (
     freshness,
     lexstore,
     media_jobs,
+    review_state,
     semantic_index,
     writer_lease,
 )
@@ -1027,7 +1028,7 @@ def test_simple_review_human_output_and_triage(vault: Path, capsys) -> None:
     assert code3 == 0, err3
     triage = json.loads(out3.strip().splitlines()[-1])["data"]
     assert triage["state"] == "dismissed"
-    assert (vault / "Knowledge Base/.review-state.json").exists()
+    assert review_state.state_path(vault).exists()
 
     code4, out4, err4 = _run(["review", "reopen", item["ref"], "--json"], capsys)
     assert code4 == 0, err4

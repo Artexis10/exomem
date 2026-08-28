@@ -17,8 +17,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from .. import reserved_paths
-from ..kbdir import kb_dirname
+from .. import reserved_paths, state_paths
 from . import projections, schema_v4
 
 SCHEMA_USER_VERSION = 2
@@ -356,8 +355,7 @@ def variant_store_path(
             "projection namespace key is invalid"
         )
     return (
-        Path(vault_root)
-        / kb_dirname()
+        state_paths.vault_state_dir(vault_root)
         / ".authorization-projections"
         / key.namespace_id
         / _STORE_FILENAME

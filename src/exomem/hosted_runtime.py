@@ -431,6 +431,7 @@ class HostedCellConfig:
         target = os.environ if env is None else env
         target["EXOMEM_VAULT_PATH"] = str(self.vault_root)
         target["EXOMEM_HOSTED_STATE_ROOT"] = str(self.state_root)
+        target["EXOMEM_STATE_ROOT"] = str(self.state_root / "vault-state")
         target["EXOMEM_WRITER_LEASE_STATE_DIR"] = str(self.state_root)
         target["EXOMEM_LOG_DIR"] = str(self.log_root)
         target["EXOMEM_UPLOAD_MAX_BYTES"] = str(self.resource_limits.upload_bytes)
@@ -1105,7 +1106,7 @@ def provision_hosted_cell(config: HostedCellConfig) -> HostedProvisionResult:
     if not stage.exists():
         stage.mkdir(mode=0o700, parents=False)
         _write_binding_marker(stage, "vault", config)
-        init_module.init_vault(stage)
+        init_module.init_vault(stage, initialize_state=False)
         _sync_tree(stage)
 
     if config.vault_root.exists():
@@ -2192,7 +2193,7 @@ def initialize_hosted_cell_v2(
                     )
                 stage.chmod(0o700, follow_symlinks=False)
                 _write_v2_marker(stage, "vault", binding)
-                init_module.init_vault(stage)
+                init_module.init_vault(stage, initialize_state=False)
                 _sync_tree(stage)
             # The chown above lands on the staging directory alone, and at that
             # point the directory is empty. `init_vault` then writes the entire
@@ -2268,6 +2269,66 @@ def initialize_hosted_cell_v2(
     )
 
 
+def _migrate_hosted_machine_state_under_lifetime_lock(
+    binding: HostedBindingV2,
+    *,
+    authority_source: str,
+):
+    """Run the state migrator while the caller holds the hosted lifetime lock."""
+
+    from . import state_migration
+
+    overrides = {
+        "EXOMEM_HOSTED_CELL": "1",
+        "EXOMEM_HOSTED_CELL_ID": binding.cell_id,
+        "EXOMEM_HOSTED_VAULT_ID": binding.vault_id,
+        "EXOMEM_HOSTED_RUNTIME_UID": str(binding.runtime_uid),
+        "EXOMEM_HOSTED_RUNTIME_GID": str(binding.runtime_gid),
+        "EXOMEM_VAULT_PATH": str(binding.vault_root),
+        "EXOMEM_HOSTED_STATE_ROOT": str(binding.state_root),
+        "EXOMEM_STATE_ROOT": str(binding.state_root / "vault-state"),
+        "EXOMEM_LOG_DIR": str(binding.log_root),
+    }
+    previous = {name: os.environ.get(name) for name in overrides}
+    os.environ.update(overrides)
+    try:
+        authority = state_migration.assert_offline_migration_authority(
+            source=authority_source,
+        )
+        resolution = state_migration.migrate_vault_state_offline(
+            binding.vault_root,
+            authority=authority,
+        )
+        # The initialization/restore Job is privileged so it can converge
+        # legacy v1 ownership. State copied by that process must be handed back
+        # to the immutable runtime uid/gid before the tenant pod can start.
+        if os.geteuid() == 0:
+            entries = _preflight_migration_tree(
+                binding.state_root,
+                HostedMigrationLimits(),
+            )
+            _converge_tree_ownership(entries, binding)
+        return resolution
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
+def _migrate_hosted_machine_state_offline(binding: HostedBindingV2) -> None:
+    """Run target-image state migration under both hosted lock layers."""
+
+    from .hosted_restore import acquire_hosted_lifetime_lock
+
+    with acquire_hosted_lifetime_lock(binding.state_root, binding=binding):
+        _migrate_hosted_machine_state_under_lifetime_lock(
+            binding,
+            authority_source="hosted target-image initialization job",
+        )
+
+
 def execute_hosted_init_v2(request: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     """Operator adapter kept separate from the storage primitive."""
 
@@ -2292,6 +2353,8 @@ def execute_hosted_init_v2(request: dict[str, Any]) -> tuple[str, dict[str, Any]
             request_digest=canonical_request_digest(request),
             allow_privileged_migration=os.geteuid() == 0,
         )
+        if os.environ.get("EXOMEM_HOSTED_OFFLINE_STATE_MIGRATION") == "1":
+            _migrate_hosted_machine_state_offline(binding)
     except HostedConfigError as exc:
         code = "HOSTED_ROOT_UNSAFE_ENTRY" if exc.code == "HOSTED_ROOT_SYMLINK" else exc.code
         code = code if code in {

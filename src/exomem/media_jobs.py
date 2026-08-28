@@ -19,7 +19,6 @@ from pathlib import Path
 from typing import Any
 
 from . import held_fs, reserved_paths
-from .kbdir import kb_dirname
 
 PENDING = "pending"
 RUNNING = "running"
@@ -257,11 +256,15 @@ def is_guarded_sidecar_sharing_violation(
 
 
 def job_store_path(vault_root: Path) -> Path:
-    return vault_root / kb_dirname() / ".media-jobs.sqlite"
+    from . import state_paths
+
+    return state_paths.vault_state_dir(vault_root) / ".media-jobs.sqlite"
 
 
 def worker_lock_path(vault_root: Path) -> Path:
-    return vault_root / kb_dirname() / ".media-worker.lock"
+    from . import state_paths
+
+    return state_paths.vault_state_dir(vault_root) / ".media-worker.lock"
 
 
 @dataclass(frozen=True)

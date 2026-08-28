@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import reserved_paths
+from exomem import reserved_paths, state_paths
 from exomem.governance import projection_store, projections
 from exomem.governance.decisions import Decision
 
@@ -92,8 +92,10 @@ def test_stage_replay_verify_and_load_exact_projection_row(tmp_path: Path) -> No
     assert manifest.variant_count == 2
     assert len(manifest.rows_digest) == 64
     assert loaded == items[0].variants[1]
-    assert projection_store.variant_store_path(tmp_path, key).relative_to(tmp_path) == Path(
-        "Knowledge Base/.authorization-projections",
+    assert projection_store.variant_store_path(tmp_path, key).relative_to(
+        state_paths.vault_state_dir(tmp_path)
+    ) == Path(
+        ".authorization-projections",
         key.namespace_id,
         "rows.sqlite",
     )

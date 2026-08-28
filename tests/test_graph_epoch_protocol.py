@@ -186,7 +186,7 @@ def test_checkpoint_accepts_1000_exact_1024_byte_paths_in_file_and_sqlite_meta(
         graph_sync.GraphSyncGenerationFloor.create(4).render(), encoding="utf-8"
     )
     graph_sync.checkpoint_path(tmp_path).write_text(checkpoint.render(), encoding="utf-8")
-    with sqlite3.connect(tmp_path / "Knowledge Base/.graph.sqlite") as conn:
+    with sqlite3.connect(graph_sync.floor_path(tmp_path).with_name(".graph.sqlite")) as conn:
         conn.execute("CREATE TABLE graph_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         conn.executemany(
             "INSERT INTO graph_meta(key, value) VALUES (?, ?)",
@@ -492,7 +492,7 @@ def test_bounded_artifact_readers_reject_sparse_oversized_inputs(
     assert graph_sync.checkpoint_state(tmp_path) == ("malformed", None)
     for path, _limit in paths_and_limits[1:]:
         with pytest.raises(OSError, match="could not be safely read"):
-            graph_sync._prior_artifact_bytes(path)
+            graph_sync._prior_artifact_bytes(tmp_path, path)
 
 
 def test_bounded_artifact_reader_rejects_regular_oversized_input_without_large_allocation(
@@ -565,6 +565,14 @@ def test_protocol_artifact_reader_rejects_replace_during_guarded_read(
     path.write_text(_valid_protocol_artifact(artifact), encoding="utf-8")
     replacement = path.with_suffix(".replacement")
     replacement.write_text(_valid_protocol_artifact(artifact), encoding="utf-8")
+    from exomem import state_paths
+
+    # Warm the state-dir anchor's capability probe: its probe READS a probe
+    # file, and a patched read that replaces on first call would otherwise
+    # spend the replacement on the probe instead of on the guarded read.
+    warmed = held_fs.acquire(state_paths.vault_state_dir(tmp_path))
+    assert warmed.ok
+    warmed.require().close()
     acquired = held_fs.acquire(tmp_path)
     assert acquired.ok
     filesystem = acquired.require()
@@ -650,7 +658,7 @@ def test_protocol_parsers_fail_closed_on_json_recursion(
 def test_oversized_sqlite_checkpoint_meta_fails_closed_without_parsing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    sidecar = tmp_path / "Knowledge Base/.graph.sqlite"
+    sidecar = graph_sync.floor_path(tmp_path).with_name(".graph.sqlite")
     sidecar.parent.mkdir(parents=True)
     with sqlite3.connect(sidecar) as conn:
         conn.execute("CREATE TABLE graph_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
@@ -697,7 +705,7 @@ def test_acknowledgement_requires_the_full_checkpoint_meta_proof(tmp_path: Path)
         graph_sync.GraphSyncGenerationFloor.create(1).render(), encoding="utf-8"
     )
     graph_sync.checkpoint_path(tmp_path).write_text(checkpoint.render(), encoding="utf-8")
-    sidecar = tmp_path / "Knowledge Base/.graph.sqlite"
+    sidecar = graph_sync.floor_path(tmp_path).with_name(".graph.sqlite")
     with sqlite3.connect(sidecar) as conn:
         conn.execute("CREATE TABLE graph_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         conn.executemany(
@@ -754,7 +762,7 @@ def test_acknowledgement_readers_close_the_sidecar_they_open(
         created_paths=(),
         scope="full",
     )
-    sidecar = tmp_path / "Knowledge Base/.graph.sqlite"
+    sidecar = graph_sync.floor_path(tmp_path).with_name(".graph.sqlite")
     sidecar.parent.mkdir(parents=True)
     setup = sqlite3.connect(sidecar)
     with setup:

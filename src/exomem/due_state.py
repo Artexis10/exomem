@@ -91,7 +91,6 @@ from pathlib import Path
 from typing import Any
 
 from . import review_state as review_state_module
-from .kbdir import kb_dirname
 
 log = logging.getLogger(__name__)
 
@@ -207,7 +206,9 @@ _PROCESS_SESSION_KEY = f"process:{uuid.uuid4().hex}"
 
 def state_path(vault_root: Path) -> Path:
     """Beside the review state, and for the same reason: this is derived bookkeeping."""
-    return Path(vault_root) / kb_dirname() / STATE_FILENAME
+    from . import state_paths
+
+    return state_paths.vault_state_dir(vault_root) / STATE_FILENAME
 
 
 def load(vault_root: Path) -> dict[str, Any] | None:
@@ -238,9 +239,9 @@ def save(vault_root: Path, payload: dict[str, Any]) -> None:
     """Atomically replace the projection state. Best effort; never raises."""
     path = state_path(vault_root)
     try:
-        from . import vault
+        from . import state_paths, vault
 
-        path.parent.mkdir(parents=True, exist_ok=True)
+        state_paths.ensure_vault_state_dir(vault_root)
         handle_fd, temp_name = tempfile.mkstemp(
             prefix=f".{STATE_FILENAME}.", suffix=".tmp", dir=path.parent
         )

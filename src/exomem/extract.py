@@ -450,7 +450,10 @@ def log_diarization_readiness(vault_root: Path | None = None) -> None:
         names: list[str] = []
         if vault_root is not None:
             names = sorted(
-                voice_profiles.load_profiles(voice_profiles.voice_profiles_path(vault_root))
+                voice_profiles.load_profiles(
+                    voice_profiles.voice_profiles_path(vault_root),
+                    vault_root=vault_root,
+                )
             )
         line = (
             f"diarization readiness: enabled={enabled} sidecar_venv={sidecar_venv} "
@@ -781,10 +784,9 @@ def _resolve_named_labels(
         # Prefer the caller's vault (worker/backfill know it); env resolution is the
         # fallback for callers that don't — a CLI run with only --vault would otherwise
         # silently degrade to anonymous when EXOMEM_VAULT_PATH isn't exported.
-        store_path = voice_profiles.voice_profiles_path(
-            vault_root if vault_root is not None else vault.resolve_vault()
-        )
-        profiles = voice_profiles.load_profiles(store_path)
+        resolved_vault = vault_root if vault_root is not None else vault.resolve_vault()
+        store_path = voice_profiles.voice_profiles_path(resolved_vault)
+        profiles = voice_profiles.load_profiles(store_path, vault_root=resolved_vault)
         if not profiles:
             return None  # nobody enrolled → anonymous, no embedding model loaded
 

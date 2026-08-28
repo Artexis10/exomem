@@ -127,11 +127,14 @@ def test_selected_deployment_lock_is_strict_and_exposes_admission_inputs(tmp_pat
         load_deployment_lock(path)
 
 
-def test_selected_runtime_exposes_only_signed_forward_upgrade_metadata(tmp_path: Path) -> None:
+@pytest.mark.parametrize("migration_mode", ("binding-v1-to-v2", "state-root-v1"))
+def test_selected_runtime_exposes_only_signed_forward_upgrade_metadata(
+    tmp_path: Path, migration_mode: str
+) -> None:
     value = _deployment_lock()
     value["runtimeUpgrade"] = {
         "compatibilityDigest": "9" * 64,
-        "migrationMode": "binding-v1-to-v2",
+        "migrationMode": migration_mode,
         "substrateConsumerCommit": "8" * 40,
         "substrateTrustSha256": "7" * 64,
     }
@@ -142,7 +145,7 @@ def test_selected_runtime_exposes_only_signed_forward_upgrade_metadata(tmp_path:
     selected = lock.selected_runtime("active")
 
     assert selected.compatibilityDigest == "9" * 64
-    assert selected.migrationMode == "binding-v1-to-v2"
+    assert selected.migrationMode == migration_mode
     assert lock.runtimeUpgrade is not None
     assert lock.runtimeUpgrade.substrateConsumerCommit == "8" * 40
     assert lock.runtimeUpgrade.substrateTrustSha256 == "7" * 64

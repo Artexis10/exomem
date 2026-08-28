@@ -831,8 +831,8 @@ def begin_deletion_transition(
     captured_prior = False
     epoch_staging_mutated = False
     try:
-        prior_floor = _prior_artifact_bytes(floor_path(root))
-        prior_checkpoint = _prior_artifact_bytes(checkpoint_path(root))
+        prior_floor = _prior_artifact_bytes(root, floor_path(root))
+        prior_checkpoint = _prior_artifact_bytes(root, checkpoint_path(root))
         captured_prior = True
         epoch = prepare_deletion_epoch(vault_root, removed_rel_paths)
     except Exception as error:
@@ -879,8 +879,8 @@ def begin_recovery_transition(
     captured_prior = False
     epoch_staging_mutated = False
     try:
-        prior_floor = _prior_artifact_bytes(floor_path(root))
-        prior_checkpoint = _prior_artifact_bytes(checkpoint_path(root))
+        prior_floor = _prior_artifact_bytes(root, floor_path(root))
+        prior_checkpoint = _prior_artifact_bytes(root, checkpoint_path(root))
         captured_prior = True
         epoch = prepare_recovery_epoch(vault_root, restored_paths)
     except Exception as error:
@@ -930,21 +930,21 @@ def next_checkpoint(
 
 
 def checkpoint_path(vault_root: Path) -> Path:
-    from .kbdir import kb_dirname
+    from . import state_paths
 
-    return Path(vault_root) / kb_dirname() / _CHECKPOINT_FILENAME
+    return state_paths.vault_state_dir(vault_root) / _CHECKPOINT_FILENAME
 
 
 def floor_path(vault_root: Path) -> Path:
-    from .kbdir import kb_dirname
+    from . import state_paths
 
-    return Path(vault_root) / kb_dirname() / _FLOOR_FILENAME
+    return state_paths.vault_state_dir(vault_root) / _FLOOR_FILENAME
 
 
 def recovery_marker_path(vault_root: Path) -> Path:
-    from .kbdir import kb_dirname
+    from . import state_paths
 
-    return Path(vault_root) / kb_dirname() / _RECOVERY_MARKER_FILENAME
+    return state_paths.vault_state_dir(vault_root) / _RECOVERY_MARKER_FILENAME
 
 
 def observe_recovery_state(vault_root: Path) -> float | None:
@@ -1086,9 +1086,13 @@ def graph_commit_receipt_path(vault_root: Path, commit_token: str) -> Path:
     """Return the hidden portable receipt location for one opaque claim token."""
     if _MUTATION_ID.fullmatch(commit_token) is None:
         raise ValueError("receipt commit token must be lowercase 24-hex")
-    from .kbdir import kb_dirname
+    from . import state_paths
 
-    return Path(vault_root) / kb_dirname() / _RECEIPT_DIRNAME / f"{commit_token}.json"
+    return (
+        state_paths.vault_state_dir(vault_root)
+        / _RECEIPT_DIRNAME
+        / f"{commit_token}.json"
+    )
 
 
 def read_graph_commit_receipt(
@@ -1701,10 +1705,10 @@ def _write_checkpoint(vault_root: Path, checkpoint: GraphSyncCheckpoint) -> None
         )
 
 
-def _prior_artifact_bytes(path: Path) -> bytes | None:
+def _prior_artifact_bytes(vault_root: Path, path: Path) -> bytes | None:
     try:
         limit = _FLOOR_READ_LIMIT if path.name == _FLOOR_FILENAME else _CHECKPOINT_READ_LIMIT
-        return _read_bounded_bytes(path, limit=limit, vault_root=path.parent.parent)
+        return _read_bounded_bytes(path, limit=limit, vault_root=Path(vault_root))
     except FileNotFoundError:
         return None
 
@@ -1714,8 +1718,9 @@ def _epoch_artifacts_changed(
 ) -> bool:
     """Whether failed epoch staging changed either bounded protocol artifact."""
     return (
-        _prior_artifact_bytes(floor_path(vault_root)) != prior_floor_bytes
-        or _prior_artifact_bytes(checkpoint_path(vault_root)) != prior_checkpoint_bytes
+        _prior_artifact_bytes(vault_root, floor_path(vault_root)) != prior_floor_bytes
+        or _prior_artifact_bytes(vault_root, checkpoint_path(vault_root))
+        != prior_checkpoint_bytes
     )
 
 
@@ -1724,10 +1729,20 @@ def _read_bounded_bytes(path: Path, *, limit: int, vault_root: Path | None = Non
     from . import reserved_paths
 
     root = Path(vault_root) if vault_root is not None else Path(path).parent
+    # A machine-local artifact lives under the external per-vault state root;
+    # its bare state-dir-relative name classifies through the same closed
+    # registry, and that anchor is the more specific one when a state root is
+    # nested inside the vault root.
+    from . import state_paths
+
+    state_dir = Path(state_paths.vault_state_dir(root)).absolute()
     try:
-        relative = Path(path).absolute().relative_to(root.absolute()).as_posix()
+        relative = Path(path).absolute().relative_to(state_dir).as_posix()
     except ValueError:
-        relative = ""
+        try:
+            relative = Path(path).absolute().relative_to(root.absolute()).as_posix()
+        except ValueError:
+            relative = ""
     classification = reserved_paths.classify_logical(relative)
     if classification.descriptor_id in {"graph-handoff", "graph-receipts"}:
         descriptor_id = classification.descriptor_id
@@ -1779,21 +1794,22 @@ def prepare_deletion_epoch(
 ) -> GraphDeletionEpoch | None:
     """Publish deletion floor before the lifecycle rename, retaining rollback proof."""
     from . import recall_policy
+    from .kbdir import kb_dirname
 
     root = Path(vault_root).resolve()
     paths: list[tuple[str, str | None]] = [
         (rel, None)
         for raw in removed_rel_paths
         if (rel := str(raw).replace("\\", "/")).endswith(".md")
-        and rel.startswith(f"{checkpoint_path(root).parent.name}/")
+        and rel.startswith(f"{kb_dirname()}/")
         and is_graph_input_path(rel)
         and not recall_policy.is_structured_only_path(root, rel)
         and recall_policy.is_recall_candidate(root, root / rel)
     ]
     if not paths:
         return None
-    prior_bytes = _prior_artifact_bytes(floor_path(root))
-    prior_checkpoint_bytes = _prior_artifact_bytes(checkpoint_path(root))
+    prior_bytes = _prior_artifact_bytes(root, floor_path(root))
+    prior_checkpoint_bytes = _prior_artifact_bytes(root, checkpoint_path(root))
     epoch = _admit_epoch_inputs(root)
     checkpoint = next_checkpoint(
         current=epoch.checkpoint,
@@ -1816,13 +1832,14 @@ def prepare_recovery_epoch(
 ) -> GraphDeletionEpoch | None:
     """Publish the restore floor before moving graph-relevant Markdown from trash."""
     from . import recall_policy
+    from .kbdir import kb_dirname
 
     root = Path(vault_root).resolve()
     paths: list[tuple[str, str | None]] = [
         (rel, content_hash)
         for raw_rel, raw_content in restored_paths
         if (rel := str(raw_rel).replace("\\", "/")).endswith(".md")
-        and rel.startswith(f"{checkpoint_path(root).parent.name}/")
+        and rel.startswith(f"{kb_dirname()}/")
         and is_graph_input_path(rel)
         and not recall_policy.is_structured_only_path(root, rel)
         and isinstance(raw_content, str)
@@ -1830,8 +1847,8 @@ def prepare_recovery_epoch(
     ]
     if not paths:
         return None
-    prior_bytes = _prior_artifact_bytes(floor_path(root))
-    prior_checkpoint_bytes = _prior_artifact_bytes(checkpoint_path(root))
+    prior_bytes = _prior_artifact_bytes(root, floor_path(root))
+    prior_checkpoint_bytes = _prior_artifact_bytes(root, checkpoint_path(root))
     epoch = _admit_epoch_inputs(root)
     checkpoint = next_checkpoint(
         current=epoch.checkpoint,
@@ -2016,9 +2033,9 @@ class GraphReset:
 
 
 def _reset_directory(vault_root: Path, operation_id: str) -> Path:
-    from .vault import kb_root
+    from . import state_paths
 
-    return kb_root(vault_root) / f"{_RESET_PREFIX}{operation_id}"
+    return state_paths.vault_state_dir(vault_root) / f"{_RESET_PREFIX}{operation_id}"
 
 
 def _reset_manifest_raw(reset: GraphReset, identities: dict[str, tuple[int, ...]]) -> bytes:

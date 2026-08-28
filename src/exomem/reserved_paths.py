@@ -1,4 +1,4 @@
-"""Closed authority for Exomem's private in-vault state paths.
+"""Closed name and placement authority for Exomem's internal state families.
 
 Logical classification is deliberately pure and existence-independent.  Physical
 classification is a second, conservative acquisition-time check; it is not a
@@ -57,6 +57,14 @@ class PathDisposition(StrEnum):
     INVALID = "invalid"
 
 
+class StatePlacement(StrEnum):
+    """The one explicit placement class for every reserved state family."""
+
+    VAULT_CANONICAL = "vault-canonical"
+    EXTERNAL_STATE = "external-state"
+    TARGET_ADJACENT = "target-adjacent"
+
+
 @dataclass(frozen=True, slots=True)
 class PathClassification:
     disposition: PathDisposition
@@ -71,10 +79,19 @@ class PathClassification:
 
 @dataclass(frozen=True, slots=True)
 class InternalStateDescriptor:
-    """One non-overlapping private-state family and its sole owner."""
+    """One non-overlapping private-state family and its sole owner.
+
+    ``placement`` is mandatory rather than inferred from a default boolean.
+    External families live under ``state_paths.vault_state_dir``; target-
+    adjacent scratch follows the operation target for same-volume atomicity;
+    vault-canonical trees remain user-governed vault structure.  The names
+    stay registered here either way, so in-vault leftovers keep classifying
+    RESERVED and nothing ever treats them as content.
+    """
 
     id: str
     owner: str
+    placement: StatePlacement
     owning_command: str | None = None
     authority_enabled: bool = True
     exact: tuple[str, ...] = ()
@@ -307,51 +324,77 @@ _REGISTRY = (
     InternalStateDescriptor(
         "governance-tree",
         "governance.tool",
+        StatePlacement.VAULT_CANONICAL,
         "govern_memory",
         trees=("_governance",),
     ),
     InternalStateDescriptor(
         "consolidation-tree",
         "consolidation.future",
+        StatePlacement.VAULT_CANONICAL,
         authority_enabled=False,
         trees=("_consolidation",),
     ),
     InternalStateDescriptor(
-        "governance-store", "governance.store", exact=_sqlite_family(".governance.sqlite")
+        "governance-store",
+        "governance.store",
+        StatePlacement.EXTERNAL_STATE,
+        exact=_sqlite_family(".governance.sqlite"),
     ),
     InternalStateDescriptor(
-        "embeddings-store", "embedding_index", exact=_sqlite_family(".embeddings.sqlite")
+        "embeddings-store",
+        "embedding_index",
+        StatePlacement.EXTERNAL_STATE,
+        exact=_sqlite_family(".embeddings.sqlite"),
     ),
     InternalStateDescriptor(
-        "clip-store", "clip_index", exact=_sqlite_family(".clip.sqlite")
+        "clip-store",
+        "clip_index",
+        StatePlacement.EXTERNAL_STATE,
+        exact=_sqlite_family(".clip.sqlite"),
     ),
     InternalStateDescriptor(
-        "lexical-store", "lexstore", exact=_sqlite_family(".lexical.sqlite")
+        "lexical-store",
+        "lexstore",
+        StatePlacement.EXTERNAL_STATE,
+        exact=_sqlite_family(".lexical.sqlite"),
     ),
     InternalStateDescriptor(
-        "graph-store", "epistemic_graph", exact=_sqlite_family(".graph.sqlite")
+        "graph-store",
+        "epistemic_graph",
+        StatePlacement.EXTERNAL_STATE,
+        exact=_sqlite_family(".graph.sqlite"),
     ),
     InternalStateDescriptor(
-        "claims-store", "claims", exact=_sqlite_family(".claims.sqlite")
+        "claims-store",
+        "claims",
+        StatePlacement.EXTERNAL_STATE,
+        exact=_sqlite_family(".claims.sqlite"),
     ),
     InternalStateDescriptor(
         "references-store",
         "references.legacy",
+        StatePlacement.EXTERNAL_STATE,
         authority_enabled=False,
         exact=_sqlite_family(".references.sqlite"),
     ),
     InternalStateDescriptor(
-        "refs-store", "memory_refs", exact=_sqlite_family(".refs.sqlite")
+        "refs-store",
+        "memory_refs",
+        StatePlacement.EXTERNAL_STATE,
+        exact=_sqlite_family(".refs.sqlite"),
     ),
     InternalStateDescriptor(
         "freshness-store",
         "freshness.legacy",
+        StatePlacement.EXTERNAL_STATE,
         authority_enabled=False,
         exact=_sqlite_family(".freshness.sqlite"),
     ),
     InternalStateDescriptor(
         "deferred-index-store",
         "deferred_index",
+        StatePlacement.EXTERNAL_STATE,
         exact=(
             *_sqlite_family(".deferred-index.sqlite"),
             *_sqlite_family(".deferred_index.sqlite"),
@@ -361,6 +404,7 @@ _REGISTRY = (
     InternalStateDescriptor(
         "media-jobs-store",
         "media_jobs",
+        StatePlacement.EXTERNAL_STATE,
         exact=(
             *_sqlite_family(".media-jobs.sqlite"),
             *_sqlite_family(".media_jobs.sqlite"),
@@ -371,6 +415,7 @@ _REGISTRY = (
     InternalStateDescriptor(
         "idempotency-store",
         "idempotency",
+        StatePlacement.EXTERNAL_STATE,
         exact=(
             *_sqlite_family(".idempotency.sqlite"),
             ".idempotency.json",
@@ -378,11 +423,15 @@ _REGISTRY = (
         ),
     ),
     InternalStateDescriptor(
-        "voice-profile-store", "voice_profiles", exact=(".voice_profiles.json",)
+        "voice-profile-store",
+        "voice_profiles",
+        StatePlacement.EXTERNAL_STATE,
+        exact=(".voice_profiles.json",),
     ),
     InternalStateDescriptor(
         "graph-handoff",
         "graph_sync",
+        StatePlacement.EXTERNAL_STATE,
         exact=(
             ".graph-sync.json",
             ".graph-sync-floor.json",
@@ -394,48 +443,82 @@ _REGISTRY = (
         ),
     ),
     InternalStateDescriptor(
-        "graph-receipts", "graph_sync", trees=(".graph-commit-receipts",)
+        "graph-receipts",
+        "graph_sync",
+        StatePlacement.EXTERNAL_STATE,
+        trees=(".graph-commit-receipts",),
     ),
     InternalStateDescriptor(
         "review-state",
         "review_state",
+        StatePlacement.EXTERNAL_STATE,
         exact=(".review-state.json",),
         patterns=(_REVIEW_TEMP_RE,),
     ),
     InternalStateDescriptor(
         "due-state",
         "due_state",
+        StatePlacement.EXTERNAL_STATE,
         exact=(".due-state.json",),
         patterns=(_DUE_TEMP_RE,),
     ),
     InternalStateDescriptor(
-        "lexical-rebuild", "lexstore", patterns=(_LEXICAL_REBUILD_RE,)
+        "lexical-rebuild",
+        "lexstore",
+        StatePlacement.EXTERNAL_STATE,
+        patterns=(_LEXICAL_REBUILD_RE,),
     ),
     InternalStateDescriptor(
-        "lexical-quarantine", "lexstore", patterns=(_LEXICAL_QUARANTINE_RE,)
+        "lexical-quarantine",
+        "lexstore",
+        StatePlacement.EXTERNAL_STATE,
+        patterns=(_LEXICAL_QUARANTINE_RE,),
     ),
     InternalStateDescriptor(
-        "graph-rebuild", "epistemic_graph", patterns=(_GRAPH_REBUILD_RE,)
+        "graph-rebuild",
+        "epistemic_graph",
+        StatePlacement.EXTERNAL_STATE,
+        patterns=(_GRAPH_REBUILD_RE,),
     ),
     InternalStateDescriptor(
-        "graph-reset", "graph_sync", tree_patterns=(_GRAPH_RESET_RE,)
+        "graph-reset",
+        "graph_sync",
+        StatePlacement.EXTERNAL_STATE,
+        tree_patterns=(_GRAPH_RESET_RE,),
+    ),
+    InternalStateDescriptor(
+        "graph-coordination",
+        "graph_sync",
+        StatePlacement.EXTERNAL_STATE,
+        trees=(".graph-coordination",),
     ),
     InternalStateDescriptor(
         "authorization-projections",
         "governance.projections",
+        StatePlacement.EXTERNAL_STATE,
         trees=(".authorization-projections",),
     ),
     InternalStateDescriptor(
         "batch-workspace",
         "vault.batch",
+        StatePlacement.TARGET_ADJACENT,
+        # Machine-local by nature, but its members stage the note they
+        # install and follow that note (atomic same-volume rename), so the
+        # placement suite exempts it from the constructor walk.
         component_tree_patterns=(_BATCH_WORKSPACE_RE,),
     ),
     InternalStateDescriptor(
         "held-publication",
         "held_fs",
+        StatePlacement.TARGET_ADJACENT,
+        # Machine-local by nature; a publish temp is a leaf under the retained
+        # parent of whatever is being published, so it follows state to the
+        # external root automatically and follows content into the vault.
         leaf_patterns=(_HELD_PUBLICATION_RE,),
     ),
 )
+
+_DESCRIPTOR_BY_ID = MappingProxyType({descriptor.id: descriptor for descriptor in _REGISTRY})
 
 
 def _roles(*values: tuple[str, str, str]) -> tuple[PathRole, ...]:
@@ -557,6 +640,133 @@ def internal_state_registry() -> tuple[InternalStateDescriptor, ...]:
     """Return the immutable version-1 descriptor registry."""
 
     return _REGISTRY
+
+
+def external_state_descriptors() -> tuple[InternalStateDescriptor, ...]:
+    """The families whose canonical home is the external per-vault state root.
+
+    This classification — not a hand-copied name list — is what the one-time
+    migration moves and what the doctor leftover scan walks, so a new family
+    is placed correctly (or flagged) the moment it is registered.
+    """
+
+    return tuple(
+        descriptor
+        for descriptor in _REGISTRY
+        if descriptor.placement is StatePlacement.EXTERNAL_STATE
+    )
+
+
+def state_target_descriptor_id(vault_root: Path, target: Path) -> str | None:
+    """Classify one absolute private-state target against its placement anchor.
+
+    Vault-relative names and external state-root names classify through the
+    same closed registry, so a consumer deciding "is this my owner-bound
+    store?" gives the same answer wherever the placement seam put the file.
+    Returns ``None`` for a target under neither anchor or with no reserved
+    classification.
+    """
+
+    root = Path(os.path.abspath(vault_root))
+    resolved = Path(os.path.abspath(target))
+    from . import state_paths
+
+    # Check the state-dir anchor first because it is the declared external
+    # placement seam. state_paths already refuses any resolved overlap with
+    # the vault before this classification can reach owner I/O.
+    for anchor in (
+        Path(os.path.abspath(state_paths.vault_state_dir(vault_root))),
+        root,
+    ):
+        try:
+            relative = resolved.relative_to(anchor)
+        except ValueError:
+            continue
+        return classify_logical(relative.as_posix()).descriptor_id
+    return None
+
+
+def state_target_is_external(vault_root: Path, target: Path) -> bool:
+    """Whether one private target lives under the external per-vault state root.
+
+    Owner subsystems use this to skip the vault-alias identity-publication
+    ritual for stores the placement seam moved out of the vault: no
+    KB-relative spelling can reach them, so there is no alias to defend.
+    """
+
+    try:
+        return _owner_anchor(vault_root, target, operation="placement probe")[2]
+    except RuntimeError:
+        return False
+
+
+def _owner_anchor(
+    vault_root: Path,
+    target: Path,
+    *,
+    operation: str,
+) -> tuple[Path, Path, bool]:
+    """Resolve one private target to its held anchor root and relative name.
+
+    Machine-local families live under ``state_paths.vault_state_dir`` (the
+    single placement seam); every other reserved family remains vault-relative.
+    Both spellings classify through the same closed registry — external names
+    are bare (no KB prefix), which :func:`classify_logical` accepts — so the
+    name authority does not fork when the placement does.
+
+    Returns ``(anchor_root, anchor_relative, external)``. Identity
+    *coordination* stays keyed on the vault root either way (callers hold
+    vault-keyed scopes); only the filesystem anchor moves. Owner-identity
+    *publication* is skipped for external targets: its purpose is refusing
+    vault-path aliases of private state at the generic leaves, and no
+    KB-relative spelling can reach the external root through the no-follow
+    substrate.
+    """
+
+    root = Path(os.path.abspath(vault_root))
+    resolved = Path(os.path.abspath(target))
+    from . import state_paths
+
+    # Check the state-dir anchor first because it is the declared external
+    # placement seam. state_paths has already rejected any resolved overlap
+    # with the vault before an owner can open this anchor.
+    state_dir = Path(os.path.abspath(state_paths.vault_state_dir(vault_root)))
+    try:
+        relative = resolved.relative_to(state_dir)
+    except ValueError:
+        pass
+    else:
+        external = True
+        anchor = state_dir
+        _require_owner_placement(relative, external=external, operation=operation)
+        return anchor, relative, external
+    try:
+        relative = resolved.relative_to(root)
+    except ValueError as error:
+        raise RuntimeError(f"private {operation} target is outside the vault") from error
+    external = False
+    _require_owner_placement(relative, external=external, operation=operation)
+    return root, relative, external
+
+
+def _require_owner_placement(relative: Path, *, external: bool, operation: str) -> None:
+    """Make the registry's declared placement authoritative at owner I/O."""
+
+    classification = classify_logical(relative.as_posix())
+    if classification.disposition is not PathDisposition.RESERVED:
+        return
+    descriptor_id = classification.descriptor_id
+    descriptor = _DESCRIPTOR_BY_ID.get(descriptor_id or "")
+    if descriptor is None:
+        raise RuntimeError(f"private {operation} target has no registered placement")
+    if descriptor.placement is StatePlacement.TARGET_ADJACENT:
+        return
+    expected_external = descriptor.placement is StatePlacement.EXTERNAL_STATE
+    if external != expected_external:
+        raise RuntimeError(
+            f"private {operation} target violates descriptor placement "
+            f"{descriptor.placement.value}"
+        )
 
 
 @contextmanager
@@ -1981,12 +2191,9 @@ def _publish_sqlite_owner_family(
     if not _identity_coordination_active(vault_root, descriptor_id):
         raise RuntimeError("SQLite identity publication lacks coordination")
 
-    root = Path(os.path.abspath(vault_root))
-    target = Path(os.path.abspath(database))
-    try:
-        relative = target.relative_to(root)
-    except ValueError as error:
-        raise RuntimeError("SQLite identity publication target is outside the vault") from error
+    anchor, relative, external = _owner_anchor(
+        vault_root, database, operation="SQLite identity publication"
+    )
     classification = classify_logical(relative.as_posix())
     if (
         classification.disposition is not PathDisposition.RESERVED
@@ -1997,6 +2204,14 @@ def _publish_sqlite_owner_family(
     if not callable(getattr(connection, "execute", None)):
         raise RuntimeError("SQLite identity publication lacks a live connection")
 
+    if external:
+        # Identity publication exists so KB-relative generic reads refuse
+        # aliases of private state.  An external-store family has no
+        # KB-relative spelling to defend; the checks above still enforce the
+        # owner-authority and coordination contract for the caller.
+        return
+
+    root = anchor
     acquired = held_fs.acquire(root)
     if not acquired.ok:
         raise RuntimeError("SQLite identity publication cannot acquire the vault")
@@ -2099,11 +2314,9 @@ def _publish_owner_bytes(
         raise TypeError("private byte publication requires bytes")
 
     root = Path(os.path.abspath(vault_root))
-    target = Path(os.path.abspath(path))
-    try:
-        relative = target.relative_to(root)
-    except ValueError as error:
-        raise RuntimeError("private byte publication target is outside the vault") from error
+    anchor, relative, external = _owner_anchor(
+        vault_root, path, operation="byte publication"
+    )
     classification = classify_logical(relative.as_posix())
     if (
         classification.disposition is not PathDisposition.RESERVED
@@ -2111,12 +2324,19 @@ def _publish_owner_bytes(
     ):
         raise RuntimeError("private byte publication target is not owner-bound")
 
-    # The caller-provided vault root is the trust anchor, not a descendant
-    # selected by vault content.  Standalone first-write flows may not have
+    # The caller-provided anchor is the trust root, not a descendant selected
+    # by vault content.  Standalone first-write flows may not have
     # materialized it yet; create that anchor, then let held_fs reject any
-    # unsafe/raced object before a private descendant is touched.
+    # unsafe/raced object before a private descendant is touched.  An
+    # external anchor is created through the placement seam so it carries the
+    # private-state posture from birth.
     try:
-        root.mkdir(parents=True, exist_ok=True)
+        if external:
+            from . import state_paths
+
+            state_paths.ensure_vault_state_dir(vault_root)
+        else:
+            anchor.mkdir(parents=True, exist_ok=True)
     except OSError as error:
         raise RuntimeError("private byte publication cannot create the vault") from error
 
@@ -2124,7 +2344,7 @@ def _publish_owner_bytes(
         root,
         descriptor_ids=(descriptor_id,),
     ):
-        acquired = held_fs.acquire(root)
+        acquired = held_fs.acquire(anchor)
         if not acquired.ok:
             raise RuntimeError("private byte publication cannot acquire the vault")
         with acquired.require() as filesystem:
@@ -2164,9 +2384,10 @@ def _publish_owner_bytes(
                 if not _owner_directory_is_current(filesystem, parent):
                     raise RuntimeError("private byte publication parent changed")
 
-        current = _reachable_owner_publications(root, descriptor_id)
-        current[relative.as_posix()] = identity
-        _publish_owner_identities(root, descriptor_id, current)
+        if not external:
+            current = _reachable_owner_publications(root, descriptor_id)
+            current[relative.as_posix()] = identity
+            _publish_owner_identities(root, descriptor_id, current)
         return identity
 
 
@@ -2186,10 +2407,9 @@ def _read_owner_bytes(
 
     root = Path(os.path.abspath(vault_root))
     target = Path(os.path.abspath(path))
-    try:
-        relative = target.relative_to(root)
-    except ValueError as error:
-        raise RuntimeError("private byte read target is outside the vault") from error
+    anchor, relative, external = _owner_anchor(
+        vault_root, path, operation="byte read"
+    )
     classification = classify_logical(relative.as_posix())
     if (
         classification.disposition is not PathDisposition.RESERVED
@@ -2198,7 +2418,7 @@ def _read_owner_bytes(
         raise RuntimeError("private byte read target is not owner-bound")
 
     try:
-        root.lstat()
+        anchor.lstat()
     except FileNotFoundError:
         raise FileNotFoundError(target) from None
     except OSError as error:
@@ -2209,7 +2429,7 @@ def _read_owner_bytes(
         descriptor_ids=(descriptor_id,),
         identity_may_change=False,
     ):
-        acquired = held_fs.acquire(root)
+        acquired = held_fs.acquire(anchor)
         if not acquired.ok:
             raise OSError("private byte read cannot acquire the vault")
         with acquired.require() as filesystem:
@@ -2257,9 +2477,10 @@ def _read_owner_bytes(
                     if not _owner_directory_is_current(filesystem, parent):
                         raise OSError("private byte read parent changed")
 
-        current = _reachable_owner_publications(root, descriptor_id)
-        current[relative.as_posix()] = identity
-        _publish_owner_identities(root, descriptor_id, current)
+        if not external:
+            current = _reachable_owner_publications(root, descriptor_id)
+            current[relative.as_posix()] = identity
+            _publish_owner_identities(root, descriptor_id, current)
         return data
 
 
@@ -2269,22 +2490,19 @@ def _owner_relative_path(
     descriptor_id: str,
     *,
     operation: str,
-) -> tuple[Path, Path]:
+) -> tuple[Path, Path, bool]:
     if not owner_authorized(descriptor_id):
         raise RuntimeError(f"private {operation} lacks exact owner authority")
-    root = Path(os.path.abspath(vault_root))
-    target = Path(os.path.abspath(path))
-    try:
-        relative = target.relative_to(root)
-    except ValueError as error:
-        raise RuntimeError(f"private {operation} target is outside the vault") from error
+    anchor, relative, external = _owner_anchor(
+        vault_root, path, operation=operation
+    )
     classification = classify_logical(relative.as_posix())
     if (
         classification.disposition is not PathDisposition.RESERVED
         or classification.descriptor_id != descriptor_id
     ):
         raise RuntimeError(f"private {operation} target is not owner-bound")
-    return root, relative
+    return anchor, relative, external
 
 
 def _owner_directory_is_current(
@@ -2317,7 +2535,7 @@ def _sqlite_owner_target_scope(
 
     if not _identity_coordination_active(vault_root, descriptor_id):
         raise RuntimeError("private SQLite target lacks coordination")
-    root, relative = _owner_relative_path(
+    root, relative, external = _owner_relative_path(
         vault_root,
         database,
         descriptor_id,
@@ -2325,7 +2543,12 @@ def _sqlite_owner_target_scope(
     )
     if create:
         try:
-            root.mkdir(parents=True, exist_ok=True)
+            if external:
+                from . import state_paths
+
+                state_paths.ensure_vault_state_dir(vault_root)
+            else:
+                root.mkdir(parents=True, exist_ok=True)
         except OSError as error:
             raise RuntimeError("private SQLite target cannot create the vault") from error
     else:
@@ -2437,26 +2660,27 @@ def _move_owner_file(
 ) -> held_fs.StableIdentity:
     """Rename one exact private file between owner-bound names."""
 
-    root, source_relative = _owner_relative_path(
+    anchor, source_relative, source_external = _owner_relative_path(
         vault_root,
         source,
         source_descriptor_id,
         operation="move",
     )
-    destination_root, destination_relative = _owner_relative_path(
+    destination_anchor, destination_relative, external = _owner_relative_path(
         vault_root,
         destination,
         destination_descriptor_id,
         operation="move",
     )
-    if destination_root != root:
+    if destination_anchor != anchor or source_external != external:
         raise RuntimeError("private move targets different vault roots")
+    root = Path(os.path.abspath(vault_root))
 
     with _identity_coordination_scope(
         root,
         descriptor_ids=(source_descriptor_id, destination_descriptor_id),
     ):
-        acquired = held_fs.acquire(root)
+        acquired = held_fs.acquire(anchor)
         if not acquired.ok:
             raise OSError("private move cannot acquire the vault")
         with acquired.require() as filesystem:
@@ -2550,7 +2774,9 @@ def _move_owner_file(
                             raise OSError("private move destination changed")
                         identity = installed_file.identity
 
-        if source_descriptor_id == destination_descriptor_id:
+        if external:
+            pass
+        elif source_descriptor_id == destination_descriptor_id:
             current = _reachable_owner_publications(root, source_descriptor_id)
             current.pop(source_relative.as_posix(), None)
             current[destination_relative.as_posix()] = identity
@@ -2580,23 +2806,29 @@ def _remove_owner_file(
 ) -> bool:
     """Unlink one exact private file through its retained owner-bound handle."""
 
-    root, relative = _owner_relative_path(
+    anchor, relative, external = _owner_relative_path(
         vault_root,
         path,
         descriptor_id,
         operation="remove",
     )
+    root = Path(os.path.abspath(vault_root))
     with _identity_coordination_scope(root, descriptor_ids=(descriptor_id,)):
-        acquired = held_fs.acquire(root)
+        acquired = held_fs.acquire(anchor)
         if not acquired.ok:
             if missing_ok:
                 return False
             raise OSError("private remove cannot acquire the vault")
         with acquired.require() as filesystem:
             parent_text = relative.parent.as_posix()
+            # Elevated access on the anchor root itself is unsupported by the
+            # held substrate. An external state target's parent IS the anchor,
+            # so retain it read-mode here; the shared no-follow path durability
+            # primitive flushes that exact anchor after the unlink below.
+            parent_access = "read" if external and parent_text == "." else "flush"
             parent_result = filesystem.parent(
                 parent_text if parent_text != "." else ".",
-                access="flush",
+                access=parent_access,
             )
             if not parent_result.ok:
                 if (
@@ -2604,7 +2836,8 @@ def _remove_owner_file(
                     and parent_result.error is not None
                     and parent_result.error.code == "MISSING"
                 ):
-                    _replace_published_owner_path(root, descriptor_id, relative, None)
+                    if not external:
+                        _replace_published_owner_path(root, descriptor_id, relative, None)
                     return False
                 raise OSError("private remove parent is unsafe")
             with parent_result.require() as parent:
@@ -2616,7 +2849,8 @@ def _remove_owner_file(
                     ):
                         if not missing_ok:
                             raise FileNotFoundError(path)
-                        _replace_published_owner_path(root, descriptor_id, relative, None)
+                        if not external:
+                            _replace_published_owner_path(root, descriptor_id, relative, None)
                         return False
                     raise OSError("private remove target is unsafe")
                 with file_result.require() as file:
@@ -2627,9 +2861,10 @@ def _remove_owner_file(
                     removed = filesystem.unlink(file)
                     if not removed.ok:
                         raise OSError("private remove was refused")
-                flushed = filesystem.flush_directory(parent)
-                if not flushed.ok:
-                    raise OSError("private remove parent flush was refused")
+                if parent_access == "flush":
+                    flushed = filesystem.flush_directory(parent)
+                    if not flushed.ok:
+                        raise OSError("private remove parent flush was refused")
                 current = filesystem.file(parent, relative.name)
                 if current.ok:
                     current.require().close()
@@ -2639,7 +2874,12 @@ def _remove_owner_file(
                 if not _owner_directory_is_current(filesystem, parent):
                     raise OSError("private remove parent changed")
 
-        _replace_published_owner_path(root, descriptor_id, relative, None)
+        if external:
+            flushed = held_fs.flush_directory_path(anchor)
+            if not flushed.ok:
+                raise OSError("private remove parent flush was refused")
+        if not external:
+            _replace_published_owner_path(root, descriptor_id, relative, None)
         return True
 
 
@@ -2736,7 +2976,11 @@ def classify_physical(
 
 def _validate_registry() -> None:
     ids = [descriptor.id for descriptor in _REGISTRY]
-    if len(ids) != len(set(ids)) or any(not descriptor.owner for descriptor in _REGISTRY):
+    if (
+        len(ids) != len(set(ids))
+        or any(not descriptor.owner for descriptor in _REGISTRY)
+        or any(type(descriptor.placement) is not StatePlacement for descriptor in _REGISTRY)
+    ):
         raise RuntimeError("internal-state registry is invalid")
 
 

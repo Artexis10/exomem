@@ -1152,6 +1152,33 @@ def _governance_negative_scan(vault_root: Path) -> None:
                         raise AuthorizationCustodyUnavailable
                 if not filesystem.validate_directory(knowledge_base).ok:
                     raise AuthorizationCustodyUnavailable
+        # The compiled governance store is machine-local and lives under the
+        # external per-vault state root now; a negative scan that ignored it
+        # would pass while a local compiled authority still exists.
+        from .. import state_paths
+
+        state_dir = state_paths.vault_state_dir(vault_root)
+        if state_dir.is_dir():
+            external = held_fs.acquire(state_dir)
+            if not external.ok:
+                raise AuthorizationCustodyUnavailable
+            with external.require() as external_filesystem:
+                root_result = external_filesystem.parent(".")
+                if not root_result.ok:
+                    raise AuthorizationCustodyUnavailable
+                with root_result.require() as state_root_directory:
+                    for name in _GOVERNANCE_AUTHORITY_NAMES:
+                        candidate = external_filesystem.file(
+                            state_root_directory, name
+                        )
+                        if candidate.ok:
+                            candidate.require().close()
+                            raise AuthorizationCustodyUnavailable
+                        if (
+                            candidate.error is None
+                            or candidate.error.code != "MISSING"
+                        ):
+                            raise AuthorizationCustodyUnavailable
     except AuthorizationCustodyUnavailable:
         raise
     except (OSError, RuntimeError, ValueError, held_fs.HeldFsError):
