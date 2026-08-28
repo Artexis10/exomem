@@ -38,6 +38,10 @@ _ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:")
+_WINDOWS_RESERVED_COMPONENT_RE = re.compile(
+    r"^(?:CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM[1-9¹²³]|LPT[1-9¹²³])(?:\..*)?$",
+    re.IGNORECASE,
+)
 _EXPORT_REF_RE = re.compile(r"^exomem-export://sha256/[0-9a-f]{64}$")
 
 
@@ -486,6 +490,13 @@ def _normalized_relative_path(path: str) -> str:
         or any(part in {"", ".", ".."} for part in path.split("/"))
     ):
         _fail("UNSAFE_ARCHIVE_PATH", "archive paths must remain beneath the vault root")
+    for part in candidate.parts:
+        if (
+            part.endswith((".", " "))
+            or _WINDOWS_RESERVED_COMPONENT_RE.fullmatch(part)
+            or any(ord(character) < 32 or character in '<>:"|?*' for character in part)
+        ):
+            _fail("UNSAFE_ARCHIVE_PATH", "archive path contains a non-portable component")
     return candidate.as_posix()
 
 
@@ -1029,6 +1040,7 @@ def _preflight_entries(
             info.is_dir()
             or not _entry_type_is_safe(info)
             or not _entry_extra_fields_are_safe(info)
+            or bool(info.comment)
             or info.flag_bits & 0x1
         ):
             _fail("UNSAFE_ARCHIVE_ENTRY", "archive contains a link or unsupported entry type")

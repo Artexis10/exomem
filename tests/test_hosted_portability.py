@@ -528,6 +528,50 @@ def test_archive_verification_rejects_unsafe_entry_shapes(
     assert _error_code(exc) == code
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "Knowledge Base/note.md:alternate-stream",
+        "Knowledge Base/CON.md",
+        "Knowledge Base/CONOUT$",
+        "Knowledge Base/COM¹.txt",
+        "Knowledge Base/trailing-dot.",
+        "Knowledge Base/trailing-space ",
+        "Knowledge Base/control-\x1f.md",
+    ],
+)
+def test_archive_verification_rejects_windows_unsafe_path_components(
+    tmp_path: Path,
+    path: str,
+) -> None:
+    archive = tmp_path / "windows-unsafe.zip"
+    _raw_zip(
+        archive,
+        [
+            (portability.MANIFEST_NAME, b"{}", None),
+            (path, b"unsafe", None),
+        ],
+    )
+
+    with pytest.raises(portability.PortabilityError) as exc:
+        portability.verify_export_archive(archive)
+
+    assert _error_code(exc) == "UNSAFE_ARCHIVE_PATH"
+
+
+def test_archive_verification_rejects_unmanifested_entry_comments(tmp_path: Path) -> None:
+    archive_path = tmp_path / "entry-comment.zip"
+    with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_STORED) as archive:
+        manifest = zipfile.ZipInfo(portability.MANIFEST_NAME)
+        manifest.comment = b"unmanifested metadata"
+        archive.writestr(manifest, b"{}")
+
+    with pytest.raises(portability.PortabilityError) as exc:
+        portability.verify_export_archive(archive_path)
+
+    assert _error_code(exc) == "UNSAFE_ARCHIVE_ENTRY"
+
+
 def test_archive_verification_rejects_unsupported_manifest_version(tmp_path: Path) -> None:
     archive = tmp_path / "future.zip"
     manifest = {"schema_version": 999, "files": []}
