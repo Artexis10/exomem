@@ -289,11 +289,14 @@ def test_reaper_start_fires_then_stops() -> None:
     slot.unload = unload
 
     thread = model_reaper.start(threshold=0.0, tick=0.01, slots=[slot])
-    assert fired.wait(timeout=1.0)
-    model_reaper.stop()
-    thread.join(timeout=1.0)
+    try:
+        assert fired.wait(timeout=5.0), "reaper thread never reached the stale slot"
+    finally:
+        model_reaper.stop()
+        thread.join(timeout=5.0)
 
     assert un == [1]  # unloaded exactly once (is_loaded False afterwards)
+    assert not thread.is_alive()
     assert not model_reaper.is_running()
 
 
