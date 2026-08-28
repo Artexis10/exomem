@@ -20,6 +20,8 @@ spec:
     metadata:
       labels:
         {{- include "exomem-cell.selectorLabels" . | nindent 8 }}
+      annotations:
+        exomem.io/authorization-session-revision: {{ required "authorizationSessionRevision is required" .Values.authorizationSessionRevision | quote }}
     spec:
       serviceAccountName: {{ .Values.resourceName }}
       automountServiceAccountToken: false

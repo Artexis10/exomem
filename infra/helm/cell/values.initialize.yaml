@@ -23,6 +23,7 @@ providerRecoveryEnvelopes:
   namespace: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   vaultPvc: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
   credentialSecret: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+  authorizationSessionSecret: qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
   serviceAccount: dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
   initRequestConfigMap: eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
   providerOperationConfigMap: ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
@@ -53,6 +54,7 @@ browserOrigin: https://substratesystems.io
 transferHostname: transfer.example.test
 credentialsSecretName: exomem-cell-credentials
 credentialsManagedExternally: true
+authorizationSessionRevision: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 activeCredentialVersion: active-v1
 initRequestId: 123e4567-e89b-42d3-a456-426614174000
 initOperationId: provision-alpha-1

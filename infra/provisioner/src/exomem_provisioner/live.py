@@ -21,6 +21,11 @@ from .adapters import (
     _require_annotations,
     mint_maintenance_transfer_grant,
 )
+from .authorization_membership import (
+    AUTHORIZATION_SESSION_SCHEMA_VERSION,
+    build_initial_hosted_authorization_bundle,
+    inspect_hosted_authorization_bundle,
+)
 from .capacity import CapacityError
 from .driver import EffectContext
 from .lifecycle import (
@@ -591,6 +596,72 @@ class LiveLifecyclePlane:
         self._snapshots[self._key(metadata)] = snapshot
         return snapshot
 
+    async def _authorization_session_revision(
+        self,
+        metadata: OpaqueProviderMetadata,
+        request: dict[str, Any],
+    ) -> str:
+        """Ensure one authenticated bootstrap generation before Helm can start a pod."""
+
+        key = self._key(metadata)
+        owned = self._owner(metadata)
+        original = self._helm_requests.get(key, request)
+        envelopes = original.get("_providerRecoveryEnvelopes")
+        if not isinstance(envelopes, dict):
+            raise MetadataConflict("authorization Secret provider authority is absent")
+        recovery_envelope = envelopes.get("authorizationSessionSecret")
+        if not isinstance(recovery_envelope, str) or not recovery_envelope:
+            raise MetadataConflict("authorization Secret provider authority is absent")
+        target = self._config.runtime_target_for(
+            original,
+            v2="runtimeTarget" in original,
+        )
+        replica_id = owned.resource_name + "-0"
+        files = await self._cell.read_authorization_session_bundle(owned)
+        current = int(self._now())
+        if files is None:
+            bundle = build_initial_hosted_authorization_bundle(
+                cell_id=owned.subject_id,
+                logical_vault_id=owned.tenant_id,
+                replica_id=replica_id,
+                software_version=str(target["releaseVersion"]),
+                schema_version=AUTHORIZATION_SESSION_SCHEMA_VERSION,
+                recovery_envelope=recovery_envelope,
+                now=current,
+            )
+            await self._cell.write_authorization_session_bundle(
+                owned,
+                bundle.files,
+                recovery_envelope=recovery_envelope,
+                membership_epoch=bundle.epoch,
+                membership_digest=bundle.membership_digest,
+                revision=bundle.revision,
+            )
+        else:
+            bundle = inspect_hosted_authorization_bundle(
+                files,
+                expected_cell_id=owned.subject_id,
+                expected_logical_vault_id=owned.tenant_id,
+                expected_replica_id=replica_id,
+                expected_software_version=str(target["releaseVersion"]),
+                expected_schema_version=AUTHORIZATION_SESSION_SCHEMA_VERSION,
+                expected_recovery_envelope=recovery_envelope,
+                now=current,
+            )
+        return bundle.revision
+
+    async def _authorization_helm_values(
+        self,
+        metadata: OpaqueProviderMetadata,
+        request: dict[str, Any],
+        values: dict[str, Any],
+    ) -> dict[str, Any]:
+        desired = dict(values)
+        desired["authorizationSessionRevision"] = (
+            await self._authorization_session_revision(metadata, request)
+        )
+        return desired
+
     async def observed_fence(self, tenant_id: str) -> int:
         return await self._registry.observed_fence(tenant_id)
 
@@ -706,6 +777,7 @@ class LiveLifecyclePlane:
     ) -> None:
         await self._require_capacity_reservation(metadata, request)
         owned = self._owner(metadata)
+        revision = await self._authorization_session_revision(metadata, request)
         await self._cell.write_credential_bundle(
             owned,
             {"1": str(request["serviceCredential"])},
@@ -718,7 +790,9 @@ class LiveLifecyclePlane:
                 ],
             },
         )
-        await self._helm.ensure_release(owned, values)
+        desired = dict(values)
+        desired["authorizationSessionRevision"] = revision
+        await self._helm.ensure_release(owned, desired)
         await self._refresh(metadata)
 
     async def volume_claim_bound(self, metadata: OpaqueProviderMetadata) -> bool:
@@ -745,6 +819,7 @@ class LiveLifecyclePlane:
             except KeyError as error:
                 raise MetadataConflict("original Helm request was not authenticated") from error
             values = _fixed_helm_values(self._owner(metadata), helm_request, config)
+            values = await self._authorization_helm_values(metadata, helm_request, values)
             values["workloadMode"] = "initialize"
             await self._helm.ensure_release(self._owner(metadata), values)
             snapshot = await self._refresh(metadata)
@@ -753,6 +828,7 @@ class LiveLifecyclePlane:
             if not snapshot.init_complete:
                 return False
         values = _fixed_helm_values(self._owner(metadata), helm_request, config)
+        values = await self._authorization_helm_values(metadata, helm_request, values)
         values["workloadMode"] = "serve"
         await self._helm.ensure_release(self._owner(metadata), values)
         return (await self._refresh(metadata)).serving
@@ -788,6 +864,7 @@ class LiveLifecyclePlane:
             if "compatibilityDigest" in request
             else _fixed_helm_values(owner, request, self._config)
         )
+        values = await self._authorization_helm_values(metadata, request, values)
         values["workloadMode"] = "serve"
         values["routes"]["enabled"] = True
         if "compatibilityDigest" in request:
@@ -922,6 +999,7 @@ class LiveLifecyclePlane:
         if config.migration_mode != "binding-v1-to-v2":
             raise MetadataConflict("runtime migration was not declared by the deployment lock")
         values = self._rollforward_helm_values(metadata, request, config)
+        values = await self._authorization_helm_values(metadata, request, values)
         values["workloadMode"] = "migrate"
         values["routes"]["enabled"] = False
         values["initOperationId"] = operation_id
@@ -941,6 +1019,7 @@ class LiveLifecyclePlane:
         operation_id: str,
     ) -> None:
         values = self._rollforward_helm_values(metadata, request, config)
+        values = await self._authorization_helm_values(metadata, request, values)
         values["workloadMode"] = "serve"
         values["routes"]["enabled"] = False
         await self._helm.transition_release(

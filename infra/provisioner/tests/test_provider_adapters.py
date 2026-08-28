@@ -29,6 +29,7 @@ from exomem_provisioner.lifecycle import (
 from exomem_provisioner.provider_identity import (
     ProviderRecoveryIdentityCodec,
     ProviderReference,
+    cell_provider_recovery_envelopes,
     chunk_hcloud_identity_envelope,
 )
 
@@ -795,6 +796,83 @@ async def test_kubernetes_cell_adapter_scales_and_writes_atomic_bundle_shape() -
 
     with pytest.raises(MetadataConflict):
         await adapter.write_credential_bundle(_metadata(), {"3": "a" * 43})
+
+
+@pytest.mark.asyncio
+async def test_kubernetes_cell_adapter_persists_one_authenticated_authorization_bundle() -> None:
+    metadata = _metadata()
+    identity = ProviderRecoveryIdentityCodec.from_secret("provider-root")
+    envelopes = cell_provider_recovery_envelopes(
+        identity,
+        tenant_id=metadata.tenant_id,
+        cell_id=metadata.subject_id,
+        operation_id=metadata.operation_id,
+        fence_generation=metadata.fence_generation,
+        resource_name=metadata.resource_name,
+        operation_resource_name="exo-op-0123456789abcdef0123",
+    )
+
+    class Core:
+        secret = None
+
+        def patch_namespaced_secret(self, name, namespace, body):
+            if self.secret is None:
+                raise _ApiNotFound()
+            self.secret = _secret(body)
+
+        def create_namespaced_secret(self, namespace, body):
+            self.secret = _secret(body)
+
+        def read_namespaced_secret(self, name, namespace):
+            if self.secret is None:
+                raise _ApiNotFound()
+            return self.secret
+
+    def _secret(body):
+        assert body["metadata"]["name"] == "exomem-authorization-session"
+        assert set(body["stringData"]) == {
+            "keyring.json",
+            "control.json",
+            "serving-membership.json",
+        }
+        return SimpleNamespace(
+            metadata=SimpleNamespace(annotations=body["metadata"]["annotations"]),
+            data={
+                key: base64.b64encode(value.encode()).decode()
+                for key, value in body["stringData"].items()
+            },
+        )
+
+    core = Core()
+    adapter = KubernetesCellAdapter(
+        core_v1=core,
+        apps_v1=SimpleNamespace(),
+        identity_verifier=identity.verifier(),
+    )
+    files = {
+        "keyring.json": b'{"keyring":"value"}',
+        "control.json": b'{"control":"value"}',
+        "serving-membership.json": b'{"membership":"value"}',
+    }
+    assert await adapter.read_authorization_session_bundle(metadata) is None
+    await adapter.write_authorization_session_bundle(
+        metadata,
+        files,
+        recovery_envelope=envelopes["authorizationSessionSecret"],
+        membership_epoch=1,
+        membership_digest="a" * 64,
+        revision="b" * 64,
+    )
+
+    stored = await adapter.read_authorization_session_bundle(metadata)
+    assert stored == files
+    assert core.secret.metadata.annotations["exomem.io/recovery-envelope"] == envelopes[
+        "authorizationSessionSecret"
+    ]
+
+    core.secret.data["extra.json"] = base64.b64encode(b"{}").decode()
+    with pytest.raises(MetadataConflict, match="bundle shape"):
+        await adapter.read_authorization_session_bundle(metadata)
 
 
 @pytest.mark.asyncio

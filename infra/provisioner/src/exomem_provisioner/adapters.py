@@ -18,6 +18,11 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
+from .authorization_membership import (
+    AUTHORIZATION_SESSION_FILES,
+    AUTHORIZATION_SESSION_SECRET_NAME,
+    MAX_BUNDLE_FILE_BYTES,
+)
 from .credentials import validate_machine_credential
 from .lifecycle import (
     HealthObservation,
@@ -588,6 +593,133 @@ class KubernetesCellAdapter:
         except ValueError as error:
             raise MetadataConflict("cell credential bundle is invalid") from error
         return values, annotations
+
+    async def write_authorization_session_bundle(
+        self,
+        metadata: OpaqueProviderMetadata,
+        files: dict[str, bytes],
+        *,
+        recovery_envelope: str,
+        membership_epoch: int,
+        membership_digest: str,
+        revision: str,
+    ) -> None:
+        if (
+            set(files) != AUTHORIZATION_SESSION_FILES
+            or any(
+                not isinstance(value, bytes)
+                or not 1 <= len(value) <= MAX_BUNDLE_FILE_BYTES
+                for value in files.values()
+            )
+            or not isinstance(membership_epoch, int)
+            or isinstance(membership_epoch, bool)
+            or membership_epoch < 1
+            or re.fullmatch(r"[0-9a-f]{64}", membership_digest) is None
+            or re.fullmatch(r"[0-9a-f]{64}", revision) is None
+            or not isinstance(recovery_envelope, str)
+            or not recovery_envelope
+        ):
+            raise MetadataConflict("authorization session bundle shape is invalid")
+        annotations = {
+            **metadata.kubernetes_annotations,
+            "exomem.io/recovery-envelope": recovery_envelope,
+            "exomem.io/authorization-membership-epoch": str(membership_epoch),
+            "exomem.io/authorization-membership-digest": membership_digest,
+            "exomem.io/authorization-session-revision": revision,
+        }
+        try:
+            string_data = {
+                name: value.decode("utf-8") for name, value in sorted(files.items())
+            }
+        except UnicodeDecodeError as error:
+            raise MetadataConflict("authorization session bundle shape is invalid") from error
+        body = {
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {
+                "name": AUTHORIZATION_SESSION_SECRET_NAME,
+                "namespace": metadata.resource_name,
+                "annotations": annotations,
+                "labels": {
+                    "exomem.io/cell": metadata.resource_name,
+                    "exomem.io/resource-name": metadata.resource_name,
+                },
+            },
+            "type": "Opaque",
+            "immutable": False,
+            "stringData": string_data,
+        }
+        try:
+            await asyncio.to_thread(
+                self._core.patch_namespaced_secret,
+                AUTHORIZATION_SESSION_SECRET_NAME,
+                metadata.resource_name,
+                body,
+            )
+        except Exception as error:
+            if _api_status(error) != 404:
+                raise
+            await asyncio.to_thread(
+                self._core.create_namespaced_secret,
+                metadata.resource_name,
+                body,
+            )
+
+    async def read_authorization_session_bundle(
+        self,
+        metadata: OpaqueProviderMetadata,
+    ) -> dict[str, bytes] | None:
+        try:
+            secret = await asyncio.to_thread(
+                self._core.read_namespaced_secret,
+                AUTHORIZATION_SESSION_SECRET_NAME,
+                metadata.resource_name,
+            )
+        except Exception as error:
+            if _api_status(error) == 404:
+                return None
+            raise
+        annotations = dict(getattr(secret.metadata, "annotations", None) or {})
+        _require_annotations(annotations, metadata)
+        if self._identity_verifier is not None:
+            try:
+                self._identity_verifier.authenticate(
+                    str(annotations.get("exomem.io/recovery-envelope", "")),
+                    provider="kubernetes",
+                    provider_reference=ProviderReference.kubernetes(
+                        provider="kubernetes",
+                        api_version="v1",
+                        kind="Secret",
+                        namespace=metadata.resource_name,
+                        name=AUTHORIZATION_SESSION_SECRET_NAME,
+                    ),
+                    tenant_id=metadata.tenant_id,
+                    cell_id=metadata.subject_id,
+                    operation_id=metadata.operation_id,
+                    fence_generation=metadata.fence_generation,
+                )
+            except ProviderIdentityConflict as error:
+                raise MetadataConflict(
+                    "authorization Secret provider recovery identity did not authenticate"
+                ) from error
+        encoded = dict(getattr(secret, "data", None) or {})
+        if set(encoded) != AUTHORIZATION_SESSION_FILES:
+            raise MetadataConflict("authorization session bundle shape is invalid")
+        try:
+            files = {
+                name: base64.b64decode(value, validate=True)
+                for name, value in encoded.items()
+            }
+        except (ValueError, TypeError) as error:
+            raise MetadataConflict("authorization session bundle shape is invalid") from error
+        if any(not 1 <= len(value) <= MAX_BUNDLE_FILE_BYTES for value in files.values()):
+            raise MetadataConflict("authorization session bundle shape is invalid")
+        if any(
+            base64.b64encode(files[name]).decode("ascii") != encoded[name]
+            for name in files
+        ):
+            raise MetadataConflict("authorization session bundle shape is invalid")
+        return files
 
     async def scale(self, metadata: OpaqueProviderMetadata, replicas: int) -> None:
         if replicas not in {0, 1}:

@@ -2435,6 +2435,9 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
         ]
         assert container["env"] == [{"name": "EXOMEM_LOG_DIR", "value": "/dev"}]
     else:
+        assert workload["spec"]["template"]["metadata"]["annotations"] == {
+            "exomem.io/authorization-session-revision": "a" * 64
+        }
         pod = workload["spec"]["template"]["spec"]
         assert pod["restartPolicy"] == "Always"
         assert "runtimeClassName" not in pod
