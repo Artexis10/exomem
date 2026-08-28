@@ -101,11 +101,11 @@
   duplicate normalized paths, case collisions, unsupported entries, source
   runtime/credential/lifecycle/lease/idempotency/log state, and source-derived
   indexes. Assert the destination and archive are unchanged on every refusal.
-- [ ] 1.9 Add red tests proving intake accepts only opaque archive/proof references,
+- [x] 1.9 Add red tests proving intake accepts only opaque archive/proof references,
   rejects inline archive bytes and active-root or `Knowledge Base/` extraction,
   cannot use a live source MCP crawl as a complete inventory, and returns only
   bounded inventory facts plus content hashes from private extraction.
-- [ ] 1.10 Extend the portability export seam to calculate the canonical source
+- [x] 1.10 Extend the portability export seam to calculate the canonical source
   census and issue/accept Ed25519 detached claims through configured verifier
   records/rotation, or the equally exact named control receipt. Hosted binds its
   distinct typed cell id; local omits that Hosted-only field and uses its
@@ -113,11 +113,11 @@
   `hosted_portability` manifest verification and extraction rules; exclude private
   identity/key state from the archive and do not add a second archive format or
   caller-selected trust.
-- [ ] 1.11 Add a reusable consolidation intake adapter that writes only to the
+- [x] 1.11 Add a reusable consolidation intake adapter that writes only to the
   private artifact abstraction, keeps the archive immutable and content-addressed,
   and never calls restore publication or overlays a destination root. Verify the
   archive and source census are byte-identical before and after every test.
-- [ ] 1.12 Run the red/green identity/intake set plus existing portability/restore
+- [x] 1.12 Run the red/green identity/intake set plus existing portability/restore
   regressions:
   `uv run python -m pytest -q tests/test_consolidation_cell_identity.py tests/test_consolidation_intake.py tests/test_hosted_binding_v2.py tests/test_hosted_portability.py tests/test_hosted_restore_candidate.py`.
 
