@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,6 +24,7 @@ from exomem.governance import (
     projection_measurement_store,
     projection_runtime,
     projection_store,
+    projection_timing,
     projections,
     schema_v4,
 )
@@ -317,6 +319,13 @@ def _wire_pages(
     dict[str, projection_runtime.ActiveProjectionRuntime],
     dict[str, tuple[httpx.Response, ...]],
 ]:
+    # This suite proves canonical application bytes, not wall-clock release timing.
+    # The dedicated actual-wire gate owns the fixed completion-class assertions.
+    monkeypatch.setattr(
+        projection_timing,
+        "fixed_public_completion",
+        lambda *_args, **_kwargs: nullcontext(),
+    )
     monkeypatch.setenv("EXOMEM_REST_API_KEY", _REST_KEY)
     if query_vector is None:
         monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
