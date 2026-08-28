@@ -2338,6 +2338,39 @@ def test_owner_byte_publication_requires_exact_named_authority(
             )
 
 
+def test_external_owner_route_holds_the_named_vault_state_directory(
+    tmp_path: Path,
+) -> None:
+    state_dir = state_paths.vault_state_dir(tmp_path)
+    target = state_dir / ".graph-sync.json"
+
+    route = reserved_paths._owner_anchor(
+        tmp_path,
+        target,
+        operation="route regression",
+    )
+
+    assert route.external
+    assert route.trust_root == state_dir.parent
+    assert route.held_relative == Path(state_dir.name) / ".graph-sync.json"
+    assert route.logical_relative == Path(".graph-sync.json")
+    assert route.target == target
+
+
+def test_external_owner_route_rejects_a_sibling_vault_state_key(
+    tmp_path: Path,
+) -> None:
+    state_dir = state_paths.vault_state_dir(tmp_path)
+    sibling_target = state_dir.with_name("another-vault-key") / ".graph-sync.json"
+
+    with pytest.raises(RuntimeError, match="outside the vault"):
+        reserved_paths._owner_anchor(
+            tmp_path,
+            sibling_target,
+            operation="route regression",
+        )
+
+
 @pytest.mark.parametrize(
     ("owner", "descriptor_id", "relative"),
     [
@@ -2577,6 +2610,8 @@ def test_private_owner_unlink_closes_file_before_return(
     original_unlink = filesystem_type.unlink
     original_close = file_type.close
     original_flush = filesystem_type.flush_directory
+    original_parent = filesystem_type.parent
+    parent_calls: list[tuple[str, str]] = []
 
     def observe_unlink(filesystem, file):  # noqa: ANN001
         events.append("unlink")
@@ -2590,9 +2625,14 @@ def test_private_owner_unlink_closes_file_before_return(
         events.append("flush")
         return original_flush(filesystem, directory)
 
+    def observe_parent(filesystem, relative, **kwargs):  # noqa: ANN001
+        parent_calls.append((str(relative), kwargs.get("access", "read")))
+        return original_parent(filesystem, relative, **kwargs)
+
     monkeypatch.setattr(filesystem_type, "unlink", observe_unlink)
     monkeypatch.setattr(file_type, "close", observe_close)
     monkeypatch.setattr(filesystem_type, "flush_directory", observe_flush)
+    monkeypatch.setattr(filesystem_type, "parent", observe_parent)
 
     with reserved_paths._subsystem_authority_scope("graph_sync"):
         assert reserved_paths._remove_owner_file(
@@ -2601,7 +2641,8 @@ def test_private_owner_unlink_closes_file_before_return(
             "graph-handoff",
         )
 
-    assert events == ["unlink", "close"]
+    assert events == ["unlink", "close", "flush"]
+    assert parent_calls == [(target.parent.name, "flush")]
     assert not target.exists()
 
 
@@ -2877,15 +2918,17 @@ def test_owner_child_file_mutations_retain_parent_without_delete_access(
             "graph-handoff",
         )
 
-    # The graph handoff artifacts live in the external state root; their
-    # parent is the state-dir anchor itself ("."), which child mutations
-    # retain without DELETE access. Root deletion durability uses the separate
-    # no-follow anchor flush, so no retained parent access may exceed "read".
+    # External owners traverse from the shared state root through their named
+    # per-vault key, so a root-level leaf retains that key rather than the
+    # unnamed global root. Removal owns the resulting directory flush.
+    state_key = state_paths.vault_state_dir(tmp_path).name
     state_parent_accesses = [
-        access for relative, access in parent_accesses if relative == "."
+        access for relative, access in parent_accesses if relative == state_key
     ]
     assert state_parent_accesses
-    assert set(state_parent_accesses) == {"read"}
+    assert "read" in state_parent_accesses
+    assert state_parent_accesses.count("flush") == 1
+    assert set(state_parent_accesses) <= {"read", "flush"}
     # The generic publication into the vault keeps its ordinary parent
     # discipline untouched.
     knowledge_base_accesses = [
@@ -2902,8 +2945,7 @@ def test_owner_remove_flushes_the_retained_parent(
 ) -> None:
     from exomem import _held_fs_posix, held_fs
 
-    target = tmp_path / "Knowledge Base" / ".graph-sync.json"
-    target.parent.mkdir(parents=True)
+    target = state_paths.ensure_vault_state_dir(tmp_path) / ".graph-sync.json"
     target.write_bytes(b"checkpoint")
     flushed: list[int] = []
 
@@ -3657,11 +3699,11 @@ def test_sqlite_owner_target_scope_retains_identity_without_delete_access(
     acquired.require().close()
     real_parent = filesystem_type.parent
     real_file = filesystem_type.file
-    parent_accesses: list[str] = []
+    parent_accesses: list[tuple[str, str]] = []
     accesses: list[str] = []
 
     def observe_parent_access(self, relative, **kwargs):  # noqa: ANN001
-        parent_accesses.append(kwargs.get("access", "read"))
+        parent_accesses.append((str(relative), kwargs.get("access", "read")))
         return real_parent(self, relative, **kwargs)
 
     def observe_access(self, parent, leaf, **kwargs):  # noqa: ANN001
@@ -3682,8 +3724,37 @@ def test_sqlite_owner_target_scope_retains_identity_without_delete_access(
             ) as retained:
                 assert retained == database
 
-    assert parent_accesses == ["read"]
+    assert parent_accesses == [(database.parent.name, "read")]
     assert accesses == ["read", "read"]
+
+
+def test_external_sqlite_owner_publication_never_acquires_a_vault_catalogue(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import held_fs
+
+    database = state_paths.vault_state_dir(tmp_path) / ".claims.sqlite"
+
+    monkeypatch.setattr(
+        held_fs,
+        "acquire",
+        lambda *_args, **_kwargs: pytest.fail(
+            "external SQLite publication reached held identity publication"
+        ),
+    )
+
+    with reserved_paths._subsystem_authority_scope("claims"):
+        with reserved_paths._identity_coordination_scope(
+            tmp_path,
+            descriptor_ids=("claims-store",),
+        ):
+            reserved_paths._publish_sqlite_owner_family(
+                tmp_path,
+                database,
+                "claims-store",
+                SimpleNamespace(execute=lambda *_args: None),
+            )
 
 
 def test_graph_live_store_uses_wal_but_rebuild_stays_single_file(
@@ -4042,61 +4113,34 @@ def test_owner_identity_is_published_before_wal_temp_index_or_receipt_reachabili
     ]
 
 
-def test_sqlite_owner_publication_retries_a_transient_wal_family_change(
+def test_claims_owner_publication_skips_vault_identity_publication(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from exomem import held_fs
+    from exomem import claims, held_fs
 
-    publish_sqlite_identities = held_fs.publish_sqlite_identities
-    attempts = 0
-
-    def transient_family_change(
-        filesystem: held_fs.HeldFilesystem,
-        parent: held_fs.HeldDirectory,
-        primary: str,
-        publish,
-    ) -> held_fs.HeldResult[None]:
-        nonlocal attempts
-        attempts += 1
-        if attempts == 1:
-            return held_fs.HeldResult(
-                error=held_fs.HeldFsError(
-                    "MISSING",
-                    "WAL family changed between probe and held acquisition",
-                )
-            )
-        return publish_sqlite_identities(filesystem, parent, primary, publish)
-
-    from exomem import claims
+    monkeypatch.setattr(
+        held_fs,
+        "publish_sqlite_identities",
+        lambda *_args, **_kwargs: pytest.fail(
+            "external claims storage reached vault identity publication"
+        ),
+    )
 
     index = claims.ClaimIndex(tmp_path)
     connection = index._connect()
     try:
-        # Guarantee reachable WAL companions before the publication attempt.
+        # Use the producer's ordinary WAL lifecycle: external storage has no
+        # vault-relative identity family to publish or retry.
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("BEGIN IMMEDIATE")
         connection.rollback()
-
-        monkeypatch.setattr(
-            held_fs,
-            "publish_sqlite_identities",
-            transient_family_change,
-        )
-        with reserved_paths._subsystem_authority_scope("claims"):
-            with reserved_paths._identity_coordination_scope(
-                tmp_path, descriptor_ids=("claims-store",)
-            ):
-                reserved_paths._publish_sqlite_owner_family(
-                    tmp_path,
-                    claims.sidecar_path(tmp_path),
-                    "claims-store",
-                    connection,
-                )
     finally:
         connection.close()
 
-    assert attempts == 2
+    assert index.path.parent == state_paths.vault_state_dir(tmp_path)
+    catalogue = reserved_paths._published_identity_catalogue(tmp_path)
+    assert catalogue.descriptor_for(reserved_paths._lstat_identity(index.path)) is None
 
 
 def test_primary_sqlite_owners_publish_under_exact_authority_and_coordination(

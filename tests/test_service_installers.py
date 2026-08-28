@@ -376,6 +376,7 @@ def _fixture(tmp_path: Path, *, os_name: str = "Linux", arch: str = "x86_64") ->
     )
 
     env = os.environ.copy()
+    env.pop("EXOMEM_STATE_ROOT", None)
     env.update(
         {
             "HOME": str(home),
@@ -495,16 +496,41 @@ def test_linux_fresh_install_retry_keeps_its_persisted_state_root(tmp_path: Path
     initial_state_root = tmp_path / "first-state-root"
     env["EXOMEM_STATE_ROOT"] = str(initial_state_root)
     env["FAKE_EXPECT_STATE_ROOT"] = str(initial_state_root)
-    env["FAKE_UV_FAIL_ONCE_MARKER"] = str(tmp_path / "uv-failed-once")
+    failure_marker = tmp_path / "uv-failed-once"
+    env["FAKE_UV_FAIL_ONCE_MARKER"] = str(failure_marker)
+    service_env = Path(env["FAKE_SERVICE_ENV_FILE"])
+
+    def diagnostics(result: subprocess.CompletedProcess[str]) -> str:
+        trace = Path(env["TRACE_FILE"]).read_text(encoding="utf-8")
+        service_env_text = (
+            service_env.read_text(encoding="utf-8") if service_env.is_file() else "<missing>"
+        )
+        return (
+            f"returncode={result.returncode}\n"
+            f"stderr:\n{result.stderr}\n"
+            f"trace:\n{trace}\n"
+            f"service.env:\n{service_env_text}"
+        )
 
     failed = _invoke(env, service_root, env_file, "--profile", "lean")
 
-    assert failed.returncode != 0
+    assert failed.returncode != 0, diagnostics(failed)
+    assert failure_marker.is_file(), diagnostics(failed)
+    service_env_text = (
+        service_env.read_text(encoding="utf-8") if service_env.is_file() else ""
+    )
+    service_env_entries = [
+        line
+        for line in service_env_text.splitlines()
+        if line.startswith("EXOMEM_STATE_ROOT=")
+    ]
+    assert service_env_entries == [f'EXOMEM_STATE_ROOT="{initial_state_root}"'], (
+        diagnostics(failed)
+    )
     env["EXOMEM_STATE_ROOT"] = str(tmp_path / "different-state-root")
     resumed = _invoke(env, service_root, env_file, "--profile", "lean")
 
-    assert resumed.returncode == 0, resumed.stderr
-    service_env = Path(env["FAKE_SERVICE_ENV_FILE"])
+    assert resumed.returncode == 0, diagnostics(resumed)
     assert f'EXOMEM_STATE_ROOT="{initial_state_root}"' in service_env.read_text(
         encoding="utf-8"
     )
