@@ -245,7 +245,7 @@
 
 ## 5. Canonical joint plan and single-use owner confirmation
 
-- [ ] 5.1 Add fixed canonical JSON and SHA-256 vectors in
+- [x] 5.1 Add fixed canonical JSON and SHA-256 vectors in
   `tests/test_consolidation_plan.py` for every required
   `exomem.consolidation-plan/v1` field using RFC 8785/JCS over the closed value
   subset: NFC-before-validation, duplicate and post-NFC-duplicate key refusal,
