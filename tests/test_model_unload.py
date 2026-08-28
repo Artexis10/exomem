@@ -17,16 +17,25 @@ import pytest
 from exomem import accel, embeddings, model_reaper, readiness
 
 
+def _stop_test_reaper() -> None:
+    model_reaper.stop()
+    thread = model_reaper._thread
+    if thread is not None:
+        thread.join(timeout=5.0)
+        assert not thread.is_alive(), "prior reaper thread did not stop"
+    model_reaper._thread = None
+
+
 @pytest.fixture(autouse=True)
 def _reset() -> None:
+    _stop_test_reaper()
     embeddings._MODEL = embeddings._RERANKER = embeddings._CLIP_MODEL = None
     for g in (embeddings.BGE_GUARD, embeddings.RERANKER_GUARD, embeddings.CLIP_GUARD):
         g._inflight = 0
         g._last_activity = 0.0
     readiness.reset()
     yield
-    model_reaper.stop()
-    model_reaper._thread = None
+    _stop_test_reaper()
     embeddings._MODEL = embeddings._RERANKER = embeddings._CLIP_MODEL = None
     readiness.reset()
 
