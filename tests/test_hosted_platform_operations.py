@@ -133,6 +133,7 @@ def test_hosted_ci_wires_every_static_security_gate() -> None:
         assert required in combined
     assert "secret" in combined.lower()
     assert 'HELM_REPOSITORY_CONFIG="${helm_repository_config}"' in validator
+    assert '--with-editable "${repo_root}"' in validator
     assert 'HELM_REPOSITORY_CACHE="${helm_repository_cache}"' in validator
     assert "openspec validate add-hosted-private-alpha-infrastructure --strict" in workflow
     assert 'UV_VERSION: "0.11.28"' in workflow
