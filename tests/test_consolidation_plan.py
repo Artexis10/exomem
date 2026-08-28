@@ -1401,3 +1401,225 @@ def test_approval_refuses_expiry_tamper_and_changed_plan() -> None:
                 now=now,
                 verifier_keys={"approval-key-01": b"k" * 32},
             )
+
+
+def _stored_completed_review(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[
+    Path,
+    consolidation_plan.CanonicalConsolidationPlan,
+    consolidation_review.CanonicalRenderReview,
+]:
+    from exomem.governance import consolidation_review_store
+
+    vault, plan, review = _stored_review(tmp_path, monkeypatch)
+    store = consolidation_review_store.ConsolidationReviewStore(vault)
+    store.persist(review, plan=plan, expected_state_digest=None)
+    for ordinal in range(6):
+        pending, page = consolidation_review.serve_page(
+            review,
+            plan=plan,
+            identity=_trusted_renderer(),
+            page_ordinal=ordinal,
+            served_at=f"2026-08-28T12:00:{ordinal:02d}.500Z",
+        )
+        store.persist(
+            pending,
+            plan=plan,
+            expected_state_digest=review.state.digest,
+        )
+        acknowledgement = consolidation_review.build_acknowledgement(
+            pending,
+            page=page,
+            identity=_trusted_renderer(),
+            issued_at=f"2026-08-28T12:00:{ordinal + 1:02d}.000Z",
+            nonce=f"render-ack-{ordinal:020d}",
+        )
+        review = consolidation_review.acknowledge_page(
+            pending,
+            plan=plan,
+            acknowledgement=acknowledgement,
+        )
+        store.persist(
+            review,
+            plan=plan,
+            expected_state_digest=pending.state.digest,
+        )
+    completed, _completeness = consolidation_review.complete_review(
+        review,
+        plan=plan,
+        identity=_trusted_renderer(),
+        issued_at="2026-08-28T12:10:00.000Z",
+        expires_at=VALID_UNTIL,
+        nonce="completeness-000000000001",
+    )
+    store.persist(
+        completed,
+        plan=plan,
+        expected_state_digest=review.state.digest,
+    )
+    return vault, plan, completed
+
+
+def _owner_confirmation(
+    plan: consolidation_plan.CanonicalConsolidationPlan,
+    review: consolidation_review.CanonicalRenderReview,
+):
+    from exomem.governance import consolidation_approval
+
+    return consolidation_approval.TrustedOwnerConfirmation(
+        owner_binding_digest=_trusted_renderer().owner_binding_digest,
+        owner_principal_digest=_trusted_renderer().owner_principal_digest,
+        authorization_session_digest=_trusted_renderer().authorization_session_digest,
+        issuer=_trusted_renderer().issuer,
+        surface=_trusted_renderer().surface,
+        action="approve",
+        run_id=RUN_ID,
+        plan_kind="cutover",
+        plan_digest=plan.digest,
+        rendering_completeness_digest=review.completeness.digest,
+        confirmed_at="2026-08-28T12:11:00.000Z",
+        nonce="owner-confirmation-00000001",
+    )
+
+
+def test_approval_store_replays_lost_issuance_without_persisting_token_or_secret(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance import consolidation_approval_store
+
+    vault, plan, review = _stored_completed_review(tmp_path, monkeypatch)
+    store = consolidation_approval_store.ConsolidationApprovalStore(vault)
+    generated = iter(
+        (
+            "0123456789abcdef0123456789abcdef",
+            "fedcba9876543210fedcba9876543210",
+        )
+    )
+    monkeypatch.setattr(store, "_new_jti", lambda: next(generated))
+    arguments = {
+        "plan": plan,
+        "render_session_digest": review.session.digest,
+        "identity": _trusted_renderer(),
+        "confirmation": _owner_confirmation(plan, review),
+        "operation_id": "00000000-0000-4000-8000-000000000041",
+        "expires_at": "2026-08-28T12:30:00.000Z",
+        "signing_key_id": "approval-key-01",
+        "signing_key": b"k" * 32,
+    }
+    issued = store.issue(**arguments)
+    assert store.issue(**arguments) == issued
+    assert next(generated) == "fedcba9876543210fedcba9876543210"
+    with pytest.raises(consolidation_approval_store.ConsolidationApprovalStoreUnavailable):
+        store.issue(
+            **{
+                **arguments,
+                "confirmation": replace(
+                    arguments["confirmation"],
+                    nonce="owner-confirmation-00000002",
+                ),
+            }
+        )
+
+    approval_dir = (
+        vault
+        / "Knowledge Base"
+        / "_Consolidation"
+        / "runs"
+        / RUN_ID
+        / "plans"
+        / "cutover"
+        / plan.digest
+        / "approvals"
+    )
+    persisted = b"".join(path.read_bytes() for path in sorted(approval_dir.rglob("*.json")))
+    assert issued.wire.encode() not in persisted
+    assert b"kkkkkkkk" not in persisted
+    assert b"approved" not in persisted
+
+
+def test_approval_store_repairs_operation_before_jti_index_crash(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance import consolidation_approval_store
+
+    vault, plan, review = _stored_completed_review(tmp_path, monkeypatch)
+    store = consolidation_approval_store.ConsolidationApprovalStore(vault)
+    monkeypatch.setattr(
+        store,
+        "_new_jti",
+        lambda: "0123456789abcdef0123456789abcdef",
+    )
+    original_publish_jti = store._publish_jti
+
+    def crash_before_jti(*_args: object, **_kwargs: object) -> None:
+        raise OSError("injected JTI-index gap")
+
+    monkeypatch.setattr(store, "_publish_jti", crash_before_jti)
+    arguments = {
+        "plan": plan,
+        "render_session_digest": review.session.digest,
+        "identity": _trusted_renderer(),
+        "confirmation": _owner_confirmation(plan, review),
+        "operation_id": "00000000-0000-4000-8000-000000000041",
+        "expires_at": "2026-08-28T12:30:00.000Z",
+        "signing_key_id": "approval-key-01",
+        "signing_key": b"k" * 32,
+    }
+    with pytest.raises(consolidation_approval_store.ConsolidationApprovalStoreUnavailable):
+        store.issue(**arguments)
+    monkeypatch.setattr(store, "_publish_jti", original_publish_jti)
+    assert store.issue(**arguments).claim.preimage["jti"] == ("0123456789abcdef0123456789abcdef")
+
+
+def test_approval_jti_reserves_exactly_one_execution_operation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance import consolidation_approval_store
+
+    vault, plan, review = _stored_completed_review(tmp_path, monkeypatch)
+    store = consolidation_approval_store.ConsolidationApprovalStore(vault)
+    monkeypatch.setattr(
+        store,
+        "_new_jti",
+        lambda: "0123456789abcdef0123456789abcdef",
+    )
+    issued = store.issue(
+        plan=plan,
+        render_session_digest=review.session.digest,
+        identity=_trusted_renderer(),
+        confirmation=_owner_confirmation(plan, review),
+        operation_id="00000000-0000-4000-8000-000000000041",
+        expires_at="2026-08-28T12:30:00.000Z",
+        signing_key_id="approval-key-01",
+        signing_key=b"k" * 32,
+    )
+    arguments = {
+        "wire": issued.wire,
+        "plan": plan,
+        "render_session_digest": review.session.digest,
+        "execution_operation_id": "00000000-0000-4000-8000-000000000042",
+        "request_digest": _digest("apply-request"),
+        "reserved_at": "2026-08-28T12:12:00.000Z",
+        "verifier_keys": {"approval-key-01": b"k" * 32},
+    }
+    reservation = store.reserve(**arguments)
+    assert store.reserve(**arguments) == reservation
+    assert store.reserve(**{**arguments, "reserved_at": "2026-08-28T12:31:00.000Z"}) == reservation
+    assert reservation.jti == "0123456789abcdef0123456789abcdef"
+    for changed in (
+        {
+            **arguments,
+            "execution_operation_id": "00000000-0000-4000-8000-000000000043",
+        },
+        {**arguments, "request_digest": _digest("changed-request")},
+    ):
+        with pytest.raises(consolidation_approval_store.ConsolidationApprovalStoreUnavailable):
+            store.reserve(**changed)
+
+    restarted = consolidation_approval_store.ConsolidationApprovalStore(vault)
+    assert restarted.reserve(**arguments) == reservation
