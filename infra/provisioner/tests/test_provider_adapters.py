@@ -818,6 +818,8 @@ async def test_kubernetes_cell_adapter_persists_one_authenticated_authorization_
         def patch_namespaced_secret(self, name, namespace, body):
             if self.secret is None:
                 raise _ApiNotFound()
+            if "resourceVersion" in body["metadata"]:
+                assert body["metadata"]["resourceVersion"] == "7"
             self.secret = _secret(body)
 
         def create_namespaced_secret(self, namespace, body):
@@ -836,17 +838,27 @@ async def test_kubernetes_cell_adapter_persists_one_authenticated_authorization_
             "serving-membership.json",
         }
         return SimpleNamespace(
-            metadata=SimpleNamespace(annotations=body["metadata"]["annotations"]),
+            metadata=SimpleNamespace(
+                annotations=body["metadata"]["annotations"],
+                resource_version="7",
+            ),
             data={
                 key: base64.b64encode(value.encode()).decode()
                 for key, value in body["stringData"].items()
             },
         )
 
+    class Apps:
+        staged = None
+
+        def patch_namespaced_stateful_set(self, name, namespace, body):
+            self.staged = (name, namespace, body)
+
     core = Core()
+    apps = Apps()
     adapter = KubernetesCellAdapter(
         core_v1=core,
-        apps_v1=SimpleNamespace(),
+        apps_v1=apps,
         identity_verifier=identity.verifier(),
     )
     files = {
@@ -854,6 +866,9 @@ async def test_kubernetes_cell_adapter_persists_one_authenticated_authorization_
         "control.json": b'{"control":"value"}',
         "serving-membership.json": b'{"membership":"value"}',
     }
+    revision = hashlib.sha256(
+        files["keyring.json"] + files["control.json"] + files["serving-membership.json"]
+    ).hexdigest()
     assert await adapter.read_authorization_session_bundle(metadata) is None
     await adapter.write_authorization_session_bundle(
         metadata,
@@ -861,14 +876,61 @@ async def test_kubernetes_cell_adapter_persists_one_authenticated_authorization_
         recovery_envelope=envelopes["authorizationSessionSecret"],
         membership_epoch=1,
         membership_digest="a" * 64,
-        revision="b" * 64,
+        revision=revision,
     )
 
     stored = await adapter.read_authorization_session_bundle(metadata)
     assert stored == files
-    assert core.secret.metadata.annotations["exomem.io/recovery-envelope"] == envelopes[
-        "authorizationSessionSecret"
-    ]
+    assert (
+        core.secret.metadata.annotations["exomem.io/recovery-envelope"]
+        == envelopes["authorizationSessionSecret"]
+    )
+
+    successor_files = {
+        **files,
+        "serving-membership.json": b'{"membership":"successor"}',
+    }
+    successor_revision = hashlib.sha256(
+        successor_files["keyring.json"]
+        + successor_files["control.json"]
+        + successor_files["serving-membership.json"]
+    ).hexdigest()
+    await adapter.write_authorization_session_bundle(
+        metadata,
+        successor_files,
+        recovery_envelope=envelopes["authorizationSessionSecret"],
+        membership_epoch=2,
+        membership_digest="c" * 64,
+        revision=successor_revision,
+        expected_revision=revision,
+    )
+    await adapter.stage_authorization_session_revision(metadata, successor_revision)
+    assert apps.staged == (
+        metadata.resource_name,
+        metadata.resource_name,
+        {
+            "spec": {
+                "template": {
+                    "metadata": {
+                        "annotations": {
+                            "exomem.io/authorization-session-revision": successor_revision
+                        }
+                    }
+                }
+            }
+        },
+    )
+
+    with pytest.raises(MetadataConflict, match="predecessor differs"):
+        await adapter.write_authorization_session_bundle(
+            metadata,
+            successor_files,
+            recovery_envelope=envelopes["authorizationSessionSecret"],
+            membership_epoch=3,
+            membership_digest="e" * 64,
+            revision=successor_revision,
+            expected_revision=revision,
+        )
 
     core.secret.data["extra.json"] = base64.b64encode(b"{}").decode()
     with pytest.raises(MetadataConflict, match="bundle shape"):
@@ -1109,6 +1171,17 @@ async def test_private_cell_api_uses_fresh_identity_and_exact_lifecycle_routes()
             )
         if url.endswith("/ready"):
             return _Response(200, ready)
+        if url.endswith("/lifecycle/quiesce"):
+            return _Response(
+                200,
+                {
+                    "phase": "quiesced",
+                    "active_reads": 0,
+                    "active_mutations": 0,
+                    "active_transfers": 0,
+                    "reason_code": "HOSTED_QUIESCED",
+                },
+            )
         return _Response(
             200,
             {"live": True, "cell_id": "cell-alpha", "protocol_version": "1"},
@@ -1160,12 +1233,19 @@ async def test_private_cell_api_uses_fresh_identity_and_exact_lifecycle_routes()
         expected_worker_policy=worker_policy,
         expected_contract_digest="b" * 64,
     )
-    await adapter.quiesce(
+    quiesced = await adapter.quiesce(
         _metadata(),
         credential=_credential(),
         protocol_version="1",
         operation_id="quiesce-alpha",
     )
+    assert quiesced == {
+        "phase": "quiesced",
+        "active_reads": 0,
+        "active_mutations": 0,
+        "active_transfers": 0,
+        "reason_code": "HOSTED_QUIESCED",
+    }
     await adapter.resume(
         _metadata(),
         credential=_credential(),

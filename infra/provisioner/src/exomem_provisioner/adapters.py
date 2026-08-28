@@ -603,12 +603,12 @@ class KubernetesCellAdapter:
         membership_epoch: int,
         membership_digest: str,
         revision: str,
+        expected_revision: str | None = None,
     ) -> None:
         if (
             set(files) != AUTHORIZATION_SESSION_FILES
             or any(
-                not isinstance(value, bytes)
-                or not 1 <= len(value) <= MAX_BUNDLE_FILE_BYTES
+                not isinstance(value, bytes) or not 1 <= len(value) <= MAX_BUNDLE_FILE_BYTES
                 for value in files.values()
             )
             or not isinstance(membership_epoch, int)
@@ -616,8 +616,16 @@ class KubernetesCellAdapter:
             or membership_epoch < 1
             or re.fullmatch(r"[0-9a-f]{64}", membership_digest) is None
             or re.fullmatch(r"[0-9a-f]{64}", revision) is None
+            or revision
+            != hashlib.sha256(
+                files["keyring.json"] + files["control.json"] + files["serving-membership.json"]
+            ).hexdigest()
             or not isinstance(recovery_envelope, str)
             or not recovery_envelope
+            or (
+                expected_revision is not None
+                and re.fullmatch(r"[0-9a-f]{64}", expected_revision) is None
+            )
         ):
             raise MetadataConflict("authorization session bundle shape is invalid")
         annotations = {
@@ -628,9 +636,7 @@ class KubernetesCellAdapter:
             "exomem.io/authorization-session-revision": revision,
         }
         try:
-            string_data = {
-                name: value.decode("utf-8") for name, value in sorted(files.items())
-            }
+            string_data = {name: value.decode("utf-8") for name, value in sorted(files.items())}
         except UnicodeDecodeError as error:
             raise MetadataConflict("authorization session bundle shape is invalid") from error
         body = {
@@ -649,6 +655,51 @@ class KubernetesCellAdapter:
             "immutable": False,
             "stringData": string_data,
         }
+        if expected_revision is not None:
+            try:
+                current = await asyncio.to_thread(
+                    self._core.read_namespaced_secret,
+                    AUTHORIZATION_SESSION_SECRET_NAME,
+                    metadata.resource_name,
+                )
+            except Exception as error:
+                raise MetadataConflict(
+                    "authorization session bundle predecessor is absent"
+                ) from error
+            current_annotations = dict(
+                getattr(getattr(current, "metadata", None), "annotations", None) or {}
+            )
+            _require_annotations(current_annotations, metadata)
+            current_encoded = dict(getattr(current, "data", None) or {})
+            try:
+                current_files = {
+                    name: base64.b64decode(value, validate=True)
+                    for name, value in current_encoded.items()
+                }
+            except (TypeError, ValueError) as error:
+                raise MetadataConflict(
+                    "authorization session bundle predecessor differs"
+                ) from error
+            current_revision = (
+                hashlib.sha256(
+                    current_files["keyring.json"]
+                    + current_files["control.json"]
+                    + current_files["serving-membership.json"]
+                ).hexdigest()
+                if set(current_files) == AUTHORIZATION_SESSION_FILES
+                else None
+            )
+            resource_version = getattr(getattr(current, "metadata", None), "resource_version", None)
+            if (
+                current_annotations.get("exomem.io/recovery-envelope") != recovery_envelope
+                or current_revision != expected_revision
+                or current_annotations.get("exomem.io/authorization-session-revision")
+                != expected_revision
+                or not isinstance(resource_version, str)
+                or not resource_version
+            ):
+                raise MetadataConflict("authorization session bundle predecessor differs")
+            body["metadata"]["resourceVersion"] = resource_version
         try:
             await asyncio.to_thread(
                 self._core.patch_namespaced_secret,
@@ -657,13 +708,48 @@ class KubernetesCellAdapter:
                 body,
             )
         except Exception as error:
-            if _api_status(error) != 404:
+            if _api_status(error) == 409:
+                raise MetadataConflict(
+                    "authorization session bundle changed concurrently"
+                ) from error
+            if _api_status(error) != 404 or expected_revision is not None:
                 raise
             await asyncio.to_thread(
                 self._core.create_namespaced_secret,
                 metadata.resource_name,
                 body,
             )
+
+    async def stage_authorization_session_revision(
+        self,
+        metadata: OpaqueProviderMetadata,
+        revision: str,
+    ) -> None:
+        """Bind the next pod generation to an already-published Secret revision."""
+
+        if re.fullmatch(r"[0-9a-f]{64}", revision) is None:
+            raise MetadataConflict("authorization session revision is invalid")
+        try:
+            await asyncio.to_thread(
+                self._apps.patch_namespaced_stateful_set,
+                metadata.resource_name,
+                metadata.resource_name,
+                {
+                    "spec": {
+                        "template": {
+                            "metadata": {
+                                "annotations": {
+                                    "exomem.io/authorization-session-revision": revision
+                                }
+                            }
+                        }
+                    }
+                },
+            )
+        except Exception as error:
+            raise MetadataConflict(
+                "authorization session pod generation could not be staged"
+            ) from error
 
     async def read_authorization_session_bundle(
         self,
@@ -707,17 +793,13 @@ class KubernetesCellAdapter:
             raise MetadataConflict("authorization session bundle shape is invalid")
         try:
             files = {
-                name: base64.b64decode(value, validate=True)
-                for name, value in encoded.items()
+                name: base64.b64decode(value, validate=True) for name, value in encoded.items()
             }
         except (ValueError, TypeError) as error:
             raise MetadataConflict("authorization session bundle shape is invalid") from error
         if any(not 1 <= len(value) <= MAX_BUNDLE_FILE_BYTES for value in files.values()):
             raise MetadataConflict("authorization session bundle shape is invalid")
-        if any(
-            base64.b64encode(files[name]).decode("ascii") != encoded[name]
-            for name in files
-        ):
+        if any(base64.b64encode(files[name]).decode("ascii") != encoded[name] for name in files):
             raise MetadataConflict("authorization session bundle shape is invalid")
         return files
 
@@ -1421,8 +1503,8 @@ class PrivateCellApiAdapter:
         credential: str,
         protocol_version: str,
         operation_id: str,
-    ) -> None:
-        await self._call(
+    ) -> dict[str, Any]:
+        return await self._call(
             "POST",
             metadata,
             "lifecycle/quiesce",

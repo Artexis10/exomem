@@ -25,6 +25,7 @@ from .authorization_membership import (
     AUTHORIZATION_SESSION_SCHEMA_VERSION,
     build_initial_hosted_authorization_bundle,
     inspect_hosted_authorization_bundle,
+    transition_hosted_authorization_bundle,
 )
 from .capacity import CapacityError
 from .driver import EffectContext
@@ -170,9 +171,7 @@ class KubernetesProviderRegistry:
                 await asyncio.to_thread(
                     self._core.list_namespaced_config_map,
                     metadata.resource_name,
-                    label_selector=(
-                        f"owner=helm,name={metadata.resource_name},status=deployed"
-                    ),
+                    label_selector=(f"owner=helm,name={metadata.resource_name},status=deployed"),
                 ),
                 "items",
                 (),
@@ -199,7 +198,11 @@ class KubernetesProviderRegistry:
             metadata,
             provider="kubernetes",
             provider_reference=ProviderReference.kubernetes(
-                provider="kubernetes", api_version="v1", kind="Namespace", namespace="", name=metadata.resource_name
+                provider="kubernetes",
+                api_version="v1",
+                kind="Namespace",
+                namespace="",
+                name=metadata.resource_name,
             ),
         )
         self._authenticate_annotations(
@@ -207,7 +210,11 @@ class KubernetesProviderRegistry:
             metadata,
             provider="kubernetes",
             provider_reference=ProviderReference.kubernetes(
-                provider="kubernetes", api_version="v1", kind="PersistentVolumeClaim", namespace=metadata.resource_name, name=metadata.resource_name + "-data"
+                provider="kubernetes",
+                api_version="v1",
+                kind="PersistentVolumeClaim",
+                namespace=metadata.resource_name,
+                name=metadata.resource_name + "-data",
             ),
         )
         self._authenticate_annotations(
@@ -215,7 +222,11 @@ class KubernetesProviderRegistry:
             metadata,
             provider="kubernetes",
             provider_reference=ProviderReference.kubernetes(
-                provider="kubernetes", api_version="v1", kind="ConfigMap", namespace=metadata.resource_name, name=provider_operation_resource_name(metadata.operation_id)
+                provider="kubernetes",
+                api_version="v1",
+                kind="ConfigMap",
+                namespace=metadata.resource_name,
+                name=provider_operation_resource_name(metadata.operation_id),
             ),
         )
         try:
@@ -235,12 +246,14 @@ class KubernetesProviderRegistry:
                 metadata,
                 provider="kubernetes",
                 provider_reference=ProviderReference.kubernetes(
-                    provider="kubernetes", api_version="batch/v1", kind="Job", namespace=metadata.resource_name, name=metadata.resource_name + "-init"
+                    provider="kubernetes",
+                    api_version="batch/v1",
+                    kind="Job",
+                    namespace=metadata.resource_name,
+                    name=metadata.resource_name + "-init",
                 ),
             )
-        return self._recovery_digest(
-            namespace, pvc, operation_record, helm_record, init_job
-        )
+        return self._recovery_digest(namespace, pvc, operation_record, helm_record, init_job)
 
     async def inspect(
         self,
@@ -323,8 +336,7 @@ class KubernetesProviderRegistry:
         )
         init_failed = not init_complete and (
             any(
-                getattr(item, "type", None) == "Failed"
-                and getattr(item, "status", None) == "True"
+                getattr(item, "type", None) == "Failed" and getattr(item, "status", None) == "True"
                 for item in conditions
             )
             or bool(getattr(getattr(init_job, "status", None), "failed", 0))
@@ -400,9 +412,7 @@ class KubernetesProviderRegistry:
                 "exomem.io/vault-id": helm_values["vaultId"],
                 "exomem.io/expected-release": helm_values["expectedRelease"],
                 "exomem.io/worker-policy-digest": helm_values["workerPolicyDigest"],
-                "exomem.io/records-reader-version": str(
-                    helm_values["recordsReaderVersion"]
-                ),
+                "exomem.io/records-reader-version": str(helm_values["recordsReaderVersion"]),
                 "exomem.io/lifecycle-actions-enabled": str(
                     helm_values["lifecycleActionsEnabled"]
                 ).lower(),
@@ -440,9 +450,7 @@ class KubernetesProviderRegistry:
                 )
                 != provision_mode
             ):
-                raise MetadataConflict(
-                    "Kubernetes namespace provision mode differs"
-                ) from error
+                raise MetadataConflict("Kubernetes namespace provision mode differs") from error
 
     async def record_operation(
         self, metadata: OpaqueProviderMetadata, recovery_envelope: str
@@ -643,7 +651,7 @@ class LiveLifecyclePlane:
                 expected_cell_id=owned.subject_id,
                 expected_logical_vault_id=owned.tenant_id,
                 expected_replica_id=replica_id,
-                expected_software_version=str(target["releaseVersion"]),
+                expected_software_version=None,
                 expected_schema_version=AUTHORIZATION_SESSION_SCHEMA_VERSION,
                 expected_recovery_envelope=recovery_envelope,
                 now=current,
@@ -657,10 +665,74 @@ class LiveLifecyclePlane:
         values: dict[str, Any],
     ) -> dict[str, Any]:
         desired = dict(values)
-        desired["authorizationSessionRevision"] = (
-            await self._authorization_session_revision(metadata, request)
+        desired["authorizationSessionRevision"] = await self._authorization_session_revision(
+            metadata, request
         )
         return desired
+
+    async def _transition_authorization_session_membership(
+        self,
+        metadata: OpaqueProviderMetadata,
+        *,
+        target_state: str,
+        target_no_in_flight: bool,
+        target_software_version: str | None = None,
+    ) -> str:
+        """Commit one authenticated successor under the lifecycle maintenance lease."""
+
+        key = self._key(metadata)
+        owned = self._owner(metadata)
+        try:
+            original = self._helm_requests[key]
+        except KeyError as error:
+            raise MetadataConflict(
+                "original authorization session identity is unavailable"
+            ) from error
+        envelopes = original.get("_providerRecoveryEnvelopes")
+        if not isinstance(envelopes, dict):
+            raise MetadataConflict("authorization Secret provider authority is absent")
+        recovery_envelope = envelopes.get("authorizationSessionSecret")
+        if not isinstance(recovery_envelope, str) or not recovery_envelope:
+            raise MetadataConflict("authorization Secret provider authority is absent")
+        files = await self._cell.read_authorization_session_bundle(owned)
+        if files is None:
+            raise MetadataConflict("authorization session bundle is absent")
+        current = int(self._now())
+        source = inspect_hosted_authorization_bundle(
+            files,
+            expected_cell_id=owned.subject_id,
+            expected_logical_vault_id=owned.tenant_id,
+            expected_replica_id=owned.resource_name + "-0",
+            expected_software_version=None,
+            expected_schema_version=AUTHORIZATION_SESSION_SCHEMA_VERSION,
+            expected_recovery_envelope=recovery_envelope,
+            now=current,
+            _require_fresh=False,
+        )
+        successor = transition_hosted_authorization_bundle(
+            files,
+            expected_cell_id=owned.subject_id,
+            expected_logical_vault_id=owned.tenant_id,
+            expected_replica_id=owned.resource_name + "-0",
+            expected_software_version=None,
+            expected_schema_version=AUTHORIZATION_SESSION_SCHEMA_VERSION,
+            expected_recovery_envelope=recovery_envelope,
+            target_state=target_state,
+            target_no_in_flight=target_no_in_flight,
+            target_software_version=target_software_version,
+            now=current,
+        )
+        if successor.revision != source.revision:
+            await self._cell.write_authorization_session_bundle(
+                owned,
+                successor.files,
+                recovery_envelope=recovery_envelope,
+                membership_epoch=successor.epoch,
+                membership_digest=successor.membership_digest,
+                revision=successor.revision,
+                expected_revision=source.revision,
+            )
+        return successor.revision
 
     async def observed_fence(self, tenant_id: str) -> int:
         return await self._registry.observed_fence(tenant_id)
@@ -855,7 +927,9 @@ class LiveLifecyclePlane:
     def runtime_admitted(self, metadata: OpaqueProviderMetadata) -> bool:
         return self._snapshot(metadata).runtime_admitted
 
-    async def enable_routes(self, metadata: OpaqueProviderMetadata, request: dict[str, Any]) -> None:
+    async def enable_routes(
+        self, metadata: OpaqueProviderMetadata, request: dict[str, Any]
+    ) -> None:
         owner = self._owner(metadata)
         if self._key(metadata) not in self._helm_requests:
             raise MetadataConflict("original Helm request was not authenticated")
@@ -928,14 +1002,48 @@ class LiveLifecyclePlane:
             except KeyError as error:
                 raise MetadataConflict("original runtime identity is unavailable") from error
         target = runtime_identity(runtime_request)
-        await self._runtime.quiesce(
+        snapshot = await self._runtime.quiesce(
             self._owner(metadata),
             credential=str(request["serviceCredential"]),
             protocol_version=target["protocolVersion"],
             operation_id=operation_id,
         )
+        if (
+            not isinstance(snapshot, dict)
+            or set(snapshot)
+            != {
+                "phase",
+                "active_reads",
+                "active_mutations",
+                "active_transfers",
+                "reason_code",
+            }
+            or snapshot.get("phase") != "quiesced"
+            or any(
+                type(snapshot.get(name)) is not int or snapshot[name] != 0
+                for name in ("active_reads", "active_mutations", "active_transfers")
+            )
+            or not isinstance(snapshot.get("reason_code"), str)
+            or not snapshot["reason_code"]
+        ):
+            raise MetadataConflict("runtime did not acknowledge a complete authorization drain")
+        await self._transition_authorization_session_membership(
+            metadata,
+            target_state="DRAINING",
+            target_no_in_flight=True,
+        )
 
     async def scale(self, metadata: OpaqueProviderMetadata, replicas: int) -> None:
+        if replicas == 1:
+            revision = await self._transition_authorization_session_membership(
+                metadata,
+                target_state="SERVING",
+                target_no_in_flight=False,
+            )
+            await self._cell.stage_authorization_session_revision(
+                self._owner(metadata),
+                revision,
+            )
         await self._cell.scale(self._owner(metadata), replicas)
 
     async def resume(
@@ -1018,8 +1126,15 @@ class LiveLifecyclePlane:
         config: LifecycleConfig,
         operation_id: str,
     ) -> None:
+        target_release = runtime_identity(request)["releaseVersion"]
+        revision = await self._transition_authorization_session_membership(
+            metadata,
+            target_state="SERVING",
+            target_no_in_flight=False,
+            target_software_version=target_release,
+        )
         values = self._rollforward_helm_values(metadata, request, config)
-        values = await self._authorization_helm_values(metadata, request, values)
+        values["authorizationSessionRevision"] = revision
         values["workloadMode"] = "serve"
         values["routes"]["enabled"] = False
         await self._helm.transition_release(
@@ -1037,6 +1152,20 @@ class LiveLifecyclePlane:
         await self._helm.rollback_release(
             self._owner(metadata),
             operation_id=operation_id,
+        )
+        try:
+            original = self._helm_requests[self._key(metadata)]
+        except KeyError as error:
+            raise MetadataConflict("original runtime identity is unavailable") from error
+        revision = await self._transition_authorization_session_membership(
+            metadata,
+            target_state="SERVING",
+            target_no_in_flight=False,
+            target_software_version=runtime_identity(original)["releaseVersion"],
+        )
+        await self._cell.stage_authorization_session_revision(
+            self._owner(metadata),
+            revision,
         )
         await self._refresh(metadata)
 
@@ -1146,9 +1275,7 @@ class LiveLifecyclePlane:
                 raise MetadataConflict("pending credential version is immutable")
             return
         credentials[pending] = credential
-        target = self._config.runtime_target_for(
-            request, v2="runtimeTarget" in request
-        )
+        target = self._config.runtime_target_for(request, v2="runtimeTarget" in request)
         result = await self._credential_transition(
             owned,
             credentials=credentials,
@@ -1188,9 +1315,7 @@ class LiveLifecyclePlane:
             return True
         revision = int(annotations.get("exomem.io/security-revision", "0"))
         probe_operation = operation_id + ":credential-probe"
-        target = self._config.runtime_target_for(
-            request, v2="runtimeTarget" in request
-        )
+        target = self._config.runtime_target_for(request, v2="runtimeTarget" in request)
         operator_request = {
             "request_id": _deterministic_uuid4(probe_operation),
             "operation_id": probe_operation,
@@ -1238,9 +1363,7 @@ class LiveLifecyclePlane:
         credentials, annotations = await self._cell.read_credential_bundle(owned)
         pending = str(version)
         old_version = annotations.get("exomem.io/active-credential-version")
-        target = self._config.runtime_target_for(
-            request, v2="runtimeTarget" in request
-        )
+        target = self._config.runtime_target_for(request, v2="runtimeTarget" in request)
         if old_version == pending and set(credentials) == {pending}:
             return await self._runtime.credential_rejected(
                 owned,
@@ -1256,9 +1379,9 @@ class LiveLifecyclePlane:
                 credentials=credentials,
                 annotations=annotations,
                 action="promote",
-            operation_id=operation_id,
-            version=pending,
-            protocol_version=target["protocolVersion"],
+                operation_id=operation_id,
+                version=pending,
+                protocol_version=target["protocolVersion"],
             )
             if result.get("phase") != "promoted":
                 raise MetadataConflict("hosted credential did not promote")
@@ -1277,9 +1400,9 @@ class LiveLifecyclePlane:
                 credentials=credentials,
                 annotations=annotations,
                 action="finalize",
-            operation_id=operation_id,
-            version=pending,
-            protocol_version=target["protocolVersion"],
+                operation_id=operation_id,
+                version=pending,
+                protocol_version=target["protocolVersion"],
             )
             if result.get("phase") != "stable" or result.get("active_version") != pending:
                 raise MetadataConflict("hosted credential did not finalize")

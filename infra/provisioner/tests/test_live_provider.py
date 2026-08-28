@@ -9,6 +9,10 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
+from exomem_provisioner.authorization_membership import (
+    build_initial_hosted_authorization_bundle,
+    inspect_hosted_authorization_bundle,
+)
 from exomem_provisioner.capacity import CapacityConflict
 from exomem_provisioner.config import (
     ProviderWorkerSettings,
@@ -581,15 +585,36 @@ async def test_live_rollforward_uses_target_fingerprint_and_original_helm_author
             assert credential == "credential-current"
             assert operation_id == "rollforward-alpha"
             quiesced_protocols.append(protocol_version)
+            return {
+                "phase": "quiesced",
+                "active_reads": 0,
+                "active_mutations": 0,
+                "active_transfers": 0,
+                "reason_code": "HOSTED_QUIESCED",
+            }
 
     class Cell:
-        files = None
+        files = build_initial_hosted_authorization_bundle(
+            cell_id=owner.subject_id,
+            logical_vault_id=owner.tenant_id,
+            replica_id=owner.resource_name + "-0",
+            software_version="0.54.1",
+            schema_version=4,
+            recovery_envelope=original_request["_providerRecoveryEnvelopes"][
+                "authorizationSessionSecret"
+            ],
+            now=1_900_000_000,
+            entropy=lambda length: bytes(range(length)),
+        ).files
 
         async def read_authorization_session_bundle(self, _owner):
             return self.files
 
         async def write_authorization_session_bundle(self, _owner, files, **_kwargs):
             self.files = files
+
+        async def stage_authorization_session_revision(self, _owner, _revision):
+            return None
 
     plane = LiveLifecyclePlane(
         repository=SimpleNamespace(),  # type: ignore[arg-type]
@@ -603,6 +628,7 @@ async def test_live_rollforward_uses_target_fingerprint_and_original_helm_author
         identity_verifier=IDENTITY_CODEC.verifier(),
         config=config,
         fingerprint=Fingerprint(),  # type: ignore[arg-type]
+        now=lambda: 1_900_000_030,
     )
     key = plane._key(current)
     plane._owned[key] = owner
@@ -620,6 +646,20 @@ async def test_live_rollforward_uses_target_fingerprint_and_original_helm_author
     await plane.upgrade_runtime(current, request, config, "rollforward-alpha")
     await plane.rollback_runtime(current, "rollforward-alpha")
 
+    rolled_back = inspect_hosted_authorization_bundle(
+        plane._cell.files,
+        expected_cell_id=owner.subject_id,
+        expected_logical_vault_id=owner.tenant_id,
+        expected_replica_id=owner.resource_name + "-0",
+        expected_software_version="0.54.1",
+        expected_schema_version=4,
+        expected_recovery_envelope=original_request["_providerRecoveryEnvelopes"][
+            "authorizationSessionSecret"
+        ],
+        now=1_900_000_030,
+    )
+    assert (rolled_back.epoch, rolled_back.replica_state) == (4, "SERVING")
+
     assert fingerprints == [(current, "rollforward-alpha", "before")]
     assert quiesced_protocols == ["legacy-protocol"]
     assert [values["workloadMode"] for _owner, values, _operation in transitions] == [
@@ -630,12 +670,136 @@ async def test_live_rollforward_uses_target_fingerprint_and_original_helm_author
         assert transition_owner == owner
         assert operation == "rollforward-alpha"
         assert values["image"] == config.image
-        assert values["providerRecoveryEnvelopes"] == original_request[
-            "_providerRecoveryEnvelopes"
-        ]
+        assert values["providerRecoveryEnvelopes"] == original_request["_providerRecoveryEnvelopes"]
         assert values["routes"]["enabled"] is False
     assert transitions[0][1]["initOperationId"] == "rollforward-alpha"
     assert rollbacks == [(owner, "rollforward-alpha")]
+
+
+@pytest.mark.asyncio
+async def test_membership_drain_requires_zero_runtime_snapshot_and_rejoin_precedes_scale() -> None:
+    metadata = _metadata()
+    now = 1_900_000_000
+    envelopes = cell_provider_recovery_envelopes(
+        IDENTITY_CODEC,
+        tenant_id=metadata.tenant_id,
+        cell_id=metadata.subject_id,
+        operation_id=metadata.operation_id,
+        fence_generation=metadata.fence_generation,
+        resource_name=metadata.resource_name,
+        operation_resource_name=provider_operation_resource_name(metadata.operation_id),
+    )
+    request = {
+        "serviceCredential": "credential-current",
+        "runtimeTarget": {
+            "releaseVersion": "0.48.0",
+            "protocolVersion": "1",
+            "agentProfile": "hosted-alpha-agent-v1",
+            "gatewayContractDigest": "a" * 64,
+            "commandFingerprint": "b" * 64,
+            "schemaDigest": "c" * 64,
+        },
+        "_providerRecoveryEnvelopes": envelopes,
+    }
+    initial = build_initial_hosted_authorization_bundle(
+        cell_id=metadata.subject_id,
+        logical_vault_id=metadata.tenant_id,
+        replica_id=metadata.resource_name + "-0",
+        software_version="0.48.0",
+        schema_version=4,
+        recovery_envelope=envelopes["authorizationSessionSecret"],
+        now=now,
+        entropy=lambda length: bytes(range(length)),
+    )
+    events: list[tuple[object, ...]] = []
+
+    class Runtime:
+        active_reads = 1
+
+        async def quiesce(self, *_args, **_kwargs):
+            return {
+                "phase": "quiesced",
+                "active_reads": self.active_reads,
+                "active_mutations": 0,
+                "active_transfers": 0,
+                "reason_code": "HOSTED_QUIESCED",
+            }
+
+    class Cell:
+        files = initial.files
+
+        async def read_authorization_session_bundle(self, _owner):
+            return self.files
+
+        async def write_authorization_session_bundle(
+            self, _owner, files, *, expected_revision, **_kwargs
+        ):
+            events.append(("write", expected_revision))
+            self.files = files
+
+        async def stage_authorization_session_revision(self, _owner, revision):
+            events.append(("stage", revision))
+
+        async def scale(self, _owner, replicas):
+            events.append(("scale", replicas))
+
+    runtime = Runtime()
+    cell = Cell()
+    plane = LiveLifecyclePlane(
+        repository=SimpleNamespace(),  # type: ignore[arg-type]
+        registry=SimpleNamespace(),  # type: ignore[arg-type]
+        cell=cell,  # type: ignore[arg-type]
+        helm=SimpleNamespace(),  # type: ignore[arg-type]
+        runtime=runtime,  # type: ignore[arg-type]
+        routes=SimpleNamespace(),  # type: ignore[arg-type]
+        maintenance=SimpleNamespace(),  # type: ignore[arg-type]
+        capacity=SimpleNamespace(),  # type: ignore[arg-type]
+        identity_verifier=IDENTITY_CODEC.verifier(),
+        config=SimpleNamespace(
+            runtime_target_for=lambda _request, **_kwargs: request["runtimeTarget"]
+        ),  # type: ignore[arg-type]
+        now=lambda: now + 30,
+    )
+    plane._owned[plane._key(metadata)] = metadata
+    plane._helm_requests[plane._key(metadata)] = request
+
+    with pytest.raises(MetadataConflict, match="complete authorization drain"):
+        await plane.quiesce(metadata, request, "quiesce-alpha")
+    assert events == []
+    assert cell.files == initial.files
+
+    runtime.active_reads = 0
+    await plane.quiesce(metadata, request, "quiesce-alpha")
+    drained = inspect_hosted_authorization_bundle(
+        cell.files,
+        expected_cell_id=metadata.subject_id,
+        expected_logical_vault_id=metadata.tenant_id,
+        expected_replica_id=metadata.resource_name + "-0",
+        expected_software_version="0.48.0",
+        expected_schema_version=4,
+        expected_recovery_envelope=envelopes["authorizationSessionSecret"],
+        now=now + 30,
+    )
+    assert (drained.epoch, drained.replica_state, drained.no_in_flight) == (
+        2,
+        "DRAINING",
+        True,
+    )
+
+    await plane.scale(metadata, 1)
+    serving = inspect_hosted_authorization_bundle(
+        cell.files,
+        expected_cell_id=metadata.subject_id,
+        expected_logical_vault_id=metadata.tenant_id,
+        expected_replica_id=metadata.resource_name + "-0",
+        expected_software_version="0.48.0",
+        expected_schema_version=4,
+        expected_recovery_envelope=envelopes["authorizationSessionSecret"],
+        now=now + 30,
+    )
+    assert (serving.epoch, serving.replica_state) == (3, "SERVING")
+    assert [event[0] for event in events] == ["write", "write", "stage", "scale"]
+    assert events[-2][1] == serving.revision
 
 
 @pytest.mark.asyncio
@@ -692,6 +856,7 @@ async def test_live_route_enable_reconciles_the_original_authenticated_helm_rele
 
         async def write_authorization_session_bundle(self, _owner, files, **_kwargs):
             self.files = files
+
     plane = LiveLifecyclePlane(
         repository=SimpleNamespace(),  # type: ignore[arg-type]
         registry=Registry(),  # type: ignore[arg-type]
@@ -1263,9 +1428,7 @@ def _init_recovery_plane(snapshots: list[SimpleNamespace]):
         operation_id=original_owner.operation_id,
         fence_generation=original_owner.fence_generation,
         resource_name=original_owner.resource_name,
-        operation_resource_name=provider_operation_resource_name(
-            original_owner.operation_id
-        ),
+        operation_resource_name=provider_operation_resource_name(original_owner.operation_id),
     )
     plane._helm_requests[key] = original_request
     return plane, metadata, original_owner, helm_calls
@@ -1547,9 +1710,7 @@ async def test_live_plane_publishes_authorization_custody_before_helm_and_reuses
 
         async def write_authorization_session_bundle(self, _owner, files, **kwargs):
             calls.append("authorization-write")
-            assert kwargs["recovery_envelope"] == envelopes[
-                "authorizationSessionSecret"
-            ]
+            assert kwargs["recovery_envelope"] == envelopes["authorizationSessionSecret"]
             self.files = files
 
         async def write_credential_bundle(self, _owner, _credentials, **_kwargs):
@@ -1564,9 +1725,7 @@ async def test_live_plane_publishes_authorization_custody_before_helm_and_reuses
 
     request = {
         "provisionMode": "serve",
-        "serviceCredential": base64.urlsafe_b64encode(bytes(range(32)))
-        .rstrip(b"=")
-        .decode(),
+        "serviceCredential": base64.urlsafe_b64encode(bytes(range(32))).rstrip(b"=").decode(),
         "workerPolicy": {"workerCount": 2, "semantic": True, "media": False},
         "runtimeTarget": {
             "releaseVersion": "0.48.0",
@@ -1587,9 +1746,7 @@ async def test_live_plane_publishes_authorization_custody_before_helm_and_reuses
         maintenance=SimpleNamespace(),  # type: ignore[arg-type]
         capacity=Capacity(),  # type: ignore[arg-type]
         identity_verifier=IDENTITY_CODEC.verifier(),
-        config=SimpleNamespace(
-            runtime_target_for=lambda value, *, v2: value["runtimeTarget"]
-        ),  # type: ignore[arg-type]
+        config=SimpleNamespace(runtime_target_for=lambda value, *, v2: value["runtimeTarget"]),  # type: ignore[arg-type]
         now=lambda: 1_900_000_000,
     )
     key = plane._key(metadata)
