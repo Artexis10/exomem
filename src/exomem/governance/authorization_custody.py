@@ -1042,6 +1042,7 @@ def _parse_detach_ack(
     *,
     keyring: AuthorizationKeyring,
     now: int,
+    allow_expired: bool = False,
 ) -> _StandaloneDetachAcknowledgement:
     try:
         if not isinstance(raw, bytes) or not 1 <= len(raw) <= MAX_CUSTODY_FILE_BYTES:
@@ -1075,7 +1076,8 @@ def _parse_detach_ack(
         current_time = _bounded_time(now)
         if (
             target_attachment_epoch != source_attachment_epoch + 1
-            or not issued_at <= current_time < expires_at
+            or current_time < issued_at
+            or (not allow_expired and current_time >= expires_at)
             or expires_at - issued_at
             > authorization_serving_membership.MAX_ATTESTATION_TTL_SECONDS
         ):
@@ -2644,6 +2646,24 @@ def _standalone_membership_successor(
     return successor
 
 
+def _historical_membership_verification_time(raw: bytes, *, now: int) -> int:
+    """Choose a bounded time for authenticating an exact expired predecessor."""
+
+    try:
+        value = json.loads(raw.decode("utf-8"), object_pairs_hook=_closed_object)
+        if not isinstance(value, dict):
+            raise AuthorizationCustodyUnavailable
+        issued_at = _bounded_time(value["issued_at"])
+        expires_at = _bounded_time(value["expires_at"])
+        if issued_at >= expires_at:
+            raise AuthorizationCustodyUnavailable
+        return min(_bounded_time(now), expires_at - 1)
+    except AuthorizationCustodyUnavailable:
+        raise
+    except (KeyError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+        raise AuthorizationCustodyUnavailable from None
+
+
 def _standalone_transition_replay_control(
     current: AuthorizationControlRecord,
     *,
@@ -2660,6 +2680,28 @@ def _standalone_transition_replay_control(
     )
 
 
+def _standalone_transition_descendant_control(
+    current: AuthorizationControlRecord,
+    *,
+    expected: AuthorizationControlRecord,
+) -> bool:
+    return (
+        current.serving_membership_epoch > expected.serving_membership_epoch
+        and replace(
+            current,
+            serving_membership_epoch=expected.serving_membership_epoch,
+            serving_membership_digest=expected.serving_membership_digest,
+        )
+        == expected
+    )
+
+
+def _standalone_transition_barrier(point: str) -> None:
+    """Crash-injection seam between standalone membership publications."""
+
+    del point
+
+
 def _transition_standalone_attachment_membership(
     vault_root: Path,
     *,
@@ -2669,6 +2711,7 @@ def _transition_standalone_attachment_membership(
     target_state: str,
     target_no_in_flight: bool,
     now: int,
+    recover_expired_source: bool = False,
 ) -> AuthorizationCustody:
     if not isinstance(expected_control, AuthorizationControlRecord):
         raise AuthorizationCustodyUnavailable
@@ -2691,37 +2734,266 @@ def _transition_standalone_attachment_membership(
             external=external,
         )
 
+        registry_source_control = expected_control
+        registry_source_state = source_state
+        registry_source_no_in_flight = source_no_in_flight
         if current_control != expected_control:
-            if not _standalone_transition_replay_control(
+            replay_is_valid = _standalone_transition_replay_control(
                 current_control,
                 expected=expected_control,
-            ):
+            )
+            if recover_expired_source:
+                replay_is_valid = _standalone_transition_descendant_control(
+                    current_control,
+                    expected=expected_control,
+                )
+            if not replay_is_valid:
                 raise AuthorizationCustodyUnavailable
-            current_record = _parse_migration_membership(
-                membership_raw,
-                keyring=keyring,
-                control=current_control,
-                now=current_time,
-                epoch=current_control.serving_membership_epoch,
-                digest=current_control.serving_membership_digest,
+            verification_time = (
+                _historical_membership_verification_time(
+                    membership_raw,
+                    now=current_time,
+                )
+                if recover_expired_source
+                else current_time
             )
-            _require_standalone_membership(
-                current_record,
-                keyring=keyring,
-                control=current_control,
-                replica_id=replica_id,
-                state=target_state,
-                no_in_flight=target_no_in_flight,
-            )
-            target_control = current_control
+            try:
+                current_record = _parse_migration_membership(
+                    membership_raw,
+                    keyring=keyring,
+                    control=current_control,
+                    now=verification_time,
+                    epoch=current_control.serving_membership_epoch,
+                    digest=current_control.serving_membership_digest,
+                )
+            except AuthorizationCustodyUnavailable:
+                if not recover_expired_source:
+                    raise
+                provisional_target = replace(
+                    current_control,
+                    serving_membership_epoch=(
+                        current_control.serving_membership_epoch + 1
+                    ),
+                    serving_membership_digest="0" * 64,
+                )
+                successor = _standalone_membership_successor(
+                    membership_raw,
+                    keyring=keyring,
+                    expected_control=current_control,
+                    target_control=provisional_target,
+                    replica_id=replica_id,
+                    target_state=target_state,
+                    target_no_in_flight=target_no_in_flight,
+                    now=verification_time,
+                )
+                if successor.expires_at <= current_time:
+                    target_membership = _standalone_membership_bytes(
+                        keyring=keyring,
+                        control=provisional_target,
+                        replica_id=replica_id,
+                        state=target_state,
+                        issuance_stopped=target_state == "DRAINING",
+                        no_in_flight=target_no_in_flight,
+                        previous_epoch_digest=(
+                            current_control.serving_membership_digest
+                        ),
+                        attested_at=current_time,
+                    )
+                    successor = _standalone_membership_successor(
+                        target_membership,
+                        keyring=keyring,
+                        expected_control=current_control,
+                        target_control=provisional_target,
+                        replica_id=replica_id,
+                        target_state=target_state,
+                        target_no_in_flight=target_no_in_flight,
+                        now=current_time,
+                    )
+                    _replace_control_bytes(
+                        membership_path,
+                        expected=membership_raw,
+                        target=target_membership,
+                    )
+                    _standalone_transition_barrier("after-membership")
+                if (
+                    current_control.serving_membership_epoch
+                    == expected_control.serving_membership_epoch + 1
+                ):
+                    _advance_host_registry(
+                        source_control=expected_control,
+                        source_state=source_state,
+                        source_no_in_flight=source_no_in_flight,
+                        target_control=current_control,
+                        target_state=target_state,
+                        target_no_in_flight=target_no_in_flight,
+                        now=current_time,
+                    )
+                else:
+                    _path, _raw, registry, _host_key = _load_host_registry(
+                        current_control,
+                        now=current_time,
+                    )
+                    if not _host_registry_matches_control(
+                        registry,
+                        current_control,
+                        state=target_state,
+                        no_in_flight=target_no_in_flight,
+                    ):
+                        raise AuthorizationCustodyUnavailable from None
+                target_control = replace(
+                    provisional_target,
+                    serving_membership_digest=successor.record_digest,
+                )
+                signing_key = next(
+                    (
+                        item.key
+                        for item in keyring.accepted_keys
+                        if item.key_id == target_control.signing_key_id
+                    ),
+                    None,
+                )
+                if signing_key is None:
+                    raise AuthorizationCustodyUnavailable from None
+                _replace_control_bytes(
+                    external.control_path,
+                    expected=external.control,
+                    target=_signed_control_bytes(
+                        target_control,
+                        signing_key=signing_key,
+                    ),
+                )
+                _standalone_transition_barrier("after-control")
+                registry_source_control = current_control
+                registry_source_state = target_state
+                registry_source_no_in_flight = target_no_in_flight
+            else:
+                _require_standalone_membership(
+                    current_record,
+                    keyring=keyring,
+                    control=current_control,
+                    replica_id=replica_id,
+                    state=target_state,
+                    no_in_flight=target_no_in_flight,
+                )
+                if (
+                    current_control.serving_membership_epoch
+                    == expected_control.serving_membership_epoch + 1
+                ):
+                    predecessor_control = expected_control
+                    predecessor_state = source_state
+                    predecessor_no_in_flight = source_no_in_flight
+                else:
+                    if current_record.previous_epoch_digest is None:
+                        raise AuthorizationCustodyUnavailable
+                    predecessor_control = replace(
+                        current_control,
+                        serving_membership_epoch=(
+                            current_control.serving_membership_epoch - 1
+                        ),
+                        serving_membership_digest=(
+                            current_record.previous_epoch_digest
+                        ),
+                    )
+                    predecessor_state = target_state
+                    predecessor_no_in_flight = target_no_in_flight
+                _advance_host_registry(
+                    source_control=predecessor_control,
+                    source_state=predecessor_state,
+                    source_no_in_flight=predecessor_no_in_flight,
+                    target_control=current_control,
+                    target_state=target_state,
+                    target_no_in_flight=target_no_in_flight,
+                    now=current_time,
+                )
+                if recover_expired_source and current_record.expires_at <= current_time:
+                    provisional_target = replace(
+                        current_control,
+                        serving_membership_epoch=(
+                            current_control.serving_membership_epoch + 1
+                        ),
+                        serving_membership_digest="0" * 64,
+                    )
+                    target_membership = _standalone_membership_bytes(
+                        keyring=keyring,
+                        control=provisional_target,
+                        replica_id=replica_id,
+                        state=target_state,
+                        issuance_stopped=target_state == "DRAINING",
+                        no_in_flight=target_no_in_flight,
+                        previous_epoch_digest=current_record.record_digest,
+                        attested_at=current_time,
+                    )
+                    successor = _standalone_membership_successor(
+                        target_membership,
+                        keyring=keyring,
+                        expected_control=current_control,
+                        target_control=provisional_target,
+                        replica_id=replica_id,
+                        target_state=target_state,
+                        target_no_in_flight=target_no_in_flight,
+                        now=current_time,
+                    )
+                    try:
+                        authorization_serving_membership.validate_membership_successor(
+                            current_record,
+                            successor,
+                            now=current_time,
+                        )
+                    except authorization_serving_membership.ServingMembershipUnavailable:
+                        raise AuthorizationCustodyUnavailable from None
+                    _replace_control_bytes(
+                        membership_path,
+                        expected=membership_raw,
+                        target=target_membership,
+                    )
+                    _standalone_transition_barrier("after-membership")
+                    target_control = replace(
+                        provisional_target,
+                        serving_membership_digest=successor.record_digest,
+                    )
+                    signing_key = next(
+                        (
+                            item.key
+                            for item in keyring.accepted_keys
+                            if item.key_id == target_control.signing_key_id
+                        ),
+                        None,
+                    )
+                    if signing_key is None:
+                        raise AuthorizationCustodyUnavailable
+                    _replace_control_bytes(
+                        external.control_path,
+                        expected=external.control,
+                        target=_signed_control_bytes(
+                            target_control,
+                            signing_key=signing_key,
+                        ),
+                    )
+                    _standalone_transition_barrier("after-control")
+                    registry_source_control = current_control
+                    registry_source_state = target_state
+                    registry_source_no_in_flight = target_no_in_flight
+                else:
+                    target_control = current_control
+                    registry_source_control = current_control
+                    registry_source_state = target_state
+                    registry_source_no_in_flight = target_no_in_flight
         else:
             source_record: ServingMembershipEpoch | None
+            source_verification_time = (
+                _historical_membership_verification_time(
+                    membership_raw,
+                    now=current_time,
+                )
+                if recover_expired_source
+                else current_time
+            )
             try:
                 source_record = _parse_migration_membership(
                     membership_raw,
                     keyring=keyring,
                     control=current_control,
-                    now=current_time,
+                    now=source_verification_time,
                     epoch=current_control.serving_membership_epoch,
                     digest=current_control.serving_membership_digest,
                 )
@@ -2742,9 +3014,46 @@ def _transition_standalone_attachment_membership(
                     replica_id=replica_id,
                     target_state=target_state,
                     target_no_in_flight=target_no_in_flight,
-                    now=current_time,
+                    now=(
+                        _historical_membership_verification_time(
+                            membership_raw,
+                            now=current_time,
+                        )
+                        if recover_expired_source
+                        else current_time
+                    ),
                 )
-                target_membership = membership_raw
+                if successor.expires_at <= current_time:
+                    target_membership = _standalone_membership_bytes(
+                        keyring=keyring,
+                        control=provisional_target,
+                        replica_id=replica_id,
+                        state=target_state,
+                        issuance_stopped=target_state == "DRAINING",
+                        no_in_flight=target_no_in_flight,
+                        previous_epoch_digest=(
+                            current_control.serving_membership_digest
+                        ),
+                        attested_at=current_time,
+                    )
+                    successor = _standalone_membership_successor(
+                        target_membership,
+                        keyring=keyring,
+                        expected_control=current_control,
+                        target_control=provisional_target,
+                        replica_id=replica_id,
+                        target_state=target_state,
+                        target_no_in_flight=target_no_in_flight,
+                        now=current_time,
+                    )
+                    _replace_control_bytes(
+                        membership_path,
+                        expected=membership_raw,
+                        target=target_membership,
+                    )
+                    _standalone_transition_barrier("after-membership")
+                else:
+                    target_membership = membership_raw
             else:
                 _require_standalone_membership(
                     source_record,
@@ -2787,6 +3096,7 @@ def _transition_standalone_attachment_membership(
                     expected=membership_raw,
                     target=target_membership,
                 )
+                _standalone_transition_barrier("after-membership")
 
             target_control = replace(
                 provisional_target,
@@ -2810,15 +3120,17 @@ def _transition_standalone_attachment_membership(
                     signing_key=signing_key,
                 ),
             )
+            _standalone_transition_barrier("after-control")
         _advance_host_registry(
-            source_control=expected_control,
-            source_state=source_state,
-            source_no_in_flight=source_no_in_flight,
+            source_control=registry_source_control,
+            source_state=registry_source_state,
+            source_no_in_flight=registry_source_no_in_flight,
             target_control=target_control,
             target_state=target_state,
             target_no_in_flight=target_no_in_flight,
             now=current_time,
         )
+        _standalone_transition_barrier("after-registry")
 
     verified = load_authorization_custody(root, now=current_time)
     if verified.serving_membership is None:
@@ -3021,7 +3333,10 @@ def _complete_standalone_attachment_transfer(
     target_vault_root: Path,
     *,
     acknowledgement: bytes,
+    target_state: str,
+    target_no_in_flight: bool,
     now: int,
+    recover_expired_reservation: bool = False,
 ) -> AuthorizationCustody:
     """Consume one detach acknowledgement and move the exclusive attachment."""
 
@@ -3038,6 +3353,7 @@ def _complete_standalone_attachment_transfer(
         acknowledgement,
         keyring=keyring,
         now=current_time,
+        allow_expired=recover_expired_reservation,
     )
     target_attachment = standalone_attachment_id(target)
     if (
@@ -3051,6 +3367,49 @@ def _complete_standalone_attachment_transfer(
         target,
         external=external,
     )
+
+    if current_time >= detached.expires_at:
+        if not recover_expired_reservation:
+            raise AuthorizationCustodyUnavailable
+        reservation_started = (
+            control.registry_attachment_id
+            == detached.target_registry_attachment_id
+            and control.attachment_epoch == detached.target_attachment_epoch
+        )
+        if not reservation_started:
+            if (
+                control.registry_attachment_id
+                != detached.source_registry_attachment_id
+                or control.attachment_epoch != detached.source_attachment_epoch
+                or control.serving_membership_epoch
+                != detached.source_membership_epoch
+                or control.serving_membership_digest
+                != detached.source_membership_digest
+            ):
+                raise AuthorizationCustodyUnavailable
+            provisional_target = replace(
+                control,
+                registry_attachment_id=detached.target_registry_attachment_id,
+                attachment_epoch=detached.target_attachment_epoch,
+                serving_membership_epoch=control.serving_membership_epoch + 1,
+                serving_membership_digest="0" * 64,
+            )
+            try:
+                _standalone_membership_successor(
+                    membership_raw,
+                    keyring=keyring,
+                    expected_control=control,
+                    target_control=provisional_target,
+                    replica_id=replica_id,
+                    target_state="DRAINING",
+                    target_no_in_flight=True,
+                    now=current_time,
+                )
+            except AuthorizationCustodyUnavailable:
+                raise AuthorizationCustodyUnavailable from None
+            reservation_started = True
+        if not reservation_started:
+            raise AuthorizationCustodyUnavailable
 
     if (
         control.registry_attachment_id == detached.target_registry_attachment_id
@@ -3074,7 +3433,14 @@ def _complete_standalone_attachment_transfer(
             membership_raw,
             keyring=keyring,
             control=control,
-            now=current_time,
+            now=(
+                _historical_membership_verification_time(
+                    membership_raw,
+                    now=current_time,
+                )
+                if current_time >= detached.expires_at
+                else current_time
+            ),
             epoch=control.serving_membership_epoch,
             digest=control.serving_membership_digest,
         )
@@ -3085,8 +3451,8 @@ def _complete_standalone_attachment_transfer(
             keyring=keyring,
             control=control,
             replica_id=replica_id,
-            state="SERVING",
-            no_in_flight=False,
+            state=target_state,
+            no_in_flight=target_no_in_flight,
         )
         source_control = replace(
             control,
@@ -3100,10 +3466,20 @@ def _complete_standalone_attachment_transfer(
             source_state="DRAINING",
             source_no_in_flight=True,
             target_control=control,
-            target_state="SERVING",
-            target_no_in_flight=False,
+            target_state=target_state,
+            target_no_in_flight=target_no_in_flight,
             now=current_time,
         )
+        if current_time >= detached.expires_at:
+            return AuthorizationCustody(
+                keyring_path=external.keyring_path,
+                control_path=external.control_path,
+                keyring=keyring,
+                control=control,
+                serving_membership=successor,
+                local_replica_id=replica_id,
+                membership_path=membership_path,
+            )
         return load_authorization_custody(target, now=current_time)
 
     if (
@@ -3152,8 +3528,8 @@ def _complete_standalone_attachment_transfer(
             expected_control=control,
             target_control=provisional_target,
             replica_id=replica_id,
-            target_state="SERVING",
-            target_no_in_flight=False,
+            target_state=target_state,
+            target_no_in_flight=target_no_in_flight,
             now=current_time,
         )
     else:
@@ -3171,6 +3547,9 @@ def _complete_standalone_attachment_transfer(
             keyring=keyring,
             control=provisional_target,
             replica_id=replica_id,
+            state=target_state,
+            issuance_stopped=target_state == "DRAINING",
+            no_in_flight=target_no_in_flight,
             previous_epoch_digest=source_record.record_digest,
             attested_at=current_time,
         )
@@ -3180,8 +3559,8 @@ def _complete_standalone_attachment_transfer(
             expected_control=control,
             target_control=provisional_target,
             replica_id=replica_id,
-            target_state="SERVING",
-            target_no_in_flight=False,
+            target_state=target_state,
+            target_no_in_flight=target_no_in_flight,
             now=current_time,
         )
         try:
@@ -3222,10 +3601,20 @@ def _complete_standalone_attachment_transfer(
         source_state="DRAINING",
         source_no_in_flight=True,
         target_control=target_control,
-        target_state="SERVING",
-        target_no_in_flight=False,
+        target_state=target_state,
+        target_no_in_flight=target_no_in_flight,
         now=current_time,
     )
+    if current_time >= detached.expires_at:
+        return AuthorizationCustody(
+            keyring_path=external.keyring_path,
+            control_path=external.control_path,
+            keyring=keyring,
+            control=target_control,
+            serving_membership=successor,
+            local_replica_id=replica_id,
+            membership_path=membership_path,
+        )
     verified = load_authorization_custody(target, now=current_time)
     if verified.control != target_control or verified.serving_membership is None:
         raise AuthorizationCustodyUnavailable
@@ -3254,8 +3643,71 @@ def complete_standalone_attachment_transfer(
             return _complete_standalone_attachment_transfer(
                 target,
                 acknowledgement=acknowledgement,
+                target_state="SERVING",
+                target_no_in_flight=False,
                 now=now,
             )
+
+
+def reserve_standalone_attachment_transfer(
+    target_vault_root: Path,
+    *,
+    acknowledgement: bytes,
+    now: int,
+    recover_expired_reservation: bool = False,
+) -> AuthorizationCustody:
+    """Move attachment authority to an exact target without serving it."""
+
+    target = Path(target_vault_root)
+    from .. import reserved_paths, writer_lease
+
+    with writer_lease.get_manager().mutation_guard(
+        target,
+        operation="authorization-attachment-transfer-reserve",
+        holder_kind="authorization-attachment-control",
+        attachment_control=True,
+        attachment_now=now,
+    ):
+        with reserved_paths._identity_coordination_scope(target):
+            return _complete_standalone_attachment_transfer(
+                target,
+                acknowledgement=acknowledgement,
+                target_state="DRAINING",
+                target_no_in_flight=True,
+                now=now,
+                recover_expired_reservation=recover_expired_reservation,
+            )
+
+
+def activate_reserved_standalone_attachment(
+    target_vault_root: Path,
+    *,
+    expected_control: AuthorizationControlRecord,
+    now: int,
+    recover_expired_reservation: bool = False,
+) -> AuthorizationCustody:
+    """Activate one exact already-reserved target attachment."""
+
+    target = Path(target_vault_root)
+    from .. import writer_lease
+
+    with writer_lease.get_manager().mutation_guard(
+        target,
+        operation="authorization-attachment-transfer-activate",
+        holder_kind="authorization-attachment-control",
+        attachment_control=True,
+        attachment_now=now,
+    ):
+        return _transition_standalone_attachment_membership(
+            target,
+            expected_control=expected_control,
+            source_state="DRAINING",
+            source_no_in_flight=True,
+            target_state="SERVING",
+            target_no_in_flight=False,
+            now=now,
+            recover_expired_source=recover_expired_reservation,
+        )
 
 
 def _clone_publication_barrier(point: str) -> None:

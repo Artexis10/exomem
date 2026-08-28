@@ -116,3 +116,52 @@ completion does not authorize rehearsal, cutover, or retirement.
 - Touched-file Ruff, `uv lock --check`, strict change validation, public
   repository artifact validation (`3394 files, 3462 text payloads`), and
   `git diff --check`: green.
+
+## Local failover identity stack
+
+- Red: the first logical-id-preserving transfer failed because no authenticated
+  failover identity API existed. Green: a separate owner-only target-candidate
+  step mints and authenticates the fresh installation id and challenge before
+  the source transfer is prepared; the target activates at generation N+1,
+  preserves the logical vault id, and stale-source mutation/admission refuses.
+- Red: matching source/target roots could still use an older valid export.
+  Green: the verified archive manifest is projected into the canonical census
+  frame and must equal both quiesced roots.
+- Red: a later attachment move reset generation N to 1 and erased clone
+  provenance. Green: rebind and failover preserve generation and immutable
+  clone lineage while changing only the authenticated installation/root/fence
+  binding.
+- Red: one operation id could prepare different targets, and target bytes could
+  drift after the first census but before authority reservation. Green: the
+  private registry binds an operation to one target and repeats the census
+  check after the source is fenced and the target is durably `DRAINING`.
+- Red: crashes inside membership/control/host-registry publication could leave
+  an exact transfer without a reachable recovery path. Green: the outer four
+  gaps plus all three inner publication gaps recover by exact predecessor and
+  target replay. Before activation the target remains non-serving; after
+  fencing the old source cannot regain admission.
+- Red: the signed reservation and its DRAINING membership could expire after a
+  durable reservation but before the transfer journal advanced. Green: expiry
+  may recover only that exact already-published reservation, authenticates its
+  historical predecessor at the record's original validity time, and publishes
+  a fresh current successor. A separate no-progress regression proves an
+  expired acknowledgement cannot start a new reservation or change custody.
+- Red: two distinct live operation ids could reserve the same source fence and
+  let the second candidate adopt the first operation's attachment reservation.
+  Green: the serialized private registry admits only one live transfer for an
+  exact vault/installation/generation/fence tuple while preserving exact replay.
+- Red: an activation successor published immediately before a crash became
+  unrecoverable if that successor expired before retry. Green: exact
+  uncommitted successors are historically authenticated and refreshed at the
+  same epoch before control publication; exact committed successors first
+  finish host-registry publication and then advance to a fresh current epoch.
+  A 2x2 crash matrix interrupts both the original activation and the recovery
+  after membership/control publication, then proves a later exact retry.
+- Python 3.13 focused/adjoining gate: `116 passed, 1 skipped` (privileged device
+  node only). Touched-file Ruff, repository `F` lint, `uv lock --check`, strict
+  change validation, all OpenSpec validation (`168 passed, 0 failed`), archive
+  discipline, public artifact validation (`3394 files, 3462 text payloads`),
+  and `git diff --check`: green.
+- Independent adversarial recheck: no P0/P1/P2 findings and GO for the explicit
+  trusted-owner, same-host failover foundation after reproducing the conflicting
+  live-transfer and expired-successor failures and verifying their corrections.
