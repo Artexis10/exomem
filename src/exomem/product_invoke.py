@@ -134,7 +134,8 @@ def invoke_prepared(
     # placement until an explicit offline migration has completed.
     from . import state_migration
 
-    state_migration.require_vault_state_ready(root)
+    if not allows_uninitialized_vault(cmd.name, kwargs):
+        state_migration.require_vault_state_ready(root)
     if cmd.needs_schema:
         injected = (root, schema_module.load_source_schema(root))
     else:

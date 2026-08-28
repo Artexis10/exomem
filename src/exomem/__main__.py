@@ -2946,12 +2946,14 @@ def _simple_maintain_main(argv: list[str]) -> int:
     parser.add_argument(
         "--adopt-state",
         dest="adopt_state",
-        choices=("vault", "external"),
+        choices=("vault", "external", "governance-store=vault"),
         default=None,
         help=(
             "resolve a dual machine-local-state conflict by keeping one copy: "
             "'external' removes the in-vault leftovers, 'vault' discards the "
-            "external state root before this explicit offline migration"
+            "external state root before this explicit offline migration; "
+            "'governance-store=vault' re-externalizes only a completed v3 "
+            "rollback governance store"
         ),
     )
     parser.add_argument("--json", action="store_true", help="emit the shared JSON envelope")

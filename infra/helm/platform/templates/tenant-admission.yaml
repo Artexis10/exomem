@@ -169,11 +169,22 @@ spec:
         !has(object.spec.containers[0].command) &&
         object.spec.containers[0].args == ['hosted', 'init', '--contract-version', '1', '--request-file', '/run/exomem/operator-requests/init.json'] &&
         has(object.spec.containers[0].env) &&
-        size(object.spec.containers[0].env) == 1 &&
+        (
+        (size(object.spec.containers[0].env) == 1 &&
+        object.spec.containers[0].env[0].name == 'EXOMEM_LOG_DIR' &&
+        has(object.spec.containers[0].env[0].value) &&
+        object.spec.containers[0].env[0].value == '/dev' &&
+        !has(object.spec.containers[0].env[0].valueFrom)) ||
+        (size(object.spec.containers[0].env) == 2 &&
         object.spec.containers[0].env[0].name == 'EXOMEM_LOG_DIR' &&
         has(object.spec.containers[0].env[0].value) &&
         object.spec.containers[0].env[0].value == '/dev' &&
         !has(object.spec.containers[0].env[0].valueFrom) &&
+        object.spec.containers[0].env[1].name == 'EXOMEM_HOSTED_OFFLINE_STATE_MIGRATION' &&
+        has(object.spec.containers[0].env[1].value) &&
+        object.spec.containers[0].env[1].value == '1' &&
+        !has(object.spec.containers[0].env[1].valueFrom))
+        ) &&
         object.spec.containers[0].securityContext.runAsUser == 0 &&
         object.spec.containers[0].securityContext.runAsGroup == 0 &&
         size(object.spec.containers[0].securityContext.capabilities.add) == 3 &&

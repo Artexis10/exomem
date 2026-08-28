@@ -1028,6 +1028,20 @@ def _check_state_placement(vault_root: Path | None) -> DoctorCheck:
             "do not delete either copy based on an unreadable manifest.",
             details=details,
         )
+    if manifest is not None and (
+        manifest.get("governance_rollback") is not None
+        or manifest.get("governance_adoption") is not None
+    ):
+        details["governance_rollback"] = manifest.get("governance_rollback")
+        details["governance_adoption"] = manifest.get("governance_adoption")
+        return _check(
+            "state.placement",
+            "fail",
+            "A governance rollback or adoption marker is present; ordinary relocated startup is fenced.",
+            "Resume the offline governance rollback or explicitly adopt `governance-store=vault`; "
+            "do not delete either governance database.",
+            details=details,
+        )
     if leftovers:
         leftover_names = ", ".join(
             sorted(path.name for members in leftovers.values() for path in members)

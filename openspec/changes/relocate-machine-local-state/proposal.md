@@ -78,6 +78,12 @@ preserve the same content/state boundary as operational features accumulated.
   pods, and uses a target-image migration Job holding the hosted lifetime lock
   plus the migration lock. Hosted restore itself relocates portable-derived
   state under that lifetime lock before a candidate can become ready, even
-  when the deployment migration mode is `none`. No path rolls an old writer
-  back after migration. The existing `EXOMEM_WRITER_LEASE_STATE_DIR` contract
-  stays separate and unchanged.
+  when the deployment migration mode is `none`. The only rollback exception is
+  an offline governance v4-to-v3 break-glass protocol. It first publishes the
+  exact pre-terminal v3 image (`D0`) at the predecessor path, then commits and
+  proves the sole terminal receipt-head transition (`D1`), aligns that legacy
+  image to `D1`, and advances the schema fence last. An immutable rollback
+  marker makes relocated admission refuse while the predecessor runs. A later
+  descriptor-scoped offline adoption re-externalizes governance only, preserving
+  all unrelated external families and any predecessor write. The existing
+  `EXOMEM_WRITER_LEASE_STATE_DIR` contract stays separate and unchanged.

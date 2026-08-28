@@ -2928,7 +2928,7 @@ def test_wal_publication_keeps_an_open_reader_on_the_previous_snapshot(
     try:
         reader.execute("BEGIN")
         assert reader.execute("SELECT item FROM value").fetchone() == ("old",)
-        graph_sync.replace_sidecar(temporary, live)
+        graph_sync.replace_sidecar(temporary, live, vault_root=tmp_path)
         assert reader.execute("SELECT item FROM value").fetchone() == ("old",)
         with closing(sqlite3.connect(live)) as current:
             assert current.execute("SELECT item FROM value").fetchone() == ("new",)
@@ -2992,7 +2992,7 @@ def test_existing_live_publication_refusal_keeps_the_previous_complete_sidecar(
     )
 
     with pytest.raises(graph_sync.GraphSidecarReplaceUnavailable):
-        graph_sync.replace_sidecar(temporary, live)
+        graph_sync.replace_sidecar(temporary, live, vault_root=tmp_path)
     assert live.read_bytes() == old_live
     assert temporary.read_bytes() == new_temporary
 
@@ -3028,7 +3028,7 @@ def test_replacement_refusal_names_what_it_observed(
     )
 
     with pytest.raises(graph_sync.GraphSidecarReplaceUnavailable) as raised:
-        graph_sync.replace_sidecar(temporary, live)
+        graph_sync.replace_sidecar(temporary, live, vault_root=tmp_path)
 
     message = str(raised.value)
     # What the SQLite publication itself said, not a paraphrase of it.
@@ -3059,7 +3059,7 @@ def test_replacement_refusal_says_when_there_was_nothing_to_publish_into(
     )
 
     with pytest.raises(graph_sync.GraphSidecarReplaceUnavailable) as raised:
-        graph_sync.replace_sidecar(temporary, live)
+        graph_sync.replace_sidecar(temporary, live, vault_root=tmp_path)
 
     assert "live sidecar absent" in str(raised.value)
 

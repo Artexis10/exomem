@@ -24,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -110,6 +111,458 @@ def _seed_state(vault: Path) -> dict[str, bytes]:
     (kb / "Notes" / "a-note.md").write_text("# stays in the vault\n", encoding="utf-8")
     (kb / "_access.yaml").write_text("tiers: {}\n", encoding="utf-8")
     return members
+
+
+def test_rollback_session_binds_backup_reference_by_operation(tmp_path: Path) -> None:
+    """A backup restore marker carries its immutable verified backup reference."""
+    from exomem import state_migration
+
+    vault = tmp_path / "vault"
+    _seed_state(vault)
+    _migrate(vault)
+    reference = "exomem-governance-v3-backup://sha256/" + "a" * 64
+
+    with state_migration.governance_rollback_session(vault) as session:
+        marker = session.begin_prepared(
+            operation="governance_schema_v3_backup_restore",
+            event_id="e" * 64,
+            plan_digest="b" * 64,
+            target_digest="c" * 64,
+            timestamp=1,
+            d0="d" * 64,
+            backup_reference=reference,
+            backup_plan_digest="f" * 64,
+            source_store_digest="1" * 64,
+        )
+
+    assert marker["backup_reference"] == reference
+
+
+@pytest.mark.parametrize("field", ("timestamp", "seq", "byte_offset"))
+def test_rollback_marker_rejects_boolean_numeric_fields(tmp_path: Path, field: str) -> None:
+    from exomem import state_migration
+
+    vault = tmp_path / "vault"
+    manifest = state_migration._new_manifest(vault, state_migration._descriptor_ids())
+    manifest["families"] = {
+        descriptor: {"status": "complete"} for descriptor in manifest["descriptors"]
+    }
+    manifest["state"] = "complete"
+    event_id = "e" * 64
+    instance_id = "f" * 32
+    marker = {
+        "operation": "governance_schema_v4_downmigration",
+        "event_id": event_id,
+        "phase": "complete",
+        "plan_digest": "a" * 64,
+        "target_digest": "b" * 64,
+        "timestamp": 1,
+        "d0": "c" * 64,
+        "legacy_path": "Knowledge Base/.governance.sqlite",
+        "stage_leaf": f".governance-v3-rollback-{event_id}.sqlite",
+        "backup_reference": None,
+        "backup_plan_digest": None,
+        "source_store_digest": None,
+        "schema_fence_generation": None,
+        "d1": "d" * 64,
+        "terminal": {
+            "instance_id": instance_id,
+            "seq": 2,
+            "hash": "1" * 64,
+            "path": f"Knowledge Base/_Governance/events/{instance_id}/2026-08.jsonl",
+            "byte_offset": 7,
+        },
+    }
+    manifest["version"] = 2
+    manifest["governance_rollback"] = marker
+    if field == "timestamp":
+        marker[field] = True
+    else:
+        marker["terminal"][field] = True
+
+    with pytest.raises(state_migration.StateMigrationManifestError):
+        state_migration._validate_manifest(tmp_path / "manifest.json", manifest, vault_root=vault)
+
+
+def test_marker_free_v2_manifest_remains_ready_after_adoption(tmp_path: Path) -> None:
+    from exomem import state_migration, state_paths
+
+    vault = tmp_path / "vault"
+    _seed_state(vault)
+    _migrate(vault)
+    manifest_path = state_paths.vault_state_dir(vault) / state_migration.MANIFEST_NAME
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["version"] = 2
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    _reset_resolution_cache()
+
+    assert state_migration.require_vault_state_ready(vault).state_dir == state_paths.vault_state_dir(vault)
+
+
+def test_legacy_adoption_requires_a_receipt_head_descending_from_d1(tmp_path: Path) -> None:
+    """Descriptor adoption cannot accept an unanchored legacy receipt head."""
+    from exomem.governance import receipts
+
+    vault = tmp_path / "vault"
+    instance_id = "1" * 32
+    event_id = "2" * 64
+    evidence = vault / "Knowledge Base" / "_Governance" / "events" / instance_id
+    evidence.mkdir(parents=True)
+    intent = {
+        "schema": receipts.SCHEMA,
+        "event_id": event_id,
+        "event_type": "critical",
+        "phase": "intent",
+        "timestamp": "2026-08-01T00:00:00Z",
+        "instance_id": instance_id,
+        "seq": 1,
+        "prev": receipts.GENESIS_HASH,
+        "durable": True,
+        "operation": "governance-schema-rollback",
+        "prior": "3" * 64,
+        "target": "4" * 64,
+        "affected_ids": [],
+    }
+    intent["hash"] = receipts._record_hash(intent)  # noqa: SLF001 - frozen evidence fixture
+    terminal = {
+        "schema": receipts.SCHEMA,
+        "event_id": f"{event_id}:committed",
+        "event_type": "critical",
+        "phase": "committed",
+        "timestamp": "2026-08-01T00:00:01Z",
+        "instance_id": instance_id,
+        "seq": 2,
+        "prev": intent["hash"],
+        "durable": True,
+        "causation_id": event_id,
+        "outcome": "schema-v3-restored",
+    }
+    terminal["hash"] = receipts._record_hash(terminal)  # noqa: SLF001 - frozen evidence fixture
+    month = evidence / "2026-08.jsonl"
+    intent_line = json.dumps(intent, sort_keys=True, separators=(",", ":")) + "\n"
+    terminal_line = json.dumps(terminal, sort_keys=True, separators=(",", ":")) + "\n"
+    month.write_bytes((intent_line + terminal_line).encode("utf-8"))
+    locator = f"Knowledge Base/_Governance/events/{instance_id}/2026-08.jsonl"
+    legacy = vault / "Knowledge Base" / ".governance.sqlite"
+    connection = sqlite3.connect(legacy)
+    try:
+        connection.execute("CREATE TABLE receipt_instance (singleton INTEGER, instance_id TEXT)")
+        connection.execute(
+            "CREATE TABLE receipts_head (instance_id TEXT, durable_seq INTEGER, durable_hash TEXT, "
+            "observed_seq INTEGER, observed_hash TEXT, path TEXT, byte_offset INTEGER)"
+        )
+        connection.execute("INSERT INTO receipt_instance VALUES (1, ?)", (instance_id,))
+        connection.execute(
+            "INSERT INTO receipts_head VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (instance_id, 2, terminal["hash"], 2, terminal["hash"], locator, len(intent_line.encode("utf-8"))),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    endpoint = {
+        "instance_id": instance_id,
+        "seq": 2,
+        "hash": terminal["hash"],
+        "path": locator,
+        "byte_offset": len(intent_line.encode("utf-8")),
+    }
+    assert receipts.require_legacy_receipt_descendant(vault, legacy, endpoint)["hash"] == terminal["hash"]
+
+    connection = sqlite3.connect(legacy)
+    try:
+        connection.execute("UPDATE receipts_head SET observed_hash=?", ("0" * 64,))
+        connection.commit()
+    finally:
+        connection.close()
+    with pytest.raises(receipts.ReceiptError, match="verified durable tail"):
+        receipts.require_legacy_receipt_descendant(vault, legacy, endpoint)
+
+
+@pytest.mark.parametrize(
+    ("phase", "external", "legacy", "legacy_residue", "expected"),
+    (
+        ("prepared", "d1", "a", False, "copy"),
+        ("prepared", "a", "a", False, "mark-copied"),
+        ("copied", "a", "a", False, "remove"),
+        ("copied", "a", None, False, "clear"),
+        # Crash after unlinking the main database but before deleting its
+        # SQLite sidecars resumes only that bounded residue cleanup.
+        ("copied", "a", None, True, "remove-residue"),
+    ),
+)
+def test_governance_adoption_replays_each_durable_crash_cut(
+    phase: str,
+    external: str,
+    legacy: str | None,
+    legacy_residue: bool,
+    expected: str,
+) -> None:
+    from exomem import state_migration
+
+    assert (
+        state_migration._governance_adoption_replay_action(  # noqa: SLF001 - crash matrix seam
+            phase=phase,
+            external_digest=external,
+            legacy_digest=legacy,
+            legacy_residue=legacy_residue,
+            d1_digest="d1",
+            adopted_digest="a",
+        )
+        == expected
+    )
+
+
+def test_governance_adoption_replay_refuses_mixed_authorities() -> None:
+    from exomem import state_migration
+
+    with pytest.raises(state_migration.StateMigrationOfflineRequired):
+        state_migration._governance_adoption_replay_action(  # noqa: SLF001 - crash matrix seam
+            phase="prepared",
+            external_digest="d1",
+            legacy_digest=None,
+            d1_digest="d1",
+            adopted_digest="a",
+        )
+
+
+def test_governance_adoption_recovers_only_sqlite_residue_after_main_unlink(tmp_path: Path) -> None:
+    """The copied-marker replay owns sidecars left by its own main unlink cut."""
+    from exomem import state_migration
+
+    vault = tmp_path / "vault"
+    kb = vault / "Knowledge Base"
+    kb.mkdir(parents=True)
+    for leaf in (
+        ".governance.sqlite-wal",
+        ".governance.sqlite-shm",
+        ".governance.sqlite-journal",
+    ):
+        (kb / leaf).write_bytes(b"crash residue")
+
+    state_migration._remove_legacy_governance_residue(vault)  # noqa: SLF001 - crash-cut seam
+
+    assert not any(kb.glob(".governance.sqlite*"))
+
+
+def test_legacy_adoption_refuses_main_file_snapshot_with_sqlite_sidecars(tmp_path: Path) -> None:
+    """A raw held main-file read never silently omits committed WAL frames."""
+    from exomem import state_migration
+
+    vault = tmp_path / "vault"
+    kb = vault / "Knowledge Base"
+    kb.mkdir(parents=True)
+    connection = sqlite3.connect(kb / ".governance.sqlite")
+    try:
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("CREATE TABLE example (value TEXT)")
+        connection.execute("INSERT INTO example VALUES ('committed')")
+        connection.commit()
+        assert (kb / ".governance.sqlite-wal").exists()
+        with pytest.raises(state_migration.StateMigrationOfflineRequired):
+            with state_migration._retained_legacy_governance_file(vault):  # noqa: SLF001
+                pass
+    finally:
+        connection.close()
+
+
+def _install_complete_rollback_adoption_fixture(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[Path, str, bytes]:
+    """Install actual exact-v3 D1/A authorities and their receipt anchor."""
+    from exomem import sidecar_store, state_migration, state_paths
+    from exomem.governance import receipts, store
+
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(vault.parent / "machine-state"))
+    state_dir = state_paths.ensure_vault_state_dir(vault)
+    external = store.sidecar_path(vault)
+    external.parent.mkdir(parents=True, exist_ok=True)
+    instance_id = "1" * 32
+    event_id = "2" * 64
+    receipts_dir = vault / "Knowledge Base" / "_Governance" / "events" / instance_id
+    receipts_dir.mkdir(parents=True)
+    intent = {
+        "schema": receipts.SCHEMA,
+        "event_id": event_id,
+        "event_type": "critical",
+        "phase": "intent",
+        "timestamp": "2026-08-01T00:00:00Z",
+        "instance_id": instance_id,
+        "seq": 1,
+        "prev": receipts.GENESIS_HASH,
+        "durable": True,
+        "operation": "governance-schema-rollback",
+        "prior": "3" * 64,
+        "target": "4" * 64,
+        "affected_ids": [],
+    }
+    intent["hash"] = receipts._record_hash(intent)  # noqa: SLF001 - immutable fixture record
+    terminal = {
+        "schema": receipts.SCHEMA,
+        "event_id": f"{event_id}:committed",
+        "event_type": "critical",
+        "phase": "committed",
+        "timestamp": "2026-08-01T00:00:01Z",
+        "instance_id": instance_id,
+        "seq": 2,
+        "prev": intent["hash"],
+        "durable": True,
+        "causation_id": event_id,
+        "outcome": "schema-v3-restored",
+    }
+    terminal["hash"] = receipts._record_hash(terminal)  # noqa: SLF001 - immutable fixture record
+    intent_line = json.dumps(intent, sort_keys=True, separators=(",", ":")) + "\n"
+    (receipts_dir / "2026-08.jsonl").write_bytes(
+        (
+            intent_line
+            + json.dumps(terminal, sort_keys=True, separators=(",", ":"))
+            + "\n"
+        ).encode("utf-8")
+    )
+    endpoint = {
+        "instance_id": instance_id,
+        "seq": 2,
+        "hash": terminal["hash"],
+        "path": f"Knowledge Base/_Governance/events/{instance_id}/2026-08.jsonl",
+        "byte_offset": len(intent_line.encode("utf-8")),
+    }
+    connection = sqlite3.connect(external)
+    try:
+        store._migrate(connection)  # noqa: SLF001 - exact-v3 fixture seam
+        sidecar_store.ensure_meta_table(connection, store.DATA_TABLE, "adoption-fixture")
+        connection.execute("INSERT INTO receipt_instance VALUES (1, ?)", (instance_id,))
+        connection.execute(
+            "INSERT INTO receipts_head VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                instance_id,
+                2,
+                terminal["hash"],
+                2,
+                terminal["hash"],
+                endpoint["path"],
+                endpoint["byte_offset"],
+            ),
+        )
+        connection.commit()
+        d1 = store._v3_snapshot_digest(connection)  # noqa: SLF001 - canonical D1 fixture proof
+    finally:
+        connection.close()
+    legacy = vault / "Knowledge Base" / ".governance.sqlite"
+    shutil.copy2(external, legacy)
+    connection = sqlite3.connect(legacy)
+    try:
+        connection.execute("UPDATE meta SET value=314159 WHERE key='instance'")
+        connection.commit()
+    finally:
+        connection.close()
+
+    manifest = state_migration._new_manifest(vault, state_migration._descriptor_ids())
+    manifest["version"] = 2
+    manifest["state"] = "complete"
+    manifest["families"] = {
+        descriptor: {"status": "complete"} for descriptor in manifest["descriptors"]
+    }
+    manifest["governance_rollback"] = {
+        "operation": "governance_schema_v4_downmigration",
+        "event_id": event_id,
+        "phase": "complete",
+        "plan_digest": "a" * 64,
+        "target_digest": "b" * 64,
+        "timestamp": 1,
+        "d0": "c" * 64,
+        "legacy_path": "Knowledge Base/.governance.sqlite",
+        "stage_leaf": f".governance-v3-rollback-{event_id}.sqlite",
+        "backup_reference": None,
+        "backup_plan_digest": None,
+        "source_store_digest": None,
+        "schema_fence_generation": None,
+        "d1": d1,
+        "terminal": endpoint,
+    }
+    state_migration._write_manifest(state_dir, manifest)  # noqa: SLF001 - durable fixture marker
+    unrelated = state_dir / ".embeddings.sqlite"
+    unrelated_bytes = b"unrelated-external-family"
+    unrelated.write_bytes(unrelated_bytes)
+    return state_dir, d1, unrelated_bytes
+
+
+@pytest.mark.parametrize(
+    "cut", ("after_external_copy", "after_copied_marker", "after_legacy_removal")
+)
+def test_governance_store_vault_adoption_replays_real_durable_cuts_without_touching_other_families(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cut: str,
+) -> None:
+    """Each adoption crash cut resumes against real v3 stores and receipt evidence."""
+    from exomem import state_migration
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    state_dir, _d1, unrelated_bytes = _install_complete_rollback_adoption_fixture(
+        vault, monkeypatch
+    )
+
+    def crash(point: str) -> None:
+        if point == cut:
+            raise RuntimeError(point)
+
+    monkeypatch.setattr(state_migration, "_governance_adoption_barrier", crash)
+    with pytest.raises(RuntimeError, match=cut):
+        state_migration._adopt_governance_store_from_vault_offline(vault)  # noqa: SLF001
+
+    monkeypatch.setattr(
+        state_migration, "_governance_adoption_barrier", lambda _point: None
+    )
+    state_migration._adopt_governance_store_from_vault_offline(vault)  # noqa: SLF001
+
+    assert not (vault / "Knowledge Base" / ".governance.sqlite").exists()
+    assert (state_dir / ".embeddings.sqlite").read_bytes() == unrelated_bytes
+    completed = json.loads((state_dir / state_migration.MANIFEST_NAME).read_text(encoding="utf-8"))
+    assert completed["version"] == 2
+    assert "governance_rollback" not in completed
+    assert "governance_adoption" not in completed
+
+
+def test_governance_store_vault_adoption_refuses_external_change_before_legacy_unlink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The final A proof is inside identity coordination and gates legacy unlink."""
+    from exomem import state_migration
+    from exomem.governance import store
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    _state_dir, _d1, _unrelated = _install_complete_rollback_adoption_fixture(
+        vault, monkeypatch
+    )
+    external = store.sidecar_path(vault)
+    real_digest = state_migration._exact_v3_digest  # noqa: SLF001 - precise destructive-cut injection
+    external_checks = 0
+
+    def mutate_before_unlink(path: Path, *, detail: str) -> str:
+        nonlocal external_checks
+        if Path(path) == external:
+            external_checks += 1
+            # Calls one/two classify D1, three proves the copied A, and four
+            # is the immediate pre-unlink proof guarded by the held identity.
+            if external_checks == 4:
+                connection = sqlite3.connect(external)
+                try:
+                    connection.execute("UPDATE meta SET value=271828 WHERE key='instance'")
+                    connection.commit()
+                finally:
+                    connection.close()
+        return real_digest(path, detail=detail)
+
+    monkeypatch.setattr(state_migration, "_exact_v3_digest", mutate_before_unlink)
+    with pytest.raises(state_migration.StateMigrationOfflineRequired):
+        state_migration._adopt_governance_store_from_vault_offline(vault)  # noqa: SLF001
+
+    assert external_checks == 4
+    assert (vault / "Knowledge Base" / ".governance.sqlite").is_file()
 
 
 def _kb_state_names(vault: Path) -> set[str]:

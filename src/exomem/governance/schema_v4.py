@@ -17,7 +17,7 @@ import sqlite3
 import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Any, Final
 
 from . import authorization_sessions
 
@@ -1723,7 +1723,7 @@ def _downmigration_terminal(
     return encoded.decode("utf-8"), digest
 
 
-def downmigrate_v4_connection(
+def _downmigrate_v4_connection(
     connection: sqlite3.Connection,
     *,
     expected: VerifiedActiveGovernanceState,
@@ -1735,6 +1735,7 @@ def downmigrate_v4_connection(
     recovery_plan_digest: str,
     recovery_target_digest: str,
     downmigrated_at: int,
+    commit: bool,
 ) -> DownmigrationResult:
     """Atomically return a fully verified, quiesced v4 store to exact schema v3.
 
@@ -1749,8 +1750,10 @@ def downmigrate_v4_connection(
         raise SchemaV4Error(
             f"explicit governance downmigration requires exact schema v4, found v{version}"
         )
-    if connection.in_transaction:
+    if commit and connection.in_transaction:
         raise SchemaV4Error("schema v4 downmigration requires a clean transaction boundary")
+    if not commit and not connection.in_transaction:
+        raise SchemaV4Error("noncommitting downmigration requires a caller transaction")
     if not isinstance(expected, VerifiedActiveGovernanceState):
         raise SchemaV4Error("schema v4 downmigration expected tuple is invalid")
     source_digest = source_documents_digest(expected_source_documents)
@@ -1776,7 +1779,8 @@ def downmigrate_v4_connection(
     if not hmac.compare_digest(catalog_rebuild_digest(descriptor), rebuild_digest):
         raise SchemaV4Error("downmigration catalog parity does not verify")
 
-    connection.execute("BEGIN IMMEDIATE")
+    if commit:
+        connection.execute("BEGIN IMMEDIATE")
     try:
         _require_downmigration_schema(connection)
         pending = connection.execute(
@@ -1918,9 +1922,11 @@ def downmigrate_v4_connection(
         _crash_point("downmigration-after-v3-schema")
         connection.execute("PRAGMA user_version=3")
         _crash_point("downmigration-before-commit")
-        connection.commit()
+        if commit:
+            connection.commit()
     except BaseException:
-        connection.rollback()
+        if commit:
+            connection.rollback()
         raise
     return DownmigrationResult(
         schema_version=3,
@@ -1938,6 +1944,22 @@ def downmigrate_v4_connection(
         recovery_event_id=event_id,
         recovery_terminal_digest=terminal_digest,
     )
+
+
+def downmigrate_v4_connection_in_transaction(
+    connection: sqlite3.Connection,
+    **kwargs: Any,
+) -> DownmigrationResult:
+    """Apply the exact v4-to-v3 transform without committing the caller's D0 transaction."""
+    return _downmigrate_v4_connection(connection, commit=False, **kwargs)
+
+
+def downmigrate_v4_connection(
+    connection: sqlite3.Connection,
+    **kwargs: Any,
+) -> DownmigrationResult:
+    """Compatibility wrapper retaining the historic begin/commit boundary."""
+    return _downmigrate_v4_connection(connection, commit=True, **kwargs)
 
 
 def load_active_state(

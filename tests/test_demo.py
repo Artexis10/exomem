@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 import exomem
-from exomem import commands
+from exomem import commands, state_migration
 from exomem import demo
 from exomem.__main__ import _core_op_names
 from exomem.__main__ import main as cli_main
@@ -115,8 +115,39 @@ def test_temp_isolation_no_leftover_dir_and_sample_vault_unmodified() -> None:
     assert _vault_signature(demo.SAMPLE_VAULT) == before_vault  # package copy untouched
 
 
-def test_keep_flag_keeps_temp_dir_and_prints_path() -> None:
+def test_demo_offline_initializes_only_product_created_vault(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[Path] = []
+    migrate = state_migration.migrate_vault_state_offline
+
+    def record_migration(root: Path, **kwargs):
+        calls.append(Path(root))
+        return migrate(root, **kwargs)
+
+    monkeypatch.setattr(state_migration, "migrate_vault_state_offline", record_migration)
+
+    assert demo.run_demo(echo=lambda *_: None) == 0
+    assert len(calls) == 1
+
+    supplied = tmp_path / "supplied"
+    shutil.copytree(demo.SAMPLE_VAULT / "Knowledge Base", supplied / "Knowledge Base")
+    assert demo.run_demo(vault=supplied, echo=lambda *_: None) == 1
+    assert len(calls) == 1
+
+
+def test_keep_flag_keeps_temp_dir_and_replays_with_its_retained_sibling_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     lines: list[str] = []
+    calls: list[Path] = []
+    migrate = state_migration.migrate_vault_state_offline
+
+    def record_migration(root: Path, **kwargs):
+        calls.append(Path(root))
+        return migrate(root, **kwargs)
+
+    monkeypatch.setattr(state_migration, "migrate_vault_state_offline", record_migration)
 
     code = demo.run_demo(keep=True, echo=lines.append)
 
@@ -124,11 +155,16 @@ def test_keep_flag_keeps_temp_dir_and_prints_path() -> None:
     kept_lines = [line for line in lines if line.startswith("kept sample vault at: ")]
     assert len(kept_lines) == 1
     kept_path = Path(kept_lines[0][len("kept sample vault at: "):])
+    retained_state = kept_path.with_name(f"{kept_path.name}-state")
     try:
         assert kept_path.is_dir()
         assert (kept_path / demo.TARGET_PATH).is_file()
+        assert retained_state.is_dir()
+        assert demo.run_demo(vault=kept_path, echo=lambda *_: None) == 0
+        assert calls == [kept_path]
     finally:
         shutil.rmtree(kept_path, ignore_errors=True)
+        shutil.rmtree(retained_state, ignore_errors=True)
 
 
 def test_env_restore_no_bleed_for_in_process_callers(monkeypatch: pytest.MonkeyPatch) -> None:

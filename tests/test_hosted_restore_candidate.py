@@ -280,7 +280,10 @@ def test_restore_uses_request_bound_state_root_not_ambient_process_root(
 @pytest.mark.skipif(os.name == "nt", reason="hosted lifetime locking requires POSIX flock")
 def test_state_migrated_journal_binds_manifest_digest_and_placement(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    ambient = tmp_path / "ambient-state"
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(ambient))
     exported = _export(tmp_path, portable_state=True)
     request = _request(tmp_path, exported)
 
@@ -318,6 +321,7 @@ def test_state_migrated_journal_binds_manifest_digest_and_placement(
     with pytest.raises(OperatorFailure) as error:
         restore_candidate(request, bootstrap_security=_bootstrap)
     assert error.value.code == "HOSTED_RESTORE_CANONICAL_INTEGRITY"
+    assert not (ambient / state_paths.vault_state_key(binding.vault_root)).exists()
 
     manifest_path.write_bytes(manifest_bytes)
     record.pop("state_placement_identity")
@@ -328,6 +332,7 @@ def test_state_migrated_journal_binds_manifest_digest_and_placement(
     with pytest.raises(OperatorFailure) as journal_error:
         restore_candidate(request, bootstrap_security=_bootstrap)
     assert journal_error.value.code == "HOSTED_RESTORE_JOURNAL_CONFLICT"
+    assert not (ambient / state_paths.vault_state_key(binding.vault_root)).exists()
 
 
 @pytest.mark.skipif(os.name == "nt", reason="hosted lifetime locking requires POSIX flock")

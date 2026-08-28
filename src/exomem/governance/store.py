@@ -262,6 +262,33 @@ def _v3_snapshot_digest(connection: sqlite3.Connection) -> str:
     ).hexdigest()
 
 
+def canonical_uncommitted_v3_digest(connection: sqlite3.Connection) -> str:
+    """Digest a held uncommitted v3 transform through SQLite's backup boundary.
+
+    ``deserialize(...); VACUUM`` is not an equivalent proof: it bypasses the
+    source connection's SQLite snapshot semantics.  Keep the clone/backup
+    sequence explicit so rollback D0 is derived from the actual held database.
+    """
+    from . import schema_v4
+
+    schema_v4.require_exact_v3_connection(connection)
+    source = sqlite3.connect(":memory:")
+    snapshot = sqlite3.connect(":memory:")
+    try:
+        source.deserialize(connection.serialize())
+        schema_v4.require_exact_v3_connection(source)
+        source.backup(snapshot)
+        snapshot.execute("VACUUM")
+        serialized = snapshot.serialize()
+    finally:
+        snapshot.close()
+        source.close()
+    domain = b"exomem.governance-v3-snapshot.v1"
+    return hashlib.sha256(
+        domain + len(serialized).to_bytes(8, "big") + serialized
+    ).hexdigest()
+
+
 def migrate_enrolled_v3_store(
     vault_root: Path,
     *,

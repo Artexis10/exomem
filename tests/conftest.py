@@ -33,6 +33,15 @@ from exomem import semantic_contract as semantic_contract_module
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_VAULT = REPO_ROOT / "tests" / "fixtures"
 
+
+def initialize_vault_state_offline(vault_root: Path, *, source: str) -> None:
+    """Initialize isolated fixture state through the production offline seam."""
+    from exomem import state_migration
+
+    authority = state_migration.assert_offline_migration_authority(source=source)
+    state_migration.migrate_vault_state_offline(vault_root, authority=authority)
+
+
 # The benchmark package (benchmarks/membench) deliberately lives outside src/
 # and outside the wheel/sdist; tests reach it via this guarded path insert.
 _BENCHMARKS_DIR = REPO_ROOT / "benchmarks"
@@ -691,6 +700,7 @@ def vault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Copy tests/fixtures/ into a tmp dir; return it as the vault root."""
     dest = tmp_path / "vault"
     shutil.copytree(FIXTURE_VAULT, dest)
+    initialize_vault_state_offline(dest, source="canonical vault fixture")
     monkeypatch.setenv("EXOMEM_VAULT_PATH", str(dest))
     # Clear find's in-process cache so previous test runs don't bleed in.
     find_module.clear_cache()

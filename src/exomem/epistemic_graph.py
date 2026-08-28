@@ -1150,12 +1150,12 @@ def _reap_preserved_temporaries(
     if not claimed:
         return []
     try:
-        return _reap_unowned_temporaries(live, keep=keep)
+        return _reap_unowned_temporaries(live, vault_root=vault_root, keep=keep)
     finally:
         graph_sync.release_rebuild_owner(vault_root, probe, state_root=state_root)
 
 
-def _reap_unowned_temporaries(live: Path, *, keep: int) -> list[Path]:
+def _reap_unowned_temporaries(live: Path, *, vault_root: Path, keep: int) -> list[Path]:
     """Do the reaping. Caller MUST already hold the rebuild-owner claim."""
     directory = live.parent
     # Re-scan under the claim: the pre-check ran without it.
@@ -1178,7 +1178,7 @@ def _reap_unowned_temporaries(live: Path, *, keep: int) -> list[Path]:
         for path in groups[base]:
             try:
                 _remove_graph_rebuild_artifact(
-                    live.parent.parent,
+                    vault_root,
                     path,
                     missing_ok=True,
                 )

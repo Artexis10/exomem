@@ -561,10 +561,15 @@ external schema/lease fence; no old-binary compatibility is claimed.
 Rollback SHALL use the tested pre-migration v3 snapshot or the explicit offline v4→v3
 tool. The latter closes v4 sessions and dependent authority, mirrors the active tuple's
 exact stored source under a whole-tree fence, proves compile/catalog parity, removes only
-v4 state, restores exact v3 schema and `user_version=3`, and advances external recovery
-metadata before the real v3 binary starts. It MUST NOT set `governance_enrolled=false`;
-the protected monotonic history remains enrolled, and an operator intentionally running
-v3 relies on the deployment fence rather than the v4 OPEN path.
+v4 state, restores exact v3 schema and `user_version=3`, publishes the exact `D0` legacy
+image, commits and verifies the sole terminal receipt-head transition as `D1`, aligns the
+legacy image to `D1`, and advances the external schema fence last. The same evidence-bound
+state-placement protocol applies to backup restore, whose immutable marker carries the
+exact backup plan and source-store result digests rather than depending on retained backup
+bytes. It MUST NOT set
+`governance_enrolled=false`; the protected monotonic history remains enrolled, and an
+operator intentionally running v3 relies on the deployment fence rather than the v4 OPEN
+path.
 
 #### Scenario: Ordinary v3 opener leaves v3 byte-for-byte
 
@@ -591,6 +596,8 @@ v3 relies on the deployment fence rather than the v4 OPEN path.
 - **WHEN** the offline v4→v3 path completes and the actual v3 binary starts
 - **THEN** v4 session authority is closed, exact v3 schema/source parity is proven, and
   the external registry still records monotonic prior governance enrollment
+- **AND** the predecessor accepts a receipt-bearing v3 write only after the
+  legacy database is exact `D1` and the schema fence has advanced last
 
 #### Scenario: Existing opener cannot downgrade tools state
 

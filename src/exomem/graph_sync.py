@@ -3081,7 +3081,7 @@ def replace_sidecar(
     temporary: Path,
     live: Path,
     *,
-    vault_root: Path | None = None,
+    vault_root: Path,
 ) -> None:
     """Publish the proven temporary as the live sidecar.
 
@@ -3099,7 +3099,7 @@ def replace_sidecar(
     """
     from . import epistemic_graph
 
-    root = Path(vault_root) if vault_root is not None else live.parent.parent
+    root = Path(vault_root)
     started = time.monotonic()
     attempts: list[str] = []
     if _publish_sidecar_in_place(
@@ -3145,7 +3145,7 @@ def _publish_sidecar_in_place(
     temporary: Path,
     live: Path,
     *,
-    vault_root: Path | None = None,
+    vault_root: Path,
     attempts_out: list[str] | None = None,
 ) -> bool:
     """Copy a proven temp sidecar over the live file without moving the entry.
@@ -3162,7 +3162,7 @@ def _publish_sidecar_in_place(
     """
     from . import epistemic_graph
 
-    root = Path(vault_root) if vault_root is not None else live.parent.parent
+    root = Path(vault_root)
     for attempt in range(PUBLISH_IN_PLACE_ATTEMPTS):
         if attempt:
             time.sleep(PUBLISH_IN_PLACE_RETRY_SECONDS)

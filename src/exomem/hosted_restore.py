@@ -842,6 +842,51 @@ def restore_candidate(
     rebuild_derived: Callable[[Path], None] | None = None,
     crash_hook: Callable[[str], None] | None = None,
 ) -> HostedRestoreResult:
+    """Restore under the exact request-bound vault/state environment."""
+    request = decode_request("restore-candidate", _canonical_bytes(raw_request))
+    try:
+        binding = HostedBindingV2(
+            cell_id=request["target_cell_id"],
+            vault_id=request["target_vault_id"],
+            vault_root=Path(request["target_vault_root"]),
+            state_root=Path(request["target_state_root"]),
+            log_root=Path(request["target_log_root"]),
+            runtime_uid=request["runtime_uid"],
+            runtime_gid=request["runtime_gid"],
+        )
+    except HostedConfigError as exc:
+        raise OperatorFailure("HOSTED_RESTORE_TARGET_CONFLICT") from exc
+    overrides = {
+        "EXOMEM_VAULT_PATH": str(binding.vault_root),
+        "EXOMEM_HOSTED_STATE_ROOT": str(binding.state_root),
+        "EXOMEM_STATE_ROOT": str(binding.state_root / "vault-state"),
+        "EXOMEM_WRITER_LEASE_STATE_DIR": str(binding.state_root),
+        "EXOMEM_LOG_DIR": str(binding.log_root),
+    }
+    previous = {name: os.environ.get(name) for name in overrides}
+    os.environ.update(overrides)
+    try:
+        return _restore_candidate_bound(
+            raw_request,
+            bootstrap_security=bootstrap_security,
+            rebuild_derived=rebuild_derived,
+            crash_hook=crash_hook,
+        )
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
+def _restore_candidate_bound(
+    raw_request: Mapping[str, Any],
+    *,
+    bootstrap_security: Callable[..., int] | None = None,
+    rebuild_derived: Callable[[Path], None] | None = None,
+    crash_hook: Callable[[str], None] | None = None,
+) -> HostedRestoreResult:
     """Restore one pinned archive into a new, exclusively locked target cell."""
 
     encoded = _canonical_bytes(raw_request)

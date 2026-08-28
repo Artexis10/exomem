@@ -8,13 +8,15 @@ import hmac
 import json
 import sqlite3
 import struct
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .. import find_corpus, reserved_paths, writer_lease
+from .. import find_corpus, reserved_paths, state_migration, writer_lease
 from ..kbdir import kb_dirname
 from . import (
     authorization_custody,
+    legacy_v3_placement,
     membership,
     policy,
     projection_store,
@@ -1484,6 +1486,183 @@ def _complete_restore_schema_fence(plan: _ForwardMigrationRestorePlan) -> None:
         raise ForwardMigrationRestoreUnavailable
 
 
+def _restore_terminal_endpoint(
+    vault_root: Path,
+    plan: _ForwardMigrationRestorePlan,
+) -> dict[str, object]:
+    """Return the one exact committed endpoint that advances restore D0 to D1."""
+
+    records = receipts.event_records(vault_root)
+    terminals = [
+        item
+        for item in records
+        if item.get("causation_id") == plan.event_id
+        and item.get("phase") == "committed"
+        and item.get("outcome") == "schema-v3-backup-restored"
+    ]
+    if len(terminals) != 1:
+        raise ForwardMigrationRestoreUnavailable
+    terminal = terminals[0]
+    endpoint = {
+        "instance_id": terminal.get("instance_id"),
+        "seq": terminal.get("seq"),
+        "hash": terminal.get("hash"),
+        "path": receipts._relative_locator(  # noqa: SLF001 - receipt locator authority
+            Path(vault_root),
+            Path(str(terminal.get("_path", ""))),
+        ),
+        "byte_offset": terminal.get("_offset"),
+    }
+    if (
+        not isinstance(endpoint["instance_id"], str)
+        or not isinstance(endpoint["seq"], int)
+        or isinstance(endpoint["seq"], bool)
+        or endpoint["seq"] < 1
+        or not isinstance(endpoint["hash"], str)
+        or len(endpoint["hash"]) != 64
+        or not isinstance(endpoint["path"], str)
+        or not endpoint["path"]
+        or not isinstance(endpoint["byte_offset"], int)
+        or isinstance(endpoint["byte_offset"], bool)
+        or endpoint["byte_offset"] < 0
+    ):
+        raise ForwardMigrationRestoreUnavailable
+    return endpoint
+
+
+def _publish_restore_legacy_d0(
+    vault_root: Path,
+    plan: _ForwardMigrationRestorePlan,
+    *,
+    d0_digest: str,
+) -> None:
+    try:
+        legacy_v3_placement.publish_exact_v3_snapshot(
+            vault_root,
+            expected_digest=d0_digest,
+            event_id=plan.event_id,
+        )
+    except legacy_v3_placement.LegacyV3PublicationUnavailable as error:
+        raise ForwardMigrationRestoreUnavailable from error
+
+
+def _require_restore_marker(
+    marker: object,
+    plan: _ForwardMigrationRestorePlan,
+    *,
+    backup_plan_digest: str,
+    backup_reference: str,
+    source_store_digest: str,
+) -> dict[str, object]:
+    if not isinstance(marker, dict) or marker.get("operation") != _RESTORE_OPERATION:
+        raise ForwardMigrationRestoreUnavailable
+    if (
+        marker.get("event_id") != plan.event_id
+        or marker.get("plan_digest") != plan.plan_digest
+        or marker.get("target_digest") != plan.target_digest
+        or marker.get("backup_plan_digest") != backup_plan_digest
+        or marker.get("backup_reference") != backup_reference
+        or marker.get("source_store_digest") != source_store_digest
+        or marker.get("schema_fence_generation") != plan.schema_fence_generation
+        or not isinstance(marker.get("timestamp"), int)
+        or isinstance(marker["timestamp"], bool)
+        or marker["timestamp"] < 1
+        or not isinstance(marker.get("d0"), str)
+        or len(marker["d0"]) != 64
+    ):
+        raise ForwardMigrationRestoreUnavailable
+    return marker
+
+
+def _restore_result_from_marker(
+    marker: dict[str, object],
+    *,
+    backup_plan_digest: str,
+    backup_reference: str,
+) -> ForwardMigrationRestoreResult:
+    event_id = marker.get("event_id")
+    plan_digest = marker.get("plan_digest")
+    source_store_digest = marker.get("source_store_digest")
+    if (
+        not isinstance(event_id, str)
+        or not isinstance(plan_digest, str)
+        or not isinstance(source_store_digest, str)
+    ):
+        raise ForwardMigrationRestoreUnavailable
+    return ForwardMigrationRestoreResult(
+        schema_version=store.SCHEMA_USER_VERSION,
+        plan_digest=backup_plan_digest,
+        source_store_digest=source_store_digest,
+        backup_reference=backup_reference,
+        recovery_event_id=event_id,
+        recovery_plan_digest=plan_digest,
+        replayed=True,
+    )
+
+
+def _require_postfence_restore_marker(
+    marker: object,
+    *,
+    backup_plan_digest: str,
+    backup_reference: str,
+) -> dict[str, object]:
+    if not isinstance(marker, dict) or (
+        marker.get("operation") != _RESTORE_OPERATION
+        or marker.get("backup_plan_digest") != backup_plan_digest
+        or marker.get("backup_reference") != backup_reference
+        or marker.get("phase") not in {"legacy-aligned", "complete"}
+        or not isinstance(marker.get("d0"), str)
+        or not isinstance(marker.get("d1"), str)
+        or not isinstance(marker.get("source_store_digest"), str)
+        or len(marker["source_store_digest"]) != 64
+        or not isinstance(marker.get("schema_fence_generation"), (int, type(None)))
+        or not isinstance(marker.get("terminal"), dict)
+    ):
+        raise ForwardMigrationRestoreUnavailable
+    return marker
+
+
+def _require_restore_postfence_external_d1(
+    vault_root: Path,
+    marker: dict[str, object],
+) -> None:
+    expected = marker.get("d1")
+    if not isinstance(expected, str) or len(expected) != 64:
+        raise ForwardMigrationRestoreUnavailable
+    connection = store.open_readonly_connection(vault_root)
+    if connection is None:
+        raise ForwardMigrationRestoreUnavailable
+    try:
+        schema_v4.require_exact_v3_connection(connection)
+        if not hmac.compare_digest(
+            store._v3_snapshot_digest(connection),  # noqa: SLF001 - canonical external D1 proof
+            expected,
+        ):
+            raise ForwardMigrationRestoreUnavailable
+    finally:
+        connection.close()
+
+
+def _restore_fence_is_sealed_metadata_only(marker: dict[str, object]) -> bool:
+    generation = marker.get("schema_fence_generation")
+    if generation is not None and (
+        not isinstance(generation, int)
+        or isinstance(generation, bool)
+        or generation < 1
+    ):
+        raise ForwardMigrationRestoreUnavailable
+    client = writer_lease.configured_schema_fence_operator_client()
+    if client is None:
+        return generation is None
+    current = client.schema_fence()
+    return (
+        current.governance_enrolled
+        and current.schema_version == store.SCHEMA_USER_VERSION
+        and generation is not None
+        and current.generation == generation + 1
+    )
+
+
 def _digest_part(digest: object, value: bytes) -> None:
     digest.update(len(value).to_bytes(8, "big"))
     digest.update(value)
@@ -1775,7 +1954,9 @@ def _preflight_v4_restore_database(
 def _restore_v3_database(
     vault_root: Path,
     plan: _ForwardMigrationRestorePlan,
-) -> None:
+    *,
+    prepare_marker: Callable[[str], None],
+) -> str:
     root = Path(vault_root)
     path = store.sidecar_path(root)
     try:
@@ -1809,13 +1990,22 @@ def _restore_v3_database(
                     schema_v4.require_exact_v3_connection(source)
                     _replace_database_schema(destination, source)
                     schema_v4.require_exact_v3_connection(destination)
+                    d0_digest = store.canonical_uncommitted_v3_digest(destination)
+                    prepare_marker(d0_digest)
                     destination.commit()
+                    schema_v4.require_exact_v3_connection(destination)
+                    if not hmac.compare_digest(
+                        store._v3_snapshot_digest(destination),  # noqa: SLF001 - canonical post-commit proof
+                        d0_digest,
+                    ):
+                        raise ForwardMigrationRestoreUnavailable
                     reserved_paths._publish_sqlite_owner_family(
                         root,
                         path,
                         "governance-store",
                         destination,
                     )
+                    return d0_digest
                 except BaseException:
                     if destination.in_transaction:
                         destination.rollback()
@@ -1824,34 +2014,6 @@ def _restore_v3_database(
                     destination.close()
     finally:
         source.close()
-
-
-def _normalized_v3_matches_backup(
-    vault_root: Path,
-    backup: ForwardMigrationBackup,
-) -> bool:
-    current = store.open_readonly_connection(vault_root)
-    if current is None:
-        return False
-    normalized = sqlite3.connect(":memory:")
-    original = sqlite3.connect(":memory:")
-    try:
-        schema_v4.require_exact_v3_connection(current)
-        current.backup(normalized)
-        original.deserialize(backup.serialized_v3)
-        schema_v4.require_exact_v3_connection(original)
-        _replace_receipt_state(normalized, _receipt_state(original))
-        normalized.execute("VACUUM")
-        schema_v4.require_exact_v3_connection(normalized)
-        digest = _framed_digest(
-            b"exomem.governance-v3-snapshot.v1",
-            normalized.serialize(),
-        )
-        return hmac.compare_digest(digest, backup.source_store_digest)
-    finally:
-        original.close()
-        normalized.close()
-        current.close()
 
 
 def restore_forward_migration_backup(
@@ -1874,121 +2036,249 @@ def restore_forward_migration_backup(
         moment = _bounded_integer(now, minimum=1)
         expected_plan = _require_digest(expected_plan_digest)
         expected_reference = _require_backup_reference(expected_backup_reference)
-        backup = verify_forward_migration_backup(
-            root,
-            expected_plan_digest=expected_plan,
-        )
-        if not hmac.compare_digest(backup.backup_reference, expected_reference):
-            raise ForwardMigrationRestoreUnavailable
-        with (
-            receipts._receipt_lock(root),  # noqa: SLF001
-            reserved_paths._identity_coordination_scope(
+        with state_migration.governance_rollback_session(root) as session:
+            marker = session.marker
+            if marker is not None and marker.get("phase") == "complete":
+                sealed = _require_postfence_restore_marker(
+                    marker,
+                    backup_plan_digest=expected_plan,
+                    backup_reference=expected_reference,
+                )
+                _require_restore_postfence_external_d1(root, sealed)
+                if not _restore_fence_is_sealed_metadata_only(sealed):
+                    raise ForwardMigrationRestoreUnavailable
+                return _restore_result_from_marker(
+                    sealed,
+                    backup_plan_digest=expected_plan,
+                    backup_reference=expected_reference,
+                )
+            if (
+                marker is not None
+                and marker.get("phase") == "legacy-aligned"
+                and _restore_fence_is_sealed_metadata_only(marker)
+            ):
+                sealed = _require_postfence_restore_marker(
+                    marker,
+                    backup_plan_digest=expected_plan,
+                    backup_reference=expected_reference,
+                )
+                _require_restore_postfence_external_d1(root, sealed)
+                session.seal_complete_metadata_only()
+                _forward_migration_barrier("after_restore_complete_marker")
+                return _restore_result_from_marker(
+                    sealed,
+                    backup_plan_digest=expected_plan,
+                    backup_reference=expected_reference,
+                )
+
+            backup = verify_forward_migration_backup(
                 root,
-                identity_may_change=False,
-            ),
-        ):
-            version = store.authorization_session_schema_version(root)
-            if version not in {
-                store.SCHEMA_USER_VERSION,
-                schema_v4.SCHEMA_USER_VERSION,
-            }:
+                expected_plan_digest=expected_plan,
+            )
+            if not hmac.compare_digest(backup.backup_reference, expected_reference):
                 raise ForwardMigrationRestoreUnavailable
-            custody = _require_drained_restore_custody(
-                root,
-                backup=backup,
-                now=moment,
-            )
-            plan = _restore_plan(
-                root,
-                backup=backup,
-                custody=custody,
-                schema_version=version,
-            )
-            event_state = _restore_event_state(root, plan)
-            replayed = event_state != "absent"
-            if event_state != "absent":
-                _require_restore_receipt_progress(
+
+            with (
+                receipts.exclusive_sequence(root),
+                reserved_paths._identity_coordination_scope(
                     root,
-                    plan,
-                    schema_version=version,
-                    event_state=event_state,
-                )
-            if version == schema_v4.SCHEMA_USER_VERSION:
-                _verify_active_target(root, backup)
-                _verify_live_source_material(root, backup)
-                if event_state == "committed":
+                    identity_may_change=False,
+                ),
+            ):
+                version = store.authorization_session_schema_version(root)
+                if version not in {
+                    store.SCHEMA_USER_VERSION,
+                    schema_v4.SCHEMA_USER_VERSION,
+                }:
                     raise ForwardMigrationRestoreUnavailable
-                if event_state == "absent" and _store_receipt_state(
-                    root,
-                    schema_version=version,
-                ) != _backup_receipt_state(backup):
-                    raise ForwardMigrationRestoreUnavailable
-                _preflight_v4_restore_database(root, backup)
-                event_state = _ensure_restore_intent(root, plan)
-                _require_restore_receipt_progress(
-                    root,
-                    plan,
-                    schema_version=version,
-                    event_state=event_state,
-                )
-                _forward_migration_barrier("after_restore_receipt_intent")
-                current_custody = _require_drained_restore_custody(
+                custody = _require_drained_restore_custody(
                     root,
                     backup=backup,
                     now=moment,
                 )
-                current_plan = _restore_plan(
+                plan = _restore_plan(
                     root,
                     backup=backup,
-                    custody=current_custody,
+                    custody=custody,
                     schema_version=version,
                 )
-                if current_plan != plan:
-                    raise ForwardMigrationRestoreUnavailable
-                _verify_active_target(root, backup)
-                _verify_live_source_material(root, backup)
-                _require_restore_receipt_progress(
-                    root,
-                    plan,
-                    schema_version=version,
-                    event_state=event_state,
-                )
-                _require_restore_schema_fence(plan)
-                _restore_v3_database(root, plan)
-                _forward_migration_barrier("after_store_restore")
-            else:
-                if event_state not in {"intent", "committed"}:
-                    raise ForwardMigrationRestoreUnavailable
-                _verify_live_source_material(root, backup)
-                _require_restore_receipt_progress(
-                    root,
-                    plan,
-                    schema_version=version,
-                    event_state=event_state,
-                )
-            if not _normalized_v3_matches_backup(root, backup):
-                raise ForwardMigrationRestoreUnavailable
-            _complete_restore_schema_fence(plan)
-            _forward_migration_barrier("after_restore_schema_fence")
-            if event_state != "committed":
-                try:
-                    receipts.commit_event(
-                        root,
-                        plan.event_id,
-                        outcome="schema-v3-backup-restored",
+                if marker is not None:
+                    marker = _require_restore_marker(
+                        marker,
+                        plan,
+                        backup_plan_digest=backup.plan_digest,
+                        backup_reference=backup.backup_reference,
+                        source_store_digest=backup.source_store_digest,
                     )
-                except receipts.ReceiptError as error:
-                    raise ForwardMigrationRestoreUnavailable from error
-                event_state = "committed"
-            _require_restore_receipt_progress(
-                root,
-                plan,
-                schema_version=store.SCHEMA_USER_VERSION,
-                event_state="committed",
-            )
-            _forward_migration_barrier("after_restore_receipt_commit")
-            if not _normalized_v3_matches_backup(root, backup):
-                raise ForwardMigrationRestoreUnavailable
+                event_state = _restore_event_state(root, plan)
+                replayed = event_state != "absent"
+                if event_state != "absent":
+                    _require_restore_receipt_progress(
+                        root,
+                        plan,
+                        schema_version=version,
+                        event_state=event_state,
+                    )
+                if version == schema_v4.SCHEMA_USER_VERSION:
+                    _verify_active_target(root, backup)
+                    _verify_live_source_material(root, backup)
+                    if event_state == "committed":
+                        raise ForwardMigrationRestoreUnavailable
+                    if event_state == "absent" and _store_receipt_state(
+                        root,
+                        schema_version=version,
+                    ) != _backup_receipt_state(backup):
+                        raise ForwardMigrationRestoreUnavailable
+                    _preflight_v4_restore_database(root, backup)
+                    event_state = _ensure_restore_intent(root, plan)
+                    _require_restore_receipt_progress(
+                        root,
+                        plan,
+                        schema_version=version,
+                        event_state=event_state,
+                    )
+                    _forward_migration_barrier("after_restore_receipt_intent")
+                    current_custody = _require_drained_restore_custody(
+                        root,
+                        backup=backup,
+                        now=moment,
+                    )
+                    current_plan = _restore_plan(
+                        root,
+                        backup=backup,
+                        custody=current_custody,
+                        schema_version=version,
+                    )
+                    if current_plan != plan:
+                        raise ForwardMigrationRestoreUnavailable
+                    _verify_active_target(root, backup)
+                    _verify_live_source_material(root, backup)
+                    _require_restore_receipt_progress(
+                        root,
+                        plan,
+                        schema_version=version,
+                        event_state=event_state,
+                    )
+                    _require_restore_schema_fence(plan)
+
+                    def prepare_marker(d0_digest: str) -> None:
+                        nonlocal marker
+                        if marker is None:
+                            marker = session.begin_prepared(
+                                operation=_RESTORE_OPERATION,
+                                event_id=plan.event_id,
+                                plan_digest=plan.plan_digest,
+                                target_digest=plan.target_digest,
+                                backup_reference=backup.backup_reference,
+                                backup_plan_digest=backup.plan_digest,
+                                source_store_digest=backup.source_store_digest,
+                                schema_fence_generation=plan.schema_fence_generation,
+                                timestamp=moment,
+                                d0=d0_digest,
+                            )
+                            return
+                        prepared = _require_restore_marker(
+                            marker,
+                            plan,
+                            backup_plan_digest=backup.plan_digest,
+                            backup_reference=backup.backup_reference,
+                            source_store_digest=backup.source_store_digest,
+                        )
+                        if (
+                            prepared.get("phase") != "prepared"
+                            or not hmac.compare_digest(str(prepared["d0"]), d0_digest)
+                        ):
+                            raise ForwardMigrationRestoreUnavailable
+
+                    d0_digest = _restore_v3_database(
+                        root,
+                        plan,
+                        prepare_marker=prepare_marker,
+                    )
+                    _forward_migration_barrier("after_store_restore")
+                else:
+                    if marker is None or event_state not in {"intent", "committed"}:
+                        raise ForwardMigrationRestoreUnavailable
+                    _verify_live_source_material(root, backup)
+                    _require_restore_receipt_progress(
+                        root,
+                        plan,
+                        schema_version=version,
+                        event_state=event_state,
+                    )
+                    d0_digest = str(marker["d0"])
+                    if event_state == "intent" and not hmac.compare_digest(
+                        legacy_v3_placement.exact_external_v3_digest(root),
+                        d0_digest,
+                    ):
+                        raise ForwardMigrationRestoreUnavailable
+
+                marker = _require_restore_marker(
+                    marker,
+                    plan,
+                    backup_plan_digest=backup.plan_digest,
+                    backup_reference=backup.backup_reference,
+                    source_store_digest=backup.source_store_digest,
+                )
+                phase = marker.get("phase")
+                if phase == "prepared":
+                    if event_state != "committed":
+                        _publish_restore_legacy_d0(root, plan, d0_digest=d0_digest)
+                        _forward_migration_barrier("after_legacy_v3_publication")
+                        try:
+                            receipts.commit_event(
+                                root,
+                                plan.event_id,
+                                outcome="schema-v3-backup-restored",
+                            )
+                        except receipts.ReceiptError as error:
+                            raise ForwardMigrationRestoreUnavailable from error
+                        _forward_migration_barrier("after_restore_terminal_durable")
+                    d1_digest = legacy_v3_placement.prove_d1_against_legacy(
+                        root,
+                        event_id=plan.event_id,
+                        d0_digest=d0_digest,
+                        expected_outcome="schema-v3-backup-restored",
+                    )
+                    session.advance_receipt_committed(
+                        d1_digest,
+                        _restore_terminal_endpoint(root, plan),
+                    )
+                    marker = _require_restore_marker(
+                        session.marker,
+                        plan,
+                        backup_plan_digest=backup.plan_digest,
+                        backup_reference=backup.backup_reference,
+                        source_store_digest=backup.source_store_digest,
+                    )
+                    _forward_migration_barrier("after_restore_receipt_commit")
+                    phase = marker.get("phase")
+                if phase == "receipt-committed":
+                    d1_digest = legacy_v3_placement.align_legacy_to_d1(
+                        root,
+                        event_id=plan.event_id,
+                        d0_digest=d0_digest,
+                        expected_outcome="schema-v3-backup-restored",
+                    )
+                    if not hmac.compare_digest(str(marker.get("d1")), d1_digest):
+                        raise ForwardMigrationRestoreUnavailable
+                    session.advance_legacy_aligned()
+                    _forward_migration_barrier("after_restore_legacy_aligned")
+                elif phase != "legacy-aligned":
+                    raise ForwardMigrationRestoreUnavailable
+                else:
+                    d1_digest = legacy_v3_placement.prove_d1_against_legacy(
+                        root,
+                        event_id=plan.event_id,
+                        d0_digest=d0_digest,
+                        expected_outcome="schema-v3-backup-restored",
+                    )
+                    if not hmac.compare_digest(str(marker.get("d1")), d1_digest):
+                        raise ForwardMigrationRestoreUnavailable
+                _complete_restore_schema_fence(plan)
+                _forward_migration_barrier("after_restore_schema_fence")
+                session.seal_complete_metadata_only()
+                _forward_migration_barrier("after_restore_complete_marker")
     except (_ForwardMigrationCrash, ForwardMigrationRestoreUnavailable):
         raise
     except (

@@ -897,7 +897,13 @@ def _memberships_for_path(
 
 def _is_operational_membership_path(vault_root: Path, candidate: Path) -> bool:
     """Whether a current internal-state owner, rather than content, owns a path."""
-    from .. import claims, voice_profiles
+    from .. import claims, reserved_paths, voice_profiles
+
+    logical = reserved_paths.classify_logical(
+        candidate.relative_to(vault_root).as_posix()
+    )
+    if logical.disposition is reserved_paths.PathDisposition.RESERVED:
+        return True
 
     sidecars = (
         index_paths.sidecar_path(vault_root),

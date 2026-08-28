@@ -60,8 +60,9 @@ SHALL call a read-only readiness gate. That gate SHALL NOT create directories,
 copy or delete bytes, take the migration lock, resume interrupted work, adopt an
 authority, or upgrade a manifest. It SHALL refuse with the stable path-free
 `STATE_MIGRATION_OFFLINE_REQUIRED` code when the manifest is absent,
-in-progress, stale relative to the descriptor registry, or complete while any
-legacy duplicate remains.
+in-progress, stale relative to the descriptor registry, complete while any
+legacy duplicate remains, or carries an active or complete governance rollback
+marker.
 
 All state placement mutation SHALL require an explicit offline migration
 authority and SHALL be reachable only through
@@ -113,6 +114,91 @@ invalid manifests, and unexplained dual authority SHALL fail closed.
 - **THEN** ordinary service and stateful CLI admission refuses with `STATE_MIGRATION_OFFLINE_REQUIRED`
 - **AND** doctor reports the legacy duplicate as a failure
 - **AND** the duplicate is neither merged nor deleted implicitly
+
+#### Scenario: Governance rollback publishes D0, then commits and aligns D1
+
+- **WHEN** an authenticated offline full downmigration or backup restore rolls
+  governance back while every writer is stopped
+- **THEN** it acquires state-migration, exclusive receipt-sequence,
+  governance-store identity, and retained SQLite-transaction ownership in that
+  order
+- **AND** before COMMIT it computes `D0` from the actual uncommitted transaction
+  only by serialize, deserialize into an isolated source, SQLite backup into a
+  fresh snapshot, VACUUM, and canonical full digest
+- **AND** it raw-hash-CAS writes a closed v2 `governance_rollback` marker into
+  the ordinary v1 state manifest with immutable operation/event/plan/target,
+  transform timestamp, `D0`, `D1`, terminal endpoint, deterministic
+  predecessor/stage bindings, and `schema_fence_generation` as a positive
+  integer or null, initially at `prepared`
+- **AND** a backup restore binds operation-derived `backup_plan_digest` and
+  `source_store_digest` as exact 64-hex values while a full downmigration binds
+  both fields as null, so replay derives the result from the marker even when a
+  backup artifact is unavailable
+- **AND** it publishes only exact `D0` at the historical
+  `Knowledge Base/.governance.sqlite` through the recorded `held_fs` stage
+- **AND** it then commits and verifies the sole exact receipt-head terminal as
+  `D1`, aligns the predecessor database to exact `D1`, advances the marker
+  through `receipt-committed` and `legacy-aligned`, and advances the v3/G+1
+  schema fence last
+
+#### Scenario: Rollback publication crash replay accepts only recorded identities
+
+- **WHEN** rollback crashes at any prepared marker, uncommitted transform,
+  D0-stage/link/unlink, receipt-terminal, durable-terminal/head-lag,
+  D1-alignment, or fence boundary
+- **THEN** offline replay accepts only the recorded regular-file identities and
+  exact phase evidence: absent predecessor plus exact single-link stage, the
+  recorded two-link stage/predecessor residue, or exact single-link predecessor
+- **AND** symlinks, non-regular files, different inode/file identities, digests,
+  link counts, receipt suffixes, schema/keysets, or database mutations refuse
+  without deleting the conflicting authority
+- **AND** head-lag heals only from the exact durable terminal and its adjacent
+  receipt chain, and `D1` normalizes back to `D0` by changing only the six
+  recorded mutable active-head fields
+
+#### Scenario: Fence-final replay cannot touch a live predecessor
+
+- **WHEN** a durable `legacy-aligned` marker remains after a crash and its
+  immutable fence binding is either null with no fence or a positive `G+1` with
+  the schema fence exactly v3 at that recorded generation
+- **THEN** the predecessor may write immediately
+- **AND** replay reaches `complete` only by metadata CAS from that marker and
+  fence evidence, verifying only the immutable marker, exact external `D1`, and
+  the exact recorded no-fence or v3-at-`G+1` fence state
+- **AND** it does not reopen, redigest, realign, re-prove legacy tail/adjacency,
+  or require v4 custody of the legacy database
+
+#### Scenario: Descriptor-scoped governance adoption restores relocated service
+
+- **WHEN** predecessor operation is complete and an operator invokes explicit
+  offline `--adopt-state governance-store=vault`
+- **THEN** it migrates only the governance-store descriptor back to the external
+  root, preserving every unrelated external family byte-identically
+- **AND** it proves the predecessor receipt chain is a valid descendant anchored
+  at recorded `D1`, rather than requiring that a live predecessor still equals
+  `D1`
+- **AND** it clears the rollback marker only after exact migration proof
+- **AND** generic global-vault adoption is not accepted as this recovery path
+
+#### Scenario: Adoption resumes after copy before its phase CAS
+
+- **WHEN** descriptor-scoped governance adoption has a durable prepared record
+  for digest `A`, and both the external governance store and legacy predecessor
+  are exact regular-file `A` because copy committed before its phase CAS
+- **THEN** replay accepts that exact `external=A, legacy=A` state, proceeds to
+  durable legacy removal, and records its later phase without treating it as
+  unexplained dual authority
+- **AND** absent/exact, copied/exact, and removed/exact crash states converge
+  only through their recorded descriptor identities; every mismatch refuses
+- **AND** every unrelated external family remains byte-identical throughout
+
+#### Scenario: Real predecessor acceptance and backup restore have identical proof
+
+- **WHEN** the full downmigration path or backup-restore path reaches its fence
+- **THEN** the actual old-v3 binary performs a receipt-bearing write against the
+  legacy predecessor database, not merely startup or a no-op command
+- **AND** both paths prove every rollback crash boundary and leave current
+  relocated admission fenced until descriptor-scoped adoption completes
 
 #### Scenario: A later release adds an external descriptor
 

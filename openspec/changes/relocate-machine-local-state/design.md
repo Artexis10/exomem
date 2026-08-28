@@ -190,6 +190,73 @@
    or commit failure returns the workload to fresh observed zero with routes
    closed rather than leaving a partially promoted candidate.
 
+10. **Governance break-glass rollback is an evidence-bound state machine.**
+    This is the sole exception to normal relocated state placement. The normal
+    state-migration manifest remains v1. A rollback adds its closed,
+    version-2 `governance_rollback` marker; old relocated readers reject that
+    marker and current readiness refuses it before opening governance state.
+    The marker binds immutable operation/event/plan/target identities, transform
+    timestamp, deterministic predecessor path and stage name, `D0`, `D1`, the
+    exact terminal receipt endpoint, and immutable `schema_fence_generation`
+    (a positive integer or null). For backup restore only it additionally binds
+    operation-derived `backup_plan_digest` and `source_store_digest`, each an
+    exact 64-hex digest; both fields are null for full downmigration. A missing
+    backup artifact never weakens replay: its required result is derived from
+    those marker fields. Its raw manifest hash is the CAS precondition for every
+    durable phase transition:
+    `prepared` → `receipt-committed` → `legacy-aligned` → `complete`. A marker
+    with conflicting fields, an unknown phase, or a raw-hash CAS miss refuses.
+
+    Both full downmigration and backup restore use one lock order: state-migration
+    lock, exclusive receipt-sequence lock, governance-store identity coordination,
+    then one retained SQLite transaction (`BEGIN IMMEDIATE`, or `EXCLUSIVE` for
+    restore). The v3 transformation completes in that actual uncommitted
+    transaction. Before its COMMIT, `D0` is calculated only through the canonical
+    route: serialize that transaction, deserialize it into an isolated source,
+    SQLite-backup that source into a fresh snapshot, VACUUM the snapshot, then
+    take the domain-separated full snapshot digest. The prepared marker is
+    raw-hash-CAS written and reread while the transaction is still held; a later
+    transaction or separately transformed clone cannot substitute for it.
+
+    The deterministic `held_fs` publication initially exposes only exact `D0`.
+    It permits exactly: an absent predecessor and an exact, regular, single-link
+    stage; the matching stage/predecessor identity with link count two after the
+    link crash boundary; or an exact, regular, single-link predecessor after the
+    stage has been removed. The two-link case removes only the recorded stage and
+    fsyncs its parent. Symlinks, non-regular files, a different identity, a
+    different digest, or any other link count refuse and preserve evidence.
+
+    `D0` publication is not the terminal state. The retained transaction commits
+    the exact receipt terminal and therefore creates `D1`, where the only allowed
+    database difference is the verified active receipt-head transition. Recovery
+    may heal a durable-terminal/head-lag only after proving the exact intent,
+    one adjacent terminal, sequence/previous hashes, terminal locator, durable
+    JSONL tail, and complete receipt schema/keysets; it then advances only that
+    head. It clones `D1`, restores only the six mutable active-head fields to the
+    recorded `D0` row, and requires the normalized full digest to equal `D0`.
+    Any other mutation, competing suffix, missing terminal, or non-normalizing
+    result refuses. The predecessor database is then aligned to exact `D1` under
+    the same held-file identity rules, and only that successful alignment may
+    CAS the marker to `legacy-aligned`.
+
+    The schema fence advances last, after legacy is `D1`-aligned. Once it is v3
+    at generation `G+1`, the predecessor may write immediately. A crash at that
+    point completes from durable `legacy-aligned` evidence plus that fence by
+    metadata-only CAS to `complete`: post-fence replay verifies only the
+    immutable marker, exact external `D1`, and either no recorded fence or v3 at
+    the exact recorded `G+1` `schema_fence_generation`; it MUST NOT reopen,
+    redigest, realign, or re-prove legacy tail/adjacency or require v4 or backup
+    custody. The current relocated runtime remains fenced while v0.57 uses the
+    legacy store, whose receipt chain may advance from `D1`. Recovery is
+    descriptor-scoped: explicit
+    offline `--adopt-state governance-store=vault` later proves a valid legacy
+    descendant receipt chain anchored at recorded `D1`, re-externalizes governance
+    only, preserves byte-identical every unrelated external family, and clears the
+    marker only after exact migration proof. Generic lossy global-vault adoption
+    is not this recovery path. Acceptance includes the real old-v3 binary making
+    a receipt-bearing write, backup-restore parity, and failure injection at every
+    marker, transaction, publication, receipt, alignment, and fence boundary.
+
 ## Explicitly out of scope
 
 - Warm-up walk performance and warm hybrid latency (own packet; re-measure

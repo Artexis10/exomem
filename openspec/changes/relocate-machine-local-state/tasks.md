@@ -90,9 +90,11 @@
 
 ## 3. Verification and delivery
 
-- [x] 3.1 Focused placement, migration, hosted, portability, privacy and
-      publication-atomicity suites + lint + strict OpenSpec validation.
-- [x] 3.2 Independent adversarial review; resolve findings.
+- [ ] 3.1 Focused placement, migration, hosted, portability, privacy and
+      publication-atomicity suites + lint + strict OpenSpec validation, including
+      the current D0/D1 governance rollback crash matrix and real old-v3 proof.
+- [ ] 3.2 Independent adversarial review of the current rollback implementation
+      and its D0/D1/fence evidence; resolve findings.
 - [ ] 3.3 Release and deploy to personal and POLLY cells; verify exact package
       and service process, path-free health/readiness, detailed doctor state,
       clean quiescent leftover scan, restart durability, and real retrieval.

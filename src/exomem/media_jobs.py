@@ -1016,9 +1016,10 @@ def _sqlite_sidecar_exists(sidecars: tuple[Path, Path]) -> bool:
 
 def _diagnostic_snapshot_rows(
     path: Path,
+    *,
+    vault_root: Path,
 ) -> tuple[list[Any], Any, list[Any], list[Any], list[Any]]:
     target = Path(os.path.abspath(path))
-    vault_root = target.parent.parent
     with reserved_paths._subsystem_authority_scope("media_jobs"):
         with reserved_paths._identity_coordination_scope(
             vault_root,
@@ -1086,7 +1087,9 @@ def status(
         return empty
     try:
         if diagnostic_snapshot:
-            rows, runtime, errors, jobs, reconciliation_rows = _diagnostic_snapshot_rows(path)
+            rows, runtime, errors, jobs, reconciliation_rows = _diagnostic_snapshot_rows(
+                path, vault_root=Path(vault_root)
+            )
         else:
             store = MediaJobStore(vault_root, create=False)
             conn = store._connect(readonly=True)

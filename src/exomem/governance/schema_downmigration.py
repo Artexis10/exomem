@@ -12,8 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-from .. import held_fs, reserved_paths, writer_lease
-from . import authorization_custody, policy, receipts, schema_v4, store
+from .. import held_fs, reserved_paths, state_migration, writer_lease
+from . import authorization_custody, legacy_v3_placement, policy, receipts, schema_v4, store
 
 _OPERATION: Final = "governance_schema_v4_downmigration"
 _PLAN_SCHEMA: Final = "exomem.governance-downmigration-plan/v1"
@@ -602,9 +602,7 @@ def _plan_from_json(
         raise DownmigrationUnavailable
     raw_fence_generation = value["schema_fence_generation"]
     schema_fence_generation = (
-        None
-        if raw_fence_generation is None
-        else _bounded_integer(raw_fence_generation, minimum=1)
+        None if raw_fence_generation is None else _bounded_integer(raw_fence_generation, minimum=1)
     )
     plan_digest = _framed_digest(_PLAN_DOMAIN, value_json.encode("utf-8"))
     target_digest = _framed_digest(
@@ -714,6 +712,24 @@ def _complete_plan_schema_fence(plan: _RecoveryPlan) -> None:
         or advanced.generation != plan.schema_fence_generation + 1
     ):
         raise DownmigrationUnavailable
+
+
+def _plan_schema_fence_is_complete(plan: _RecoveryPlan) -> bool:
+    """Read the final fence classification without advancing or opening legacy state."""
+
+    try:
+        client = writer_lease.configured_schema_fence_operator_client()
+        if plan.schema_fence_generation is None:
+            return client is None
+        if client is None:
+            return False
+        current = client.schema_fence()
+    except writer_lease.OpError:
+        raise DownmigrationUnavailable from None
+    return (
+        current.schema_version == store.SCHEMA_USER_VERSION
+        and current.generation == plan.schema_fence_generation + 1
+    )
 
 
 def _ensure_receipt_intent(
@@ -901,6 +917,10 @@ def _stage_plan(vault_root: Path, plan: _RecoveryPlan) -> None:
                 (plan.event_id, plan.event_id, plan.value_json, plan.plan_digest),
             )
             connection.commit()
+        except (sqlite3.Error, schema_v4.SchemaV4Error):
+            if connection.in_transaction:
+                connection.rollback()
+            raise DownmigrationUnavailable from None
         except BaseException:
             if connection.in_transaction:
                 connection.rollback()
@@ -914,9 +934,7 @@ def _load_or_prepare_plan(
     now: int,
 ) -> _RecoveryPlan:
     try:
-        fence = writer_lease.require_configured_schema_fence(
-            schema_v4.SCHEMA_USER_VERSION
-        )
+        fence = writer_lease.require_configured_schema_fence(schema_v4.SCHEMA_USER_VERSION)
     except writer_lease.OpError:
         raise DownmigrationUnavailable from None
     with _owned_store_connection(
@@ -975,30 +993,71 @@ def _mirror_workspace(vault_root: Path, plan: _RecoveryPlan) -> None:
         raise DownmigrationUnavailable
 
 
-def _commit_database(vault_root: Path, plan: _RecoveryPlan, *, now: int) -> str:
+def _commit_database(
+    vault_root: Path,
+    plan: _RecoveryPlan,
+    *,
+    marker_session: state_migration.GovernanceRollbackSession,
+) -> tuple[str, str]:
+    """Transform the one held v4 connection and bind its uncommitted D0.
+
+    The manifest write is deliberately inside the retained SQLite transaction:
+    a prepared marker therefore either describes the still-v4 source which
+    must reproduce D0, or the exact committed v3 D0.  It never describes a
+    separately cloned snapshot.
+    """
     with _owned_store_connection(
         vault_root,
         schema_version=schema_v4.SCHEMA_USER_VERSION,
         writable=True,
     ) as connection:
-        result = schema_v4.downmigrate_v4_connection(
-            connection,
-            expected=plan.active,
-            expected_source_documents=plan.source_documents,
-            expected_catalog_descriptor=plan.catalog_descriptor,
-            verified_workspace_digest=plan.workspace_digest,
-            verified_catalog_digest=plan.catalog_digest,
-            recovery_event_id=plan.event_id,
-            recovery_plan_digest=plan.plan_digest,
-            recovery_target_digest=plan.target_digest,
-            downmigrated_at=now,
-        )
-    return result.recovery_terminal_digest
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            result = schema_v4.downmigrate_v4_connection_in_transaction(
+                connection,
+                expected=plan.active,
+                expected_source_documents=plan.source_documents,
+                expected_catalog_descriptor=plan.catalog_descriptor,
+                verified_workspace_digest=plan.workspace_digest,
+                verified_catalog_digest=plan.catalog_digest,
+                recovery_event_id=plan.event_id,
+                recovery_plan_digest=plan.plan_digest,
+                recovery_target_digest=plan.target_digest,
+                downmigrated_at=plan.created_at,
+            )
+            published_digest = store.canonical_uncommitted_v3_digest(connection)
+            marker = marker_session.marker
+            if marker is None:
+                marker_session.begin_prepared(
+                    operation=_OPERATION,
+                    event_id=plan.event_id,
+                    plan_digest=plan.plan_digest,
+                    target_digest=plan.target_digest,
+                    timestamp=plan.created_at,
+                    d0=published_digest,
+                    backup_reference=None,
+                    backup_plan_digest=None,
+                    source_store_digest=None,
+                    schema_fence_generation=plan.schema_fence_generation,
+                )
+            else:
+                _verify_prepared_marker(marker, plan, d0=published_digest)
+            _downmigration_barrier("after_marker_prepare")
+            connection.commit()
+        except (sqlite3.Error, schema_v4.SchemaV4Error):
+            if connection.in_transaction:
+                connection.rollback()
+            raise DownmigrationUnavailable from None
+        except BaseException:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+    return result.recovery_terminal_digest, published_digest
 
 
 def _terminal_plan(
     vault_root: Path,
-    custody: authorization_custody.AuthorizationCustody,
+    custody: authorization_custody.AuthorizationCustody | None,
 ) -> tuple[_RecoveryPlan, str]:
     with _owned_store_connection(
         vault_root,
@@ -1129,6 +1188,9 @@ def _terminal_plan(
                 or blocked_reason is not None
             ):
                 raise DownmigrationUnavailable
+            if custody is None:
+                matches.append((plan, terminal_digest))
+                continue
             control = custody.control
             if (
                 control.activation_store_id == plan.active.activation_store_id
@@ -1153,6 +1215,23 @@ def _complete_receipt(vault_root: Path, plan: _RecoveryPlan) -> None:
         raise DownmigrationUnavailable from None
 
 
+def _publish_legacy_v3_snapshot(
+    vault_root: Path,
+    *,
+    plan: _RecoveryPlan,
+    expected_digest: str,
+) -> None:
+    try:
+        legacy_v3_placement.publish_exact_v3_snapshot(
+            vault_root,
+            expected_digest=expected_digest,
+            event_id=plan.event_id,
+            barrier=lambda point: _downmigration_barrier(f"legacy:{point}"),
+        )
+    except legacy_v3_placement.LegacyV3PublicationUnavailable:
+        raise DownmigrationUnavailable from None
+
+
 def _verify_completed_state(
     vault_root: Path,
     plan: _RecoveryPlan,
@@ -1170,26 +1249,284 @@ def _verify_completed_state(
         raise DownmigrationUnavailable
 
 
-def downmigrate_enrolled_v4_store(
+def _marker_digest(value: object) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise DownmigrationUnavailable
+    return value
+
+
+def _verify_prepared_marker(
+    marker: object,
+    plan: _RecoveryPlan,
+    *,
+    d0: str | None = None,
+) -> dict[str, object]:
+    """Bind a v2 marker to exactly this one plan before any replay effect."""
+
+    if not isinstance(marker, dict) or set(marker) != {
+        "operation",
+        "event_id",
+        "phase",
+        "plan_digest",
+        "target_digest",
+        "timestamp",
+        "d0",
+        "legacy_path",
+        "stage_leaf",
+        "backup_reference",
+        "backup_plan_digest",
+        "source_store_digest",
+        "schema_fence_generation",
+        "d1",
+        "terminal",
+    }:
+        raise DownmigrationUnavailable
+    if (
+        marker.get("operation") != _OPERATION
+        or marker.get("event_id") != plan.event_id
+        or marker.get("plan_digest") != plan.plan_digest
+        or marker.get("target_digest") != plan.target_digest
+        or marker.get("timestamp") != plan.created_at
+        or marker.get("legacy_path") != legacy_v3_placement.legacy_v3_path(Path(".")).as_posix()
+        or marker.get("stage_leaf") != legacy_v3_placement.rollback_stage_leaf(plan.event_id)
+        or marker.get("backup_reference") is not None
+        or marker.get("backup_plan_digest") is not None
+        or marker.get("source_store_digest") is not None
+        or marker.get("schema_fence_generation") != plan.schema_fence_generation
+    ):
+        raise DownmigrationUnavailable
+    marker_d0 = _marker_digest(marker.get("d0"))
+    if d0 is not None and marker_d0 != _marker_digest(d0):
+        raise DownmigrationUnavailable
+    if marker.get("phase") not in {"prepared", "receipt-committed", "legacy-aligned", "complete"}:
+        raise DownmigrationUnavailable
+    return marker
+
+
+def _terminal_endpoint(vault_root: Path, event_id: str) -> dict[str, object]:
+    """Return the exact durable receipt endpoint already proved by D1 evidence."""
+
+    try:
+        with _owned_store_connection(
+            vault_root,
+            schema_version=store.SCHEMA_USER_VERSION,
+            writable=False,
+        ) as connection:
+            instance = connection.execute(
+                "SELECT instance_id FROM receipt_instance WHERE singleton=1"
+            ).fetchone()
+            if instance is None or not isinstance(instance[0], str):
+                raise DownmigrationUnavailable
+            instance_id = instance[0]
+            head = connection.execute(
+                "SELECT durable_seq, durable_hash, observed_seq, observed_hash, path, byte_offset "
+                "FROM receipts_head WHERE instance_id=?",
+                (instance_id,),
+            ).fetchone()
+            if head is None:
+                raise DownmigrationUnavailable
+        records, issues = receipts._chain_state(  # noqa: SLF001 - exact durable locator proof
+            receipts._instance_dir(Path(vault_root), instance_id)  # noqa: SLF001
+        )
+        if issues:
+            raise DownmigrationUnavailable
+        terminals = [
+            record
+            for record in records
+            if record.get("causation_id") == event_id and record.get("phase") == "committed"
+        ]
+        if len(terminals) != 1:
+            raise DownmigrationUnavailable
+        terminal = terminals[0]
+        endpoint = {
+            "instance_id": instance_id,
+            "seq": terminal.get("seq"),
+            "hash": terminal.get("hash"),
+            "path": receipts._relative_locator(  # noqa: SLF001 - shared locator authority
+                Path(vault_root), Path(str(terminal.get("_path", "")))
+            ),
+            "byte_offset": terminal.get("_offset"),
+        }
+        if (
+            not isinstance(endpoint["seq"], int)
+            or endpoint["seq"] < 1
+            or not isinstance(endpoint["hash"], str)
+            or len(endpoint["hash"]) != 64
+            or tuple(head)
+            != (
+                endpoint["seq"],
+                endpoint["hash"],
+                endpoint["seq"],
+                endpoint["hash"],
+                endpoint["path"],
+                endpoint["byte_offset"],
+            )
+        ):
+            raise DownmigrationUnavailable
+        return endpoint
+    except (OSError, sqlite3.Error, receipts.ReceiptError):
+        raise DownmigrationUnavailable from None
+
+
+def _verify_marker_endpoint(
+    marker: dict[str, object], d1: str, endpoint: dict[str, object]
+) -> None:
+    if marker.get("d1") != _marker_digest(d1) or marker.get("terminal") != endpoint:
+        raise DownmigrationUnavailable
+
+
+def _verify_external_marker_d1(root: Path, marker: dict[str, object]) -> None:
+    """Fence-era replay trusts neither a changed external store nor legacy bytes."""
+
+    d1 = _marker_digest(marker.get("d1"))
+    try:
+        observed = legacy_v3_placement.exact_external_v3_digest(root)
+    except legacy_v3_placement.LegacyV3PublicationUnavailable:
+        raise DownmigrationUnavailable from None
+    if observed != d1:
+        raise DownmigrationUnavailable
+
+
+def _marker_plan(
+    root: Path, marker: object, *, custody: authorization_custody.AuthorizationCustody | None
+) -> tuple[_RecoveryPlan, str, dict[str, object]]:
+    plan, terminal_digest = _terminal_plan(root, custody)
+    verified = _verify_prepared_marker(marker, plan)
+    return plan, terminal_digest, verified
+
+
+def _complete_pre_fence_v3(
+    root: Path,
+    *,
+    session: state_migration.GovernanceRollbackSession,
+    plan: _RecoveryPlan,
+    marker: dict[str, object],
+    now: int,
+) -> None:
+    """Advance v3 only through immutable D0, D1 and the final schema fence."""
+
+    d0 = _marker_digest(marker.get("d0"))
+    phase = marker["phase"]
+    if phase == "prepared":
+        try:
+            external_digest = legacy_v3_placement.exact_external_v3_digest(root)
+        except legacy_v3_placement.LegacyV3PublicationUnavailable:
+            raise DownmigrationUnavailable from None
+        if external_digest == d0:
+            _verify_completed_state(root, plan, now=now)
+            _publish_legacy_v3_snapshot(root, plan=plan, expected_digest=d0)
+            _downmigration_barrier("after_legacy_v3_publication")
+            _ensure_receipt_intent(root, plan, must_exist=True)
+            _complete_receipt(root, plan)
+            _downmigration_barrier("after_receipt_commit")
+        d1 = _prove_d1(root, plan=plan, d0=d0)
+        endpoint = _terminal_endpoint(root, plan.event_id)
+        session.advance_receipt_committed(d1, endpoint)
+        marker = _verify_prepared_marker(session.marker, plan)
+        phase = marker["phase"]
+    if phase == "receipt-committed":
+        d1 = _prove_d1(root, plan=plan, d0=d0)
+        endpoint = _terminal_endpoint(root, plan.event_id)
+        _verify_marker_endpoint(marker, d1, endpoint)
+        _align_d1(root, plan=plan, d0=d0, expected_d1=d1)
+        session.advance_legacy_aligned()
+        marker = _verify_prepared_marker(session.marker, plan)
+        phase = marker["phase"]
+    if phase != "legacy-aligned":
+        raise DownmigrationUnavailable
+    d1 = _prove_d1(root, plan=plan, d0=d0)
+    endpoint = _terminal_endpoint(root, plan.event_id)
+    _verify_marker_endpoint(marker, d1, endpoint)
+    _align_d1(root, plan=plan, d0=d0, expected_d1=d1)
+    _complete_plan_schema_fence(plan)
+    _downmigration_barrier("after_schema_fence")
+    session.seal_complete_metadata_only()
+
+
+def _prove_d1(root: Path, *, plan: _RecoveryPlan, d0: str) -> str:
+    try:
+        return legacy_v3_placement.prove_d1_against_legacy(
+            root, event_id=plan.event_id, d0_digest=d0
+        )
+    except legacy_v3_placement.LegacyV3PublicationUnavailable:
+        raise DownmigrationUnavailable from None
+
+
+def _align_d1(root: Path, *, plan: _RecoveryPlan, d0: str, expected_d1: str) -> None:
+    try:
+        aligned = legacy_v3_placement.align_legacy_to_d1(root, event_id=plan.event_id, d0_digest=d0)
+    except legacy_v3_placement.LegacyV3PublicationUnavailable:
+        raise DownmigrationUnavailable from None
+    if aligned != expected_d1:
+        raise DownmigrationUnavailable
+
+
+def _downmigrate_enrolled_v4_store_locked(
     vault_root: Path,
     *,
     now: int,
+    marker_session: state_migration.GovernanceRollbackSession,
 ) -> OfflineDownmigrationResult:
     """Run or replay one explicit, drained, receipt-first v4-to-v3 rollback."""
 
     root = Path(vault_root)
     moment = _bounded_integer(now, minimum=1)
-    custody = _require_drained_custody(root, now=moment)
+    marker = marker_session.marker
     version = store.authorization_session_schema_version(root)
+    if marker is not None and marker.get("phase") in {"legacy-aligned", "complete"}:
+        if version != store.SCHEMA_USER_VERSION:
+            raise DownmigrationUnavailable
+        plan, terminal_digest, verified_marker = _marker_plan(root, marker, custody=None)
+        _verify_external_marker_d1(root, verified_marker)
+        if verified_marker["phase"] == "legacy-aligned":
+            if not _plan_schema_fence_is_complete(plan):
+                # The old writer fence is still authoritative, so legacy proof
+                # remains legal only in the pre-fence branch below.
+                marker = verified_marker
+            else:
+                marker_session.seal_complete_metadata_only()
+                return OfflineDownmigrationResult(
+                    schema_version=3,
+                    active=plan.active,
+                    recovery_event_id=plan.event_id,
+                    recovery_plan_digest=plan.plan_digest,
+                    recovery_target_digest=plan.target_digest,
+                    recovery_terminal_digest=terminal_digest,
+                    replayed=True,
+                )
+        if verified_marker["phase"] == "complete":
+            if not _plan_schema_fence_is_complete(plan):
+                raise DownmigrationUnavailable
+            return OfflineDownmigrationResult(
+                schema_version=3,
+                active=plan.active,
+                recovery_event_id=plan.event_id,
+                recovery_plan_digest=plan.plan_digest,
+                recovery_target_digest=plan.target_digest,
+                recovery_terminal_digest=terminal_digest,
+                replayed=True,
+            )
+    if marker is not None and marker.get("phase") == "complete":
+        # The earlier branch returns; keep this guard explicit if marker
+        # validation above ever changes.
+        raise DownmigrationUnavailable
     if version == store.SCHEMA_USER_VERSION:
-        plan, terminal_digest = _terminal_plan(root, custody)
+        if marker is None:
+            raise DownmigrationUnavailable
+        custody = _require_drained_custody(root, now=moment)
+        plan, terminal_digest, marker = _marker_plan(root, marker, custody=custody)
         _verify_plan_custody(plan, custody, vault_root=root)
-        _verify_completed_state(root, plan, now=moment)
-        _ensure_receipt_intent(root, plan, must_exist=True)
-        _complete_plan_schema_fence(plan)
-        if plan.schema_fence_generation is not None:
-            _downmigration_barrier("after_schema_fence")
-        _complete_receipt(root, plan)
+        _complete_pre_fence_v3(
+            root,
+            session=marker_session,
+            plan=plan,
+            marker=marker,
+            now=moment,
+        )
         return OfflineDownmigrationResult(
             schema_version=3,
             active=plan.active,
@@ -1201,8 +1538,13 @@ def downmigrate_enrolled_v4_store(
         )
     if version != schema_v4.SCHEMA_USER_VERSION:
         raise DownmigrationUnavailable
+    custody = _require_drained_custody(root, now=moment)
     plan = _load_or_prepare_plan(root, custody=custody, now=moment)
     _verify_plan_custody(plan, custody, vault_root=root)
+    if marker is not None:
+        marker = _verify_prepared_marker(marker, plan)
+        if marker.get("phase") != "prepared":
+            raise DownmigrationUnavailable
     _ensure_receipt_intent(root, plan, must_exist=False)
     _downmigration_barrier("after_receipt_intent")
     _stage_plan(root, plan)
@@ -1212,14 +1554,21 @@ def downmigrate_enrolled_v4_store(
     current_custody = _require_drained_custody(root, now=moment)
     _verify_plan_custody(plan, current_custody, vault_root=root)
     _require_plan_schema_fence(plan)
-    terminal_digest = _commit_database(root, plan, now=moment)
+    terminal_digest, published_digest = _commit_database(root, plan, marker_session=marker_session)
     _downmigration_barrier("after_store_commit")
-    _verify_completed_state(root, plan, now=moment)
-    _complete_plan_schema_fence(plan)
-    if plan.schema_fence_generation is not None:
-        _downmigration_barrier("after_schema_fence")
-    _complete_receipt(root, plan)
-    _downmigration_barrier("after_receipt_commit")
+    try:
+        if legacy_v3_placement.exact_external_v3_digest(root) != published_digest:
+            raise DownmigrationUnavailable
+    except legacy_v3_placement.LegacyV3PublicationUnavailable:
+        raise DownmigrationUnavailable from None
+    prepared = _verify_prepared_marker(marker_session.marker, plan, d0=published_digest)
+    _complete_pre_fence_v3(
+        root,
+        session=marker_session,
+        plan=plan,
+        marker=prepared,
+        now=moment,
+    )
     return OfflineDownmigrationResult(
         schema_version=3,
         active=plan.active,
@@ -1229,3 +1578,28 @@ def downmigrate_enrolled_v4_store(
         recovery_terminal_digest=terminal_digest,
         replayed=False,
     )
+
+
+def downmigrate_enrolled_v4_store(
+    vault_root: Path,
+    *,
+    now: int,
+) -> OfflineDownmigrationResult:
+    """Run rollback under the state marker then one reentrant receipt sequence."""
+    root = Path(vault_root)
+    try:
+        with state_migration.governance_rollback_session(root) as marker_session:
+            with receipts.exclusive_sequence(root):
+                return _downmigrate_enrolled_v4_store_locked(
+                    root,
+                    now=now,
+                    marker_session=marker_session,
+                )
+    except (
+        state_migration.StateMigrationOfflineRequired,
+        state_migration.StateMigrationManifestError,
+        state_migration.StatePlacementConflict,
+    ):
+        raise DownmigrationUnavailable from None
+    except (sqlite3.Error, schema_v4.SchemaV4Error, receipts.ReceiptError):
+        raise DownmigrationUnavailable from None

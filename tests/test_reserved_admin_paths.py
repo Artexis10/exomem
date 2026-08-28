@@ -3839,7 +3839,7 @@ def test_private_sqlite_read_probes_retain_their_named_owner_targets(
     assert graph.reads_suspended() is False
     observational = lexical._connect_observational_main()
     observational.close()
-    media_jobs._diagnostic_snapshot_rows(media.path)
+    media_jobs._diagnostic_snapshot_rows(media.path, vault_root=tmp_path)
     assert governance_store.guard_generation_probe(tmp_path)["state"] == "clear"
     assert graph_sync.acknowledgement_state(tmp_path)[0] == "absent"
 
