@@ -266,7 +266,7 @@ def _documents_from_value(value: object) -> tuple[tuple[str, bytes], ...]:
         if not isinstance(item, dict) or set(item) != {"path", "bytes"}:
             raise DownmigrationUnavailable
         relative = _bounded_text(item["path"])
-        if relative in seen or not policy._mirror_relative_path(relative):
+        if relative in seen or not policy._authoring_snapshot_relative_path(relative):
             raise DownmigrationUnavailable
         encoded = item["bytes"]
         if not isinstance(encoded, str):
@@ -328,8 +328,12 @@ def _snapshot_from_value(value: object) -> policy.AuthoringSnapshot:
     if source_fingerprint != policy._document_fingerprint(document_map):
         raise DownmigrationUnavailable
     conflict_digest = _digest(value["conflict_set_digest"])
+    if conflict_digest != policy._path_set_digest(
+        b"exomem.governance-conflict-set.v1", ()
+    ):
+        raise DownmigrationUnavailable
     guard = value["guard_generation"]
-    if not isinstance(guard, str) or len(guard.encode("utf-8")) > 4096:
+    if guard != "":
         raise DownmigrationUnavailable
 
     raw_files = value["file_identities"]
@@ -362,11 +366,9 @@ def _snapshot_from_value(value: object) -> policy.AuthoringSnapshot:
         if not isinstance(item, dict) or set(item) != {"path", "identity"}:
             raise DownmigrationUnavailable
         relative = _bounded_text(item["path"])
-        path = Path(relative)
         if (
-            path.is_absolute()
-            or relative != path.as_posix()
-            or any(part in {"", ".", ".."} for part in path.parts)
+            not policy._authoring_snapshot_relative_path(relative)
+            or relative in document_map
         ):
             raise DownmigrationUnavailable
         directories.append((relative, _identity_from_value(item["identity"], kind="directory")))
@@ -374,11 +376,19 @@ def _snapshot_from_value(value: object) -> policy.AuthoringSnapshot:
         sorted({relative for relative, _ in directories})
     ):
         raise DownmigrationUnavailable
+    required_directories = {
+        parent.as_posix()
+        for relative in (*document_map, *(relative for relative, _ in directories))
+        for parent in Path(relative).parents
+        if parent.as_posix() != "."
+    }
+    if not required_directories <= {relative for relative, _ in directories}:
+        raise DownmigrationUnavailable
     root_value = value["governance_root_identity"]
     root_identity = (
         None if root_value is None else _identity_from_value(root_value, kind="directory")
     )
-    if documents and root_identity is None:
+    if root_identity is None and (documents or directories):
         raise DownmigrationUnavailable
     return policy.AuthoringSnapshot(
         documents=documents,
@@ -474,6 +484,10 @@ def _plan_from_parts(
     schema_fence_generation: int | None,
     created_at: int,
 ) -> _RecoveryPlan:
+    if policy._immutable_companion_documents(
+        dict(reviewed_workspace.documents)
+    ) != policy._immutable_companion_documents(dict(active_snapshot.source_documents)):
+        raise DownmigrationUnavailable
     workspace_digest = schema_v4.source_documents_digest(active_snapshot.source_documents)
     catalog_digest = schema_v4.catalog_rebuild_digest(active_snapshot.catalog_descriptor)
     membership = custody.serving_membership
@@ -585,6 +599,10 @@ def _plan_from_json(
     active = _active_from_value(value["active"])
     reviewed = _snapshot_from_value(value["reviewed_workspace"])
     source_documents = _documents_from_value(value["source_documents"])
+    if policy._immutable_companion_documents(
+        dict(reviewed.documents)
+    ) != policy._immutable_companion_documents(dict(source_documents)):
+        raise DownmigrationUnavailable
     encoded_descriptor = value["catalog_descriptor"]
     if not isinstance(encoded_descriptor, str):
         raise DownmigrationUnavailable

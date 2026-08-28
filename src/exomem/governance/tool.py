@@ -3362,6 +3362,10 @@ def _v4_mirror_relative_path(relative: str) -> bool:
     )
 
 
+def _v4_authoring_snapshot_relative_path(relative: str) -> bool:
+    return policy_module._authoring_snapshot_relative_path(relative)
+
+
 def _decoded_stable_identity(value: object, *, kind: str) -> held_fs.StableIdentity:
     if not isinstance(value, dict) or set(value) != {
         "device",
@@ -3414,7 +3418,10 @@ def _decoded_v4_authoring_snapshot(value: object) -> policy_module.AuthoringSnap
         )
     documents = _decoded_bound_documents(value["documents"])
     document_map = dict(documents)
-    if any(not _v4_mirror_relative_path(relative) for relative in document_map):
+    if any(
+        not _v4_authoring_snapshot_relative_path(relative)
+        for relative in document_map
+    ):
         raise GovernanceError(
             "INVALID_GOVERNANCE_PROPOSAL",
             "stored governance authoring path is invalid",
@@ -3475,12 +3482,10 @@ def _decoded_v4_authoring_snapshot(value: object) -> policy_module.AuthoringSnap
                 "stored governance authoring directories are invalid",
             )
         relative = item["path"]
-        path = Path(relative) if isinstance(relative, str) else None
         if (
-            path is None
-            or path.is_absolute()
-            or relative != path.as_posix()
-            or any(part in {"", ".", ".."} for part in path.parts)
+            not isinstance(relative, str)
+            or not _v4_authoring_snapshot_relative_path(relative)
+            or relative in document_map
             or relative in seen_directories
         ):
             raise GovernanceError(
@@ -3501,13 +3506,24 @@ def _decoded_v4_authoring_snapshot(value: object) -> policy_module.AuthoringSnap
             "INVALID_GOVERNANCE_PROPOSAL",
             "stored governance authoring directories are not ordered",
         )
+    required_directories = {
+        parent.as_posix()
+        for relative in (*document_map, *seen_directories)
+        for parent in Path(relative).parents
+        if parent.as_posix() != "."
+    }
+    if not required_directories <= seen_directories:
+        raise GovernanceError(
+            "INVALID_GOVERNANCE_PROPOSAL",
+            "stored governance authoring directories are incomplete",
+        )
     root_value = value["governance_root_identity"]
     root_identity = (
         None
         if root_value is None
         else _decoded_stable_identity(root_value, kind="directory")
     )
-    if (root_identity is None) != (not documents):
+    if root_identity is None and (documents or directories):
         raise GovernanceError(
             "INVALID_GOVERNANCE_PROPOSAL",
             "stored governance authoring root is invalid",
@@ -3521,7 +3537,8 @@ def _decoded_v4_authoring_snapshot(value: object) -> policy_module.AuthoringSnap
         or _SHA256_RE.fullmatch(source_fingerprint) is None
         or source_fingerprint != compiled.fingerprint
         or not isinstance(conflict_digest, str)
-        or _SHA256_RE.fullmatch(conflict_digest) is None
+        or conflict_digest
+        != policy_module._path_set_digest(b"exomem.governance-conflict-set.v1", ())
         or not isinstance(guard_generation, str)
         or not guard_generation
     ):
@@ -3714,7 +3731,10 @@ def _decode_v4_proposal_binding(
             "stored governance target is invalid",
         )
     target_documents = _decoded_bound_documents(target["source_documents"])
-    if any(not _v4_mirror_relative_path(relative) for relative, _ in target_documents):
+    if any(
+        not _v4_authoring_snapshot_relative_path(relative)
+        for relative, _ in target_documents
+    ):
         raise GovernanceError(
             "INVALID_GOVERNANCE_PROPOSAL",
             "stored governance target path is invalid",
@@ -3912,6 +3932,13 @@ def _decode_v4_proposal_binding(
                     "the reviewed catalog reuse does not verify",
                 )
     snapshot = _decoded_v4_authoring_snapshot(binding["authoring_snapshot"])
+    if policy_module._immutable_companion_documents(
+        dict(snapshot.documents)
+    ) != policy_module._immutable_companion_documents(dict(target_documents)):
+        raise GovernanceError(
+            "INVALID_GOVERNANCE_PROPOSAL",
+            "stored governance companion target is invalid",
+        )
     return _DecodedV4PolicyProposal(
         payload=payload,
         expected=expected,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
@@ -37,6 +38,84 @@ ACTIVE_DOCUMENTS = (
         b"governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAW\npaths:\n  - Sources/**\n",
     ),
 )
+
+
+@pytest.mark.parametrize(
+    "relative",
+    (
+        "",
+        "/README.md",
+        "C:/README.md",
+        "README\\.md",
+        "README\x00.md",
+        "./README.md",
+        "../README.md",
+        "folder//README.md",
+        "events/README.md",
+        "README (conflicted copy 2026-08-29).md",
+    ),
+)
+def test_persisted_source_documents_refuse_unsafe_companion_paths(relative: str) -> None:
+    with pytest.raises(schema_downmigration.DownmigrationUnavailable):
+        schema_downmigration._documents_from_value(  # noqa: SLF001 - decoder fence
+            [{"path": relative, "bytes": "eA=="}]
+        )
+
+
+def _persisted_snapshot_value(
+    documents: tuple[str, ...],
+    directories: tuple[str, ...],
+) -> dict[str, object]:
+    document_map = {relative: b"x" for relative in documents}
+    identity = {"device": 1, "inode": 1, "kind": "file", "link_count": 1}
+    directory_identity = {
+        "device": 1,
+        "inode": 2,
+        "kind": "directory",
+        "link_count": 1,
+    }
+    return {
+        "documents": [
+            {"path": relative, "bytes": "eA=="} for relative in documents
+        ],
+        "source_fingerprint": policy._document_fingerprint(document_map),
+        "conflict_set_digest": policy._path_set_digest(
+            b"exomem.governance-conflict-set.v1", ()
+        ),
+        "guard_generation": "",
+        "file_identities": [
+            {
+                "path": relative,
+                "identity": identity,
+                "sha256": hashlib.sha256(b"x").hexdigest(),
+            }
+            for relative in documents
+        ],
+        "directory_identities": [
+            {"path": relative, "identity": directory_identity}
+            for relative in directories
+        ],
+        "governance_root_identity": directory_identity,
+    }
+
+
+@pytest.mark.parametrize(
+    ("documents", "directories"),
+    (
+        (("foo",), ("foo/bar",)),
+        (("foo/bar/baz",), ("foo/bar",)),
+        ((), ("foo/bar",)),
+    ),
+    ids=("file-ancestor", "missing-document-ancestor", "missing-directory-ancestor"),
+)
+def test_persisted_snapshot_refuses_impossible_directory_topology(
+    documents: tuple[str, ...],
+    directories: tuple[str, ...],
+) -> None:
+    with pytest.raises(schema_downmigration.DownmigrationUnavailable):
+        schema_downmigration._snapshot_from_value(  # noqa: SLF001 - decoder fence
+            _persisted_snapshot_value(documents, directories)
+        )
 PENDING_DOCUMENTS = tuple(
     (relative, content + b"# pending direct edit\n") for relative, content in ACTIVE_DOCUMENTS
 )
@@ -633,6 +712,41 @@ def test_offline_downmigration_reuses_intent_after_prepared_plan_was_not_written
     records = _receipt_records(vault)
     assert [item["phase"] for item in records[-2:]] == ["intent", "committed"]
     assert records[-2]["event_id"] == result.recovery_event_id
+
+
+def test_offline_downmigration_resumes_a_prepared_plan_with_an_unchanged_companion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _vault(tmp_path)
+    readme = vault / "Knowledge Base" / "_Governance" / "README.md"
+    readme.write_bytes(b"# Governance authoring\n")
+    now = int(time.time())
+    _migrate(vault, now=now)
+    _set_pending_workspace(vault)
+    _drain_verified_membership(monkeypatch)
+
+    def crash(point: str) -> None:
+        if point == "after_plan_prepare":
+            raise RuntimeError("injected prepared-plan crash")
+
+    monkeypatch.setattr(schema_downmigration, "_downmigration_barrier", crash)
+    with pytest.raises(RuntimeError, match="prepared-plan"):
+        schema_downmigration.downmigrate_enrolled_v4_store(vault, now=now + 3)
+
+    assert _schema_version(vault) == 4
+    assert readme.read_bytes() == b"# Governance authoring\n"
+
+    monkeypatch.setattr(schema_downmigration, "_downmigration_barrier", lambda _point: None)
+    result = schema_downmigration.downmigrate_enrolled_v4_store(vault, now=now + 4)
+
+    assert result.replayed is False
+    final = policy.observe_authoring_snapshot(vault)
+    assert final is not None
+    assert final.documents == (
+        ("README.md", b"# Governance authoring\n"),
+        *ACTIVE_DOCUMENTS,
+    )
 
 
 def test_offline_downmigration_resumes_a_partially_mirrored_workspace(

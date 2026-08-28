@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
@@ -75,6 +76,116 @@ def test_exact_workspace_mirror_replaces_adds_and_removes_under_one_guard(
     assert final is not None
     assert final.documents == target
     assert not (root / "scopes" / "remove.yaml").exists()
+
+
+def test_exact_workspace_mirror_preserves_reviewed_companions_while_updating_yaml(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    root = _workspace(vault)
+    readme = root / "README.md"
+    readme.write_bytes(b"# Governance authoring\n")
+    (root / "scopes" / "a.yaml").write_bytes(POLICY_A)
+    reviewed = policy.observe_authoring_snapshot(vault)
+    assert reviewed is not None
+    target = (
+        ("README.md", b"# Governance authoring\n"),
+        ("scopes/a.yaml", POLICY_B),
+    )
+    events: list[tuple[str, str]] = []
+
+    assert (
+        _mirror(
+            vault,
+            reviewed=reviewed,
+            target_documents=target,
+            barrier=lambda phase, relative: events.append((phase, relative)),
+        )
+        == "complete"
+    )
+
+    final = policy.observe_authoring_snapshot(vault)
+    assert final is not None and final.documents == target
+    assert readme.read_bytes() == b"# Governance authoring\n"
+    assert events == [
+        ("before_write", "scopes/a.yaml"),
+        ("after_write", "scopes/a.yaml"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("target_companions", "expected"),
+    (
+        ((("NEW.md", b"new\n"), ("README.md", b"reviewed\n")), "reviewed\n"),
+        ((("README.md", b"changed\n"),), "reviewed\n"),
+        ((), "reviewed\n"),
+    ),
+    ids=("novel", "changed", "omitted"),
+)
+def test_exact_workspace_mirror_refuses_companion_target_drift_without_writes(
+    tmp_path: Path,
+    target_companions: tuple[tuple[str, bytes], ...],
+    expected: str,
+) -> None:
+    vault = tmp_path / "vault"
+    root = _workspace(vault)
+    readme = root / "README.md"
+    readme.write_text("reviewed\n", encoding="utf-8")
+    path = root / "scopes" / "a.yaml"
+    path.write_bytes(POLICY_A)
+    reviewed = policy.observe_authoring_snapshot(vault)
+    assert reviewed is not None
+    target = tuple(sorted((*target_companions, ("scopes/a.yaml", POLICY_B))))
+    events: list[tuple[str, str]] = []
+
+    assert (
+        _mirror(
+            vault,
+            reviewed=reviewed,
+            target_documents=target,
+            barrier=lambda phase, relative: events.append((phase, relative)),
+        )
+        == "diverged"
+    )
+
+    assert readme.read_text(encoding="utf-8") == expected
+    assert path.read_bytes() == POLICY_A
+    assert not (root / "NEW.md").exists()
+    assert events == []
+
+
+def test_exact_workspace_mirror_refuses_replaced_companion_identity_without_writes(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    root = _workspace(vault)
+    readme = root / "README.md"
+    readme.write_bytes(b"reviewed\n")
+    path = root / "scopes" / "a.yaml"
+    path.write_bytes(POLICY_A)
+    reviewed = policy.observe_authoring_snapshot(vault)
+    assert reviewed is not None
+    replacement = root / "README.replacement"
+    replacement.write_bytes(b"reviewed\n")
+    os.replace(replacement, readme)
+    events: list[tuple[str, str]] = []
+
+    assert (
+        _mirror(
+            vault,
+            reviewed=reviewed,
+            target_documents=(
+                ("README.md", b"reviewed\n"),
+                ("scopes/a.yaml", POLICY_B),
+            ),
+            barrier=lambda phase, relative: events.append((phase, relative)),
+        )
+        == "diverged"
+    )
+
+    assert readme.read_bytes() == b"reviewed\n"
+    assert path.read_bytes() == POLICY_A
+    assert events == []
 
 
 def test_exact_workspace_mirror_refuses_unreviewed_drift_without_writes(

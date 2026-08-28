@@ -67,6 +67,12 @@ outcome. Source/generation parity and recovery SHALL recompile only the exact so
 bytes stored in the immutable generation; no recovery path may infer active authority
 from a fresh workspace walk.
 
+Only canonical policy YAML beneath `scopes`, `rules`, or `grants` is mutable mirror
+input. Canonical safe non-operational companion files may be captured in a reviewed
+snapshot, but are immutable pass-through: planning and durable replay require exact
+bidirectional path-to-bytes equality with the target, and the mirror emits no companion
+write, delete, or authority effect.
+
 On successful tuple activation, commit SHALL archive the predecessor generation,
 publish the new policy fingerprint on the next request, and preserve any independently
 edited workspace bytes for a future proposal. Backup/restore and rebuild SHALL require
