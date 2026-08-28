@@ -563,6 +563,71 @@ def test_actual_old_v3_binary_is_write_fenced_from_v4_and_reopens_only_after_rol
         assert visible.read_bytes() == before_visible
         assert not list((vault / "Knowledge Base" / "Notes").rglob("old-writer-must-not-land.md"))
 
+        original_mirror = policy.mirror_authoring_workspace
+
+        def diagnostic_mirror(
+            vault_root: Path,
+            *,
+            reviewed: policy.AuthoringSnapshot,
+            target_documents: tuple[tuple[str, bytes], ...],
+            barrier: object | None = None,
+        ) -> str:
+            result = original_mirror(
+                vault_root,
+                reviewed=reviewed,
+                target_documents=target_documents,
+                barrier=barrier,
+            )
+            if result == "complete":
+                return result
+            current = policy.observe_authoring_snapshot(vault_root)
+            plan = (
+                None
+                if current is None
+                else policy._workspace_mirror_plan(  # noqa: SLF001
+                    current,
+                    reviewed,
+                    target_documents,
+                )
+            )
+            reviewed_documents = dict(reviewed.documents)
+            current_documents = {} if current is None else dict(current.documents)
+            reviewed_directories = dict(reviewed.directory_identities)
+            current_directories = {} if current is None else dict(current.directory_identities)
+            reviewed_files = {item.path: item for item in reviewed.file_identities}
+            current_files = (
+                {} if current is None else {item.path: item for item in current.file_identities}
+            )
+            document_names = sorted(set(reviewed_documents) | set(current_documents))
+            discriminator = {
+                "result": result,
+                "current_snapshot_none": current is None,
+                "plan_none": plan is None,
+                "root_identity_match": (
+                    False
+                    if current is None
+                    else policy._same_authoring_identity(  # noqa: SLF001
+                        current.governance_root_identity,
+                        reviewed.governance_root_identity,
+                    )
+                ),
+                "extra_documents": sorted(set(current_documents) - set(reviewed_documents)),
+                "missing_documents": sorted(set(reviewed_documents) - set(current_documents)),
+                "extra_directories": sorted(set(current_directories) - set(reviewed_directories)),
+                "missing_directories": sorted(set(reviewed_directories) - set(current_directories)),
+                "document_bytes_equal": {
+                    name: current_documents.get(name) == reviewed_documents.get(name)
+                    for name in document_names
+                },
+                "mismatched_file_identities": sorted(
+                    name
+                    for name in set(reviewed_files) | set(current_files)
+                    if current_files.get(name) != reviewed_files.get(name)
+                ),
+            }
+            raise AssertionError(f"downmigration workspace discriminator: {discriminator}")
+
+        monkeypatch.setattr(policy, "mirror_authoring_workspace", diagnostic_mirror)
         _drain_verified_membership(monkeypatch)
         result = schema_downmigration.downmigrate_enrolled_v4_store(
             vault,
