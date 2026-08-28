@@ -59,6 +59,22 @@ The worker uses the official Kubernetes client and pinned Helm CLI. Its RBAC can
 
 Alternative considered: run Helm/Terraform synchronously from the Vercel cron. Rejected because cron budgets are shorter than storage/export/restore work and neither Vercel nor Kubernetes apply provides durable idempotency/fencing.
 
+### Keep exceptional operation recovery narrow and transactional
+
+A terminal provision operation may be reopened only for the historical init-observation false negative with exact state `PROVISION / ERROR / failed / PROVISIONER_PROVIDER_METADATA_CONFLICT`. The signed provisioner image contains a one-purpose operator command, not a general operation editor or HTTP endpoint. It accepts the internal operation identifier only over standard input or a current-user-owned mode-`0600` file, revalidates the stored request, resource identities, capacity reservation, runtime target, live provider state, and compare-and-swap row under the normal fence-first lock order, then changes only the operation state to `PENDING / volume-owned` and clears terminal/claim fields. An append-only content-free recovery receipt and that transition commit in the same PostgreSQL transaction. The operation's request, identities, fences, resources, reservation, progress, retry contract, and creation time remain unchanged.
+
+Alternative considered: raw SQL or a general recovery endpoint. Rejected because either would bypass authenticated encrypted state, live provider identity, fencing, and the transactional audit needed to prove that an existing resource set was resumed rather than duplicated.
+
+### Select destructive authority explicitly and release only owned leases
+
+Deletion authority is the singleton live `discard` or `destroy` claim selected by the caller's tenant, external operation, fence, claim token, and unexpired lease. Maintenance or final historical rows sharing identifiers are never eligible, and multiple eligible rows fail closed. The authority query preserves the `TenantFence -> Operation` lock order.
+
+Maintenance Lease release preserves its UID and resource-version deletion preconditions and deletes only the version owned by the worker. Client-library calling convention changes may alter how that precondition document is passed, but cannot weaken ownership, expiry, retry, checkpoint, or provider-operation semantics.
+
+### Keep one specification authority
+
+This change and the canonical `openspec/specs/` tree absorb the durable contracts that previously lived under `docs/superpowers/`. Local-client reliability and connector edit normalization already have archived OpenSpec changes; media retry remains in the canonical media-processing reliability spec; init-retry recovery, deletion authority, and Lease ownership are captured here. Black-box scheduling and CI sharding are routine workflow contracts already pinned by workflows, runbooks, and tests. Their Git history remains evidence, not a second specification system.
+
 ### Freeze one runtime release unit before chart work
 
 Exomem image digest, Exomem release, hosted protocol, generated command registry, and contract digest form one immutable release unit. Phase 0 refreshes PR #227/#32, adds supported init/offline restore/active-pending credential rotation, regenerates the Substrate fixture, and verifies the deployed private contract through the real route.

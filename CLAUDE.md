@@ -83,6 +83,19 @@ by later work when refreshing a stale `MODIFIED` block, and run
 `openspec validate --all --strict` before and after the archive. A task-complete
 active change is archive debt and CI rejects it.
 
+## OpenSpec is the sole specification system
+
+<!-- spec-system:openspec-only -->
+
+Use `openspec/` for durable change proposals, designs, requirements, and task
+plans. Do not create, read as current authority, or revive
+`docs/superpowers/` or any parallel specification tree. Before deleting legacy
+planning documents, migrate any unique durable contract into the relevant
+existing OpenSpec artifact; leave routine implementation history to code,
+tests, runbooks, and Git. Routine restorative fixes and operational repair do
+not need a new OpenSpec change. New capabilities, contract changes, and
+non-trivial repairs do.
+
 ## Memory boundary
 
 Treat Claude, ChatGPT, Codex, and other assistants' native memory as short-term
