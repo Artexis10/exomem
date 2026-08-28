@@ -1,9 +1,11 @@
-# Terminal review surface — requirements handoff
+<!-- authority:implementation-reference -->
 
-Audience: the implementation session for OpenSpec change
-`add-terminal-review-surface`. This document is requirements-only; no TUI
-code exists yet (verified 2026-07-31: no active or archived TUI change
-anywhere in `openspec/`). It is informed by the benchmark-foundation audit
+# Terminal review surface — historical exploration
+
+This is non-authoritative product exploration, not approved requirements or an
+implementation brief. If the terminal surface is revived, create an OpenSpec
+change and make that change the sole durable design and requirements authority.
+This historical note was informed by the benchmark-foundation audit
 (`docs/memory-proof-benchmark.md`) and by a UX audit of Gray Box's hand-rolled
 terminal UI (MIT, `~/projects/graybox`).
 

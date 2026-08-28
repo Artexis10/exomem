@@ -73,7 +73,7 @@ Maintenance Lease release preserves its UID and resource-version deletion precon
 
 ### Keep one specification authority
 
-This change and the canonical `openspec/specs/` tree absorb the durable contracts that previously lived under `docs/superpowers/`. Local-client reliability and connector edit normalization already have archived OpenSpec changes; media retry remains in the canonical media-processing reliability spec; init-retry recovery, deletion authority, and Lease ownership are captured here. Black-box scheduling and CI sharding are routine workflow contracts already pinned by workflows, runbooks, and tests. Their Git history remains evidence, not a second specification system.
+This change and the canonical `openspec/specs/` tree absorb the durable contracts that previously lived under `docs/superpowers/`. Local-client reliability has an archived OpenSpec change, connector edit normalization is explicit in the canonical command-surface specification, media retry remains in the canonical media-processing reliability spec, and init-retry recovery, deletion authority, and Lease ownership are captured here. Black-box scheduling and CI sharding are routine workflow contracts already pinned by workflows, runbooks, and tests. Their Git history remains evidence, not a second specification system.
 
 ### Freeze one runtime release unit before chart work
 

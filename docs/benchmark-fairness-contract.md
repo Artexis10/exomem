@@ -1,9 +1,11 @@
+<!-- authority:implementation-reference -->
+
 # Benchmark fairness contract
 
-The rules an adversarial reviewer checks before believing any comparative
-number from this repository. Normative source: OpenSpec capability
+An operational companion used when running and reviewing benchmarks. It is not
+a separate specification authority. Normative source: OpenSpec capability
 `benchmark-fairness-contract` (change `add-competitive-benchmark-programme`);
-this document is the human-readable companion. History: the 2026-08-08
+this document is the human-readable implementation reference. History: the 2026-08-08
 independent audit rejected the prior head-to-head because its author
 configured the competitor; this contract exists so that defect class is
 structurally impossible, not merely discouraged.

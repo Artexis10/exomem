@@ -160,6 +160,31 @@ REST binary-blob guard for text fields SHALL be preserved.
 - **THEN** it is rejected with the existing `BINARY_BLOB_REJECTED`-class error,
   as before
 
+### Requirement: Connector-encoded batch edits preserve canonical validation
+
+The public `edit_memory` tool SHALL advertise batch items as an object array.
+At runtime, its typed pre-validation adapter MAY also accept connector-supplied
+JSON-object strings for individual items. Each such string SHALL be decoded
+before canonical edit validation; malformed JSON, non-object JSON, missing
+fields, and all other unsupported item types SHALL be rejected through the
+existing `INVALID_EDIT` path. Encoding SHALL NOT relax content safety: decoded text still passes the binary-blob guard in both middleware and the edit leaf.
+Expected hashes, semantic preflight, idempotency, and guarded commit behavior
+remain unchanged.
+
+#### Scenario: Connector stringifies valid batch items
+
+- **WHEN** a connector sends an `edit_memory` batch whose items are valid
+  JSON-object strings representing the advertised object shape
+- **THEN** the adapter decodes them and the canonical edit validator processes
+  them exactly as object items
+
+#### Scenario: Encoded input cannot bypass edit validation
+
+- **WHEN** a connector sends malformed JSON, non-object JSON, an incomplete
+  object, or encoded binary-blob content as a batch item
+- **THEN** the request is rejected through `INVALID_EDIT` or the unchanged
+  binary-blob rejection path before mutation
+
 ### Requirement: Bootstrap Is Exposed On Every Generated Surface
 The system SHALL expose `bootstrap` through the single command registry on MCP,
 REST, CLI, and OpenAPI. The tool SHALL be marked read-only and non-destructive in
@@ -2084,4 +2109,3 @@ returned.
 - **WHEN** the exact same generic reserved-path mutation is issued on each surface
 - **THEN** each returns the shared stable code/remediation, performs no write, and emits
   no resolved path or tree metadata
-

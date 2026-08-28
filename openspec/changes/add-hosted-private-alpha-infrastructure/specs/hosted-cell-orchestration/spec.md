@@ -46,7 +46,7 @@ Each of the existing 14 action responses SHALL be a strict union of a pending ch
 - **THEN** replay of the original action/key resumes from durable progress without duplicate side effects
 
 ### Requirement: Exceptional init-retry recovery is exact, private, and transactional
-The provisioner SHALL expose an operator-only helper inside the signed image that can reopen only an exact `PROVISION / ERROR / failed / PROVISIONER_PROVIDER_METADATA_CONFLICT` operation to `PROVISION / PENDING / volume-owned`. It MUST NOT expose a general operation editor or HTTP recovery endpoint, accept caller-selected lifecycle fields, or receive the confidential operation identifier through command-line arguments. Before mutation it SHALL validate the exact PostgreSQL role/schema/revision; old operation state; tenant fence and lock conflicts; decrypted canonical request and request hash; immutable tenant, cell, provider-operation, protocol, runtime-target, and fence identity; exact durable resource set and authenticated references; one unreleased USER reservation; and two stable non-terminating live provider observations. It SHALL preserve the request, identities, fences, resources, reservation, progress, retry interval, claim generation, result fields, and creation timestamp. The single compare-and-swap transition and one append-only content-free recovery receipt SHALL commit in the same PostgreSQL transaction or neither SHALL commit.
+The provisioner SHALL expose an operator-only helper inside the signed image that can reopen only an exact `PROVISION / ERROR / failed / PROVISIONER_PROVIDER_METADATA_CONFLICT` operation to `PROVISION / PENDING / volume-owned`. It MUST NOT expose a general operation editor or HTTP recovery endpoint, accept caller-selected lifecycle fields, or receive the confidential operation identifier through command-line arguments. Before mutation it SHALL validate the exact PostgreSQL role/schema/revision; old operation state; tenant fence and lock conflicts; decrypted canonical request and request hash; immutable tenant, cell, provider-operation, protocol, runtime-target, and fence identity; exact durable resource set and authenticated references; one unreleased USER reservation; and two stable non-terminating live provider observations. The init Job is absent in a valid observation when its TTL has already removed it. If present, it SHALL be authenticated and non-terminating and SHALL either still be running or reports `Complete=True`. A Failed-only init Job and a terminating init Job SHALL be refused. It SHALL preserve the request, identities, fences, resources, reservation, progress, retry interval, claim generation, result fields, and creation timestamp. The single compare-and-swap transition and one append-only content-free recovery receipt SHALL commit in the same PostgreSQL transaction or neither SHALL commit.
 
 #### Scenario: Exact historical false negative resumes in place
 - **WHEN** the stored operation has the exact eligible terminal shape, every durable and live identity matches, no conflicting claim or fence exists, and the second observation is stable
@@ -59,6 +59,25 @@ The provisioner SHALL expose an operator-only helper inside the signed image tha
 #### Scenario: Repeated recovery cannot reopen again
 - **WHEN** the helper is invoked after the transition committed or after another actor progressed the operation
 - **THEN** it returns the verified existing receipt or `already-progressed` without another mutation
+
+#### Scenario: Init Job TTL expiry is a valid recovery observation
+
+- **WHEN** every recovery invariant matches and the init Job is absent because
+  its TTL removed it
+- **THEN** recovery may reopen the operation for the normal idempotent
+  initializer replay
+
+#### Scenario: Present init Job must be safe to observe
+
+- **WHEN** the init Job is authenticated, non-terminating, and either running
+  or reports `Complete=True`
+- **THEN** its state is eligible for the otherwise exact recovery preflight
+
+#### Scenario: Failed or terminating init Job refuses recovery
+
+- **WHEN** recovery observes a Failed-only init Job or a terminating init Job
+- **THEN** it refuses without changing the operation, receipt table,
+  resources, or reservation
 
 ### Requirement: Provision creates one fixed isolated cell
 Provision SHALL create a namespace and versioned Helm release with one single-replica StatefulSet, one 10 GiB encrypted PVC, one ClusterIP Service, one no-API ServiceAccount, private Secrets, ResourceQuota, LimitRange, restricted Pod Security labels, default-deny policies, and restricted routes. Kubernetes quota SHALL permit exactly that one 10 GiB claim and deny a second claim; the separate 5 GiB application entitlement MUST NOT be encoded as a 5 GiB PVC storage quota. It SHALL use only an opaque immutable cell identifier in resource names/labels, preserve the original cell ID in runtime configuration, and SHALL NOT store a person's name or email.

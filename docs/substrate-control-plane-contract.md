@@ -1,8 +1,10 @@
-# Substrate companion control-plane contract
+<!-- authority:implementation-reference -->
 
-This document is the repository boundary for the managed Exomem service. It
-defines what the companion Substrate change must provide around private,
-single-vault Exomem cells. It is intentionally provider-neutral at the cell
+# Substrate companion control-plane implementation reference
+
+This is a readable summary of the repository boundary defined by the hosted
+OpenSpec capabilities. It is not a separate contract or specification
+authority. The implementation boundary remains provider-neutral at the cell
 boundary even though the first billing adapter is Paddle.
 
 ## Ownership split
