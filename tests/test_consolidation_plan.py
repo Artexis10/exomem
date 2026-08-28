@@ -3,7 +3,9 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 from collections.abc import Callable
+from pathlib import Path
 
 import pytest
 
@@ -37,36 +39,8 @@ def _policy_document() -> dict[str, object]:
     }
 
 
-def _rendering_definition() -> dict[str, object]:
-    section_ids = (
-        "impact-summary",
-        "content-actions",
-        "policy",
-        "principals-disclosure",
-        "verification",
-        "rollback-retention",
-    )
-    return {
-        "schema": "exomem.consolidation-rendering-definition/v1",
-        "page_size": 20,
-        "page_count": len(section_ids),
-        "total_rows": len(section_ids),
-        "sections": [
-            {
-                "ordinal": ordinal,
-                "section_id": section_id,
-                "row_count": 1,
-                "first_page_ordinal": ordinal,
-                "page_count": 1,
-                "content_digest": _digest(f"section:{section_id}"),
-            }
-            for ordinal, section_id in enumerate(section_ids)
-        ],
-    }
-
-
 def _plan_input() -> dict[str, object]:
-    return {
+    value = {
         "schema": "exomem.consolidation-plan/v1",
         "protocol_version": 1,
         "plan_kind": "cutover",
@@ -140,26 +114,30 @@ def _plan_input() -> dict[str, object]:
             "rollback_consequence": "The prior destination bytes remain recoverable.",
             "surviving_copy_obligation": "Keep one verified source copy through recovery.",
         },
-        "rendering_definition": _rendering_definition(),
         "created_at": CREATED_AT,
         "valid_until": VALID_UNTIL,
         "nonce": NONCE,
     }
+    value["rendering_definition"] = consolidation_plan.derive_rendering_definition(value)
+    return value
 
 
-def _materialization() -> consolidation_plan.PlanMaterializationContext:
+def _materialization(
+    *,
+    basis_run_revision: int = 7,
+) -> consolidation_plan.PlanMaterializationContext:
     return consolidation_plan.PlanMaterializationContext(
         operation_id=OPERATION_ID,
-        basis_run_revision=7,
+        basis_run_revision=basis_run_revision,
         predecessor_event_id=_digest("reconcile-terminal"),
         predecessor_payload_digest=_digest("reconcile-payload"),
     )
 
 
-def _plan() -> consolidation_plan.CanonicalConsolidationPlan:
+def _plan(*, basis_run_revision: int = 7) -> consolidation_plan.CanonicalConsolidationPlan:
     return consolidation_plan.materialize_plan(
         _plan_input(),
-        materialization=_materialization(),
+        materialization=_materialization(basis_run_revision=basis_run_revision),
     )
 
 
@@ -219,22 +197,22 @@ def test_plan_has_one_closed_cross_runtime_canonical_vector() -> None:
 
     assert set(plan.preimage) == EXPECTED_TOP_LEVEL_FIELDS
     assert set(plan.control_basis.preimage) == EXPECTED_CONTROL_BASIS_FIELDS
-    assert plan.digest == "062739152e58992e29a8a224f01f7aee45f6941a6622aeb82ed76f374c4d1f76"
+    assert plan.digest == "8a999da89e1ffea6fc39a5be071f11b697733674f98b383a2786a25bc52819e8"
     assert plan.plan_input_set_digest == (
-        "14313cde01a2586e455ae0235ad5971451d5c7b7d34aaec34772338f7c90ae09"
+        "1c2498af2ee36226a2d8a2f492a4a701c26ec18a8b5d7ac0f2f8d5de19689b76"
     )
     assert plan.control_basis.digest == (
-        "4adcd528d34f4784ceaef8b67c33998a34af8fff0c3d418ba97b44efc34d9a04"
+        "9d34ae072e4bb0a1210ed7b5ce64d112978d2f295af84bf38c2852a7c39aadb5"
     )
     assert plan.impact_summary_digest == (
         "e6ec13c6d5a662678910a04d60d67cc095480b907cb8f30751399977ac6ec46f"
     )
     assert plan.rendering_definition_digest == (
-        "feafeaf811ca3c02b13afaacd0e731846b812e753fc519e7dd9a9d15422b0172"
+        "f156fef8cac9c177c52b17038bb16be32ee3e3cac680cf9d115c6f8c25dd6d57"
     )
     assert len(plan.canonical_bytes) == 5178
     assert hashlib.sha256(plan.canonical_bytes).hexdigest() == (
-        "e03ad068536f73875d679c39f0298463d94d32ced350cf28c794a9f5c8c8b816"
+        "863fbd64bc8ede83bea2cbc6a090bd5d448e177c6487ee5a20a553bb54305443"
     )
     assert len(plan.framed_bytes) == 5218
     assert plan.framed_bytes[:40].hex() == (
@@ -319,6 +297,7 @@ def test_closed_plan_jcs_accepts_both_integer_boundaries() -> None:
     value = _plan_input()
     value["impact_summary"]["principal_change_count"] = (1 << 53) - 1
     value["source_retention"]["recovery_window_ttl_ms"] = (1 << 53) - 1
+    value["rendering_definition"] = consolidation_plan.derive_rendering_definition(value)
     plan = consolidation_plan.materialize_plan(
         value,
         materialization=consolidation_plan.PlanMaterializationContext(
@@ -442,7 +421,7 @@ def _mutate_impact(value: dict[str, object]) -> None:
 
 
 def _mutate_rendering(value: dict[str, object]) -> None:
-    value["rendering_definition"]["sections"][0]["content_digest"] = _digest("changed-section")
+    value["impact_summary"]["rollback_consequence"] = "Changed trusted rendering consequence."
 
 
 @pytest.mark.parametrize(
@@ -479,6 +458,9 @@ def test_every_mutable_plan_input_changes_the_plan_digest(mutation: Mutation) ->
     original = _plan()
     changed_input = copy.deepcopy(_plan_input())
     mutation(changed_input)
+    changed_input["rendering_definition"] = consolidation_plan.derive_rendering_definition(
+        changed_input
+    )
     changed = consolidation_plan.materialize_plan(
         changed_input,
         materialization=_materialization(),
@@ -504,3 +486,206 @@ def test_control_basis_predecessor_changes_the_plan_without_entering_input_set()
     assert changed.plan_input_set_digest == original.plan_input_set_digest
     assert changed.control_basis.digest != original.control_basis.digest
     assert changed.digest != original.digest
+
+
+def test_rendering_definition_is_derived_from_the_exact_plan_rows() -> None:
+    draft = _plan_input()
+    draft.pop("rendering_definition")
+
+    definition = consolidation_plan.derive_rendering_definition(draft)
+    draft["rendering_definition"] = definition
+    plan = consolidation_plan.materialize_plan(
+        draft,
+        materialization=_materialization(),
+    )
+
+    assert definition["page_size"] == 20
+    assert definition["page_count"] == 6
+    assert definition["total_rows"] == 7
+    assert [section["section_id"] for section in definition["sections"]] == list(
+        consolidation_plan.RENDER_SECTION_IDS
+    )
+    assert consolidation_plan.canonical_closed_jcs(
+        plan.preimage["rendering_definition"]
+    ) == consolidation_plan.canonical_closed_jcs(definition)
+    assert consolidation_plan.render_plan_page(plan, page_ordinal=0).digest == (
+        "2b001af5360c42fcbf94f1d6003d77c32961aea966be4e9815ec820f020a857a"
+    )
+
+    injected = copy.deepcopy(draft)
+    injected["rendering_definition"]["sections"][0]["content_digest"] = _digest("caller-defined")
+    with pytest.raises(consolidation_plan.ConsolidationPlanUnavailable):
+        consolidation_plan.materialize_plan(
+            injected,
+            materialization=_materialization(),
+        )
+
+
+def test_rendered_plan_pages_are_bounded_complete_and_digest_stable() -> None:
+    draft = _plan_input()
+    actions = []
+    for ordinal in range(45):
+        action = copy.deepcopy(draft["content_actions"][0])
+        action["ordinal"] = ordinal
+        action["batch_ordinal"] = ordinal // 10
+        action["object_ref"] = f"source-object-{ordinal:03d}"
+        action["source_path"] = f"Knowledge Base/Notes/source-{ordinal:03d}.md"
+        action["destination_path"] = f"Knowledge Base/Notes/destination-{ordinal:03d}.md"
+        actions.append(action)
+    draft["content_actions"] = actions
+    draft["impact_summary"]["overwrite_count"] = 45
+    draft["impact_summary"]["batch_count"] = 5
+    draft.pop("rendering_definition")
+    draft["rendering_definition"] = consolidation_plan.derive_rendering_definition(draft)
+    plan = consolidation_plan.materialize_plan(
+        draft,
+        materialization=_materialization(),
+    )
+
+    pages = tuple(
+        consolidation_plan.render_plan_page(plan, page_ordinal=ordinal)
+        for ordinal in range(plan.preimage["rendering_definition"]["page_count"])
+    )
+    assert len(pages) == 8
+    assert sum(len(page.rows) for page in pages) == 51
+    assert max(len(page.rows) for page in pages) == 20
+    assert len({page.digest for page in pages}) == len(pages)
+    assert all(page.plan_digest == plan.digest for page in pages)
+    assert all(page.total_pages == 8 for page in pages)
+    assert all(page.total_rows == 51 for page in pages)
+    assert pages[1].section_id == "content-actions"
+    assert pages[1].rows[0]["ordinal"] == 0
+    assert pages[3].rows[-1]["ordinal"] == 44
+    assert consolidation_plan.render_plan_page(plan, page_ordinal=3) == pages[3]
+    with pytest.raises(consolidation_plan.ConsolidationPlanUnavailable):
+        consolidation_plan.render_plan_page(plan, page_ordinal=8)
+
+
+def _create_run(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from exomem import writer_lease
+    from exomem.governance import consolidation_run_state
+    from exomem.governance.consolidation_intake import ConsolidationInventoryItem
+
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(state_dir=vault.parent / "writer-state")
+    )
+    monkeypatch.setattr(writer_lease, "active_manager", lambda: manager)
+    identity = consolidation_run_state.ConsolidationRunIdentity(
+        run_id=RUN_ID,
+        start_operation_id="00000000-0000-4000-8000-000000000003",
+        run_mode="cloned-rehearsal",
+        destination_vault_id="vault-destination-01",
+        destination_installation_id="installation-destination-01",
+        destination_generation=3,
+        destination_fence_digest=_digest("destination-fence"),
+        destination_identity_binding_digest=_digest("destination-identity"),
+        destination_snapshot_fingerprint=_digest("destination-snapshot"),
+        source_artifact_ref="exomem-export://sha256/" + _digest("archive"),
+        source_attestation_ref="exomem-source-attestation://sha256/" + _digest("proof"),
+        archive_sha256=_digest("archive"),
+        manifest_sha256=_digest("manifest"),
+        source_census_sha256=_digest("source-census"),
+        source_proof_digest=_digest("proof"),
+        source_fingerprint=_digest("source-snapshot"),
+        created_at=CREATED_AT,
+    )
+    item = ConsolidationInventoryItem(
+        path="Knowledge Base/Notes/source.md",
+        size=10,
+        sha256=_digest("source-item"),
+        classification="canonical",
+        artifact_ref="exomem-consolidation-object://sha256/" + _digest("source-item"),
+    )
+    consolidation_run_state.ConsolidationRunStore(vault).create(identity, (item,))
+
+
+def test_owner_only_plan_store_reloads_exact_bytes_and_replays_idempotently(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance import consolidation_plan_store
+
+    vault = tmp_path / "vault"
+    _create_run(vault, monkeypatch)
+    plan = _plan(basis_run_revision=1)
+    store = consolidation_plan_store.ConsolidationPlanStore(vault)
+
+    first = store.persist(plan, expected_run_revision=1)
+    assert store.persist(plan, expected_run_revision=1) == first
+    assert store.load(RUN_ID, plan_kind="cutover", plan_digest=plan.digest) == plan
+    plan_dir = (
+        vault
+        / "Knowledge Base"
+        / "_Consolidation"
+        / "runs"
+        / RUN_ID
+        / "plans"
+        / "cutover"
+        / plan.digest
+    )
+    assert sorted(path.name for path in plan_dir.iterdir()) == [
+        "control-basis.json",
+        "plan.json",
+    ]
+    if os.name != "nt":
+        assert plan_dir.stat().st_mode & 0o777 == 0o700
+        assert all(path.stat().st_mode & 0o777 == 0o600 for path in plan_dir.iterdir())
+
+    restarted = consolidation_plan_store.ConsolidationPlanStore(vault)
+    assert restarted.load(RUN_ID, plan_kind="cutover", plan_digest=plan.digest) == plan
+
+
+def test_plan_store_refuses_wrong_run_revision_or_partial_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance import consolidation_plan_store
+
+    vault = tmp_path / "vault"
+    _create_run(vault, monkeypatch)
+    plan = _plan(basis_run_revision=1)
+    store = consolidation_plan_store.ConsolidationPlanStore(vault)
+
+    with pytest.raises(consolidation_plan_store.ConsolidationPlanStoreUnavailable):
+        store.persist(plan, expected_run_revision=2)
+    store.persist(plan, expected_run_revision=1)
+    control_path = (
+        vault
+        / "Knowledge Base"
+        / "_Consolidation"
+        / "runs"
+        / RUN_ID
+        / "plans"
+        / "cutover"
+        / plan.digest
+        / "control-basis.json"
+    )
+    control_path.unlink()
+    with pytest.raises(consolidation_plan_store.ConsolidationPlanStoreUnavailable):
+        store.load(RUN_ID, plan_kind="cutover", plan_digest=plan.digest)
+
+
+def test_plan_store_recovers_control_first_crash_without_changing_plan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance import consolidation_plan_store
+
+    vault = tmp_path / "vault"
+    _create_run(vault, monkeypatch)
+    plan = _plan(basis_run_revision=1)
+    store = consolidation_plan_store.ConsolidationPlanStore(vault)
+    original_publish = store._publish_missing
+
+    def crash_before_plan(path: Path, value: bytes) -> None:
+        if path.name == "plan.json":
+            raise OSError("injected crash gap")
+        original_publish(path, value)
+
+    monkeypatch.setattr(store, "_publish_missing", crash_before_plan)
+    with pytest.raises(consolidation_plan_store.ConsolidationPlanStoreUnavailable):
+        store.persist(plan, expected_run_revision=1)
+
+    monkeypatch.setattr(store, "_publish_missing", original_publish)
+    assert store.persist(plan, expected_run_revision=1) == plan
+    assert store.load(RUN_ID, plan_kind="cutover", plan_digest=plan.digest) == plan

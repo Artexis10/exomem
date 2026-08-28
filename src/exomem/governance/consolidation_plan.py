@@ -32,6 +32,8 @@ _PLAN_INPUT_SET_DOMAIN = PLAN_INPUT_SET_SCHEMA.encode("ascii")
 _AUTOMATON_DOMAIN = PLAN_SUCCESSOR_AUTOMATON_SCHEMA.encode("ascii")
 _IMPACT_SUMMARY_DOMAIN = b"exomem.consolidation-impact-summary/v1"
 _RENDERING_DEFINITION_DOMAIN = b"exomem.consolidation-rendering-definition/v1"
+_RENDER_SECTION_DOMAIN = b"exomem.consolidation-render-section/v1"
+_RENDER_PAGE_DOMAIN = b"exomem.consolidation-render-page/v1"
 
 _MAX_SAFE_INTEGER = (1 << 53) - 1
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
@@ -61,6 +63,8 @@ _SECTION_IDS = (
     "verification",
     "rollback-retention",
 )
+RENDER_SECTION_IDS = _SECTION_IDS
+RENDER_PAGE_SIZE = 20
 
 _BASE_FIELDS = frozenset(
     {
@@ -187,12 +191,18 @@ __all__ = [
     "PLAN_SUCCESSOR_AUTOMATON_SCHEMA",
     "CanonicalConsolidationPlan",
     "CanonicalObject",
+    "CanonicalPlanPage",
     "ConsolidationPlanUnavailable",
     "PlanMaterializationContext",
+    "RENDER_PAGE_SIZE",
+    "RENDER_SECTION_IDS",
     "canonical_closed_jcs",
+    "derive_rendering_definition",
     "materialize_plan",
     "parse_canonical_plan",
+    "parse_control_basis",
     "plan_successor_automaton",
+    "render_plan_page",
 ]
 
 
@@ -231,6 +241,25 @@ class CanonicalConsolidationPlan:
     control_basis: CanonicalObject
     impact_summary_digest: str
     rendering_definition_digest: str
+
+
+@dataclass(frozen=True, slots=True)
+class CanonicalPlanPage:
+    plan_digest: str
+    plan_kind: str
+    run_id: str
+    page_ordinal: int
+    section_id: str
+    section_page_ordinal: int
+    total_pages: int
+    total_rows: int
+    section_row_count: int
+    page_row_start: int
+    page_row_stop: int
+    impact_summary: Mapping[str, object]
+    rows: tuple[Mapping[str, object], ...]
+    canonical_bytes: bytes
+    digest: str
 
 
 def _fail() -> NoReturn:
@@ -524,11 +553,126 @@ def _identifier_or_prose(value: object) -> str:
     return text
 
 
+def _render_section_rows(
+    value: Mapping[str, object],
+) -> tuple[tuple[str, tuple[Mapping[str, object], ...]], ...]:
+    impact = _mapping(value["impact_summary"], _IMPACT_FIELDS)
+    actions = tuple(_mapping(item, _ACTION_FIELDS) for item in _sequence(value["content_actions"]))
+    documents = tuple(
+        {
+            "row_kind": "policy-document",
+            **dict(_mapping(item, _POLICY_DOCUMENT_FIELDS)),
+        }
+        for item in _sequence(value["policy_documents"], maximum=1024)
+    )
+    policy_fingerprints: Mapping[str, object] = {
+        "row_kind": "policy-fingerprints",
+        "prospective_policy_fingerprint": value["prospective_policy_fingerprint"],
+        "bridge_fingerprints": tuple(_sequence(value["bridge_fingerprints"], maximum=4096)),
+        "exact_release_approval_fingerprints": tuple(
+            _sequence(value["exact_release_approval_fingerprints"], maximum=4096)
+        ),
+    }
+    principal_disclosure: Mapping[str, object] = {
+        "row_kind": "principal-disclosure",
+        "principal_attestation_set_digest": value["principal_attestation_set_digest"],
+        "disclosure_matrix_digest": value["disclosure_matrix_digest"],
+    }
+    verification: Mapping[str, object] = {
+        "row_kind": "verification",
+        **dict(_mapping(value["verification_plan"], _VERIFICATION_FIELDS)),
+    }
+    rollback_retention: Mapping[str, object] = {
+        "row_kind": "rollback-retention",
+        "rollback_contingency": dict(_mapping(value["rollback_contingency"], _ROLLBACK_FIELDS)),
+        "source_retention": dict(_mapping(value["source_retention"], _RETENTION_FIELDS)),
+    }
+    return (
+        ("impact-summary", (impact,)),
+        ("content-actions", actions),
+        ("policy", (*documents, policy_fingerprints)),
+        ("principals-disclosure", (principal_disclosure,)),
+        ("verification", (verification,)),
+        ("rollback-retention", (rollback_retention,)),
+    )
+
+
+def _derived_rendering_definition(value: Mapping[str, object]) -> dict[str, object]:
+    sections: list[dict[str, object]] = []
+    total_rows = 0
+    first_page = 0
+    for ordinal, (section_id, rows) in enumerate(_render_section_rows(value)):
+        row_count = len(rows)
+        if row_count == 0:
+            _fail()
+        page_count = (row_count + RENDER_PAGE_SIZE - 1) // RENDER_PAGE_SIZE
+        section_digest = _canonical_object(
+            {
+                "schema": "exomem.consolidation-render-section/v1",
+                "section_id": section_id,
+                "rows": rows,
+            },
+            _RENDER_SECTION_DOMAIN,
+        ).digest
+        sections.append(
+            {
+                "ordinal": ordinal,
+                "section_id": section_id,
+                "row_count": row_count,
+                "first_page_ordinal": first_page,
+                "page_count": page_count,
+                "content_digest": section_digest,
+            }
+        )
+        total_rows += row_count
+        first_page += page_count
+    return {
+        "schema": "exomem.consolidation-rendering-definition/v1",
+        "page_size": RENDER_PAGE_SIZE,
+        "page_count": first_page,
+        "total_rows": total_rows,
+        "sections": sections,
+    }
+
+
+def derive_rendering_definition(
+    plan_fields: Mapping[str, object],
+) -> Mapping[str, object]:
+    """Derive the trusted review topology from immutable plan rows."""
+
+    if not isinstance(plan_fields, Mapping):
+        _fail()
+    fields = frozenset(plan_fields)
+    if fields == _BASE_FIELDS:
+        source = {key: item for key, item in plan_fields.items() if key != "rendering_definition"}
+    elif fields == _BASE_FIELDS - {"rendering_definition"}:
+        source = dict(plan_fields)
+    else:
+        _fail()
+    actions = _validate_content_actions(source["content_actions"])
+    documents = _validate_policy_documents(source["policy_documents"])
+    _validate_impact(source["impact_summary"], actions)
+    _validate_verification(source["verification_plan"])
+    _validate_rollback(source["rollback_contingency"])
+    _validate_retention(source["source_retention"])
+    _digest(source["prospective_policy_fingerprint"])
+    source["content_actions"] = actions
+    source["policy_documents"] = documents
+    source["bridge_fingerprints"] = _sorted_digests(source["bridge_fingerprints"])
+    source["exact_release_approval_fingerprints"] = _sorted_digests(
+        source["exact_release_approval_fingerprints"]
+    )
+    _digest(source["principal_attestation_set_digest"])
+    _digest(source["disclosure_matrix_digest"])
+    return _derived_rendering_definition(source)
+
+
 def _validate_rendering(value: object) -> Mapping[str, object]:
     item = _mapping(value, _RENDERING_FIELDS)
     if item["schema"] != "exomem.consolidation-rendering-definition/v1":
         _fail()
-    _integer(item["page_size"], minimum=1, maximum=1000)
+    if _integer(item["page_size"], minimum=1, maximum=1000) != RENDER_PAGE_SIZE:
+        _fail()
     page_count = _integer(item["page_count"], minimum=1, maximum=(1 << 31) - 1)
     total_rows = _integer(item["total_rows"])
     sections = _sequence(item["sections"], maximum=len(_SECTION_IDS))
@@ -592,7 +736,10 @@ def _validate_base(value: Mapping[str, object]) -> dict[str, object]:
     if item["plan_successor_automaton_digest"] != automaton.digest:
         _fail()
     _validate_impact(item["impact_summary"], actions)
-    _validate_rendering(item["rendering_definition"])
+    provided_rendering = _validate_rendering(item["rendering_definition"])
+    expected_rendering = derive_rendering_definition(item)
+    if canonical_closed_jcs(provided_rendering) != canonical_closed_jcs(expected_rendering):
+        _fail()
     created_text, created = _timestamp(item["created_at"])
     valid_text, valid = _timestamp(item["valid_until"])
     if created >= valid or valid > retention_deadline:
@@ -601,6 +748,7 @@ def _validate_base(value: Mapping[str, object]) -> dict[str, object]:
     normalized = dict(item)
     normalized["bridge_fingerprints"] = bridge_fingerprints
     normalized["exact_release_approval_fingerprints"] = release_fingerprints
+    normalized["rendering_definition"] = expected_rendering
     normalized["created_at"] = created_text
     normalized["valid_until"] = valid_text
     return normalized
@@ -764,6 +912,83 @@ def materialize_plan(
     return _build_plan(full, control_basis=control)
 
 
+def render_plan_page(
+    plan: CanonicalConsolidationPlan,
+    *,
+    page_ordinal: int,
+) -> CanonicalPlanPage:
+    """Derive one bounded trusted-human page from stored canonical plan bytes."""
+
+    if not isinstance(plan, CanonicalConsolidationPlan):
+        _fail()
+    checked = _build_plan(plan.preimage, control_basis=plan.control_basis)
+    if checked != plan:
+        _fail()
+    ordinal = _integer(page_ordinal)
+    definition = _mapping(plan.preimage["rendering_definition"], _RENDERING_FIELDS)
+    total_pages = _integer(definition["page_count"], minimum=1)
+    total_rows = _integer(definition["total_rows"], minimum=1)
+    if ordinal >= total_pages:
+        _fail()
+    sections = _render_section_rows(plan.preimage)
+    selected_section_id = ""
+    selected_rows: tuple[Mapping[str, object], ...] = ()
+    selected_section_page = -1
+    selected_row_start = -1
+    for section_id, rows in sections:
+        section_pages = (len(rows) + RENDER_PAGE_SIZE - 1) // RENDER_PAGE_SIZE
+        if ordinal < section_pages:
+            selected_section_id = section_id
+            selected_rows = rows
+            selected_section_page = ordinal
+            selected_row_start = ordinal * RENDER_PAGE_SIZE
+            break
+        ordinal -= section_pages
+    if selected_section_page < 0:
+        _fail()
+    selected_row_stop = min(selected_row_start + RENDER_PAGE_SIZE, len(selected_rows))
+    page_rows = selected_rows[selected_row_start:selected_row_stop]
+    impact = _mapping(plan.preimage["impact_summary"], _IMPACT_FIELDS)
+    page_preimage = {
+        "schema": "exomem.consolidation-render-page/v1",
+        "run_id": plan.preimage["run_id"],
+        "plan_kind": plan.preimage["plan_kind"],
+        "plan_digest": plan.digest,
+        "page_ordinal": page_ordinal,
+        "section_id": selected_section_id,
+        "section_page_ordinal": selected_section_page,
+        "section_row_count": len(selected_rows),
+        "page_row_start": selected_row_start,
+        "page_row_stop": selected_row_stop,
+        "total_pages": total_pages,
+        "total_rows": total_rows,
+        "impact_summary": impact,
+        "rows": page_rows,
+    }
+    page = _canonical_object(page_preimage, _RENDER_PAGE_DOMAIN)
+    frozen_rows = _freeze(page_rows)
+    frozen_impact = _freeze(impact)
+    if not isinstance(frozen_rows, tuple) or not isinstance(frozen_impact, Mapping):
+        _fail()
+    return CanonicalPlanPage(
+        plan_digest=plan.digest,
+        plan_kind=_identifier(plan.preimage["plan_kind"]),
+        run_id=_uuid4(plan.preimage["run_id"]),
+        page_ordinal=page_ordinal,
+        section_id=selected_section_id,
+        section_page_ordinal=selected_section_page,
+        total_pages=total_pages,
+        total_rows=total_rows,
+        section_row_count=len(selected_rows),
+        page_row_start=selected_row_start,
+        page_row_stop=selected_row_stop,
+        impact_summary=frozen_impact,
+        rows=frozen_rows,
+        canonical_bytes=page.canonical_bytes,
+        digest=page.digest,
+    )
+
+
 def _reject_constant(_value: str) -> NoReturn:
     _fail()
 
@@ -792,14 +1017,8 @@ def _closed_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return value
 
 
-def parse_canonical_plan(
-    raw: bytes,
-    *,
-    control_basis: CanonicalObject,
-) -> CanonicalConsolidationPlan:
-    """Parse only exact canonical stored bytes and rebind their control basis."""
-
-    if not isinstance(raw, bytes) or len(raw) > 16 * 1024 * 1024:
+def _parse_canonical_mapping(raw: bytes, *, maximum: int) -> Mapping[str, object]:
+    if not isinstance(raw, bytes) or len(raw) > maximum:
         _fail()
     try:
         parsed = json.loads(
@@ -813,6 +1032,27 @@ def parse_canonical_plan(
         _fail()
     if not isinstance(parsed, Mapping):
         _fail()
+    return parsed
+
+
+def parse_control_basis(raw: bytes) -> CanonicalObject:
+    """Parse exact stored control-basis bytes and recompute their framed digest."""
+
+    parsed = _parse_canonical_mapping(raw, maximum=64 * 1024)
+    control = _canonical_object(_validate_control(parsed), _CONTROL_BASIS_DOMAIN)
+    if control.canonical_bytes != raw:
+        _fail()
+    return control
+
+
+def parse_canonical_plan(
+    raw: bytes,
+    *,
+    control_basis: CanonicalObject,
+) -> CanonicalConsolidationPlan:
+    """Parse only exact canonical stored bytes and rebind their control basis."""
+
+    parsed = _parse_canonical_mapping(raw, maximum=16 * 1024 * 1024)
     plan = _build_plan(parsed, control_basis=control_basis)
     if plan.canonical_bytes != raw:
         _fail()
