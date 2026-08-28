@@ -172,7 +172,8 @@ completion does not authorize rehearsal, cutover, or retirement.
   because the detached source-attestation subsystem was absent; collection and
   imports succeeded. Follow-on red assertions separately exposed the missing
   API, valid-proof refusal, mixed registry-generation acceptance, mutable
-  verified claims, and a malformed trust-set exception leak.
+  verified claims, a malformed trust-set exception leak, and unbounded
+  pre-parse claim admission.
 - Green: the focused file passes with the exact
   `source-export-attestation/v1` JCS frame, RFC 8032 key plus fixed Exomem
   signature vector, raw unpadded-base64url Ed25519 key/signature encodings,
@@ -186,7 +187,7 @@ completion does not authorize rehearsal, cutover, or retirement.
 - Final focused/adjoining gate:
   `tests/test_consolidation_intake.py`,
   `tests/test_consolidation_cell_identity.py`, and
-  `tests/test_hosted_portability.py` -> `172 passed`. Touched-file Ruff and
+  `tests/test_hosted_portability.py` -> `173 passed`. Touched-file Ruff and
   format checks, repository `F` lint, `uv lock --check`, strict change
   validation, public repository artifact validation (`3396 files, 3464 text
   payloads`), and `git diff --check` are green.

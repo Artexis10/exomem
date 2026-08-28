@@ -32,9 +32,11 @@ ATTESTATION_SCHEMA = "source-export-attestation/v1"
 VERIFIER_RECORD_SCHEMA = "SourceExportVerifierRecord/v1"
 SIGNING_DOMAIN = b"exomem.source-export-attestation/v1"
 VERIFIER_PURPOSE = "vault-consolidation-export"
+MAX_ATTESTATION_CLAIM_BYTES = 8192
 
 __all__ = [
     "ATTESTATION_SCHEMA",
+    "MAX_ATTESTATION_CLAIM_BYTES",
     "SIGNING_DOMAIN",
     "VERIFIER_PURPOSE",
     "VERIFIER_RECORD_SCHEMA",
@@ -266,6 +268,8 @@ def canonical_source_export_claims(claims: Mapping[str, object] | bytes) -> byte
     """Return the one canonical JCS encoding accepted by the signature contract."""
 
     raw = bytes(claims) if isinstance(claims, (bytes, bytearray)) else None
+    if raw is not None and len(raw) > MAX_ATTESTATION_CLAIM_BYTES:
+        _fail()
     parsed = _parse_claim_bytes(raw) if raw is not None else claims
     if not isinstance(parsed, Mapping):
         _fail()
@@ -273,6 +277,8 @@ def canonical_source_export_claims(claims: Mapping[str, object] | bytes) -> byte
     try:
         encoded = canonical_jcs(normalized)
     except ProjectionCanonicalizationError:
+        _fail()
+    if len(encoded) > MAX_ATTESTATION_CLAIM_BYTES:
         _fail()
     if raw is not None and raw != encoded:
         _fail()

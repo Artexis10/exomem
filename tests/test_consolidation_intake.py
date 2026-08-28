@@ -434,3 +434,18 @@ def test_malformed_trust_set_refuses_with_the_same_content_free_error() -> None:
             verified_at="2026-08-28T10:00:00.000Z",
             verification_gate="intake",
         )
+
+
+def test_oversized_claims_refuse_before_json_parsing(monkeypatch: pytest.MonkeyPatch) -> None:
+    attestation = _attestation_module()
+    limit = getattr(attestation, "MAX_ATTESTATION_CLAIM_BYTES", None)
+    assert limit == 8192
+    oversized = b" " * (limit + 1)
+
+    monkeypatch.setattr(
+        attestation.json,
+        "loads",
+        lambda *_args, **_kwargs: pytest.fail("oversized claims reached the JSON parser"),
+    )
+    with pytest.raises(attestation.SourceExportAttestationUnavailable):
+        attestation.canonical_source_export_claims(oversized)
