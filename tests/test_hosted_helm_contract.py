@@ -2448,6 +2448,7 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
             "exomem.governance.authorization_hosted_mount",
         ]
         assert custody_init["securityContext"]["runAsUser"] == 10001
+        assert custody_init["resources"]["requests"]["ephemeral-storage"] == "16Mi"
         container = pod["containers"][0]
         security = container["securityContext"]
         assert "seccompProfile" not in security
