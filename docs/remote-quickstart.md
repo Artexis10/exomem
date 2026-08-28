@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # exomem — remote connector quickstart
 
 **What you get:** exomem on your phone and on claude.ai's web app, via a

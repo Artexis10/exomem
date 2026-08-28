@@ -1,8 +1,28 @@
 # media-processing-reliability Specification
 
 ## Purpose
-TBD - created by archiving change fix-media-graph-sharing-retry. Update Purpose after archive.
+Keep canonical media sidecars durable and truthful when Windows sharing,
+post-commit derived fanout, or ambiguous historical batch outcomes fail.
 ## Requirements
+### Requirement: Windows Sharing Violations Receive Bounded Guarded Retries
+
+At the guarded atomic sidecar commit boundary, Exomem SHALL treat only Windows `PermissionError` values with `winerror` 5 or 32 as transient sharing violations. It SHALL requeue the claimed media job without consuming a media attempt, preserve its attempt accounting, exit through the existing lock-unavailable path, and let the supervisor apply its normal backoff. Each retry SHALL rerun the complete guarded commit path against fresh source, destination, and mutation state. No job SHALL receive more than three automatic sharing retries. Startup recovery SHALL requeue only failures with the exact Exomem staged atomic-replacement signature and remaining retry allowance; unrelated permission failures and exhausted sharing violations SHALL remain actionable terminal failures.
+
+#### Scenario: Transient sharing denial recovers safely
+
+- **WHEN** replacement of an existing sidecar raises Windows sharing error 5 or 32 before the retry ceiling and a later guarded attempt succeeds
+- **THEN** the job is requeued through normal supervisor backoff, the destination remains intact between attempts, and the successful attempt commits once
+
+#### Scenario: Sharing retry is bounded
+
+- **WHEN** the exact Windows sharing violation persists through three automatic retries
+- **THEN** the job remains an actionable terminal failure and Exomem does not loop around `os.replace` or weaken path and mutation guards
+
+#### Scenario: Startup recovery refuses unrelated permission failures
+
+- **WHEN** a historical failure lacks the exact staged atomic-replacement signature, has another permission error, or exhausted its sharing retry allowance
+- **THEN** startup recovery leaves it failed for operator action
+
 ### Requirement: Derived Fanout Cannot Terminalize Completed Media Extraction
 
 Before a deferred media sidecar commit, Exomem SHALL admit a revisioned full-refresh receipt for that sidecar; admission failure SHALL abort before floor or canonical mutation. After canonical commit, graph/index failure SHALL NOT fail the media job, roll back the sidecar, or rerun extraction. The admitted receipt SHALL remain until the exact checkpoint is published and every required component either completes or installs a verified durable exact downstream handoff. Any failed, degraded, missing, or unverifiable handoff SHALL retain the receipt. Then only the admitted revision SHALL be cleared.

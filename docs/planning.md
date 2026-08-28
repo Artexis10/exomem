@@ -1,4 +1,11 @@
+<!-- authority:non-specification -->
+
+<!-- authority:implementation-reference -->
+
 # Planning
+
+Product and command usage reference derived from the OpenSpec contract. It is
+not a repository task plan or a separate specification authority.
 
 Planning is human-authored intended future state. A collection lives under
 `Knowledge Base/Planning/` and stores one readable Markdown item per plan; no

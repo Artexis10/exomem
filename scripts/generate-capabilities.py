@@ -75,6 +75,8 @@ def build_capabilities_markdown() -> str:
     hand_registered = sorted(commands.HAND_REGISTERED_EXCEPTIONS)
 
     lines = [
+        "<!-- authority:non-specification -->",
+        "",
         "# Capabilities",
         "",
         "This file is generated from `src/exomem/commands.py`.",

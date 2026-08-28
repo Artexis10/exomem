@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Product gap matrix: Exomem vs Basic Memory
 
 Product-flow baseline measured 2026-07-09; direct graph comparison added
