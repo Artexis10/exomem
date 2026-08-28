@@ -358,6 +358,7 @@ class ExportResult:
     archive_format: str
     artifact_reference: str
     manifest: dict[str, Any]
+    source_census_sha256: str
 
     @property
     def manifest_sha256(self) -> str:
@@ -381,6 +382,16 @@ class PreparedRestore:
     manifest: dict[str, Any]
     context: PortabilityContext
     state: str = "prepared"
+
+
+@dataclass(frozen=True, slots=True)
+class ExtractedArchive:
+    """Verified archive bytes extracted into a new, non-published directory."""
+
+    staging_root: Path
+    source_archive: Path
+    archive_sha256: str
+    manifest: dict[str, Any]
 
 
 @dataclass(frozen=True, slots=True)
@@ -731,16 +742,48 @@ def canonical_vault_fingerprint(
     repeated = records(_enumerate_source(vault_root, effective_limits))
     if repeated != first:
         _fail("SOURCE_CHANGED_DURING_EXPORT", "the vault changed during fingerprinting")
+    return _source_census_sha256(first)
+
+
+def _source_census_sha256(records: Iterable[Mapping[str, Any]]) -> str:
     return _sha256_bytes(
         _canonical_json(
             {
                 "artifact": "exomem-hosted-canonical-vault",
                 "schema_version": 1,
                 "classification_version": CLASSIFICATION_VERSION,
-                "files": first,
+                "files": [dict(record) for record in records],
             }
         )
     )
+
+
+def canonical_source_census_sha256(manifest: Mapping[str, Any]) -> str:
+    """Derive the export's exact canonical source census from its file records.
+
+    Callers authenticate this digest separately from the archive.  The archive
+    and manifest digests still cover every admitted byte; this census is the
+    stable content inventory used by consolidation identity and drift checks.
+    """
+
+    if not isinstance(manifest, Mapping):
+        _fail("INVALID_MANIFEST", "manifest root must be an object")
+    files = manifest.get("files")
+    if not isinstance(files, list):
+        _fail("INVALID_MANIFEST", "manifest files must be a list")
+    records: list[dict[str, Any]] = []
+    for raw_record in files:
+        if not isinstance(raw_record, dict) or set(raw_record) != {
+            "path",
+            "size",
+            "sha256",
+            "classification",
+        }:
+            _fail("INVALID_MANIFEST", "manifest file record is invalid")
+        records.append(dict(raw_record))
+    if [record["path"] for record in records] != sorted(record["path"] for record in records):
+        _fail("INVALID_MANIFEST", "manifest file records must be sorted")
+    return _source_census_sha256(records)
 
 
 def _zip_info(path: str) -> zipfile.ZipInfo:
@@ -915,6 +958,15 @@ def export_quiesced_vault(
         archive_format=ARCHIVE_FORMAT,
         artifact_reference=f"exomem-export://sha256/{verified.archive_sha256}",
         manifest=verified.manifest,
+        source_census_sha256=_source_census_sha256(
+            {
+                "path": item.path,
+                "size": item.size,
+                "sha256": item.sha256,
+                "classification": item.classification,
+            }
+            for item in snapshots
+        ),
     )
 
 
@@ -1342,6 +1394,66 @@ def _verify_staged_files(
             _fail("STAGING_DIGEST_MISMATCH", "canonical staged bytes do not match the manifest")
 
 
+def extract_verified_archive(
+    verified: VerifiedArchive,
+    staging_root: Path | str,
+    *,
+    limits: PortabilityLimits | None = None,
+) -> ExtractedArchive:
+    """Extract exact verified bytes into a new directory without publishing them."""
+
+    if not isinstance(verified, VerifiedArchive):
+        _fail("INVALID_ARCHIVE", "verified archive has the wrong type")
+    expected_cell_id = verified.manifest.get("cell_id")
+    expected_vault_id = verified.manifest.get("vault_id")
+    before = verify_export_archive(
+        verified.archive_path,
+        expected_cell_id=expected_cell_id,
+        expected_vault_id=expected_vault_id,
+        limits=limits,
+    )
+    if (
+        before.archive_sha256 != verified.archive_sha256
+        or before.archive_size != verified.archive_size
+        or before.manifest != verified.manifest
+    ):
+        _fail("ARCHIVE_CHANGED", "verified archive changed before extraction")
+
+    destination = Path(staging_root).absolute()
+    if os.path.lexists(destination):
+        _fail("STAGING_ROOT_EXISTS", "extraction staging root must be new")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = Path(tempfile.mkdtemp(prefix=f".{destination.name}-", dir=destination.parent))
+    try:
+        _extract_verified_archive(before.archive_path, before.manifest["files"], temporary)
+        _verify_staged_files(temporary, before.manifest)
+        after = verify_export_archive(
+            before.archive_path,
+            expected_cell_id=expected_cell_id,
+            expected_vault_id=expected_vault_id,
+            limits=limits,
+        )
+        if (
+            after.archive_sha256 != before.archive_sha256
+            or after.archive_size != before.archive_size
+            or after.manifest != before.manifest
+        ):
+            _fail("ARCHIVE_CHANGED", "verified archive changed during extraction")
+        if os.path.lexists(destination):
+            _fail("STAGING_ROOT_EXISTS", "extraction staging root was claimed concurrently")
+        os.rename(temporary, destination)
+        _fsync_directory(destination.parent)
+    except BaseException:
+        _remove_tree(temporary)
+        raise
+    return ExtractedArchive(
+        staging_root=destination,
+        source_archive=before.archive_path,
+        archive_sha256=before.archive_sha256,
+        manifest=before.manifest,
+    )
+
+
 def prepare_restore(
     archive_path: Path | str,
     staging_root: Path | str,
@@ -1364,24 +1476,11 @@ def prepare_restore(
         expected_vault_id=expected_source_vault_id or context.vault_id,
         limits=limits,
     )
-    destination = Path(staging_root).absolute()
-    if os.path.lexists(destination):
-        _fail("STAGING_ROOT_EXISTS", "restore staging root must be new")
     records = verified.manifest["files"]
     _verify_required_scaffold(records)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = Path(tempfile.mkdtemp(prefix=f".{destination.name}-", dir=destination.parent))
-    try:
-        _extract_verified_archive(verified.archive_path, records, temporary)
-        _verify_staged_files(temporary, verified.manifest)
-        if os.path.lexists(destination):
-            _fail("STAGING_ROOT_EXISTS", "restore staging root was claimed concurrently")
-        os.rename(temporary, destination)
-    except BaseException:
-        _remove_tree(temporary)
-        raise
+    extracted = extract_verified_archive(verified, staging_root, limits=limits)
     return PreparedRestore(
-        staging_root=destination,
+        staging_root=extracted.staging_root,
         source_archive=verified.archive_path,
         archive_sha256=verified.archive_sha256,
         manifest=verified.manifest,
@@ -1738,6 +1837,7 @@ __all__ = [
     "MANIFEST_SCHEMA_VERSION",
     "ArtifactClass",
     "ArtifactClassification",
+    "ExtractedArchive",
     "ExportResult",
     "LifecycleCheckpoint",
     "LifecycleCheckpointStore",
@@ -1747,10 +1847,12 @@ __all__ = [
     "PreparedRestore",
     "PublishedRestore",
     "VerifiedArchive",
+    "canonical_source_census_sha256",
     "classification_registry",
     "classify_artifact",
     "canonical_vault_fingerprint",
     "export_quiesced_vault",
+    "extract_verified_archive",
     "prepare_restore",
     "publish_prepared_restore",
     "verify_export_archive",

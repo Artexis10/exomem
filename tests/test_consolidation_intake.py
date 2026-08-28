@@ -6,10 +6,14 @@ import importlib
 import inspect
 import json
 from dataclasses import replace
+from pathlib import Path
+from typing import Any
 
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+from exomem import hosted_portability
 
 _SEED = bytes.fromhex("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60")
 _PUBLIC = bytes.fromhex("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a")
@@ -449,3 +453,337 @@ def test_oversized_claims_refuse_before_json_parsing(monkeypatch: pytest.MonkeyP
     )
     with pytest.raises(attestation.SourceExportAttestationUnavailable):
         attestation.canonical_source_export_claims(oversized)
+
+
+def _intake_module():
+    try:
+        return importlib.import_module("exomem.governance.consolidation_intake")
+    except ModuleNotFoundError:
+        pytest.fail("the private consolidation intake boundary is missing")
+
+
+def _portable_vault(root: Path) -> Path:
+    vault = root / "source-vault"
+    (vault / "Knowledge Base" / "_Schema").mkdir(parents=True)
+    (vault / "Knowledge Base" / "_Schema" / "SKILL.md").write_text(
+        "# schema\n", encoding="utf-8"
+    )
+    (vault / "Knowledge Base" / "Notes").mkdir()
+    (vault / "Knowledge Base" / "Notes" / "private.md").write_text(
+        "# Private\n\nsource-only sentinel\n", encoding="utf-8"
+    )
+    (vault / "Knowledge Base" / "asset.bin").write_bytes(b"\x00\x01\x02")
+    return vault
+
+
+def _export(root: Path):
+    vault = _portable_vault(root)
+    exported = hosted_portability.export_quiesced_vault(
+        vault,
+        root / "exports",
+        context=hosted_portability.PortabilityContext(
+            cell_id="cell-source-01",
+            vault_id="vault-source-01",
+            operation_id="export-operation-01",
+            created_at="2026-08-28T09:44:00.000+00:00",
+            operator_authorized=True,
+            lifecycle_state="quiesced",
+            routing_stopped=True,
+            active_mutations=0,
+            background_writers_stopped=True,
+            reads_allowed=True,
+        ),
+    )
+    return vault, exported
+
+
+def _resolved_proof(intake, exported):
+    attestation = _attestation_module()
+    claims = _claims(source_cell_id="cell-source-01")
+    claims.update(
+        archive_sha256=exported.archive_sha256,
+        manifest_sha256=exported.manifest_sha256,
+        source_census_sha256=exported.source_census_sha256,
+    )
+    claim_bytes, signature = attestation.sign_source_export_attestation(
+        claims,
+        Ed25519PrivateKey.from_private_bytes(_SEED),
+    )
+    expectation = replace(
+        _expectation(attestation, source_cell_id="cell-source-01"),
+        archive_sha256=exported.archive_sha256,
+        manifest_sha256=exported.manifest_sha256,
+        source_census_sha256=exported.source_census_sha256,
+    )
+    proof = intake.ResolvedSourceExportProof(
+        claim_bytes=claim_bytes,
+        signature=signature,
+        expectation=expectation,
+        verifier_records=(
+            _record(attestation, source_cell_id="cell-source-01"),
+        ),
+    )
+    proof_ref = (
+        "exomem-source-attestation://sha256/"
+        + intake.detached_source_proof_digest(claim_bytes, signature)
+    )
+    return proof_ref, proof
+
+
+class _Resolver:
+    def __init__(self, *, archive_ref: str, archive_path: Path, proof_ref: str, proof: Any):
+        self.archive_ref = archive_ref
+        self.archive_path = archive_path
+        self.proof_ref = proof_ref
+        self.proof = proof
+        self.calls: list[tuple[str, str]] = []
+
+    def resolve_archive(self, reference: str) -> Path:
+        self.calls.append(("archive", reference))
+        if reference != self.archive_ref:
+            raise LookupError
+        return self.archive_path
+
+    def resolve_source_proof(self, reference: str):
+        self.calls.append(("proof", reference))
+        if reference != self.proof_ref:
+            raise LookupError
+        return self.proof
+
+
+def _intake_fixture(tmp_path: Path):
+    intake = _intake_module()
+    vault, exported = _export(tmp_path)
+    proof_ref, proof = _resolved_proof(intake, exported)
+    request = intake.ConsolidationIntakeRequest(
+        source_artifact_ref=exported.artifact_reference,
+        source_attestation_ref=proof_ref,
+    )
+    resolver = _Resolver(
+        archive_ref=exported.artifact_reference,
+        archive_path=exported.archive_path,
+        proof_ref=proof_ref,
+        proof=proof,
+    )
+    store = intake.PrivateConsolidationArtifactStore(
+        tmp_path / "private-intake",
+        active_vault_roots=(vault, tmp_path / "destination-vault"),
+    )
+    return intake, vault, exported, request, resolver, store
+
+
+def test_portable_export_carries_the_exact_current_source_census(tmp_path: Path) -> None:
+    vault, exported = _export(tmp_path)
+
+    assert exported.source_census_sha256 == hosted_portability.canonical_source_census_sha256(
+        exported.manifest
+    )
+    assert exported.source_census_sha256 == hosted_portability.canonical_vault_fingerprint(vault)
+
+    (vault / "Knowledge Base" / "Notes" / "private.md").write_text(
+        "# Private\n\nchanged after export\n", encoding="utf-8"
+    )
+    assert hosted_portability.canonical_vault_fingerprint(vault) != exported.source_census_sha256
+
+
+def test_intake_request_has_only_opaque_archive_and_proof_references() -> None:
+    intake = _intake_module()
+
+    assert tuple(inspect.signature(intake.ConsolidationIntakeRequest).parameters) == (
+        "source_artifact_ref",
+        "source_attestation_ref",
+    )
+    for forbidden in (
+        "archive",
+        "archive_bytes",
+        "archive_path",
+        "source_root",
+        "staging_root",
+        "crawler",
+        "mcp",
+        "public_key",
+    ):
+        assert forbidden not in inspect.signature(intake.intake_source_export).parameters
+
+
+@pytest.mark.parametrize(
+    ("artifact_ref", "proof_ref"),
+    (
+        ("/tmp/source.zip", "exomem-source-attestation://sha256/" + "a" * 64),
+        ("exomem-export://sha256/" + "a" * 64, "/tmp/proof.json"),
+        ("data:application/zip;base64,AAAA", "exomem-source-attestation://sha256/" + "a" * 64),
+        ("exomem-export://sha256/" + "a" * 64, "inline:{\"signature\":\"x\"}"),
+    ),
+)
+def test_intake_rejects_inline_or_path_inputs_before_resolution(
+    tmp_path: Path,
+    artifact_ref: str,
+    proof_ref: str,
+) -> None:
+    intake = _intake_module()
+
+    class NeverResolve:
+        def resolve_archive(self, _reference: str) -> Path:
+            pytest.fail("invalid archive reference reached resolution")
+
+        def resolve_source_proof(self, _reference: str):
+            pytest.fail("invalid proof reference reached resolution")
+
+    store = intake.PrivateConsolidationArtifactStore(tmp_path / "private", active_vault_roots=())
+    with pytest.raises(
+        intake.ConsolidationIntakeUnavailable,
+        match="^consolidation intake is unavailable$",
+    ):
+        intake.intake_source_export(
+            intake.ConsolidationIntakeRequest(artifact_ref, proof_ref),
+            resolver=NeverResolve(),
+            artifact_store=store,
+            verified_at="2026-08-28T10:00:00.000Z",
+        )
+
+
+@pytest.mark.parametrize("relative", ("private-intake", "Knowledge Base/private-intake"))
+def test_intake_refuses_private_extraction_beneath_an_active_vault(
+    tmp_path: Path, relative: str
+) -> None:
+    intake, vault, _exported, request, resolver, _store = _intake_fixture(tmp_path)
+
+    with pytest.raises(intake.ConsolidationIntakeUnavailable):
+        intake.PrivateConsolidationArtifactStore(
+            vault / relative,
+            active_vault_roots=(vault,),
+        )
+    assert resolver.calls == []
+
+    # The valid request still has no caller-controlled extraction target.
+    assert not hasattr(request, "staging_root")
+
+
+def test_intake_refuses_any_knowledge_base_extraction_root(tmp_path: Path) -> None:
+    intake = _intake_module()
+
+    with pytest.raises(intake.ConsolidationIntakeUnavailable):
+        intake.PrivateConsolidationArtifactStore(
+            tmp_path / "detached" / "Knowledge Base" / "private-intake",
+            active_vault_roots=(),
+        )
+
+
+def test_intake_refuses_a_private_root_beneath_a_nested_symlink(
+    tmp_path: Path,
+) -> None:
+    intake = _intake_module()
+    actual = tmp_path / "actual"
+    existing = actual / "existing"
+    existing.mkdir(parents=True)
+    alias = tmp_path / "alias"
+    try:
+        alias.symlink_to(actual, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("directory symlinks are unavailable")
+
+    with pytest.raises(intake.ConsolidationIntakeUnavailable):
+        intake.PrivateConsolidationArtifactStore(
+            alias / "existing" / "private-intake",
+            active_vault_roots=(),
+        )
+
+
+def test_intake_extracts_only_private_content_addressed_objects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    intake, _vault, exported, request, resolver, store = _intake_fixture(tmp_path)
+    archive_before = exported.archive_path.read_bytes()
+    census_before = exported.source_census_sha256
+
+    monkeypatch.setattr(
+        hosted_portability,
+        "prepare_restore",
+        lambda *_args, **_kwargs: pytest.fail("consolidation called restore staging"),
+    )
+    result = intake.intake_source_export(
+        request,
+        resolver=resolver,
+        artifact_store=store,
+        verified_at="2026-08-28T10:00:00.000Z",
+    )
+
+    assert resolver.calls == [
+        ("archive", request.source_artifact_ref),
+        ("proof", request.source_attestation_ref),
+    ]
+    assert result.archive_sha256 == exported.archive_sha256
+    assert result.manifest_sha256 == exported.manifest_sha256
+    assert result.source_census_sha256 == census_before
+    assert result.object_count == len(exported.manifest["files"])
+    assert result.total_bytes == sum(item["size"] for item in exported.manifest["files"])
+    assert result.archive_artifact_ref.startswith("exomem-consolidation-archive://sha256/")
+    assert result.source_proof_artifact_ref.startswith(
+        "exomem-consolidation-proof://sha256/"
+    )
+    assert tuple(item.path for item in result.inventory) == tuple(
+        item["path"] for item in exported.manifest["files"]
+    )
+    assert all(
+        item.artifact_ref == f"exomem-consolidation-object://sha256/{item.sha256}"
+        for item in result.inventory
+    )
+    assert all(store.resolve_object(item.artifact_ref).read_bytes() for item in result.inventory)
+    assert store.resolve_archive(result.archive_artifact_ref).read_bytes() == archive_before
+    proof_bytes = store.resolve_source_proof(result.source_proof_artifact_ref).read_bytes()
+    assert hashlib.sha256(proof_bytes).hexdigest() == result.source_proof_digest
+
+    rendered = json.dumps(result.to_bounded_dict(), sort_keys=True)
+    assert "source-only sentinel" not in rendered
+    assert str(tmp_path) not in rendered
+    assert "archive_path" not in rendered
+    assert exported.archive_path.read_bytes() == archive_before
+    assert hosted_portability.canonical_source_census_sha256(exported.manifest) == census_before
+
+
+def test_intake_is_idempotent_and_deduplicates_equal_content(tmp_path: Path) -> None:
+    intake, _vault, _exported, request, resolver, store = _intake_fixture(tmp_path)
+
+    first = intake.intake_source_export(
+        request,
+        resolver=resolver,
+        artifact_store=store,
+        verified_at="2026-08-28T10:00:00.000Z",
+    )
+    second = intake.intake_source_export(
+        request,
+        resolver=resolver,
+        artifact_store=store,
+        verified_at="2026-08-28T10:00:00.000Z",
+    )
+
+    assert second == first
+    assert len(list((store.root / "archives").glob("*.zip"))) == 1
+    assert len(list((store.root / "proofs").glob("*.json"))) == 1
+    assert not list(store.root.rglob("*.partial"))
+    assert not list(store.root.rglob(".intake-*"))
+
+
+def test_intake_refuses_changed_proof_or_archive_without_publishing(
+    tmp_path: Path,
+) -> None:
+    intake, _vault, exported, request, resolver, store = _intake_fixture(tmp_path)
+    resolver.proof = replace(
+        resolver.proof,
+        expectation=replace(resolver.proof.expectation, source_census_sha256="f" * 64),
+    )
+    archive_before = exported.archive_path.read_bytes()
+
+    with pytest.raises(
+        intake.ConsolidationIntakeUnavailable,
+        match="^consolidation intake is unavailable$",
+    ):
+        intake.intake_source_export(
+            request,
+            resolver=resolver,
+            artifact_store=store,
+            verified_at="2026-08-28T10:00:00.000Z",
+        )
+
+    assert exported.archive_path.read_bytes() == archive_before
+    assert not store.root.exists() or not [path for path in store.root.rglob("*") if path.is_file()]
