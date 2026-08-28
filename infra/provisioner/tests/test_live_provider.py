@@ -446,6 +446,12 @@ async def test_live_plane_namespace_carries_the_fixed_helm_contract_annotations(
         def list_namespaced_config_map(self, namespace, *, label_selector):
             return SimpleNamespace(items=[])
 
+        def list_namespaced_pod(self, namespace, *, label_selector):
+            assert namespace == metadata.resource_name
+            assert "!exomem.io/storage-init" in label_selector
+            assert "!exomem.io/vault-fingerprint" in label_selector
+            return SimpleNamespace(items=[])
+
     class Missing:
         def __getattr__(self, name):
             def missing(*args, **kwargs):
@@ -482,6 +488,7 @@ async def test_live_plane_namespace_carries_the_fixed_helm_contract_annotations(
             transfer_hostname="transfer.example.invalid",
             protocol_version="1",
             release_version="0.22.0",
+            migration_mode="none",
         ),  # type: ignore[arg-type]
     )
     key = plane._key(metadata)
@@ -958,6 +965,7 @@ async def test_live_route_enable_reconciles_the_original_authenticated_helm_rele
         transfer_hostname="transfer.example.invalid",
         protocol_version="1",
         release_version="0.22.0",
+        migration_mode="none",
         runtime_target_for=lambda _request, *, v2: {
             "releaseVersion": "0.22.0",
             "protocolVersion": "1",
@@ -1576,6 +1584,7 @@ def _init_recovery_config() -> SimpleNamespace:
         transfer_hostname="transfer.example.invalid",
         protocol_version="1",
         release_version="0.22.0",
+        migration_mode="none",
         runtime_target_for=lambda _request, *, v2: {
             "releaseVersion": "0.22.0",
             "protocolVersion": "1",
@@ -1852,6 +1861,7 @@ async def test_live_plane_requires_exact_reservation_before_namespace_or_release
             transfer_hostname="transfer.example.invalid",
             protocol_version="1",
             release_version="0.22.0",
+            migration_mode="none",
         ),  # type: ignore[arg-type]
     )
     key = plane._key(metadata)

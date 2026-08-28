@@ -1217,6 +1217,7 @@ async def test_provision_adopts_partial_attempt_and_waits_for_volume_health_and_
         "resourceName": _metadata().resource_name,
         "recordsReaderVersion": 2,
         "lifecycleActionsEnabled": False,
+        "migrationMode": "none",
         "routes": {"controlHostname": "control.example.invalid", "enabled": False},
         "runtimeGid": 10001,
         "runtimeUid": 10001,
