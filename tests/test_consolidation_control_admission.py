@@ -1,0 +1,555 @@
+from __future__ import annotations
+
+import hashlib
+import multiprocessing
+import os
+import threading
+import time
+from contextlib import ExitStack
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+VAULT_BINDING = hashlib.sha256(b"admission-vault").hexdigest()
+OTHER_VAULT_BINDING = hashlib.sha256(b"other-admission-vault").hexdigest()
+RUN_ID = "00000000-0000-4000-8000-000000000061"
+OPERATION_ID = "00000000-0000-4000-8000-000000000062"
+JOURNAL_DIGEST = hashlib.sha256(b"admission-journal").hexdigest()
+T0 = "2026-08-28T16:00:00.000Z"
+T1 = "2026-08-28T16:00:01.000Z"
+T2 = "2026-08-28T16:00:02.000Z"
+
+
+def _open_admission(vault: Path, *, binding: str = VAULT_BINDING):
+    from exomem.governance import consolidation_admission, consolidation_seal
+
+    store = consolidation_seal.ConsolidationSealStore(vault)
+    store.initialize_open(vault_binding_digest=binding, recorded_at=T0)
+    return consolidation_admission.ConsolidationAdmission(
+        vault,
+        vault_binding_digest=binding,
+    )
+
+
+def _apply_authority():
+    from exomem.governance import consolidation_authority
+
+    return consolidation_authority.issue_authority(
+        vault_binding_digest=VAULT_BINDING,
+        run_id=RUN_ID,
+        operation_id=OPERATION_ID,
+        journal_digest=JOURNAL_DIGEST,
+        phase="sealing",
+        action="apply",
+    )
+
+
+def _assert_admission_error(code: str):
+    from exomem.governance import consolidation_admission
+
+    return pytest.raises(
+        consolidation_admission.ConsolidationAdmissionUnavailable,
+        match=f"^{code}$",
+    )
+
+
+def _hold_process_read(
+    vault: str,
+    entered: Any,
+    release: Any,
+) -> None:
+    from exomem.governance import consolidation_admission
+
+    admission = consolidation_admission.ConsolidationAdmission(
+        Path(vault),
+        vault_binding_digest=VAULT_BINDING,
+    )
+    with admission.admit_read():
+        entered.set()
+        release.wait(5.0)
+
+
+def _crash_process_read(vault: str, entered: Any) -> None:
+    from exomem.governance import consolidation_admission
+
+    admission = consolidation_admission.ConsolidationAdmission(
+        Path(vault),
+        vault_binding_digest=VAULT_BINDING,
+    )
+    with admission.admit_read():
+        entered.set()
+        os._exit(0)
+
+
+def test_seal_intent_precedes_stop_and_new_work_while_admitted_read_drains(
+    tmp_path: Path,
+) -> None:
+    from exomem.governance import consolidation_admission, consolidation_seal
+
+    controller = _open_admission(tmp_path)
+    admission = consolidation_admission.ConsolidationAdmission(
+        tmp_path,
+        vault_binding_digest=VAULT_BINDING,
+    )
+    admitted = admission.admit_read()
+    admitted.__enter__()
+    stopper_observed = threading.Event()
+    finished = threading.Event()
+    failure: list[Exception] = []
+
+    def stop_background() -> None:
+        state = consolidation_seal.ConsolidationSealStore(tmp_path).load(
+            vault_binding_digest=VAULT_BINDING
+        )
+        assert state.phase == "sealing"
+        for enter in (
+            admission.admit_read,
+            admission.admit_mutation,
+            admission.admit_transfer,
+            admission.admit_background,
+        ):
+            with _assert_admission_error("CONSOLIDATION_SEALED"):
+                with enter():
+                    pass
+        stopper_observed.set()
+
+    def seal() -> None:
+        try:
+            controller.seal_and_drain(
+                authority=_apply_authority(),
+                run_id=RUN_ID,
+                operation_id=OPERATION_ID,
+                journal_digest=JOURNAL_DIGEST,
+                sealed_at=T1,
+                completed_at=T2,
+                expected_revision=0,
+                timeout=2.0,
+                stoppers=(stop_background,),
+            )
+        except Exception as error:  # noqa: BLE001  # pragma: no cover - asserted below
+            failure.append(error)
+        finally:
+            finished.set()
+
+    worker = threading.Thread(target=seal)
+    worker.start()
+    assert stopper_observed.wait(1.0)
+    assert not finished.wait(0.05)
+
+    admitted.__exit__(None, None, None)
+    worker.join(2.0)
+    assert not worker.is_alive()
+    assert failure == []
+    assert controller.snapshot().state.phase == "sealed"
+    assert admission.snapshot().state.phase == "sealed"
+    assert controller.snapshot().active_total == 0
+    with _assert_admission_error("CONSOLIDATION_SEALED"):
+        with admission.admit_read():
+            pass
+
+
+def test_seal_drains_participant_admitted_by_another_process(tmp_path: Path) -> None:
+    from exomem.governance import consolidation_seal
+
+    admission = _open_admission(tmp_path)
+    context = multiprocessing.get_context("spawn")
+    entered = context.Event()
+    release = context.Event()
+    participant = context.Process(
+        target=_hold_process_read,
+        args=(str(tmp_path), entered, release),
+    )
+    participant.start()
+    assert entered.wait(3.0)
+    finished = threading.Event()
+    failures: list[Exception] = []
+
+    def seal() -> None:
+        try:
+            admission.seal_and_drain(
+                authority=_apply_authority(),
+                run_id=RUN_ID,
+                operation_id=OPERATION_ID,
+                journal_digest=JOURNAL_DIGEST,
+                sealed_at=T1,
+                completed_at=T2,
+                expected_revision=0,
+                timeout=4.0,
+            )
+        except Exception as error:  # noqa: BLE001  # pragma: no cover - asserted below
+            failures.append(error)
+        finally:
+            finished.set()
+
+    controller = threading.Thread(target=seal)
+    controller.start()
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        state = consolidation_seal.ConsolidationSealStore(tmp_path).load(
+            vault_binding_digest=VAULT_BINDING
+        )
+        if state.phase == "sealing":
+            break
+        time.sleep(0.005)
+    assert state.phase == "sealing"
+    assert not finished.wait(0.05)
+    with _assert_admission_error("CONSOLIDATION_SEALED"):
+        with admission.admit_mutation():
+            pass
+
+    release.set()
+    participant.join(3.0)
+    controller.join(3.0)
+    assert participant.exitcode == 0
+    assert not controller.is_alive()
+    assert failures == []
+    assert admission.snapshot().state.phase == "sealed"
+
+
+def test_seal_reclaims_same_domain_record_after_participant_process_crash(
+    tmp_path: Path,
+) -> None:
+    admission = _open_admission(tmp_path)
+    context = multiprocessing.get_context("spawn")
+    entered = context.Event()
+    participant = context.Process(
+        target=_crash_process_read,
+        args=(str(tmp_path), entered),
+    )
+    participant.start()
+    assert entered.wait(3.0)
+    participant.join(3.0)
+    assert participant.exitcode == 0
+    assert admission.snapshot().active_reads == 1
+
+    sealed = admission.seal_and_drain(
+        authority=_apply_authority(),
+        run_id=RUN_ID,
+        operation_id=OPERATION_ID,
+        journal_digest=JOURNAL_DIGEST,
+        sealed_at=T1,
+        completed_at=T2,
+        expected_revision=0,
+        timeout=2.0,
+    )
+
+    assert sealed.state.phase == "sealed"
+    assert sealed.active_total == 0
+    assert admission.snapshot().active_total == 0
+
+
+def test_foreign_state_domain_fails_immediately_without_deleting_evidence(
+    tmp_path: Path,
+) -> None:
+    from exomem.governance import consolidation_admission, consolidation_seal
+
+    admission = _open_admission(tmp_path)
+    participant_id = "a" * 32
+    admission._publish_participant(  # noqa: SLF001 - adversarial stored-state fixture
+        consolidation_admission._Participant(  # noqa: SLF001
+            participant_id,
+            "read",
+            hashlib.sha256(b"foreign-state-domain").hexdigest(),
+        )
+    )
+
+    started = time.monotonic()
+    with _assert_admission_error("CONSOLIDATION_ADMISSION_DOMAIN_CONFLICT"):
+        admission.seal_and_drain(
+            authority=_apply_authority(),
+            run_id=RUN_ID,
+            operation_id=OPERATION_ID,
+            journal_digest=JOURNAL_DIGEST,
+            sealed_at=T1,
+            completed_at=T2,
+            expected_revision=0,
+            timeout=2.0,
+        )
+    assert time.monotonic() - started < 0.5
+
+    durable = consolidation_seal.ConsolidationSealStore(tmp_path).load(
+        vault_binding_digest=VAULT_BINDING
+    )
+    assert durable.phase == "sealing"
+    assert admission.snapshot().active_reads == 1
+    assert admission._load_participant(participant_id) is not None  # noqa: SLF001
+
+
+def test_drain_timeout_leaves_recoverable_durable_sealing_state(tmp_path: Path) -> None:
+    from exomem.governance import consolidation_seal
+
+    admission = _open_admission(tmp_path)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def hold_transfer() -> None:
+        with admission.admit_transfer():
+            entered.set()
+            release.wait(2.0)
+
+    participant = threading.Thread(target=hold_transfer)
+    participant.start()
+    assert entered.wait(1.0)
+    with _assert_admission_error("CONSOLIDATION_DRAIN_TIMEOUT"):
+        admission.seal_and_drain(
+            authority=_apply_authority(),
+            run_id=RUN_ID,
+            operation_id=OPERATION_ID,
+            journal_digest=JOURNAL_DIGEST,
+            sealed_at=T1,
+            completed_at=T2,
+            expected_revision=0,
+            timeout=0.05,
+        )
+    release.set()
+    participant.join(2.0)
+    assert not participant.is_alive()
+
+    durable = consolidation_seal.ConsolidationSealStore(tmp_path).load(
+        vault_binding_digest=VAULT_BINDING
+    )
+    assert durable.kind == "consolidation-sealed"
+    assert durable.phase == "sealing"
+    assert durable.revision == 1
+    with _assert_admission_error("CONSOLIDATION_SEALED"):
+        with admission.admit_mutation():
+            pass
+
+    recovered = admission.seal_and_drain(
+        authority=_apply_authority(),
+        run_id=RUN_ID,
+        operation_id=OPERATION_ID,
+        journal_digest=JOURNAL_DIGEST,
+        sealed_at=T1,
+        completed_at=T2,
+        expected_revision=0,
+        timeout=1.0,
+    )
+    assert recovered.state.phase == "sealed"
+    assert recovered.draining is False
+
+
+def test_restart_loads_nonterminal_seal_before_any_ordinary_admission(
+    tmp_path: Path,
+) -> None:
+    from exomem.governance import consolidation_admission, consolidation_seal
+
+    store = consolidation_seal.ConsolidationSealStore(tmp_path)
+    store.initialize_open(vault_binding_digest=VAULT_BINDING, recorded_at=T0)
+    store.begin_consolidation(
+        vault_binding_digest=VAULT_BINDING,
+        run_id=RUN_ID,
+        operation_id=OPERATION_ID,
+        journal_digest=JOURNAL_DIGEST,
+        sealed_at=T1,
+        expected_revision=0,
+    )
+
+    restarted = consolidation_admission.ConsolidationAdmission(
+        tmp_path,
+        vault_binding_digest=VAULT_BINDING,
+    )
+    assert restarted.snapshot().state.phase == "sealing"
+    for enter in (
+        restarted.admit_read,
+        restarted.admit_mutation,
+        restarted.admit_transfer,
+        restarted.admit_background,
+    ):
+        with _assert_admission_error("CONSOLIDATION_SEALED"):
+            with enter():
+                pass
+
+
+def test_enrolled_admission_never_interprets_missing_seal_as_open(tmp_path: Path) -> None:
+    from exomem.governance import consolidation_admission
+
+    with _assert_admission_error("CONSOLIDATION_SEAL_UNAVAILABLE"):
+        consolidation_admission.ConsolidationAdmission(
+            tmp_path,
+            vault_binding_digest=VAULT_BINDING,
+        )
+
+
+def test_all_ordinary_participant_kinds_are_counted_until_exit(tmp_path: Path) -> None:
+    admission = _open_admission(tmp_path)
+    with ExitStack() as stack:
+        stack.enter_context(admission.admit_read())
+        stack.enter_context(admission.admit_mutation())
+        stack.enter_context(admission.admit_transfer())
+        stack.enter_context(admission.admit_background())
+        snapshot = admission.snapshot()
+        assert snapshot.active_reads == 1
+        assert snapshot.active_mutations == 1
+        assert snapshot.active_transfers == 1
+        assert snapshot.active_background == 1
+        assert snapshot.active_total == 4
+    assert admission.snapshot().active_total == 0
+
+
+def test_other_canonical_vault_remains_independently_open(tmp_path: Path) -> None:
+    first = _open_admission(tmp_path / "first")
+    second = _open_admission(tmp_path / "second", binding=OTHER_VAULT_BINDING)
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def hold_first() -> None:
+        with first.admit_read():
+            entered.set()
+            release.wait(2.0)
+
+    def seal_first() -> None:
+        first.seal_and_drain(
+            authority=_apply_authority(),
+            run_id=RUN_ID,
+            operation_id=OPERATION_ID,
+            journal_digest=JOURNAL_DIGEST,
+            sealed_at=T1,
+            completed_at=T2,
+            expected_revision=0,
+            timeout=2.0,
+        )
+        finished.set()
+
+    participant = threading.Thread(target=hold_first)
+    participant.start()
+    assert entered.wait(1.0)
+    controller = threading.Thread(target=seal_first)
+    controller.start()
+    deadline = time.monotonic() + 1.0
+    while first.reload().state.phase != "sealing" and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert first.reload().state.phase == "sealing"
+    assert not finished.is_set()
+    try:
+        with second.admit_mutation():
+            assert second.snapshot().active_mutations == 1
+    finally:
+        release.set()
+    participant.join(2.0)
+    controller.join(2.0)
+    assert not participant.is_alive()
+    assert not controller.is_alive()
+    assert finished.is_set()
+
+
+@pytest.mark.parametrize("timeout", [float("inf"), float("-inf"), float("nan")])
+def test_non_finite_drain_timeout_is_rejected_before_seal(
+    tmp_path: Path,
+    timeout: float,
+) -> None:
+    admission = _open_admission(tmp_path)
+
+    with pytest.raises(ValueError, match="finite and non-negative"):
+        admission.seal_and_drain(
+            authority=_apply_authority(),
+            run_id=RUN_ID,
+            operation_id=OPERATION_ID,
+            journal_digest=JOURNAL_DIGEST,
+            sealed_at=T1,
+            completed_at=T2,
+            expected_revision=0,
+            timeout=timeout,
+        )
+
+    assert admission.snapshot().state.kind == "open"
+
+
+def test_deletion_seal_uses_same_content_free_ordinary_refusal(tmp_path: Path) -> None:
+    from exomem.governance import consolidation_admission, consolidation_seal
+
+    store = consolidation_seal.ConsolidationSealStore(tmp_path)
+    opened = store.initialize_open(vault_binding_digest=VAULT_BINDING, recorded_at=T0)
+    store.seal_for_deletion(
+        vault_binding_digest=VAULT_BINDING,
+        checkpoint_digest=hashlib.sha256(b"checkpoint").hexdigest(),
+        sealed_at=T1,
+        expected_revision=opened.revision,
+    )
+    restarted = consolidation_admission.ConsolidationAdmission(
+        tmp_path,
+        vault_binding_digest=VAULT_BINDING,
+    )
+    assert restarted.snapshot().state.kind == "deletion-sealed"
+    with _assert_admission_error("CONSOLIDATION_SEALED"):
+        with restarted.admit_read():
+            pass
+
+
+def test_background_stop_failure_keeps_durable_seal_intent(tmp_path: Path) -> None:
+    from exomem.governance import consolidation_seal
+
+    admission = _open_admission(tmp_path)
+
+    def fail() -> None:
+        raise RuntimeError("private worker detail")
+
+    with _assert_admission_error("CONSOLIDATION_DRAIN_FAILED"):
+        admission.seal_and_drain(
+            authority=_apply_authority(),
+            run_id=RUN_ID,
+            operation_id=OPERATION_ID,
+            journal_digest=JOURNAL_DIGEST,
+            sealed_at=T1,
+            completed_at=T2,
+            expected_revision=0,
+            timeout=1.0,
+            stoppers=(fail,),
+        )
+    durable = consolidation_seal.ConsolidationSealStore(tmp_path).load(
+        vault_binding_digest=VAULT_BINDING
+    )
+    assert durable.phase == "sealing"
+
+
+def test_untrusted_authority_cannot_create_denial_of_service_seal(tmp_path: Path) -> None:
+    admission = _open_admission(tmp_path)
+    with _assert_admission_error("CONSOLIDATION_AUTHORITY_UNAVAILABLE"):
+        admission.seal_and_drain(
+            authority=object(),
+            run_id=RUN_ID,
+            operation_id=OPERATION_ID,
+            journal_digest=JOURNAL_DIGEST,
+            sealed_at=T1,
+            completed_at=T2,
+            expected_revision=0,
+            timeout=1.0,
+        )
+    assert admission.snapshot().state.kind == "open"
+    with admission.admit_read():
+        pass
+
+
+def test_hung_background_stopper_is_bounded_and_keeps_seal_intent(
+    tmp_path: Path,
+) -> None:
+    from exomem.governance import consolidation_seal
+
+    admission = _open_admission(tmp_path)
+    release = threading.Event()
+
+    def hang() -> None:
+        release.wait(5.0)
+
+    started = time.monotonic()
+    with _assert_admission_error("CONSOLIDATION_DRAIN_TIMEOUT"):
+        admission.seal_and_drain(
+            authority=_apply_authority(),
+            run_id=RUN_ID,
+            operation_id=OPERATION_ID,
+            journal_digest=JOURNAL_DIGEST,
+            sealed_at=T1,
+            completed_at=T2,
+            expected_revision=0,
+            timeout=0.05,
+            stoppers=(hang,),
+        )
+    elapsed = time.monotonic() - started
+    release.set()
+    assert elapsed < 0.5
+    durable = consolidation_seal.ConsolidationSealStore(tmp_path).load(
+        vault_binding_digest=VAULT_BINDING
+    )
+    assert durable.phase == "sealing"
