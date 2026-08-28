@@ -347,8 +347,36 @@ def test_publishing_a_next_namespace_keeps_prior_namespace_identities(tmp_path: 
         projector_schema_version=first_key.projector_schema_version,
         catalog_generation=first_key.catalog_generation + 1,
     )
-    projection_store.stage_variant_store(tmp_path, key=first_key, items=_items())
-    projection_store.stage_variant_store(tmp_path, key=second_key, items=_items())
+    items = _items()
+    first = projection_store.stage_variant_store(tmp_path, key=first_key, items=items)
+    second = projection_store.stage_variant_store(tmp_path, key=second_key, items=items)
+
+    assert projection_store.verify_variant_store(
+        tmp_path,
+        key=first_key,
+        expected_rows_digest=first.rows_digest,
+    ) == first
+    assert projection_store.verify_variant_store(
+        tmp_path,
+        key=second_key,
+        expected_rows_digest=second.rows_digest,
+    ) == second
+    assert projection_store.load_projection_variant(
+        tmp_path,
+        key=first_key,
+        expected_rows_digest=first.rows_digest,
+        item_identity=items[0].item_identity,
+        expected_content_hash=items[0].content_hash,
+        projection_variant_id=items[0].variants[0].projection_variant_id,
+    ) == items[0].variants[0]
+    assert projection_store.load_projection_variant(
+        tmp_path,
+        key=second_key,
+        expected_rows_digest=second.rows_digest,
+        item_identity=items[0].item_identity,
+        expected_content_hash=items[0].content_hash,
+        projection_variant_id=items[0].variants[0].projection_variant_id,
+    ) == items[0].variants[0]
 
     with reserved_paths._subsystem_authority_scope("governance.projections"):
         with reserved_paths._identity_coordination_scope(
@@ -360,11 +388,4 @@ def test_publishing_a_next_namespace_keeps_prior_namespace_identities(tmp_path: 
                 "authorization-projections",
             )
 
-    assert {
-        projection_store.variant_store_path(tmp_path, first_key)
-        .relative_to(state_paths.vault_state_dir(tmp_path))
-        .as_posix(),
-        projection_store.variant_store_path(tmp_path, second_key)
-        .relative_to(state_paths.vault_state_dir(tmp_path))
-        .as_posix(),
-    } <= set(published)
+    assert published == {}

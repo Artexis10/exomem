@@ -243,7 +243,7 @@ def _fixture(tmp_path: Path, *, os_name: str = "Linux", arch: str = "x86_64") ->
         '''
         #!/bin/sh
         if [ -n "${FAKE_EXPECT_STATE_ROOT:-}" ]; then
-            expected="EXOMEM_STATE_ROOT=\"${FAKE_EXPECT_STATE_ROOT}\""
+            expected="EXOMEM_STATE_ROOT=\\\"${FAKE_EXPECT_STATE_ROOT}\\\""
             grep -Fx "$expected" "$FAKE_SERVICE_ENV_FILE" >/dev/null || exit 1
         fi
         printf 'uv %s\n' "$*" >> "$TRACE_FILE"

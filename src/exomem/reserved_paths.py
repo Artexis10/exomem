@@ -695,9 +695,38 @@ def state_target_is_external(vault_root: Path, target: Path) -> bool:
     """
 
     try:
-        return _owner_anchor(vault_root, target, operation="placement probe")[2]
+        return _owner_anchor(vault_root, target, operation="placement probe").external
     except RuntimeError:
         return False
+
+
+@dataclass(frozen=True, slots=True)
+class _OwnerRoute:
+    """One owner target's logical classification and held traversal route."""
+
+    trust_root: Path
+    held_relative: Path
+    logical_relative: Path
+    external: bool
+
+    def __post_init__(self) -> None:
+        if not self.trust_root.is_absolute():
+            raise RuntimeError("private owner route root is not absolute")
+        for relative in (self.held_relative, self.logical_relative):
+            if relative.is_absolute() or ".." in relative.parts:
+                raise RuntimeError("private owner route relative is unsafe")
+        if self.external:
+            if (
+                len(self.held_relative.parts) < 2
+                or self.held_relative.parts[1:] != self.logical_relative.parts
+            ):
+                raise RuntimeError("private external owner route is inconsistent")
+        elif self.held_relative != self.logical_relative:
+            raise RuntimeError("private vault owner route is inconsistent")
+
+    @property
+    def target(self) -> Path:
+        return self.trust_root / self.held_relative
 
 
 def _owner_anchor(
@@ -705,8 +734,8 @@ def _owner_anchor(
     target: Path,
     *,
     operation: str,
-) -> tuple[Path, Path, bool]:
-    """Resolve one private target to its held anchor root and relative name.
+) -> _OwnerRoute:
+    """Resolve one private target to its logical and physical owner route.
 
     Machine-local families live under ``state_paths.vault_state_dir`` (the
     single placement seam); every other reserved family remains vault-relative.
@@ -714,13 +743,12 @@ def _owner_anchor(
     are bare (no KB prefix), which :func:`classify_logical` accepts — so the
     name authority does not fork when the placement does.
 
-    Returns ``(anchor_root, anchor_relative, external)``. Identity
-    *coordination* stays keyed on the vault root either way (callers hold
-    vault-keyed scopes); only the filesystem anchor moves. Owner-identity
-    *publication* is skipped for external targets: its purpose is refusing
-    vault-path aliases of private state at the generic leaves, and no
-    KB-relative spelling can reach the external root through the no-follow
-    substrate.
+    External files are held from the shared state root through their named
+    per-vault state directory, rather than by acquiring that directory itself.
+    This keeps a root-level external leaf's parent named across a rename and
+    recreate exchange. Identity *coordination* stays keyed on the vault root
+    either way; owner-identity *publication* remains skipped for external
+    targets because no KB-relative spelling can reach them.
     """
 
     root = Path(os.path.abspath(vault_root))
@@ -737,16 +765,31 @@ def _owner_anchor(
         pass
     else:
         external = True
-        anchor = state_dir
         _require_owner_placement(relative, external=external, operation=operation)
-        return anchor, relative, external
+        route = _OwnerRoute(
+            trust_root=state_dir.parent,
+            held_relative=Path(state_dir.name) / relative,
+            logical_relative=relative,
+            external=True,
+        )
+        if route.held_relative.parts[0] != state_dir.name or route.target != resolved:
+            raise RuntimeError("private external owner route does not reach its target")
+        return route
     try:
         relative = resolved.relative_to(root)
     except ValueError as error:
         raise RuntimeError(f"private {operation} target is outside the vault") from error
     external = False
     _require_owner_placement(relative, external=external, operation=operation)
-    return root, relative, external
+    route = _OwnerRoute(
+        trust_root=root,
+        held_relative=relative,
+        logical_relative=relative,
+        external=False,
+    )
+    if route.target != resolved:
+        raise RuntimeError("private vault owner route does not reach its target")
+    return route
 
 
 def _require_owner_placement(relative: Path, *, external: bool, operation: str) -> None:
@@ -2191,10 +2234,10 @@ def _publish_sqlite_owner_family(
     if not _identity_coordination_active(vault_root, descriptor_id):
         raise RuntimeError("SQLite identity publication lacks coordination")
 
-    anchor, relative, external = _owner_anchor(
+    route = _owner_anchor(
         vault_root, database, operation="SQLite identity publication"
     )
-    classification = classify_logical(relative.as_posix())
+    classification = classify_logical(route.logical_relative.as_posix())
     if (
         classification.disposition is not PathDisposition.RESERVED
         or classification.descriptor_id != descriptor_id
@@ -2204,26 +2247,30 @@ def _publish_sqlite_owner_family(
     if not callable(getattr(connection, "execute", None)):
         raise RuntimeError("SQLite identity publication lacks a live connection")
 
-    if external:
+    if route.external:
         # Identity publication exists so KB-relative generic reads refuse
         # aliases of private state.  An external-store family has no
         # KB-relative spelling to defend; the checks above still enforce the
         # owner-authority and coordination contract for the caller.
         return
 
-    root = anchor
+    root = route.trust_root
     acquired = held_fs.acquire(root)
     if not acquired.ok:
         raise RuntimeError("SQLite identity publication cannot acquire the vault")
     with acquired.require() as filesystem:
-        parent_relative = relative.parent.as_posix()
+        parent_relative = route.held_relative.parent.as_posix()
         parent_result = filesystem.parent(
             parent_relative if parent_relative != "." else "."
         )
         if not parent_result.ok:
             raise RuntimeError("SQLite identity publication cannot retain its parent")
         with parent_result.require() as parent:
-            prefix = "" if relative.parent == Path(".") else f"{relative.parent.as_posix()}/"
+            prefix = (
+                ""
+                if route.logical_relative.parent == Path(".")
+                else f"{route.logical_relative.parent.as_posix()}/"
+            )
 
             def publish(family: dict[str, held_fs.StableIdentity]) -> None:
                 installed = {f"{prefix}{name}": identity for name, identity in family.items()}
@@ -2240,7 +2287,9 @@ def _publish_sqlite_owner_family(
             for attempt in range(3):
                 wal_or_shm_reachable = False
                 for suffix in ("-wal", "-shm"):
-                    probe = filesystem.file(parent, f"{relative.name}{suffix}")
+                    probe = filesystem.file(
+                        parent, f"{route.logical_relative.name}{suffix}"
+                    )
                     if probe.ok:
                         probe.require().close()
                         wal_or_shm_reachable = True
@@ -2256,7 +2305,7 @@ def _publish_sqlite_owner_family(
                 result = held_fs.publish_sqlite_identities(
                     filesystem,
                     parent,
-                    relative.name,
+                    route.logical_relative.name,
                     publish,
                 )
                 if result.ok:
@@ -2287,7 +2336,7 @@ def _publish_sqlite_owner_family(
 
             family: dict[str, held_fs.StableIdentity] = {}
             for suffix in ("", "-journal", "-wal", "-shm"):
-                name = f"{relative.name}{suffix}"
+                name = f"{route.logical_relative.name}{suffix}"
                 file_result = filesystem.file(parent, name)
                 if not file_result.ok:
                     if suffix and file_result.error is not None and file_result.error.code == "MISSING":
@@ -2314,10 +2363,10 @@ def _publish_owner_bytes(
         raise TypeError("private byte publication requires bytes")
 
     root = Path(os.path.abspath(vault_root))
-    anchor, relative, external = _owner_anchor(
+    route = _owner_anchor(
         vault_root, path, operation="byte publication"
     )
-    classification = classify_logical(relative.as_posix())
+    classification = classify_logical(route.logical_relative.as_posix())
     if (
         classification.disposition is not PathDisposition.RESERVED
         or classification.descriptor_id != descriptor_id
@@ -2331,12 +2380,12 @@ def _publish_owner_bytes(
     # external anchor is created through the placement seam so it carries the
     # private-state posture from birth.
     try:
-        if external:
+        if route.external:
             from . import state_paths
 
             state_paths.ensure_vault_state_dir(vault_root)
         else:
-            anchor.mkdir(parents=True, exist_ok=True)
+            route.trust_root.mkdir(parents=True, exist_ok=True)
     except OSError as error:
         raise RuntimeError("private byte publication cannot create the vault") from error
 
@@ -2344,11 +2393,11 @@ def _publish_owner_bytes(
         root,
         descriptor_ids=(descriptor_id,),
     ):
-        acquired = held_fs.acquire(anchor)
+        acquired = held_fs.acquire(route.trust_root)
         if not acquired.ok:
             raise RuntimeError("private byte publication cannot acquire the vault")
         with acquired.require() as filesystem:
-            parent_text = relative.parent.as_posix()
+            parent_text = route.held_relative.parent.as_posix()
             parent_result = filesystem.parent(
                 parent_text if parent_text != "." else ".",
                 create=True,
@@ -2357,7 +2406,7 @@ def _publish_owner_bytes(
                 raise RuntimeError("private byte publication cannot retain its parent")
             with parent_result.require() as parent:
                 expected: held_fs.StableIdentity | None = None
-                current = filesystem.file(parent, relative.name)
+                current = filesystem.file(parent, route.held_relative.name)
                 if current.ok:
                     with current.require() as existing:
                         if existing.identity.link_count != 1:
@@ -2374,7 +2423,7 @@ def _publish_owner_bytes(
                 result = held_fs.publish_bytes(
                     filesystem,
                     parent,
-                    relative.name,
+                    route.held_relative.name,
                     data,
                     expected_identity=expected,
                 )
@@ -2384,9 +2433,9 @@ def _publish_owner_bytes(
                 if not _owner_directory_is_current(filesystem, parent):
                     raise RuntimeError("private byte publication parent changed")
 
-        if not external:
+        if not route.external:
             current = _reachable_owner_publications(root, descriptor_id)
-            current[relative.as_posix()] = identity
+            current[route.logical_relative.as_posix()] = identity
             _publish_owner_identities(root, descriptor_id, current)
         return identity
 
@@ -2407,10 +2456,10 @@ def _read_owner_bytes(
 
     root = Path(os.path.abspath(vault_root))
     target = Path(os.path.abspath(path))
-    anchor, relative, external = _owner_anchor(
+    route = _owner_anchor(
         vault_root, path, operation="byte read"
     )
-    classification = classify_logical(relative.as_posix())
+    classification = classify_logical(route.logical_relative.as_posix())
     if (
         classification.disposition is not PathDisposition.RESERVED
         or classification.descriptor_id != descriptor_id
@@ -2418,7 +2467,7 @@ def _read_owner_bytes(
         raise RuntimeError("private byte read target is not owner-bound")
 
     try:
-        anchor.lstat()
+        route.trust_root.lstat()
     except FileNotFoundError:
         raise FileNotFoundError(target) from None
     except OSError as error:
@@ -2429,11 +2478,11 @@ def _read_owner_bytes(
         descriptor_ids=(descriptor_id,),
         identity_may_change=False,
     ):
-        acquired = held_fs.acquire(anchor)
+        acquired = held_fs.acquire(route.trust_root)
         if not acquired.ok:
             raise OSError("private byte read cannot acquire the vault")
         with acquired.require() as filesystem:
-            parent_text = relative.parent.as_posix()
+            parent_text = route.held_relative.parent.as_posix()
             parent_result = filesystem.parent(
                 parent_text if parent_text != "." else "."
             )
@@ -2442,7 +2491,7 @@ def _read_owner_bytes(
                     raise FileNotFoundError(target)
                 raise OSError("private byte read cannot retain its parent")
             with parent_result.require() as parent:
-                file_result = filesystem.file(parent, relative.name)
+                file_result = filesystem.file(parent, route.held_relative.name)
                 if not file_result.ok:
                     if file_result.error is not None and file_result.error.code == "MISSING":
                         raise FileNotFoundError(target)
@@ -2468,7 +2517,7 @@ def _read_owner_bytes(
                     if len(data) > limit:
                         raise OSError("private byte read exceeds its limit")
                     identity = file.identity
-                    current = filesystem.file(parent, relative.name)
+                    current = filesystem.file(parent, route.held_relative.name)
                     if not current.ok:
                         raise OSError("private byte read target changed")
                     with current.require() as current_file:
@@ -2477,9 +2526,9 @@ def _read_owner_bytes(
                     if not _owner_directory_is_current(filesystem, parent):
                         raise OSError("private byte read parent changed")
 
-        if not external:
+        if not route.external:
             current = _reachable_owner_publications(root, descriptor_id)
-            current[relative.as_posix()] = identity
+            current[route.logical_relative.as_posix()] = identity
             _publish_owner_identities(root, descriptor_id, current)
         return data
 
@@ -2490,19 +2539,19 @@ def _owner_relative_path(
     descriptor_id: str,
     *,
     operation: str,
-) -> tuple[Path, Path, bool]:
+) -> _OwnerRoute:
     if not owner_authorized(descriptor_id):
         raise RuntimeError(f"private {operation} lacks exact owner authority")
-    anchor, relative, external = _owner_anchor(
+    route = _owner_anchor(
         vault_root, path, operation=operation
     )
-    classification = classify_logical(relative.as_posix())
+    classification = classify_logical(route.logical_relative.as_posix())
     if (
         classification.disposition is not PathDisposition.RESERVED
         or classification.descriptor_id != descriptor_id
     ):
         raise RuntimeError(f"private {operation} target is not owner-bound")
-    return anchor, relative, external
+    return route
 
 
 def _owner_directory_is_current(
@@ -2535,7 +2584,7 @@ def _sqlite_owner_target_scope(
 
     if not _identity_coordination_active(vault_root, descriptor_id):
         raise RuntimeError("private SQLite target lacks coordination")
-    root, relative, external = _owner_relative_path(
+    route = _owner_relative_path(
         vault_root,
         database,
         descriptor_id,
@@ -2543,27 +2592,27 @@ def _sqlite_owner_target_scope(
     )
     if create:
         try:
-            if external:
+            if route.external:
                 from . import state_paths
 
                 state_paths.ensure_vault_state_dir(vault_root)
             else:
-                root.mkdir(parents=True, exist_ok=True)
+                route.trust_root.mkdir(parents=True, exist_ok=True)
         except OSError as error:
             raise RuntimeError("private SQLite target cannot create the vault") from error
     else:
         try:
-            root.lstat()
+            route.trust_root.lstat()
         except FileNotFoundError:
             raise FileNotFoundError(database) from None
         except OSError as error:
             raise RuntimeError("private SQLite target cannot inspect the vault") from error
 
-    acquired = held_fs.acquire(root)
+    acquired = held_fs.acquire(route.trust_root)
     if not acquired.ok:
         raise RuntimeError("private SQLite target cannot acquire the vault")
     with acquired.require() as filesystem:
-        parent_text = relative.parent.as_posix()
+        parent_text = route.held_relative.parent.as_posix()
         parent_result = filesystem.parent(
             parent_text if parent_text != "." else ".",
             create=create,
@@ -2582,7 +2631,7 @@ def _sqlite_owner_target_scope(
             # handle does not necessarily share DELETE with another opener.
             existing_result = filesystem.file(
                 parent,
-                relative.name,
+                route.held_relative.name,
                 access="read",
             )
             existing: held_fs.HeldFile | None = None
@@ -2610,7 +2659,7 @@ def _sqlite_owner_target_scope(
                 if not _owner_directory_is_current(filesystem, parent):
                     raise RuntimeError("private SQLite target parent changed")
                 try:
-                    yield root / relative
+                    yield route.target
                 except BaseException:
                     raise
                 else:
@@ -2618,7 +2667,7 @@ def _sqlite_owner_target_scope(
                         raise RuntimeError("private SQLite target parent changed")
                     current_result = filesystem.file(
                         parent,
-                        relative.name,
+                        route.held_relative.name,
                         access="read",
                     )
                     if not current_result.ok:
@@ -2660,19 +2709,22 @@ def _move_owner_file(
 ) -> held_fs.StableIdentity:
     """Rename one exact private file between owner-bound names."""
 
-    anchor, source_relative, source_external = _owner_relative_path(
+    source_route = _owner_relative_path(
         vault_root,
         source,
         source_descriptor_id,
         operation="move",
     )
-    destination_anchor, destination_relative, external = _owner_relative_path(
+    destination_route = _owner_relative_path(
         vault_root,
         destination,
         destination_descriptor_id,
         operation="move",
     )
-    if destination_anchor != anchor or source_external != external:
+    if (
+        destination_route.trust_root != source_route.trust_root
+        or source_route.external != destination_route.external
+    ):
         raise RuntimeError("private move targets different vault roots")
     root = Path(os.path.abspath(vault_root))
 
@@ -2680,12 +2732,12 @@ def _move_owner_file(
         root,
         descriptor_ids=(source_descriptor_id, destination_descriptor_id),
     ):
-        acquired = held_fs.acquire(anchor)
+        acquired = held_fs.acquire(source_route.trust_root)
         if not acquired.ok:
             raise OSError("private move cannot acquire the vault")
         with acquired.require() as filesystem:
-            source_parent_text = source_relative.parent.as_posix()
-            destination_parent_text = destination_relative.parent.as_posix()
+            source_parent_text = source_route.held_relative.parent.as_posix()
+            destination_parent_text = destination_route.held_relative.parent.as_posix()
             source_parent_result = filesystem.parent(
                 source_parent_text if source_parent_text != "." else ".",
             )
@@ -2708,7 +2760,7 @@ def _move_owner_file(
                 with destination_parent_result.require() as destination_parent:
                     source_result = filesystem.file(
                         source_parent,
-                        source_relative.name,
+                        source_route.held_relative.name,
                         access="mutate",
                     )
                     if not source_result.ok:
@@ -2723,7 +2775,7 @@ def _move_owner_file(
                             raise OSError("private move source is ambiguous")
                         destination_result = filesystem.file(
                             destination_parent,
-                            destination_relative.name,
+                            destination_route.held_relative.name,
                         )
                         if destination_result.ok:
                             with destination_result.require() as destination_file:
@@ -2749,7 +2801,7 @@ def _move_owner_file(
                         moved = filesystem.rename(
                             source_file,
                             destination_parent,
-                            destination_relative.name,
+                            destination_route.held_relative.name,
                             replace=replace,
                         )
                         if not moved.ok:
@@ -2765,7 +2817,7 @@ def _move_owner_file(
 
                     installed = filesystem.file(
                         destination_parent,
-                        destination_relative.name,
+                        destination_route.held_relative.name,
                     )
                     if not installed.ok:
                         raise OSError("private move destination is unavailable")
@@ -2774,24 +2826,24 @@ def _move_owner_file(
                             raise OSError("private move destination changed")
                         identity = installed_file.identity
 
-        if external:
+        if source_route.external:
             pass
         elif source_descriptor_id == destination_descriptor_id:
             current = _reachable_owner_publications(root, source_descriptor_id)
-            current.pop(source_relative.as_posix(), None)
-            current[destination_relative.as_posix()] = identity
+            current.pop(source_route.logical_relative.as_posix(), None)
+            current[destination_route.logical_relative.as_posix()] = identity
             _publish_owner_identities(root, source_descriptor_id, current)
         else:
             _replace_published_owner_path(
                 root,
                 source_descriptor_id,
-                source_relative,
+                source_route.logical_relative,
                 None,
             )
             _replace_published_owner_path(
                 root,
                 destination_descriptor_id,
-                destination_relative,
+                destination_route.logical_relative,
                 identity,
             )
         return identity
@@ -2806,7 +2858,7 @@ def _remove_owner_file(
 ) -> bool:
     """Unlink one exact private file through its retained owner-bound handle."""
 
-    anchor, relative, external = _owner_relative_path(
+    route = _owner_relative_path(
         vault_root,
         path,
         descriptor_id,
@@ -2814,18 +2866,14 @@ def _remove_owner_file(
     )
     root = Path(os.path.abspath(vault_root))
     with _identity_coordination_scope(root, descriptor_ids=(descriptor_id,)):
-        acquired = held_fs.acquire(anchor)
+        acquired = held_fs.acquire(route.trust_root)
         if not acquired.ok:
             if missing_ok:
                 return False
             raise OSError("private remove cannot acquire the vault")
         with acquired.require() as filesystem:
-            parent_text = relative.parent.as_posix()
-            # Elevated access on the anchor root itself is unsupported by the
-            # held substrate. An external state target's parent IS the anchor,
-            # so retain it read-mode here; the shared no-follow path durability
-            # primitive flushes that exact anchor after the unlink below.
-            parent_access = "read" if external and parent_text == "." else "flush"
+            parent_text = route.held_relative.parent.as_posix()
+            parent_access = "flush"
             parent_result = filesystem.parent(
                 parent_text if parent_text != "." else ".",
                 access=parent_access,
@@ -2836,12 +2884,16 @@ def _remove_owner_file(
                     and parent_result.error is not None
                     and parent_result.error.code == "MISSING"
                 ):
-                    if not external:
-                        _replace_published_owner_path(root, descriptor_id, relative, None)
+                    if not route.external:
+                        _replace_published_owner_path(
+                            root, descriptor_id, route.logical_relative, None
+                        )
                     return False
                 raise OSError("private remove parent is unsafe")
             with parent_result.require() as parent:
-                file_result = filesystem.file(parent, relative.name, access="mutate")
+                file_result = filesystem.file(
+                    parent, route.held_relative.name, access="mutate"
+                )
                 if not file_result.ok:
                     if (
                         file_result.error is not None
@@ -2849,8 +2901,10 @@ def _remove_owner_file(
                     ):
                         if not missing_ok:
                             raise FileNotFoundError(path)
-                        if not external:
-                            _replace_published_owner_path(root, descriptor_id, relative, None)
+                        if not route.external:
+                            _replace_published_owner_path(
+                                root, descriptor_id, route.logical_relative, None
+                            )
                         return False
                     raise OSError("private remove target is unsafe")
                 with file_result.require() as file:
@@ -2865,7 +2919,7 @@ def _remove_owner_file(
                     flushed = filesystem.flush_directory(parent)
                     if not flushed.ok:
                         raise OSError("private remove parent flush was refused")
-                current = filesystem.file(parent, relative.name)
+                current = filesystem.file(parent, route.held_relative.name)
                 if current.ok:
                     current.require().close()
                     raise OSError("private remove target changed")
@@ -2874,12 +2928,10 @@ def _remove_owner_file(
                 if not _owner_directory_is_current(filesystem, parent):
                     raise OSError("private remove parent changed")
 
-        if external:
-            flushed = held_fs.flush_directory_path(anchor)
-            if not flushed.ok:
-                raise OSError("private remove parent flush was refused")
-        if not external:
-            _replace_published_owner_path(root, descriptor_id, relative, None)
+        if not route.external:
+            _replace_published_owner_path(
+                root, descriptor_id, route.logical_relative, None
+            )
         return True
 
 

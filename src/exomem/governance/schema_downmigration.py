@@ -1438,7 +1438,7 @@ def _complete_pre_fence_v3(
         phase = marker["phase"]
     if phase != "legacy-aligned":
         raise DownmigrationUnavailable
-    d1 = _prove_d1(root, plan=plan, d0=d0)
+    d1 = _marker_digest(marker.get("d1"))
     endpoint = _terminal_endpoint(root, plan.event_id)
     _verify_marker_endpoint(marker, d1, endpoint)
     _align_d1(root, plan=plan, d0=d0, expected_d1=d1)

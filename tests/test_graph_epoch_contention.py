@@ -33,7 +33,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import epistemic_graph, graph_sync, held_fs, reserved_paths
+from exomem import epistemic_graph, graph_sync, reserved_paths
 from exomem.kbdir import kb_dirname
 
 
@@ -88,39 +88,26 @@ def test_a_locked_sidecar_reads_busy_rather_than_malformed(tmp_path: Path) -> No
     assert acknowledgement is None
 
 
-def test_a_transient_wal_identity_snapshot_reads_busy_rather_than_malformed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_external_graph_sqlite_publication_leaves_vault_identity_catalogue_empty(
+    tmp_path: Path,
 ) -> None:
-    """A WAL family changing under its retained snapshot is contention, not damage."""
+    """External graph state has no KB-relative identity alias to publish."""
     root = _kb(tmp_path)
     path = _sidecar_with_meta(root)
-    holder = sqlite3.connect(path)
+    connection = epistemic_graph._connect_existing_owner_target(
+        root,
+        path,
+        readonly=True,
+    )
     try:
-        assert holder.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",)
-        holder.execute("INSERT INTO graph_meta VALUES ('probe', 'live')")
-        holder.commit()
-
-        monkeypatch.setattr(
-            held_fs,
-            "publish_sqlite_identities",
-            lambda *_args, **_kwargs: held_fs.HeldResult(
-                error=held_fs.HeldFsError(
-                    "IDENTITY_CHANGED", "WAL family moved during publication"
-                )
-            ),
-        )
-        monkeypatch.setattr(
-            reserved_paths,
-            "_owner_directory_is_current",
-            lambda *_args, **_kwargs: True,
-        )
-
-        status, acknowledgement = graph_sync.acknowledgement_state(root)
+        assert connection.execute("SELECT 1").fetchone() == (1,)
     finally:
-        holder.close()
+        connection.close()
 
-    assert status == "busy"
-    assert acknowledgement is None
+    graph_identity = reserved_paths._lstat_identity(path)
+    published = reserved_paths._published_identity_catalogue(root)
+    assert published.descriptor_for(graph_identity) is None
+    assert reserved_paths.IdentityCatalogue.from_vault(root).descriptor_for(graph_identity) is None
 
 
 def test_a_stably_incomplete_wal_family_reads_malformed_not_busy(
@@ -136,53 +123,6 @@ def test_a_stably_incomplete_wal_family_reads_malformed_not_busy(
 
     assert status == "malformed"
     assert acknowledgement is None
-
-
-def test_a_final_wal_identity_failure_rechecks_the_retained_parent(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A parent exchange is structural ambiguity, never benign contention."""
-    root = _kb(tmp_path)
-    path = _sidecar_with_meta(root)
-    holder = sqlite3.connect(path)
-    try:
-        assert holder.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",)
-        holder.execute("INSERT INTO graph_meta VALUES ('probe', 'live')")
-        holder.commit()
-
-        monkeypatch.setattr(
-            held_fs,
-            "publish_sqlite_identities",
-            lambda *_args, **_kwargs: held_fs.HeldResult(
-                error=held_fs.HeldFsError(
-                    "IDENTITY_CHANGED", "WAL family moved during publication"
-                )
-            ),
-        )
-        parent_checks = iter((True, True, True, True, True, False))
-        monkeypatch.setattr(
-            reserved_paths,
-            "_owner_directory_is_current",
-            lambda *_args, **_kwargs: next(parent_checks),
-        )
-        monkeypatch.setattr(reserved_paths, "owner_authorized", lambda _descriptor: True)
-        monkeypatch.setattr(
-            reserved_paths,
-            "_identity_coordination_active",
-            lambda *_args, **_kwargs: True,
-        )
-
-        with pytest.raises(RuntimeError, match="publication parent changed") as raised:
-            reserved_paths._publish_sqlite_owner_family(
-                root,
-                path,
-                "graph-store",
-                holder,
-            )
-    finally:
-        holder.close()
-
-    assert not isinstance(raised.value, reserved_paths.SqliteIdentityBusyError)
 
 
 def test_a_locked_sidecar_is_given_up_on_quickly(tmp_path: Path) -> None:

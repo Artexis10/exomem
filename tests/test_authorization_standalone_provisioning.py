@@ -481,7 +481,7 @@ def test_v3_staging_keyring_cannot_be_claimed_by_a_copied_attachment(
     vault = _vault(tmp_path)
     copied = _vault(tmp_path, "copied-vault")
     original_sidecar = _exact_v3(vault)
-    copied_sidecar = store.sidecar_path(copied)
+    copied_sidecar = _exact_v3(copied)
     copied_sidecar.write_bytes(original_sidecar.read_bytes())
     now = 1_800_000_000
     first = authorization_custody.stage_standalone_v3_custody(vault, now=now)

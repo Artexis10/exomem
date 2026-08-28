@@ -637,19 +637,27 @@ def test_external_floor_and_checkpoint_swaps_after_media_cas_do_not_pair_stale_t
     original_snapshot = vault_module._capture_batch_snapshot
     fanout_calls: list[object] = []
     swapped = False
+    postlude_active = False
+    postlude_batches = 0
 
     def capture_postlude_batch(writes, **kwargs):  # noqa: ANN001
+        nonlocal postlude_active, postlude_batches
+        postlude_batches += 1
         floor_write, checkpoint_write = writes
         assert kwargs["vault_root"] == vault
         assert floor_write.path == floor_path
         assert floor_write.content == floor_path.read_text(encoding="utf-8")
         assert floor_write.expected_hash == content_hash(floor_write.content)
         assert checkpoint_write.path == checkpoint_path
-        return original_batch(writes, **kwargs)
+        postlude_active = True
+        try:
+            return original_batch(writes, **kwargs)
+        finally:
+            postlude_active = False
 
     def replace_after_hash_check(path: Path):
         nonlocal swapped
-        if Path(path) == floor_path and not swapped:
+        if postlude_active and Path(path) == floor_path and not swapped:
             swapped = True
             old_floor = graph_sync.read_floor(vault)
             old_checkpoint = graph_sync.read_checkpoint(vault)
@@ -698,6 +706,7 @@ def test_external_floor_and_checkpoint_swaps_after_media_cas_do_not_pair_stale_t
     )
 
     assert outcome.state == "complete"
+    assert postlude_batches == 1
     assert swapped
     assert graph_sync.read_floor(vault) == replace_after_hash_check.floor
     assert graph_sync.read_checkpoint(vault) == replace_after_hash_check.checkpoint

@@ -1151,6 +1151,7 @@ def test_plan_progress_round_trips_over_rest(
 
     from exomem import commands, server
 
+    initialize_vault_state_offline(tmp_path, source="plan progress REST fixture")
     _build_vault(tmp_path)
     _add_plan(
         tmp_path,
@@ -1169,8 +1170,6 @@ def test_plan_progress_round_trips_over_rest(
         Path(__file__).parent / "fixtures" / "Knowledge Base" / "_Schema",
         tmp_path / "Knowledge Base" / "_Schema",
     )
-    initialize_vault_state_offline(tmp_path, source="plan progress REST fixture")
-
     monkeypatch.setattr(server, "load_dotenv", lambda *a, **k: None)
     monkeypatch.setenv("EXOMEM_REST_API_KEY", "plan-progress-key")
     monkeypatch.setenv("EXOMEM_VAULT_PATH", str(tmp_path))

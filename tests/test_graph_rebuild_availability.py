@@ -533,7 +533,6 @@ def test_dry_run_census_never_recovers_an_interrupted_reset(
     graph_sync._write_checkpoint(tmp_path, _checkpoint(1))
     graph_sync._write_floor(tmp_path, graph_sync.GraphSyncGenerationFloor.create(2))
     live = epistemic_graph.sidecar_path(tmp_path)
-    live.parent.mkdir(parents=True)
     live.write_bytes(b"graph")
 
     monkeypatch.setattr(
@@ -577,7 +576,6 @@ def test_unavailable_reset_quarantines_only_the_live_graph_set(tmp_path: Path) -
     graph_sync._write_floor(tmp_path, graph_sync.GraphSyncGenerationFloor.create(2))
     live = epistemic_graph.sidecar_path(tmp_path)
     state_dir = live.parent
-    state_dir.mkdir(parents=True)
     companion = live.with_name(".graph.sqlite-wal")
     receipt = state_dir / ".graph-commit-receipts" / "receipt.json"
     note = tmp_path / "Knowledge Base/Notes/unchanged.md"
@@ -685,7 +683,6 @@ def test_unavailable_reset_rolls_back_a_partial_move(tmp_path: Path, monkeypatch
     graph_sync._write_checkpoint(tmp_path, _checkpoint(1))
     graph_sync._write_floor(tmp_path, graph_sync.GraphSyncGenerationFloor.create(2))
     live = epistemic_graph.sidecar_path(tmp_path)
-    live.parent.mkdir(parents=True)
     live.write_bytes(b"main")
     live.with_name(".graph.sqlite-wal").write_bytes(b"wal")
     original = mutation_lock.rename_retained_regular_file

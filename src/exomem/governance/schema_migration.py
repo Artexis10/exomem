@@ -1492,30 +1492,60 @@ def _restore_terminal_endpoint(
 ) -> dict[str, object]:
     """Return the one exact committed endpoint that advances restore D0 to D1."""
 
-    records = receipts.event_records(vault_root)
+    root = Path(vault_root)
+    connection = store.open_readonly_connection(root)
+    if connection is None:
+        raise ForwardMigrationRestoreUnavailable
+    try:
+        schema_v4.require_exact_v3_connection(connection)
+        instance = connection.execute(
+            "SELECT instance_id FROM receipt_instance WHERE singleton=1"
+        ).fetchone()
+        if instance is None or not isinstance(instance[0], str):
+            raise ForwardMigrationRestoreUnavailable
+        instance_id = instance[0]
+        head = connection.execute(
+            "SELECT durable_seq, durable_hash, observed_seq, observed_hash, path, byte_offset "
+            "FROM receipts_head WHERE instance_id=?",
+            (instance_id,),
+        ).fetchone()
+        if head is None:
+            raise ForwardMigrationRestoreUnavailable
+    except sqlite3.Error as error:
+        raise ForwardMigrationRestoreUnavailable from error
+    finally:
+        connection.close()
+
+    try:
+        records, issues = receipts._chain_state(  # noqa: SLF001 - exact durable locator proof
+            receipts._instance_dir(root, instance_id)  # noqa: SLF001 - active receipt authority
+        )
+    except receipts.ReceiptError as error:
+        raise ForwardMigrationRestoreUnavailable from error
+    if issues:
+        raise ForwardMigrationRestoreUnavailable
     terminals = [
-        item
-        for item in records
-        if item.get("causation_id") == plan.event_id
-        and item.get("phase") == "committed"
-        and item.get("outcome") == "schema-v3-backup-restored"
+        record
+        for record in records
+        if record.get("causation_id") == plan.event_id
+        and record.get("phase") == "committed"
+        and record.get("outcome") == "schema-v3-backup-restored"
     ]
     if len(terminals) != 1:
         raise ForwardMigrationRestoreUnavailable
     terminal = terminals[0]
     endpoint = {
-        "instance_id": terminal.get("instance_id"),
+        "instance_id": instance_id,
         "seq": terminal.get("seq"),
         "hash": terminal.get("hash"),
         "path": receipts._relative_locator(  # noqa: SLF001 - receipt locator authority
-            Path(vault_root),
+            root,
             Path(str(terminal.get("_path", ""))),
         ),
         "byte_offset": terminal.get("_offset"),
     }
     if (
-        not isinstance(endpoint["instance_id"], str)
-        or not isinstance(endpoint["seq"], int)
+        not isinstance(endpoint["seq"], int)
         or isinstance(endpoint["seq"], bool)
         or endpoint["seq"] < 1
         or not isinstance(endpoint["hash"], str)
@@ -1525,6 +1555,15 @@ def _restore_terminal_endpoint(
         or not isinstance(endpoint["byte_offset"], int)
         or isinstance(endpoint["byte_offset"], bool)
         or endpoint["byte_offset"] < 0
+        or tuple(head)
+        != (
+            endpoint["seq"],
+            endpoint["hash"],
+            endpoint["seq"],
+            endpoint["hash"],
+            endpoint["path"],
+            endpoint["byte_offset"],
+        )
     ):
         raise ForwardMigrationRestoreUnavailable
     return endpoint
@@ -2254,26 +2293,34 @@ def restore_forward_migration_backup(
                     _forward_migration_barrier("after_restore_receipt_commit")
                     phase = marker.get("phase")
                 if phase == "receipt-committed":
+                    expected_d1 = _require_digest(marker.get("d1"))
+                    endpoint = _restore_terminal_endpoint(root, plan)
+                    if marker.get("terminal") != endpoint:
+                        raise ForwardMigrationRestoreUnavailable
                     d1_digest = legacy_v3_placement.align_legacy_to_d1(
                         root,
                         event_id=plan.event_id,
                         d0_digest=d0_digest,
                         expected_outcome="schema-v3-backup-restored",
                     )
-                    if not hmac.compare_digest(str(marker.get("d1")), d1_digest):
+                    if not hmac.compare_digest(expected_d1, d1_digest):
                         raise ForwardMigrationRestoreUnavailable
                     session.advance_legacy_aligned()
                     _forward_migration_barrier("after_restore_legacy_aligned")
                 elif phase != "legacy-aligned":
                     raise ForwardMigrationRestoreUnavailable
                 else:
-                    d1_digest = legacy_v3_placement.prove_d1_against_legacy(
+                    expected_d1 = _require_digest(marker.get("d1"))
+                    endpoint = _restore_terminal_endpoint(root, plan)
+                    if marker.get("terminal") != endpoint:
+                        raise ForwardMigrationRestoreUnavailable
+                    d1_digest = legacy_v3_placement.align_legacy_to_d1(
                         root,
                         event_id=plan.event_id,
                         d0_digest=d0_digest,
                         expected_outcome="schema-v3-backup-restored",
                     )
-                    if not hmac.compare_digest(str(marker.get("d1")), d1_digest):
+                    if not hmac.compare_digest(expected_d1, d1_digest):
                         raise ForwardMigrationRestoreUnavailable
                 _complete_restore_schema_fence(plan)
                 _forward_migration_barrier("after_restore_schema_fence")

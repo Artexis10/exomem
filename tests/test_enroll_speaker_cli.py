@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from conftest import initialize_vault_state_offline
 
 from exomem import __main__ as cli
 from exomem import enroll_speaker, voice_embed, voice_profiles
@@ -65,6 +66,7 @@ def test_list_and_remove_round_trip(tmp_path, sample, monkeypatch) -> None:
 
 
 def test_cli_dispatch_enroll_list_remove(tmp_path, sample, monkeypatch) -> None:
+    initialize_vault_state_offline(tmp_path, source="speaker CLI dispatch fixture")
     monkeypatch.setattr(voice_embed, "embed_spans", lambda p, spans: np.array([1.0, 0.0, 0.0]))
     v = str(tmp_path)
 
@@ -76,6 +78,7 @@ def test_cli_dispatch_enroll_list_remove(tmp_path, sample, monkeypatch) -> None:
 
 
 def test_cli_enroll_soft_fail_returns_nonzero(tmp_path, sample, monkeypatch) -> None:
+    initialize_vault_state_offline(tmp_path, source="speaker CLI soft-fail fixture")
     monkeypatch.setattr(voice_embed, "embed_spans", lambda p, spans: None)
     rc = cli.main(["enroll-speaker", "--name", "Alice", "--vault", str(tmp_path), str(sample)])
     assert rc == 1

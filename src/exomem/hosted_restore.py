@@ -1018,8 +1018,9 @@ def _restore_candidate_bound(
         if record["phase"] == "state_migrated":
             from . import state_migration
 
+            expected_state_dir = _expected_state_dir(binding)
             resolution = state_migration.require_vault_state_ready(binding.vault_root)
-            _verify_state_manifest_proof(record, resolution.state_dir)
+            _verify_state_manifest_proof(record, expected_state_dir)
             _verify_migrated_published(
                 binding,
                 verified.manifest,
@@ -1034,22 +1035,24 @@ def _restore_candidate_bound(
                 except Exception:  # noqa: BLE001 - optional derived work may degrade
                     derived_state = "degraded"
                     derived_error = "DERIVED_REBUILD_FAILED"
-            resolution = state_migration.require_vault_state_ready(binding.vault_root)
-            _verify_state_manifest_proof(record, resolution.state_dir)
             try:
+                resolution = state_migration.require_vault_state_ready(binding.vault_root)
+                _verify_state_manifest_proof(record, expected_state_dir)
                 _verify_migrated_published(
                     binding,
                     verified.manifest,
                     resolution.state_dir,
                     allow_state_extras=True,
                 )
-            except OperatorFailure as exc:
+            except (OperatorFailure, state_migration.StateMigrationOfflineRequired) as exc:
                 try:
                     portability._repair_canonical_from_archive(
                         prepared,
                         binding.vault_root,
-                        portable_state_root=resolution.state_dir,
+                        portable_state_root=expected_state_dir,
                     )
+                    resolution = state_migration.require_vault_state_ready(binding.vault_root)
+                    _verify_state_manifest_proof(record, expected_state_dir)
                     _verify_migrated_published(
                         binding,
                         verified.manifest,

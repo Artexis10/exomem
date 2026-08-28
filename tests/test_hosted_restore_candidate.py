@@ -10,7 +10,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from exomem import __version__, hosted_runtime, server_runtime, state_migration, state_paths
+from exomem import (
+    __version__,
+    hosted_runtime,
+    server_runtime,
+    state_migration,
+    state_paths,
+)
 from exomem import hosted_portability as portability
 from exomem import init as init_module
 from exomem.hosted_operator import OperatorFailure
@@ -189,7 +195,7 @@ def test_fresh_initialize_workload_creates_state_manifest_before_server_start(
     _configure_hosted_server(monkeypatch, binding)
     runtime = server_runtime.initialize_runtime(load_dotenv_func=lambda **_kwargs: None)
     try:
-        assert runtime.config.vault_root == binding.vault_root
+        assert runtime.vault_root == binding.vault_root
     finally:
         assert runtime.hosted_lifetime_lock is not None
         runtime.hosted_lifetime_lock.__exit__(None, None, None)
@@ -262,7 +268,7 @@ def test_restore_candidate_migrates_portable_state_before_server_start(
     _configure_hosted_server(monkeypatch, binding)
     runtime = server_runtime.initialize_runtime(load_dotenv_func=lambda **_kwargs: None)
     try:
-        assert runtime.config.vault_root == binding.vault_root
+        assert runtime.vault_root == binding.vault_root
     finally:
         assert runtime.hosted_lifetime_lock is not None
         runtime.hosted_lifetime_lock.__exit__(None, None, None)
@@ -355,6 +361,8 @@ def test_state_migrated_journal_binds_manifest_digest_and_placement(
 def test_relocated_repair_restores_portable_bytes_only_to_external_state(
     tmp_path: Path,
 ) -> None:
+    from exomem import hosted_restore
+
     exported = _export(tmp_path, portable_state=True)
     request = _request(tmp_path, exported)
     binding = _binding(tmp_path)
@@ -389,6 +397,12 @@ def test_relocated_repair_restores_portable_bytes_only_to_external_state(
     assert (state_dir / ".review-state.json").read_text(encoding="utf-8") == (
         '{"restored":true}\n'
     )
+    journal_path = hosted_restore._journal_path(binding, "restore-operation")
+    record = json.loads(journal_path.read_text(encoding="utf-8"))
+    assert record["phase"] == "state_migrated"
+    assert record["state_manifest_sha256"] == hashlib.sha256(
+        (state_dir / state_migration.MANIFEST_NAME).read_bytes()
+    ).hexdigest()
 
 
 @pytest.mark.skipif(os.name == "nt", reason="hosted lifetime locking requires POSIX flock")

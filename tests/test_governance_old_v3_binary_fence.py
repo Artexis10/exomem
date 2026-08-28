@@ -407,6 +407,45 @@ def _deployment_admission(coordinator_url: str, schema_version: int) -> dict[str
     return value
 
 
+def _transition_schema_fence(
+    coordinator_url: str,
+    *,
+    expected_generation: int,
+    schema_version: int,
+) -> dict[str, object]:
+    request = urllib.request.Request(
+        f"{coordinator_url}/v1/vaults/old-binary-probe/schema-fence",
+        data=json.dumps(
+            {
+                "expected_generation": expected_generation,
+                "schema_version": schema_version,
+            },
+            separators=(",", ":"),
+        ).encode("utf-8"),
+        headers={
+            "Authorization": "Bearer operator-secret",
+            "Content-Type": "application/json",
+        },
+        method="PUT",
+    )
+    with urllib.request.urlopen(request, timeout=5) as response:
+        value = json.loads(response.read())
+    assert isinstance(value, dict)
+    return value
+
+
+def _schema_fence(coordinator_url: str) -> dict[str, object]:
+    request = urllib.request.Request(
+        f"{coordinator_url}/v1/vaults/old-binary-probe/schema-fence",
+        headers={"Authorization": "Bearer operator-secret"},
+        method="GET",
+    )
+    with urllib.request.urlopen(request, timeout=5) as response:
+        value = json.loads(response.read())
+    assert isinstance(value, dict)
+    return value
+
+
 def test_actual_old_v3_binary_is_write_fenced_from_v4_and_reopens_only_after_rollback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -417,7 +456,21 @@ def test_actual_old_v3_binary_is_write_fenced_from_v4_and_reopens_only_after_rol
     coordinator_database = tmp_path / "coordinator.sqlite"
     with _lease_server(coordinator_database) as coordinator_url:
         _configure_schema_fence(monkeypatch, coordinator_url)
+        assert _transition_schema_fence(
+            coordinator_url,
+            expected_generation=0,
+            schema_version=3,
+        ) == {
+            "governance_enrolled": True,
+            "schema_version": 3,
+            "generation": 1,
+        }
         vault, active = _v4_vault(tmp_path, now=now)
+        assert _schema_fence(coordinator_url) == {
+            "governance_enrolled": True,
+            "schema_version": 4,
+            "generation": 2,
+        }
         before_database = _database_digest(store.sidecar_path(vault))
         visible = vault / "Knowledge Base" / "Notes" / "Insights" / "visible.md"
         before_visible = visible.read_bytes()
@@ -502,7 +555,7 @@ def test_actual_old_v3_binary_is_write_fenced_from_v4_and_reopens_only_after_rol
             "admitted": False,
             "governance_enrolled": True,
             "required_schema_version": 4,
-            "schema_fence_generation": 1,
+            "schema_fence_generation": 2,
         }
         # Deployment stops here: the old process is never started against the
         # live v4 root, so even its read-path DML cannot occur.
@@ -532,12 +585,12 @@ def test_actual_old_v3_binary_is_write_fenced_from_v4_and_reopens_only_after_rol
         assert isinstance(marker, dict)
         assert marker["phase"] == "complete"
         assert marker["d1"] == external_digest
-        assert marker["schema_fence_generation"] == 1
+        assert marker["schema_fence_generation"] == 2
         assert _deployment_admission(coordinator_url, 3) == {
             "admitted": True,
             "governance_enrolled": True,
             "required_schema_version": 3,
-            "schema_fence_generation": 2,
+            "schema_fence_generation": 3,
         }
 
         allowed = _old_cli(
@@ -589,7 +642,21 @@ def test_actual_old_v3_binary_writes_receipts_after_production_backup_restore(
     coordinator_database = tmp_path / "backup-restore-coordinator.sqlite"
     with _lease_server(coordinator_database) as coordinator_url:
         _configure_schema_fence(monkeypatch, coordinator_url)
+        assert _transition_schema_fence(
+            coordinator_url,
+            expected_generation=0,
+            schema_version=3,
+        ) == {
+            "governance_enrolled": True,
+            "schema_version": 3,
+            "generation": 1,
+        }
         vault, plan, committed = _backup_restore_vault(tmp_path, now=now)
+        assert _schema_fence(coordinator_url) == {
+            "governance_enrolled": True,
+            "schema_version": 4,
+            "generation": 2,
+        }
         _drain_verified_membership(monkeypatch)
         restored = schema_migration.restore_forward_migration_backup(
             vault,
@@ -611,7 +678,7 @@ def test_actual_old_v3_binary_writes_receipts_after_production_backup_restore(
         assert marker["operation"] == "governance_schema_v3_backup_restore"
         assert marker["phase"] == "complete"
         assert marker["d1"] == external_d1
-        assert marker["schema_fence_generation"] == 1
+        assert marker["schema_fence_generation"] == 2
         with sqlite3.connect(legacy) as connection:
             assert int(connection.execute("PRAGMA user_version").fetchone()[0]) == 3
             assert store._v3_snapshot_digest(connection) == external_d1  # noqa: SLF001
@@ -619,7 +686,7 @@ def test_actual_old_v3_binary_writes_receipts_after_production_backup_restore(
             "admitted": True,
             "governance_enrolled": True,
             "required_schema_version": 3,
-            "schema_fence_generation": 2,
+            "schema_fence_generation": 3,
         }
 
         env = _old_environment(

@@ -133,7 +133,7 @@ def test_embedding_freshness_uses_percent_safe_uri_and_live_wal_without_changes(
             calls.append(str(database))
             return real_connect(database, *args, **kwargs)
 
-        monkeypatch.setattr(deferred_index.sqlite3, "connect", record_connect)
+        monkeypatch.setattr(deferred_index, "_sqlite_connect_owned", record_connect)
 
         result = deferred_index.inspect_embedding_freshness(vault, [rel])
 

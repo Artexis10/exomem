@@ -1343,9 +1343,13 @@ def test_pre_migration_backup_restore_replays_store_commit_before_schema_fence(
 
     assert _schema_version(vault) == 3
     legacy = legacy_v3_placement.legacy_v3_path(vault)
-    assert legacy.is_file()
-    with sqlite3.connect(legacy) as connection:
-        assert int(connection.execute("PRAGMA user_version").fetchone()[0]) == 3
+    assert not legacy.exists()
+    external = store.open_readonly_connection(vault)
+    assert external is not None
+    try:
+        schema_v4.require_exact_v3_connection(external)
+    finally:
+        external.close()
     assert state == [writer_lease.SchemaFenceState(True, 4, 17)]
     assert transitions == []
 
