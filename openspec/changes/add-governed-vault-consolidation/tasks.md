@@ -175,13 +175,13 @@
 
 ## 3. Exhaustive C1-C8 inventory and reconciliation
 
-- [ ] 3.1 Add a red golden fixture in `tests/test_consolidation_reconciliation.py`
+- [x] 3.1 Add a red golden fixture in `tests/test_consolidation_reconciliation.py`
   containing at least one item in every class C1-C8 and overlap cases proving the
   exact precedence `C8 > C6 > C5 > C4 > C3 > C1 > C7 > C2`. For every row assert
   the primary class, attached dependency findings, exact source/destination
   fingerprints, allowed resolutions, default action where permitted, and stable
   order independent of traversal/dictionary/platform order.
-- [ ] 3.2 Add red property tests generating path/identity/content/dependency
+- [x] 3.2 Add red property tests generating path/identity/content/dependency
   combinations. Prove every source object receives exactly one primary class,
   C1-C3 defaults are deterministic and lossless, C4-C8 remain blocked without an
   owner decision, and a row cannot disappear when an index or downstream
@@ -201,16 +201,16 @@
   authenticated source snapshot/object/path/identity/hash to destination
   object/path/identity/hash, inclusion in reconciliation/plan digests, and a
   plaintext-free mapping-set receipt digest through completion and rollback.
-- [ ] 3.5 Implement pure bounded inventory/index builders and the C1-C8 classifier,
+- [x] 3.5 Implement pure bounded inventory/index builders and the C1-C8 classifier,
   returning stable typed rows and explicit dependency maps. Reuse canonical
   identity, relation, media, Records, review, and provenance parsers rather than
   adding consolidation-only interpretations.
-- [ ] 3.6 Implement finite resolution schemas and a deterministic tentative-map
+- [x] 3.6 Implement finite resolution schemas and a deterministic tentative-map
   validator. Reject unresolved conflicts, dangling/ambiguous anchors and edges,
   invalid lifecycle/type transitions, duplicate identities, append-only rewrites,
   and unaccounted inventory rows before a plan can materialize. Keep reasoning and
   suggested resolution prose agent-side.
-- [ ] 3.7 Run
+- [x] 3.7 Run
   `uv run python -m pytest -q tests/test_consolidation_reconciliation.py tests/test_unicode_page_identity.py tests/test_case_insensitive_identity.py tests/test_relation_registry.py tests/test_review_state.py tests/test_records_recall_graph.py tests/test_records_recall_media.py tests/test_media_processing.py`.
 
 ## 4. Fresh destination principals and prospective policy
