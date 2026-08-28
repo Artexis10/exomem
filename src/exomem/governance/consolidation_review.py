@@ -846,6 +846,108 @@ def complete_review(
     )
 
 
+def validate_review(
+    review: CanonicalRenderReview,
+    *,
+    plan: consolidation_plan.CanonicalConsolidationPlan,
+) -> CanonicalRenderReview:
+    """Revalidate a complete in-memory review against its exact stored plan."""
+
+    session = _checked_session(review)
+    state = _checked_state(review)
+    plan = _bind_plan(session, plan)
+    identity = _session_identity(session)
+    expected_session = begin_review(
+        plan,
+        identity=identity,
+        issued_at=_text(session["issued_at"]),
+        expires_at=_text(session["expires_at"]),
+        nonce=_text(session["nonce"]),
+    ).session
+    if expected_session != review.session:
+        _fail()
+
+    previous_acknowledgement: datetime | None = None
+    for ordinal, acknowledgement in enumerate(review.acknowledgements):
+        page = consolidation_plan.render_plan_page(plan, page_ordinal=ordinal)
+        fields = acknowledgement.preimage
+        if (
+            fields["section_id"] != page.section_id
+            or fields["section_page_ordinal"] != page.section_page_ordinal
+            or fields["page_ordinal"] != page.page_ordinal
+            or fields["page_digest"] != page.digest
+        ):
+            _fail()
+        _identifier(fields["nonce"])
+        _issued_text, issued = _timestamp(_within_session(session, fields["issued_at"]))
+        if previous_acknowledgement is not None and issued < previous_acknowledgement:
+            _fail()
+        previous_acknowledgement = issued
+
+    if state["pending"]:
+        pending = consolidation_plan.render_plan_page(
+            plan,
+            page_ordinal=_integer(state["pending_page_ordinal"]),
+        )
+        if pending.digest != state["pending_page_digest"]:
+            _fail()
+
+    if review.completeness is not None:
+        fields = review.completeness.preimage
+        expected = _build_completeness(
+            review,
+            plan=plan,
+            issued_at=_text(fields["issued_at"]),
+            expires_at=_text(fields["expires_at"]),
+            nonce=_text(fields["nonce"]),
+        )
+        if expected != review.completeness:
+            _fail()
+    return review
+
+
+def restore_review(
+    *,
+    plan: consolidation_plan.CanonicalConsolidationPlan,
+    session: Mapping[str, object],
+    state: Mapping[str, object],
+    acknowledgements: Sequence[Mapping[str, object]],
+    completeness: Mapping[str, object] | None,
+) -> CanonicalRenderReview:
+    """Restore exact canonical review preimages and rebind them to one plan."""
+
+    if isinstance(acknowledgements, (str, bytes)) or not isinstance(acknowledgements, Sequence):
+        _fail()
+    session_artifact = _artifact(
+        _mapping(session, _SESSION_FIELDS),
+        _SESSION_DOMAIN,
+    )
+    state_artifact = _artifact(
+        _mapping(state, _STATE_FIELDS),
+        _STATE_DOMAIN,
+    )
+    acknowledgement_artifacts = tuple(
+        _artifact(_mapping(item, _ACK_FIELDS), _ACK_DOMAIN) for item in acknowledgements
+    )
+    completeness_artifact = (
+        None
+        if completeness is None
+        else _artifact(
+            _mapping(completeness, _COMPLETENESS_FIELDS),
+            _COMPLETENESS_DOMAIN,
+        )
+    )
+    return validate_review(
+        CanonicalRenderReview(
+            session=session_artifact,
+            state=state_artifact,
+            acknowledgements=acknowledgement_artifacts,
+            completeness=completeness_artifact,
+        ),
+        plan=plan,
+    )
+
+
 __all__ = [
     "CanonicalRenderReview",
     "CanonicalReviewArtifact",
@@ -855,5 +957,7 @@ __all__ = [
     "begin_review",
     "build_acknowledgement",
     "complete_review",
+    "restore_review",
     "serve_page",
+    "validate_review",
 ]
