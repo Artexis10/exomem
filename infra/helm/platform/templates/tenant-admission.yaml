@@ -128,10 +128,11 @@ spec:
             object.spec.initContainers[0].securityContext.capabilities.drop[0] == 'ALL' &&
             string(dyn(object.spec.initContainers[0].resources).requests['cpu']) == '10m' &&
             string(dyn(object.spec.initContainers[0].resources).requests['memory']) == '16Mi' &&
+            string(dyn(object.spec.initContainers[0].resources).requests['ephemeral-storage']) == '16Mi' &&
             string(dyn(object.spec.initContainers[0].resources).limits['cpu']) == '100m' &&
             string(dyn(object.spec.initContainers[0].resources).limits['memory']) == '64Mi' &&
             string(dyn(object.spec.initContainers[0].resources).limits['ephemeral-storage']) == '16Mi' &&
-            size(dyn(object.spec.initContainers[0].resources).requests) == 2 &&
+            size(dyn(object.spec.initContainers[0].resources).requests) == 3 &&
             size(dyn(object.spec.initContainers[0].resources).limits) == 3 &&
             (!has(object.spec.initContainers[0].env) ||
               size(object.spec.initContainers[0].env) == 0) &&
