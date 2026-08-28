@@ -940,6 +940,10 @@ def test_public_file_move_refuses_private_hardlink_destination_before_planning(
 @pytest.mark.parametrize(
     "private_relative",
     [
+        (
+            "Knowledge Base/_Consolidation/runs/"
+            "00000000-0000-4000-8000-000000000001/run.json"
+        ),
         "Knowledge Base/.graph-sync.json",
         "Knowledge Base/.graph-sync-floor.json",
         "Knowledge Base/.graph-commit-receipts/" + "1" * 24 + ".json",
@@ -2304,6 +2308,46 @@ def test_named_subsystem_authority_is_exact_and_nonserializable() -> None:
     with reserved_paths._subsystem_authority_scope("governance.projections"):
         assert reserved_paths.owner_authorized("authorization-projections")
         assert not reserved_paths.owner_authorized("governance-store")
+
+
+def test_consolidation_run_authority_is_exact_nonserializable_and_required(
+    tmp_path: Path,
+) -> None:
+    target = (
+        tmp_path
+        / "Knowledge Base"
+        / "_Consolidation"
+        / "runs"
+        / "00000000-0000-4000-8000-000000000001"
+        / "run.json"
+    )
+
+    with pytest.raises(RuntimeError, match="authority"):
+        reserved_paths._publish_owner_bytes(
+            tmp_path,
+            target,
+            "consolidation-tree",
+            b"{}\n",
+            require_missing=True,
+        )
+
+    with reserved_paths._subsystem_authority_scope("consolidation.run"):
+        authority = reserved_paths._active_owner_authority()
+        assert reserved_paths.owner_authorized("consolidation-tree")
+        assert not reserved_paths.owner_authorized("governance-tree")
+        assert not reserved_paths.owner_authorized("governance-store")
+        with pytest.raises((pickle.PickleError, TypeError)):
+            pickle.dumps(authority)
+        reserved_paths._publish_owner_bytes(
+            tmp_path,
+            target,
+            "consolidation-tree",
+            b"{}\n",
+            require_missing=True,
+        )
+
+    assert target.read_bytes() == b"{}\n"
+    assert reserved_paths._active_owner_authority() is None
 
 
 def test_owner_byte_publication_requires_exact_named_authority(

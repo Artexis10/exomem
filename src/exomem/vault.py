@@ -326,17 +326,21 @@ def is_lexical_rebuild_runtime_file_name(name: str) -> bool:
 
 
 def in_excluded_scan_dir(rel_path: str) -> bool:
-    """True when any segment of `rel_path` is a reserved scan directory.
+    """True when `rel_path` is private state or has an excluded scan segment.
 
     The incremental-path counterpart of the exclusion every FULL walk applies
     (walk_vault_md, find's walker, the inbound scan): event-driven patchers
-    must not index a path their index's full rebuild would skip. The concrete
-    bug this guards: `delete_file` moves a note into `Knowledge Base/_trash/`,
-    the watcher sees that as a fresh markdown file, and the trashed content
-    gets re-embedded under its trash path — invisible to find (walks exclude
-    `_trash/`) but not to the corpus-aware near-dup sweep, which reads the raw
-    sidecar (observed 2026-07-04: dup warnings flagging trash entries).
+    must not index a path their index's full rebuild would skip. This includes
+    both the legacy excluded directory set and every family in the closed
+    private-state registry.
     """
+    # The closed private-state registry is the shared authority for both full
+    # walks and incremental events.  Checking it before the legacy name sets
+    # keeps a watcher write byte-identical to a later rebuild: operational
+    # state such as `_Consolidation/**` never enters freshness or index fanout.
+    if reserved_paths.classify_logical(rel_path).blocked:
+        return True
+
     segments = rel_path.replace("\\", "/").split("/")
     if (
         len(segments) >= 2
