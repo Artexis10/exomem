@@ -237,6 +237,74 @@ def test_open_connection_migrates_v1_through_governance_schema_v3(vault: Path) -
         migrated.close()
 
 
+def test_open_connection_migrates_v2_without_rewriting_receipt_state(
+    vault: Path,
+) -> None:
+    path = store.sidecar_path(vault)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    durable_hash = "a" * 64
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute(
+            "CREATE TABLE compiled_policy "
+            "(fingerprint TEXT PRIMARY KEY, snapshot TEXT NOT NULL, compiled_at REAL NOT NULL)"
+        )
+        conn.execute(
+            "CREATE TABLE receipt_instance "
+            "(singleton INTEGER PRIMARY KEY CHECK (singleton = 1), instance_id TEXT NOT NULL)"
+        )
+        conn.execute(
+            "CREATE TABLE receipts_head ("
+            "instance_id TEXT PRIMARY KEY, durable_seq INTEGER NOT NULL, "
+            "durable_hash TEXT NOT NULL, observed_seq INTEGER NOT NULL, "
+            "observed_hash TEXT NOT NULL)"
+        )
+        conn.execute(
+            "CREATE TABLE receipt_secrets "
+            "(name TEXT PRIMARY KEY, value BLOB NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO compiled_policy VALUES (?, ?, ?)",
+            ("policy-v2", '{"enabled":true}', 17.0),
+        )
+        conn.execute("INSERT INTO receipt_instance VALUES (1, 'instance-v2')")
+        conn.execute(
+            "INSERT INTO receipts_head VALUES (?, ?, ?, ?, ?)",
+            ("instance-v2", 7, durable_hash, 7, durable_hash),
+        )
+        conn.execute(
+            "INSERT INTO receipt_secrets VALUES (?, ?)",
+            ("label", b"v2-receipt-secret"),
+        )
+        conn.execute("PRAGMA user_version = 2")
+        conn.commit()
+    finally:
+        conn.close()
+
+    migrated = store.open_connection(vault)
+    try:
+        assert migrated.execute("PRAGMA user_version").fetchone() == (3,)
+        assert migrated.execute(
+            "SELECT fingerprint, snapshot, compiled_at FROM compiled_policy"
+        ).fetchone() == ("policy-v2", '{"enabled":true}', 17.0)
+        assert migrated.execute(
+            "SELECT singleton, instance_id FROM receipt_instance"
+        ).fetchone() == (1, "instance-v2")
+        assert migrated.execute(
+            "SELECT instance_id, durable_seq, durable_hash, observed_seq, "
+            "observed_hash, path, byte_offset FROM receipts_head"
+        ).fetchone() == ("instance-v2", 7, durable_hash, 7, durable_hash, "", 0)
+        assert migrated.execute(
+            "SELECT name, value FROM receipt_secrets"
+        ).fetchone() == ("label", b"v2-receipt-secret")
+        assert migrated.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='governance_authorization_sessions'"
+        ).fetchone() is None
+    finally:
+        migrated.close()
+
+
 def _prepare_future_sidecar(vault: Path, version: int) -> Path:
     token_conn = tokens._open(vault)
     token_conn.close()
