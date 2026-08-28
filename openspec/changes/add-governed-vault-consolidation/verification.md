@@ -165,3 +165,28 @@ completion does not authorize rehearsal, cutover, or retirement.
 - Independent adversarial recheck: no P0/P1/P2 findings and GO for the explicit
   trusted-owner, same-host failover foundation after reproducing the conflicting
   live-transfer and expired-successor failures and verifying their corrections.
+
+## Detached source-attestation stack
+
+- Red: `tests/test_consolidation_intake.py` first failed one explicit assertion
+  because the detached source-attestation subsystem was absent; collection and
+  imports succeeded. Follow-on red assertions separately exposed the missing
+  API, valid-proof refusal, mixed registry-generation acceptance, mutable
+  verified claims, and a malformed trust-set exception leak.
+- Green: the focused file passes with the exact
+  `source-export-attestation/v1` JCS frame, RFC 8032 key plus fixed Exomem
+  signature vector, raw unpadded-base64url Ed25519 key/signature encodings,
+  closed local/Hosted claim shapes, exact source/artifact/checkpoint/fence
+  binding, one private verifier purpose/audience/source registry generation,
+  bounded two-key overlap, immutable verified claims, and the same content-free
+  refusal at intake, apply, retirement clearance, and retirement consumption.
+- This slice intentionally does not mark task 1.6 complete: the separately
+  trusted control-plane-receipt alternative and its issuer record remain for a
+  later bounded stack. It does not extract an archive or touch a live vault.
+- Final focused/adjoining gate:
+  `tests/test_consolidation_intake.py`,
+  `tests/test_consolidation_cell_identity.py`, and
+  `tests/test_hosted_portability.py` -> `172 passed`. Touched-file Ruff and
+  format checks, repository `F` lint, `uv lock --check`, strict change
+  validation, public repository artifact validation (`3396 files, 3464 text
+  payloads`), and `git diff --check` are green.
