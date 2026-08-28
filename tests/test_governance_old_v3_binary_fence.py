@@ -10,6 +10,7 @@ import subprocess
 import threading
 import time
 import urllib.request
+from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
@@ -17,8 +18,8 @@ from pathlib import Path
 import pytest
 import uvicorn
 
+from exomem import held_fs, state_migration, state_paths, writer_lease
 from exomem import init as init_module
-from exomem import state_migration, state_paths, writer_lease
 from exomem.governance import (
     authorization_custody,
     legacy_v3_placement,
@@ -570,62 +571,171 @@ def test_actual_old_v3_binary_is_write_fenced_from_v4_and_reopens_only_after_rol
             *,
             reviewed: policy.AuthoringSnapshot,
             target_documents: tuple[tuple[str, bytes], ...],
-            barrier: object | None = None,
+            barrier: Callable[[str, str], None] | None = None,
         ) -> str:
-            result = original_mirror(
-                vault_root,
-                reviewed=reviewed,
-                target_documents=target_documents,
-                barrier=barrier,
-            )
-            if result == "complete":
-                return result
-            current = policy.observe_authoring_snapshot(vault_root)
-            plan = (
+            current_before = policy.observe_authoring_snapshot(vault_root)
+            effects_before = (
                 None
-                if current is None
+                if current_before is None
                 else policy._workspace_mirror_plan(  # noqa: SLF001
-                    current,
+                    current_before,
                     reviewed,
                     target_documents,
                 )
             )
             reviewed_documents = dict(reviewed.documents)
-            current_documents = {} if current is None else dict(current.documents)
-            reviewed_directories = dict(reviewed.directory_identities)
-            current_directories = {} if current is None else dict(current.directory_identities)
-            reviewed_files = {item.path: item for item in reviewed.file_identities}
-            current_files = (
-                {} if current is None else {item.path: item for item in current.file_identities}
+            target = dict(target_documents)
+            changed_names = sorted(
+                name
+                for name in set(reviewed_documents) | set(target)
+                if reviewed_documents.get(name) != target.get(name)
             )
-            document_names = sorted(set(reviewed_documents) | set(current_documents))
+            phases: list[str] = []
+            held_trace: list[dict[str, object]] = []
+            original_acquire = held_fs.acquire
+            original_publish = held_fs.publish_bytes
+
+            def record(
+                operation: str, result: held_fs.HeldResult[object], **fields: object
+            ) -> None:
+                held_trace.append(
+                    {
+                        "operation": operation,
+                        **fields,
+                        "result": "ok" if result.ok else result.error.code,
+                    }
+                )
+
+            def tracing_acquire(root: Path) -> held_fs.HeldResult[held_fs.HeldFilesystem]:
+                acquired = original_acquire(root)
+                record("acquire", acquired)
+                if not acquired.ok:
+                    return acquired
+                filesystem = acquired.require()
+                original_parent = filesystem.parent
+                original_file = filesystem.file
+                original_flush = filesystem.flush_directory
+                original_unlink = filesystem.unlink
+                original_validate = filesystem.validate_directory
+
+                def tracing_parent(
+                    relative: str,
+                    *,
+                    create: bool = False,
+                    exclusive: bool = False,
+                    access: str = "read",
+                ) -> held_fs.HeldResult[held_fs.HeldDirectory]:
+                    result = original_parent(
+                        relative,
+                        create=create,
+                        exclusive=exclusive,
+                        access=access,
+                    )
+                    record("parent", result, relative=relative, access=access)
+                    return result
+
+                def tracing_file(
+                    parent: held_fs.HeldDirectory,
+                    leaf: str,
+                    *,
+                    access: str = "read",
+                    create: bool = False,
+                    exclusive: bool = False,
+                ) -> held_fs.HeldResult[held_fs.HeldFile]:
+                    result = original_file(
+                        parent,
+                        leaf,
+                        access=access,
+                        create=create,
+                        exclusive=exclusive,
+                    )
+                    record("file", result, leaf=leaf, access=access)
+                    return result
+
+                def tracing_flush(
+                    directory: held_fs.HeldDirectory,
+                ) -> held_fs.HeldResult[None]:
+                    result = original_flush(directory)
+                    record("flush", result)
+                    return result
+
+                def tracing_unlink(file: held_fs.HeldFile) -> held_fs.HeldResult[None]:
+                    result = original_unlink(file)
+                    record("unlink", result)
+                    return result
+
+                def tracing_validate(
+                    directory: held_fs.HeldDirectory,
+                    *,
+                    require_name: bool = True,
+                ) -> held_fs.HeldResult[None]:
+                    result = original_validate(directory, require_name=require_name)
+                    record("validate", result, require_name=require_name)
+                    return result
+
+                filesystem.parent = tracing_parent  # type: ignore[method-assign]
+                filesystem.file = tracing_file  # type: ignore[method-assign]
+                filesystem.flush_directory = tracing_flush  # type: ignore[method-assign]
+                filesystem.unlink = tracing_unlink  # type: ignore[method-assign]
+                filesystem.validate_directory = tracing_validate  # type: ignore[method-assign]
+                return acquired
+
+            def tracing_publish(
+                filesystem: held_fs.HeldFilesystem,
+                parent: held_fs.HeldDirectory,
+                leaf: str,
+                data: bytes,
+                *,
+                expected_identity: held_fs.StableIdentity | None = None,
+                expected_sha256: str | None = None,
+                prepare: Callable[[held_fs.HeldFile], None] | None = None,
+            ) -> held_fs.HeldResult[held_fs.StableIdentity]:
+                result = original_publish(
+                    filesystem,
+                    parent,
+                    leaf,
+                    data,
+                    expected_identity=expected_identity,
+                    expected_sha256=expected_sha256,
+                    prepare=prepare,
+                )
+                record("publish", result, leaf=leaf)
+                return result
+
+            def tracing_barrier(phase: str, relative: str) -> None:
+                phases.append(f"{phase}:{relative}")
+                assert barrier is not None
+                barrier(phase, relative)
+
+            held_fs.acquire = tracing_acquire
+            held_fs.publish_bytes = tracing_publish
+            try:
+                result = original_mirror(
+                    vault_root,
+                    reviewed=reviewed,
+                    target_documents=target_documents,
+                    barrier=None if barrier is None else tracing_barrier,
+                )
+            finally:
+                held_fs.acquire = original_acquire
+                held_fs.publish_bytes = original_publish
+            if result == "complete":
+                return result
+            current_after = policy.observe_authoring_snapshot(vault_root)
             discriminator = {
                 "result": result,
-                "current_snapshot_none": current is None,
-                "plan_none": plan is None,
-                "root_identity_match": (
-                    False
-                    if current is None
-                    else policy._same_authoring_identity(  # noqa: SLF001
-                        current.governance_root_identity,
-                        reviewed.governance_root_identity,
-                    )
+                "effect_count": None if effects_before is None else len(effects_before),
+                "current_before_equals_target": (
+                    current_before is not None and current_before.documents == target_documents
                 ),
-                "extra_documents": sorted(set(current_documents) - set(reviewed_documents)),
-                "missing_documents": sorted(set(reviewed_documents) - set(current_documents)),
-                "extra_directories": sorted(set(current_directories) - set(reviewed_directories)),
-                "missing_directories": sorted(set(reviewed_directories) - set(current_directories)),
-                "document_bytes_equal": {
-                    name: current_documents.get(name) == reviewed_documents.get(name)
-                    for name in document_names
-                },
-                "mismatched_file_identities": sorted(
-                    name
-                    for name in set(reviewed_files) | set(current_files)
-                    if current_files.get(name) != reviewed_files.get(name)
+                "current_after_equals_target": (
+                    current_after is not None and current_after.documents == target_documents
                 ),
+                "target_vs_reviewed_changed_names": changed_names,
+                "barrier_phases": phases,
+                "held_trace": held_trace,
             }
-            raise AssertionError(f"downmigration workspace discriminator: {discriminator}")
+            raise AssertionError(f"downmigration mirror trace: {discriminator}")
 
         monkeypatch.setattr(policy, "mirror_authoring_workspace", diagnostic_mirror)
         _drain_verified_membership(monkeypatch)
