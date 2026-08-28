@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # exomem — remote deployment
 
 This guide covers the **remote tier**: running exomem as an always-on HTTP service

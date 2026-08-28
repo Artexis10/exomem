@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Hosted runtime upgrades
 
 Use this controller workflow for every Hosted runtime release. Concrete versions,

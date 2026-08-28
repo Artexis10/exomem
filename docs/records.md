@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Records
 
 Records are Exomem's human-owned layer for observed events and current state:

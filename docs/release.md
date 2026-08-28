@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Release checklist
 
 exomem is source-first today: users can install from a checkout with `uv`.

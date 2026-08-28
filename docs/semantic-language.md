@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # First-class semantic language
 
 Exomem keeps Markdown readable while making small observations, richer typed

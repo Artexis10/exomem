@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Prominence — how much Exomem speaks up
 
 Exomem has one knob for how much it participates in a conversation. It is separate

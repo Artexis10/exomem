@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Distribution: getting Exomem into each client
 
 The scaffold at `src/exomem/_scaffold/_Schema/` is the source of truth for skill

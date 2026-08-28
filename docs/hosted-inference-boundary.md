@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Hosted-inference boundary — candidate jobs and decision thresholds
 
 Status: boundary document only. **No hosted inference is implemented or
