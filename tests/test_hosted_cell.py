@@ -889,6 +889,32 @@ def test_quiesce_drains_and_rejects_new_mutations_then_resume_is_idempotent(
     assert lifecycle.readiness().ready is True
 
 
+def test_runtime_membership_attestation_requires_admitted_active_state(
+    tmp_path: Path,
+) -> None:
+    _values, config = _provisioned(tmp_path)
+    lifecycle = HostedCellLifecycle(config)
+    lifecycle.complete_startup(
+        vault_ready=True,
+        mutation_authority_ready=True,
+        service_auth_ready=True,
+    )
+    observed: list[str] = []
+
+    assert lifecycle.attest_authorization_membership(
+        lambda snapshot: observed.append(snapshot.phase) or b"signed"
+    ) == b"signed"
+    lifecycle.set_mutation_authority(False)
+
+    with pytest.raises(HostedLifecycleError) as raised:
+        lifecycle.attest_authorization_membership(
+            lambda _snapshot: b"must-not-sign"
+        )
+
+    assert raised.value.code == "AUTHORIZATION_SESSION_UNAVAILABLE"
+    assert observed == ["active"]
+
+
 def test_deletion_seal_is_idempotent_and_rejects_reads_and_writes(
     tmp_path: Path,
 ) -> None:

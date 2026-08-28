@@ -21,6 +21,7 @@ from typing import Any, Literal
 from .authorization_membership import (
     AUTHORIZATION_SESSION_FILES,
     AUTHORIZATION_SESSION_SECRET_NAME,
+    MAX_ATTESTATION_TTL_SECONDS,
     MAX_BUNDLE_FILE_BYTES,
 )
 from .credentials import validate_machine_credential
@@ -1205,6 +1206,7 @@ class PrivateCellApiAdapter:
         .rstrip(b"=")
         .decode("ascii")
     )
+    _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
     def __init__(self, *, request: CellRequester, internal_origin: str) -> None:
         if not internal_origin.startswith("http://") and not internal_origin.startswith("https://"):
@@ -1514,6 +1516,67 @@ class PrivateCellApiAdapter:
             routing_stopped=True,
             body={"timeout_seconds": 30},
         )
+
+    async def attest_authorization_session_membership(
+        self,
+        metadata: OpaqueProviderMetadata,
+        *,
+        credential: str,
+        protocol_version: str,
+        target_epoch: int,
+        previous_epoch_digest: str,
+        ttl_seconds: int,
+    ) -> bytes:
+        if (
+            isinstance(target_epoch, bool)
+            or not isinstance(target_epoch, int)
+            or target_epoch < 1
+            or not isinstance(previous_epoch_digest, str)
+            or self._SHA256.fullmatch(previous_epoch_digest) is None
+            or isinstance(ttl_seconds, bool)
+            or not isinstance(ttl_seconds, int)
+            or not 1 <= ttl_seconds <= MAX_ATTESTATION_TTL_SECONDS
+        ):
+            raise MetadataConflict("authorization membership challenge is invalid")
+        data = await self._call(
+            "POST",
+            metadata,
+            "authorization-membership/attest",
+            credential=credential,
+            protocol_version=protocol_version,
+            body={
+                "target_epoch": target_epoch,
+                "previous_epoch_digest": previous_epoch_digest,
+                "ttl_seconds": ttl_seconds,
+            },
+        )
+        if set(data) != {"version", "attestation", "attestation_sha256"}:
+            raise MetadataConflict("authorization membership attestation is invalid")
+        encoded = data.get("attestation")
+        digest = data.get("attestation_sha256")
+        if (
+            data.get("version") != 1
+            or not isinstance(encoded, str)
+            or not isinstance(digest, str)
+            or self._SHA256.fullmatch(digest) is None
+        ):
+            raise MetadataConflict("authorization membership attestation is invalid")
+        try:
+            encoded_bytes = encoded.encode("ascii")
+            raw = base64.b64decode(
+                encoded_bytes + b"=" * (-len(encoded_bytes) % 4),
+                altchars=b"-_",
+                validate=True,
+            )
+        except (UnicodeEncodeError, ValueError) as error:
+            raise MetadataConflict("authorization membership attestation is invalid") from error
+        if (
+            not 1 <= len(raw) <= MAX_BUNDLE_FILE_BYTES
+            or base64.urlsafe_b64encode(raw).rstrip(b"=") != encoded_bytes
+            or not hmac.compare_digest(hashlib.sha256(raw).hexdigest(), digest)
+        ):
+            raise MetadataConflict("authorization membership attestation is invalid")
+        return raw
 
     async def operator(
         self,

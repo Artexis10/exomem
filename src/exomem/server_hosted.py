@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import errno
 import hashlib
 import hmac
@@ -38,7 +39,11 @@ from . import (
 )
 from . import commands as commands_module
 from . import hosted_gateway as gateway
-from .governance import authorization_request, authorization_transport
+from .governance import (
+    authorization_request,
+    authorization_session_lifecycle,
+    authorization_transport,
+)
 from .hosted_runtime import (
     HostedCellConfig,
     HostedCellLifecycle,
@@ -1338,6 +1343,79 @@ def register_hosted_routes(
             result.as_dict(),
             config=config,
             operation="quiesce",
+            request_id=context.request_id,
+            started=started,
+        )
+
+    @mcp_app.custom_route(
+        "/private/exomem/v1/authorization-membership/attest",
+        methods=["POST"],
+    )
+    async def _attest_authorization_membership(
+        request: Request,
+    ) -> HostedJSONResponse:
+        context, error, started = await lifecycle_context(
+            request,
+            "authorization-membership-attest",
+        )
+        if error is not None:
+            return error
+        assert context is not None
+        try:
+            body = await _json_body(request)
+            if set(body) != {
+                "target_epoch",
+                "previous_epoch_digest",
+                "ttl_seconds",
+            }:
+                raise gateway.HostedGatewayError(
+                    "INVALID_BODY",
+                    "authorization membership attestation challenge is invalid",
+                )
+            if config.vault_id is None or config.authorization_session_replica_id is None:
+                raise authorization_session_lifecycle.AuthorizationSessionUnavailable
+
+            def sign(snapshot: Any) -> bytes:
+                return authorization_session_lifecycle.mint_hosted_replica_readiness_attestation(
+                    config.vault_root,
+                    expected_cell_id=config.cell_id,
+                    expected_logical_vault_id=config.vault_id,
+                    expected_replica_id=config.authorization_session_replica_id,
+                    lifecycle_phase=snapshot.phase,
+                    active_reads=snapshot.active_reads,
+                    active_mutations=snapshot.active_mutations,
+                    active_transfers=snapshot.active_transfers,
+                    target_epoch=body["target_epoch"],
+                    previous_epoch_digest=body["previous_epoch_digest"],
+                    ttl_seconds=body["ttl_seconds"],
+                )
+
+            raw = await run_in_threadpool(
+                lifecycle.attest_authorization_membership,
+                sign,
+            )
+        except (
+            gateway.HostedGatewayError,
+            HostedLifecycleError,
+            authorization_session_lifecycle.AuthorizationSessionUnavailable,
+        ) as exc:
+            return _error_response(
+                exc.code,
+                config=config,
+                operation="authorization-membership-attest",
+                request_id=context.request_id,
+                started=started,
+            )
+        return _success_response(
+            {
+                "version": 1,
+                "attestation": base64.urlsafe_b64encode(raw)
+                .rstrip(b"=")
+                .decode("ascii"),
+                "attestation_sha256": hashlib.sha256(raw).hexdigest(),
+            },
+            config=config,
+            operation="authorization-membership-attest",
             request_id=context.request_id,
             started=started,
         )

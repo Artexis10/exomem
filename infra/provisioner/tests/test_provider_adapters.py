@@ -1182,6 +1182,21 @@ async def test_private_cell_api_uses_fresh_identity_and_exact_lifecycle_routes()
                     "reason_code": "HOSTED_QUIESCED",
                 },
             )
+        if url.endswith("/authorization-membership/attest"):
+            return _Response(
+                200,
+                {
+                    "version": 1,
+                    "attestation": base64.urlsafe_b64encode(
+                        b'{"signed":"runtime-attestation"}'
+                    )
+                    .rstrip(b"=")
+                    .decode("ascii"),
+                    "attestation_sha256": hashlib.sha256(
+                        b'{"signed":"runtime-attestation"}'
+                    ).hexdigest(),
+                },
+            )
         return _Response(
             200,
             {"live": True, "cell_id": "cell-alpha", "protocol_version": "1"},
@@ -1246,6 +1261,15 @@ async def test_private_cell_api_uses_fresh_identity_and_exact_lifecycle_routes()
         "active_transfers": 0,
         "reason_code": "HOSTED_QUIESCED",
     }
+    attestation = await adapter.attest_authorization_session_membership(
+        _metadata(),
+        credential=_credential(),
+        protocol_version="1",
+        target_epoch=8,
+        previous_epoch_digest="a" * 64,
+        ttl_seconds=300,
+    )
+    assert attestation == b'{"signed":"runtime-attestation"}'
     await adapter.resume(
         _metadata(),
         credential=_credential(),
@@ -1279,8 +1303,14 @@ async def test_private_cell_api_uses_fresh_identity_and_exact_lifecycle_routes()
     request_ids = [call[2]["X-Exomem-Request-Id"] for call in calls]
     assert len(request_ids) == len(set(request_ids))
     assert all(call[2]["Authorization"] == "Bearer " + _credential() for call in calls)
-    assert calls[-3][1].endswith("/private/exomem/v1/lifecycle/quiesce")
-    assert calls[-3][2]["X-Exomem-Routing-Stopped"] == "true"
+    assert calls[-4][1].endswith("/private/exomem/v1/lifecycle/quiesce")
+    assert calls[-4][2]["X-Exomem-Routing-Stopped"] == "true"
+    assert calls[-3][1].endswith("/private/exomem/v1/authorization-membership/attest")
+    assert calls[-3][3] == {
+        "target_epoch": 8,
+        "previous_epoch_digest": "a" * 64,
+        "ttl_seconds": 300,
+    }
     assert calls[-2][1].endswith("/private/exomem/v1/lifecycle/resume")
     assert calls[-1][1].endswith("/private/exomem/v1/lifecycle/seal")
     assert calls[-1][2]["X-Exomem-Routing-Stopped"] == "true"

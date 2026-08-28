@@ -764,6 +764,27 @@ class HostedCellLifecycle:
                 "code": "CELL_READY" if readiness.ready else readiness.reason_code,
             }
 
+    def attest_authorization_membership(
+        self,
+        signer: Callable[[HostedLifecycleSnapshot], bytes],
+    ) -> bytes:
+        """Hold lifecycle state stable while the cell signs one readiness proof."""
+
+        with self._condition:
+            snapshot = self._snapshot_locked()
+            if snapshot.phase == "active" and not self._core_ready_locked():
+                raise HostedLifecycleError(
+                    "AUTHORIZATION_SESSION_UNAVAILABLE",
+                    "authorization membership attestation is unavailable",
+                )
+            result = signer(snapshot)
+            if not isinstance(result, bytes) or not result:
+                raise HostedLifecycleError(
+                    "AUTHORIZATION_SESSION_UNAVAILABLE",
+                    "authorization membership attestation is unavailable",
+                )
+            return result
+
     def complete_startup(
         self,
         *,
