@@ -403,22 +403,37 @@ def test_exact_terminal_consolidation_journal_can_unseal_only_its_own_kind(
         sealed_at=T1,
         expected_revision=0,
     )
-    sealing_authority = consolidation_authority.issue_authority(
-        vault_binding_digest=VAULT_BINDING,
-        run_id=RUN_ID,
-        operation_id=OPERATION_ID,
-        journal_digest=JOURNAL_DIGEST,
-        phase="sealing",
-        action="apply",
-    )
-    complete = store.advance_consolidation(
-        sealing_authority,
-        vault_binding_digest=VAULT_BINDING,
-        action="apply",
-        target_phase="complete",
-        recorded_at=T2,
-        expected_revision=1,
-    )
+    complete = store.load(vault_binding_digest=VAULT_BINDING)
+    for target_phase in (
+        "sealed",
+        "preimage-ready",
+        "policy-active",
+        "publishing",
+        "rebuilding",
+        "verifying",
+        "verified",
+        "transport-stopping",
+        "transport-verifying",
+        "transport-verified",
+        "routing-opening",
+        "complete",
+    ):
+        authority = consolidation_authority.issue_authority(
+            vault_binding_digest=VAULT_BINDING,
+            run_id=RUN_ID,
+            operation_id=OPERATION_ID,
+            journal_digest=JOURNAL_DIGEST,
+            phase=complete.phase,
+            action="apply",
+        )
+        complete = store.advance_consolidation(
+            authority,
+            vault_binding_digest=VAULT_BINDING,
+            action="apply",
+            target_phase=target_phase,
+            recorded_at=T2,
+            expected_revision=complete.revision,
+        )
     terminal_authority = consolidation_authority.issue_authority(
         vault_binding_digest=VAULT_BINDING,
         run_id=RUN_ID,
@@ -444,7 +459,7 @@ def test_exact_terminal_consolidation_journal_can_unseal_only_its_own_kind(
         expected_revision=complete.revision,
     )
     assert opened.kind == "open"
-    assert opened.revision == 3
+    assert opened.revision == complete.revision + 1
 
 
 def test_other_vault_identity_remains_independent(tmp_path: Path) -> None:

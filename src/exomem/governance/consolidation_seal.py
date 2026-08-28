@@ -55,6 +55,20 @@ _PHASES = frozenset(
 )
 _ACTIONS = frozenset({"apply", "verify", "recover", "abort", "rollback", "probe"})
 _UNSEAL_PHASES = frozenset({"complete", "rollback-complete", "aborted"})
+_PHASE_SUCCESSORS = {
+    "sealing": "sealed",
+    "sealed": "preimage-ready",
+    "preimage-ready": "policy-active",
+    "policy-active": "publishing",
+    "publishing": "rebuilding",
+    "rebuilding": "verifying",
+    "verifying": "verified",
+    "verified": "transport-stopping",
+    "transport-stopping": "transport-verifying",
+    "transport-verifying": "transport-verified",
+    "transport-verified": "routing-opening",
+    "routing-opening": "complete",
+}
 _SNAPSHOT_FIELDS = frozenset(
     {"schema", "revision", "kind", "vault_binding_digest", "recorded_at", "state"}
 )
@@ -491,6 +505,7 @@ class ConsolidationSealStore:
                     and current.journal_digest == checked_journal
                     and current.phase == "sealing"
                     and current.sealed_at == checked_time
+                    and current.revision == expected_revision + 1
                 ):
                     return current
                 _fail("SEAL_STATE_CONFLICT")
@@ -587,6 +602,7 @@ class ConsolidationSealStore:
         """Advance only the consolidation member bound to the exact current authority."""
 
         expected_vault = _digest(vault_binding_digest)
+        checked_action = _action(action)
         checked_phase = _phase(target_phase)
         checked_time = _timestamp(recorded_at)
         expected_revision = _revision(expected_revision)
@@ -597,11 +613,21 @@ class ConsolidationSealStore:
                 current,
                 authority,
                 vault_binding_digest=expected_vault,
-                action=action,
+                action=checked_action,
             )
-            if current.phase == checked_phase:
-                return current
-            if current.phase in _UNSEAL_PHASES:
+            if checked_action != "apply":
+                _fail("SEAL_PHASE_CONFLICT")
+            current_phase = _phase(current.phase)
+            if current_phase == checked_phase:
+                if (
+                    current.recorded_at == checked_time
+                    and current.revision == expected_revision + 1
+                ):
+                    return current
+                _fail("SEAL_PHASE_CONFLICT")
+            if current_phase in _UNSEAL_PHASES:
+                _fail("SEAL_PHASE_CONFLICT")
+            if _PHASE_SUCCESSORS.get(current_phase) != checked_phase:
                 _fail("SEAL_PHASE_CONFLICT")
             if current.revision != expected_revision:
                 _fail("SEAL_REVISION_CONFLICT")
