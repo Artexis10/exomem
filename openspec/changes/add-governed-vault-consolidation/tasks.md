@@ -129,12 +129,12 @@
   identity, resumes after process restart, pages large inventories deterministically,
   and never stores an absolute artifact path, source body, conflict text, policy
   body, principal id, credential, archive bytes, or rollback-preimage bytes.
-- [ ] 2.2 Extend `tests/test_reserved_admin_paths.py` with red command-registry and
+- [x] 2.2 Extend `tests/test_reserved_admin_paths.py` with red command-registry and
   filesystem-alias coverage proving every generic read, write, move, copy, delete,
   restore, transfer, adoption, Records, media, dataset, audit, and canonical-ref
   path hides/refuses `_Consolidation` before existence/count/parse effects, while
   only a non-serializable consolidation authority can mutate it.
-- [ ] 2.3 Add red recall/index tests proving `scope="vault"`, keyword/vector/graph
+- [x] 2.3 Add red recall/index tests proving `scope="vault"`, keyword/vector/graph
   rebuilds, review queues, overview counts, resources, exports, and file watchers
   exclude run state and the entire private artifact root. Hold request input fixed
   and prove results are byte-identical with no run versus a run containing matching
