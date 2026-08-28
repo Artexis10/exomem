@@ -952,3 +952,259 @@ def test_review_refuses_plan_drift_expiry_and_changed_completion_payload() -> No
             issued_at=VALID_UNTIL,
             nonce="render-ack-000000000000001",
         )
+
+
+def _stored_review(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[
+    Path,
+    consolidation_plan.CanonicalConsolidationPlan,
+    consolidation_review.CanonicalRenderReview,
+]:
+    from exomem.governance import consolidation_plan_store
+
+    vault = tmp_path / "vault"
+    _create_run(vault, monkeypatch)
+    plan = _plan(basis_run_revision=1)
+    consolidation_plan_store.ConsolidationPlanStore(vault).persist(
+        plan,
+        expected_run_revision=1,
+    )
+    review = consolidation_review.begin_review(
+        plan,
+        identity=_trusted_renderer(),
+        issued_at=CREATED_AT,
+        expires_at=VALID_UNTIL,
+        nonce="render-session-000000000001",
+    )
+    return vault, plan, review
+
+
+def test_review_store_persists_and_reloads_exact_ordered_progress(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance import consolidation_review_store
+
+    vault, plan, review = _stored_review(tmp_path, monkeypatch)
+    store = consolidation_review_store.ConsolidationReviewStore(vault)
+    assert store.persist(review, plan=plan, expected_state_digest=None) == review
+    assert (
+        store.load(
+            RUN_ID,
+            plan_kind="cutover",
+            plan_digest=plan.digest,
+            render_session_digest=review.session.digest,
+        )
+        == review
+    )
+
+    pending, page = consolidation_review.serve_page(
+        review,
+        plan=plan,
+        identity=_trusted_renderer(),
+        page_ordinal=0,
+        served_at="2026-08-28T12:00:00.500Z",
+    )
+    store.persist(
+        pending,
+        plan=plan,
+        expected_state_digest=review.state.digest,
+    )
+    acknowledgement = consolidation_review.build_acknowledgement(
+        pending,
+        page=page,
+        identity=_trusted_renderer(),
+        issued_at="2026-08-28T12:00:01.000Z",
+        nonce="render-ack-000000000000001",
+    )
+    acknowledged = consolidation_review.acknowledge_page(
+        pending,
+        plan=plan,
+        acknowledgement=acknowledgement,
+    )
+    store.persist(
+        acknowledged,
+        plan=plan,
+        expected_state_digest=pending.state.digest,
+    )
+
+    restarted = consolidation_review_store.ConsolidationReviewStore(vault)
+    loaded = restarted.load(
+        RUN_ID,
+        plan_kind="cutover",
+        plan_digest=plan.digest,
+        render_session_digest=review.session.digest,
+    )
+    assert loaded == acknowledged
+
+    current = loaded
+    for ordinal in range(1, 6):
+        pending, page = consolidation_review.serve_page(
+            current,
+            plan=plan,
+            identity=_trusted_renderer(),
+            page_ordinal=ordinal,
+            served_at=f"2026-08-28T12:00:{ordinal:02d}.500Z",
+        )
+        restarted.persist(
+            pending,
+            plan=plan,
+            expected_state_digest=current.state.digest,
+        )
+        acknowledgement = consolidation_review.build_acknowledgement(
+            pending,
+            page=page,
+            identity=_trusted_renderer(),
+            issued_at=f"2026-08-28T12:00:{ordinal + 1:02d}.000Z",
+            nonce=f"render-ack-{ordinal:020d}",
+        )
+        acknowledged = consolidation_review.acknowledge_page(
+            pending,
+            plan=plan,
+            acknowledgement=acknowledgement,
+        )
+        restarted.persist(
+            acknowledged,
+            plan=plan,
+            expected_state_digest=pending.state.digest,
+        )
+        current = acknowledged
+    completed, _completeness = consolidation_review.complete_review(
+        current,
+        plan=plan,
+        identity=_trusted_renderer(),
+        issued_at="2026-08-28T12:10:00.000Z",
+        expires_at=VALID_UNTIL,
+        nonce="completeness-000000000001",
+    )
+    restarted.persist(
+        completed,
+        plan=plan,
+        expected_state_digest=current.state.digest,
+    )
+    assert (
+        consolidation_review_store.ConsolidationReviewStore(vault).load(
+            RUN_ID,
+            plan_kind="cutover",
+            plan_digest=plan.digest,
+            render_session_digest=review.session.digest,
+        )
+        == completed
+    )
+    stored = b"".join(
+        path.read_bytes()
+        for path in sorted(
+            (
+                vault
+                / "Knowledge Base"
+                / "_Consolidation"
+                / "runs"
+                / RUN_ID
+                / "plans"
+                / "cutover"
+                / plan.digest
+                / "reviews"
+            ).rglob("*.json")
+        )
+    )
+    assert b"Knowledge Base/Notes/source.md" not in stored
+    assert b"source body" not in stored
+
+
+def test_review_store_rejects_stale_concurrent_acknowledgement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance import consolidation_review_store
+
+    vault, plan, review = _stored_review(tmp_path, monkeypatch)
+    store = consolidation_review_store.ConsolidationReviewStore(vault)
+    store.persist(review, plan=plan, expected_state_digest=None)
+    pending, page = consolidation_review.serve_page(
+        review,
+        plan=plan,
+        identity=_trusted_renderer(),
+        page_ordinal=0,
+        served_at="2026-08-28T12:00:00.500Z",
+    )
+    store.persist(pending, plan=plan, expected_state_digest=review.state.digest)
+    first_ack = consolidation_review.build_acknowledgement(
+        pending,
+        page=page,
+        identity=_trusted_renderer(),
+        issued_at="2026-08-28T12:00:01.000Z",
+        nonce="render-ack-000000000000001",
+    )
+    second_ack = consolidation_review.build_acknowledgement(
+        pending,
+        page=page,
+        identity=_trusted_renderer(),
+        issued_at="2026-08-28T12:00:01.000Z",
+        nonce="render-ack-000000000000002",
+    )
+    first = consolidation_review.acknowledge_page(
+        pending,
+        plan=plan,
+        acknowledgement=first_ack,
+    )
+    second = consolidation_review.acknowledge_page(
+        pending,
+        plan=plan,
+        acknowledgement=second_ack,
+    )
+    store.persist(first, plan=plan, expected_state_digest=pending.state.digest)
+    with pytest.raises(consolidation_review_store.ConsolidationReviewStoreUnavailable):
+        store.persist(second, plan=plan, expected_state_digest=pending.state.digest)
+
+    assert store.persist(first, plan=plan, expected_state_digest=pending.state.digest) == first
+
+
+def test_review_store_recovers_snapshot_before_active_pointer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance import consolidation_review_store
+
+    vault, plan, review = _stored_review(tmp_path, monkeypatch)
+    store = consolidation_review_store.ConsolidationReviewStore(vault)
+    store.persist(review, plan=plan, expected_state_digest=None)
+    pending, _page = consolidation_review.serve_page(
+        review,
+        plan=plan,
+        identity=_trusted_renderer(),
+        page_ordinal=0,
+        served_at="2026-08-28T12:00:00.500Z",
+    )
+    original_publish_active = store._publish_active
+
+    def crash_before_active(*_args: object, **_kwargs: object) -> None:
+        raise OSError("injected active-pointer gap")
+
+    monkeypatch.setattr(store, "_publish_active", crash_before_active)
+    with pytest.raises(consolidation_review_store.ConsolidationReviewStoreUnavailable):
+        store.persist(
+            pending,
+            plan=plan,
+            expected_state_digest=review.state.digest,
+        )
+    monkeypatch.setattr(store, "_publish_active", original_publish_active)
+
+    assert (
+        store.load(
+            RUN_ID,
+            plan_kind="cutover",
+            plan_digest=plan.digest,
+            render_session_digest=review.session.digest,
+        )
+        == review
+    )
+    assert (
+        store.persist(
+            pending,
+            plan=plan,
+            expected_state_digest=review.state.digest,
+        )
+        == pending
+    )
