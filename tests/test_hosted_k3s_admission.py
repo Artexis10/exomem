@@ -1665,7 +1665,7 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
     writable_tmp["spec"]["containers"][0]["volumeMounts"].append(
         {"name": "tmp", "mountPath": "/tmp"}
     )
-    _assert_denied(k3s, writable_tmp, message="own PVC and credential Secret")
+    _assert_denied(k3s, writable_tmp, message="PVC and exact control-plane Secrets")
 
     side_init = copy.deepcopy(serving_pod)
     side_init["metadata"]["name"] = "cell-alpha-serve-side-init"
@@ -1675,7 +1675,7 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
     for field in ("ports", "env", "startupProbe", "livenessProbe", "readinessProbe"):
         helper.pop(field, None)
     side_init["spec"]["initContainers"] = [helper]
-    _assert_denied(k3s, side_init, message="sidecars or init containers")
+    _assert_denied(k3s, side_init, message="exact authorization-custody init container")
 
 
 def test_exact_k3s_scopes_privileged_volume_and_deletion_mutations(k3s: str) -> None:
