@@ -1,4 +1,4 @@
-"""`exomem lease status|release` — ops-only CLI (R6). Not an MCP/REST product
+"""`exomem lease status|schema-admission|release` — ops-only CLI (R6). Not an MCP/REST product
 command. Exercises the CLI's own argument handling, --yes gate, --json
 output, and exit codes against a FakeClient (fast, deterministic); the
 coordinator's own release-on-behalf-of contract is proven separately in
@@ -14,7 +14,7 @@ import pytest
 from exomem import writer_lease
 from exomem.__main__ import main
 from exomem.cli_ops import OpError
-from exomem.writer_lease import LeaseRecord
+from exomem.writer_lease import LeaseRecord, SchemaAdmission
 
 
 class FakeCoordinatorClient:
@@ -32,6 +32,15 @@ class FakeCoordinatorClient:
             return _STATE["record"]
         return LeaseRecord(record.holder, record.expires_at, record.fencing_token, False)
 
+    def schema_admission(self, schema_version: int) -> SchemaAdmission:
+        required = _STATE["required_schema"]
+        return SchemaAdmission(
+            admitted=schema_version == required,
+            governance_enrolled=True,
+            required_schema_version=required,
+            schema_fence_generation=7,
+        )
+
 
 _STATE: dict = {}
 
@@ -42,9 +51,11 @@ def _lease_env(tmp_path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("EXOMEM_WRITER_LEASE_VAULT_ID", "main")
     monkeypatch.setenv("EXOMEM_WRITER_LEASE_REPLICA_ID", "desktop")
     monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN", "operator-secret")
     monkeypatch.setattr(writer_lease, "LeaseCoordinatorClient", FakeCoordinatorClient)
     _STATE["record"] = LeaseRecord("laptop", 999999999.0, 3, True)
     _STATE["release_calls"] = []
+    _STATE["required_schema"] = 4
     yield
 
 
@@ -143,3 +154,20 @@ def test_lease_steal_and_force_acquire_are_not_offered(capsys: pytest.CaptureFix
         main(["lease", "steal"])
     assert exc.value.code == 2
     assert "invalid choice" in capsys.readouterr().err
+
+
+def test_lease_schema_admission_is_an_exit_code_gate_for_deployment(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    assert main(["lease", "schema-admission", "--schema-version", "3", "--json"]) == 1
+    refused = json.loads(capsys.readouterr().out)
+    assert refused == {
+        "admitted": False,
+        "governance_enrolled": True,
+        "required_schema_version": 4,
+        "schema_fence_generation": 7,
+    }
+
+    assert main(["lease", "schema-admission", "--schema-version", "4", "--json"]) == 0
+    admitted = json.loads(capsys.readouterr().out)
+    assert admitted["admitted"] is True

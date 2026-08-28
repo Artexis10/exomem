@@ -618,8 +618,8 @@ async def test_api_seals_distinct_provider_recovery_envelopes_before_queueing(
     assert operation is not None
     queued = await repository.load_request(operation.id)
     envelopes = queued["_providerRecoveryEnvelopes"]
-    assert len(envelopes) == 16
-    assert len(set(envelopes.values())) == 16
+    assert len(envelopes) == 17
+    assert len(set(envelopes.values())) == 17
     assert all(value.startswith("eyJ") for value in envelopes.values())
 
 

@@ -28,6 +28,7 @@ from . import (
     schema,
 )
 from .governance import authorization_session_lifecycle, projection_runtime
+from .governance.authorization_serving_membership import unavailable_readiness
 from .hosted_runtime import (
     HostedBindingV2,
     HostedCellConfig,
@@ -280,6 +281,25 @@ def _initialize_hosted_runtime() -> ServerRuntime:
         raise
 
 
+def _hosted_authorization_session_readiness_provider(
+    config: HostedCellConfig,
+) -> Callable[[], Any]:
+    """Bind Hosted membership checks to deployment-owned identity, never liveness."""
+
+    if config.vault_id is None or config.authorization_session_replica_id is None:
+        return unavailable_readiness
+
+    def readiness() -> Any:
+        return authorization_session_lifecycle.hosted_serving_membership_readiness(
+            config.vault_root,
+            expected_cell_id=config.cell_id,
+            expected_logical_vault_id=config.vault_id,
+            expected_replica_id=config.authorization_session_replica_id,
+        )
+
+    return readiness
+
+
 def _initialize_locked_hosted_runtime(
     config: HostedCellConfig,
     lifetime_lock: AbstractContextManager[None],
@@ -293,10 +313,8 @@ def _initialize_locked_hosted_runtime(
     _start_metrics_persistence()
     lifecycle = HostedCellLifecycle(
         config,
-        authorization_session_readiness_provider=lambda: (
-            authorization_session_lifecycle.serving_membership_readiness(
-                config.vault_root
-            )
+        authorization_session_readiness_provider=(
+            _hosted_authorization_session_readiness_provider(config)
         ),
     )
     security_authority = _initialize_hosted_security(config)

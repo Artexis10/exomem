@@ -65,6 +65,7 @@ spec:
         'exomem.io/resource-name' in namespaceObject.metadata.annotations &&
         'exomem.io/pvc-name' in namespaceObject.metadata.annotations &&
         'exomem.io/credentials-secret-name' in namespaceObject.metadata.annotations &&
+        'exomem.io/authorization-session-secret-name' in namespaceObject.metadata.annotations &&
         'exomem.io/init-request-configmap-name' in namespaceObject.metadata.annotations &&
         'exomem.io/records-reader-version' in namespaceObject.metadata.annotations &&
         'exomem.io/lifecycle-actions-enabled' in namespaceObject.metadata.annotations &&
@@ -89,8 +90,11 @@ spec:
         has(object.spec.securityContext) &&
         has(object.spec.securityContext.seccompProfile) &&
         object.spec.securityContext.seccompProfile.type == 'RuntimeDefault' &&
-        !has(object.spec.securityContext.fsGroup) &&
-        !has(object.spec.securityContext.fsGroupChangePolicy) &&
+        (variables.lifecycleJob
+          ? (!has(object.spec.securityContext.fsGroup) &&
+            !has(object.spec.securityContext.fsGroupChangePolicy))
+          : (object.spec.securityContext.fsGroup == 10001 &&
+            object.spec.securityContext.fsGroupChangePolicy == 'OnRootMismatch')) &&
         !has(object.spec.securityContext.runAsUser) &&
         !has(object.spec.securityContext.runAsGroup) &&
         !has(object.spec.securityContext.supplementalGroups) &&
@@ -106,9 +110,36 @@ spec:
     - expression: >-
         !variables.inScope ||
         (
-        (!has(object.spec.initContainers) || size(object.spec.initContainers) == 0) &&
+        (variables.lifecycleJob
+          ? (!has(object.spec.initContainers) || size(object.spec.initContainers) == 0)
+          : (size(object.spec.initContainers) == 1 &&
+            object.spec.initContainers[0].name == 'authorization-session-custody' &&
+            object.spec.initContainers[0].image in {{ $runtimeImages | toJson }} &&
+            object.spec.initContainers[0].imagePullPolicy == 'IfNotPresent' &&
+            object.spec.initContainers[0].command == ['python'] &&
+            object.spec.initContainers[0].args ==
+              ['-m', 'exomem.governance.authorization_hosted_mount'] &&
+            object.spec.initContainers[0].securityContext.runAsNonRoot == true &&
+            object.spec.initContainers[0].securityContext.runAsUser == 10001 &&
+            object.spec.initContainers[0].securityContext.runAsGroup == 10001 &&
+            object.spec.initContainers[0].securityContext.allowPrivilegeEscalation == false &&
+            object.spec.initContainers[0].securityContext.readOnlyRootFilesystem == true &&
+            size(object.spec.initContainers[0].securityContext.capabilities.drop) == 1 &&
+            object.spec.initContainers[0].securityContext.capabilities.drop[0] == 'ALL' &&
+            string(dyn(object.spec.initContainers[0].resources).requests['cpu']) == '10m' &&
+            string(dyn(object.spec.initContainers[0].resources).requests['memory']) == '16Mi' &&
+            string(dyn(object.spec.initContainers[0].resources).requests['ephemeral-storage']) == '16Mi' &&
+            string(dyn(object.spec.initContainers[0].resources).limits['cpu']) == '100m' &&
+            string(dyn(object.spec.initContainers[0].resources).limits['memory']) == '64Mi' &&
+            string(dyn(object.spec.initContainers[0].resources).limits['ephemeral-storage']) == '16Mi' &&
+            size(dyn(object.spec.initContainers[0].resources).requests) == 3 &&
+            size(dyn(object.spec.initContainers[0].resources).limits) == 3 &&
+            (!has(object.spec.initContainers[0].env) ||
+              size(object.spec.initContainers[0].env) == 0) &&
+            (!has(object.spec.initContainers[0].ports) ||
+              size(object.spec.initContainers[0].ports) == 0))) &&
         size(object.spec.containers) == 1)
-      message: Tenant pods cannot use sidecars or init containers.
+      message: Tenant pods may use only the exact authorization-custody init container.
     - expression: >-
         !variables.inScope ||
         (
@@ -266,7 +297,7 @@ spec:
         (
         !has(object.spec.containers[0].command) &&
         object.spec.containers[0].args == ['--transport', 'http', '--port', '8765'] &&
-        size(object.spec.containers[0].env) == 24 &&
+        size(object.spec.containers[0].env) == 28 &&
         object.spec.containers[0].env.exists(env,
           env.name == 'EXOMEM_HOSTED_CELL' && has(env.value) && env.value == '1' && !has(env.valueFrom)) &&
         object.spec.containers[0].env.exists(env,
@@ -303,6 +334,18 @@ spec:
         object.spec.containers[0].env.exists(env,
           env.name == 'EXOMEM_HOSTED_LIFECYCLE_ACTIONS_ENABLED' && has(env.value) &&
           env.value == namespaceObject.metadata.annotations['exomem.io/lifecycle-actions-enabled'] && !has(env.valueFrom)) &&
+        object.spec.containers[0].env.exists(env,
+          env.name == 'EXOMEM_AUTH_SESSION_KEYRING_FILE' && has(env.value) &&
+          env.value == '/run/exomem/authorization-session/keyring.json' && !has(env.valueFrom)) &&
+        object.spec.containers[0].env.exists(env,
+          env.name == 'EXOMEM_AUTH_SESSION_CONTROL_FILE' && has(env.value) &&
+          env.value == '/run/exomem/authorization-session/control.json' && !has(env.valueFrom)) &&
+        object.spec.containers[0].env.exists(env,
+          env.name == 'EXOMEM_AUTH_SESSION_MEMBERSHIP_FILE' && has(env.value) &&
+          env.value == '/run/exomem/authorization-session/serving-membership.json' && !has(env.valueFrom)) &&
+        object.spec.containers[0].env.exists(env,
+          env.name == 'EXOMEM_AUTH_SESSION_REPLICA_ID' && !has(env.value) && has(env.valueFrom) &&
+          env.valueFrom.fieldRef.fieldPath == 'metadata.name') &&
         object.spec.containers[0].env.exists(env,
           env.name == 'EXOMEM_HOSTED_STORAGE_LIMIT_BYTES' && has(env.value) && env.value == '5368709120' && !has(env.valueFrom)) &&
         object.spec.containers[0].env.exists(env,
@@ -411,17 +454,23 @@ spec:
     - expression: >-
         !variables.inScope ||
         variables.lifecycleJob ||
-        (size(object.spec.volumes) == 2 && object.spec.volumes.all(volume,
+        (size(object.spec.volumes) == 4 && object.spec.volumes.all(volume,
           (volume.name == 'data' && has(volume.persistentVolumeClaim) &&
             volume.persistentVolumeClaim.claimName == namespaceObject.metadata.annotations['exomem.io/pvc-name']) ||
           (volume.name == 'credentials' && has(volume.secret) &&
             volume.secret.secretName == namespaceObject.metadata.annotations['exomem.io/credentials-secret-name'] &&
-            volume.secret.defaultMode == 292)))
-      message: Serving pods may mount only their own PVC and credential Secret.
+            volume.secret.defaultMode == 292) ||
+          (volume.name == 'authorization-session-source' && has(volume.secret) &&
+            volume.secret.secretName == namespaceObject.metadata.annotations['exomem.io/authorization-session-secret-name'] &&
+            volume.secret.defaultMode == 288) ||
+          (volume.name == 'authorization-session-custody' && has(volume.emptyDir) &&
+            volume.emptyDir.medium == 'Memory' &&
+            string(dyn(volume.emptyDir).sizeLimit) == '256Ki')))
+      message: Serving pods may mount only their PVC and exact control-plane Secrets.
     - expression: >-
         !variables.inScope ||
         variables.lifecycleJob ||
-        (size(object.spec.containers[0].volumeMounts) == 4 &&
+        (size(object.spec.containers[0].volumeMounts) == 5 &&
         object.spec.containers[0].volumeMounts.exists(mount,
           mount.name == 'data' && mount.mountPath == '/var/lib/exomem/vault' && mount.subPath == 'vault') &&
         object.spec.containers[0].volumeMounts.exists(mount,
@@ -430,7 +479,20 @@ spec:
           mount.name == 'data' && mount.mountPath == '/var/lib/exomem/logs' && mount.subPath == 'logs') &&
         object.spec.containers[0].volumeMounts.exists(mount,
           mount.name == 'credentials' && mount.mountPath == '/run/exomem/credentials' &&
-          mount.readOnly == true && !has(mount.subPath)))
+          mount.readOnly == true && !has(mount.subPath)) &&
+        object.spec.containers[0].volumeMounts.exists(mount,
+          mount.name == 'authorization-session-custody' &&
+          mount.mountPath == '/run/exomem/authorization-session' &&
+          mount.readOnly == true && !has(mount.subPath)) &&
+        size(object.spec.initContainers[0].volumeMounts) == 2 &&
+        object.spec.initContainers[0].volumeMounts.exists(mount,
+          mount.name == 'authorization-session-source' &&
+          mount.mountPath == '/run/exomem/authorization-session-source' &&
+          mount.readOnly == true && !has(mount.subPath)) &&
+        object.spec.initContainers[0].volumeMounts.exists(mount,
+          mount.name == 'authorization-session-custody' &&
+          mount.mountPath == '/run/exomem/authorization-session' &&
+          (!has(mount.readOnly) || mount.readOnly == false) && !has(mount.subPath)))
       message: Serving mounts must match the exact tenant paths.
 ---
 apiVersion: admissionregistration.k8s.io/v1

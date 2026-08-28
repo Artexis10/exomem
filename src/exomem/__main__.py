@@ -16,6 +16,7 @@ Subcommands:
   (requires the optional `tui` extra; needs an interactive terminal)
 - `doctor` — read-only local install/setup preflight
 - `auth sessions|revoke` — operator-only durable MCP session administration
+- `governance-schema status|plan-migration|stage-migration|commit-migration|restore-migration-backup|downmigrate` — offline schema control
 - `status` — resource posture/residency diagnostics without loading models
 - `warm` — pre-download/load the search models (bge, reranker, CLIP) so the first
   server start doesn't pay the download in the background; optional `--vault`
@@ -35,6 +36,8 @@ import importlib.util
 import json
 import os
 import sys
+import time
+from dataclasses import replace
 from pathlib import Path
 
 from .kbdir import kb_dirname, kb_prefix
@@ -108,6 +111,7 @@ _CLI_ONLY_SUBCOMMANDS: frozenset[str] = frozenset(
         "trace",
         "logs",
         "lease",
+        "governance-schema",
     }
 )
 
@@ -234,6 +238,8 @@ def _dispatch_main(raw: list[str]) -> int:
         return _logs_main(raw[1:])
     if raw and raw[0] == "lease":
         return _lease_main(raw[1:])
+    if raw and raw[0] == "governance-schema":
+        return _governance_schema_main(raw[1:])
     # Registry-driven product operations (reads + writes): `exomem ask_memory "..."`,
     # `exomem remember ...`, etc. Product commands take precedence over old
     # short aliases when a name overlaps.
@@ -1419,13 +1425,51 @@ def _lease_release_main(config, *, confirmed: bool, as_json: bool) -> int:  # no
     return 0
 
 
+def _lease_schema_admission_main(
+    config, *, schema_version: int, as_json: bool  # noqa: ANN001
+) -> int:
+    from . import writer_lease
+
+    operator_token = os.environ.get("EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN", "").strip()
+    if not operator_token:
+        _lease_print_error(
+            "schema admission requires EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN.",
+            as_json=as_json,
+        )
+        return 1
+    try:
+        admission = writer_lease.LeaseCoordinatorClient(
+            replace(config, token=operator_token)
+        ).schema_admission(schema_version)
+    except writer_lease.OpError as error:
+        _lease_print_error(f"{error.code}: {error.message}", as_json=as_json)
+        return 1
+    payload = admission.as_dict()
+    if as_json:
+        print(json.dumps(payload))
+    elif admission.admitted:
+        print(
+            f"schema {schema_version} is admitted by external fence generation "
+            f"{admission.schema_fence_generation}."
+        )
+    else:
+        required = admission.required_schema_version
+        print(
+            f"schema {schema_version} is refused; external fence requires "
+            f"{required if required is not None else 'an enrolled schema'}.",
+            file=sys.stderr,
+        )
+    return 0 if admission.admitted else 1
+
+
 def _lease_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="exomem lease",
         description=(
-            "Ops-only writer-lease inspection and manual release. Not an MCP or REST "
-            "product command; 'steal'/'force-acquire' are deliberately absent — release "
-            "plus preferred-writer reclaim already hands over within roughly one lease TTL."
+            "Ops-only writer-lease inspection, schema admission, and manual release. "
+            "Not an MCP or REST product command; 'steal'/'force-acquire' are deliberately "
+            "absent — release plus preferred-writer reclaim already hands over within "
+            "roughly one lease TTL."
         ),
     )
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -1443,6 +1487,19 @@ def _lease_main(argv: list[str]) -> int:
     )
     release_parser.add_argument("--json", action="store_true", help="emit stable JSON")
 
+    admission_parser = subcommands.add_parser(
+        "schema-admission",
+        help="fail unless a release schema may join the externally fenced cell",
+    )
+    admission_parser.add_argument(
+        "--schema-version",
+        type=int,
+        choices=(3, 4),
+        required=True,
+        help="schema contract declared by the release being admitted",
+    )
+    admission_parser.add_argument("--json", action="store_true", help="emit stable JSON")
+
     args = parser.parse_args(argv)
 
     from . import writer_lease
@@ -1457,7 +1514,475 @@ def _lease_main(argv: list[str]) -> int:
 
     if args.command == "status":
         return _lease_status_main(config, as_json=args.json)
+    if args.command == "schema-admission":
+        return _lease_schema_admission_main(
+            config,
+            schema_version=args.schema_version,
+            as_json=args.json,
+        )
     return _lease_release_main(config, confirmed=args.yes, as_json=args.json)
+
+
+def _governance_schema_print_error(
+    code: str,
+    message: str,
+    *,
+    as_json: bool,
+) -> None:
+    if as_json:
+        print(json.dumps({"error": code, "message": message}))
+    else:
+        print(f"{code}: {message}", file=sys.stderr)
+
+
+def _governance_schema_status(vault: Path, *, now: int) -> dict[str, object]:
+    from .governance import authorization_custody, store
+
+    custody = authorization_custody.load_authorization_custody(vault, now=now)
+    control = custody.control
+    membership = custody.serving_membership
+    replicas = [] if membership is None else [
+        {
+            "replica_id": item.replica_id,
+            "state": item.state,
+            "schema_version": item.schema_version,
+            "issuance_stopped": item.issuance_stopped,
+            "no_in_flight": item.no_in_flight,
+        }
+        for item in membership.replicas
+    ]
+    return {
+        "schema_version": store.authorization_session_schema_version(vault),
+        "governance_enrolled": control.governance_enrolled,
+        "logical_vault_id": control.logical_vault_id,
+        "activation_store_id": control.activation_store_id,
+        "activation_epoch": control.activation_epoch,
+        "activation_state_digest": control.activation_state_digest,
+        "serving_membership_epoch": control.serving_membership_epoch,
+        "replicas": replicas,
+    }
+
+
+def _governance_schema_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="exomem governance-schema",
+        description=(
+            "Ops-only governance schema inspection, planning, and explicit rollback. "
+            "This command is not exposed through MCP, REST, or Hosted agent surfaces."
+        ),
+    )
+    subcommands = parser.add_subparsers(dest="command", required=True)
+
+    status_parser = subcommands.add_parser(
+        "status",
+        help="show the content-free schema, activation, and drain basis",
+    )
+    status_parser.add_argument("--vault", required=True, help="explicit absolute vault root")
+    status_parser.add_argument("--json", action="store_true", help="emit stable JSON")
+
+    plan_parser = subcommands.add_parser(
+        "plan-migration",
+        help="stage and review an inert exact-v3 to exact-v4 migration target",
+    )
+    plan_parser.add_argument("--vault", required=True, help="explicit absolute vault root")
+    plan_parser.add_argument("--json", action="store_true", help="emit stable JSON")
+
+    stage_parser = subcommands.add_parser(
+        "stage-migration",
+        help="publish the exact reviewed immutable namespace without activating it",
+    )
+    stage_parser.add_argument("--vault", required=True, help="explicit absolute vault root")
+    stage_parser.add_argument(
+        "--expected-plan-digest",
+        required=True,
+        help="64-character digest copied from the reviewed migration plan",
+    )
+    stage_parser.add_argument(
+        "--yes", action="store_true", help="confirm the reviewed inert publication"
+    )
+    stage_parser.add_argument("--json", action="store_true", help="emit stable JSON")
+
+    commit_parser = subcommands.add_parser(
+        "commit-migration",
+        help="back up exact v3 and commit the reviewed staged v4 target",
+    )
+    commit_parser.add_argument(
+        "--vault", required=True, help="explicit absolute vault root"
+    )
+    commit_parser.add_argument(
+        "--expected-plan-digest",
+        required=True,
+        help="64-character digest copied from the reviewed migration plan",
+    )
+    commit_parser.add_argument(
+        "--yes", action="store_true", help="confirm the irreversible reviewed cutover"
+    )
+    commit_parser.add_argument("--json", action="store_true", help="emit stable JSON")
+
+    restore_parser = subcommands.add_parser(
+        "restore-migration-backup",
+        help="restore the exact immediate pre-migration v3 backup under a drained fence",
+    )
+    restore_parser.add_argument(
+        "--vault", required=True, help="explicit absolute vault root"
+    )
+    restore_parser.add_argument(
+        "--expected-plan-digest",
+        required=True,
+        help="64-character digest copied from the committed migration terminal",
+    )
+    restore_parser.add_argument(
+        "--expected-backup-reference",
+        required=True,
+        help="private backup reference copied from the committed migration terminal",
+    )
+    restore_parser.add_argument(
+        "--yes", action="store_true", help="confirm the reviewed predecessor restore"
+    )
+    restore_parser.add_argument("--json", action="store_true", help="emit stable JSON")
+
+    downmigrate_parser = subcommands.add_parser(
+        "downmigrate",
+        help="restore exact schema v3 after every v4 replica is drained",
+    )
+    downmigrate_parser.add_argument(
+        "--vault", required=True, help="explicit absolute vault root"
+    )
+    downmigrate_parser.add_argument(
+        "--expected-activation-state-digest",
+        required=True,
+        help="64-character digest copied from the reviewed status output",
+    )
+    downmigrate_parser.add_argument(
+        "--yes", action="store_true", help="confirm the reviewed destructive rollback"
+    )
+    downmigrate_parser.add_argument("--json", action="store_true", help="emit stable JSON")
+
+    args = parser.parse_args(argv)
+    vault = Path(args.vault).expanduser()
+    as_json = bool(args.json)
+    if not vault.is_absolute() or not vault.is_dir():
+        _governance_schema_print_error(
+            "GOVERNANCE_SCHEMA_VAULT_INVALID",
+            "--vault must name an existing absolute vault root",
+            as_json=as_json,
+        )
+        return 1
+
+    from .governance import authorization_custody, schema_downmigration, schema_migration
+
+    moment = int(time.time())
+    if args.command == "plan-migration":
+        try:
+            plan = schema_migration.prepare_forward_migration(vault, now=moment)
+            summary = schema_migration.plan_summary(plan)
+        except schema_migration.ForwardMigrationUnavailable:
+            _governance_schema_print_error(
+                "GOVERNANCE_SCHEMA_MIGRATION_UNAVAILABLE",
+                "the exact quiesced v3 policy and catalog could not be prepared",
+                as_json=as_json,
+            )
+            return 1
+        if as_json:
+            print(json.dumps(summary))
+        else:
+            for key, value in summary.items():
+                print(f"{key}: {value}")
+        return 0
+
+    if args.command == "stage-migration":
+        expected_plan_digest = args.expected_plan_digest
+        if not args.yes:
+            confirmation = {
+                "staged": False,
+                "reason": "confirmation_required",
+                "plan_digest": expected_plan_digest,
+            }
+            if as_json:
+                print(json.dumps(confirmation))
+            else:
+                for key, value in confirmation.items():
+                    print(f"{key}: {value}")
+            return 2
+        try:
+            terminal = schema_migration.stage_forward_migration(
+                vault,
+                expected_plan_digest=expected_plan_digest,
+                now=moment,
+            )
+        except schema_migration.ForwardMigrationPlanMismatch:
+            _governance_schema_print_error(
+                "GOVERNANCE_SCHEMA_PLAN_MISMATCH",
+                "the reviewed migration plan changed; no activation was attempted",
+                as_json=as_json,
+            )
+            return 1
+        except schema_migration.ForwardMigrationUnavailable:
+            _governance_schema_print_error(
+                "GOVERNANCE_SCHEMA_MIGRATION_UNAVAILABLE",
+                "the exact v3 migration namespace could not be staged",
+                as_json=as_json,
+            )
+            return 1
+        result = {
+            "staged": True,
+            "schema_version": 3,
+            "plan_digest": terminal.plan_digest,
+            "projection_namespace_id": terminal.projection_namespace_id,
+            "projection_rows_digest": terminal.projection_rows_digest,
+            "item_count": terminal.item_count,
+        }
+        if as_json:
+            print(json.dumps(result))
+        else:
+            for key, value in result.items():
+                print(f"{key}: {value}")
+        return 0
+
+    if args.command == "commit-migration":
+        expected_plan_digest = args.expected_plan_digest
+        if not args.yes:
+            confirmation = {
+                "migrated": False,
+                "reason": "confirmation_required",
+                "plan_digest": expected_plan_digest,
+            }
+            if as_json:
+                print(json.dumps(confirmation))
+            else:
+                print(
+                    "migration cutover requires --yes after reviewing this exact plan: "
+                    f"{expected_plan_digest}",
+                    file=sys.stderr,
+                )
+            return 2
+        try:
+            result = schema_migration.commit_forward_migration(
+                vault,
+                expected_plan_digest=expected_plan_digest,
+                now=moment,
+            )
+        except schema_migration.ForwardMigrationPlanMismatch:
+            _governance_schema_print_error(
+                "GOVERNANCE_SCHEMA_PLAN_MISMATCH",
+                "the reviewed migration plan changed; no activation was attempted",
+                as_json=as_json,
+            )
+            return 1
+        except schema_migration.ForwardMigrationUnavailable:
+            _governance_schema_print_error(
+                "GOVERNANCE_SCHEMA_MIGRATION_UNAVAILABLE",
+                "the verified backup and exact v3-to-v4 cutover could not complete",
+                as_json=as_json,
+            )
+            return 1
+        target = result.target
+        terminal = {
+            "migrated": True,
+            "schema_version": result.schema_version,
+            "logical_vault_id": target.logical_vault_id,
+            "activation_store_id": target.activation_store_id,
+            "activation_epoch": target.activation_epoch,
+            "activation_state_digest": target.activation_state_digest,
+            "policy_generation_id": target.policy_generation_id,
+            "policy_fingerprint": target.policy_fingerprint,
+            "projector_schema_version": target.projector_schema_version,
+            "catalog_generation": target.catalog_generation,
+            "projection_namespace_id": target.projection_namespace_id,
+            "plan_digest": result.plan_digest,
+            "source_store_digest": result.source_store_digest,
+            "backup_reference": result.backup_reference,
+            "replayed": result.replayed,
+        }
+        if as_json:
+            print(json.dumps(terminal))
+        else:
+            delivery = "replayed" if result.replayed else "committed"
+            print(
+                f"schema v4 migration {delivery}; backup {result.backup_reference}"
+            )
+        return 0
+
+    if args.command == "restore-migration-backup":
+        expected_plan_digest = args.expected_plan_digest
+        expected_backup_reference = args.expected_backup_reference
+        if not args.yes:
+            confirmation = {
+                "restored": False,
+                "reason": "confirmation_required",
+                "plan_digest": expected_plan_digest,
+                "backup_reference": expected_backup_reference,
+            }
+            if as_json:
+                print(json.dumps(confirmation))
+            else:
+                print(
+                    "pre-migration backup restore requires --yes after reviewing "
+                    f"plan {expected_plan_digest} and backup {expected_backup_reference}",
+                    file=sys.stderr,
+                )
+            return 2
+        try:
+            result = schema_migration.restore_forward_migration_backup(
+                vault,
+                expected_plan_digest=expected_plan_digest,
+                expected_backup_reference=expected_backup_reference,
+                now=moment,
+            )
+        except schema_migration.ForwardMigrationRestoreUnavailable:
+            _governance_schema_print_error(
+                "GOVERNANCE_SCHEMA_BACKUP_RESTORE_UNAVAILABLE",
+                "the immediate predecessor backup could not be restored safely; "
+                "use reviewed v4-to-v3 downmigration after later durable changes",
+                as_json=as_json,
+            )
+            return 1
+        terminal = {
+            "restored": True,
+            "schema_version": result.schema_version,
+            "plan_digest": result.plan_digest,
+            "source_store_digest": result.source_store_digest,
+            "backup_reference": result.backup_reference,
+            "recovery_event_id": result.recovery_event_id,
+            "recovery_plan_digest": result.recovery_plan_digest,
+            "replayed": result.replayed,
+        }
+        if as_json:
+            print(json.dumps(terminal))
+        else:
+            delivery = "replayed" if result.replayed else "committed"
+            print(
+                f"schema v3 predecessor restore {delivery}; recovery event "
+                f"{result.recovery_event_id}"
+            )
+        return 0
+
+    try:
+        status = _governance_schema_status(vault, now=moment)
+    except (
+        authorization_custody.AuthorizationCustodyUnavailable,
+        OSError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+    ):
+        _governance_schema_print_error(
+            "GOVERNANCE_SCHEMA_UNAVAILABLE",
+            "the external custody and local schema basis could not be verified",
+            as_json=as_json,
+        )
+        return 1
+
+    if args.command == "status":
+        if as_json:
+            print(json.dumps(status))
+        else:
+            for key in (
+                "schema_version",
+                "governance_enrolled",
+                "logical_vault_id",
+                "activation_store_id",
+                "activation_epoch",
+                "activation_state_digest",
+                "serving_membership_epoch",
+            ):
+                print(f"{key}: {status[key]}")
+            for replica in status["replicas"]:
+                assert isinstance(replica, dict)
+                print(
+                    "replica: "
+                    f"{replica['replica_id']} state={replica['state']} "
+                    f"schema={replica['schema_version']} "
+                    f"issuance_stopped={replica['issuance_stopped']} "
+                    f"no_in_flight={replica['no_in_flight']}"
+                )
+        return 0
+
+    expected_digest = args.expected_activation_state_digest
+    if (
+        len(expected_digest) != 64
+        or any(character not in "0123456789abcdef" for character in expected_digest)
+        or expected_digest != status["activation_state_digest"]
+    ):
+        _governance_schema_print_error(
+            "GOVERNANCE_SCHEMA_TARGET_MISMATCH",
+            "the reviewed activation state changed; no downmigration was attempted",
+            as_json=as_json,
+        )
+        return 1
+    if status["schema_version"] != 4:
+        _governance_schema_print_error(
+            "GOVERNANCE_SCHEMA_NOT_V4",
+            "the reviewed vault is not an exact schema-v4 downmigration source",
+            as_json=as_json,
+        )
+        return 1
+    if not args.yes:
+        payload = {
+            "downmigrated": False,
+            "reason": "confirmation_required",
+            "schema_version": status["schema_version"],
+            "logical_vault_id": status["logical_vault_id"],
+            "activation_state_digest": status["activation_state_digest"],
+        }
+        if as_json:
+            print(json.dumps(payload))
+        else:
+            print(
+                "downmigration requires --yes after reviewing this exact activation "
+                f"state: {status['activation_state_digest']}",
+                file=sys.stderr,
+            )
+        return 2
+
+    try:
+        result = schema_downmigration.downmigrate_enrolled_v4_store(
+            vault,
+            now=moment,
+        )
+    except schema_downmigration.DownmigrationUnavailable:
+        _governance_schema_print_error(
+            "GOVERNANCE_SCHEMA_DOWNMIGRATION_UNAVAILABLE",
+            "the drained schema-v4 rollback basis did not verify; no unsafe recovery was attempted",
+            as_json=as_json,
+        )
+        return 1
+    active = result.active
+    if (
+        result.schema_version != 3
+        or active.logical_vault_id != status["logical_vault_id"]
+        or active.activation_store_id != status["activation_store_id"]
+        or active.activation_epoch != status["activation_epoch"]
+        or active.activation_state_digest != status["activation_state_digest"]
+    ):
+        _governance_schema_print_error(
+            "GOVERNANCE_SCHEMA_DOWNMIGRATION_UNAVAILABLE",
+            "the durable downmigration terminal did not match the reviewed activation state",
+            as_json=as_json,
+        )
+        return 1
+    terminal = {
+        "downmigrated": True,
+        "schema_version": result.schema_version,
+        "logical_vault_id": active.logical_vault_id,
+        "activation_store_id": active.activation_store_id,
+        "activation_epoch": active.activation_epoch,
+        "activation_state_digest": active.activation_state_digest,
+        "recovery_event_id": result.recovery_event_id,
+        "recovery_plan_digest": result.recovery_plan_digest,
+        "recovery_target_digest": result.recovery_target_digest,
+        "recovery_terminal_digest": result.recovery_terminal_digest,
+        "replayed": result.replayed,
+    }
+    if as_json:
+        print(json.dumps(terminal))
+    else:
+        delivery = "replayed" if result.replayed else "committed"
+        print(
+            f"schema v3 downmigration {delivery}; recovery terminal "
+            f"{result.recovery_terminal_digest}"
+        )
+    return 0
 
 
 def _reclaim_schema_main(argv: list[str]) -> int:

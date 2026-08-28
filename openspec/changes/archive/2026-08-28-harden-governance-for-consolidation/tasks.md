@@ -3,17 +3,18 @@
 This checklist is an end-state acceptance ledger, not a percentage-complete meter. A
 checkbox is complete only when its whole obligation is evidenced; several broad open
 tasks therefore contain substantial merged foundations. The implementation baseline for
-this reconciliation is `origin/main` at `1a7f30e1` (merged PR #778).
+this reconciliation is `origin/main` at `c8ba4be7` plus cumulative stacked evidence PR
+#887 (`7852a5f9`).
 
 | Area | Merged implementation evidence | Remaining end-state obligation |
 | --- | --- | --- |
-| Per-scope disclosure | Conservative lattice, option meet, unconditional scrubber, and session-bound scope enforcement are merged. | Exact v3 grant migration/recovery closure in 1.7/1.10. |
-| Non-Markdown membership | Descriptor binding, owner backfill, fail-closed propagation, and structured-read preflight are merged in #723, #724, and #727. | Final combined evidence run in 2.11. |
-| Policy authority | Prospective snapshots and the immutable active policy/catalog tuple substrate are merged in #729 and #740. | Product writer/mirror integration, migration, recovery, and concurrency closure in 3.3-3.7 and 3.10-3.13. |
+| Per-scope disclosure | Conservative lattice, option meet, unconditional scrubber, and session-bound scope enforcement are merged. | Exact v3 grant migration and receipt-first v4 scope-bound recovery are implemented and evidenced in this stacked change; no section 1 obligation remains. Merge stays behind the Personal stability hold. |
+| Non-Markdown membership | Descriptor binding, owner backfill, fail-closed propagation, structured-read preflight, and the combined regression matrix are complete through #723, #724, #727, and green PR #832 CI. | No section 2 obligation remains. |
+| Policy authority | Prospective snapshots, exact proposal authority binding, atomic publication, writer successors, irreversible enrollment, forward migration, downmigration, predecessor-backup recovery, and semantic suspend/resume/undo are complete through #729, #740, #800-#830, and #869-#887. | No section 3 obligation remains: every slice retains its red/green barrier evidence, independent rechecks are green, and cumulative #887 CI passed the complete stacked implementation. Merge stays behind the Personal stability hold and whole-change closeout. |
 | Reserved state | Held filesystem substrate and the closed reserved-path monopoly are merged and complete. | Final whole-change review/verification only. |
 | Authorization sessions | Credential verification, external custody, schema-v4 authority, transport binding, standalone attachment, and serving-membership verification are merged in #728, #732, #734, #737, #741, #772, #775, and #778. | Hosted membership publisher, complete move/restore and v3 migration/downmigration, hygiene, and combined lifecycle evidence in the remaining section 5 tasks. |
-| Direct reads | Markdown projection and structured direct-read gates are merged in #730 and #731. | Complete the remaining L0-L6/never-enrolled matrix and combined regression evidence in 7.1/7.6. |
-| Projected retrieval | Projection/measurement stores, preactivation, request-local authorization, lane reduction, and timing/release foundations are merged in #748-#753 and #771. | #774 deliberately reclosed serving until genuine hidden-state error, real pagination, exact-capacity, and active-model evidence satisfy 8.1-8.6, 8.9, 8.11, and 8.14-8.16. |
+| Direct reads | Markdown and structured-direct gates are merged in #730/#731; the full L0-L6 and registry-proven never-enrolled matrix is complete in stacked PR #832. | No section 7 implementation obligation remains; merge stays behind the Personal stability hold. |
+| Projected retrieval | Projection/measurement stores, preactivation, request-local authorization, lane reduction, real visible continuation, CPU-vector certification, and every catalog/measurement/graph writer successor are merged through #748-#753, #771, #781, #792, and #804-#830. | #774 deliberately reclosed serving until the remaining counterfactual, exact-capacity, timing, and active-model gates in section 8 are complete. |
 | Closeout | No consolidation workflow is exposed. | Sections 9-11: integration/migration gates, independent security recheck, independent verification, canonical sync, and archive. |
 
 ## 0. Evidence-Gated Prerequisite Bookkeeping
@@ -58,7 +59,7 @@ this reconciliation is `origin/main` at `1a7f30e1` (merged PR #778).
   proving the shared terminal secret/bearer scrubber is non-disableable under active
   governance. Assert legacy scrubber-off policy blocks compilation and the exact typed
   open/rotate issuance occurrence remains the only terminal exception.
-- [ ] 1.7 Extend `tests/test_govern_memory_tool.py` and `tests/test_governance_store.py`
+- [x] 1.7 Extend `tests/test_govern_memory_tool.py` and `tests/test_governance_store.py`
   with red persistence/drift tests for exact session-grant scope bindings and a
   monotonic migration that expires legacy rows unable to prove them.
 - [x] 1.8 Implement the pure per-scope lattice and closed conservative option meet in
@@ -69,7 +70,7 @@ this reconciliation is `origin/main` at `1a7f30e1` (merged PR #778).
   migration finding for every legacy occurrence, and make terminal scrubber invocation
   unconditional across content/error/control dispatch; retain only the exact validated
   issuance exception.
-- [ ] 1.10 Persist the reviewed scope set with session grants, return it from active-grant
+- [x] 1.10 Persist the reviewed scope set with session grants, return it from active-grant
   lookup, include it in composite digests/recovery, and make membership or policy drift
   invalidate rather than broaden it.
 - [x] 1.11 Run the focused compiler/lattice/scrubber/store/tool tests and preserve the red-before-green
@@ -120,7 +121,7 @@ this reconciliation is `origin/main` at `1a7f30e1` (merged PR #778).
 - [x] 2.10 Wire direct media/frame/dataset reads, corpus walks, proposal membership, and
   active-session-grant revalidation to propagate unresolved membership; remove every
   fallback that converts it to `frozenset()`.
-- [ ] 2.11 Run the membership, preserve/media-processing, scene-frame, query-dataset,
+- [x] 2.11 Run the membership, preserve/media-processing, scene-frame, query-dataset,
   egress, Records, and grant-drift focused tests with embeddings/media model extras
   disabled; retain red/green output for every legacy fixture class.
 
@@ -132,29 +133,30 @@ this reconciliation is `origin/main` at `1a7f30e1` (merged PR #778).
 - [x] 3.2 Add red tests for timestamp-preserving byte replacement, added/deleted policy
   files, pending-guard generation changes, symlink/non-regular policy paths, and mixed
   before/after document sets during prospective acquisition.
-- [ ] 3.3 Add red `tests/test_govern_memory_tool.py` coverage proving proposals persist
+- [x] 3.3 Add red `govern_memory` integration coverage in
+  `tests/test_governance_active_tuple.py` proving proposals persist
   exact workspace byte map/source/conflict/guard identities, reviewed active policy/
   projector/catalog tuple, canonical target compiled bytes/fingerprint/schema versions,
   exact membership, and ready projection namespace; reject any tuple mismatch at commit.
-- [ ] 3.4 Add red tests proving direct workspace create/edit/delete/conflict never changes
+- [x] 3.4 Add red tests proving direct workspace create/edit/delete/conflict never changes
   active authority. Prove valid edits/deletions remain pending and deletion does not
   revoke, while missing/corrupt/conflicted workspace blocks warm/restart content. Barrier
   every edit before/after snapshot and tuple commit; assert the cooperatively fenced
   held-parent/descriptor-identity mirror refuses observed drift, while only the expected
   immutable target may activate. Direct OS-owner mutation is outside that guarantee.
-- [ ] 3.5 Add deterministic SQLite barrier/crash tests for two commits sharing one
+- [x] 3.5 Add deterministic SQLite barrier/crash tests for two commits sharing one
   predecessor and policy commit versus content create/edit/delete/companion publication:
   stage-before-tuple, tuple/receipt/namespace transaction, reader snapshot, response, and
   workspace mirror.
   Assert one full-tuple CAS winner, predecessor-or-target visibility,
   exact nonce recovery, append-only generations, and no stale policy/catalog projection.
-- [ ] 3.6 Add red startup/migration/backup tests for current direct-source v3 to v4:
+- [x] 3.6 Add red startup/migration/backup tests for current direct-source v3 to v4:
   ordinary v3 opener leaves exact v3 with no v4 DDL/DML; quiesced explicit migration;
   monotonic external `governance_enrolled` plus expected store id/epoch/digest; stable
   source/catalog recheck; atomic initial tuple; stopped/running deletion and corrupt/
   missing/aliased registry/workspace/store/tuple/policy/catalog/namespace fail-closed;
   WAL-consistent restore and no last-good/OPEN/historical fallback.
-- [ ] 3.7 Add red `govern_memory` suspend/resume/undo matrices: semantic widening and
+- [x] 3.7 Add red `govern_memory` suspend/resume/undo matrices: semantic widening and
   narrowing; changed dependent scope/member identity/hash/set with deterministic expire/
   review state; exact policy generation + grant manifest + ready namespace identity;
   races against content create/edit/delete and companion publication; cooperatively fenced
@@ -170,7 +172,7 @@ this reconciliation is `origin/main` at `1a7f30e1` (merged PR #778).
   compiled bytes/fingerprints, compiler/projector versions, predecessor/event/receipt,
   projection namespace, immutable store id, epoch, and activation digest; enforce
   no-follow private store and immutable row constraints.
-- [ ] 3.10 Implement one `BEGIN IMMEDIATE` publication transaction that inserts the
+- [x] 3.10 Implement one `BEGIN IMMEDIATE` publication transaction that inserts the
   complete target and CASes the full policy/projector/catalog tuple with receipt,
   activation epoch/digest, and ready namespace. Make policy commits CAS expected catalog,
   content/companion writers CAS expected policy, and readers pin one tuple; remove direct
@@ -179,12 +181,12 @@ this reconciliation is `origin/main` at `1a7f30e1` (merged PR #778).
   workspace mirror with held-parent/descriptor-identity checks. Refuse observable drift,
   record exact mirror result and pending divergence, and allow an already-exact tuple
   transaction to stand; direct OS-owner mutation is outside the filesystem guarantee.
-- [ ] 3.12 Restrict recovery/doctor/backup/rebuild/downmigration compiles to immutable
+- [x] 3.12 Restrict recovery/doctor/backup/rebuild/downmigration compiles to immutable
   generation/journal/receipt bytes. Implement irreversible registry enrollment, initial
   direct-source/catalog migration, exact active-source mirroring for v4→v3 under the
   cooperative fence, and external expected-tuple restore/rebuild CAS. Preserve enrollment
   history and treat a reviewed empty generation as governed, never OPEN.
-- [ ] 3.13 Run policy, govern-tool, activation-store, suspend/resume/undo dependent-grant,
+- [x] 3.13 Run policy, govern-tool, activation-store, suspend/resume/undo dependent-grant,
   recovery, receipt, conflict-copy, proposal concurrency, migration/rollback,
   backup/restore, and cross-process reader tests; retain red/green evidence for every
   barrier.
@@ -307,7 +309,7 @@ made before both PRs and their combined verification are complete.
   version/id/key length/time/signature, identity mismatch, permissive POSIX mode or
   Windows ACL, policy/request/CLI/vault-provided values, and first-use generation all
   fail closed. Prove rows store external ids + key id + keyed verifier, never key/bearer.
-- [ ] 5.3 Add red authenticated standalone/hosted provisioning tests for atomic external
+- [x] 5.3 Add red authenticated standalone/hosted provisioning tests for atomic external
   registration of cell/logical-vault/keyring/storage/owner identity plus monotonic
   `governance_enrolled` and expected activation store id/epoch/digest. Prove false only
   after a trusted negative scan for governance workspace/activation state, irreversible
@@ -315,22 +317,31 @@ made before both PRs and their combined verification are complete.
   and stopped/warm deletion/corruption/mismatch BLOCKED. Cover concurrent
   vault+sidecar+keyring/control copies, copied external files without registry ownership,
   exact offline restore, clone with new ids, and detach-ack/attachment-epoch move; no
-  colliding pair may serve simultaneously or synthesize identity.
+  colliding pair may serve simultaneously or synthesize identity. For version 1, prove
+  restore uses the same drained/no-in-flight target-bound transfer protocol and
+  invalidates every imported session-derived authority before serving. For exact-v4
+  clone, prove one staged keyring fixes all fresh target ids across crash/retry, one
+  exclusive transaction refuses receipt conflicts and preserves the active
+  policy/projector/catalog plus immutable
+  history while committing session invalidation, a fresh receipt instance/genesis
+  head/label secret that preserves copied evidence without sharing append identity, and a predecessor-bound
+  `attachment-clone` activation publication, and copied or contradictory external
+  custody files remain BLOCKED.
 - [x] 5.4 Add red lifecycle tests for exact typed `issued_credential` open/rotate,
   status, close, replay of the old bearer, restart/resume, and two v4 processes/replicas.
   Add malformed/extra-copy/raised issuance tests proving the terminal scrubber exception
   activates only after exact response validation and otherwise scrubs/refuses.
-- [ ] 5.5 Add red hygiene tests that scan request copies, sidecar rows, receipts, journals,
+- [x] 5.5 Add red hygiene tests that scan request copies, sidecar rows, receipts, journals,
   token claims, logs, metrics, traces, error/remediation strings, repr/debug output,
   idempotency/control-plane rows, and corpus projection for the exact raw bearer and find zero copies outside the
   exact typed successful issue field/protected request input; scan retry/validation/
   exception copies and assert issuance text retrieved from content stays inert.
-- [ ] 5.6 Freeze an exact current schema-v3 fixture from `store.SCHEMA_USER_VERSION == 3`
+- [x] 5.6 Freeze an exact current schema-v3 fixture from `store.SCHEMA_USER_VERSION == 3`
   containing legacy handles, grants, purposes, tokens, receipts, and live recovery
   journals/direct-source policy. Prove every ordinary v3/v4-capable opener leaves v3 with
   no v4 DDL/DML; add red explicit v3→v4 session + immutable policy/catalog/tuple migration
   crash tests, irreversible enrollment, and unknown >v4 refusal.
-- [ ] 5.7 Add actual rollback/rollout tests: run the real pre-change v3 binary against an
+- [x] 5.7 Add actual rollback/rollout tests: run the real pre-change v3 binary against an
   isolated v4 copy and record exact startup/read/authoring behavior without permitting
   DDL/DML; prove the deployment schema/lease fence bars it from a live v4 cell even if a
   path does not self-refuse. Restore the v3 snapshot and test offline v4→v3 closure/
@@ -344,18 +355,29 @@ made before both PRs and their combined verification are complete.
 - [x] 5.9 Add red same-principal cross-session tests: tokens, grants, purpose, revoke, and
   close from session A are rejected or isolated in session B; missing/unresolved session
   refuses without consuming or writing anything.
-- [ ] 5.10 Implement transactional schema v4
+- [x] 5.10 Implement transactional schema v4
   `governance_authorization_sessions` with internal session id, keyed locator digest/
   verifier, verifier key id, credential generation, principal, issuer family, external
   cell/logical-vault/keyring ids, status, and lifecycle timestamps only, plus the shared
   immutable policy/catalog and active-tuple schema. Conservatively expire v3 arbitrary-handle/
   unscoped authority and add the explicit offline downmigration tool; drain v3 replicas
-  before first migration.
-- [ ] 5.11 Implement strict external keyring/control loading, authenticated owner/hosted
+  before first migration. Freeze the tuple-publication kind registry as exactly
+  `migration|policy|catalog|attachment-clone`; only the clone kind may atomically change
+  logical-vault/activation-store identity while retaining the exact active
+  policy/projector/catalog tuple and predecessor chain. Its transaction also preserves
+  old receipt rows/evidence but changes the active receipt append instance and label
+  secret to fresh target-derived values.
+- [x] 5.11 Implement strict external keyring/control loading, authenticated owner/hosted
   provisioning, host/control-plane registry attachment with monotonic enrollment and
   activation-store tuple parity, copy collision, exclusive move/restore/clone rules, and
-  no automatic key/cell identity or OPEN inference.
-- [ ] 5.12 Integrate the serving-membership epoch with the existing deployment control
+  no automatic key/cell identity or OPEN inference. Implement version-1 restore as the
+  conservative transfer protocol with unconditional imported-session invalidation.
+  Implement exact-v4 clone with an inert staged keyring, stable derived target ids, the
+  exclusive `attachment-clone` store transition, and control/membership/registry
+  publication only after that commit; every partial or conflicting state stays BLOCKED
+  and recovery never rotates the staged identity/receipt instance or modifies the source
+  registry.
+- [x] 5.12 Integrate the serving-membership epoch with the existing deployment control
   plane/readiness surface: provisioner/cell control owns the Hosted record,
   `hosted_runtime.control_plane_readiness()` verifies/exposes content-free readiness, and
   the standalone host registry uses the same schema. Implement authenticated per-replica
@@ -373,10 +395,13 @@ made before both PRs and their combined verification are complete.
 - [x] 5.16 Add the generated `govern_memory(operation="session")` selector and explicit
   open/status/rotate/close argument validation; treat legacy handles only as bounded
   echoes after capability verification and never as first-use authority.
-- [ ] 5.17 Run session, keyring/control/registry, membership epoch, migration/downmigration,
+- [x] 5.17 Run session, keyring/control/registry, membership epoch, migration/downmigration,
   actual old-binary probe/fence, token, store, governance-tool, receipt, and crash-
   recovery suites and preserve exact red-before-green commands/results for standalone,
-  hosted, and both supported OS custody paths.
+  hosted, and both supported OS custody paths. Include restore-session invalidation and
+  clone crash barriers after staged keyring, exclusive store publication, control,
+  membership, and registry publication; prove retry keeps one identity and source and
+  clone serve independently only after distinct registry and receipt-instance attachment.
 
 ## 6. Real MCP REST Hosted And CLI Principal Binding
 
@@ -434,14 +459,14 @@ made before both PRs and their combined verification are complete.
   schema-fidelity tests for the consumed MCP placeholder, REST/Hosted protected header,
   CLI descriptor option, and session lifecycle; assert no bearer body/query/env/literal-
   argv or public authoritative principal/session parameter appears.
-- [ ] 6.13 Run real generated-surface parity plus installed-wheel E2E covering typed open,
+- [x] 6.13 Run real generated-surface parity plus installed-wheel E2E covering typed open,
   grant/declare, every content family, reconnect, restart, mixed-key v4 replica routing,
   rotate, cross-session refusal, close, invalid+malformed FastMCP precedence, and complete
   bearer-copy scrubbing.
 
 ## 7. Governed Raw Direct-Read Projection
 
-- [ ] 7.1 Add red `tests/test_get_payload.py` cases at L0-L6 for default,
+- [x] 7.1 Add red `tests/test_get_payload.py` cases at L0-L6 for default,
   `frontmatter_only`, `include_raw=false`, and `include_raw=true`; assert exact bytes/hash
   only at L6, identical true/false projection at L1-L5, and same-input present-L0 versus
   absent byte equality. Add secret-free and secret/canonical-bearer L6 fixtures in both
@@ -464,38 +489,38 @@ made before both PRs and their combined verification are complete.
   separate from public hash projection, run the shared terminal parser before emission,
   omit/refuse secret-bearing raw deterministically, and enforce L6-or-missing for every
   structured direct representation registered by 7.3.
-- [ ] 7.6 Preserve registry-proven never-enrolled/L6 default shape, byte-exact scrub-safe
+- [x] 7.6 Preserve registry-proven never-enrolled/L6 default shape, byte-exact scrub-safe
   opt-in raw content, full-raw `content_hash`, and `edit(expected_hash)` stale-write
   semantics; update lower projection code/docs so excerpts/bridge abstractions are
   Markdown-only and run payload, egress, media, dataset, edit, and postfilter tests.
 
 ## 8. Counterfactual Retrieval Rank Graph Count Error And Timing Closure
 
-- [ ] 8.1 Add a deterministic red paired-fixture suite in
+- [x] 8.1 Add a deterministic red paired-fixture suite in
   `tests/test_governance_oracle_closure.py` that serializes the exact same request with
   each L0 artifact present versus physically absent and compares the complete canonical
   governed envelope, not selected fields. Register one transport normalizer that may
   remove only echoed JSON-RPC id, HTTP Date/outer trace headers, and framing; application
   code/message/remediation/data, request ids, timings, warnings, and diagnostics remain.
-- [ ] 8.2 In that suite, cover high/middle/low hidden ranks, keyword/BM25 fusion,
+- [x] 8.2 In that suite, cover high/middle/low hidden ranks, keyword/BM25 fusion,
   raw-lane caps greater than visible top-k, projection-only query terms, projected-corpus
   DF/IDF, vector projection-only/raw-only relevance, reranking seams, top-k displacement,
   exhausted/non-exhausted sources, every pagination boundary, order, cursors, totals,
   facets, ambiguity counts, degraded diagnostics, and caller-visible candidate caps.
-- [ ] 8.3 Add red CLIP/non-text pairs where the highest hidden pixel/keyframe match would
+- [x] 8.3 Add red CLIP/non-text pairs where the highest hidden pixel/keyframe match would
   consume the cap. Assert authorization occurs inside CLIP before its cap, L6 visible
   visual top-k is exact, and L1-L5 media participates only through its authorized textual
   companion projection or is excluded from the binary lane. Bind each image to one
   untimestamped sample and each video to one through forty strictly timestamp-ordered
   samples, returning the parent once with its earliest best `frame_timestamp_ms`.
-- [ ] 8.4 Add red graph pairs where hidden vertices/edges change in-degree, out-degree,
+- [x] 8.4 Add red graph pairs where hidden vertices/edges change in-degree, out-degree,
   reachability, shortest paths, relation matches, seed expansion, graph-assisted fusion,
   and pagination; assert the visible graph/order is identical to physical absence.
-- [ ] 8.5 Add red error pairs for hidden malformed/stale/index-missing items, duplicate
+- [x] 8.5 Add red error pairs for hidden malformed/stale/index-missing items, duplicate
   identifiers, ambiguous refs, parser failures, and candidate-safety boundaries; assert
   identical success/error code, text, shape, count, and remediation when hidden versus
   absent.
-- [ ] 8.6 Add red namespace tests proving its key is exactly `(policy_fingerprint,
+- [x] 8.6 Add red namespace tests proving its key is exactly `(policy_fingerprint,
   projector_schema_version, catalog_generation)`, immutable content identity is a row
   key, and extractor/model versions are measurement subkeys. Cover initial warming,
   complete build before active-tuple activation, atomic next-catalog generation, policy/
@@ -511,7 +536,7 @@ made before both PRs and their combined verification are complete.
   bounded first-600-code-point whole-token `_excerpt_of`: one variant/model vector,
   query independence, no acquisition by later hidden terms, no query-centered hidden
   snippet, and correct projection-only top-k.
-- [ ] 8.9 Check in repository-owned constants `MAX_HIDDEN_CORPUS_WIRE_DELTA_MS=25`, ratio
+- [x] 8.9 Check in repository-owned constants `MAX_HIDDEN_CORPUS_WIRE_DELTA_MS=25`, ratio
   `0.10`, catalog items `16_384`, searchable bytes/item `1_048_576`, and graph edges
   `262_144`; make the release manifest lower-only. Add a red actual-wire harness with at
   least 200 predeclared randomized/interleaved samples at zero/one/exact capacity across
@@ -557,14 +582,14 @@ made before both PRs and their combined verification are complete.
 - [x] 8.13 Authorize graph vertices and edges before expansion and recompute all public
   graph reductions over the projected graph; absorb errors belonging only to L0 state as
   absence.
-- [ ] 8.14 Move fusion, final sort/top-k, pagination/cursor creation, counts/facets,
+- [x] 8.14 Move fusion, final sort/top-k, pagination/cursor creation, counts/facets,
   ambiguity, diagnostics, and error reduction after complete projected lane acquisition;
   add cross-principal hot-cache reuse tests proving decisions/order stay request-local.
   Governed find continuation SHALL use the exact bounded `pc1` visible-snapshot digest
   and retained-runtime registry specified in `release-gate`; add red first/next/exhausted,
   hidden-only catalog drift, authority drift, expiry/cap/restart, replay, cross-binding,
   and generated-surface parity tests before enabling the release fence.
-- [ ] 8.15 Implement stable payload timing suppression and fixed repository-registered
+- [x] 8.15 Implement stable payload timing suppression and fixed repository-registered
   public-request deadline/padding classes; fail if either bound exceeds any ceiling or
   maximum capacity cannot complete. Do not claim cryptographic constant time or pass by
   deleting timing fields; keep server-only aggregates content- and bearer-free.
@@ -573,21 +598,28 @@ made before both PRs and their combined verification are complete.
   active vector
   measurement family, refuse mixed/override configurations, and cap only vector-model
   query input with the fixed 600-code-point whole-token projection.
-- [ ] 8.16 Run the full no-model counterfactual and exact-capacity actual-wire suites, then optional live
+- [x] 8.16 Run the full no-model counterfactual and exact-capacity actual-wire suites, then optional live
   embedding/reranker and CLIP lanes behind their existing soft-fail/marker gates; no
   optional-model absence may skip keyword/graph or the declared timing security oracle.
-- [ ] 8.16a Check in and pass the separate `vectors-cpu-torch-v1` 12-route actual-wire
+- [x] 8.16a Check in and pass the separate `vectors-cpu-torch-v1` 12-route actual-wire
   manifest/matrix with 200 hidden-present and 200 physically-absent REST observations per
   route at zero/one/exact capacity. Keep reranker, CLIP, GPU, ONNX, and mixed profiles
   closed pending their own evidence.
 
+  Evidence: GitHub Actions run
+  [`33048555592`](https://github.com/Artexis10/exomem/actions/runs/33048555592)
+  completed successfully at `ec67c74ff8253229f1fd433382c518009bc0fc5b`: 58/58 jobs,
+  including 12/12 no-model wire routes, 12/12 `vectors-cpu-torch-v1` wire routes,
+  native Windows NTFS held-filesystem coverage, Python 3.11/3.13 shards,
+  installed-wheel E2E, Docker smoke, retrieval/semantic-write latency, and quality gates.
+
 ## 9. Integration Migration And Regression Gates
 
-- [ ] 9.1 Add an overlap fixture representing personal plus delegated compartments with
+- [x] 9.1 Add an overlap fixture representing personal plus delegated compartments with
   one dual-member Markdown page, one non-Markdown artifact, standing/session grants, and
   conflicting options; exercise get, recall, graph, Records, dataset, media, and
   governance inspection end to end.
-- [ ] 9.2 Add migration tests from every supported governance sidecar version, including
+- [x] 9.2 Add migration tests from every supported governance sidecar version, including
   exact current v3 active legacy grants/purposes/tokens and v4 authorization sessions;
   prove ordinary open leaves v3 unchanged, explicit v3→v4 atomically initializes
   bearer-free sessions plus immutable policy/catalog/active tuple from stable direct-
@@ -596,31 +628,31 @@ made before both PRs and their combined verification are complete.
   external registry/key/cell move/restore rules are conservative, and snapshot/offline
   v4→v3 closes session authority and mirrors the tuple's exact source before the real v3
   binary starts without erasing enrollment history.
-- [ ] 9.3 Update generic capability/help documentation and the hand-authored generic skill
+- [x] 9.3 Update generic capability/help documentation and the hand-authored generic skill
   scaffold only where the public session lifecycle or reserved-path remediation must be
   discoverable; keep all examples generic and pass the scaffold leak gate.
-- [ ] 9.4 Run focused governance coverage with model extras disabled:
+- [x] 9.4 Run focused governance coverage with model extras disabled:
   `uv run python -m pytest -q tests/test_governance_decisions.py tests/test_governance_membership.py tests/test_governance_policy.py tests/test_governance_store.py tests/test_govern_memory_tool.py tests/test_authorization_session_binding.py tests/test_reserved_admin_paths.py tests/test_get_payload.py tests/test_governance_oracle_closure.py`.
-- [ ] 9.5 Run surface, egress, Records, and media coverage:
+- [x] 9.5 Run surface, egress, Records, and media coverage:
   `uv run python -m pytest -q tests/test_governance_egress.py tests/test_governance_postfilter.py tests/test_governance_principal.py tests/test_governance_tokens.py tests/test_command_surface_retry.py tests/test_rest_api.py tests/test_rest_registry.py tests/test_hosted_private_routes.py tests/test_record_governance.py tests/test_media_processing.py tests/test_media_deletion_propagation.py`.
-- [ ] 9.6 Run governance overhead and retrieval latency gates, including
+- [x] 9.6 Run governance overhead and retrieval latency gates, including
   `tests/test_governance_overhead.py`, `tests/test_latency_gate.py`, and
   `scripts/semantic_write_latency.py --check`, plus the checked actual-wire hidden-corpus
   distribution gate; explain and fix any regression/security differential instead of
   weakening the ceilings or deleting timing fields.
-- [ ] 9.7 Run `uvx ruff check`, `git diff --check`, `uv lock --check`,
+- [x] 9.7 Run `uvx ruff check`, `git diff --check`, `uv lock --check`,
   `tests/test_scaffold_no_leak.py`, schema-fidelity/golden checks, and public-artifact
   validation; regenerate only artifacts intentionally changed by this contract.
-- [ ] 9.8 Run the lean full suite with embeddings and media extraction disabled, then the
+- [x] 9.8 Run the lean full suite with embeddings and media extraction disabled, then the
   installed-wheel product E2E and optional embeddings-marked retrieval suite on an
   equipped host; retain exact commands, versions, counts, and results as durable
   evidence.
-- [ ] 9.9 Run `openspec validate harden-governance-for-consolidation --strict` after the
+- [x] 9.9 Run `openspec validate harden-governance-for-consolidation --strict` after the
   implementation diff and tests agree with every scenario.
 
 ## 10. Independent Security Review And Recheck
 
-- [ ] 10.1 Have an independent security reviewer inspect the exact implementation diff
+- [x] 10.1 Have an independent security reviewer inspect the exact implementation diff
   against this proposal/design/spec set, explicitly attacking grant crossover, option
   last-write-wins/equal-purpose widening/meet laws and retired scrubber bypass, raw/
   provenance and structured-direct bypass, exact namespace/finite fixed variants/L5/
@@ -636,16 +668,16 @@ made before both PRs and their combined verification are complete.
   membership epoch/drain/rejoin/key rotation, v3-v4
   rollback, cross-session replay, canonical-envelope boundaries, and non-waivable exact-
   capacity actual-wire rank/graph/count/error/timing displacement.
-- [ ] 10.2 Record every finding durably with severity and exact file/test evidence; for
+- [x] 10.2 Record every finding durably with severity and exact file/test evidence; for
   each accepted finding, add a reproducing red test before the smallest implementation
   fix and rerun the focused plus regression gates.
-- [ ] 10.3 Require the same independent reviewer to recheck every finding against the
+- [x] 10.3 Require the same independent reviewer to recheck every finding against the
   amended exact diff and record explicit closure or a remaining blocker; no self-review
   or green CI substitutes for this gate.
 
 ## 11. Independent Verification And Evidence-Gated Closeout
 
-- [ ] 11.1 Have a separate independent verifier run the focused suites, lean/full suites,
+- [x] 11.1 Have a separate independent verifier run the focused suites, lean/full suites,
   latency/overhead plus normative 25ms/10%-ratio exact-capacity actual-wire gates, lint/
   privacy/schema and direct-source↔immutable-tuple v3↔v4 migration/downmigration/old-
   binary checks, external-enrollment stopped/warm deletion/corruption, internal-state
@@ -654,7 +686,7 @@ made before both PRs and their combined verification are complete.
   races, L6
   raw scrub-safe/secret fixtures, atomic MCP batch refusal, and strict OpenSpec validation from a clean environment; record exact
   outputs and identify any skipped optional lane.
-- [ ] 11.2 Have that verifier exercise real generated MCP stateless HTTP, REST, Hosted,
+- [x] 11.2 Have that verifier exercise real generated MCP stateless HTTP, REST, Hosted,
   and CLI flows across exact protected carriers, invalid+malformed installed-FastMCP
   precedence/log scans, typed issuance, reconnect/restart/mixed-key epoch replica routing,
   external cell copy collision/move/restore, find/get/Records/dataset/media/frame binding,
@@ -664,13 +696,13 @@ made before both PRs and their combined verification are complete.
   JSON-RPC batch zero-effects, plus
   same-input hidden-versus-absent matrices; require canonical-envelope byte equality and
   measured latency bounds where specified.
-- [ ] 11.3 Confirm no consolidation workflow is exposed until the prerequisite diff and
+- [x] 11.3 Confirm no consolidation workflow is exposed until the prerequisite diff and
   migrations are deployed, the review/recheck is closed, and independent verification is
   green.
-- [ ] 11.4 Only after tasks 10.1-11.3 have durable evidence, sync all six delta specs into
+- [x] 11.4 Only after tasks 10.1-11.3 have durable evidence, sync all six delta specs into
   the canonical capability specs and validate the canonical post-sync contract; do not
   edit canonical specs earlier to make validation pass.
-- [ ] 11.5 Only after implementation merge evidence and canonical sync, archive
+- [x] 11.5 Only after implementation merge evidence and canonical sync, archive
   `harden-governance-for-consolidation`, run strict validation over the archive/canonical
   state, and record the merge revision, review record, verifier record, and complete CI
   result in the archive closeout.

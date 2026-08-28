@@ -24,7 +24,7 @@ from . import companions
 from .policy import Policy, Scope
 
 _MEMO_MAX = 4096
-_MEMO: OrderedDict[tuple[str, str, int, int], frozenset[str]] = OrderedDict()
+_MEMO: OrderedDict[tuple[str, str, int, int, bool], frozenset[str]] = OrderedDict()
 _SNAPSHOT_MEMO: OrderedDict[tuple[str, str, str], frozenset[str]] = OrderedDict()
 _PATH_MEMO: OrderedDict[
     tuple[str, str, tuple[companions.BoundSnapshot, ...]], MembershipOutcome
@@ -159,6 +159,29 @@ def _needs_frontmatter(scope: Scope) -> bool:
     return bool(scope.projects or scope.tags or scope.types or scope.classes)
 
 
+def _evaluate_markdown_scopes(page: ParsedPage, policy: Policy) -> frozenset[str]:
+    if page.frontmatter_valid:
+        return frozenset(
+            scope_id
+            for scope_id, scope in policy.scopes.items()
+            if _scope_matches(scope, page)
+        )
+
+    matched: set[str] = set()
+    for scope_id, scope in policy.scopes.items():
+        if _path_ref_excludes(scope, page.rel_path):
+            continue
+        if _path_ref_matches(scope, page.rel_path):
+            matched.add(scope_id)
+            continue
+        if _needs_frontmatter(scope):
+            raise MembershipUnresolved(
+                f"malformed frontmatter leaves scope membership unresolved for "
+                f"{page.rel_path!r}"
+            )
+    return frozenset(matched)
+
+
 def _semantic_scope_matches(scope: Scope, companion: companions.BoundCompanion) -> bool:
     projects = {value.casefold() for value in companion.projects}
     tags = {value.casefold() for value in companion.tags}
@@ -262,14 +285,12 @@ def evaluate(page: ParsedPage, policy: Policy) -> frozenset[str]:
         raise MembershipUnresolved(
             f"cannot stat {page.rel_path!r} to resolve scope membership: {exc}"
         ) from exc
-    key = (policy.fingerprint, page.rel_path, mtime_ns, size)
+    key = (policy.fingerprint, page.rel_path, mtime_ns, size, page.frontmatter_valid)
     cached = _MEMO.get(key)
     if cached is not None:
         _MEMO.move_to_end(key)
         return cached
-    result = frozenset(
-        scope_id for scope_id, scope in policy.scopes.items() if _scope_matches(scope, page)
-    )
+    result = _evaluate_markdown_scopes(page, policy)
     _MEMO[key] = result
     _MEMO.move_to_end(key)
     while len(_MEMO) > _MEMO_MAX:
@@ -295,9 +316,7 @@ def evaluate_snapshot(
     if cached is not None:
         _SNAPSHOT_MEMO.move_to_end(key)
         return cached
-    result = frozenset(
-        scope_id for scope_id, scope in policy.scopes.items() if _scope_matches(scope, page)
-    )
+    result = _evaluate_markdown_scopes(page, policy)
     _SNAPSHOT_MEMO[key] = result
     _SNAPSHOT_MEMO.move_to_end(key)
     while len(_SNAPSHOT_MEMO) > _MEMO_MAX:

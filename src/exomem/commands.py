@@ -1772,7 +1772,7 @@ def _citation_url(_path: str) -> str:
 
 def _resolve_memory_identifier(vault_root: Path, value: str) -> str:
     try:
-        resolved = memory_refs_module.resolve_identifier(vault_root, value)
+        resolved = egress_module.resolve_visible_identifier(vault_root, value)
     except memory_refs_module.ReferenceError as exc:
         raise ValueError(f"{exc.code}: {exc.reason}") from exc
     if reserved_paths_module.classify_logical(resolved).blocked:

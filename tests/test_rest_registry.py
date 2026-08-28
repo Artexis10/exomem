@@ -94,6 +94,18 @@ def test_governed_continuation_is_shared_by_product_read_surfaces() -> None:
         assert continuation.type == "str"
         assert continuation.required is False
 
+    for profile in commands_module.PRODUCT_SURFACE_PROFILES:
+        command = next(
+            item
+            for item in commands_module.product_commands_for_profile(profile, "rest")
+            if item.name == "ask_memory"
+        )
+        continuation = next(
+            item for item in command.params if item.name == "continuation"
+        )
+        assert continuation.type == "str"
+        assert continuation.required is False
+
 
 def _client(vault, monkeypatch: pytest.MonkeyPatch, **env: str) -> TestClient:
     monkeypatch.setattr(server, "load_dotenv", lambda *a, **k: None)

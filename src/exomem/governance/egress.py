@@ -47,7 +47,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
 
-from .. import find_corpus, memory_refs
+from .. import find_corpus, memory_refs, reserved_paths
 from ..find_types import Hit, SemanticUnitHit
 from ..kbdir import kb_dirname
 from . import (
@@ -1438,6 +1438,79 @@ def _decide_path(
     )
 
 
+def resolve_visible_identifier(
+    vault_root: Path,
+    value: str,
+    *,
+    principal: RequestPrincipal | None = None,
+    purpose: str | None = None,
+) -> str:
+    """Resolve a memory ref after removing candidates invisible to the caller.
+
+    Raw reference resolution decides ambiguity from every matching page. That
+    leaks both the presence and count of L0 pages and lets one hidden duplicate
+    shadow an otherwise unique visible page. A governed content route must
+    instead behave as if those candidates were physically absent.
+    """
+
+    vault_root = Path(vault_root)
+    raw = str(value or "").strip()
+    memory_id = memory_refs.parse_memory_ref(raw)
+    if not raw.lower().startswith(memory_refs.REF_PREFIX):
+        return memory_refs.resolve_identifier(vault_root, raw)
+    if memory_id is None:
+        raise memory_refs.ReferenceError(
+            "INVALID_REFERENCE", f"invalid memory reference: {raw!r}"
+        )
+
+    candidates = tuple(
+        rel_path
+        for rel_path in memory_refs.paths_for_ids_read_only(
+            vault_root, (memory_id,)
+        ).get(memory_id, ())
+        if not reserved_paths.classify_logical(rel_path).blocked
+        if not lifecycle.is_tombstoned(vault_root, rel_path)
+    )
+    policy = policy_module.load(vault_root)
+    who = principal if principal is not None else effective_principal()
+    if policy.empty:
+        visible = candidates
+    elif policy.blocked or not who.resolved:
+        visible = ()
+    else:
+        declared_purpose = _declared_purpose(vault_root, who, purpose)
+        grants_hash = _grants_hash(policy)
+        visible = tuple(
+            rel_path
+            for rel_path in candidates
+            if (
+                decision := _decide_path(
+                    vault_root,
+                    rel_path,
+                    policy=policy,
+                    audience=who.audience_id,
+                    purpose=declared_purpose,
+                    grants_hash=grants_hash,
+                    authorization_session=who.authorization_session_id,
+                    authorization_context=who.verified_authorization_session,
+                )
+            )
+            is not None
+            and decision.level > LEVEL_NONE
+        )
+
+    if len(visible) > 1:
+        raise memory_refs.ReferenceError(
+            "AMBIGUOUS_REFERENCE",
+            f"memory id {memory_id} appears in {len(visible)} pages",
+        )
+    if not visible:
+        raise memory_refs.ReferenceError(
+            "REFERENCE_NOT_FOUND", f"memory id not found: {memory_id}"
+        )
+    return visible[0]
+
+
 def _scope_label(policy: Policy, decision: Decision) -> str | None:
     labels = [policy.scopes[sid].name or sid for sid in decision.scope_ids if sid in policy.scopes]
     return ", ".join(sorted(labels)) if labels else None
@@ -2201,7 +2274,13 @@ def annotate_page(
         if "content" in page and page.get("content") != raw.decode("utf-8"):
             _record_blocked_outcome(who.audience_id)
             return None
-        scope_ids = membership_module.evaluate_snapshot(parsed, policy, content_hash=snapshot_hash)
+        try:
+            scope_ids = membership_module.evaluate_snapshot(
+                parsed, policy, content_hash=snapshot_hash
+            )
+        except membership_module.MembershipUnresolved:
+            _record_blocked_outcome(who.audience_id)
+            return None
         active_grants, _session_identity = _active_grants_for_snapshot(
             vault_root,
             policy=policy,
@@ -2593,6 +2672,20 @@ def postfilter(command_name: str, result: Any, vault_root: Path) -> Any:
     if result is None:
         return None
     issuance_context = scrubber._issuance_projection_context(result)
+    if issuance_context is not None:
+        # `rotate` has already invalidated the request's prior credential by
+        # the time terminal filtering runs. Re-entering the ordinary artifact
+        # gate would revalidate that stale context and swallow the one-time
+        # replacement. The sealed issuance projection was created only after
+        # exact lifecycle-shape validation and still runs the non-disableable
+        # terminal scrubber over every non-bearer field here.
+        cleaned, blocked = scrubber._scrub_issuance_projection(
+            result,
+            issuance_context,
+        )
+        if blocked:
+            _record_credential_block()
+        return cleaned
     vault_root = Path(vault_root)
     result = _withheld_cross_check(vault_root, result)
     # Free text and nested resource/prompt strings have no structural entry
@@ -2610,13 +2703,7 @@ def postfilter(command_name: str, result: Any, vault_root: Path) -> Any:
         if blocked:
             _record_credential_block()
         return cleaned
-    if issuance_context is not None:
-        cleaned, blocked = scrubber._scrub_issuance_projection(
-            result,
-            issuance_context,
-        )
-    else:
-        cleaned, blocked = scrubber.scrub_value(result)
+    cleaned, blocked = scrubber.scrub_value(result)
     if blocked:
         _record_credential_block()
     return cleaned

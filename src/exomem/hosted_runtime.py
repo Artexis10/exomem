@@ -140,6 +140,7 @@ class HostedCellConfig:
     enforce_transfer_v1_compatibility: bool = True
     records_reader_version: int = 2
     lifecycle_actions_enabled: bool = False
+    authorization_session_replica_id: str | None = None
 
     @classmethod
     def from_env(
@@ -286,6 +287,16 @@ class HostedCellConfig:
                 "HOSTED_RECORDS_READER_UNSUPPORTED",
                 "lifecycle actions require Records reader version 2",
             )
+        authorization_session_replica_id = (
+            str(values.get("EXOMEM_AUTH_SESSION_REPLICA_ID", "")).strip() or None
+        )
+        if authorization_session_replica_id is not None and not _CELL_ID.fullmatch(
+            authorization_session_replica_id
+        ):
+            raise HostedConfigError(
+                "HOSTED_AUTHORIZATION_REPLICA_INVALID",
+                "authorization-session replica identity is invalid",
+            )
         worker_policy_digest = (
             str(values.get("EXOMEM_HOSTED_WORKER_POLICY_DIGEST", "")).strip() or None
         )
@@ -346,6 +357,7 @@ class HostedCellConfig:
             enforce_transfer_v1_compatibility=True,
             records_reader_version=records_reader_version,
             lifecycle_actions_enabled=lifecycle_actions_enabled,
+            authorization_session_replica_id=authorization_session_replica_id,
         )
         if require_provisioned:
             config.validate_provisioned()
@@ -752,6 +764,27 @@ class HostedCellLifecycle:
                 "authorizationSession": session_readiness.as_public_dict(),
                 "code": "CELL_READY" if readiness.ready else readiness.reason_code,
             }
+
+    def attest_authorization_membership(
+        self,
+        signer: Callable[[HostedLifecycleSnapshot], bytes],
+    ) -> bytes:
+        """Hold lifecycle state stable while the cell signs one readiness proof."""
+
+        with self._condition:
+            snapshot = self._snapshot_locked()
+            if snapshot.phase == "active" and not self._core_ready_locked():
+                raise HostedLifecycleError(
+                    "AUTHORIZATION_SESSION_UNAVAILABLE",
+                    "authorization membership attestation is unavailable",
+                )
+            result = signer(snapshot)
+            if not isinstance(result, bytes) or not result:
+                raise HostedLifecycleError(
+                    "AUTHORIZATION_SESSION_UNAVAILABLE",
+                    "authorization membership attestation is unavailable",
+                )
+            return result
 
     def complete_startup(
         self,

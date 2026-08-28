@@ -28,6 +28,7 @@ exomem.io/recovery-envelope: {{ required (printf "providerRecoveryEnvelopes.%s i
   .Values.providerRecoveryEnvelopes.namespace
   .Values.providerRecoveryEnvelopes.vaultPvc
   .Values.providerRecoveryEnvelopes.credentialSecret
+  .Values.providerRecoveryEnvelopes.authorizationSessionSecret
   .Values.providerRecoveryEnvelopes.serviceAccount
   .Values.providerRecoveryEnvelopes.initRequestConfigMap
   .Values.providerRecoveryEnvelopes.providerOperationConfigMap
@@ -42,7 +43,7 @@ exomem.io/recovery-envelope: {{ required (printf "providerRecoveryEnvelopes.%s i
   .Values.providerRecoveryEnvelopes.controlIngressRoute
   .Values.providerRecoveryEnvelopes.transferIngressRoute
 -}}
-{{- if ne (len (uniq $values)) 16 -}}
+{{- if ne (len (uniq $values)) 17 -}}
 {{- fail "provider recovery envelopes must be unique per exact object" -}}
 {{- end -}}
 {{- end -}}

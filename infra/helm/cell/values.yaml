@@ -27,6 +27,7 @@ providerRecoveryEnvelopes:
   namespace: ""
   vaultPvc: ""
   credentialSecret: ""
+  authorizationSessionSecret: ""
   serviceAccount: ""
   initRequestConfigMap: ""
   providerOperationConfigMap: ""
@@ -56,6 +57,8 @@ browserOrigin: https://substratesystems.io
 transferHostname: ""
 credentialsSecretName: exomem-cell-credentials
 credentialsManagedExternally: true
+authorizationSessionSecretName: exomem-authorization-session
+authorizationSessionRevision: ""
 activeCredentialVersion: ""
 initRequestId: ""
 initOperationId: ""

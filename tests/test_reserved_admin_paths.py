@@ -4334,7 +4334,7 @@ def test_managed_alias_resolution_cannot_reintroduce_reserved_paths(
     assert error.value.args == ("NOT_FOUND: memory identifier is unavailable",)
 
 
-def test_canonical_reference_resolution_cannot_reintroduce_reserved_paths(
+def test_reserved_reference_index_row_is_identical_to_missing(
     tmp_path: Path,
 ) -> None:
     from exomem import memory_refs
@@ -4365,7 +4365,9 @@ def test_canonical_reference_resolution_cannot_reintroduce_reserved_paths(
     with pytest.raises(ValueError) as error:
         commands._resolve_memory_identifier(tmp_path, memory_refs.memory_ref(memory_id))
 
-    assert error.value.args == ("NOT_FOUND: memory identifier is unavailable",)
+    assert error.value.args == (
+        f"REFERENCE_NOT_FOUND: memory id not found: {memory_id}",
+    )
 
 
 def test_every_command_and_finite_selector_has_total_path_role_metadata() -> None:

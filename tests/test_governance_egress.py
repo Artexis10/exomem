@@ -1255,6 +1255,204 @@ def test_verified_session_grant_cannot_cross_into_an_overlapping_scope(
     assert result.notices == []
 
 
+def test_personal_and_delegated_overlap_meets_across_every_product_family(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One dual-member fixture cannot borrow the more permissive compartment."""
+    from record_fixtures import copy_vehicle_maintenance_fixture
+
+    from exomem.cli_ops import OpError
+    from exomem.writer_lease import invoke_command
+
+    delegated_scope = "01ARZ3NDEKTSV4RRFFQ69G5FC0"
+    root = _gov_dir(vault)
+    (root / "scopes").mkdir(parents=True, exist_ok=True)
+    (root / "grants").mkdir(parents=True, exist_ok=True)
+    shared_paths = 'paths: ["Notes/Patterns/**", "Records/**"]\n'
+    (root / "scopes" / "personal.yaml").write_text(
+        "governance_version: 1\n"
+        f"id: {SCOPE_ID}\n"
+        "name: Personal compartment\n"
+        "default_deny: true\n"
+        "constraint: Personal review is required.\n"
+        + shared_paths,
+        encoding="utf-8",
+    )
+    (root / "scopes" / "delegated.yaml").write_text(
+        "governance_version: 1\n"
+        f"id: {delegated_scope}\n"
+        "name: Delegated compartment\n"
+        "default_deny: true\n"
+        "constraint: Delegated review is required.\n"
+        + shared_paths,
+        encoding="utf-8",
+    )
+    (root / "grants" / "personal.yaml").write_text(
+        "governance_version: 1\n"
+        f"id: {GRANT_ID}\n"
+        "kind: standing\n"
+        f'scope_ids: ["{SCOPE_ID}"]\n'
+        f"audience: {EXTERNAL}\n"
+        "ceiling: 6\n",
+        encoding="utf-8",
+    )
+
+    note = vault / RESTRICTED_PATH
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text(
+        "---\ntype: pattern\ntitle: Dual member\n---\n"
+        "dual-member-private-sentinel\n",
+        encoding="utf-8",
+    )
+    dataset_path = "Knowledge Base/Notes/Patterns/dual-member.csv"
+    (vault / dataset_path).write_text(
+        "name,value\ndual-member-private-sentinel,7\n",
+        encoding="utf-8",
+    )
+    media_path = "Knowledge Base/Notes/Patterns/dual-member.mp4"
+    (vault / media_path).write_bytes(b"\x00\x00\x00\x18ftypmp42private-sentinel")
+    records_root = copy_vehicle_maintenance_fixture(vault)
+    collection = (records_root / "_collection.md").relative_to(vault).as_posix()
+
+    principal, context = _verified_external_session()
+
+    class Connection:
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        egress.store,
+        "open_authorization_session_connection",
+        lambda _vault: Connection(),
+    )
+
+    session_grant_paths: list[str] = []
+
+    def active_session_grants(**kwargs: object):
+        path = str(kwargs["path"])
+        fingerprint = str(kwargs["fingerprint"])
+        scope_ids = tuple(kwargs["scope_ids"])
+        assert scope_ids == tuple(sorted((SCOPE_ID, delegated_scope)))
+        session_grant_paths.append(path)
+        return (
+            (
+                authorization_session_authority.SessionGrant(
+                    grant_id="8" * 64,
+                    authorization_session_id=context.session_id,
+                    principal_id=EXTERNAL,
+                    issuer_family="mcp-oauth",
+                    audience=EXTERNAL,
+                    purpose="support",
+                    ceiling=egress.LEVEL_FULL,
+                    paths=(path,),
+                    fingerprints=(fingerprint,),
+                    scope_ids=(delegated_scope,),
+                    membership=(
+                        authorization_session_authority.SessionMembership(
+                            path=path,
+                            fingerprint=fingerprint,
+                            scope_ids=scope_ids,
+                        ),
+                    ),
+                    policy_fingerprint=str(kwargs["policy_fingerprint"]),
+                    token_jti="token-overlap",
+                    created_at=1_800_000_000,
+                    expires_at=1_900_000_000,
+                ),
+            ),
+            "session-grants-overlap",
+        )
+
+    monkeypatch.setattr(
+        authorization_session_authority,
+        "active_session_grants",
+        active_session_grants,
+    )
+    _reset_caches()
+
+    def public_command(name: str):
+        return next(
+            command
+            for command in (*commands.PRODUCT_COMMANDS, *commands.COMMANDS)
+            if command.name == name
+        )
+
+    governance_command = public_command("govern_memory")
+    with request_scope(principal):
+        direct = invoke_command(public_command("get"), vault, path=RESTRICTED_PATH)
+        recall = invoke_command(
+            public_command("find"),
+            vault,
+            query="dual member private sentinel",
+            mode="keyword",
+            graph=False,
+            limit=10,
+        )
+        graph = invoke_command(
+            public_command("graph_context"), vault, path=RESTRICTED_PATH
+        )
+        with pytest.raises(ValueError, match="^NOT_FOUND:"):
+            invoke_command(public_command("query_dataset"), vault, path=dataset_path)
+        with pytest.raises(ValueError, match="^NOT_FOUND:"):
+            invoke_command(public_command("read_media"), vault, path=media_path)
+        with pytest.raises(OpError, match="^COLLECTION_NOT_FOUND:"):
+            invoke_command(
+                public_command("record_memory"),
+                vault,
+                action="inspect",
+                collection=collection,
+            )
+        external_explained = invoke_command(
+            governance_command,
+            vault,
+            operation="explain",
+            audience=EXTERNAL,
+            path=RESTRICTED_PATH,
+        )
+
+    serialized = json.dumps(
+        {"get": direct, "recall": recall, "graph": graph},
+        sort_keys=True,
+        default=str,
+    )
+    assert direct["level"] == egress.LEVEL_NOTICE
+    assert direct["withheld"] is True
+    assert RESTRICTED_PATH not in serialized
+    assert "dual-member-private-sentinel" not in serialized
+    assert graph["seeds"] == []
+    assert graph["nodes"] == []
+    assert external_explained["effective_ceiling"] == egress.LEVEL_NOTICE
+    assert "scope_contributions" not in external_explained
+    assert {
+        RESTRICTED_PATH,
+        dataset_path,
+        media_path,
+        collection,
+    } <= set(session_grant_paths)
+
+    with request_scope(owner_principal()):
+        explained = invoke_command(
+            governance_command,
+            vault,
+            operation="explain",
+            audience=EXTERNAL,
+            path=RESTRICTED_PATH,
+        )
+    assert explained["effective_ceiling"] == egress.LEVEL_NONE
+    personal, delegated = explained["scope_contributions"]
+    assert personal["scope_id"] == SCOPE_ID
+    assert personal["grant_ids"] == [GRANT_ID]
+    assert personal["final_ceiling"] == egress.LEVEL_FULL
+    assert personal["option_values"] == {
+        "constraint": "Personal review is required.",
+    }
+    assert delegated["scope_id"] == delegated_scope
+    assert delegated["default_deny_supplied_floor"] is True
+    assert delegated["grant_ids"] == []
+    assert delegated["final_ceiling"] == egress.LEVEL_NONE
+
+
 def test_verified_session_notice_mints_token_from_internal_context(
     vault: Path,
     monkeypatch: pytest.MonkeyPatch,

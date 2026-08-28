@@ -91,7 +91,12 @@ def inspect_operation(
             audience=audience,
             purpose=purpose,
             grants_hash=egress._grants_hash(pol),
-            authorization_session=(None if cross_audience else who.authorization_session_id),
+            authorization_session=(
+                None if cross_audience else who.authorization_session_id
+            ),
+            authorization_context=(
+                None if cross_audience else who.verified_authorization_session
+            ),
         )
 
     if operation == "explain":

@@ -9,7 +9,9 @@ import json
 import os
 import re
 import sqlite3
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -102,6 +104,41 @@ def _documents(*, ceiling: int) -> tuple[tuple[str, bytes], ...]:
     )
 
 
+def _documents_with_suspension(*, suspended: bool) -> tuple[tuple[str, bytes], ...]:
+    documents = dict(_documents(ceiling=2))
+    rule = documents["rules/external.yaml"].decode()
+    if suspended:
+        rule += "options:\n  suspended: true\n"
+    documents["rules/external.yaml"] = rule.encode()
+    return tuple(sorted(documents.items()))
+
+
+def _open_scope_documents(*, suspended: bool) -> tuple[tuple[str, bytes], ...]:
+    rule = (
+        "governance_version: 1\n"
+        f"id: {RULE_ID}\n"
+        "scope_ids:\n"
+        f"  - {SCOPE_ID}\n"
+        "audience: external\n"
+        "ceiling: 2\n"
+    )
+    if suspended:
+        rule += "options:\n  suspended: true\n"
+    return (
+        ("rules/external.yaml", rule.encode()),
+        (
+            "scopes/private.yaml",
+            (
+                "governance_version: 1\n"
+                f"id: {SCOPE_ID}\n"
+                "name: private\n"
+                "paths:\n"
+                "  - Knowledge Base/Notes/**\n"
+            ).encode(),
+        ),
+    )
+
+
 def _compiled(documents: tuple[tuple[str, bytes], ...]) -> policy.Policy:
     compiled = policy.compile_documents(dict(documents))
     assert not compiled.empty and not compiled.blocked
@@ -166,6 +203,30 @@ def _write_workspace(vault: Path, documents: tuple[tuple[str, bytes], ...]) -> N
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
+
+
+def _write_dependent_member(
+    vault: Path,
+    *,
+    name: str,
+) -> tuple[str, str, str]:
+    relative = f"Knowledge Base/Notes/{name}.md"
+    path = vault / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"---\ntype: note\n---\nreviewed member {name}\n", encoding="utf-8")
+    fingerprint = hashlib.sha256(path.read_bytes()).hexdigest()
+    manifest = json.dumps(
+        [
+            {
+                "fingerprint": fingerprint,
+                "path": relative,
+                "scope_ids": [SCOPE_ID],
+            }
+        ],
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return relative, fingerprint, manifest
 
 
 def _protected_file(path: Path, value: bytes) -> None:
@@ -413,10 +474,15 @@ def _migrate_with_projection_items(
     *,
     items: tuple[tuple[str, str], ...],
     ceiling: int = 2,
+    policy_documents: tuple[tuple[str, bytes], ...] | None = None,
     graph_edges: tuple[projected_graph.ProjectionGraphEdge, ...] | None = None,
     now: int,
 ) -> schema_v4.MigrationResult:
-    documents = _documents(ceiling=ceiling)
+    documents = (
+        _documents(ceiling=ceiling)
+        if policy_documents is None
+        else policy_documents
+    )
     compiled = _compiled(documents)
     key = projections.ProjectionNamespaceKey(
         policy_fingerprint=compiled.fingerprint,
@@ -1166,7 +1232,8 @@ def test_govern_memory_v4_proposal_persists_exact_authority_binding(
         catalog_generation=1,
     )
 
-    assert binding["schema"] == "exomem.governance-policy-proposal/v3"
+    assert binding["schema"] == "exomem.governance-policy-proposal/v4"
+    assert binding["dependent_grants"] == []
     assert reviewed == {
         "activation_epoch": 1,
         "activation_state_digest": migration.activation_state_digest,
@@ -1193,6 +1260,11 @@ def test_govern_memory_v4_proposal_persists_exact_authority_binding(
         "rules",
         "scopes",
     ]
+    assert all(
+        item["identity"]["link_count"] == 1
+        for item in snapshot["directory_identities"]
+    )
+    assert snapshot["governance_root_identity"]["link_count"] == 1
     assert target["policy_fingerprint"] == target_policy.fingerprint
     assert target["source_fingerprint"] == target_policy.fingerprint
     assert re.fullmatch(r"[0-9A-HJKMNP-TV-Z]{26}", target["generation_id"])
@@ -1342,6 +1414,19 @@ def test_govern_memory_v4_commit_publishes_the_exact_reviewed_authority(
     assert re.fullmatch(r"[0-9a-f]{64}", mirror_records[0]["prior"])
     assert re.fullmatch(r"[0-9a-f]{64}", mirror_records[0]["prepared"])
     assert re.fullmatch(r"[0-9a-f]{64}", mirror_records[0]["target"])
+    publication_records = [
+        record
+        for record in receipts.event_records(vault)
+        if record.get("operation") == "governance_policy_publication"
+        or record.get("causation_id") == committed["event_id"]
+        and record.get("outcome") == "committed"
+    ]
+    assert [record["phase"] for record in publication_records] == [
+        "intent",
+        "committed",
+    ]
+    assert publication_records[0]["event_id"] == committed["event_id"]
+    assert publication_records[1]["causation_id"] == committed["event_id"]
 
     with sqlite3.connect(store.sidecar_path(vault)) as connection:
         assert connection.execute(
@@ -1360,6 +1445,1184 @@ def test_govern_memory_v4_commit_publishes_the_exact_reviewed_authority(
             "SELECT COUNT(*) FROM governance_tuple_publications "
             "WHERE publication_kind='policy'"
         ).fetchone() == (1,)
+
+
+def test_govern_memory_v4_suspend_and_resume_publish_complete_grant_tuple(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance.tool import op_govern_memory
+
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    initial_documents = _documents_with_suspension(suspended=False)
+    _write_workspace(vault, initial_documents)
+    member_path = "Knowledge Base/Notes/granted.md"
+    member = vault / member_path
+    member.parent.mkdir(parents=True)
+    member.write_text("---\ntype: note\n---\nreviewed grant member\n", encoding="utf-8")
+    member_fingerprint = hashlib.sha256(member.read_bytes()).hexdigest()
+    membership_manifest = json.dumps(
+        [
+            {
+                "fingerprint": member_fingerprint,
+                "path": member_path,
+                "scope_ids": [SCOPE_ID],
+            }
+        ],
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    migration = _migrate_with_projection_items(
+        vault,
+        items=((member_path, member.read_text(encoding="utf-8")),),
+        policy_documents=initial_documents,
+        now=now,
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    connection = store.open_authorization_session_connection(vault)
+    try:
+        _insert_active_dependent_grant(
+            connection,
+            grant_id="grant-toggle",
+            policy_fingerprint=_compiled(initial_documents).fingerprint,
+            membership_manifest=membership_manifest,
+            now=now,
+            paths=(member_path,),
+            fingerprints=(member_fingerprint,),
+            scope_ids=(SCOPE_ID,),
+        )
+    finally:
+        connection.close()
+
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        suspended = op_govern_memory(
+            vault,
+            operation="suspend",
+            principal=owner_principal(),
+            rule_ids=[RULE_ID],
+            now=now + 1,
+        )
+
+    assert suspended == {
+        "status": "committed",
+        "event_id": suspended["event_id"],
+        "operation": "suspend",
+        "direction": "narrowing",
+        "mirror_status": "complete",
+    }
+    suspended_policy = policy.load(vault)
+    assert suspended_policy.rules[0].options["suspended"] is True
+    connection = store.open_authorization_session_connection(vault)
+    try:
+        assert connection.execute(
+            "SELECT status, policy_fingerprint, membership_manifest, revoked_at "
+            "FROM governance_session_grants WHERE grant_id='grant-toggle'"
+        ).fetchone() == (
+            "review",
+            suspended_policy.fingerprint,
+            membership_manifest,
+            now + 1,
+        )
+    finally:
+        connection.close()
+
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    assert custody.control.activation_epoch == 2
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        resumed = op_govern_memory(
+            vault,
+            operation="resume",
+            principal=owner_principal(),
+            rule_ids=[RULE_ID],
+            now=now + 2,
+        )
+
+    assert resumed == {
+        "status": "committed",
+        "event_id": resumed["event_id"],
+        "operation": "resume",
+        "direction": "widening",
+        "mirror_status": "complete",
+    }
+    resumed_policy = policy.load(vault)
+    assert "suspended" not in resumed_policy.rules[0].options
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 2)
+    assert custody.control.activation_epoch == 3
+
+
+def test_govern_memory_v4_suspend_expires_changed_grant_member_with_valid_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance.tool import op_govern_memory
+
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    documents = _documents_with_suspension(suspended=False)
+    _write_workspace(vault, documents)
+    member_path, member_fingerprint, membership_manifest = _write_dependent_member(
+        vault,
+        name="changed-grant",
+    )
+    member = vault / member_path
+    original_source = member.read_text(encoding="utf-8")
+    migration = _migrate_with_projection_items(
+        vault,
+        items=((member_path, original_source),),
+        policy_documents=documents,
+        now=now,
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    connection = store.open_authorization_session_connection(vault)
+    try:
+        _insert_active_dependent_grant(
+            connection,
+            grant_id="grant-changed-member",
+            policy_fingerprint=_compiled(documents).fingerprint,
+            membership_manifest=membership_manifest,
+            now=now,
+            paths=(member_path,),
+            fingerprints=(member_fingerprint,),
+            scope_ids=(SCOPE_ID,),
+        )
+    finally:
+        connection.close()
+    changed_source = "---\ntype: note\n---\nchanged member bytes\n"
+    changed_fingerprint = hashlib.sha256(changed_source.encode()).hexdigest()
+    preflight = semantic_writes.preflight_existing(
+        vault,
+        path=member_path,
+        after_source=changed_source,
+        operation="edit",
+        expected_before_hash=vault_module.content_hash(original_source),
+    )
+    semantic_writes.commit_existing(vault, preflight=preflight)
+
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        suspended = op_govern_memory(
+            vault,
+            operation="suspend",
+            principal=owner_principal(),
+            rule_ids=[RULE_ID],
+            now=now + 1,
+        )
+
+    assert suspended["status"] == "committed"
+    connection = store.open_authorization_session_connection(vault)
+    try:
+        status, target_manifest = connection.execute(
+            "SELECT status, membership_manifest FROM governance_session_grants "
+            "WHERE grant_id='grant-changed-member'"
+        ).fetchone()
+    finally:
+        connection.close()
+    assert status == "expired"
+    assert json.loads(target_manifest) == [
+        {
+            "fingerprint": changed_fingerprint,
+            "path": member_path,
+            "scope_ids": [SCOPE_ID],
+        }
+    ]
+
+
+def test_govern_memory_v4_widening_suspend_keeps_predecessor_on_tuple_crash(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance.tool import op_govern_memory
+
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    documents = _open_scope_documents(suspended=False)
+    _write_workspace(vault, documents)
+    note = vault / "Knowledge Base" / "Notes" / "secret.md"
+    note.parent.mkdir(parents=True)
+    note.write_text("---\ntype: note\n---\nsecret context\n", encoding="utf-8")
+    member_path, member_fingerprint, membership_manifest = _write_dependent_member(
+        vault,
+        name="grant-widening",
+    )
+    migration = _migrate_with_projection_items(
+        vault,
+        items=(
+            ("Knowledge Base/Notes/secret.md", note.read_text(encoding="utf-8")),
+            (member_path, (vault / member_path).read_text(encoding="utf-8")),
+        ),
+        policy_documents=documents,
+        now=now,
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    connection = store.open_authorization_session_connection(vault)
+    try:
+        _insert_active_dependent_grant(
+            connection,
+            grant_id="grant-widening",
+            policy_fingerprint=_compiled(documents).fingerprint,
+            membership_manifest=membership_manifest,
+            now=now,
+            paths=(member_path,),
+            fingerprints=(member_fingerprint,),
+            scope_ids=(SCOPE_ID,),
+        )
+    finally:
+        connection.close()
+
+    def crash(point: str) -> None:
+        if point == "policy-publication-before-commit":
+            raise RuntimeError("injected widening suspend crash")
+
+    monkeypatch.setattr(schema_v4, "_crash_point", crash)
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        with pytest.raises(RuntimeError, match="injected widening suspend crash"):
+            op_govern_memory(
+                vault,
+                operation="suspend",
+                principal=owner_principal(),
+                rule_ids=[RULE_ID],
+                now=now + 1,
+            )
+
+    active = policy.load(vault)
+    assert "suspended" not in active.rules[0].options
+    connection = store.open_authorization_session_connection(vault)
+    try:
+        proposal_json = connection.execute(
+            "SELECT proposal_json FROM governance_proposals "
+            "ORDER BY created_at DESC, proposal_id DESC LIMIT 1"
+        ).fetchone()
+        assert proposal_json is not None
+        assert json.loads(str(proposal_json[0]))["authority_binding"][
+            "transition_direction"
+        ] == "widening"
+        assert connection.execute(
+            "SELECT status, policy_fingerprint, revoked_at "
+            "FROM governance_session_grants WHERE grant_id='grant-widening'"
+        ).fetchone() == ("active", active.fingerprint, None)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM governance_tuple_publications "
+            "WHERE publication_kind='policy'"
+        ).fetchone() == (0,)
+    finally:
+        connection.close()
+
+
+def test_govern_memory_v4_undo_restores_exact_generation_without_reactivating_grant(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance.tool import GovernanceError, op_govern_memory
+
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    initial_documents = _documents_with_suspension(suspended=False)
+    _write_workspace(vault, initial_documents)
+    member_path, member_fingerprint, membership_manifest = _write_dependent_member(
+        vault,
+        name="grant-undo",
+    )
+    migration = _migrate_with_projection_items(
+        vault,
+        items=((member_path, (vault / member_path).read_text(encoding="utf-8")),),
+        policy_documents=initial_documents,
+        now=now,
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    connection = store.open_authorization_session_connection(vault)
+    try:
+        _insert_active_dependent_grant(
+            connection,
+            grant_id="grant-undo",
+            policy_fingerprint=_compiled(initial_documents).fingerprint,
+            membership_manifest=membership_manifest,
+            now=now,
+            paths=(member_path,),
+            fingerprints=(member_fingerprint,),
+            scope_ids=(SCOPE_ID,),
+        )
+    finally:
+        connection.close()
+
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        op_govern_memory(
+            vault,
+            operation="suspend",
+            principal=owner_principal(),
+            rule_ids=[RULE_ID],
+            now=now + 1,
+        )
+        undone = op_govern_memory(
+            vault,
+            operation="undo",
+            principal=owner_principal(),
+            now=now + 2,
+        )
+
+    assert undone == {
+        "status": "committed",
+        "event_id": undone["event_id"],
+        "operation": "undo",
+        "direction": "widening",
+        "mirror_status": "complete",
+    }
+    active = policy.load(vault)
+    assert "suspended" not in active.rules[0].options
+    connection = store.open_authorization_session_connection(vault)
+    try:
+        active_pointer = schema_v4.load_active_tuple_pointer(connection)
+        active_generation = schema_v4.load_policy_generation(
+            connection,
+            active_pointer.policy_generation_id,
+        )
+        assert dict(active_generation.source_documents) == dict(initial_documents)
+        assert connection.execute(
+            "SELECT status FROM governance_session_grants WHERE grant_id='grant-undo'"
+        ).fetchone() == ("review",)
+    finally:
+        connection.close()
+
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        with pytest.raises(GovernanceError) as exhausted:
+            op_govern_memory(
+                vault,
+                operation="undo",
+                principal=owner_principal(),
+                now=now + 3,
+            )
+    assert exhausted.value.code == "NOTHING_TO_UNDO"
+
+
+def test_v4_semantic_history_survives_sweep_and_keeps_undo_idempotent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance.tool import GovernanceError, op_govern_memory
+
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    documents = _documents_with_suspension(suspended=False)
+    _write_workspace(vault, documents)
+    migration = _migrate_with_empty_projection_catalog(vault, now=now)
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        op_govern_memory(
+            vault,
+            operation="suspend",
+            principal=owner_principal(),
+            rule_ids=[RULE_ID],
+            now=now + 1,
+        )
+        op_govern_memory(
+            vault,
+            operation="undo",
+            principal=owner_principal(),
+            now=now + 2,
+        )
+
+    store.sweep_authoring_state(vault, now=300_000_000_000.0)
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        with pytest.raises(GovernanceError) as exhausted:
+            op_govern_memory(
+                vault,
+                operation="undo",
+                principal=owner_principal(),
+                now=now + 3,
+            )
+    assert exhausted.value.code == "NOTHING_TO_UNDO"
+
+
+def test_completed_semantic_history_does_not_reopen_collected_projection_store(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance import tool as governance_tool
+    from exomem.governance.tool import op_govern_memory
+
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    documents = _documents_with_suspension(suspended=False)
+    _write_workspace(vault, documents)
+    migration = _migrate_with_empty_projection_catalog(vault, now=now)
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        op_govern_memory(
+            vault,
+            operation="suspend",
+            principal=owner_principal(),
+            rule_ids=[RULE_ID],
+            now=now + 1,
+        )
+
+    def collected(*_args, **_kwargs):
+        raise AssertionError("completed history reopened an inactive projection store")
+
+    monkeypatch.setattr(projection_store, "load_projection_catalog", collected)
+    assert governance_tool._resume_v4_semantic_policy_operation(
+        vault,
+        operation="resume",
+        rule_ids=[RULE_ID],
+        request_digest=None,
+        who=owner_principal(),
+        crash_at=None,
+        now=float(now + 2),
+    ) is None
+
+
+def test_committed_semantic_tuple_and_grant_survive_sweep_before_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance.tool import GovernanceCrash, op_govern_memory
+
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    documents = _documents_with_suspension(suspended=False)
+    _write_workspace(vault, documents)
+    member_path, member_fingerprint, membership_manifest = _write_dependent_member(
+        vault,
+        name="grant-sweep-recovery",
+    )
+    migration = _migrate_with_projection_items(
+        vault,
+        items=((member_path, (vault / member_path).read_text(encoding="utf-8")),),
+        policy_documents=documents,
+        now=now,
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    connection = store.open_authorization_session_connection(vault)
+    try:
+        _insert_active_dependent_grant(
+            connection,
+            grant_id="grant-sweep-recovery",
+            policy_fingerprint=_compiled(documents).fingerprint,
+            membership_manifest=membership_manifest,
+            now=now,
+            paths=(member_path,),
+            fingerprints=(member_fingerprint,),
+            scope_ids=(SCOPE_ID,),
+        )
+    finally:
+        connection.close()
+
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        with pytest.raises(GovernanceCrash, match="v4_after_registry_ack"):
+            op_govern_memory(
+                vault,
+                operation="suspend",
+                principal=owner_principal(),
+                rule_ids=[RULE_ID],
+                crash_at="v4_after_registry_ack",
+                now=now + 1,
+            )
+    store.sweep_authoring_state(vault, now=300_000_000_000.0)
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        recovered = op_govern_memory(
+            vault,
+            operation="suspend",
+            principal=owner_principal(),
+            rule_ids=[RULE_ID],
+            now=now + 2,
+        )
+    assert recovered["status"] == "committed"
+    connection = store.open_authorization_session_connection(vault)
+    try:
+        assert connection.execute(
+            "SELECT status FROM governance_session_grants "
+            "WHERE grant_id='grant-sweep-recovery'"
+        ).fetchone() == ("review",)
+    finally:
+        connection.close()
+
+
+def test_govern_memory_v4_suspend_does_not_activate_or_overwrite_pending_yaml(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance.tool import op_govern_memory
+
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    active_documents = _documents_with_suspension(suspended=False)
+    _write_workspace(vault, active_documents)
+    migration = _migrate_with_empty_projection_catalog(vault, now=now)
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    pending_scope = dict(active_documents)["scopes/private.yaml"].replace(
+        b"default_deny: true\n",
+        b"default_deny: false\n",
+    )
+    scope_path = (
+        vault
+        / "Knowledge Base"
+        / "_Governance"
+        / "scopes"
+        / "private.yaml"
+    )
+    scope_path.write_bytes(pending_scope)
+
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        suspended = op_govern_memory(
+            vault,
+            operation="suspend",
+            principal=owner_principal(),
+            rule_ids=[RULE_ID],
+            now=now + 1,
+        )
+
+    assert suspended["status"] == "committed"
+    assert suspended["mirror_status"] == "diverged"
+    assert scope_path.read_bytes() == pending_scope
+    connection = store.open_authorization_session_connection(vault)
+    try:
+        active_pointer = schema_v4.load_active_tuple_pointer(connection)
+        generation = schema_v4.load_policy_generation(
+            connection,
+            active_pointer.policy_generation_id,
+        )
+    finally:
+        connection.close()
+    active_sources = dict(generation.source_documents)
+    assert active_sources["scopes/private.yaml"] == dict(active_documents)[
+        "scopes/private.yaml"
+    ]
+    assert b"suspended: true" in active_sources["rules/external.yaml"]
+
+
+def test_govern_memory_v4_undo_removes_policy_file_added_by_last_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance.tool import op_govern_memory
+
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    initial_documents = _documents_with_suspension(suspended=False)
+    _write_workspace(vault, initial_documents)
+    migration = _migrate_with_empty_projection_catalog(vault, now=now)
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    added_relative = "rules/added.yaml"
+    added_document = (
+        "governance_version: 1\n"
+        "id: 01ARZ3NDEKTSV4RRFFQ69G5FAT\n"
+        "scope_ids:\n"
+        f"  - {SCOPE_ID}\n"
+        "audience: external\n"
+        "ceiling: 1\n"
+    )
+
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        proposed = op_govern_memory(
+            vault,
+            operation="propose",
+            principal=owner_principal(),
+            intent="Add one reviewed restriction",
+            documents={added_relative: added_document},
+            target_ceiling=2,
+            now=now + 1,
+        )
+        committed = op_govern_memory(
+            vault,
+            operation="commit",
+            principal=owner_principal(),
+            proposal_id=proposed["proposal_id"],
+            now=now + 2,
+        )
+        undone = op_govern_memory(
+            vault,
+            operation="undo",
+            principal=owner_principal(),
+            now=now + 3,
+        )
+
+    assert committed["status"] == "committed"
+    assert undone["status"] == "committed"
+    assert undone["mirror_status"] == "complete"
+    connection = store.open_authorization_session_connection(vault)
+    try:
+        active_pointer = schema_v4.load_active_tuple_pointer(connection)
+        generation = schema_v4.load_policy_generation(
+            connection,
+            active_pointer.policy_generation_id,
+        )
+    finally:
+        connection.close()
+    assert dict(generation.source_documents) == dict(initial_documents)
+    assert not (
+        vault / "Knowledge Base" / "_Governance" / added_relative
+    ).exists()
+
+
+def test_govern_memory_v4_undo_rebuilds_catalog_membership_for_restored_selectors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance.tool import op_govern_memory
+
+    now = int(time.time())
+    monkeypatch.setenv(
+        "EXOMEM_WRITER_LEASE_STATE_DIR",
+        str(tmp_path / "writer-state"),
+    )
+    writer_lease.reset_managers_for_tests()
+    vault = tmp_path / "vault"
+    relative = "Knowledge Base/Notes/selector-undo.md"
+    before = "---\ntitle: Selector undo\nstatus: draft\n---\n\nbefore\n"
+    after = before.replace("before", "after")
+    target = vault / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(before, encoding="utf-8")
+    restrictive_documents = _open_scope_documents(suspended=False)
+    _write_workspace(vault, restrictive_documents)
+    migration = _migrate_with_projection_items(
+        vault,
+        items=((relative, before),),
+        policy_documents=restrictive_documents,
+        now=now,
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    permissive_documents = dict(restrictive_documents)
+    permissive_documents["scopes/private.yaml"] = permissive_documents[
+        "scopes/private.yaml"
+    ].replace(b"Knowledge Base/Notes/**", b"Knowledge Base/Public/**")
+
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        proposed = op_govern_memory(
+            vault,
+            operation="propose",
+            principal=owner_principal(),
+            intent="Move the reviewed scope away from notes",
+            documents={
+                path: source.decode("utf-8")
+                for path, source in permissive_documents.items()
+            },
+            target_ceiling=6,
+            now=now + 1,
+        )
+        op_govern_memory(
+            vault,
+            operation="commit",
+            principal=owner_principal(),
+            proposal_id=proposed["proposal_id"],
+            now=now + 2,
+        )
+    preflight = semantic_writes.preflight_existing(
+        vault,
+        path=relative,
+        after_source=after,
+        operation="edit",
+        expected_before_hash=vault_module.content_hash(before),
+    )
+    semantic_writes.commit_existing(vault, preflight=preflight)
+
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        undone = op_govern_memory(
+            vault,
+            operation="undo",
+            principal=owner_principal(),
+            now=now + 3,
+        )
+
+    assert undone["status"] == "committed"
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 3)
+    connection = store.open_authorization_session_connection(vault)
+    try:
+        active = schema_v4.load_active_policy(
+            connection,
+            expected_logical_vault_id=LOGICAL_VAULT_ID,
+            expected_activation_store_id=ACTIVATION_STORE_ID,
+            expected_activation_epoch=4,
+            expected_activation_state_digest=custody.control.activation_state_digest or "",
+        )
+    finally:
+        connection.close()
+    evidence = projection_store.namespace_evidence_from_snapshot(active)
+    _manifest, items = projection_store.load_projection_catalog(
+        vault,
+        key=evidence.manifest.namespace_key,
+        expected_rows_digest=evidence.manifest.rows_digest,
+    )
+    # The selector-changing commit and undo each publish a new immutable
+    # membership catalog; the intervening content edit publishes the third.
+    assert active.active.catalog_generation == 4
+    assert active.policy.scopes[SCOPE_ID].paths == ("Knowledge Base/Notes/**",)
+    assert [(item.item_identity, item.scope_ids) for item in items] == [
+        (relative, (SCOPE_ID,))
+    ]
+
+
+def test_govern_memory_v4_suspend_recovers_exact_tuple_after_registry_gap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance.tool import op_govern_memory
+
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    documents = _documents_with_suspension(suspended=False)
+    _write_workspace(vault, documents)
+    migration = _migrate_with_empty_projection_catalog(vault, now=now)
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    def crash(point: str) -> None:
+        if point == "policy-publication-after-commit-before-registry":
+            raise RuntimeError("injected registry gap")
+
+    monkeypatch.setattr(schema_v4, "_crash_point", crash)
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        with pytest.raises(RuntimeError, match="injected registry gap"):
+            op_govern_memory(
+                vault,
+                operation="suspend",
+                principal=owner_principal(),
+                rule_ids=[RULE_ID],
+                now=now + 1,
+            )
+
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
+    assert custody.control.activation_epoch == 1
+    assert policy.load(vault).blocked
+    monkeypatch.setattr(schema_v4, "_crash_point", lambda _point: None)
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        recovered = op_govern_memory(
+            vault,
+            operation="suspend",
+            principal=owner_principal(),
+            rule_ids=[RULE_ID],
+            now=now + 2,
+        )
+
+    assert recovered["status"] == "committed"
+    assert recovered["operation"] == "suspend"
+    assert recovered["mirror_status"] == "complete"
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 2)
+    assert custody.control.activation_epoch == 2
+    assert policy.load(vault).rules[0].options["suspended"] is True
+    connection = store.open_authorization_session_connection(vault)
+    try:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM governance_tuple_publications "
+            "WHERE publication_kind='policy'"
+        ).fetchone() == (1,)
+        assert connection.execute(
+            "SELECT status FROM governance_proposals "
+            "WHERE proposal_json LIKE '%\"semantic_operation\":\"suspend\"%'"
+        ).fetchone() == ("spent",)
+    finally:
+        connection.close()
+
+
+def test_govern_memory_v4_suspend_recovers_exact_receipt_intent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance.tool import (
+        DEFAULT_PROPOSAL_TTL_SECONDS,
+        GovernanceCrash,
+        op_govern_memory,
+    )
+
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    documents = _documents_with_suspension(suspended=False)
+    _write_workspace(vault, documents)
+    migration = _migrate_with_empty_projection_catalog(vault, now=now)
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        with pytest.raises(GovernanceCrash, match="v4_after_policy_receipt_intent"):
+            op_govern_memory(
+                vault,
+                operation="suspend",
+                principal=owner_principal(),
+                rule_ids=[RULE_ID],
+                crash_at="v4_after_policy_receipt_intent",
+                now=now + 1,
+            )
+
+    connection = store.open_authorization_session_connection(vault)
+    try:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM governance_tuple_publications "
+            "WHERE publication_kind='policy'"
+        ).fetchone() == (0,)
+        reservation = connection.execute(
+            "SELECT reserved_event_id, expires_at FROM governance_proposals "
+            "WHERE status='pending'"
+        ).fetchone()
+        assert reservation is not None
+        assert re.fullmatch(r"[0-9a-f]{64}", str(reservation[0]))
+        assert float(reservation[1]) > now + 100_000
+    finally:
+        connection.close()
+    publication_records = [
+        record
+        for record in receipts.event_records(vault)
+        if record.get("operation") == "governance_policy_publication"
+    ]
+    assert [record["phase"] for record in publication_records] == ["intent"]
+    assert store.sweep_authoring_state(
+        vault,
+        now=now + DEFAULT_PROPOSAL_TTL_SECONDS + 100,
+    ) == 0
+
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        recovered = op_govern_memory(
+            vault,
+            operation="suspend",
+            principal=owner_principal(),
+            rule_ids=[RULE_ID],
+            now=now + DEFAULT_PROPOSAL_TTL_SECONDS + 101,
+        )
+
+    terminal_records = [
+        record
+        for record in receipts.event_records(vault)
+        if record.get("event_id") == recovered["event_id"]
+        or record.get("causation_id") == recovered["event_id"]
+    ]
+    assert [record["phase"] for record in terminal_records] == [
+        "intent",
+        "committed",
+    ]
+    assert policy.load(vault).rules[0].options["suspended"] is True
+
+
+@pytest.mark.parametrize(
+    "crash_at",
+    [
+        "v4_after_registry_ack",
+        "v4_after_policy_receipt_terminal",
+        "v4_after_mirror_intent",
+        "v4_after_mirror_write:1",
+        "v4_after_mirror_effect",
+        "v4_after_mirror_terminal",
+    ],
+)
+def test_govern_memory_v4_suspend_crash_retries_exact_semantic_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    crash_at: str,
+) -> None:
+    from exomem import writer_lease
+    from exomem.governance.tool import GovernanceCrash, op_govern_memory
+
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    documents = _documents_with_suspension(suspended=False)
+    _write_workspace(vault, documents)
+    migration = _migrate_with_empty_projection_catalog(vault, now=now)
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    monkeypatch.setattr(
+        writer_lease,
+        "active_mutation_request_id",
+        lambda: "11111111-1111-4111-8111-111111111111",
+    )
+
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        with pytest.raises(GovernanceCrash, match=re.escape(crash_at)):
+            op_govern_memory(
+                vault,
+                operation="suspend",
+                principal=owner_principal(),
+                rule_ids=[RULE_ID],
+                crash_at=crash_at,
+                now=now + 1,
+            )
+        recovered = op_govern_memory(
+            vault,
+            operation="suspend",
+            principal=owner_principal(),
+            rule_ids=[RULE_ID],
+            now=now + 2,
+        )
+
+    assert recovered["status"] == "committed"
+    assert recovered["operation"] == "suspend"
+    assert recovered["mirror_status"] == "complete"
+    assert policy.load(vault).rules[0].options["suspended"] is True
+    connection = store.open_authorization_session_connection(vault)
+    try:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM governance_tuple_publications "
+            "WHERE publication_kind='policy'"
+        ).fetchone() == (1,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM compiled_policy_generations"
+        ).fetchone() == (2,)
+    finally:
+        connection.close()
+
+
+def test_v4_delayed_exact_retry_replays_after_later_tuple_and_projection_gc(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import writer_lease
+    from exomem.governance.tool import op_govern_memory
+
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    documents = _documents_with_suspension(suspended=False)
+    _write_workspace(vault, documents)
+    migration = _migrate_with_empty_projection_catalog(vault, now=now)
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    request_id = "11111111-1111-4111-8111-111111111111"
+    monkeypatch.setattr(
+        writer_lease,
+        "active_mutation_request_id",
+        lambda: request_id,
+    )
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        suspended = op_govern_memory(
+            vault,
+            operation="suspend",
+            principal=owner_principal(),
+            rule_ids=[RULE_ID],
+            now=now + 1,
+        )
+        request_id = "22222222-2222-4222-8222-222222222222"
+        op_govern_memory(
+            vault,
+            operation="resume",
+            principal=owner_principal(),
+            rule_ids=[RULE_ID],
+            now=now + 2,
+        )
+
+    def collected(*_args, **_kwargs):
+        raise AssertionError("exact terminal replay reopened projection storage")
+
+    monkeypatch.setattr(projection_store, "load_projection_catalog", collected)
+    request_id = "11111111-1111-4111-8111-111111111111"
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        replayed = op_govern_memory(
+            vault,
+            operation="suspend",
+            principal=owner_principal(),
+            rule_ids=[RULE_ID],
+            now=now + 3,
+        )
+    assert replayed == suspended
+    assert "suspended" not in policy.load(vault).rules[0].options
+
+
+def test_v4_incomplete_historical_mirror_recovers_after_content_tuple_and_gc(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import writer_lease
+    from exomem.governance.tool import GovernanceCrash, op_govern_memory
+
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    documents = _documents_with_suspension(suspended=False)
+    _write_workspace(vault, documents)
+    relative = "Knowledge Base/Notes/mirror-recovery.md"
+    before = "---\ntype: note\n---\nbefore\n"
+    after = before.replace("before", "after")
+    note = vault / relative
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text(before, encoding="utf-8")
+    migration = _migrate_with_projection_items(
+        vault,
+        items=((relative, before),),
+        policy_documents=documents,
+        now=now,
+    )
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    request_id = "11111111-1111-4111-8111-111111111111"
+    monkeypatch.setattr(
+        writer_lease,
+        "active_mutation_request_id",
+        lambda: request_id,
+    )
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        with pytest.raises(GovernanceCrash, match="v4_after_mirror_intent"):
+            op_govern_memory(
+                vault,
+                operation="suspend",
+                principal=owner_principal(),
+                rule_ids=[RULE_ID],
+                crash_at="v4_after_mirror_intent",
+                now=now + 1,
+            )
+
+    preflight = semantic_writes.preflight_existing(
+        vault,
+        path=relative,
+        after_source=after,
+        operation="edit",
+        expected_before_hash=vault_module.content_hash(before),
+    )
+    semantic_writes.commit_existing(vault, preflight=preflight)
+
+    def collected(*_args, **_kwargs):
+        raise AssertionError("historical mirror reopened projection storage")
+
+    monkeypatch.setattr(projection_store, "load_projection_catalog", collected)
+    request_id = "22222222-2222-4222-8222-222222222222"
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        recovered = op_govern_memory(
+            vault,
+            operation="resume",
+            principal=owner_principal(),
+            rule_ids=[RULE_ID],
+            now=now + 2,
+        )
+    assert recovered["operation"] == "suspend"
+    assert recovered["mirror_status"] == "complete"
+    assert policy.load(vault).rules[0].options["suspended"] is True
+    assert note.read_text(encoding="utf-8") == after
+
+
+def test_govern_memory_v4_new_semantic_action_finishes_prior_recovery_first(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance.tool import GovernanceCrash, op_govern_memory
+
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    documents = _documents_with_suspension(suspended=False)
+    _write_workspace(vault, documents)
+    migration = _migrate_with_empty_projection_catalog(vault, now=now)
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        with pytest.raises(GovernanceCrash, match="v4_after_registry_ack"):
+            op_govern_memory(
+                vault,
+                operation="suspend",
+                principal=owner_principal(),
+                rule_ids=[RULE_ID],
+                crash_at="v4_after_registry_ack",
+                now=now + 1,
+            )
+        recovered = op_govern_memory(
+            vault,
+            operation="resume",
+            principal=owner_principal(),
+            rule_ids=[RULE_ID],
+            now=now + 2,
+        )
+
+    assert recovered["operation"] == "suspend"
+    assert policy.load(vault).rules[0].options["suspended"] is True
+    connection = store.open_authorization_session_connection(vault)
+    try:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM governance_tuple_publications "
+            "WHERE publication_kind='policy'"
+        ).fetchone() == (1,)
+    finally:
+        connection.close()
+
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        resumed = op_govern_memory(
+            vault,
+            operation="resume",
+            principal=owner_principal(),
+            rule_ids=[RULE_ID],
+            now=now + 3,
+        )
+    assert resumed["operation"] == "resume"
+    assert "suspended" not in policy.load(vault).rules[0].options
 
 
 def test_govern_memory_v4_commit_recovers_mirror_after_lost_terminal(
@@ -1451,6 +2714,103 @@ def test_govern_memory_v4_commit_recovers_mirror_after_lost_terminal(
             "SELECT COUNT(*) FROM governance_tuple_publications "
             "WHERE publication_kind='policy'"
         ).fetchone() == (1,)
+
+
+def test_v4_mirror_recovers_old_directory_link_count_receipt_preimage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance import tool as governance_tool
+    from exomem.governance.tool import GovernanceCrash, op_govern_memory
+
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    initial = _documents(ceiling=2)
+    target = _documents(ceiling=1)
+    _write_workspace(vault, initial)
+    migration = _migrate_with_empty_projection_catalog(vault, now=now)
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        proposed = op_govern_memory(
+            vault,
+            operation="propose",
+            principal=owner_principal(),
+            intent="Lower the external ceiling",
+            documents={path: source.decode() for path, source in target},
+            target_ceiling=1,
+            now=now + 1,
+        )
+
+    connection = store.open_authorization_session_connection(vault)
+    try:
+        proposal_json, created_at = connection.execute(
+            "SELECT proposal_json, created_at FROM governance_proposals "
+            "WHERE proposal_id=?",
+            (proposed["proposal_id"],),
+        ).fetchone()
+        payload = json.loads(str(proposal_json))
+        binding = payload["authority_binding"]
+        snapshot = binding["authoring_snapshot"]
+        for item in snapshot["directory_identities"]:
+            if item["identity"] is not None:
+                item["identity"]["link_count"] = 2
+        if snapshot["governance_root_identity"] is not None:
+            snapshot["governance_root_identity"]["link_count"] = 2
+        bound_target = binding["target"]
+        review_target = {
+            key: value
+            for key, value in bound_target.items()
+            if key not in {"generation_id", "authoring_event_id", "receipt_event_id"}
+        }
+        review_binding = {
+            key: (review_target if key == "target" else value)
+            for key, value in binding.items()
+        }
+        generation_id, authoring_event_id, receipt_event_id = (
+            governance_tool._policy_publication_identities(
+                proposal_id=proposed["proposal_id"],
+                created_at=float(created_at),
+                review_digest=governance_tool._digest(review_binding),
+            )
+        )
+        bound_target.update(
+            generation_id=generation_id,
+            authoring_event_id=authoring_event_id,
+            receipt_event_id=receipt_event_id,
+        )
+        connection.execute(
+            "UPDATE governance_proposals SET proposal_json=? WHERE proposal_id=?",
+            (governance_tool._canonical_json(payload), proposed["proposal_id"]),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        with pytest.raises(GovernanceCrash, match="v4_after_mirror_intent"):
+            op_govern_memory(
+                vault,
+                operation="commit",
+                principal=owner_principal(),
+                proposal_id=proposed["proposal_id"],
+                crash_at="v4_after_mirror_intent",
+                now=now + 2,
+            )
+        recovered = op_govern_memory(
+            vault,
+            operation="commit",
+            principal=owner_principal(),
+            proposal_id=proposed["proposal_id"],
+            now=now + 3,
+        )
+    assert recovered["status"] == "committed"
+    assert recovered["mirror_status"] == "complete"
 
 
 def test_govern_memory_v4_commit_retries_transient_mirror_refusal(
@@ -2256,6 +3616,126 @@ def test_v4_policy_load_uses_the_verified_immutable_generation_not_live_yaml(
     assert pending.rules[0].ceiling == 2
 
 
+@pytest.mark.parametrize("mutation", ("create", "edit", "delete"))
+def test_v4_valid_direct_workspace_mutation_is_pending_not_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    _write_workspace(vault, _documents(ceiling=2))
+    result = _migrate(vault, now=now)
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=result.activation_state_digest,
+        now=now,
+    )
+    active_before = policy.load(vault)
+    rule = vault / "Knowledge Base" / "_Governance" / "rules" / "external.yaml"
+    if mutation == "create":
+        rule.with_name("pending.yaml").write_text(
+            "governance_version: 1\n"
+            "id: 01ARZ3NDEKTSV4RRFFQ69G5FB1\n"
+            "scope_ids:\n"
+            f"  - {SCOPE_ID}\n"
+            "audience: external\n"
+            "ceiling: 0\n",
+            encoding="utf-8",
+        )
+    elif mutation == "edit":
+        rule.write_bytes(dict(_documents(ceiling=0))["rules/external.yaml"])
+    else:
+        rule.unlink()
+
+    pending = policy.compile_prospective(vault, {})
+    served = policy.load(vault)
+    with sqlite3.connect(store.sidecar_path(vault)) as connection:
+        active_after = connection.execute(
+            "SELECT policy_generation_id, policy_fingerprint, projector_schema_version, "
+            "catalog_generation "
+            "FROM active_governance_tuple WHERE singleton=1"
+        ).fetchone()
+        activation_after = connection.execute(
+            "SELECT activation_epoch, activation_state_digest "
+            "FROM governance_activation_store WHERE singleton=1"
+        ).fetchone()
+        policy_publications = connection.execute(
+            "SELECT COUNT(*) FROM governance_tuple_publications "
+            "WHERE publication_kind='policy'"
+        ).fetchone()
+
+    assert pending is not None and not pending.policy.blocked
+    assert pending.policy.fingerprint != active_before.fingerprint
+    assert served == active_before
+    assert served.rules[0].ceiling == 2
+    assert active_after == (
+        FIRST_GENERATION_ID,
+        active_before.fingerprint,
+        1,
+        1,
+    )
+    assert activation_after == (1, result.activation_state_digest)
+    assert policy_publications == (0,)
+
+
+@pytest.mark.parametrize("mutation", ("conflict", "unparsable", "missing"))
+def test_v4_invalid_direct_workspace_blocks_warm_and_restart_without_tuple_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    _write_workspace(vault, _documents(ceiling=2))
+    result = _migrate(vault, now=now)
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=result.activation_state_digest,
+        now=now,
+    )
+    assert policy.load(vault).rules[0].ceiling == 2
+    rule = vault / "Knowledge Base" / "_Governance" / "rules" / "external.yaml"
+    if mutation == "conflict":
+        rule.with_name(
+            "external.sync-conflict-20260826-120000-ABCDEFG.yaml"
+        ).write_bytes(rule.read_bytes())
+    elif mutation == "unparsable":
+        rule.write_text("governance_version: 1\nceiling: [\n", encoding="utf-8")
+    else:
+        root = vault / "Knowledge Base" / "_Governance"
+        for path in sorted(root.rglob("*"), reverse=True):
+            path.rmdir() if path.is_dir() else path.unlink()
+        root.rmdir()
+
+    warm = policy.load(vault)
+    policy._CACHE.clear()
+    policy._LAST_GOOD.clear()
+    policy._compile_pinned_documents.cache_clear()
+    restarted = policy.load(vault)
+    with sqlite3.connect(store.sidecar_path(vault)) as connection:
+        active_after = connection.execute(
+            "SELECT policy_generation_id, policy_fingerprint "
+            "FROM active_governance_tuple WHERE singleton=1"
+        ).fetchone()
+        activation_after = connection.execute(
+            "SELECT activation_epoch, activation_state_digest "
+            "FROM governance_activation_store WHERE singleton=1"
+        ).fetchone()
+
+    assert warm.blocked
+    assert restarted.blocked
+    assert active_after == (
+        FIRST_GENERATION_ID,
+        _compiled(_documents(ceiling=2)).fingerprint,
+    )
+    assert activation_after == (1, result.activation_state_digest)
+
+
 def test_v4_policy_load_blocks_registry_tuple_mismatch_and_workspace_loss(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2446,6 +3926,604 @@ def test_policy_publication_cas_has_one_winner_and_no_losing_rows(
     finally:
         second.close()
         first.close()
+
+
+def _insert_active_dependent_grant(
+    connection: sqlite3.Connection,
+    *,
+    grant_id: str,
+    policy_fingerprint: str,
+    membership_manifest: str,
+    now: int,
+    paths: tuple[str, ...] = (),
+    fingerprints: tuple[str, ...] = (),
+    scope_ids: tuple[str, ...] = (),
+) -> None:
+    connection.execute(
+        "INSERT INTO governance_session_grants "
+        "(grant_id, authorization_session_id, principal_id, issuer_family, audience, "
+        "purpose, ceiling, paths, fingerprints, scope_ids, membership_manifest, "
+        "policy_fingerprint, token_jti, status, prepared_event_id, created_at, "
+        "expires_at, revoked_at) VALUES (?, ?, ?, 'rest', ?, NULL, 6, ?, ?, "
+        "?, ?, ?, ?, 'active', NULL, ?, ?, NULL)",
+        (
+            grant_id,
+            f"session-{grant_id}",
+            f"principal-{grant_id}",
+            f"principal-{grant_id}",
+            json.dumps(list(paths), separators=(",", ":")),
+            json.dumps(list(fingerprints), separators=(",", ":")),
+            json.dumps(list(scope_ids), separators=(",", ":")),
+            membership_manifest,
+            policy_fingerprint,
+            f"token-{grant_id}",
+            now,
+            now + 3_600,
+        ),
+    )
+    connection.commit()
+
+
+def test_policy_publication_applies_complete_dependent_grant_manifest_atomically(
+    tmp_path: Path,
+) -> None:
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    _write_workspace(vault, _documents(ceiling=2))
+    result = _migrate(vault, now=now)
+    connection = store.open_authorization_session_connection(vault)
+    try:
+        predecessor_policy = _compiled(_documents(ceiling=2)).fingerprint
+        target_policy = _compiled(_documents(ceiling=1)).fingerprint
+        first_manifest = '[{"fingerprint":"' + "1" * 64 + '","path":"Notes/a.md","scope_ids":[]}]'
+        second_manifest = '[{"fingerprint":"' + "2" * 64 + '","path":"Notes/b.md","scope_ids":[]}]'
+        _insert_active_dependent_grant(
+            connection,
+            grant_id="grant-a",
+            policy_fingerprint=predecessor_policy,
+            membership_manifest=first_manifest,
+            now=now,
+        )
+        _insert_active_dependent_grant(
+            connection,
+            grant_id="grant-b",
+            policy_fingerprint=predecessor_policy,
+            membership_manifest=second_manifest,
+            now=now,
+        )
+        expected = schema_v4.load_active_state(
+            connection,
+            expected_logical_vault_id=LOGICAL_VAULT_ID,
+            expected_activation_store_id=ACTIVATION_STORE_ID,
+            expected_activation_epoch=1,
+            expected_activation_state_digest=result.activation_state_digest,
+        )
+
+        published = schema_v4.publish_policy_generation(
+            connection,
+            expected=expected,
+            policy=_policy_seed(
+                generation_id=SECOND_GENERATION_ID,
+                documents=_documents(ceiling=1),
+                predecessor_generation_id=FIRST_GENERATION_ID,
+                event_suffix="dependent-grants",
+                now=now + 1,
+            ),
+            namespace=schema_v4.ProjectionNamespaceSeed(
+                namespace_id="namespace-dependent-grants",
+                evidence=b'{"ready":true}',
+                ready_at=now + 1,
+            ),
+            dependent_grants=(
+                schema_v4.DependentGrantTransition(
+                    grant_id="grant-a",
+                    expected_policy_fingerprint=predecessor_policy,
+                    expected_membership_manifest=first_manifest,
+                    target_status="expired",
+                    target_policy_fingerprint=target_policy,
+                    target_membership_manifest=first_manifest,
+                ),
+                schema_v4.DependentGrantTransition(
+                    grant_id="grant-b",
+                    expected_policy_fingerprint=predecessor_policy,
+                    expected_membership_manifest=second_manifest,
+                    target_status="review",
+                    target_policy_fingerprint=target_policy,
+                    target_membership_manifest=second_manifest,
+                ),
+            ),
+            activated_at=now + 1,
+            acknowledge_registry=_acknowledge,
+        )
+
+        assert published.active.policy_fingerprint == target_policy
+        assert connection.execute(
+            "SELECT grant_id, status, policy_fingerprint, membership_manifest, "
+            "prepared_event_id, revoked_at FROM governance_session_grants "
+            "ORDER BY grant_id"
+        ).fetchall() == [
+            ("grant-a", "expired", target_policy, first_manifest, None, now + 1),
+            ("grant-b", "review", target_policy, second_manifest, None, now + 1),
+        ]
+    finally:
+        connection.close()
+
+
+def test_policy_publication_refuses_stale_dependent_grant_without_partial_tuple(
+    tmp_path: Path,
+) -> None:
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    _write_workspace(vault, _documents(ceiling=2))
+    result = _migrate(vault, now=now)
+    connection = store.open_authorization_session_connection(vault)
+    try:
+        predecessor_policy = _compiled(_documents(ceiling=2)).fingerprint
+        target_policy = _compiled(_documents(ceiling=1)).fingerprint
+        manifest = '[{"fingerprint":"' + "3" * 64 + '","path":"Notes/a.md","scope_ids":[]}]'
+        _insert_active_dependent_grant(
+            connection,
+            grant_id="grant-a",
+            policy_fingerprint=predecessor_policy,
+            membership_manifest=manifest,
+            now=now,
+        )
+        expected = schema_v4.load_active_state(
+            connection,
+            expected_logical_vault_id=LOGICAL_VAULT_ID,
+            expected_activation_store_id=ACTIVATION_STORE_ID,
+            expected_activation_epoch=1,
+            expected_activation_state_digest=result.activation_state_digest,
+        )
+
+        with pytest.raises(schema_v4.ActiveTupleStale):
+            schema_v4.publish_policy_generation(
+                connection,
+                expected=expected,
+                policy=_policy_seed(
+                    generation_id=SECOND_GENERATION_ID,
+                    documents=_documents(ceiling=1),
+                    predecessor_generation_id=FIRST_GENERATION_ID,
+                    event_suffix="stale-dependent-grant",
+                    now=now + 1,
+                ),
+                namespace=schema_v4.ProjectionNamespaceSeed(
+                    namespace_id="namespace-stale-dependent-grant",
+                    evidence=b'{"ready":true}',
+                    ready_at=now + 1,
+                ),
+                dependent_grants=(
+                    schema_v4.DependentGrantTransition(
+                        grant_id="grant-a",
+                        expected_policy_fingerprint=predecessor_policy,
+                        expected_membership_manifest="[]",
+                        target_status="expired",
+                        target_policy_fingerprint=target_policy,
+                        target_membership_manifest=manifest,
+                    ),
+                ),
+                activated_at=now + 1,
+                acknowledge_registry=_acknowledge,
+            )
+        with pytest.raises(schema_v4.ActiveTupleStale):
+            schema_v4.publish_policy_generation(
+                connection,
+                expected=expected,
+                policy=_policy_seed(
+                    generation_id=SECOND_GENERATION_ID,
+                    documents=_documents(ceiling=1),
+                    predecessor_generation_id=FIRST_GENERATION_ID,
+                    event_suffix="legacy-unbound-dependent-grant",
+                    now=now + 1,
+                ),
+                namespace=schema_v4.ProjectionNamespaceSeed(
+                    namespace_id="namespace-legacy-unbound-dependent-grant",
+                    evidence=b'{"ready":true}',
+                    ready_at=now + 1,
+                ),
+                dependent_grants=(),
+                activated_at=now + 1,
+                acknowledge_registry=_acknowledge,
+            )
+
+        assert connection.execute(
+            "SELECT policy_generation_id, policy_fingerprint FROM active_governance_tuple"
+        ).fetchone() == (FIRST_GENERATION_ID, predecessor_policy)
+        assert connection.execute(
+            "SELECT status, policy_fingerprint, membership_manifest, revoked_at "
+            "FROM governance_session_grants WHERE grant_id='grant-a'"
+        ).fetchone() == ("active", predecessor_policy, manifest, None)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM compiled_policy_generations "
+            "WHERE generation_id=?",
+            (SECOND_GENERATION_ID,),
+        ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM governance_projection_namespaces "
+            "WHERE namespace_id='namespace-stale-dependent-grant'"
+        ).fetchone() == (0,)
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize(
+    ("winner_kind", "loser_kind"),
+    [
+        ("policy", "policy"),
+        ("policy", "catalog"),
+        ("catalog", "policy"),
+    ],
+)
+def test_tuple_publications_serialize_at_the_sqlite_barrier(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    winner_kind: str,
+    loser_kind: str,
+) -> None:
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate(vault, now=now)
+    connection = store.open_authorization_session_connection(vault)
+    try:
+        expected = schema_v4.load_active_state(
+            connection,
+            expected_logical_vault_id=LOGICAL_VAULT_ID,
+            expected_activation_store_id=ACTIVATION_STORE_ID,
+            expected_activation_epoch=1,
+            expected_activation_state_digest=migration.activation_state_digest,
+        )
+    finally:
+        connection.close()
+
+    winner_inside_transaction = threading.Event()
+    release_winner = threading.Event()
+    loser_attempted_transaction = threading.Event()
+    winner_thread_id: list[int] = []
+    winner_point = f"{winner_kind}-publication-before-commit"
+
+    def barrier(point: str) -> None:
+        if point == winner_point and threading.get_ident() == winner_thread_id[0]:
+            winner_inside_transaction.set()
+            assert release_winner.wait(timeout=5)
+
+    monkeypatch.setattr(schema_v4, "_crash_point", barrier)
+
+    def publish(kind: str, *, winner: bool) -> schema_v4.TuplePublicationResult:
+        active = store.open_authorization_session_connection(vault)
+        try:
+            if not winner:
+                active.set_trace_callback(
+                    lambda statement: (
+                        loser_attempted_transaction.set()
+                        if statement == "BEGIN IMMEDIATE"
+                        else None
+                    )
+                )
+            if kind == "policy":
+                return schema_v4.publish_policy_generation(
+                    active,
+                    expected=expected,
+                    policy=_policy_seed(
+                        generation_id=(
+                            SECOND_GENERATION_ID if winner else LOSING_GENERATION_ID
+                        ),
+                        documents=_documents(ceiling=1 if winner else 0),
+                        predecessor_generation_id=FIRST_GENERATION_ID,
+                        event_suffix="barrier-winner" if winner else "barrier-loser",
+                        now=now + 1,
+                    ),
+                    namespace=schema_v4.ProjectionNamespaceSeed(
+                        namespace_id=(
+                            "namespace-barrier-winner"
+                            if winner
+                            else "namespace-barrier-loser"
+                        ),
+                        evidence=b'{"ready":true}',
+                        ready_at=now + 1,
+                    ),
+                    activated_at=now + 1,
+                    acknowledge_registry=_acknowledge,
+                )
+            return schema_v4.publish_catalog_generation(
+                active,
+                expected=expected,
+                catalog=schema_v4.CatalogGenerationSeed(
+                    catalog_generation=2,
+                    descriptor=b'{"artifacts":["Notes/barrier.md"]}',
+                    artifact_count=1,
+                    created_at=now + 1,
+                ),
+                namespace=schema_v4.ProjectionNamespaceSeed(
+                    namespace_id=(
+                        "namespace-barrier-winner"
+                        if winner
+                        else "namespace-barrier-loser"
+                    ),
+                    evidence=b'{"ready":true}',
+                    ready_at=now + 1,
+                ),
+                receipt_event_id=(
+                    "receipt-barrier-winner"
+                    if winner
+                    else "receipt-barrier-loser"
+                ),
+                activated_at=now + 1,
+                acknowledge_registry=_acknowledge,
+            )
+        finally:
+            active.close()
+
+    def publish_winner() -> schema_v4.TuplePublicationResult:
+        winner_thread_id.append(threading.get_ident())
+        return publish(winner_kind, winner=True)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        winner_future = executor.submit(publish_winner)
+        assert winner_inside_transaction.wait(timeout=5)
+        loser_future = executor.submit(publish, loser_kind, winner=False)
+        assert loser_attempted_transaction.wait(timeout=5)
+        release_winner.set()
+        winner = winner_future.result(timeout=5)
+        with pytest.raises(schema_v4.ActiveTupleStale):
+            loser_future.result(timeout=5)
+
+    connection = store.open_authorization_session_connection(vault)
+    try:
+        active = schema_v4.load_active_state(
+            connection,
+            expected_logical_vault_id=LOGICAL_VAULT_ID,
+            expected_activation_store_id=ACTIVATION_STORE_ID,
+            expected_activation_epoch=winner.active.activation_epoch,
+            expected_activation_state_digest=winner.active.activation_state_digest,
+        )
+        assert active == winner.active
+        assert active.activation_epoch == 2
+        assert connection.execute(
+            "SELECT publication_kind, COUNT(*) FROM governance_tuple_publications "
+            "WHERE publication_kind != 'migration' GROUP BY publication_kind"
+        ).fetchall() == [(winner_kind, 1)]
+        assert connection.execute(
+            "SELECT COUNT(*) FROM compiled_policy_generations"
+        ).fetchone() == ((2,) if winner_kind == "policy" else (1,))
+        assert connection.execute(
+            "SELECT COUNT(*) FROM compiled_policy_generations "
+            "WHERE generation_id=?",
+            (LOSING_GENERATION_ID,),
+        ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM catalog_generation_descriptors "
+            "WHERE catalog_generation=2"
+        ).fetchone() == ((1,) if winner_kind == "catalog" else (0,))
+        assert connection.execute(
+            "SELECT COUNT(*) FROM governance_projection_namespaces "
+            "WHERE namespace_id='namespace-barrier-loser'"
+        ).fetchone() == (0,)
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("mutation", ["create", "edit", "delete", "companion"])
+def test_content_publication_wins_a_race_with_a_reviewed_policy_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    from exomem.governance.tool import GovernanceError, op_govern_memory
+
+    now = int(time.time())
+    monkeypatch.setenv(
+        "EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-state")
+    )
+    writer_lease.reset_managers_for_tests()
+    vault = tmp_path / "vault"
+    relative = "Knowledge Base/Notes/race.md"
+    before = "---\ntitle: Race\nstatus: draft\n---\n\nbefore\n"
+    after = before.replace("before", "after")
+    companion_payload: dict[str, object] | None = None
+    companion_proposal_id: str | None = None
+
+    if mutation == "create":
+        _write_workspace(vault, _documents(ceiling=2))
+        migration = _migrate_with_empty_projection_catalog(vault, now=now)
+    elif mutation == "companion":
+        _artifact, relative, before, companion_payload = (
+            _legacy_companion_backfill_input(vault)
+        )
+        _write_workspace(vault, _documents(ceiling=2))
+        migration = _migrate_with_projection_items(
+            vault,
+            items=((relative, before),),
+            now=now,
+        )
+    else:
+        target = vault / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(before, encoding="utf-8")
+        _write_workspace(vault, _documents(ceiling=2))
+        if mutation == "delete":
+            log_relative = "Knowledge Base/log.md"
+            log_source = "# Log\n\n---\n"
+            (vault / log_relative).write_text(log_source, encoding="utf-8")
+            migration = _migrate_with_projection_items(
+                vault,
+                items=((relative, before), (log_relative, log_source)),
+                now=now,
+            )
+        else:
+            migration = _migrate_with_projection_item(
+                vault,
+                path=relative,
+                source=before,
+                now=now,
+            )
+
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    if companion_payload is not None:
+        companion_proposal_id = str(
+            _preview_companion_backfill(
+                vault,
+                companion_payload,
+                now=now + 1,
+            )["proposal_id"]
+        )
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        policy_proposal = op_govern_memory(
+            vault,
+            operation="propose",
+            principal=owner_principal(),
+            intent="Lower the external ceiling after the content change",
+            documents={
+                path: source.decode("utf-8")
+                for path, source in _documents(ceiling=1)
+            },
+            target_ceiling=1,
+            now=now + 1,
+        )
+
+    edit_preflight = (
+        semantic_writes.preflight_existing(
+            vault,
+            path=relative,
+            after_source=after,
+            operation="edit",
+            expected_before_hash=vault_module.content_hash(before),
+        )
+        if mutation == "edit"
+        else None
+    )
+
+    content_inside_transaction = threading.Event()
+    release_content = threading.Event()
+    policy_ready_to_publish = threading.Event()
+    allow_policy_publication = threading.Event()
+    policy_attempting_publication = threading.Event()
+    content_thread_id: list[int] = []
+    real_policy_publication = schema_v4.publish_policy_generation
+
+    def tuple_barrier(point: str) -> None:
+        if (
+            point == "catalog-publication-before-commit"
+            and threading.get_ident() == content_thread_id[0]
+        ):
+            content_inside_transaction.set()
+            assert release_content.wait(timeout=5)
+
+    def publish_reviewed_policy(
+        *args: object, **kwargs: object
+    ) -> schema_v4.TuplePublicationResult:
+        policy_ready_to_publish.set()
+        assert allow_policy_publication.wait(timeout=5)
+        policy_attempting_publication.set()
+        return real_policy_publication(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(schema_v4, "_crash_point", tuple_barrier)
+    monkeypatch.setattr(
+        schema_v4,
+        "publish_policy_generation",
+        publish_reviewed_policy,
+    )
+
+    def commit_policy() -> dict[str, object]:
+        with reserved_paths._owner_authority_scope("govern_memory"):
+            return op_govern_memory(
+                vault,
+                operation="commit",
+                principal=owner_principal(),
+                proposal_id=policy_proposal["proposal_id"],
+                now=now + 2,
+            )
+
+    def commit_content() -> object:
+        content_thread_id.append(threading.get_ident())
+        if mutation == "create":
+            return create_file_module.create_file(
+                vault,
+                path=relative,
+                content="Created during the tuple race.\n",
+                frontmatter={"title": "Race", "status": "draft"},
+                today=dt.date(2026, 8, 26),
+            )
+        if mutation == "edit":
+            assert edit_preflight is not None
+            return semantic_writes.commit_existing(vault, preflight=edit_preflight)
+        if mutation == "delete":
+            return delete_file_module.delete_file(
+                vault,
+                path=relative,
+                confirm=True,
+                today=dt.date(2026, 8, 26),
+                now=dt.datetime.fromtimestamp(now),
+            )
+        assert companion_payload is not None and companion_proposal_id is not None
+        return _commit_companion_backfill(
+            vault,
+            companion_payload,
+            proposal_id=companion_proposal_id,
+            now=now + 2,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        policy_future = executor.submit(commit_policy)
+        assert policy_ready_to_publish.wait(timeout=5)
+        content_future = executor.submit(commit_content)
+        assert content_inside_transaction.wait(timeout=5)
+        allow_policy_publication.set()
+        assert policy_attempting_publication.wait(timeout=5)
+        release_content.set()
+        content_future.result(timeout=10)
+        with pytest.raises(GovernanceError) as stale:
+            policy_future.result(timeout=10)
+
+    assert stale.value.code == "STALE_GOVERNANCE_POLICY"
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 3)
+    connection = store.open_authorization_session_connection(vault)
+    try:
+        active = schema_v4.load_active_policy(
+            connection,
+            expected_logical_vault_id=LOGICAL_VAULT_ID,
+            expected_activation_store_id=ACTIVATION_STORE_ID,
+            expected_activation_epoch=2,
+            expected_activation_state_digest=(
+                custody.control.activation_state_digest or ""
+            ),
+        )
+        assert active.active.policy_generation_id == FIRST_GENERATION_ID
+        assert active.active.catalog_generation == 2
+        assert active.policy.rules[0].ceiling == 2
+        assert connection.execute(
+            "SELECT publication_kind, COUNT(*) FROM governance_tuple_publications "
+            "WHERE publication_kind != 'migration' GROUP BY publication_kind"
+        ).fetchall() == [("catalog", 1)]
+        assert connection.execute(
+            "SELECT COUNT(*) FROM compiled_policy_generations"
+        ).fetchone() == (1,)
+        assert connection.execute(
+            "SELECT status FROM governance_proposals WHERE proposal_id=?",
+            (policy_proposal["proposal_id"],),
+        ).fetchone() == ("expired",)
+    finally:
+        connection.close()
+
+    evidence = projection_store.namespace_evidence_from_snapshot(active)
+    _manifest, items = projection_store.load_projection_catalog(
+        vault,
+        key=evidence.manifest.namespace_key,
+        expected_rows_digest=evidence.manifest.rows_digest,
+    )
+    item_paths = {item.item_identity for item in items}
+    if mutation == "delete":
+        assert relative not in item_paths
+        assert not (vault / relative).exists()
+    else:
+        assert relative in item_paths
+        assert (vault / relative).is_file()
 
 
 def test_registry_ack_is_required_before_the_new_policy_can_serve(
@@ -2643,6 +4721,20 @@ def test_policy_publication_crash_before_commit_restores_exact_predecessor(
     migration = _migrate(vault, now=now)
     connection = store.open_authorization_session_connection(vault)
     try:
+        predecessor_policy = _compiled(_documents(ceiling=2)).fingerprint
+        target_policy = _compiled(_documents(ceiling=1)).fingerprint
+        membership_manifest = (
+            '[{"fingerprint":"'
+            + "4" * 64
+            + '","path":"Notes/crash.md","scope_ids":[]}]'
+        )
+        _insert_active_dependent_grant(
+            connection,
+            grant_id="grant-crash",
+            policy_fingerprint=predecessor_policy,
+            membership_manifest=membership_manifest,
+            now=now,
+        )
         expected = schema_v4.load_active_state(
             connection,
             expected_logical_vault_id=LOGICAL_VAULT_ID,
@@ -2672,6 +4764,16 @@ def test_policy_publication_crash_before_commit_restores_exact_predecessor(
                     evidence=b'{"ready":true}',
                     ready_at=now + 1,
                 ),
+                dependent_grants=(
+                    schema_v4.DependentGrantTransition(
+                        grant_id="grant-crash",
+                        expected_policy_fingerprint=predecessor_policy,
+                        expected_membership_manifest=membership_manifest,
+                        target_status="expired",
+                        target_policy_fingerprint=target_policy,
+                        target_membership_manifest=membership_manifest,
+                    ),
+                ),
                 activated_at=now + 1,
                 acknowledge_registry=_acknowledge,
             )
@@ -2692,6 +4794,10 @@ def test_policy_publication_crash_before_commit_restores_exact_predecessor(
             "SELECT COUNT(*) FROM governance_tuple_publications "
             "WHERE event_id='receipt-crash'"
         ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT status, policy_fingerprint, membership_manifest, revoked_at "
+            "FROM governance_session_grants WHERE grant_id='grant-crash'"
+        ).fetchone() == ("active", predecessor_policy, membership_manifest, None)
     finally:
         connection.close()
 

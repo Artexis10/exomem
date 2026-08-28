@@ -964,8 +964,9 @@ def test_cell_provider_recovery_envelopes_are_unique_and_exact_per_object() -> N
         resource_name="exo-cell-alpha",
         operation_resource_name="exo-op-operation-alpha",
     )
+    assert "authorizationSessionSecret" in values
+    assert len(values) == 17
 
-    assert len(values) == 16
     assert len(set(values.values())) == len(values)
     codec.verifier().authenticate(
         values["controlIngressRoute"],

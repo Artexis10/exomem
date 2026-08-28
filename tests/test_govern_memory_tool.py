@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import importlib
 import json
 import os
@@ -10,7 +11,7 @@ import sqlite3
 import subprocess
 import sys
 from pathlib import Path
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 
 import pytest
 
@@ -22,6 +23,7 @@ from exomem.governance.principal import RequestPrincipal, owner_principal
 SCOPE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
 RULE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FB0"
 PATTERN_GLOB = "Knowledge Base/Notes/Patterns/**"
+V4_NOW = 1_800_000_000
 
 
 @pytest.fixture(autouse=True)
@@ -642,6 +644,47 @@ def test_commit_direction_is_proven_from_effective_rule_change(vault: Path) -> N
     )["direction"] == "narrowing"
 
 
+def test_proposal_direction_treats_equal_level_option_change_as_unknown(
+    vault: Path,
+) -> None:
+    from exomem.governance.tool import op_govern_memory
+
+    original = _proposal_documents(ceiling=1)
+    original["rules/confidential-patterns.yaml"] += (
+        "options:\n  notice: Original notice\n"
+    )
+    proposed = op_govern_memory(
+        vault,
+        operation="propose",
+        principal=owner_principal(),
+        intent="Install the original reviewed notice",
+        documents=original,
+        target_ceiling=1,
+    )
+    op_govern_memory(
+        vault,
+        operation="commit",
+        principal=owner_principal(),
+        proposal_id=proposed["proposal_id"],
+    )
+    changed = dict(original)
+    changed["rules/confidential-patterns.yaml"] = changed[
+        "rules/confidential-patterns.yaml"
+    ].replace("Original notice", "Different notice")
+
+    reviewed = op_govern_memory(
+        vault,
+        operation="propose",
+        principal=owner_principal(),
+        intent="Review a different notice at the same ceiling",
+        documents=changed,
+        target_ceiling=1,
+    )
+
+    assert reviewed["consequences"]["direction"] == "widening"
+    assert reviewed["consequences"]["widened"] > 0
+
+
 @pytest.mark.parametrize(
     ("before", "after", "expected"),
     [
@@ -655,6 +698,16 @@ def test_transition_direction_requires_pointwise_proof(before, after, expected) 
     from exomem.governance.tool import classify_transition_direction
 
     assert classify_transition_direction(before, after) == expected
+
+
+def test_transition_direction_requires_equal_disclosure_at_equal_level() -> None:
+    from exomem.governance.tool import classify_transition_direction
+
+    old = (2, "old-disclosure")
+    new = (2, "new-disclosure")
+    assert classify_transition_direction({"a": old}, {"a": old}) == "narrowing"
+    assert classify_transition_direction({"a": old}, {"a": new}) == "widening"
+    assert classify_transition_direction({"a": old}, {"a": (1, new[1])}) == "narrowing"
 
 
 def _external(session: str | None = "conversation-a") -> RequestPrincipal:
@@ -675,6 +728,133 @@ def _committed_policy(vault: Path) -> None:
         principal=owner_principal(),
         proposal_id=proposal["proposal_id"],
     )
+
+
+def _configure_v4_grant(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[RequestPrincipal, object, str, str, str]:
+    from exomem.governance import (
+        authorization_session_authority,
+        authorization_session_lifecycle,
+        policy,
+        schema_v4,
+    )
+    from exomem.governance import tool as governance_tool
+
+    _committed_policy(vault)
+    prospective = policy.compile_prospective(vault, {})
+    assert prospective is not None and not prospective.policy.blocked
+    compiled = prospective.policy
+    seed = schema_v4.MigrationSeed(
+        activation_store_id="activation-store-grant",
+        logical_vault_id="logical-vault-grant",
+        activation_epoch=1,
+        policy=schema_v4.PolicyGenerationSeed(
+            generation_id="01ARZ3NDEKTSV4RRFFQ69G5FAX",
+            source_documents=prospective.target_documents,
+            source_fingerprint=compiled.fingerprint,
+            conflict_digest=prospective.snapshot.conflict_set_digest,
+            compiled_policy=policy.canonical_compiled_bytes(compiled),
+            policy_fingerprint=compiled.fingerprint,
+            compiler_schema_version=1,
+            projector_schema_version=1,
+            predecessor_generation_id=None,
+            authoring_event_id="authoring-v4-grant",
+            receipt_event_id="receipt-v4-grant",
+            created_at=V4_NOW,
+        ),
+        catalog=schema_v4.CatalogGenerationSeed(
+            catalog_generation=1,
+            descriptor=b'{"artifacts":[]}',
+            artifact_count=0,
+            created_at=V4_NOW,
+        ),
+        namespace=schema_v4.ProjectionNamespaceSeed(
+            namespace_id="namespace-v4-grant",
+            evidence=b'{"ready":true}',
+            ready_at=V4_NOW,
+        ),
+        migrated_at=V4_NOW,
+    )
+    connection = store.open_connection(vault)
+    try:
+        schema_v4.migrate_v3_connection(connection, seed)
+        context = authorization_session_lifecycle.AuthorizationSessionContext(
+            session_id="authorization-session:grant-recovery",
+            principal_id="principal:external",
+            issuer_family="mcp-oauth",
+            cell_id="cell-grant",
+            logical_vault_id="logical-vault-grant",
+            keyring_id="keyring-grant",
+            credential_generation=1,
+            expires_at=V4_NOW + 600,
+        )
+        connection.execute(
+            "INSERT INTO governance_authorization_sessions "
+            "(session_id, locator_digest, verifier, verifier_key_id, "
+            "credential_generation, principal_id, issuer_family, cell_id, "
+            "logical_vault_id, keyring_id, status, created_at, rotated_at, "
+            "expires_at, closed_at) VALUES (?, ?, ?, 'key-grant', 1, ?, ?, ?, ?, "
+            "?, 'active', ?, NULL, ?, NULL)",
+            (
+                context.session_id,
+                b"l" * 32,
+                b"v" * 32,
+                context.principal_id,
+                context.issuer_family,
+                context.cell_id,
+                context.logical_vault_id,
+                context.keyring_id,
+                V4_NOW,
+                context.expires_at,
+            ),
+        )
+        connection.commit()
+        path = "Knowledge Base/Notes/Patterns/kill-switch-for-risky-releases.md"
+        fingerprint = hashlib.sha256((vault / path).read_bytes()).hexdigest()
+        signing_key = b"t" * 32
+        token = authorization_session_authority.mint_escalation_token(
+            connection,
+            context=context,
+            signing_key=signing_key,
+            audience=context.principal_id,
+            purpose=None,
+            max_level=5,
+            org_ceiling=6,
+            paths=(path,),
+            fingerprints=(fingerprint,),
+            scope_ids=(SCOPE_ID,),
+            now=V4_NOW + 1,
+            expires_at=V4_NOW + 300,
+        )
+    finally:
+        connection.close()
+
+    principal = RequestPrincipal(
+        audience_id=context.principal_id,
+        surface="mcp",
+        issuer_family=context.issuer_family,
+        verified_authorization_session=context,
+    )
+    custody = SimpleNamespace(
+        keyring=SimpleNamespace(
+            accepted_keys=(SimpleNamespace(key=signing_key),),
+        )
+    )
+
+    def authority_inputs(root: Path, _kwargs: object):
+        return (
+            principal,
+            context,
+            custody,
+            store.open_authorization_session_connection(root),
+            V4_NOW + 2,
+        )
+
+    monkeypatch.setattr(governance_tool, "_v4_authority_inputs", authority_inputs)
+    monkeypatch.setattr(governance_tool.policy_module, "load", lambda _root: compiled)
+    return principal, context, token, path, fingerprint
 
 
 def test_grant_compound_receipts_leave_schema_v3_session_grant_inert_until_v4(
@@ -753,6 +933,152 @@ def test_grant_compound_receipts_leave_schema_v3_session_grant_inert_until_v4(
             authorization_session="conversation-a",
             token=token,
         )
+
+
+def test_v4_grant_receipt_composite_persists_exact_reviewed_scope_ids(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance import receipts
+    from exomem.governance.tool import op_govern_memory
+
+    principal, _context, token, _path, _fingerprint = _configure_v4_grant(
+        vault, monkeypatch
+    )
+
+    granted = op_govern_memory(
+        vault,
+        operation="grant",
+        principal=principal,
+        token=token,
+        duration_seconds=600,
+    )
+
+    assert granted["status"] == "committed"
+    assert granted["causation_id"]
+    records = receipts.event_records(vault)
+    assert {
+        record["operation"]
+        for record in records
+        if record.get("phase") == "intent"
+        and record.get("parent_causation_id") == granted["causation_id"]
+    } == {"governance_token_redemption", "governance_grant_creation"}
+    with sqlite3.connect(store.sidecar_path(vault)) as connection:
+        scope_ids, membership_manifest, status = connection.execute(
+            "SELECT scope_ids, membership_manifest, status "
+            "FROM governance_session_grants WHERE grant_id=?",
+            (granted["grant_id"],),
+        ).fetchone()
+        component = connection.execute(
+            "SELECT value_json FROM governance_operation_components "
+            "WHERE event_id=? AND phase='final' AND component_kind='grant'",
+            (granted["causation_id"],),
+        ).fetchone()
+    assert json.loads(scope_ids) == [SCOPE_ID]
+    assert json.loads(membership_manifest)[0]["scope_ids"] == [SCOPE_ID]
+    assert status == "active"
+    assert component is not None
+    projected = json.loads(component[0])
+    assert projected["scope_ids"] == json.dumps([SCOPE_ID], separators=(",", ":"))
+    assert json.loads(projected["membership_manifest"])[0]["scope_ids"] == [SCOPE_ID]
+
+
+def test_v4_grant_crash_recovers_only_the_exact_scope_bound_prepared_state(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance import authorization_session_authority
+    from exomem.governance.tool import (
+        GovernanceCrash,
+        op_govern_memory,
+        reconcile_governance_operations,
+    )
+
+    principal, context, token, path, fingerprint = _configure_v4_grant(
+        vault, monkeypatch
+    )
+    with pytest.raises(GovernanceCrash, match="after_compound_state"):
+        op_govern_memory(
+            vault,
+            operation="grant",
+            principal=principal,
+            token=token,
+            crash_at="after_compound_state",
+        )
+
+    with sqlite3.connect(store.sidecar_path(vault)) as connection:
+        assert connection.execute(
+            "SELECT status, scope_ids FROM governance_session_grants"
+        ).fetchone() == ("prepared", json.dumps([SCOPE_ID], separators=(",", ":")))
+    recovered = reconcile_governance_operations(vault)
+    assert recovered["activated"] == 1 and recovered["blocked"] is False
+
+    connection = store.open_authorization_session_connection(vault)
+    try:
+        active, _identity = authorization_session_authority.active_session_grants(
+            connection,
+            context=context,
+            audience=context.principal_id,
+            purpose=None,
+            path=path,
+            fingerprint=fingerprint,
+            scope_ids=(SCOPE_ID,),
+            policy_fingerprint=connection.execute(
+                "SELECT policy_fingerprint FROM active_governance_tuple WHERE singleton=1"
+            ).fetchone()[0],
+            now=V4_NOW + 3,
+        )
+        drifted, _identity = authorization_session_authority.active_session_grants(
+            connection,
+            context=context,
+            audience=context.principal_id,
+            purpose=None,
+            path=path,
+            fingerprint=fingerprint,
+            scope_ids=(SCOPE_ID, "scope-added-after-review"),
+            policy_fingerprint=connection.execute(
+                "SELECT policy_fingerprint FROM active_governance_tuple WHERE singleton=1"
+            ).fetchone()[0],
+            now=V4_NOW + 3,
+        )
+    finally:
+        connection.close()
+    assert tuple(grant.scope_ids for grant in active) == ((SCOPE_ID,),)
+    assert drifted == ()
+
+
+def test_v4_grant_scope_tamper_blocks_receipt_recovery(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance.tool import (
+        GovernanceCrash,
+        op_govern_memory,
+        reconcile_governance_operations,
+    )
+
+    principal, _context, token, _path, _fingerprint = _configure_v4_grant(
+        vault, monkeypatch
+    )
+    with pytest.raises(GovernanceCrash, match="after_compound_state"):
+        op_govern_memory(
+            vault,
+            operation="grant",
+            principal=principal,
+            token=token,
+            crash_at="after_compound_state",
+        )
+    with sqlite3.connect(store.sidecar_path(vault)) as connection:
+        connection.execute(
+            "UPDATE governance_session_grants SET scope_ids=?",
+            (json.dumps([SCOPE_ID, "unreviewed-scope"], separators=(",", ":")),),
+        )
+        connection.commit()
+
+    recovered = reconcile_governance_operations(vault)
+
+    assert recovered["activated"] == 0
+    assert recovered["blocked"] is True
 
 
 def test_grant_explicit_session_scope_activates_like_the_omitted_scope(vault: Path) -> None:
@@ -3731,6 +4057,35 @@ def test_adding_default_deny_is_classified_as_a_narrowing(vault: Path) -> None:
     )
 
     assert direction == "narrowing"
+
+
+def test_v4_proposal_analysis_never_calls_release_grant_change_narrowing(
+    vault: Path,
+) -> None:
+    from exomem.governance import policy
+    from exomem.governance.tool import _proposal_analysis
+
+    current = policy.Policy(fingerprint="a" * 64)
+    release = policy.ReleaseGrant(
+        id="01ARZ3NDEKTSV4RRFFQ69G5FZZ",
+        source="grants/release.yaml",
+        path="Knowledge Base/Notes/released.md",
+        ref="mem:01ARZ3NDEKTSV4RRFFQ69G5FZY",
+        content_hash="b" * 64,
+        to_audience="external",
+        released_at="2026-08-27T00:00:00Z",
+        why="reviewed release",
+        bridge_scope="exact",
+        bridge_of=(),
+        strip_provenance=(),
+    )
+    prospective = dataclasses.replace(
+        current,
+        fingerprint="c" * 64,
+        release_grants=(release,),
+    )
+
+    assert _proposal_analysis(vault, current, prospective, [])[2] == "widening"
 
 
 def test_a_proposal_removing_default_deny_counts_the_widened_audience(

@@ -21,6 +21,13 @@ from .adapters import (
     _require_annotations,
     mint_maintenance_transfer_grant,
 )
+from .authorization_membership import (
+    AUTHORIZATION_SESSION_SCHEMA_VERSION,
+    DEFAULT_ATTESTATION_TTL_SECONDS,
+    build_initial_hosted_authorization_bundle,
+    inspect_hosted_authorization_bundle,
+    transition_hosted_authorization_bundle,
+)
 from .capacity import CapacityError
 from .driver import EffectContext
 from .lifecycle import (
@@ -167,9 +174,7 @@ class KubernetesProviderRegistry:
                 await asyncio.to_thread(
                     self._core.list_namespaced_config_map,
                     metadata.resource_name,
-                    label_selector=(
-                        f"owner=helm,name={metadata.resource_name},status=deployed"
-                    ),
+                    label_selector=(f"owner=helm,name={metadata.resource_name},status=deployed"),
                 ),
                 "items",
                 (),
@@ -196,7 +201,11 @@ class KubernetesProviderRegistry:
             metadata,
             provider="kubernetes",
             provider_reference=ProviderReference.kubernetes(
-                provider="kubernetes", api_version="v1", kind="Namespace", namespace="", name=metadata.resource_name
+                provider="kubernetes",
+                api_version="v1",
+                kind="Namespace",
+                namespace="",
+                name=metadata.resource_name,
             ),
         )
         self._authenticate_annotations(
@@ -204,7 +213,11 @@ class KubernetesProviderRegistry:
             metadata,
             provider="kubernetes",
             provider_reference=ProviderReference.kubernetes(
-                provider="kubernetes", api_version="v1", kind="PersistentVolumeClaim", namespace=metadata.resource_name, name=metadata.resource_name + "-data"
+                provider="kubernetes",
+                api_version="v1",
+                kind="PersistentVolumeClaim",
+                namespace=metadata.resource_name,
+                name=metadata.resource_name + "-data",
             ),
         )
         self._authenticate_annotations(
@@ -212,7 +225,11 @@ class KubernetesProviderRegistry:
             metadata,
             provider="kubernetes",
             provider_reference=ProviderReference.kubernetes(
-                provider="kubernetes", api_version="v1", kind="ConfigMap", namespace=metadata.resource_name, name=provider_operation_resource_name(metadata.operation_id)
+                provider="kubernetes",
+                api_version="v1",
+                kind="ConfigMap",
+                namespace=metadata.resource_name,
+                name=provider_operation_resource_name(metadata.operation_id),
             ),
         )
         try:
@@ -232,12 +249,14 @@ class KubernetesProviderRegistry:
                 metadata,
                 provider="kubernetes",
                 provider_reference=ProviderReference.kubernetes(
-                    provider="kubernetes", api_version="batch/v1", kind="Job", namespace=metadata.resource_name, name=metadata.resource_name + "-init"
+                    provider="kubernetes",
+                    api_version="batch/v1",
+                    kind="Job",
+                    namespace=metadata.resource_name,
+                    name=metadata.resource_name + "-init",
                 ),
             )
-        return self._recovery_digest(
-            namespace, pvc, operation_record, helm_record, init_job
-        )
+        return self._recovery_digest(namespace, pvc, operation_record, helm_record, init_job)
 
     async def inspect(
         self,
@@ -320,8 +339,7 @@ class KubernetesProviderRegistry:
         )
         init_failed = not init_complete and (
             any(
-                getattr(item, "type", None) == "Failed"
-                and getattr(item, "status", None) == "True"
+                getattr(item, "type", None) == "Failed" and getattr(item, "status", None) == "True"
                 for item in conditions
             )
             or bool(getattr(getattr(init_job, "status", None), "failed", 0))
@@ -412,9 +430,7 @@ class KubernetesProviderRegistry:
                 "exomem.io/vault-id": helm_values["vaultId"],
                 "exomem.io/expected-release": helm_values["expectedRelease"],
                 "exomem.io/worker-policy-digest": helm_values["workerPolicyDigest"],
-                "exomem.io/records-reader-version": str(
-                    helm_values["recordsReaderVersion"]
-                ),
+                "exomem.io/records-reader-version": str(helm_values["recordsReaderVersion"]),
                 "exomem.io/lifecycle-actions-enabled": str(
                     helm_values["lifecycleActionsEnabled"]
                 ).lower(),
@@ -452,9 +468,7 @@ class KubernetesProviderRegistry:
                 )
                 != provision_mode
             ):
-                raise MetadataConflict(
-                    "Kubernetes namespace provision mode differs"
-                ) from error
+                raise MetadataConflict("Kubernetes namespace provision mode differs") from error
 
     async def record_operation(
         self, metadata: OpaqueProviderMetadata, recovery_envelope: str
@@ -608,6 +622,154 @@ class LiveLifecyclePlane:
         self._snapshots[self._key(metadata)] = snapshot
         return snapshot
 
+    async def _authorization_session_revision(
+        self,
+        metadata: OpaqueProviderMetadata,
+        request: dict[str, Any],
+    ) -> str:
+        """Ensure one authenticated bootstrap generation before Helm can start a pod."""
+
+        key = self._key(metadata)
+        owned = self._owner(metadata)
+        original = self._helm_requests.get(key, request)
+        envelopes = original.get("_providerRecoveryEnvelopes")
+        if not isinstance(envelopes, dict):
+            raise MetadataConflict("authorization Secret provider authority is absent")
+        recovery_envelope = envelopes.get("authorizationSessionSecret")
+        if not isinstance(recovery_envelope, str) or not recovery_envelope:
+            raise MetadataConflict("authorization Secret provider authority is absent")
+        target = self._config.runtime_target_for(
+            original,
+            v2="runtimeTarget" in original,
+        )
+        replica_id = owned.resource_name + "-0"
+        files = await self._cell.read_authorization_session_bundle(owned)
+        current = int(self._now())
+        if files is None:
+            bundle = build_initial_hosted_authorization_bundle(
+                cell_id=owned.subject_id,
+                logical_vault_id=owned.tenant_id,
+                replica_id=replica_id,
+                software_version=str(target["releaseVersion"]),
+                schema_version=AUTHORIZATION_SESSION_SCHEMA_VERSION,
+                recovery_envelope=recovery_envelope,
+                now=current,
+            )
+            await self._cell.write_authorization_session_bundle(
+                owned,
+                bundle.files,
+                recovery_envelope=recovery_envelope,
+                membership_epoch=bundle.epoch,
+                membership_digest=bundle.membership_digest,
+                revision=bundle.revision,
+            )
+        else:
+            bundle = inspect_hosted_authorization_bundle(
+                files,
+                expected_cell_id=owned.subject_id,
+                expected_logical_vault_id=owned.tenant_id,
+                expected_replica_id=replica_id,
+                expected_software_version=None,
+                expected_schema_version=AUTHORIZATION_SESSION_SCHEMA_VERSION,
+                expected_recovery_envelope=recovery_envelope,
+                now=current,
+            )
+        return bundle.revision
+
+    async def _authorization_helm_values(
+        self,
+        metadata: OpaqueProviderMetadata,
+        request: dict[str, Any],
+        values: dict[str, Any],
+    ) -> dict[str, Any]:
+        desired = dict(values)
+        desired["authorizationSessionRevision"] = await self._authorization_session_revision(
+            metadata, request
+        )
+        return desired
+
+    async def _transition_authorization_session_membership(
+        self,
+        metadata: OpaqueProviderMetadata,
+        *,
+        target_state: str,
+        target_no_in_flight: bool,
+        target_software_version: str | None = None,
+        require_runtime_attestation: bool = False,
+        runtime_credential: str | None = None,
+        runtime_protocol_version: str | None = None,
+    ) -> str:
+        """Commit one authenticated successor under the lifecycle maintenance lease."""
+
+        key = self._key(metadata)
+        owned = self._owner(metadata)
+        try:
+            original = self._helm_requests[key]
+        except KeyError as error:
+            raise MetadataConflict(
+                "original authorization session identity is unavailable"
+            ) from error
+        envelopes = original.get("_providerRecoveryEnvelopes")
+        if not isinstance(envelopes, dict):
+            raise MetadataConflict("authorization Secret provider authority is absent")
+        recovery_envelope = envelopes.get("authorizationSessionSecret")
+        if not isinstance(recovery_envelope, str) or not recovery_envelope:
+            raise MetadataConflict("authorization Secret provider authority is absent")
+        files = await self._cell.read_authorization_session_bundle(owned)
+        if files is None:
+            raise MetadataConflict("authorization session bundle is absent")
+        current = int(self._now())
+        source = inspect_hosted_authorization_bundle(
+            files,
+            expected_cell_id=owned.subject_id,
+            expected_logical_vault_id=owned.tenant_id,
+            expected_replica_id=owned.resource_name + "-0",
+            expected_software_version=None,
+            expected_schema_version=AUTHORIZATION_SESSION_SCHEMA_VERSION,
+            expected_recovery_envelope=recovery_envelope,
+            now=current,
+            _require_fresh=False,
+        )
+        runtime_attestation = None
+        if require_runtime_attestation:
+            if not runtime_credential or not runtime_protocol_version:
+                raise MetadataConflict("runtime attestation authority is unavailable")
+            runtime_attestation = (
+                await self._runtime.attest_authorization_session_membership(
+                    owned,
+                    credential=runtime_credential,
+                    protocol_version=runtime_protocol_version,
+                    target_epoch=source.epoch + 1,
+                    previous_epoch_digest=source.membership_digest,
+                    ttl_seconds=DEFAULT_ATTESTATION_TTL_SECONDS,
+                )
+            )
+        successor = transition_hosted_authorization_bundle(
+            files,
+            expected_cell_id=owned.subject_id,
+            expected_logical_vault_id=owned.tenant_id,
+            expected_replica_id=owned.resource_name + "-0",
+            expected_software_version=None,
+            expected_schema_version=AUTHORIZATION_SESSION_SCHEMA_VERSION,
+            expected_recovery_envelope=recovery_envelope,
+            target_state=target_state,
+            target_no_in_flight=target_no_in_flight,
+            target_software_version=target_software_version,
+            now=current,
+            runtime_attestation=runtime_attestation,
+        )
+        if successor.revision != source.revision:
+            await self._cell.write_authorization_session_bundle(
+                owned,
+                successor.files,
+                recovery_envelope=recovery_envelope,
+                membership_epoch=successor.epoch,
+                membership_digest=successor.membership_digest,
+                revision=successor.revision,
+                expected_revision=source.revision,
+            )
+        return successor.revision
+
     async def observed_fence(self, tenant_id: str) -> int:
         return await self._registry.observed_fence(tenant_id)
 
@@ -723,6 +885,7 @@ class LiveLifecyclePlane:
     ) -> None:
         await self._require_capacity_reservation(metadata, request)
         owned = self._owner(metadata)
+        revision = await self._authorization_session_revision(metadata, request)
         await self._cell.write_credential_bundle(
             owned,
             {"1": str(request["serviceCredential"])},
@@ -735,7 +898,9 @@ class LiveLifecyclePlane:
                 ],
             },
         )
-        await self._helm.ensure_release(owned, values)
+        desired = dict(values)
+        desired["authorizationSessionRevision"] = revision
+        await self._helm.ensure_release(owned, desired)
         await self._refresh(metadata)
 
     async def volume_claim_bound(self, metadata: OpaqueProviderMetadata) -> bool:
@@ -762,6 +927,7 @@ class LiveLifecyclePlane:
             except KeyError as error:
                 raise MetadataConflict("original Helm request was not authenticated") from error
             values = _fixed_helm_values(self._owner(metadata), helm_request, config)
+            values = await self._authorization_helm_values(metadata, helm_request, values)
             values["workloadMode"] = "initialize"
             await self._helm.ensure_release(self._owner(metadata), values)
             snapshot = await self._refresh(metadata)
@@ -770,6 +936,7 @@ class LiveLifecyclePlane:
             if not snapshot.init_complete:
                 return False
         values = _fixed_helm_values(self._owner(metadata), helm_request, config)
+        values = await self._authorization_helm_values(metadata, helm_request, values)
         values["workloadMode"] = "serve"
         await self._helm.ensure_release(self._owner(metadata), values)
         return (await self._refresh(metadata)).serving
@@ -796,7 +963,9 @@ class LiveLifecyclePlane:
     def runtime_admitted(self, metadata: OpaqueProviderMetadata) -> bool:
         return self._snapshot(metadata).runtime_admitted
 
-    async def enable_routes(self, metadata: OpaqueProviderMetadata, request: dict[str, Any]) -> None:
+    async def enable_routes(
+        self, metadata: OpaqueProviderMetadata, request: dict[str, Any]
+    ) -> None:
         owner = self._owner(metadata)
         if self._key(metadata) not in self._helm_requests:
             raise MetadataConflict("original Helm request was not authenticated")
@@ -805,6 +974,7 @@ class LiveLifecyclePlane:
             if "compatibilityDigest" in request
             else _fixed_helm_values(owner, request, self._config)
         )
+        values = await self._authorization_helm_values(metadata, request, values)
         values["workloadMode"] = "serve"
         values["routes"]["enabled"] = True
         if "compatibilityDigest" in request:
@@ -868,14 +1038,51 @@ class LiveLifecyclePlane:
             except KeyError as error:
                 raise MetadataConflict("original runtime identity is unavailable") from error
         target = runtime_identity(runtime_request)
-        await self._runtime.quiesce(
+        snapshot = await self._runtime.quiesce(
             self._owner(metadata),
             credential=str(request["serviceCredential"]),
             protocol_version=target["protocolVersion"],
             operation_id=operation_id,
         )
+        if (
+            not isinstance(snapshot, dict)
+            or set(snapshot)
+            != {
+                "phase",
+                "active_reads",
+                "active_mutations",
+                "active_transfers",
+                "reason_code",
+            }
+            or snapshot.get("phase") != "quiesced"
+            or any(
+                type(snapshot.get(name)) is not int or snapshot[name] != 0
+                for name in ("active_reads", "active_mutations", "active_transfers")
+            )
+            or not isinstance(snapshot.get("reason_code"), str)
+            or not snapshot["reason_code"]
+        ):
+            raise MetadataConflict("runtime did not acknowledge a complete authorization drain")
+        await self._transition_authorization_session_membership(
+            metadata,
+            target_state="DRAINING",
+            target_no_in_flight=True,
+            require_runtime_attestation=True,
+            runtime_credential=str(request["serviceCredential"]),
+            runtime_protocol_version=str(target["protocolVersion"]),
+        )
 
     async def scale(self, metadata: OpaqueProviderMetadata, replicas: int) -> None:
+        if replicas == 1:
+            revision = await self._transition_authorization_session_membership(
+                metadata,
+                target_state="SERVING",
+                target_no_in_flight=False,
+            )
+            await self._cell.stage_authorization_session_revision(
+                self._owner(metadata),
+                revision,
+            )
         await self._cell.scale(self._owner(metadata), replicas)
 
     async def runtime_stopped(self, metadata: OpaqueProviderMetadata) -> bool:
@@ -943,6 +1150,7 @@ class LiveLifecyclePlane:
         if config.migration_mode not in {"binding-v1-to-v2", "state-root-v1"}:
             raise MetadataConflict("runtime migration was not declared by the deployment lock")
         values = self._rollforward_helm_values(metadata, request, config)
+        values = await self._authorization_helm_values(metadata, request, values)
         values["workloadMode"] = "migrate"
         values["routes"]["enabled"] = False
         values["initOperationId"] = operation_id
@@ -961,7 +1169,15 @@ class LiveLifecyclePlane:
         config: LifecycleConfig,
         operation_id: str,
     ) -> None:
+        target_release = runtime_identity(request)["releaseVersion"]
+        revision = await self._transition_authorization_session_membership(
+            metadata,
+            target_state="SERVING",
+            target_no_in_flight=False,
+            target_software_version=target_release,
+        )
         values = self._rollforward_helm_values(metadata, request, config)
+        values["authorizationSessionRevision"] = revision
         values["workloadMode"] = "serve"
         values["routes"]["enabled"] = False
         await self._helm.transition_release(
@@ -979,6 +1195,20 @@ class LiveLifecyclePlane:
         await self._helm.rollback_release(
             self._owner(metadata),
             operation_id=operation_id,
+        )
+        try:
+            original = self._helm_requests[self._key(metadata)]
+        except KeyError as error:
+            raise MetadataConflict("original runtime identity is unavailable") from error
+        revision = await self._transition_authorization_session_membership(
+            metadata,
+            target_state="SERVING",
+            target_no_in_flight=False,
+            target_software_version=runtime_identity(original)["releaseVersion"],
+        )
+        await self._cell.stage_authorization_session_revision(
+            self._owner(metadata),
+            revision,
         )
         await self._refresh(metadata)
 
@@ -1088,9 +1318,7 @@ class LiveLifecyclePlane:
                 raise MetadataConflict("pending credential version is immutable")
             return
         credentials[pending] = credential
-        target = self._config.runtime_target_for(
-            request, v2="runtimeTarget" in request
-        )
+        target = self._config.runtime_target_for(request, v2="runtimeTarget" in request)
         result = await self._credential_transition(
             owned,
             credentials=credentials,
@@ -1130,9 +1358,7 @@ class LiveLifecyclePlane:
             return True
         revision = int(annotations.get("exomem.io/security-revision", "0"))
         probe_operation = operation_id + ":credential-probe"
-        target = self._config.runtime_target_for(
-            request, v2="runtimeTarget" in request
-        )
+        target = self._config.runtime_target_for(request, v2="runtimeTarget" in request)
         operator_request = {
             "request_id": _deterministic_uuid4(probe_operation),
             "operation_id": probe_operation,
@@ -1180,9 +1406,7 @@ class LiveLifecyclePlane:
         credentials, annotations = await self._cell.read_credential_bundle(owned)
         pending = str(version)
         old_version = annotations.get("exomem.io/active-credential-version")
-        target = self._config.runtime_target_for(
-            request, v2="runtimeTarget" in request
-        )
+        target = self._config.runtime_target_for(request, v2="runtimeTarget" in request)
         if old_version == pending and set(credentials) == {pending}:
             return await self._runtime.credential_rejected(
                 owned,
@@ -1198,9 +1422,9 @@ class LiveLifecyclePlane:
                 credentials=credentials,
                 annotations=annotations,
                 action="promote",
-            operation_id=operation_id,
-            version=pending,
-            protocol_version=target["protocolVersion"],
+                operation_id=operation_id,
+                version=pending,
+                protocol_version=target["protocolVersion"],
             )
             if result.get("phase") != "promoted":
                 raise MetadataConflict("hosted credential did not promote")
@@ -1219,9 +1443,9 @@ class LiveLifecyclePlane:
                 credentials=credentials,
                 annotations=annotations,
                 action="finalize",
-            operation_id=operation_id,
-            version=pending,
-            protocol_version=target["protocolVersion"],
+                operation_id=operation_id,
+                version=pending,
+                protocol_version=target["protocolVersion"],
             )
             if result.get("phase") != "stable" or result.get("active_version") != pending:
                 raise MetadataConflict("hosted credential did not finalize")

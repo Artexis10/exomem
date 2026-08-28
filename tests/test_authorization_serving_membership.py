@@ -79,6 +79,36 @@ def _round_trip(
     )
 
 
+def test_replica_attestation_has_an_independent_canonical_wire_contract() -> None:
+    attestation = _replica("replica-a", epoch=8)
+
+    raw = membership.encode_replica_readiness_attestation(
+        attestation,
+        verifier_keys=KEYS,
+    )
+    parsed = membership.parse_replica_readiness_attestation(
+        raw,
+        verifier_keys=KEYS,
+        now=NOW,
+        expected_epoch=8,
+        expected_cell_id="cell-7",
+    )
+
+    assert parsed == attestation
+    assert membership.encode_replica_readiness_attestation(
+        parsed,
+        verifier_keys=KEYS,
+    ) == raw
+    with pytest.raises(membership.ServingMembershipUnavailable):
+        membership.parse_replica_readiness_attestation(
+            raw.replace(b'"replica-a"', b'"replica-x"'),
+            verifier_keys=KEYS,
+            now=NOW,
+            expected_epoch=8,
+            expected_cell_id="cell-7",
+        )
+
+
 def _readiness(
     record: membership.ServingMembershipEpoch,
     *,
