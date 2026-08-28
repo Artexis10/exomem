@@ -191,3 +191,24 @@ completion does not authorize rehearsal, cutover, or retirement.
   format checks, repository `F` lint, `uv lock --check`, strict change
   validation, public repository artifact validation (`3396 files, 3464 text
   payloads`), and `git diff --check` are green.
+
+## Closed portability-manifest stack
+
+- Red: two exact restore regressions failed because the v1 parser accepted an
+  unknown manifest-root field and an unknown `overall_digest` field. The first
+  remained acceptable after an attacker recomputed the self-consistent digest;
+  the second was outside the digest preimage entirely. Both malformed archives
+  were extracted instead of refused.
+- Green: v1 admission now requires the exact manifest-root and digest-object
+  field sets. Both malformed forms fail with the same content-free
+  `INVALID_MANIFEST` result before staging, while archive bytes and the existing
+  destination parent remain byte-identical.
+- This is a bounded part of task 1.8 and does not mark that task complete; its
+  wider path, entry-type, resource, and runtime-state adversarial matrix remains
+  explicit work. No live vault or artifact store is touched.
+- Python 3.13 focused/adjoining gate:
+  `tests/test_hosted_portability.py` and `tests/test_consolidation_intake.py` ->
+  `133 passed`. Touched-file Ruff, repository `F` lint, `uv lock --check`, strict
+  change validation, all OpenSpec validation (`168 passed, 0 failed`), public
+  repository artifact validation (`3396 files, 3464 text payloads`), and
+  `git diff --check` are green.
