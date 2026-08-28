@@ -312,8 +312,7 @@ _REGISTRY = (
     ),
     InternalStateDescriptor(
         "consolidation-tree",
-        "consolidation.future",
-        authority_enabled=False,
+        "consolidation.run",
         trees=("_consolidation",),
     ),
     InternalStateDescriptor(
@@ -2090,6 +2089,9 @@ def _publish_owner_bytes(
     path: Path,
     descriptor_id: str,
     data: bytes,
+    *,
+    expected_sha256: str | None = None,
+    require_missing: bool = False,
 ) -> held_fs.StableIdentity:
     """Create or replace one exact private owner file through held handles."""
 
@@ -2140,6 +2142,10 @@ def _publish_owner_bytes(
                 current = filesystem.file(parent, relative.name)
                 if current.ok:
                     with current.require() as existing:
+                        if require_missing:
+                            raise RuntimeError(
+                                "private byte publication target already exists"
+                            )
                         if existing.identity.link_count != 1:
                             raise RuntimeError(
                                 "private byte publication target is ambiguous"
@@ -2147,6 +2153,8 @@ def _publish_owner_bytes(
                         expected = existing.identity
                 elif current.error is None or current.error.code != "MISSING":
                     raise RuntimeError("private byte publication target is unsafe")
+                elif expected_sha256 is not None:
+                    raise RuntimeError("private byte publication target is missing")
 
                 if not _owner_directory_is_current(filesystem, parent):
                     raise RuntimeError("private byte publication parent changed")
@@ -2157,6 +2165,7 @@ def _publish_owner_bytes(
                     relative.name,
                     data,
                     expected_identity=expected,
+                    expected_sha256=expected_sha256,
                 )
                 if not result.ok:
                     raise RuntimeError("private byte publication was refused")

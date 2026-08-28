@@ -123,7 +123,7 @@
 
 ## 2. Reserved run state, private artifacts, and immutable fingerprints
 
-- [ ] 2.1 Add red tests in `tests/test_consolidation_run_state.py` proving each run
+- [x] 2.1 Add red tests in `tests/test_consolidation_run_state.py` proving each run
   persists owner-only state beneath
   `Knowledge Base/_Consolidation/runs/<run_id>/`, rejects duplicate/conflicting run
   identity, resumes after process restart, pages large inventories deterministically,
