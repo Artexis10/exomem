@@ -19,6 +19,15 @@ SHALL retain the exact ordered source-document bytes and source fingerprint from
 its canonical compiled bytes and fingerprint were derived; every catalog generation and
 projection namespace it names SHALL be immutable and independently verifiable.
 Historical generations SHALL be append-only.
+The exact v4 tuple-publication kind registry SHALL be `migration`, `policy`, `catalog`,
+and `attachment-clone`. An authenticated offline clone publication SHALL retain the
+complete active policy/projector/catalog tuple and immutable history, while one exclusive
+transaction changes the activation-store/logical-vault identity, increments the
+activation epoch, recomputes the activation digest, invalidates all copied session-derived
+authority, preserves copied receipt evidence while atomically starting a fresh target
+receipt instance/genesis head/label secret, and appends the predecessor-bound
+`attachment-clone` row. No other
+publication kind may change logical-vault or activation-store identity.
 
 The protected external cell registry SHALL carry a monotonic `governance_enrolled` flag
 and, after irreversible enrollment, the expected
@@ -68,6 +77,16 @@ knowledge, including to owner/L6 or through non-Markdown classification.
   conflicted, symlinked, or unparsable while the process is stopped or running
 - **THEN** restart and warm-process reads both fail closed; the active tuple remains
   immutable but is not served until owner repair
+
+#### Scenario: Clone identity changes without relabeling policy or catalog
+
+- **WHEN** an authenticated offline clone transaction creates a new logical vault from
+  one verified exact-v4 copy
+- **THEN** the active policy generation, projector version, catalog generation,
+  immutable rows, and namespace remain byte-identical while the new activation identity,
+  epoch/digest, session invalidation, fresh receipt append identity, and predecessor-bound
+  `attachment-clone` publication commit atomically; copied receipt rows remain historical
+  and source/clone cannot append under one shared instance
 
 #### Scenario: Unknown version fails closed
 

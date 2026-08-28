@@ -18,6 +18,12 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
+from .authorization_membership import (
+    AUTHORIZATION_SESSION_FILES,
+    AUTHORIZATION_SESSION_SECRET_NAME,
+    MAX_ATTESTATION_TTL_SECONDS,
+    MAX_BUNDLE_FILE_BYTES,
+)
 from .credentials import validate_machine_credential
 from .lifecycle import (
     HealthObservation,
@@ -589,6 +595,215 @@ class KubernetesCellAdapter:
             raise MetadataConflict("cell credential bundle is invalid") from error
         return values, annotations
 
+    async def write_authorization_session_bundle(
+        self,
+        metadata: OpaqueProviderMetadata,
+        files: dict[str, bytes],
+        *,
+        recovery_envelope: str,
+        membership_epoch: int,
+        membership_digest: str,
+        revision: str,
+        expected_revision: str | None = None,
+    ) -> None:
+        if (
+            set(files) != AUTHORIZATION_SESSION_FILES
+            or any(
+                not isinstance(value, bytes) or not 1 <= len(value) <= MAX_BUNDLE_FILE_BYTES
+                for value in files.values()
+            )
+            or not isinstance(membership_epoch, int)
+            or isinstance(membership_epoch, bool)
+            or membership_epoch < 1
+            or re.fullmatch(r"[0-9a-f]{64}", membership_digest) is None
+            or re.fullmatch(r"[0-9a-f]{64}", revision) is None
+            or revision
+            != hashlib.sha256(
+                files["keyring.json"] + files["control.json"] + files["serving-membership.json"]
+            ).hexdigest()
+            or not isinstance(recovery_envelope, str)
+            or not recovery_envelope
+            or (
+                expected_revision is not None
+                and re.fullmatch(r"[0-9a-f]{64}", expected_revision) is None
+            )
+        ):
+            raise MetadataConflict("authorization session bundle shape is invalid")
+        annotations = {
+            **metadata.kubernetes_annotations,
+            "exomem.io/recovery-envelope": recovery_envelope,
+            "exomem.io/authorization-membership-epoch": str(membership_epoch),
+            "exomem.io/authorization-membership-digest": membership_digest,
+            "exomem.io/authorization-session-revision": revision,
+        }
+        try:
+            string_data = {name: value.decode("utf-8") for name, value in sorted(files.items())}
+        except UnicodeDecodeError as error:
+            raise MetadataConflict("authorization session bundle shape is invalid") from error
+        body = {
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {
+                "name": AUTHORIZATION_SESSION_SECRET_NAME,
+                "namespace": metadata.resource_name,
+                "annotations": annotations,
+                "labels": {
+                    "exomem.io/cell": metadata.resource_name,
+                    "exomem.io/resource-name": metadata.resource_name,
+                },
+            },
+            "type": "Opaque",
+            "immutable": False,
+            "stringData": string_data,
+        }
+        if expected_revision is not None:
+            try:
+                current = await asyncio.to_thread(
+                    self._core.read_namespaced_secret,
+                    AUTHORIZATION_SESSION_SECRET_NAME,
+                    metadata.resource_name,
+                )
+            except Exception as error:
+                raise MetadataConflict(
+                    "authorization session bundle predecessor is absent"
+                ) from error
+            current_annotations = dict(
+                getattr(getattr(current, "metadata", None), "annotations", None) or {}
+            )
+            _require_annotations(current_annotations, metadata)
+            current_encoded = dict(getattr(current, "data", None) or {})
+            try:
+                current_files = {
+                    name: base64.b64decode(value, validate=True)
+                    for name, value in current_encoded.items()
+                }
+            except (TypeError, ValueError) as error:
+                raise MetadataConflict(
+                    "authorization session bundle predecessor differs"
+                ) from error
+            current_revision = (
+                hashlib.sha256(
+                    current_files["keyring.json"]
+                    + current_files["control.json"]
+                    + current_files["serving-membership.json"]
+                ).hexdigest()
+                if set(current_files) == AUTHORIZATION_SESSION_FILES
+                else None
+            )
+            resource_version = getattr(getattr(current, "metadata", None), "resource_version", None)
+            if (
+                current_annotations.get("exomem.io/recovery-envelope") != recovery_envelope
+                or current_revision != expected_revision
+                or current_annotations.get("exomem.io/authorization-session-revision")
+                != expected_revision
+                or not isinstance(resource_version, str)
+                or not resource_version
+            ):
+                raise MetadataConflict("authorization session bundle predecessor differs")
+            body["metadata"]["resourceVersion"] = resource_version
+        try:
+            await asyncio.to_thread(
+                self._core.patch_namespaced_secret,
+                AUTHORIZATION_SESSION_SECRET_NAME,
+                metadata.resource_name,
+                body,
+            )
+        except Exception as error:
+            if _api_status(error) == 409:
+                raise MetadataConflict(
+                    "authorization session bundle changed concurrently"
+                ) from error
+            if _api_status(error) != 404 or expected_revision is not None:
+                raise
+            await asyncio.to_thread(
+                self._core.create_namespaced_secret,
+                metadata.resource_name,
+                body,
+            )
+
+    async def stage_authorization_session_revision(
+        self,
+        metadata: OpaqueProviderMetadata,
+        revision: str,
+    ) -> None:
+        """Bind the next pod generation to an already-published Secret revision."""
+
+        if re.fullmatch(r"[0-9a-f]{64}", revision) is None:
+            raise MetadataConflict("authorization session revision is invalid")
+        try:
+            await asyncio.to_thread(
+                self._apps.patch_namespaced_stateful_set,
+                metadata.resource_name,
+                metadata.resource_name,
+                {
+                    "spec": {
+                        "template": {
+                            "metadata": {
+                                "annotations": {
+                                    "exomem.io/authorization-session-revision": revision
+                                }
+                            }
+                        }
+                    }
+                },
+            )
+        except Exception as error:
+            raise MetadataConflict(
+                "authorization session pod generation could not be staged"
+            ) from error
+
+    async def read_authorization_session_bundle(
+        self,
+        metadata: OpaqueProviderMetadata,
+    ) -> dict[str, bytes] | None:
+        try:
+            secret = await asyncio.to_thread(
+                self._core.read_namespaced_secret,
+                AUTHORIZATION_SESSION_SECRET_NAME,
+                metadata.resource_name,
+            )
+        except Exception as error:
+            if _api_status(error) == 404:
+                return None
+            raise
+        annotations = dict(getattr(secret.metadata, "annotations", None) or {})
+        _require_annotations(annotations, metadata)
+        if self._identity_verifier is not None:
+            try:
+                self._identity_verifier.authenticate(
+                    str(annotations.get("exomem.io/recovery-envelope", "")),
+                    provider="kubernetes",
+                    provider_reference=ProviderReference.kubernetes(
+                        provider="kubernetes",
+                        api_version="v1",
+                        kind="Secret",
+                        namespace=metadata.resource_name,
+                        name=AUTHORIZATION_SESSION_SECRET_NAME,
+                    ),
+                    tenant_id=metadata.tenant_id,
+                    cell_id=metadata.subject_id,
+                    operation_id=metadata.operation_id,
+                    fence_generation=metadata.fence_generation,
+                )
+            except ProviderIdentityConflict as error:
+                raise MetadataConflict(
+                    "authorization Secret provider recovery identity did not authenticate"
+                ) from error
+        encoded = dict(getattr(secret, "data", None) or {})
+        if set(encoded) != AUTHORIZATION_SESSION_FILES:
+            raise MetadataConflict("authorization session bundle shape is invalid")
+        try:
+            files = {
+                name: base64.b64decode(value, validate=True) for name, value in encoded.items()
+            }
+        except (ValueError, TypeError) as error:
+            raise MetadataConflict("authorization session bundle shape is invalid") from error
+        if any(not 1 <= len(value) <= MAX_BUNDLE_FILE_BYTES for value in files.values()):
+            raise MetadataConflict("authorization session bundle shape is invalid")
+        if any(base64.b64encode(files[name]).decode("ascii") != encoded[name] for name in files):
+            raise MetadataConflict("authorization session bundle shape is invalid")
+        return files
+
     async def scale(self, metadata: OpaqueProviderMetadata, replicas: int) -> None:
         if replicas not in {0, 1}:
             raise MetadataConflict("hosted cell replicas must be zero or one")
@@ -991,6 +1206,7 @@ class PrivateCellApiAdapter:
         .rstrip(b"=")
         .decode("ascii")
     )
+    _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
     def __init__(self, *, request: CellRequester, internal_origin: str) -> None:
         if not internal_origin.startswith("http://") and not internal_origin.startswith("https://"):
@@ -1289,8 +1505,8 @@ class PrivateCellApiAdapter:
         credential: str,
         protocol_version: str,
         operation_id: str,
-    ) -> None:
-        await self._call(
+    ) -> dict[str, Any]:
+        return await self._call(
             "POST",
             metadata,
             "lifecycle/quiesce",
@@ -1300,6 +1516,67 @@ class PrivateCellApiAdapter:
             routing_stopped=True,
             body={"timeout_seconds": 30},
         )
+
+    async def attest_authorization_session_membership(
+        self,
+        metadata: OpaqueProviderMetadata,
+        *,
+        credential: str,
+        protocol_version: str,
+        target_epoch: int,
+        previous_epoch_digest: str,
+        ttl_seconds: int,
+    ) -> bytes:
+        if (
+            isinstance(target_epoch, bool)
+            or not isinstance(target_epoch, int)
+            or target_epoch < 1
+            or not isinstance(previous_epoch_digest, str)
+            or self._SHA256.fullmatch(previous_epoch_digest) is None
+            or isinstance(ttl_seconds, bool)
+            or not isinstance(ttl_seconds, int)
+            or not 1 <= ttl_seconds <= MAX_ATTESTATION_TTL_SECONDS
+        ):
+            raise MetadataConflict("authorization membership challenge is invalid")
+        data = await self._call(
+            "POST",
+            metadata,
+            "authorization-membership/attest",
+            credential=credential,
+            protocol_version=protocol_version,
+            body={
+                "target_epoch": target_epoch,
+                "previous_epoch_digest": previous_epoch_digest,
+                "ttl_seconds": ttl_seconds,
+            },
+        )
+        if set(data) != {"version", "attestation", "attestation_sha256"}:
+            raise MetadataConflict("authorization membership attestation is invalid")
+        encoded = data.get("attestation")
+        digest = data.get("attestation_sha256")
+        if (
+            data.get("version") != 1
+            or not isinstance(encoded, str)
+            or not isinstance(digest, str)
+            or self._SHA256.fullmatch(digest) is None
+        ):
+            raise MetadataConflict("authorization membership attestation is invalid")
+        try:
+            encoded_bytes = encoded.encode("ascii")
+            raw = base64.b64decode(
+                encoded_bytes + b"=" * (-len(encoded_bytes) % 4),
+                altchars=b"-_",
+                validate=True,
+            )
+        except (UnicodeEncodeError, ValueError) as error:
+            raise MetadataConflict("authorization membership attestation is invalid") from error
+        if (
+            not 1 <= len(raw) <= MAX_BUNDLE_FILE_BYTES
+            or base64.urlsafe_b64encode(raw).rstrip(b"=") != encoded_bytes
+            or not hmac.compare_digest(hashlib.sha256(raw).hexdigest(), digest)
+        ):
+            raise MetadataConflict("authorization membership attestation is invalid")
+        return raw
 
     async def operator(
         self,

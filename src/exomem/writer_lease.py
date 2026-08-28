@@ -725,6 +725,10 @@ class LeaseConfig:
     # `0` disables idle release entirely. A preferred replica is exempt —
     # see writer_lease.py's `_maybe_idle_release` docstring for why.
     idle_release_seconds: float = 60.0
+    # This is the binary's writer-side schema contract, not a caller-selected
+    # view of the vault. Pre-v4 clients omit the field entirely; the external
+    # coordinator interprets that released wire shape as schema 3.
+    schema_version: int = 4
 
     @property
     def enabled(self) -> bool:
@@ -802,24 +806,126 @@ class LeaseRecord:
     expires_at: float | None
     fencing_token: int
     granted: bool = False
+    required_schema_version: int | None = None
+    schema_fence_generation: int | None = None
+    governance_enrolled: bool = False
 
     @classmethod
     def from_json(cls, data: Mapping[str, Any]) -> LeaseRecord:
         holder = data.get("holder")
         expires = data.get("expires_at")
         token = data.get("fencing_token", 0)
+        granted = data.get("granted", False)
+        enrolled = data.get("governance_enrolled", False)
         if holder is not None and not isinstance(holder, str):
             raise ValueError("holder must be a string or null")
         if expires is not None and not isinstance(expires, (int, float)):
             raise ValueError("expires_at must be a number or null")
         if isinstance(token, bool) or not isinstance(token, int):
             raise ValueError("fencing_token must be an integer")
+        if not isinstance(granted, bool) or not isinstance(enrolled, bool):
+            raise ValueError("lease booleans are invalid")
+        required_schema = data.get("required_schema_version")
+        fence_generation = data.get("schema_fence_generation")
+        if required_schema is not None and (
+            isinstance(required_schema, bool)
+            or not isinstance(required_schema, int)
+            or required_schema not in {3, 4}
+        ):
+            raise ValueError("required_schema_version must be 3, 4, or null")
+        if fence_generation is not None and (
+            isinstance(fence_generation, bool)
+            or not isinstance(fence_generation, int)
+            or fence_generation < 1
+        ):
+            raise ValueError("schema_fence_generation must be a positive integer or null")
+        has_fence = required_schema is not None and fence_generation is not None
+        if enrolled != has_fence:
+            raise ValueError("schema fence metadata is inconsistent")
         return cls(
             holder,
             float(expires) if expires is not None else None,
             token,
-            bool(data.get("granted")),
+            granted,
+            required_schema,
+            fence_generation,
+            enrolled,
         )
+
+
+@dataclass(frozen=True)
+class SchemaAdmission:
+    admitted: bool
+    governance_enrolled: bool
+    required_schema_version: int | None
+    schema_fence_generation: int | None
+
+    @classmethod
+    def from_json(cls, data: Mapping[str, Any]) -> SchemaAdmission:
+        expected_fields = {
+            "admitted",
+            "governance_enrolled",
+            "required_schema_version",
+            "schema_fence_generation",
+        }
+        if set(data) != expected_fields:
+            raise ValueError("schema admission response fields are invalid")
+        admitted = data.get("admitted")
+        enrolled = data.get("governance_enrolled")
+        required = data.get("required_schema_version")
+        generation = data.get("schema_fence_generation")
+        if not isinstance(admitted, bool) or not isinstance(enrolled, bool):
+            raise ValueError("schema admission booleans are invalid")
+        if required is not None and (
+            isinstance(required, bool) or not isinstance(required, int) or required not in {3, 4}
+        ):
+            raise ValueError("required_schema_version is invalid")
+        if generation is not None and (
+            isinstance(generation, bool) or not isinstance(generation, int) or generation < 1
+        ):
+            raise ValueError("schema_fence_generation is invalid")
+        has_fence = required is not None and generation is not None
+        if enrolled != has_fence or (admitted and not enrolled):
+            raise ValueError("schema admission response has inconsistent authority")
+        return cls(admitted, enrolled, required, generation)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "admitted": self.admitted,
+            "governance_enrolled": self.governance_enrolled,
+            "required_schema_version": self.required_schema_version,
+            "schema_fence_generation": self.schema_fence_generation,
+        }
+
+
+@dataclass(frozen=True)
+class SchemaFenceState:
+    governance_enrolled: bool
+    schema_version: int
+    generation: int
+
+    @classmethod
+    def from_json(cls, data: Mapping[str, Any]) -> SchemaFenceState:
+        if set(data) != {"governance_enrolled", "schema_version", "generation"}:
+            raise ValueError("schema fence response fields are invalid")
+        enrolled = data.get("governance_enrolled")
+        schema_version = data.get("schema_version")
+        generation = data.get("generation")
+        if enrolled is not True:
+            raise ValueError("schema fence enrollment is invalid")
+        if (
+            isinstance(schema_version, bool)
+            or not isinstance(schema_version, int)
+            or schema_version not in {3, 4}
+        ):
+            raise ValueError("schema fence version is invalid")
+        if (
+            isinstance(generation, bool)
+            or not isinstance(generation, int)
+            or generation < 1
+        ):
+            raise ValueError("schema fence generation is invalid")
+        return cls(enrolled, schema_version, generation)
 
 
 #: Statuses that mean the URL answered and does not implement the lease
@@ -860,7 +966,7 @@ def _coordinator_unavailable_error(exc: BaseException) -> OpError:
     )
 
 
-def _contract_absent_error(url: str, operation: str, status: int) -> OpError:
+def _contract_absent_error(url: str, route: str, status: int) -> OpError:
     """A URL that answers but does not serve the writer-lease contract.
 
     Fail-closed exactly like an unavailable coordinator -- authority is still
@@ -868,7 +974,6 @@ def _contract_absent_error(url: str, operation: str, status: int) -> OpError:
     configuration fault instead of an outage, and callers that poll can slow
     down instead of asking a 404 the same question every five seconds.
     """
-    route = "/v1/vaults/<id>/lease" + (f"/{operation}" if operation else "")
     safe_url = _redacted_coordinator_url(url)
     logger.warning(
         "writer-lease coordinator %s answered %d for %s; "
@@ -900,7 +1005,11 @@ class LeaseCoordinatorClient:
         return self._request(
             "POST",
             "acquire",
-            {"replica_id": self.config.replica_id, "ttl_seconds": self.config.ttl_seconds},
+            {
+                "replica_id": self.config.replica_id,
+                "ttl_seconds": self.config.ttl_seconds,
+                "schema_version": self.config.schema_version,
+            },
         )
 
     def renew(self, fencing_token: int) -> LeaseRecord:
@@ -911,6 +1020,7 @@ class LeaseCoordinatorClient:
                 "replica_id": self.config.replica_id,
                 "fencing_token": fencing_token,
                 "ttl_seconds": self.config.ttl_seconds,
+                "schema_version": self.config.schema_version,
             },
         )
 
@@ -935,10 +1045,103 @@ class LeaseCoordinatorClient:
     def status(self) -> LeaseRecord:
         return self._request("GET", "", None)
 
+    def schema_admission(self, schema_version: int) -> SchemaAdmission:
+        if isinstance(schema_version, bool) or schema_version not in {3, 4}:
+            raise ValueError("schema_version must be 3 or 4")
+        vault = urllib.parse.quote(str(self.config.vault_id), safe="")
+        payload = self._request_json(
+            "POST",
+            f"/v1/vaults/{vault}/schema-fence/admit",
+            {
+                "replica_id": self.config.replica_id,
+                "schema_version": schema_version,
+            },
+            contract_route="/v1/vaults/<id>/schema-fence/admit",
+        )
+        try:
+            admission = SchemaAdmission.from_json(payload)
+            expected_admission = bool(
+                admission.governance_enrolled
+                and admission.required_schema_version == schema_version
+            )
+            if admission.admitted != expected_admission:
+                raise ValueError("schema admission decision disagrees with its fence")
+            return admission
+        except ValueError as exc:
+            raise _coordinator_unavailable_error(exc) from None
+
+    def schema_fence(self) -> SchemaFenceState:
+        vault = urllib.parse.quote(str(self.config.vault_id), safe="")
+        payload = self._request_json(
+            "GET",
+            f"/v1/vaults/{vault}/schema-fence",
+            None,
+            contract_route="/v1/vaults/<id>/schema-fence",
+        )
+        try:
+            return SchemaFenceState.from_json(payload)
+        except ValueError as exc:
+            raise _coordinator_unavailable_error(exc) from None
+
+    def transition_schema_fence(
+        self,
+        *,
+        expected_generation: int,
+        schema_version: int,
+    ) -> SchemaFenceState:
+        if (
+            isinstance(expected_generation, bool)
+            or not isinstance(expected_generation, int)
+            or expected_generation < 1
+        ):
+            raise ValueError("expected_generation must be a positive integer")
+        if isinstance(schema_version, bool) or schema_version not in {3, 4}:
+            raise ValueError("schema_version must be 3 or 4")
+        vault = urllib.parse.quote(str(self.config.vault_id), safe="")
+        payload = self._request_json(
+            "PUT",
+            f"/v1/vaults/{vault}/schema-fence",
+            {
+                "expected_generation": expected_generation,
+                "schema_version": schema_version,
+            },
+            contract_route="/v1/vaults/<id>/schema-fence",
+        )
+        try:
+            state = SchemaFenceState.from_json(payload)
+            if (
+                state.schema_version != schema_version
+                or state.generation != expected_generation + 1
+            ):
+                raise ValueError("schema fence transition result is inconsistent")
+            return state
+        except ValueError as exc:
+            raise _coordinator_unavailable_error(exc) from None
+
     def _request(self, method: str, operation: str, body: dict | None) -> LeaseRecord:
         vault = urllib.parse.quote(str(self.config.vault_id), safe="")
         suffix = f"/{operation}" if operation else ""
-        url = f"{self.config.url}/v1/vaults/{vault}/lease{suffix}"
+        route = f"/v1/vaults/{vault}/lease{suffix}"
+        payload = self._request_json(
+            method,
+            route,
+            body,
+            contract_route="/v1/vaults/<id>/lease" + (f"/{operation}" if operation else ""),
+        )
+        try:
+            return LeaseRecord.from_json(payload)
+        except ValueError as exc:
+            raise _coordinator_unavailable_error(exc) from None
+
+    def _request_json(
+        self,
+        method: str,
+        route: str,
+        body: dict | None,
+        *,
+        contract_route: str,
+    ) -> dict[str, Any]:
+        url = f"{self.config.url}{route}"
         headers = {"Accept": "application/json", "User-Agent": _COORDINATOR_USER_AGENT}
         data = None
         if body is not None:
@@ -952,12 +1155,14 @@ class LeaseCoordinatorClient:
                 payload = json.loads(response.read().decode("utf-8"))
             if not isinstance(payload, dict):
                 raise ValueError("response is not an object")
-            return LeaseRecord.from_json(payload)
+            return payload
         except urllib.error.HTTPError as exc:
             # HTTPError subclasses URLError, so it has to be caught first for
             # the status to be visible at all.
             if exc.code in _CONTRACT_ABSENT_STATUSES:
-                raise _contract_absent_error(self.config.url, operation, exc.code) from None
+                raise _contract_absent_error(
+                    self.config.url, contract_route, exc.code
+                ) from None
             raise _coordinator_unavailable_error(exc) from None
         except (
             urllib.error.URLError,
@@ -967,6 +1172,105 @@ class LeaseCoordinatorClient:
             ValueError,
         ) as exc:
             raise _coordinator_unavailable_error(exc) from None
+
+
+def configured_schema_fence_operator_client(
+    env: Mapping[str, str] | None = None,
+) -> LeaseCoordinatorClient | None:
+    """Return the protected rollout client when writer coordination is configured."""
+
+    values = os.environ if env is None else env
+    config = LeaseConfig.from_env(values)
+    if not config.enabled:
+        return None
+    operator_token = values.get(
+        "EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN", ""
+    ).strip()
+    if not operator_token:
+        raise OpError(
+            "SCHEMA_FENCE_OPERATOR_UNAVAILABLE",
+            "schema fence operator credential is unavailable",
+            "Set EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN only in the protected "
+            "offline rollout environment.",
+        )
+    if operator_token == config.token:
+        raise OpError(
+            "SCHEMA_FENCE_OPERATOR_UNAVAILABLE",
+            "schema fence operator credential must be distinct from the writer lease credential",
+            "Provision a separate operator credential before changing the schema fence.",
+        )
+    return LeaseCoordinatorClient(replace(config, token=operator_token))
+
+
+def require_configured_schema_fence(
+    schema_version: int,
+) -> SchemaFenceState | None:
+    """Verify an optional external rollout fence without widening its state."""
+
+    if isinstance(schema_version, bool) or schema_version not in {3, 4}:
+        raise ValueError("schema_version must be 3 or 4")
+    client = configured_schema_fence_operator_client()
+    if client is None:
+        return None
+    state = client.schema_fence()
+    if state.schema_version != schema_version:
+        raise OpError(
+            "SCHEMA_FENCE_CONFLICT",
+            f"external schema fence requires v{state.schema_version}, not v{schema_version}",
+            "Reconcile the durable store and schema-fence generation before retrying.",
+            details={
+                "required_schema_version": state.schema_version,
+                "schema_fence_generation": state.generation,
+            },
+        )
+    return state
+
+
+def advance_configured_schema_fence(
+    *,
+    source_schema_version: int,
+    target_schema_version: int,
+) -> SchemaFenceState | None:
+    """CAS an optional rollout fence, accepting an exact lost-ack replay."""
+
+    if (
+        isinstance(source_schema_version, bool)
+        or isinstance(target_schema_version, bool)
+        or source_schema_version not in {3, 4}
+        or target_schema_version not in {3, 4}
+        or source_schema_version == target_schema_version
+    ):
+        raise ValueError("schema fence transition must be between v3 and v4")
+    client = configured_schema_fence_operator_client()
+    if client is None:
+        return None
+    current = client.schema_fence()
+    if current.schema_version == target_schema_version:
+        return current
+    if current.schema_version != source_schema_version:
+        raise OpError(
+            "SCHEMA_FENCE_CONFLICT",
+            "external schema fence does not match the transition predecessor",
+            "Reconcile the durable store and schema-fence generation before retrying.",
+            details={
+                "required_schema_version": current.schema_version,
+                "schema_fence_generation": current.generation,
+            },
+        )
+    advanced = client.transition_schema_fence(
+        expected_generation=current.generation,
+        schema_version=target_schema_version,
+    )
+    if (
+        advanced.schema_version != target_schema_version
+        or advanced.generation != current.generation + 1
+    ):
+        raise OpError(
+            "SCHEMA_FENCE_CONFLICT",
+            "external schema fence returned an inconsistent transition terminal",
+            "Reconcile the durable store and schema-fence generation before retrying.",
+        )
+    return advanced
 
 
 def _mutation_outcome_unknown_error() -> OpError:
@@ -2357,6 +2661,22 @@ class LeaseManager:
                 self._record_coordinator_error(error.code)
                 self._record_lease_op("acquire", "error")
                 raise
+            if (
+                record.governance_enrolled
+                and record.required_schema_version is not None
+                and record.required_schema_version != self.config.schema_version
+            ):
+                self._record_lease_op("acquire", "schema_refused")
+                raise OpError(
+                    "WRITER_SCHEMA_FENCE_MISMATCH",
+                    "this replica does not match the enrolled writer schema",
+                    "Drain this replica and deploy the schema version selected by the "
+                    "external lease fence.",
+                    details={
+                        "required_schema_version": record.required_schema_version,
+                        "schema_fence_generation": record.schema_fence_generation,
+                    },
+                )
             if not record.granted or record.holder != self.config.replica_id:
                 self._record_lease_op("acquire", "refused")
                 raise OpError(
@@ -2476,6 +2796,8 @@ class LeaseManager:
         request_id: str | None = None,
         operation: str | None = None,
         holder_kind: str = "command",
+        attachment_control: bool = False,
+        attachment_now: int | None = None,
     ) -> Iterator[VaultMutationCoordinator]:
         """Hold the shared vault mutation boundary and revalidate writer authority."""
         direct_boundary: tuple[str, Path] | None = None
@@ -2500,7 +2822,11 @@ class LeaseManager:
                 holder_kind=holder_kind,
             ) as mutation:
                 try:
-                    with self.writer_authority_guard():
+                    with self.writer_authority_guard(
+                        vault_root=vault_root,
+                        attachment_control=attachment_control,
+                        attachment_now=attachment_now,
+                    ):
                         yield mutation
                 finally:
                     # Bump while the boundary is still held, so the counter is
@@ -2546,7 +2872,13 @@ class LeaseManager:
                 )
 
     @contextmanager
-    def writer_authority_guard(self) -> Iterator[None]:
+    def writer_authority_guard(
+        self,
+        *,
+        vault_root: os.PathLike[str] | str | None = None,
+        attachment_control: bool = False,
+        attachment_now: int | None = None,
+    ) -> Iterator[None]:
         """Revalidate writer authority without holding the vault mutation lock.
 
         The single choke point for idle-release accounting (R5): this is the
@@ -2556,6 +2888,24 @@ class LeaseManager:
         """
         fence_context: Token[tuple[Any, int] | None] | None = None
         counted = False
+        if vault_root is not None and not attachment_control:
+            from .governance import authorization_custody
+
+            try:
+                authorization_custody.require_standalone_mutation_admission(
+                    Path(vault_root),
+                    now=(
+                        int(time.time())
+                        if attachment_now is None
+                        else attachment_now
+                    ),
+                )
+            except authorization_custody.AuthorizationCustodyUnavailable:
+                raise OpError(
+                    "ATTACHMENT_DRAINING",
+                    "the registered vault attachment is not serving mutations",
+                    "Complete or recover the authenticated attachment transition before retrying.",
+                ) from None
         if self.config.enabled:
             lease = self.ensure_writer()
             fence_context = _ACTIVE_WRITE_FENCE.set((self, lease.fencing_token))
@@ -2600,6 +2950,19 @@ class LeaseManager:
         else:
             assert public_idempotency_key is None or isinstance(public_idempotency_key, str)
             effective_public_idempotency_key = public_idempotency_key
+        authorization_issuance = (
+            command.name == "govern_memory"
+            and kwargs.get("operation") == "session"
+            and kwargs.get("session_action") in {"open", "rotate"}
+        )
+        if authorization_issuance:
+            # The generic mutation store pickles its terminal for replay. An
+            # authorization-session issuance terminal contains the one raw
+            # bearer occurrence the product may return, so it must never enter
+            # that durable cache (or be emitted a second time by replay).
+            idempotency_key = None
+            implicit_idempotency_scope = None
+            effective_public_idempotency_key = None
         invocation_read_only = command.read_only if read_only is None else read_only
         if invocation_read_only:
             # Reads never take the mutation boundary, hosted or local: every

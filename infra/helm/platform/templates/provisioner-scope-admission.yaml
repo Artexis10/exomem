@@ -110,6 +110,8 @@ spec:
             variables.annotations['exomem.io/resource-name'] + '-data' &&
           variables.annotations['exomem.io/credentials-secret-name'] ==
             'exomem-cell-credentials' &&
+          variables.annotations['exomem.io/authorization-session-secret-name'] ==
+            'exomem-authorization-session' &&
           variables.annotations['exomem.io/init-request-configmap-name'] ==
             variables.annotations['exomem.io/resource-name'] + '-init-request' &&
           !('exomem.io/approved-image' in variables.annotations) &&

@@ -463,7 +463,7 @@ def inspect_escalation_token(
     )
 
 
-def redeem_escalation_token(
+def review_escalation_redemption(
     connection: sqlite3.Connection,
     *,
     token: object,
@@ -476,7 +476,7 @@ def redeem_escalation_token(
     now: int,
     grant_expires_at: int | None = None,
 ) -> SessionGrant:
-    """Consume a token once and atomically create its exact session grant."""
+    """Return the exact grant a live token may create without changing state."""
 
     current = _active_context(connection, context, now=now)
     review = inspect_escalation_token(
@@ -508,7 +508,6 @@ def redeem_escalation_token(
         )
     ):
         raise _unavailable()
-    membership_json = _membership_json(canonical_membership)
     grant_id = hashlib.sha256(
         _GRANT_ID_DOMAIN + current.session_id.encode() + b"\0" + jti.encode("ascii")
     ).hexdigest()
@@ -535,25 +534,159 @@ def redeem_escalation_token(
             else _integer(grant_expires_at, minimum=_integer(now, minimum=1) + 1),
         ),
     )
+    return grant
+
+
+def _insert_session_grant(
+    connection: sqlite3.Connection,
+    grant: SessionGrant,
+    *,
+    status: str,
+    prepared_event_id: str | None,
+) -> None:
+    connection.execute(
+        "INSERT INTO governance_session_grants "
+        "(grant_id, authorization_session_id, principal_id, issuer_family, audience, "
+        "purpose, ceiling, paths, fingerprints, scope_ids, membership_manifest, "
+        "policy_fingerprint, token_jti, status, prepared_event_id, created_at, "
+        "expires_at, revoked_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+        "?, ?, ?, NULL)",
+        (
+            grant.grant_id,
+            grant.authorization_session_id,
+            grant.principal_id,
+            grant.issuer_family,
+            grant.audience,
+            grant.purpose,
+            grant.ceiling,
+            _canonical_json(list(grant.paths)).decode(),
+            _canonical_json(list(grant.fingerprints)).decode(),
+            _canonical_json(list(grant.scope_ids)).decode(),
+            _membership_json(grant.membership),
+            grant.policy_fingerprint,
+            grant.token_jti,
+            status,
+            prepared_event_id,
+            grant.created_at,
+            grant.expires_at,
+        ),
+    )
+
+
+def prepare_escalation_redemption(
+    connection: sqlite3.Connection,
+    *,
+    token: object,
+    context: AuthorizationSessionContext,
+    signing_key: bytes,
+    audience: str,
+    purpose: str | None,
+    membership: tuple[SessionMembership, ...],
+    policy_fingerprint: str,
+    now: int,
+    grant_expires_at: int | None,
+    prepared_event_id: str,
+    expected_grant: SessionGrant,
+) -> SessionGrant:
+    """Atomically stage one receipt-bound token redemption and exact grant."""
+
+    event_id = _text(prepared_event_id)
+    if not isinstance(expected_grant, SessionGrant) or connection.in_transaction:
+        raise _unavailable()
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        reviewed = review_escalation_redemption(
+            connection,
+            token=token,
+            context=context,
+            signing_key=signing_key,
+            audience=audience,
+            purpose=purpose,
+            membership=membership,
+            policy_fingerprint=policy_fingerprint,
+            now=now,
+            grant_expires_at=grant_expires_at,
+        )
+        if reviewed != expected_grant:
+            raise _unavailable()
+        consumed = connection.execute(
+            "UPDATE withhold_tokens SET consumed_at=?, status='prepared', "
+            "prepared_event_id=? WHERE jti=? AND authorization_session_id=? "
+            "AND status='active' AND prepared_event_id IS NULL AND consumed_at IS NULL",
+            (
+                reviewed.created_at,
+                event_id,
+                reviewed.token_jti,
+                reviewed.authorization_session_id,
+            ),
+        )
+        if consumed.rowcount != 1:
+            raise _unavailable()
+        _insert_session_grant(
+            connection,
+            reviewed,
+            status="prepared",
+            prepared_event_id=event_id,
+        )
+        connection.commit()
+    except (sqlite3.Error, AuthorizationSessionUnavailable):
+        connection.rollback()
+        raise _unavailable() from None
+    except BaseException:
+        connection.rollback()
+        raise
+    return reviewed
+
+
+def redeem_escalation_token(
+    connection: sqlite3.Connection,
+    *,
+    token: object,
+    context: AuthorizationSessionContext,
+    signing_key: bytes,
+    audience: str,
+    purpose: str | None,
+    membership: tuple[SessionMembership, ...],
+    policy_fingerprint: str,
+    now: int,
+    grant_expires_at: int | None = None,
+) -> SessionGrant:
+    """Consume a token once and atomically create its exact session grant."""
+
+    grant = review_escalation_redemption(
+        connection,
+        token=token,
+        context=context,
+        signing_key=signing_key,
+        audience=audience,
+        purpose=purpose,
+        membership=membership,
+        policy_fingerprint=policy_fingerprint,
+        now=now,
+        grant_expires_at=grant_expires_at,
+    )
+    current = _active_context(connection, context, now=now)
+    canonical_policy = grant.policy_fingerprint
+    canonical_audience = grant.audience
+    canonical_purpose = grant.purpose
+    jti = grant.token_jti
     if connection.in_transaction:
         raise _unavailable()
     try:
         connection.execute("BEGIN IMMEDIATE")
         _active_context(connection, current, now=now)
-        if inspect_escalation_token(
+        if review_escalation_redemption(
             connection,
             token=token,
             context=current,
             signing_key=signing_key,
             audience=canonical_audience,
             purpose=canonical_purpose,
+            membership=membership,
+            policy_fingerprint=canonical_policy,
             now=now,
-        ) != review:
-            raise _unavailable()
-        active_policy = connection.execute(
-            "SELECT policy_fingerprint FROM active_governance_tuple WHERE singleton=1"
-        ).fetchone()
-        if active_policy != (canonical_policy,):
+            grant_expires_at=grant_expires_at,
+        ) != grant:
             raise _unavailable()
         consumed = connection.execute(
             "UPDATE withhold_tokens SET consumed_at=?, status='consumed' "
@@ -563,30 +696,11 @@ def redeem_escalation_token(
         )
         if consumed.rowcount != 1:
             raise _unavailable()
-        connection.execute(
-            "INSERT INTO governance_session_grants "
-            "(grant_id, authorization_session_id, principal_id, issuer_family, audience, "
-            "purpose, ceiling, paths, fingerprints, scope_ids, membership_manifest, "
-            "policy_fingerprint, token_jti, status, prepared_event_id, created_at, "
-            "expires_at, revoked_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-            "'active', NULL, ?, ?, NULL)",
-            (
-                grant.grant_id,
-                grant.authorization_session_id,
-                grant.principal_id,
-                grant.issuer_family,
-                grant.audience,
-                grant.purpose,
-                grant.ceiling,
-                _canonical_json(list(grant.paths)).decode(),
-                _canonical_json(list(grant.fingerprints)).decode(),
-                _canonical_json(list(grant.scope_ids)).decode(),
-                membership_json,
-                grant.policy_fingerprint,
-                grant.token_jti,
-                grant.created_at,
-                grant.expires_at,
-            ),
+        _insert_session_grant(
+            connection,
+            grant,
+            status="active",
+            prepared_event_id=None,
         )
         connection.commit()
     except (sqlite3.Error, AuthorizationSessionUnavailable):

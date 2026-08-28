@@ -19,6 +19,7 @@ metadata:
     exomem.io/resource-name: {{ .Values.resourceName | quote }}
     exomem.io/pvc-name: {{ printf "%s-data" .Values.resourceName | quote }}
     exomem.io/credentials-secret-name: {{ .Values.credentialsSecretName | quote }}
+    exomem.io/authorization-session-secret-name: {{ .Values.authorizationSessionSecretName | quote }}
     exomem.io/init-request-configmap-name: {{ printf "%s-init-request" .Values.resourceName | quote }}
     exomem.io/provision-mode: {{ .Values.provisionMode | quote }}
     exomem.io/vault-id: {{ .Values.vaultId | quote }}

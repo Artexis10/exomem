@@ -708,6 +708,59 @@ def test_control_plane_readiness_rechecks_content_free_session_membership(
     assert "digest" not in repr(first).lower()
 
 
+def test_hosted_readiness_provider_uses_the_bound_control_plane_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    values = _env(tmp_path)
+    values.pop("EXOMEM_HOSTED_SERVICE_CREDENTIAL")
+    values.update(
+        {
+            "EXOMEM_HOSTED_VAULT_ID": "vault-alpha",
+            "EXOMEM_HOSTED_RUNTIME_UID": str(os.geteuid()),
+            "EXOMEM_HOSTED_RUNTIME_GID": str(os.getegid()),
+            "EXOMEM_HOSTED_WORKER_POLICY_DIGEST": "a" * 64,
+            "EXOMEM_AUTH_SESSION_REPLICA_ID": "cell-alpha-0",
+        }
+    )
+    config = HostedCellConfig.from_env(values)
+    expected = ServingMembershipReadiness(
+        ready=True,
+        code="AUTHORIZATION_MEMBERSHIP_READY",
+        epoch=9,
+        serving_replicas=1,
+        draining_replicas=0,
+    )
+    calls: list[dict[str, object]] = []
+
+    def hosted_provider(vault_root: Path, **kwargs: object) -> ServingMembershipReadiness:
+        calls.append({"vault_root": vault_root, **kwargs})
+        return expected
+
+    monkeypatch.setattr(
+        server_runtime.authorization_session_lifecycle,
+        "hosted_serving_membership_readiness",
+        hosted_provider,
+    )
+    monkeypatch.setattr(
+        server_runtime.authorization_session_lifecycle,
+        "serving_membership_readiness",
+        lambda *_args, **_kwargs: pytest.fail("Hosted used the standalone registry"),
+    )
+
+    provider = server_runtime._hosted_authorization_session_readiness_provider(config)
+
+    assert provider() == expected
+    assert calls == [
+        {
+            "vault_root": config.vault_root,
+            "expected_cell_id": "cell-alpha",
+            "expected_logical_vault_id": "vault-alpha",
+            "expected_replica_id": "cell-alpha-0",
+        }
+    ]
+
+
 def test_quiesce_and_deletion_sealing_wait_for_an_admitted_download(tmp_path: Path) -> None:
     _values, config = _provisioned(tmp_path)
     lifecycle = HostedCellLifecycle(config)
@@ -834,6 +887,32 @@ def test_quiesce_drains_and_rejects_new_mutations_then_resume_is_idempotent(
     second = lifecycle.resume()
     assert first.phase == second.phase == "active"
     assert lifecycle.readiness().ready is True
+
+
+def test_runtime_membership_attestation_requires_admitted_active_state(
+    tmp_path: Path,
+) -> None:
+    _values, config = _provisioned(tmp_path)
+    lifecycle = HostedCellLifecycle(config)
+    lifecycle.complete_startup(
+        vault_ready=True,
+        mutation_authority_ready=True,
+        service_auth_ready=True,
+    )
+    observed: list[str] = []
+
+    assert lifecycle.attest_authorization_membership(
+        lambda snapshot: observed.append(snapshot.phase) or b"signed"
+    ) == b"signed"
+    lifecycle.set_mutation_authority(False)
+
+    with pytest.raises(HostedLifecycleError) as raised:
+        lifecycle.attest_authorization_membership(
+            lambda _snapshot: b"must-not-sign"
+        )
+
+    assert raised.value.code == "AUTHORIZATION_SESSION_UNAVAILABLE"
+    assert observed == ["active"]
 
 
 def test_deletion_seal_is_idempotent_and_rejects_reads_and_writes(

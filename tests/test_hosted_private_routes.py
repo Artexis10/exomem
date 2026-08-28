@@ -35,6 +35,7 @@ from exomem import (
 from exomem import commands as commands_module
 from exomem import hosted_gateway as gateway
 from exomem.access_log import AccessLogMiddleware
+from exomem.governance import authorization_session_lifecycle
 from exomem.governance.authorization_transport import AuthorizationCarrierMiddleware
 from exomem.hosted_runtime import (
     HostedCellConfig,
@@ -246,6 +247,7 @@ def _cell(
     records_reader_version: int = 2,
     lifecycle_actions_enabled: bool = False,
     production_invoker: bool = False,
+    authorization_session_replica_id: str | None = None,
 ) -> tuple[_ASGIClient, HostedCellConfig, HostedCellLifecycle, IsolatedInvoker]:
     vault_root = tmp_path / cell_id / "vault"
     from exomem.init import init_vault
@@ -262,6 +264,7 @@ def _cell(
         enforce_transfer_v1_compatibility=False,
         records_reader_version=records_reader_version,
         lifecycle_actions_enabled=lifecycle_actions_enabled,
+        authorization_session_replica_id=authorization_session_replica_id,
         resource_limits=HostedResourceLimits(
             storage_bytes=1024 * 1024,
             upload_bytes=4096,
@@ -1015,6 +1018,7 @@ def test_every_private_custom_route_manually_requires_service_auth(tmp_path: Pat
         ("GET", "/private/exomem/v1/live"),
         ("GET", "/private/exomem/v1/ready"),
         ("POST", "/private/exomem/v1/lifecycle/quiesce"),
+        ("POST", "/private/exomem/v1/authorization-membership/attest"),
         ("POST", "/private/exomem/v1/lifecycle/export"),
         ("POST", "/private/exomem/v1/lifecycle/export/release"),
         ("POST", "/private/exomem/v1/lifecycle/resume"),
@@ -1032,6 +1036,72 @@ def test_every_private_custom_route_manually_requires_service_auth(tmp_path: Pat
         assert config.service_credential not in response.text
 
     assert client.get("/private/exomem/v1/live", headers=valid).status_code == 200
+
+
+def test_private_runtime_attestation_derives_lifecycle_and_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class DynamicAuthority:
+        def authenticate(self, presented: str | None) -> object | None:
+            if presented == "dynamic-attestation-secret":
+                return SimpleNamespace(
+                    credential_version="active-v1",
+                    security_revision=1,
+                    preferred=True,
+                )
+            return None
+
+    client, config, lifecycle, _invoker = _cell(
+        tmp_path,
+        cell_id="cell-attestation",
+        credential="legacy-secret-must-not-work",
+        private_authenticator=DynamicAuthority(),
+        authorization_session_replica_id="cell-attestation-0",
+    )
+    captured: dict[str, object] = {}
+
+    def mint(vault_root: Path, **kwargs: object) -> bytes:
+        captured.update({"vault_root": vault_root, **kwargs})
+        return b'{"signed":"runtime-attestation"}'
+
+    monkeypatch.setattr(
+        authorization_session_lifecycle,
+        "mint_hosted_replica_readiness_attestation",
+        mint,
+    )
+    lifecycle.quiesce(timeout=1)
+
+    response = client.post(
+        "/private/exomem/v1/authorization-membership/attest",
+        headers=_headers(config, credential="dynamic-attestation-secret"),
+        json={
+            "target_epoch": 8,
+            "previous_epoch_digest": "a" * 64,
+            "ttl_seconds": 300,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    raw = b'{"signed":"runtime-attestation"}'
+    assert response.json()["data"] == {
+        "version": 1,
+        "attestation": base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii"),
+        "attestation_sha256": hashlib.sha256(raw).hexdigest(),
+    }
+    assert captured == {
+        "vault_root": config.vault_root,
+        "expected_cell_id": "cell-attestation",
+        "expected_logical_vault_id": "vault-cell-attestation",
+        "expected_replica_id": "cell-attestation-0",
+        "lifecycle_phase": "quiesced",
+        "active_reads": 0,
+        "active_mutations": 0,
+        "active_transfers": 0,
+        "target_epoch": 8,
+        "previous_epoch_digest": "a" * 64,
+        "ttl_seconds": 300,
+    }
 
 
 def test_private_readiness_is_a_complete_control_plane_binding_proof(tmp_path: Path) -> None:

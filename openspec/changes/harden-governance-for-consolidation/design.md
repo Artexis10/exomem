@@ -897,10 +897,45 @@ vault/sidecar copy presenting the same ids and keyring collides with the attachm
 lease and fails; copying the keyring/control file without registry ownership also fails.
 A move quiesces the old attachment, obtains its explicit detach acknowledgement,
 advances the registry attachment epoch, and attaches the same logical vault at the new
-location before serving. A restore may preserve unexpired sessions only when the exact
-vault, sidecar, keyring, control record, cell/logical-vault ids, and exclusive registry
-attachment are restored after the old instance is proven offline; clone/import into a
-new logical vault provisions a new cell/keyring and invalidates copied session rows.
+location before serving. Version 1 deliberately gives an exact offline restore the same
+protocol and the same conservative authority outcome: the old attachment reaches
+`DRAINING` plus `no_in_flight`, a short-lived target-bound detach acknowledgement names
+the exact source control and serving-membership digests, and target attachment invalidates
+every imported authorization session, grant, purpose, and token before it can advance the
+attachment/membership epochs and serve. No version-1 restore preserves an unexpired
+session. A future preservation mode would require its own reviewed snapshot/census and
+exclusive-offline proof and cannot be inferred from copied bytes, a stopped process, or
+the ordinary transfer acknowledgement.
+
+Clone/import into a new logical vault is a distinct authenticated offline operation. It
+requires a copied exact-v4 activation store with no target external custody files and no
+target registry attachment. It publishes one inert target keyring first, deriving stable
+new cell, logical-vault, keyring, and activation-store ids from that one staged random
+root plus the target attachment so retry never rotates identity. Under the target writer,
+schema, receipt, and held-filesystem fences, one `BEGIN EXCLUSIVE` transaction verifies
+the complete copied active tuple, immutable publication chain, and unforked receipt
+evidence/anchor set, closes every copied
+session and invalidates every session-derived grant, purpose, and token, changes only the
+activation-store/logical-vault identity, preserves copied receipt rows and evidence as
+historical input while replacing the active receipt singleton with a fresh target-derived
+instance, genesis head, and label-HMAC secret, increments the activation epoch, recomputes its
+activation digest over the unchanged active policy/projector/catalog tuple, and appends
+one immutable `attachment-clone` tuple publication whose predecessor is the copied active
+digest. The immutable policy generations, catalog descriptors, projection namespaces,
+and prior publication evidence remain append-only and byte-identical.
+
+Only after that transaction commits may the operation publish target control and
+serving-membership records and create the new host-registry attachment. Store/control/
+registry mismatch remains BLOCKED throughout those external steps. Recovery may finish
+only the exact staged-keyring-derived clone publication and external records; it never
+generates a second identity, rekeys the source, reopens a copied session, or treats an
+old copied keyring/control file as target authority. A crash before the transaction may
+retry or abandon the inert keyring; a crash after it must finish the exact new identity
+or remain blocked. The source receipt chain continues only under its original instance;
+the clone appends only under the fresh instance, so later evidence cannot fork one chain.
+The source logical vault and its registry record are untouched and may
+continue independently because the clone has a different cell, logical-vault, keyring,
+activation-store, attachment, and membership identity.
 
 The authoritative serving set is the external `serving_membership_epoch` control-plane
 record, never peer gossip, timeout inference, or the set of recently responding pods.

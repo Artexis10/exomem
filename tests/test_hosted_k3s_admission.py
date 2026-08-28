@@ -1324,8 +1324,22 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
     serving = _render(CELL, CELL / "values.validation.yaml", namespace)
     stateful_set = next(item for item in serving if item.get("kind") == "StatefulSet")
     serving_pod = _pod(stateful_set, name="cell-alpha-serve-positive", namespace=namespace)
-    assert "initContainers" not in serving_pod["spec"]
+    assert [
+        container["name"] for container in serving_pod["spec"]["initContainers"]
+    ] == ["authorization-session-custody"]
     assert _server_dry_run(k3s, serving_pod).returncode == 0
+
+    serving_init_escape = copy.deepcopy(serving_pod)
+    serving_init_escape["metadata"]["name"] = "cell-alpha-serve-init-escape"
+    serving_init_escape["spec"]["initContainers"][0]["args"] = [
+        "-c",
+        "print('unexpected executable surface')",
+    ]
+    _assert_denied(
+        k3s,
+        serving_init_escape,
+        message="exact authorization-custody init container",
+    )
 
     serving_command_escape = copy.deepcopy(serving_pod)
     serving_command_escape["metadata"]["name"] = "cell-alpha-serve-command-escape"
@@ -1651,7 +1665,7 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
     writable_tmp["spec"]["containers"][0]["volumeMounts"].append(
         {"name": "tmp", "mountPath": "/tmp"}
     )
-    _assert_denied(k3s, writable_tmp, message="own PVC and credential Secret")
+    _assert_denied(k3s, writable_tmp, message="PVC and exact control-plane Secrets")
 
     side_init = copy.deepcopy(serving_pod)
     side_init["metadata"]["name"] = "cell-alpha-serve-side-init"
@@ -1661,7 +1675,7 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
     for field in ("ports", "env", "startupProbe", "livenessProbe", "readinessProbe"):
         helper.pop(field, None)
     side_init["spec"]["initContainers"] = [helper]
-    _assert_denied(k3s, side_init, message="sidecars or init containers")
+    _assert_denied(k3s, side_init, message="exact authorization-custody init container")
 
 
 def test_exact_k3s_scopes_privileged_volume_and_deletion_mutations(k3s: str) -> None:

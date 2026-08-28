@@ -354,9 +354,49 @@ def test_verified_grant_binds_product_redemption_to_context_policy_and_membershi
 
     context = _context()
     principal = _principal(context)
+    token_jti = "7" * 32
+
+    class Cursor:
+        def __init__(self, row: tuple[object, ...] | None = None) -> None:
+            self.row = row
+
+        def fetchone(self) -> tuple[object, ...] | None:
+            return self.row
 
     class Connection:
         closed = False
+
+        def execute(
+            self, statement: str, _parameters: object = None
+        ) -> Cursor:
+            if "FROM withhold_tokens" in statement:
+                return Cursor(
+                    (
+                        context.session_id,
+                        context.principal_id,
+                        context.issuer_family,
+                        context.principal_id,
+                        5,
+                        '["' + "4" * 64 + '"]',
+                        '["Notes/shared.md"]',
+                        '["scope-a"]',
+                        "support",
+                        6,
+                        "active",
+                        None,
+                        NOW + 300,
+                        NOW - 1,
+                        None,
+                    )
+                )
+            assert statement == "BEGIN IMMEDIATE"
+            return Cursor()
+
+        def commit(self) -> None:
+            pass
+
+        def rollback(self) -> None:
+            pass
 
         def close(self) -> None:
             self.closed = True
@@ -378,7 +418,32 @@ def test_verified_grant_binds_product_redemption_to_context_policy_and_membershi
         expires_at=NOW + 300,
     )
     policy = SimpleNamespace(empty=False, blocked=False, fingerprint="3" * 64)
-    calls: list[dict[str, object]] = []
+    membership = (
+        authorization_session_authority.SessionMembership(
+            path="Notes/shared.md",
+            fingerprint="4" * 64,
+            scope_ids=("scope-a", "scope-b"),
+        ),
+    )
+    grant = authorization_session_authority.SessionGrant(
+        grant_id="8" * 64,
+        authorization_session_id=context.session_id,
+        principal_id=context.principal_id,
+        issuer_family=context.issuer_family,
+        audience=context.principal_id,
+        purpose="support",
+        ceiling=5,
+        paths=("Notes/shared.md",),
+        fingerprints=("4" * 64,),
+        scope_ids=("scope-a",),
+        membership=membership,
+        policy_fingerprint="3" * 64,
+        token_jti=token_jti,
+        created_at=NOW,
+        expires_at=NOW + 300,
+    )
+    review_calls: list[dict[str, object]] = []
+    prepare_calls: list[dict[str, object]] = []
 
     monkeypatch.setattr(
         governance_tool,
@@ -404,26 +469,49 @@ def test_verified_grant_binds_product_redemption_to_context_policy_and_membershi
         lambda _path: "4" * 64,
     )
 
-    def redeem_escalation_token(**kwargs: object):
-        calls.append(kwargs)
-        assert kwargs["connection"] is connection
+    def review_escalation_redemption(
+        active: object, **kwargs: object
+    ) -> authorization_session_authority.SessionGrant:
+        review_calls.append(kwargs)
+        assert active is connection
         assert kwargs["context"] is context
         assert kwargs["signing_key"] == key
         assert kwargs["policy_fingerprint"] == "3" * 64
-        assert kwargs["membership"] == (
-            authorization_session_authority.SessionMembership(
-                path="Notes/shared.md",
-                fingerprint="4" * 64,
-                scope_ids=("scope-a", "scope-b"),
-            ),
-        )
-        return SimpleNamespace(grant_id="8" * 64)
+        assert kwargs["membership"] == membership
+        return grant
+
+    def prepare_escalation_redemption(
+        active: object, **kwargs: object
+    ) -> authorization_session_authority.SessionGrant:
+        prepare_calls.append(kwargs)
+        assert active is connection
+        assert kwargs["expected_grant"] is grant
+        assert kwargs["context"] is context
+        assert kwargs["membership"] == membership
+        return grant
 
     monkeypatch.setattr(
         authorization_session_authority,
-        "redeem_escalation_token",
-        redeem_escalation_token,
+        "review_escalation_redemption",
+        review_escalation_redemption,
     )
+    monkeypatch.setattr(
+        authorization_session_authority,
+        "prepare_escalation_redemption",
+        prepare_escalation_redemption,
+    )
+    monkeypatch.setattr(
+        governance_tool,
+        "_create_journal",
+        lambda _connection, **kwargs: {
+            phase: governance_tool._composite(phase, rows)
+            for phase, rows in kwargs["phases"].items()
+        },
+    )
+    monkeypatch.setattr(governance_tool.receipts, "begin_event", lambda *_a, **_k: None)
+    monkeypatch.setattr(governance_tool.receipts, "commit_event", lambda *_a, **_k: None)
+    monkeypatch.setattr(governance_tool, "_arm_journal", lambda *_a, **_k: None)
+    monkeypatch.setattr(governance_tool, "_activate_event", lambda *_a, **_k: None)
 
     result = governance_tool.op_govern_memory(
         tmp_path / "vault",
@@ -434,6 +522,10 @@ def test_verified_grant_binds_product_redemption_to_context_policy_and_membershi
         now=NOW,
     )
 
-    assert result == {"status": "committed", "grant_id": "8" * 64}
-    assert len(calls) == 1
+    assert result["status"] == "committed"
+    assert result["grant_id"] == "8" * 64
+    assert result["causation_id"]
+    assert len(review_calls) == 1
+    assert len(prepare_calls) == 1
+    assert prepare_calls[0]["prepared_event_id"] == result["causation_id"]
     assert connection.closed

@@ -29,6 +29,7 @@ from exomem_provisioner.lifecycle import (
 from exomem_provisioner.provider_identity import (
     ProviderRecoveryIdentityCodec,
     ProviderReference,
+    cell_provider_recovery_envelopes,
     chunk_hcloud_identity_envelope,
 )
 
@@ -798,6 +799,145 @@ async def test_kubernetes_cell_adapter_scales_and_writes_atomic_bundle_shape() -
 
 
 @pytest.mark.asyncio
+async def test_kubernetes_cell_adapter_persists_one_authenticated_authorization_bundle() -> None:
+    metadata = _metadata()
+    identity = ProviderRecoveryIdentityCodec.from_secret("provider-root")
+    envelopes = cell_provider_recovery_envelopes(
+        identity,
+        tenant_id=metadata.tenant_id,
+        cell_id=metadata.subject_id,
+        operation_id=metadata.operation_id,
+        fence_generation=metadata.fence_generation,
+        resource_name=metadata.resource_name,
+        operation_resource_name="exo-op-0123456789abcdef0123",
+    )
+
+    class Core:
+        secret = None
+
+        def patch_namespaced_secret(self, name, namespace, body):
+            if self.secret is None:
+                raise _ApiNotFound()
+            if "resourceVersion" in body["metadata"]:
+                assert body["metadata"]["resourceVersion"] == "7"
+            self.secret = _secret(body)
+
+        def create_namespaced_secret(self, namespace, body):
+            self.secret = _secret(body)
+
+        def read_namespaced_secret(self, name, namespace):
+            if self.secret is None:
+                raise _ApiNotFound()
+            return self.secret
+
+    def _secret(body):
+        assert body["metadata"]["name"] == "exomem-authorization-session"
+        assert set(body["stringData"]) == {
+            "keyring.json",
+            "control.json",
+            "serving-membership.json",
+        }
+        return SimpleNamespace(
+            metadata=SimpleNamespace(
+                annotations=body["metadata"]["annotations"],
+                resource_version="7",
+            ),
+            data={
+                key: base64.b64encode(value.encode()).decode()
+                for key, value in body["stringData"].items()
+            },
+        )
+
+    class Apps:
+        staged = None
+
+        def patch_namespaced_stateful_set(self, name, namespace, body):
+            self.staged = (name, namespace, body)
+
+    core = Core()
+    apps = Apps()
+    adapter = KubernetesCellAdapter(
+        core_v1=core,
+        apps_v1=apps,
+        identity_verifier=identity.verifier(),
+    )
+    files = {
+        "keyring.json": b'{"keyring":"value"}',
+        "control.json": b'{"control":"value"}',
+        "serving-membership.json": b'{"membership":"value"}',
+    }
+    revision = hashlib.sha256(
+        files["keyring.json"] + files["control.json"] + files["serving-membership.json"]
+    ).hexdigest()
+    assert await adapter.read_authorization_session_bundle(metadata) is None
+    await adapter.write_authorization_session_bundle(
+        metadata,
+        files,
+        recovery_envelope=envelopes["authorizationSessionSecret"],
+        membership_epoch=1,
+        membership_digest="a" * 64,
+        revision=revision,
+    )
+
+    stored = await adapter.read_authorization_session_bundle(metadata)
+    assert stored == files
+    assert (
+        core.secret.metadata.annotations["exomem.io/recovery-envelope"]
+        == envelopes["authorizationSessionSecret"]
+    )
+
+    successor_files = {
+        **files,
+        "serving-membership.json": b'{"membership":"successor"}',
+    }
+    successor_revision = hashlib.sha256(
+        successor_files["keyring.json"]
+        + successor_files["control.json"]
+        + successor_files["serving-membership.json"]
+    ).hexdigest()
+    await adapter.write_authorization_session_bundle(
+        metadata,
+        successor_files,
+        recovery_envelope=envelopes["authorizationSessionSecret"],
+        membership_epoch=2,
+        membership_digest="c" * 64,
+        revision=successor_revision,
+        expected_revision=revision,
+    )
+    await adapter.stage_authorization_session_revision(metadata, successor_revision)
+    assert apps.staged == (
+        metadata.resource_name,
+        metadata.resource_name,
+        {
+            "spec": {
+                "template": {
+                    "metadata": {
+                        "annotations": {
+                            "exomem.io/authorization-session-revision": successor_revision
+                        }
+                    }
+                }
+            }
+        },
+    )
+
+    with pytest.raises(MetadataConflict, match="predecessor differs"):
+        await adapter.write_authorization_session_bundle(
+            metadata,
+            successor_files,
+            recovery_envelope=envelopes["authorizationSessionSecret"],
+            membership_epoch=3,
+            membership_digest="e" * 64,
+            revision=successor_revision,
+            expected_revision=revision,
+        )
+
+    core.secret.data["extra.json"] = base64.b64encode(b"{}").decode()
+    with pytest.raises(MetadataConflict, match="bundle shape"):
+        await adapter.read_authorization_session_bundle(metadata)
+
+
+@pytest.mark.asyncio
 async def test_kubernetes_fingerprint_job_is_read_only_bounded_and_content_free() -> None:
     metadata = _metadata()
     image = "registry.example/exomem-provisioner@sha256:" + "a" * 64
@@ -1031,6 +1171,32 @@ async def test_private_cell_api_uses_fresh_identity_and_exact_lifecycle_routes()
             )
         if url.endswith("/ready"):
             return _Response(200, ready)
+        if url.endswith("/lifecycle/quiesce"):
+            return _Response(
+                200,
+                {
+                    "phase": "quiesced",
+                    "active_reads": 0,
+                    "active_mutations": 0,
+                    "active_transfers": 0,
+                    "reason_code": "HOSTED_QUIESCED",
+                },
+            )
+        if url.endswith("/authorization-membership/attest"):
+            return _Response(
+                200,
+                {
+                    "version": 1,
+                    "attestation": base64.urlsafe_b64encode(
+                        b'{"signed":"runtime-attestation"}'
+                    )
+                    .rstrip(b"=")
+                    .decode("ascii"),
+                    "attestation_sha256": hashlib.sha256(
+                        b'{"signed":"runtime-attestation"}'
+                    ).hexdigest(),
+                },
+            )
         return _Response(
             200,
             {"live": True, "cell_id": "cell-alpha", "protocol_version": "1"},
@@ -1082,12 +1248,28 @@ async def test_private_cell_api_uses_fresh_identity_and_exact_lifecycle_routes()
         expected_worker_policy=worker_policy,
         expected_contract_digest="b" * 64,
     )
-    await adapter.quiesce(
+    quiesced = await adapter.quiesce(
         _metadata(),
         credential=_credential(),
         protocol_version="1",
         operation_id="quiesce-alpha",
     )
+    assert quiesced == {
+        "phase": "quiesced",
+        "active_reads": 0,
+        "active_mutations": 0,
+        "active_transfers": 0,
+        "reason_code": "HOSTED_QUIESCED",
+    }
+    attestation = await adapter.attest_authorization_session_membership(
+        _metadata(),
+        credential=_credential(),
+        protocol_version="1",
+        target_epoch=8,
+        previous_epoch_digest="a" * 64,
+        ttl_seconds=300,
+    )
+    assert attestation == b'{"signed":"runtime-attestation"}'
     await adapter.resume(
         _metadata(),
         credential=_credential(),
@@ -1121,8 +1303,14 @@ async def test_private_cell_api_uses_fresh_identity_and_exact_lifecycle_routes()
     request_ids = [call[2]["X-Exomem-Request-Id"] for call in calls]
     assert len(request_ids) == len(set(request_ids))
     assert all(call[2]["Authorization"] == "Bearer " + _credential() for call in calls)
-    assert calls[-3][1].endswith("/private/exomem/v1/lifecycle/quiesce")
-    assert calls[-3][2]["X-Exomem-Routing-Stopped"] == "true"
+    assert calls[-4][1].endswith("/private/exomem/v1/lifecycle/quiesce")
+    assert calls[-4][2]["X-Exomem-Routing-Stopped"] == "true"
+    assert calls[-3][1].endswith("/private/exomem/v1/authorization-membership/attest")
+    assert calls[-3][3] == {
+        "target_epoch": 8,
+        "previous_epoch_digest": "a" * 64,
+        "ttl_seconds": 300,
+    }
     assert calls[-2][1].endswith("/private/exomem/v1/lifecycle/resume")
     assert calls[-1][1].endswith("/private/exomem/v1/lifecycle/seal")
     assert calls[-1][2]["X-Exomem-Routing-Stopped"] == "true"

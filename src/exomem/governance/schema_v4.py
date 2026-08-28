@@ -9,6 +9,7 @@ policy/projector/catalog tuple in one transaction.
 from __future__ import annotations
 
 import base64
+import functools
 import hashlib
 import hmac
 import json
@@ -161,6 +162,18 @@ class ProjectionNamespaceSeed:
 
 
 @dataclass(frozen=True, slots=True)
+class DependentGrantTransition:
+    """One exact active-grant successor bound to a policy publication."""
+
+    grant_id: str
+    expected_policy_fingerprint: str
+    expected_membership_manifest: str
+    target_status: str
+    target_policy_fingerprint: str
+    target_membership_manifest: str
+
+
+@dataclass(frozen=True, slots=True)
 class MigrationSeed:
     activation_store_id: str
     logical_vault_id: str
@@ -176,6 +189,72 @@ class MigrationResult:
     schema_version: int
     activation_store_id: str
     activation_state_digest: str
+
+
+@dataclass(frozen=True, slots=True)
+class DownmigrationResult:
+    schema_version: int
+    activation_store_id: str
+    activation_epoch: int
+    activation_state_digest: str
+    policy_generation_id: str
+    policy_fingerprint: str
+    source_documents: tuple[tuple[str, bytes], ...]
+    closed_sessions: int
+    expired_grants: int
+    expired_purposes: int
+    expired_tokens: int
+    expired_proposals: int
+    recovery_event_id: str
+    recovery_terminal_digest: str
+
+
+def _complete_schema_signature(
+    connection: sqlite3.Connection,
+) -> tuple[tuple[object, ...], ...]:
+    return tuple(
+        tuple(row)
+        for row in connection.execute(
+            "SELECT type, name, tbl_name, sql FROM sqlite_master "
+            "WHERE name NOT LIKE 'sqlite_autoindex_%' "
+            "ORDER BY type, name"
+        )
+    )
+
+
+@functools.cache
+def _expected_v3_schema_signature() -> tuple[tuple[object, ...], ...]:
+    from .. import sidecar_store
+    from . import store
+
+    reference = sqlite3.connect(":memory:")
+    try:
+        store._migrate(reference)
+        sidecar_store.ensure_meta_table(
+            reference,
+            store.DATA_TABLE,
+            "governance-v3-reference",
+        )
+        return _complete_schema_signature(reference)
+    finally:
+        reference.close()
+
+
+def require_exact_v3_connection(connection: sqlite3.Connection) -> None:
+    """Refuse any database that is not the frozen current schema-v3 authority."""
+
+    try:
+        version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+        quick_check = tuple(connection.execute("PRAGMA quick_check(1)"))
+        signature = _complete_schema_signature(connection)
+    except (AttributeError, TypeError, ValueError, sqlite3.Error) as exc:
+        raise SchemaV4Error("schema v3 migration source is unavailable") from exc
+    if version != 3:
+        raise SchemaV4Error(
+            f"schema v3 migration source requires exact schema v3, found v{version}"
+        )
+    if quick_check != (("ok",),) or signature != _expected_v3_schema_signature():
+        raise SchemaV4Error("schema v3 migration source is not exact")
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,6 +299,87 @@ RegistryAcknowledger = Callable[
 ]
 
 
+def _canonical_membership_manifest(value: object, name: str) -> str:
+    if not isinstance(value, str):
+        raise SchemaV4Error(f"{name} must be canonical bounded JSON")
+    try:
+        encoded = value.encode("utf-8")
+        decoded = json.loads(value)
+    except (UnicodeEncodeError, json.JSONDecodeError) as exc:
+        raise SchemaV4Error(f"{name} must be canonical bounded JSON") from exc
+    if (
+        not isinstance(decoded, list)
+        or len(encoded) > _MAX_BLOB_BYTES
+        or json.dumps(
+            decoded,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        != value
+    ):
+        raise SchemaV4Error(f"{name} must be canonical bounded JSON")
+    return value
+
+
+def _dependent_grant_transitions(
+    value: tuple[DependentGrantTransition, ...] | None,
+    *,
+    expected_policy_fingerprint: str,
+    target_policy_fingerprint: str,
+) -> tuple[DependentGrantTransition, ...] | None:
+    if value is None:
+        return None
+    if not isinstance(value, tuple) or len(value) > 100_000:
+        raise SchemaV4Error("dependent_grants must be one bounded ordered tuple")
+    normalized: list[DependentGrantTransition] = []
+    seen: set[str] = set()
+    for ordinal, transition in enumerate(value):
+        if not isinstance(transition, DependentGrantTransition):
+            raise SchemaV4Error("dependent_grants contains an invalid transition")
+        grant_id = _text(transition.grant_id, f"dependent_grants[{ordinal}].grant_id")
+        if grant_id in seen:
+            raise SchemaV4Error("dependent_grants contains a duplicate grant")
+        seen.add(grant_id)
+        expected_fingerprint = _digest(
+            transition.expected_policy_fingerprint,
+            f"dependent_grants[{ordinal}].expected_policy_fingerprint",
+        )
+        target_fingerprint = _digest(
+            transition.target_policy_fingerprint,
+            f"dependent_grants[{ordinal}].target_policy_fingerprint",
+        )
+        if (
+            expected_fingerprint != expected_policy_fingerprint
+            or target_fingerprint != target_policy_fingerprint
+            or transition.target_status not in {"expired", "review"}
+        ):
+            raise SchemaV4Error(
+                "dependent grant transition does not match the policy publication"
+            )
+        normalized.append(
+            DependentGrantTransition(
+                grant_id=grant_id,
+                expected_policy_fingerprint=expected_fingerprint,
+                expected_membership_manifest=_canonical_membership_manifest(
+                    transition.expected_membership_manifest,
+                    f"dependent_grants[{ordinal}].expected_membership_manifest",
+                ),
+                target_status=transition.target_status,
+                target_policy_fingerprint=target_fingerprint,
+                target_membership_manifest=_canonical_membership_manifest(
+                    transition.target_membership_manifest,
+                    f"dependent_grants[{ordinal}].target_membership_manifest",
+                ),
+            )
+        )
+    ordered = tuple(sorted(normalized, key=lambda item: item.grant_id))
+    if tuple(normalized) != ordered:
+        raise SchemaV4Error("dependent_grants must be ordered by grant identity")
+    return ordered
+
+
 @dataclass(frozen=True, slots=True)
 class _SeedMaterial:
     source_documents: bytes
@@ -254,6 +414,28 @@ def _source_document_bytes(documents: tuple[tuple[str, bytes], ...]) -> bytes:
     if len(encoded) > _MAX_BLOB_BYTES:
         raise SchemaV4Error("source_documents exceeds the bounded byte map")
     return bytes(encoded)
+
+
+def source_documents_digest(documents: tuple[tuple[str, bytes], ...]) -> str:
+    """Bind one exact ordered policy-source byte map for an offline mirror proof."""
+
+    return hashlib.sha256(
+        _framed(
+            b"exomem.governance-v3-workspace-mirror.v1",
+            _source_document_bytes(documents),
+        )
+    ).hexdigest()
+
+
+def catalog_rebuild_digest(descriptor: bytes) -> str:
+    """Bind the exact active catalog descriptor rebuilt by an offline rollback."""
+
+    return hashlib.sha256(
+        _framed(
+            b"exomem.governance-v3-catalog-rebuild.v1",
+            _blob(descriptor, "catalog descriptor", allow_empty=True),
+        )
+    ).hexdigest()
 
 
 def _decode_source_document_bytes(value: object) -> tuple[tuple[str, bytes], ...]:
@@ -512,6 +694,23 @@ def _seed_material(seed: MigrationSeed) -> _SeedMaterial:
     )
 
 
+def migration_target(seed: MigrationSeed) -> VerifiedActiveGovernanceState:
+    """Derive the exact initial active tuple before irreversible enrollment."""
+
+    material = _seed_material(seed)
+    return VerifiedActiveGovernanceState(
+        logical_vault_id=seed.logical_vault_id,
+        activation_store_id=seed.activation_store_id,
+        activation_epoch=seed.activation_epoch,
+        activation_state_digest=material.activation_digest,
+        policy_generation_id=seed.policy.generation_id,
+        policy_fingerprint=seed.policy.policy_fingerprint,
+        projector_schema_version=seed.policy.projector_schema_version,
+        catalog_generation=seed.catalog.catalog_generation,
+        projection_namespace_id=seed.namespace.namespace_id,
+    )
+
+
 def _json_archive_value(value: object) -> object:
     if value is None or isinstance(value, (str, int, float)):
         return value
@@ -619,7 +818,7 @@ def _create_v4_schema(connection: sqlite3.Connection) -> None:
     connection.execute(
         "CREATE TABLE governance_tuple_publications ("
         "event_id TEXT PRIMARY KEY, publication_kind TEXT NOT NULL "
-        "CHECK(publication_kind IN ('migration','policy','catalog')), "
+        "CHECK(publication_kind IN ('migration','policy','catalog','attachment-clone')), "
         "predecessor_activation_state_digest TEXT, "
         "target_activation_state_digest TEXT NOT NULL UNIQUE "
         "CHECK(length(target_activation_state_digest)=64), "
@@ -983,6 +1182,764 @@ def migrate_v3_connection(
     return MigrationResult(4, seed.activation_store_id, material.activation_digest)
 
 
+_V4_ONLY_TABLES: Final = (
+    "governance_authorization_sessions",
+    "compiled_policy_generations",
+    "catalog_generation_descriptors",
+    "governance_projection_namespaces",
+    "active_governance_tuple",
+    "governance_activation_store",
+    "governance_tuple_publications",
+    "governance_schema_migrations",
+    "governance_legacy_authority",
+)
+_VERSIONED_AUTHORITY_TABLES: Final = (
+    "governance_session_grants",
+    "governance_session_purpose",
+    "governance_session_purpose_staging",
+    "withhold_tokens",
+)
+_V3_COMMON_TABLES: Final = (
+    "compiled_policy",
+    "governance_operation_components",
+    "governance_operation_journals",
+    "governance_policy_archives",
+    "governance_proposals",
+    "receipt_instance",
+    "receipt_secrets",
+    "receipts_head",
+)
+
+
+def _versioned_schema_signature(
+    connection: sqlite3.Connection,
+) -> tuple[tuple[object, ...], ...]:
+    tables = (*_VERSIONED_AUTHORITY_TABLES, *_V4_ONLY_TABLES)
+    placeholders = ",".join("?" for _ in tables)
+    return tuple(
+        tuple(row)
+        for row in connection.execute(
+            "SELECT type, name, tbl_name, sql FROM sqlite_master "
+            f"WHERE tbl_name IN ({placeholders}) "
+            "AND name NOT LIKE 'sqlite_autoindex_%' "
+            "ORDER BY type, name",
+            tables,
+        )
+    )
+
+
+def _expected_versioned_schema_signature() -> tuple[tuple[object, ...], ...]:
+    reference = sqlite3.connect(":memory:")
+    try:
+        _create_legacy_archive(reference)
+        _create_v4_schema(reference)
+        return _versioned_schema_signature(reference)
+    finally:
+        reference.close()
+
+
+def _require_downmigration_schema(connection: sqlite3.Connection) -> None:
+    tables = {
+        str(row[0])
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+        )
+    }
+    required = (
+        set(_V4_ONLY_TABLES)
+        | set(_VERSIONED_AUTHORITY_TABLES)
+        | set(_V3_COMMON_TABLES)
+    )
+    if not required <= tables:
+        raise SchemaV4Error("schema v4 downmigration source is incomplete")
+    unexpected = tables - required - {"meta"}
+    if unexpected:
+        raise SchemaV4Error("schema v4 downmigration source has unknown state")
+    if _versioned_schema_signature(connection) != _expected_versioned_schema_signature():
+        raise SchemaV4Error("schema v4 downmigration source is not exact")
+
+
+@functools.cache
+def _expected_v4_schema_signature() -> tuple[tuple[object, ...], ...]:
+    from .. import sidecar_store
+    from . import policy as policy_module
+    from . import store
+
+    documents = (
+        (
+            "scopes/reference.yaml",
+            b"governance_version: 1\n"
+            b"id: 01ARZ3NDEKTSV4RRFFQ69G5FAV\n"
+            b"paths:\n"
+            b"  - Notes/**\n",
+        ),
+    )
+    compiled = policy_module.compile_documents(dict(documents))
+    seed = MigrationSeed(
+        activation_store_id="activation-store-reference",
+        logical_vault_id="logical-vault-reference",
+        activation_epoch=1,
+        policy=PolicyGenerationSeed(
+            generation_id="01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            source_documents=documents,
+            source_fingerprint=compiled.fingerprint,
+            conflict_digest="0" * 64,
+            compiled_policy=policy_module.canonical_compiled_bytes(compiled),
+            policy_fingerprint=compiled.fingerprint,
+            compiler_schema_version=1,
+            projector_schema_version=1,
+            predecessor_generation_id=None,
+            authoring_event_id="event-schema-reference",
+            receipt_event_id="receipt-schema-reference",
+            created_at=1,
+        ),
+        catalog=CatalogGenerationSeed(
+            catalog_generation=1,
+            descriptor=b"",
+            artifact_count=0,
+            created_at=1,
+        ),
+        namespace=ProjectionNamespaceSeed(
+            namespace_id="projection-namespace-reference",
+            evidence=b"",
+            ready_at=1,
+        ),
+        migrated_at=1,
+    )
+    reference = sqlite3.connect(":memory:")
+    try:
+        store._migrate(reference)
+        sidecar_store.ensure_meta_table(
+            reference,
+            store.DATA_TABLE,
+            "governance-v4-reference",
+        )
+        reference.commit()
+        migrate_v3_connection(reference, seed)
+        return _complete_schema_signature(reference)
+    finally:
+        reference.close()
+
+
+def require_exact_v4_connection(connection: sqlite3.Connection) -> None:
+    """Refuse any incomplete, corrupt, or extended schema-v4 authority."""
+
+    try:
+        version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+        quick_check = tuple(connection.execute("PRAGMA quick_check(1)"))
+        signature = _complete_schema_signature(connection)
+    except (AttributeError, TypeError, ValueError, sqlite3.Error) as exc:
+        raise SchemaV4Error("schema v4 authority is unavailable") from exc
+    if version != SCHEMA_USER_VERSION:
+        raise SchemaV4Error(
+            f"schema v4 authority requires exact schema v4, found v{version}"
+        )
+    if quick_check != (("ok",),) or signature != _expected_v4_schema_signature():
+        raise SchemaV4Error("schema v4 authority is not exact")
+
+
+def _close_downmigration_authority(
+    connection: sqlite3.Connection,
+    *,
+    downmigrated_at: int,
+) -> tuple[int, int, int, int, int]:
+    sessions = int(
+        connection.execute(
+            "UPDATE governance_authorization_sessions "
+            "SET status='closed', closed_at=? WHERE status='active'",
+            (downmigrated_at,),
+        ).rowcount
+        or 0
+    )
+    grants = int(
+        connection.execute(
+            "UPDATE governance_session_grants "
+            "SET status='revoked', revoked_at=? WHERE status<>'revoked'",
+            (downmigrated_at,),
+        ).rowcount
+        or 0
+    )
+    purposes = int(
+        connection.execute(
+            "UPDATE governance_session_purpose SET status='revoked' "
+            "WHERE status<>'revoked'"
+        ).rowcount
+        or 0
+    )
+    purposes += int(
+        connection.execute("DELETE FROM governance_session_purpose_staging").rowcount
+        or 0
+    )
+    tokens = int(
+        connection.execute(
+            "UPDATE withhold_tokens SET status='expired', "
+            "consumed_at=COALESCE(consumed_at, ?) WHERE status<>'expired'",
+            (downmigrated_at,),
+        ).rowcount
+        or 0
+    )
+    proposals = int(
+        connection.execute(
+            "UPDATE governance_proposals SET status='expired', "
+            "spent_at=COALESCE(spent_at, ?) WHERE status='pending'",
+            (downmigrated_at,),
+        ).rowcount
+        or 0
+    )
+    return sessions, grants, purposes, tokens, proposals
+
+
+def _invalidate_attachment_session_authority_rows(
+    connection: sqlite3.Connection,
+    *,
+    invalidated_at: int,
+) -> tuple[int, int, int, int]:
+    moment = _integer(invalidated_at, "invalidated_at")
+    sessions = int(
+        connection.execute(
+            "UPDATE governance_authorization_sessions "
+            "SET status='closed', closed_at=? WHERE status='active'",
+            (moment,),
+        ).rowcount
+        or 0
+    )
+    grants = int(
+        connection.execute(
+            "UPDATE governance_session_grants SET status='revoked', "
+            "prepared_event_id=NULL, revoked_at=? WHERE status<>'revoked'",
+            (moment,),
+        ).rowcount
+        or 0
+    )
+    purposes = int(
+        connection.execute(
+            "UPDATE governance_session_purpose SET status='revoked', "
+            "prepared_event_id=NULL WHERE status<>'revoked'"
+        ).rowcount
+        or 0
+    )
+    purposes += int(
+        connection.execute(
+            "DELETE FROM governance_session_purpose_staging"
+        ).rowcount
+        or 0
+    )
+    tokens = int(
+        connection.execute(
+            "UPDATE withhold_tokens SET status='expired', prepared_event_id=NULL, "
+            "consumed_at=COALESCE(consumed_at, ?) WHERE status<>'expired'",
+            (moment,),
+        ).rowcount
+        or 0
+    )
+    return sessions, grants, purposes, tokens
+
+
+def invalidate_attachment_session_authority(
+    connection: sqlite3.Connection,
+    *,
+    invalidated_at: int,
+) -> tuple[int, int, int, int]:
+    """Invalidate every imported session-derived authority before attachment.
+
+    A copied activation store can be policy-current while its ephemeral session
+    rows predate a close or rotation on the source.  Attachment transfer is
+    therefore conservative: unless a later protocol proves an exact source
+    snapshot, the target closes all imported session authority transactionally
+    before the external host registry can make that target reachable.
+    """
+
+    moment = _integer(invalidated_at, "invalidated_at")
+    if connection.in_transaction:
+        raise SchemaV4Error("attachment invalidation requires an idle connection")
+    require_exact_v4_connection(connection)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        result = _invalidate_attachment_session_authority_rows(
+            connection,
+            invalidated_at=moment,
+        )
+        connection.commit()
+        return result
+    except (sqlite3.Error, SchemaV4Error):
+        connection.rollback()
+        raise SchemaV4Error("attachment session invalidation failed") from None
+    except BaseException:
+        connection.rollback()
+        raise
+
+
+def clone_attachment_identity(
+    connection: sqlite3.Connection,
+    *,
+    logical_vault_id: str,
+    activation_store_id: str,
+    publication_event_id: str,
+    receipt_instance_id: str,
+    receipt_label_secret: bytes,
+    activated_at: int,
+) -> VerifiedActiveGovernanceState:
+    """Commit one fresh activation identity for an unattached exact-v4 copy.
+
+    The policy, projector, catalog, namespace, and immutable publication history
+    remain unchanged. Copied session-derived authority is closed in the same
+    exclusive transaction that advances the activation identity.
+    """
+
+    target_vault = _text(logical_vault_id, "logical_vault_id")
+    target_store = _text(activation_store_id, "activation_store_id")
+    event_id = _text(publication_event_id, "publication_event_id")
+    target_receipt_instance = _text(
+        receipt_instance_id,
+        "receipt_instance_id",
+        maximum=32,
+    )
+    if len(target_receipt_instance) != 32 or any(
+        character not in _HEX_DIGITS for character in target_receipt_instance
+    ):
+        raise SchemaV4Error("receipt_instance_id must be lowercase hex")
+    if not isinstance(receipt_label_secret, bytes) or len(receipt_label_secret) != 32:
+        raise SchemaV4Error("receipt label secret must be 32 bytes")
+    target_receipt_secret = bytes(receipt_label_secret)
+    activated = _integer(activated_at, "activated_at")
+    if connection.in_transaction:
+        raise SchemaV4Error("attachment clone requires an idle connection")
+    require_exact_v4_connection(connection)
+    pointer = load_active_tuple_pointer(connection)
+    current = load_active_state(
+        connection,
+        expected_logical_vault_id=pointer.logical_vault_id,
+        expected_activation_store_id=pointer.activation_store_id,
+        expected_activation_epoch=pointer.activation_epoch,
+        expected_activation_state_digest=pointer.activation_state_digest,
+    )
+    if (
+        current.logical_vault_id == target_vault
+        and current.activation_store_id == target_store
+    ):
+        publication = connection.execute(
+            "SELECT event_id, publication_kind FROM governance_tuple_publications "
+            "WHERE target_activation_state_digest=?",
+            (current.activation_state_digest,),
+        ).fetchone()
+        if publication != (event_id, "attachment-clone"):
+            raise ActiveTupleStale("clone activation identity is already claimed")
+        receipt_instance = connection.execute(
+            "SELECT instance_id FROM receipt_instance WHERE singleton=1"
+        ).fetchone()
+        receipt_secret = connection.execute(
+            "SELECT value FROM receipt_secrets WHERE name='label_hmac'"
+        ).fetchone()
+        if receipt_instance != (target_receipt_instance,) or receipt_secret != (
+            target_receipt_secret,
+        ):
+            raise ActiveTupleStale("clone receipt identity is unavailable")
+        return current
+    if (
+        current.logical_vault_id == target_vault
+        or current.activation_store_id == target_store
+    ):
+        raise ActiveTupleStale("clone activation identity is only partially fresh")
+
+    material = _publication_result(connection, current)
+    target_epoch = _integer(
+        current.activation_epoch + 1,
+        "target_activation_epoch",
+    )
+    target_digest = activation_state_digest(
+        logical_vault_id=target_vault,
+        activation_store_id=target_store,
+        activation_epoch=target_epoch,
+        policy_generation_id=current.policy_generation_id,
+        policy_fingerprint=current.policy_fingerprint,
+        policy_row_digest=material.policy_row_digest,
+        projector_schema_version=current.projector_schema_version,
+        catalog_generation=current.catalog_generation,
+        catalog_descriptor_digest=material.catalog_descriptor_digest,
+        projection_namespace_identity=material.projection_namespace_digest,
+    )
+
+    try:
+        connection.execute("BEGIN EXCLUSIVE")
+        reviewed = load_active_state(
+            connection,
+            expected_logical_vault_id=current.logical_vault_id,
+            expected_activation_store_id=current.activation_store_id,
+            expected_activation_epoch=current.activation_epoch,
+            expected_activation_state_digest=current.activation_state_digest,
+        )
+        if reviewed != current:
+            raise ActiveTupleStale("copied activation tuple changed during clone")
+        _invalidate_attachment_session_authority_rows(
+            connection,
+            invalidated_at=activated,
+        )
+        receipt_instance = connection.execute(
+            "SELECT instance_id FROM receipt_instance WHERE singleton=1"
+        ).fetchone()
+        if receipt_instance is not None:
+            source_receipt_instance = _text(
+                receipt_instance[0],
+                "source_receipt_instance_id",
+                maximum=32,
+            )
+            if (
+                len(source_receipt_instance) != 32
+                or any(
+                    character not in _HEX_DIGITS
+                    for character in source_receipt_instance
+                )
+                or hmac.compare_digest(
+                    source_receipt_instance,
+                    target_receipt_instance,
+                )
+            ):
+                raise SchemaV4Error("copied receipt identity is invalid")
+            connection.execute(
+                "UPDATE receipt_instance SET instance_id=? WHERE singleton=1",
+                (target_receipt_instance,),
+            )
+        else:
+            connection.execute(
+                "INSERT INTO receipt_instance(singleton, instance_id) VALUES (1, ?)",
+                (target_receipt_instance,),
+            )
+        existing_target_head = connection.execute(
+            "SELECT 1 FROM receipts_head WHERE instance_id=?",
+            (target_receipt_instance,),
+        ).fetchone()
+        if existing_target_head is not None:
+            raise SchemaV4Error("clone receipt head already exists")
+        connection.execute(
+            "INSERT INTO receipts_head "
+            "(instance_id, durable_seq, durable_hash, observed_seq, observed_hash, "
+            "path, byte_offset) VALUES (?, 0, ?, 0, ?, '', 0)",
+            (target_receipt_instance, "0" * 64, "0" * 64),
+        )
+        connection.execute(
+            "INSERT INTO receipt_secrets(name, value) VALUES ('label_hmac', ?) "
+            "ON CONFLICT(name) DO UPDATE SET value=excluded.value",
+            (target_receipt_secret,),
+        )
+        updated = connection.execute(
+            "UPDATE governance_activation_store SET activation_store_id=?, "
+            "logical_vault_id=?, activation_epoch=?, activation_state_digest=? "
+            "WHERE singleton=1 AND activation_store_id=? AND logical_vault_id=? "
+            "AND activation_epoch=? AND activation_state_digest=?",
+            (
+                target_store,
+                target_vault,
+                target_epoch,
+                target_digest,
+                current.activation_store_id,
+                current.logical_vault_id,
+                current.activation_epoch,
+                current.activation_state_digest,
+            ),
+        )
+        if updated.rowcount != 1:
+            raise ActiveTupleStale("copied activation tuple changed during clone")
+        connection.execute(
+            "INSERT INTO governance_tuple_publications "
+            "(event_id, publication_kind, predecessor_activation_state_digest, "
+            "target_activation_state_digest, policy_generation_id, policy_fingerprint, "
+            "projector_schema_version, catalog_generation, activation_epoch, status, "
+            "activated_at) VALUES (?, 'attachment-clone', ?, ?, ?, ?, ?, ?, ?, "
+            "'committed', ?)",
+            (
+                event_id,
+                current.activation_state_digest,
+                target_digest,
+                current.policy_generation_id,
+                current.policy_fingerprint,
+                current.projector_schema_version,
+                current.catalog_generation,
+                target_epoch,
+                activated,
+            ),
+        )
+        _crash_point("attachment-clone-before-commit")
+        connection.commit()
+    except BaseException:
+        connection.rollback()
+        raise
+
+    _crash_point("attachment-clone-after-commit")
+    return load_active_state(
+        connection,
+        expected_logical_vault_id=target_vault,
+        expected_activation_store_id=target_store,
+        expected_activation_epoch=target_epoch,
+        expected_activation_state_digest=target_digest,
+    )
+
+
+def _downmigration_terminal(
+    *,
+    event_id: str,
+    plan_digest: str,
+    target_digest: str,
+    expected: VerifiedActiveGovernanceState,
+    workspace_digest: str,
+    catalog_digest: str,
+    downmigrated_at: int,
+    closed: tuple[int, int, int, int, int],
+) -> tuple[str, str]:
+    value: dict[str, str | int] = {
+        "schema": "exomem.governance-downmigration-terminal/v1",
+        "recovery_event_id": event_id,
+        "recovery_plan_digest": plan_digest,
+        "recovery_target_digest": target_digest,
+        "logical_vault_id": expected.logical_vault_id,
+        "activation_store_id": expected.activation_store_id,
+        "activation_epoch": expected.activation_epoch,
+        "activation_state_digest": expected.activation_state_digest,
+        "policy_generation_id": expected.policy_generation_id,
+        "policy_fingerprint": expected.policy_fingerprint,
+        "projector_schema_version": expected.projector_schema_version,
+        "catalog_generation": expected.catalog_generation,
+        "projection_namespace_id": expected.projection_namespace_id,
+        "workspace_digest": workspace_digest,
+        "catalog_digest": catalog_digest,
+        "downmigrated_at": downmigrated_at,
+        "closed_sessions": closed[0],
+        "expired_grants": closed[1],
+        "expired_purposes": closed[2],
+        "expired_tokens": closed[3],
+        "expired_proposals": closed[4],
+    }
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    digest = _framed_digest(
+        b"exomem.governance-downmigration-terminal.v1",
+        encoded,
+    )
+    return encoded.decode("utf-8"), digest
+
+
+def downmigrate_v4_connection(
+    connection: sqlite3.Connection,
+    *,
+    expected: VerifiedActiveGovernanceState,
+    expected_source_documents: tuple[tuple[str, bytes], ...],
+    expected_catalog_descriptor: bytes,
+    verified_workspace_digest: str,
+    verified_catalog_digest: str,
+    recovery_event_id: str,
+    recovery_plan_digest: str,
+    recovery_target_digest: str,
+    downmigrated_at: int,
+) -> DownmigrationResult:
+    """Atomically return a fully verified, quiesced v4 store to exact schema v3.
+
+    This is the database half of the offline rollback coordinator.  Its caller
+    must already hold the whole-tree/schema/replica fence and must supply the
+    digests produced after mirroring the pointed source bytes and rebuilding
+    the pointed catalog.  Ordinary openers never call this function.
+    """
+
+    version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+    if version != SCHEMA_USER_VERSION:
+        raise SchemaV4Error(
+            f"explicit governance downmigration requires exact schema v4, found v{version}"
+        )
+    if connection.in_transaction:
+        raise SchemaV4Error("schema v4 downmigration requires a clean transaction boundary")
+    if not isinstance(expected, VerifiedActiveGovernanceState):
+        raise SchemaV4Error("schema v4 downmigration expected tuple is invalid")
+    source_digest = source_documents_digest(expected_source_documents)
+    descriptor = _blob(
+        expected_catalog_descriptor,
+        "expected_catalog_descriptor",
+        allow_empty=True,
+    )
+    workspace_digest = _digest(
+        verified_workspace_digest,
+        "verified_workspace_digest",
+    )
+    rebuild_digest = _digest(
+        verified_catalog_digest,
+        "verified_catalog_digest",
+    )
+    event_id = _digest(recovery_event_id, "recovery_event_id")
+    plan_digest = _digest(recovery_plan_digest, "recovery_plan_digest")
+    target_digest = _digest(recovery_target_digest, "recovery_target_digest")
+    completed_at = _integer(downmigrated_at, "downmigrated_at")
+    if not hmac.compare_digest(source_digest, workspace_digest):
+        raise SchemaV4Error("downmigration workspace parity does not verify")
+    if not hmac.compare_digest(catalog_rebuild_digest(descriptor), rebuild_digest):
+        raise SchemaV4Error("downmigration catalog parity does not verify")
+
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        _require_downmigration_schema(connection)
+        pending = connection.execute(
+            "SELECT event_id FROM governance_operation_journals "
+            "WHERE phase IN ('allocating','pending') AND event_id<>? "
+            "ORDER BY event_id LIMIT 1",
+            (event_id,),
+        ).fetchone()
+        if pending is not None:
+            raise SchemaV4Error("downmigration cannot discard an open recovery journal")
+        recovery = connection.execute(
+            "SELECT operation, causation_id, authorization_session, principal_id, phase, "
+            "direction, prior_digest, prepared_digest, final_digest, affected_ids, "
+            "required_child_intents, required_child_terminals, proposal_id, attempt_no, "
+            "marker_required, blocked_reason FROM governance_operation_journals "
+            "WHERE event_id=?",
+            (event_id,),
+        ).fetchone()
+        affected_ids = json.dumps(
+            sorted((expected.activation_store_id, expected.logical_vault_id)),
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        )
+        prepared_recovery = recovery is not None
+        if prepared_recovery:
+            if recovery != (
+                "governance_schema_v4_downmigration",
+                event_id,
+                None,
+                "offline-schema-coordinator",
+                "pending",
+                "narrowing",
+                expected.activation_state_digest,
+                plan_digest,
+                target_digest,
+                affected_ids,
+                "[]",
+                "[]",
+                None,
+                1,
+                0,
+                None,
+            ):
+                raise SchemaV4Error("downmigration recovery event already exists")
+            component = connection.execute(
+                "SELECT phase, ordinal, component_kind, component_key, value_hash, status "
+                "FROM governance_operation_components WHERE event_id=?",
+                (event_id,),
+            ).fetchall()
+            if component != [
+                (
+                    "prepared",
+                    0,
+                    "schema-downmigration-plan",
+                    event_id,
+                    plan_digest,
+                    "complete",
+                )
+            ]:
+                raise SchemaV4Error("downmigration recovery plan is unavailable")
+        snapshot = load_active_policy(
+            connection,
+            expected_logical_vault_id=expected.logical_vault_id,
+            expected_activation_store_id=expected.activation_store_id,
+            expected_activation_epoch=expected.activation_epoch,
+            expected_activation_state_digest=expected.activation_state_digest,
+        )
+        if snapshot.active != expected:
+            raise SchemaV4Error("downmigration active tuple changed")
+        if snapshot.source_documents != expected_source_documents:
+            raise SchemaV4Error("downmigration workspace parity does not verify")
+        if not hmac.compare_digest(snapshot.catalog_descriptor, descriptor):
+            raise SchemaV4Error("downmigration catalog parity does not verify")
+        closed = _close_downmigration_authority(
+            connection,
+            downmigrated_at=completed_at,
+        )
+        terminal_json, terminal_digest = _downmigration_terminal(
+            event_id=event_id,
+            plan_digest=plan_digest,
+            target_digest=target_digest,
+            expected=expected,
+            workspace_digest=workspace_digest,
+            catalog_digest=rebuild_digest,
+            downmigrated_at=completed_at,
+            closed=closed,
+        )
+        if prepared_recovery:
+            updated = connection.execute(
+                "UPDATE governance_operation_journals SET phase='closed', final_digest=?, "
+                "updated_at=? WHERE event_id=? AND phase='pending' AND prepared_digest=? "
+                "AND final_digest=?",
+                (
+                    terminal_digest,
+                    completed_at,
+                    event_id,
+                    plan_digest,
+                    target_digest,
+                ),
+            )
+            if updated.rowcount != 1:
+                raise SchemaV4Error("downmigration recovery plan changed")
+        else:
+            connection.execute(
+                "INSERT INTO governance_operation_journals "
+                "(event_id, operation, causation_id, authorization_session, principal_id, "
+                "phase, direction, prior_digest, prepared_digest, final_digest, affected_ids, "
+                "required_child_intents, required_child_terminals, proposal_id, attempt_no, "
+                "marker_required, created_at, updated_at, blocked_reason) "
+                "VALUES (?, 'governance_schema_v4_downmigration', ?, NULL, "
+                "'offline-schema-coordinator', 'closed', 'narrowing', ?, ?, ?, ?, '[]', "
+                "'[]', NULL, 1, 0, ?, ?, NULL)",
+                (
+                    event_id,
+                    event_id,
+                    expected.activation_state_digest,
+                    plan_digest,
+                    terminal_digest,
+                    affected_ids,
+                    completed_at,
+                    completed_at,
+                ),
+            )
+        connection.execute(
+            "INSERT INTO governance_operation_components "
+            "(event_id, phase, ordinal, component_kind, component_key, value_json, "
+            "value_hash, status) VALUES (?, 'final', 0, "
+            "'schema-downmigration-terminal', ?, ?, ?, 'complete')",
+            (event_id, event_id, terminal_json, terminal_digest),
+        )
+        _crash_point("downmigration-after-authority-close")
+        for table in (*_VERSIONED_AUTHORITY_TABLES, *_V4_ONLY_TABLES):
+            connection.execute(f"DROP TABLE {table}")
+        _crash_point("downmigration-after-v4-drop")
+        from . import store as store_module
+
+        store_module._migrate_v3(connection)
+        _crash_point("downmigration-after-v3-schema")
+        connection.execute("PRAGMA user_version=3")
+        _crash_point("downmigration-before-commit")
+        connection.commit()
+    except BaseException:
+        connection.rollback()
+        raise
+    return DownmigrationResult(
+        schema_version=3,
+        activation_store_id=expected.activation_store_id,
+        activation_epoch=expected.activation_epoch,
+        activation_state_digest=expected.activation_state_digest,
+        policy_generation_id=expected.policy_generation_id,
+        policy_fingerprint=expected.policy_fingerprint,
+        source_documents=expected_source_documents,
+        closed_sessions=closed[0],
+        expired_grants=closed[1],
+        expired_purposes=closed[2],
+        expired_tokens=closed[3],
+        expired_proposals=closed[4],
+        recovery_event_id=event_id,
+        recovery_terminal_digest=terminal_digest,
+    )
+
+
 def load_active_state(
     connection: sqlite3.Connection,
     *,
@@ -1139,7 +2096,12 @@ def load_active_state(
         publication = tuple(publication_rows[0])
         publication_event_id = _text(publication[0], "publication.event_id")
         publication_kind = _text(publication[1], "publication.publication_kind")
-        if publication_kind not in {"migration", "policy", "catalog"}:
+        if publication_kind not in {
+            "migration",
+            "policy",
+            "catalog",
+            "attachment-clone",
+        }:
             raise SchemaV4Error("active tuple publication kind is invalid")
         predecessor_digest = publication[2]
         if publication_kind == "migration":
@@ -1157,6 +2119,24 @@ def load_active_state(
             ).fetchone()
             if predecessor_rows != (1,):
                 raise SchemaV4Error("active tuple publication predecessor is unavailable")
+            if publication_kind == "attachment-clone":
+                predecessor_tuple = connection.execute(
+                    "SELECT policy_generation_id, policy_fingerprint, "
+                    "projector_schema_version, catalog_generation, activation_epoch "
+                    "FROM governance_tuple_publications "
+                    "WHERE target_activation_state_digest=?",
+                    (predecessor,),
+                ).fetchone()
+                if predecessor_tuple != (
+                    generation_id,
+                    policy_fingerprint,
+                    projector_schema_version,
+                    catalog_generation,
+                    activation_epoch - 1,
+                ):
+                    raise SchemaV4Error(
+                        "attachment clone changed the active policy or catalog tuple"
+                    )
         if (
             (
                 publication_kind in {"migration", "policy"}
@@ -1339,6 +2319,151 @@ def load_active_policy(
     )
 
 
+def load_policy_generation(
+    connection: sqlite3.Connection,
+    generation_id: str,
+) -> PolicyGenerationSeed:
+    """Verify and return one immutable historical policy generation."""
+
+    identity = _text(generation_id, "policy.generation_id")
+    try:
+        row = connection.execute(
+            "SELECT generation_id, source_documents, source_fingerprint, "
+            "conflict_digest, compiled_policy, policy_fingerprint, "
+            "compiler_schema_version, projector_schema_version, "
+            "predecessor_generation_id, authoring_event_id, receipt_event_id, "
+            "immutable_row_digest, created_at FROM compiled_policy_generations "
+            "WHERE generation_id=?",
+            (identity,),
+        ).fetchone()
+        if row is None:
+            raise SchemaV4Error("policy generation is unavailable")
+        stored = tuple(row)
+        if not hmac.compare_digest(
+            _stored_policy_row_digest(stored),
+            _digest(stored[11], "policy.immutable_row_digest"),
+        ):
+            raise SchemaV4Error("policy generation digest does not verify")
+        seed = PolicyGenerationSeed(
+            generation_id=_text(stored[0], "policy.generation_id"),
+            source_documents=_decode_source_document_bytes(stored[1]),
+            source_fingerprint=_digest(
+                stored[2], "policy.source_fingerprint"
+            ),
+            conflict_digest=_digest(stored[3], "policy.conflict_digest"),
+            compiled_policy=_blob(
+                stored[4], "policy.compiled_policy", allow_empty=True
+            ),
+            policy_fingerprint=_digest(
+                stored[5], "policy.policy_fingerprint"
+            ),
+            compiler_schema_version=_integer(
+                stored[6], "policy.compiler_schema_version"
+            ),
+            projector_schema_version=_integer(
+                stored[7], "policy.projector_schema_version"
+            ),
+            predecessor_generation_id=(
+                None
+                if stored[8] is None
+                else _text(stored[8], "policy.predecessor_generation_id")
+            ),
+            authoring_event_id=_text(stored[9], "policy.authoring_event_id"),
+            receipt_event_id=_text(stored[10], "policy.receipt_event_id"),
+            created_at=_integer(stored[12], "policy.created_at"),
+        )
+        source_documents, row_digest = _validate_policy(seed)
+        if not hmac.compare_digest(row_digest, str(stored[11])):
+            raise SchemaV4Error("policy generation digest does not verify")
+        _verify_policy_source_parity(seed, source_documents)
+        return seed
+    except (IndexError, TypeError, ValueError, sqlite3.Error, SchemaV4Error):
+        raise SchemaV4Error("policy generation is unavailable") from None
+
+
+def _projection_namespace_id(value: object) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in _HEX_DIGITS for character in value)
+    ):
+        raise SchemaV4Error("projection namespace pins cannot be verified")
+    return value
+
+
+def projection_namespace_ids(connection: sqlite3.Connection) -> frozenset[str]:
+    """Return every registered immutable namespace in one caller-held snapshot."""
+
+    try:
+        if int(connection.execute("PRAGMA user_version").fetchone()[0]) != 4:
+            raise SchemaV4Error("projection namespace inventory requires schema v4")
+        return frozenset(
+            _projection_namespace_id(row[0])
+            for row in connection.execute(
+                "SELECT namespace_id FROM governance_projection_namespaces"
+            )
+        )
+    except SchemaV4Error:
+        raise
+    except (IndexError, sqlite3.Error, TypeError) as error:
+        raise SchemaV4Error(
+            "projection namespace inventory cannot be verified"
+        ) from error
+
+
+def projection_namespace_pins(connection: sqlite3.Connection) -> frozenset[str]:
+    """Return active and recovery-bound namespaces in one caller-held snapshot."""
+
+    try:
+        if int(connection.execute("PRAGMA user_version").fetchone()[0]) != 4:
+            raise SchemaV4Error("projection namespace pins require schema v4")
+        active_rows = connection.execute(
+            "SELECT n.namespace_id FROM active_governance_tuple a "
+            "JOIN governance_projection_namespaces n "
+            "ON n.policy_fingerprint=a.policy_fingerprint "
+            "AND n.projector_schema_version=a.projector_schema_version "
+            "AND n.catalog_generation=a.catalog_generation "
+            "WHERE a.singleton=1"
+        ).fetchall()
+        if len(active_rows) != 1:
+            raise SchemaV4Error("projection namespace pins cannot be verified")
+        pins = {_projection_namespace_id(active_rows[0][0])}
+
+        for (proposal_json,) in connection.execute(
+            "SELECT proposal_json FROM governance_proposals WHERE status='pending'"
+        ):
+            try:
+                payload = json.loads(proposal_json)
+                binding = payload["authority_binding"]
+                reviewed = binding["reviewed_active_tuple"]
+                target = binding["target"]["projection_namespace"]
+                pins.add(_projection_namespace_id(reviewed["projection_namespace_id"]))
+                pins.add(_projection_namespace_id(target["namespace_id"]))
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+                raise SchemaV4Error(
+                    "projection namespace pins cannot be verified"
+                ) from error
+
+        for (value_json,) in connection.execute(
+            "SELECT c.value_json FROM governance_operation_components c "
+            "JOIN governance_operation_journals j ON j.event_id=c.event_id "
+            "WHERE j.phase IN ('allocating','pending') "
+            "AND c.component_kind='catalog'"
+        ):
+            try:
+                value = json.loads(value_json)
+                pins.add(_projection_namespace_id(value["projection_namespace_id"]))
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+                raise SchemaV4Error(
+                    "projection namespace pins cannot be verified"
+                ) from error
+        return frozenset(pins)
+    except SchemaV4Error:
+        raise
+    except (IndexError, sqlite3.Error, TypeError) as error:
+        raise SchemaV4Error("projection namespace pins cannot be verified") from error
+
+
 def _publication_result(
     connection: sqlite3.Connection,
     active: VerifiedActiveGovernanceState,
@@ -1461,8 +2586,15 @@ def publish_policy_generation(
     namespace: ProjectionNamespaceSeed,
     activated_at: int,
     acknowledge_registry: RegistryAcknowledger,
+    dependent_grants: tuple[DependentGrantTransition, ...] | None = None,
+    catalog: CatalogGenerationSeed | None = None,
 ) -> TuplePublicationResult:
-    """Insert and CAS one complete policy generation against its reviewed tuple."""
+    """Insert and CAS one complete policy/catalog generation successor.
+
+    Policy changes that alter selector membership supply ``catalog`` so the
+    immutable target catalog and its namespace enter the same tuple CAS.  A
+    policy-only change may reuse the reviewed catalog by passing ``None``.
+    """
 
     if not isinstance(expected, VerifiedActiveGovernanceState):
         raise SchemaV4Error("expected active tuple is invalid")
@@ -1483,6 +2615,44 @@ def publish_policy_generation(
     namespace_ready_at = _integer(namespace.ready_at, "namespace.ready_at")
     if namespace_ready_at > activated:
         raise SchemaV4Error("projection namespace is not ready at activation")
+    grant_transitions = _dependent_grant_transitions(
+        dependent_grants,
+        expected_policy_fingerprint=expected.policy_fingerprint,
+        target_policy_fingerprint=policy.policy_fingerprint,
+    )
+    if catalog is None:
+        target_catalog_generation = expected.catalog_generation
+        catalog_descriptor = None
+        catalog_artifact_count = None
+        catalog_created_at = None
+        catalog_descriptor_digest = None
+    else:
+        if not isinstance(catalog, CatalogGenerationSeed):
+            raise SchemaV4Error("catalog generation is invalid")
+        target_catalog_generation = _integer(
+            catalog.catalog_generation,
+            "catalog.catalog_generation",
+        )
+        if target_catalog_generation != expected.catalog_generation + 1:
+            raise ActiveTupleStale("catalog generation is not the reviewed successor")
+        catalog_descriptor = _blob(
+            catalog.descriptor,
+            "catalog.descriptor",
+            allow_empty=True,
+        )
+        catalog_artifact_count = _integer(
+            catalog.artifact_count,
+            "catalog.artifact_count",
+            minimum=0,
+        )
+        catalog_created_at = _integer(catalog.created_at, "catalog.created_at")
+        catalog_descriptor_digest = _framed_digest(
+            b"exomem.catalog-generation-descriptor.v1",
+            _ascii_integer(target_catalog_generation),
+            catalog_descriptor,
+            _ascii_integer(catalog_artifact_count),
+            _ascii_integer(catalog_created_at),
+        )
 
     _verify_policy_source_parity(policy, source_documents)
 
@@ -1504,21 +2674,22 @@ def publish_policy_generation(
             raise ActiveTupleStale(
                 "active tuple no longer matches the reviewed predecessor"
             )
-        catalog = connection.execute(
-            "SELECT descriptor_digest FROM catalog_generation_descriptors "
-            "WHERE catalog_generation=?",
-            (expected.catalog_generation,),
-        ).fetchone()
-        if catalog is None:
-            raise SchemaV4Error("reviewed catalog descriptor is unavailable")
-        catalog_descriptor_digest = _digest(
-            catalog[0], "catalog.descriptor_digest"
-        )
+        if catalog_descriptor_digest is None:
+            current_catalog = connection.execute(
+                "SELECT descriptor_digest FROM catalog_generation_descriptors "
+                "WHERE catalog_generation=?",
+                (expected.catalog_generation,),
+            ).fetchone()
+            if current_catalog is None:
+                raise SchemaV4Error("reviewed catalog descriptor is unavailable")
+            catalog_descriptor_digest = _digest(
+                current_catalog[0], "catalog.descriptor_digest"
+            )
         namespace_digest = _framed_digest(
             b"exomem.authorization-projection-namespace.v1",
             policy.policy_fingerprint.encode("ascii"),
             _ascii_integer(policy.projector_schema_version),
-            _ascii_integer(expected.catalog_generation),
+            _ascii_integer(target_catalog_generation),
             namespace_id.encode(),
             namespace_evidence,
             _ascii_integer(namespace_ready_at),
@@ -1535,10 +2706,51 @@ def publish_policy_generation(
             policy_fingerprint=policy.policy_fingerprint,
             policy_row_digest=policy_row_digest,
             projector_schema_version=policy.projector_schema_version,
-            catalog_generation=expected.catalog_generation,
+            catalog_generation=target_catalog_generation,
             catalog_descriptor_digest=catalog_descriptor_digest,
             projection_namespace_identity=namespace_digest,
         )
+        if grant_transitions is not None:
+            active_grants = connection.execute(
+                "SELECT grant_id, policy_fingerprint, membership_manifest, status, "
+                "prepared_event_id FROM governance_session_grants "
+                "WHERE status='active' ORDER BY grant_id"
+            ).fetchall()
+            expected_grants = [
+                (
+                    transition.grant_id,
+                    transition.expected_policy_fingerprint,
+                    transition.expected_membership_manifest,
+                    "active",
+                    None,
+                )
+                for transition in grant_transitions
+            ]
+            if active_grants != expected_grants:
+                raise ActiveTupleStale(
+                    "dependent grant manifest no longer matches the reviewed predecessor"
+                )
+            for transition in grant_transitions:
+                updated_grant = connection.execute(
+                    "UPDATE governance_session_grants SET status=?, "
+                    "policy_fingerprint=?, membership_manifest=?, "
+                    "prepared_event_id=NULL, revoked_at=? WHERE grant_id=? "
+                    "AND status='active' AND prepared_event_id IS NULL "
+                    "AND policy_fingerprint=? AND membership_manifest=?",
+                    (
+                        transition.target_status,
+                        transition.target_policy_fingerprint,
+                        transition.target_membership_manifest,
+                        activated,
+                        transition.grant_id,
+                        transition.expected_policy_fingerprint,
+                        transition.expected_membership_manifest,
+                    ),
+                )
+                if updated_grant.rowcount != 1:
+                    raise ActiveTupleStale(
+                        "dependent grant changed during policy publication"
+                    )
         connection.execute(
             "INSERT INTO compiled_policy_generations "
             "(generation_id, source_documents, source_fingerprint, conflict_digest, "
@@ -1562,30 +2774,62 @@ def publish_policy_generation(
                 policy.created_at,
             ),
         )
-        connection.execute(
-            "INSERT INTO governance_projection_namespaces "
-            "(policy_fingerprint, projector_schema_version, catalog_generation, "
-            "namespace_id, namespace_digest, evidence, ready_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        if catalog_descriptor is not None:
+            connection.execute(
+                "INSERT INTO catalog_generation_descriptors "
+                "(catalog_generation, descriptor, descriptor_digest, artifact_count, "
+                "created_at) VALUES (?, ?, ?, ?, ?)",
+                (
+                    target_catalog_generation,
+                    catalog_descriptor,
+                    catalog_descriptor_digest,
+                    catalog_artifact_count,
+                    catalog_created_at,
+                ),
+            )
+        namespace_row = connection.execute(
+            "SELECT namespace_id, namespace_digest, evidence, ready_at "
+            "FROM governance_projection_namespaces WHERE policy_fingerprint=? "
+            "AND projector_schema_version=? AND catalog_generation=?",
             (
                 policy.policy_fingerprint,
                 policy.projector_schema_version,
-                expected.catalog_generation,
-                namespace_id,
-                namespace_digest,
-                namespace_evidence,
-                namespace_ready_at,
+                target_catalog_generation,
             ),
+        ).fetchone()
+        expected_namespace_row = (
+            namespace_id,
+            namespace_digest,
+            namespace_evidence,
+            namespace_ready_at,
         )
+        if namespace_row is None:
+            connection.execute(
+                "INSERT INTO governance_projection_namespaces "
+                "(policy_fingerprint, projector_schema_version, catalog_generation, "
+                "namespace_id, namespace_digest, evidence, ready_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    policy.policy_fingerprint,
+                    policy.projector_schema_version,
+                    target_catalog_generation,
+                    *expected_namespace_row,
+                ),
+            )
+        elif tuple(namespace_row) != expected_namespace_row:
+            raise SchemaV4Error(
+                "existing projection namespace does not match the policy publication"
+            )
         active_update = connection.execute(
             "UPDATE active_governance_tuple SET policy_generation_id=?, "
-            "policy_fingerprint=?, projector_schema_version=? "
+            "policy_fingerprint=?, projector_schema_version=?, catalog_generation=? "
             "WHERE singleton=1 AND policy_generation_id=? AND policy_fingerprint=? "
             "AND projector_schema_version=? AND catalog_generation=?",
             (
                 policy.generation_id,
                 policy.policy_fingerprint,
                 policy.projector_schema_version,
+                target_catalog_generation,
                 expected.policy_generation_id,
                 expected.policy_fingerprint,
                 expected.projector_schema_version,
@@ -1623,7 +2867,7 @@ def publish_policy_generation(
                 policy.generation_id,
                 policy.policy_fingerprint,
                 policy.projector_schema_version,
-                expected.catalog_generation,
+                target_catalog_generation,
                 target_epoch,
                 activated,
             ),

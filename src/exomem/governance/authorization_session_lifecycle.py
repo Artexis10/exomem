@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import re
 import secrets
 import sqlite3
 import time
@@ -19,6 +21,8 @@ from . import (
 
 MAX_SESSION_TTL_SECONDS: Final = 3_600
 _MAX_SQLITE_INTEGER: Final = (1 << 63) - 1
+_HOSTED_ATTACHMENT = re.compile(r"hosted-attachment-v1-[0-9a-f]{64}\Z")
+_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
 
 class AuthorizationSessionUnavailable(RuntimeError):
@@ -117,6 +121,11 @@ def _ready_custody(
         current = _bounded_time(now)
         if not isinstance(custody, authorization_custody.AuthorizationCustody):
             raise AuthorizationSessionUnavailable
+        authorization_custody.require_current_standalone_registry(
+            custody,
+            now=current,
+            require_serving=True,
+        )
         keyring = custody.keyring
         control = custody.control
         if (
@@ -249,6 +258,216 @@ def serving_membership_readiness(
             connection.close()
 
 
+def hosted_serving_membership_readiness(
+    vault_root: Path,
+    *,
+    expected_cell_id: str,
+    expected_logical_vault_id: str,
+    expected_replica_id: str,
+    now: int | None = None,
+) -> authorization_serving_membership.ServingMembershipReadiness:
+    """Recheck provisioner-owned Hosted membership without a standalone fallback."""
+
+    connection: sqlite3.Connection | None = None
+    try:
+        current = int(time.time()) if now is None else _bounded_time(now)
+        cell_id = _bounded_identity(expected_cell_id)
+        logical_vault_id = _bounded_identity(expected_logical_vault_id)
+        replica_id = _bounded_identity(expected_replica_id)
+        fixed_paths = {
+            authorization_custody.KEYRING_FILE_ENV: authorization_custody.HOSTED_KEYRING_FILE,
+            authorization_custody.CONTROL_FILE_ENV: authorization_custody.HOSTED_CONTROL_FILE,
+            authorization_custody.MEMBERSHIP_FILE_ENV: authorization_custody.HOSTED_MEMBERSHIP_FILE,
+        }
+        if any(
+            os.environ.get(variable, "") != str(path)
+            for variable, path in fixed_paths.items()
+        ) or os.environ.get(authorization_custody.REPLICA_ID_ENV, "") != replica_id:
+            raise AuthorizationSessionUnavailable
+        custody = authorization_custody.load_authorization_custody(
+            Path(vault_root),
+            now=current,
+        )
+        if (
+            custody.keyring_path != authorization_custody.HOSTED_KEYRING_FILE
+            or custody.control_path != authorization_custody.HOSTED_CONTROL_FILE
+            or custody.membership_path != authorization_custody.HOSTED_MEMBERSHIP_FILE
+            or custody.control.cell_id != cell_id
+            or custody.control.logical_vault_id != logical_vault_id
+            or custody.local_replica_id != replica_id
+            or _HOSTED_ATTACHMENT.fullmatch(custody.control.registry_attachment_id)
+            is None
+        ):
+            raise AuthorizationSessionUnavailable
+        from . import store
+
+        connection = store.open_authorization_session_connection(Path(vault_root))
+        _ready_custody(connection, custody, now=current)
+        membership = custody.serving_membership
+        if membership is None:
+            raise AuthorizationSessionUnavailable
+        return authorization_serving_membership.ServingMembershipReadiness(
+            ready=True,
+            code="AUTHORIZATION_MEMBERSHIP_READY",
+            epoch=membership.epoch,
+            serving_replicas=sum(
+                item.state == "SERVING" for item in membership.replicas
+            ),
+            draining_replicas=sum(
+                item.state == "DRAINING" for item in membership.replicas
+            ),
+        )
+    except (
+        OSError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+        sqlite3.Error,
+        AuthorizationSessionUnavailable,
+        authorization_custody.AuthorizationCustodyUnavailable,
+    ):
+        return authorization_serving_membership.unavailable_readiness()
+    finally:
+        if connection is not None:
+            connection.close()
+
+
+def _bounded_counter(value: object) -> int:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 0 <= value <= _MAX_SQLITE_INTEGER
+    ):
+        raise AuthorizationSessionUnavailable
+    return value
+
+
+def mint_hosted_replica_readiness_attestation(
+    vault_root: Path,
+    *,
+    expected_cell_id: str,
+    expected_logical_vault_id: str,
+    expected_replica_id: str,
+    lifecycle_phase: str,
+    active_reads: int,
+    active_mutations: int,
+    active_transfers: int,
+    target_epoch: int,
+    previous_epoch_digest: str,
+    ttl_seconds: int,
+    now: int | None = None,
+) -> bytes:
+    """Sign one runtime-derived Hosted readiness statement for the next epoch."""
+
+    try:
+        current = int(time.time()) if now is None else _bounded_time(now)
+        cell_id = _bounded_identity(expected_cell_id)
+        logical_vault_id = _bounded_identity(expected_logical_vault_id)
+        replica_id = _bounded_identity(expected_replica_id)
+        epoch = _bounded_time(target_epoch)
+        reads = _bounded_counter(active_reads)
+        mutations = _bounded_counter(active_mutations)
+        transfers = _bounded_counter(active_transfers)
+        if (
+            not isinstance(previous_epoch_digest, str)
+            or _SHA256.fullmatch(previous_epoch_digest) is None
+            or isinstance(ttl_seconds, bool)
+            or not isinstance(ttl_seconds, int)
+            or not 1
+            <= ttl_seconds
+            <= authorization_serving_membership.MAX_ATTESTATION_TTL_SECONDS
+        ):
+            raise AuthorizationSessionUnavailable
+        fixed_paths = {
+            authorization_custody.KEYRING_FILE_ENV: authorization_custody.HOSTED_KEYRING_FILE,
+            authorization_custody.CONTROL_FILE_ENV: authorization_custody.HOSTED_CONTROL_FILE,
+            authorization_custody.MEMBERSHIP_FILE_ENV: authorization_custody.HOSTED_MEMBERSHIP_FILE,
+        }
+        if any(
+            os.environ.get(variable, "") != str(path)
+            for variable, path in fixed_paths.items()
+        ) or os.environ.get(authorization_custody.REPLICA_ID_ENV, "") != replica_id:
+            raise AuthorizationSessionUnavailable
+        custody = authorization_custody.load_authorization_custody(
+            Path(vault_root),
+            now=current,
+        )
+        membership = custody.serving_membership
+        control = custody.control
+        keyring = custody.keyring
+        active_key = keyring.active_key
+        if (
+            custody.keyring_path != authorization_custody.HOSTED_KEYRING_FILE
+            or custody.control_path != authorization_custody.HOSTED_CONTROL_FILE
+            or custody.membership_path != authorization_custody.HOSTED_MEMBERSHIP_FILE
+            or control.cell_id != cell_id
+            or control.logical_vault_id != logical_vault_id
+            or custody.local_replica_id != replica_id
+            or _HOSTED_ATTACHMENT.fullmatch(control.registry_attachment_id) is None
+            or membership is None
+            or membership.epoch != control.serving_membership_epoch
+            or epoch != control.serving_membership_epoch + 1
+            or previous_epoch_digest != control.serving_membership_digest
+            or (
+                membership.record_digest
+                and membership.record_digest != previous_epoch_digest
+            )
+            or not active_key.not_before <= current < active_key.not_after
+        ):
+            raise AuthorizationSessionUnavailable
+        if lifecycle_phase == "active":
+            state = "SERVING"
+            issuance_stopped = False
+            no_in_flight = False
+        elif lifecycle_phase == "quiesced" and not (reads or mutations or transfers):
+            state = "DRAINING"
+            issuance_stopped = True
+            no_in_flight = True
+        else:
+            raise AuthorizationSessionUnavailable
+        expires_at = min(
+            current + ttl_seconds,
+            active_key.not_after,
+        )
+        if expires_at <= current:
+            raise AuthorizationSessionUnavailable
+        attestation = authorization_serving_membership.ReplicaReadinessAttestation(
+            version=1,
+            epoch=epoch,
+            replica_id=replica_id,
+            state=state,
+            software_version=authorization_custody.runtime_software_version(),
+            schema_version=schema_v4.SCHEMA_USER_VERSION,
+            cell_id=cell_id,
+            active_key_id=keyring.active_key_id,
+            accepted_key_ids=tuple(
+                sorted(item.key_id for item in keyring.accepted_keys)
+            ),
+            control_digest=authorization_custody.control_attestation_digest(control),
+            keyring_digest=authorization_custody.keyring_attestation_digest(keyring),
+            attested_at=current,
+            expires_at=expires_at,
+            issuance_stopped=issuance_stopped,
+            no_in_flight=no_in_flight,
+            signing_key_id=keyring.active_key_id,
+        )
+        return authorization_serving_membership.encode_replica_readiness_attestation(
+            attestation,
+            verifier_keys={item.key_id: item.key for item in keyring.accepted_keys},
+        )
+    except (
+        AttributeError,
+        OSError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+        authorization_custody.AuthorizationCustodyUnavailable,
+        authorization_serving_membership.ServingMembershipUnavailable,
+        AuthorizationSessionUnavailable,
+    ):
+        raise AuthorizationSessionUnavailable from None
+
+
 def _expiry(
     *,
     now: int,
@@ -361,6 +580,7 @@ def open_session(
     )
     _begin_immediate(connection)
     try:
+        _ready_custody(connection, custody, now=now)
         schema_v4.insert_authorization_session(
             connection,
             issued.record,
@@ -710,6 +930,7 @@ def _rotate_resolved_session(
     )
     _begin_immediate(connection)
     try:
+        _ready_custody(connection, custody, now=now)
         updated = connection.execute(
             "UPDATE governance_authorization_sessions SET locator_digest=?, verifier=?, "
             "verifier_key_id=?, credential_generation=?, principal_id=?, issuer_family=?, "

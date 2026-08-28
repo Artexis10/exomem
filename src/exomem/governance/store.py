@@ -16,9 +16,14 @@ import os
 import sqlite3
 import threading
 from collections import OrderedDict
+from collections.abc import Callable
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .. import index_paths, reserved_paths, sidecar_store
+
+if TYPE_CHECKING:
+    from .schema_v4 import MigrationSeed, VerifiedActiveGovernanceState
 
 SCHEMA_USER_VERSION = 3
 DATA_TABLE = "compiled_policy"
@@ -235,6 +240,223 @@ def authorization_session_schema_version(vault_root: Path) -> int | None:
     finally:
         if connection is not None:
             connection.close()
+
+
+def _schema_migration_barrier(point: str) -> None:
+    """Test seam after the only durable database effect."""
+
+    del point
+
+
+def _v3_snapshot_digest(connection: sqlite3.Connection) -> str:
+    snapshot = sqlite3.connect(":memory:")
+    try:
+        connection.backup(snapshot)
+        snapshot.execute("VACUUM")
+        serialized = snapshot.serialize()
+    finally:
+        snapshot.close()
+    domain = b"exomem.governance-v3-snapshot.v1"
+    return hashlib.sha256(
+        domain + len(serialized).to_bytes(8, "big") + serialized
+    ).hexdigest()
+
+
+def migrate_enrolled_v3_store(
+    vault_root: Path,
+    *,
+    seed: MigrationSeed,
+    expected_source_store_digest: str,
+    now: int,
+    source_recheck: Callable[[], None] | None = None,
+) -> VerifiedActiveGovernanceState:
+    """Commit one pre-enrolled exact-v3 store to its exact v4 target.
+
+    This is the filesystem-backed offline migration coordinator.  It verifies
+    the authenticated serving membership is wholly drained at schema v3 before
+    the first database effect, then advances the external membership to serving
+    v4 only after the exact store target commits.  The cooperative identity guard
+    keeps current Exomem writers out while the exact policy workspace is
+    rechecked; external direct OS mutation remains outside that guarantee and is
+    detected by the post-commit observation.
+    """
+
+    from .. import writer_lease
+    from . import authorization_custody, policy, schema_v4
+
+    root = Path(vault_root)
+    path = sidecar_path(root)
+    if (
+        not isinstance(expected_source_store_digest, str)
+        or len(expected_source_store_digest) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in expected_source_store_digest
+        )
+    ):
+        raise schema_v4.SchemaV4Error("migration source store digest is invalid")
+    with reserved_paths._subsystem_authority_scope("governance.store"):
+        with reserved_paths._identity_coordination_scope(
+            root,
+            descriptor_ids=("governance-store",),
+            identity_may_change=False,
+        ):
+            with reserved_paths._sqlite_owner_target_scope(
+                root,
+                path,
+                "governance-store",
+                create=False,
+            ) as retained_path:
+                connection = sqlite3.connect(
+                    f"{retained_path.as_uri()}?mode=rw",
+                    uri=True,
+                )
+                try:
+                    connection.execute("PRAGMA synchronous=FULL")
+                    connection.execute("PRAGMA busy_timeout=0")
+                    reserved_paths._publish_sqlite_owner_family(
+                        root,
+                        path,
+                        "governance-store",
+                        connection,
+                    )
+                    version = int(
+                        connection.execute("PRAGMA user_version").fetchone()[0]
+                    )
+                    if version == SCHEMA_USER_VERSION:
+                        schema_v4.require_exact_v3_connection(connection)
+                    elif version == schema_v4.SCHEMA_USER_VERSION:
+                        schema_v4.require_exact_v4_connection(connection)
+                    else:
+                        raise UnsupportedGovernanceSchema(
+                            "explicit governance migration requires exact schema v3 or v4"
+                        )
+
+                    target = schema_v4.migration_target(seed)
+                    custody = authorization_custody.load_authorization_custody(
+                        root,
+                        now=now,
+                    )
+                    control = custody.control
+                    if (
+                        not control.governance_enrolled
+                        or control.activation_store_id != target.activation_store_id
+                        or control.activation_epoch != target.activation_epoch
+                        or control.activation_state_digest
+                        != target.activation_state_digest
+                        or control.logical_vault_id != target.logical_vault_id
+                    ):
+                        raise authorization_custody.AuthorizationCustodyUnavailable
+                    if version == SCHEMA_USER_VERSION and (
+                        custody.serving_membership is None
+                        or custody.local_replica_id is None
+                        or not custody.serving_membership.replicas
+                        or any(
+                            replica.state != "DRAINING"
+                            or replica.schema_version != SCHEMA_USER_VERSION
+                            or not replica.issuance_stopped
+                            or not replica.no_in_flight
+                            for replica in custody.serving_membership.replicas
+                        )
+                    ):
+                        raise authorization_custody.AuthorizationCustodyUnavailable
+                    if version == SCHEMA_USER_VERSION and (
+                        _v3_snapshot_digest(connection) != expected_source_store_digest
+                    ):
+                        raise schema_v4.SchemaV4Error(
+                            "migration source store changed after owner review"
+                        )
+
+                    before = None
+                    if version == SCHEMA_USER_VERSION:
+                        before = policy.observe_authoring_snapshot(root)
+                        if (
+                            before is None
+                            or before.documents != seed.policy.source_documents
+                            or before.source_fingerprint
+                            != seed.policy.source_fingerprint
+                            or before.conflict_set_digest
+                            != seed.policy.conflict_digest
+                        ):
+                            raise schema_v4.SchemaV4Error(
+                                "migration policy workspace does not match the reviewed seed"
+                            )
+
+                    try:
+                        fenced = writer_lease.advance_configured_schema_fence(
+                            source_schema_version=SCHEMA_USER_VERSION,
+                            target_schema_version=schema_v4.SCHEMA_USER_VERSION,
+                        )
+                    except writer_lease.OpError:
+                        raise authorization_custody.AuthorizationCustodyUnavailable from None
+                    if fenced is not None:
+                        _schema_migration_barrier("after_schema_fence")
+
+                    result = schema_v4.migrate_v3_connection(connection, seed)
+                    reserved_paths._publish_sqlite_owner_family(
+                        root,
+                        path,
+                        "governance-store",
+                        connection,
+                    )
+                    _schema_migration_barrier("after_store_commit")
+                    if fenced is not None:
+                        try:
+                            confirmed_fence = (
+                                writer_lease.require_configured_schema_fence(
+                                    schema_v4.SCHEMA_USER_VERSION
+                                )
+                            )
+                        except writer_lease.OpError:
+                            raise authorization_custody.AuthorizationCustodyUnavailable from None
+                        if confirmed_fence != fenced:
+                            raise authorization_custody.AuthorizationCustodyUnavailable
+                    active = schema_v4.load_active_policy(
+                        connection,
+                        expected_logical_vault_id=target.logical_vault_id,
+                        expected_activation_store_id=target.activation_store_id,
+                        expected_activation_epoch=target.activation_epoch,
+                        expected_activation_state_digest=(
+                            target.activation_state_digest
+                        ),
+                    ).active
+                    if (
+                        result.schema_version != schema_v4.SCHEMA_USER_VERSION
+                        or result.activation_store_id != target.activation_store_id
+                        or result.activation_state_digest
+                        != target.activation_state_digest
+                        or active != target
+                    ):
+                        raise schema_v4.SchemaV4Error(
+                            "migration result does not match the enrolled target"
+                        )
+                    if before is not None:
+                        after = policy.observe_authoring_snapshot(root)
+                        if after != before:
+                            raise schema_v4.SchemaV4Error(
+                                "migration policy workspace changed during commit"
+                            )
+                    if source_recheck is not None:
+                        source_recheck()
+                finally:
+                    connection.close()
+
+            verified = authorization_custody.complete_standalone_v4_migration(
+                root,
+                target=target,
+                now=now,
+            )
+            if (
+                verified.keyring != custody.keyring
+                or verified.control.logical_vault_id != target.logical_vault_id
+                or verified.control.activation_store_id != target.activation_store_id
+                or verified.control.activation_epoch != target.activation_epoch
+                or verified.control.activation_state_digest
+                != target.activation_state_digest
+                or verified.control.serving_membership_epoch != 2
+            ):
+                raise authorization_custody.AuthorizationCustodyUnavailable
+    return active
 
 
 def _open_connection_owned(
@@ -552,6 +774,84 @@ def _delete_expired_except(
     return int(cursor.rowcount or 0)
 
 
+def _retained_v4_policy_components(
+    conn: sqlite3.Connection,
+) -> tuple[frozenset[str], frozenset[str]]:
+    """Return immutable policy-history rows that TTL sweeping cannot retire.
+
+    A spent v4 proposal is the retained semantic/publication history for its
+    compiled generation, and its reviewed dependent-grant targets remain part
+    of crash recovery evidence.  They are intentionally durable until a later
+    schema supplies an equivalent immutable history table.
+    """
+
+    proposal_ids: set[str] = set()
+    grant_ids: set[str] = set()
+
+    def retain_all_grants() -> None:
+        grant_ids.update(
+            str(row[0])
+            for row in conn.execute(
+                "SELECT grant_id FROM governance_session_grants"
+            ).fetchall()
+        )
+
+    rows = conn.execute(
+        "SELECT proposal_id, proposal_json, status, reserved_event_id "
+        "FROM governance_proposals WHERE status IN ('pending','spent') "
+        "ORDER BY proposal_id"
+    ).fetchall()
+    for proposal_id, proposal_json, status, reserved_event_id in rows:
+        if status == "pending" and reserved_event_id is None:
+            continue
+        try:
+            payload = json.loads(str(proposal_json))
+        except json.JSONDecodeError:
+            if "exomem.governance-policy-proposal/v" in str(proposal_json):
+                proposal_ids.add(str(proposal_id))
+                retain_all_grants()
+            continue
+        binding = payload.get("authority_binding") if isinstance(payload, dict) else None
+        schema = binding.get("schema") if isinstance(binding, dict) else None
+        if schema not in {
+            "exomem.governance-policy-proposal/v3",
+            "exomem.governance-policy-proposal/v4",
+        }:
+            continue
+        proposal_ids.add(str(proposal_id))
+        dependent = binding.get("dependent_grants", [])
+        if not isinstance(dependent, list):
+            retain_all_grants()
+            continue
+        seen_grants: set[str] = set()
+        malformed = False
+        expected_transition_keys = {
+            "grant_id",
+            "expected_policy_fingerprint",
+            "expected_membership_manifest",
+            "target_status",
+            "target_policy_fingerprint",
+            "target_membership_manifest",
+        }
+        for transition in dependent:
+            grant_id = transition.get("grant_id") if isinstance(transition, dict) else None
+            if (
+                not isinstance(transition, dict)
+                or set(transition) != expected_transition_keys
+                or not isinstance(grant_id, str)
+                or not grant_id
+                or grant_id in seen_grants
+            ):
+                malformed = True
+                break
+            seen_grants.add(grant_id)
+        if malformed:
+            retain_all_grants()
+        else:
+            grant_ids.update(seen_grants)
+    return frozenset(proposal_ids), frozenset(grant_ids)
+
+
 def sweep_authoring_state(vault_root: Path, *, now: float | None = None) -> int:
     """Physically retire expired tool state while pinning live composites."""
     if not sidecar_path(vault_root).exists():
@@ -562,17 +862,18 @@ def sweep_authoring_state(vault_root: Path, *, now: float | None = None) -> int:
     conn.execute("BEGIN IMMEDIATE")
     try:
         pinned = pinned_component_keys(vault_root, conn=conn)
+        retained_proposals, retained_grants = _retained_v4_policy_components(conn)
         removed = _delete_expired_except(
             conn,
             table="governance_proposals",
             key_column="proposal_id",
             expiry_column="expires_at",
             now=moment,
-            pinned=pinned.get("proposal", frozenset()),
+            pinned=pinned.get("proposal", frozenset()) | retained_proposals,
         )
         grant_pins = pinned.get("grant", frozenset()) | pinned.get(
             "dependent_grant", frozenset()
-        )
+        ) | retained_grants
         removed += _delete_expired_except(
             conn,
             table="governance_session_grants",

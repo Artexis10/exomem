@@ -9,7 +9,8 @@ import os
 import sqlite3
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from numbers import Real
 from pathlib import Path, PurePosixPath
@@ -260,6 +261,7 @@ _PROJECTED_CONTINUATIONS: dict[
     tuple[str, str],
     _ProjectedContinuationRecord,
 ] = {}
+_ACTIVE_PROJECTED_REQUESTS: dict[tuple[str, str], int] = {}
 _PROJECTED_CONTINUATION_LOCK = threading.RLock()
 
 
@@ -416,6 +418,11 @@ def _clear_projected_continuations_for_tests() -> None:
         _PROJECTED_CONTINUATIONS.clear()
 
 
+def _clear_projection_request_pins_for_tests() -> None:
+    with _PROJECTED_CONTINUATION_LOCK:
+        _ACTIVE_PROJECTED_REQUESTS.clear()
+
+
 def _lookup_projected_continuation(
     vault_root: Path,
     continuation: object,
@@ -438,6 +445,64 @@ def _lookup_projected_continuation(
     if record is None:
         raise _invalid_continuation()
     return record
+
+
+@contextmanager
+def _projection_runtime_request_scope(
+    vault_root: Path,
+    runtime: ActiveProjectionRuntime,
+    *,
+    continuation: object,
+) -> Iterator[tuple[ActiveProjectionRuntime, _ProjectedContinuationRecord | None]]:
+    """Pin the exact current or continuation runtime for one complete request."""
+
+    if not isinstance(runtime, ActiveProjectionRuntime):
+        raise ProjectionRuntimeUnavailable(
+            "governed projected retrieval is unavailable"
+        )
+    root_key = _root_key(Path(vault_root))
+    with _PROJECTED_CONTINUATION_LOCK:
+        record = (
+            None
+            if continuation is None
+            else _lookup_projected_continuation(Path(vault_root), continuation)
+        )
+        selected = runtime if record is None else record.runtime
+        pin = (root_key, selected.namespace.namespace_key.namespace_id)
+        _ACTIVE_PROJECTED_REQUESTS[pin] = _ACTIVE_PROJECTED_REQUESTS.get(pin, 0) + 1
+    try:
+        yield selected, record
+    finally:
+        with _PROJECTED_CONTINUATION_LOCK:
+            remaining = _ACTIVE_PROJECTED_REQUESTS.get(pin, 0) - 1
+            if remaining > 0:
+                _ACTIVE_PROJECTED_REQUESTS[pin] = remaining
+            else:
+                _ACTIVE_PROJECTED_REQUESTS.pop(pin, None)
+
+
+def projection_namespace_runtime_pins(vault_root: Path) -> frozenset[str]:
+    """Snapshot exact process-local serving, request, and continuation pins."""
+
+    root_key = _root_key(Path(vault_root))
+    pins: set[str] = set()
+    with _PREACTIVATED_RUNTIME_LOCK:
+        current = _PREACTIVATED_RUNTIMES.get(root_key)
+        if current is not None:
+            pins.add(current.runtime.namespace.namespace_key.namespace_id)
+    with _PROJECTED_CONTINUATION_LOCK:
+        _purge_projected_continuations(time.monotonic())
+        pins.update(
+            record.runtime.namespace.namespace_key.namespace_id
+            for (record_root, _token), record in _PROJECTED_CONTINUATIONS.items()
+            if record_root == root_key
+        )
+        pins.update(
+            namespace_id
+            for (request_root, namespace_id), count in _ACTIVE_PROJECTED_REQUESTS.items()
+            if request_root == root_key and count > 0
+        )
+    return frozenset(pins)
 
 
 def _register_projected_continuation(
@@ -1227,10 +1292,12 @@ def _should_auto_rerank(
     return 1.0 - overlap / max(len(vector), len(lexical)) > 0.5
 
 
-def find_projected_hits(
+def _find_projected_hits_pinned(
     vault_root: Path,
     runtime: ActiveProjectionRuntime,
     *,
+    current_runtime: ActiveProjectionRuntime,
+    continuation_record: _ProjectedContinuationRecord | None,
     query: str,
     limit: int,
     scope: str = "vault",
@@ -1253,12 +1320,6 @@ def find_projected_hits(
         raise ProjectionRuntimeUnavailable(
             "governed projected retrieval is unavailable"
         )
-    current_runtime = runtime
-    continuation_record = (
-        None
-        if continuation is None
-        else _lookup_projected_continuation(Path(vault_root), continuation)
-    )
     if continuation_record is not None:
         if (
             continuation_record.runtime.snapshot.policy.fingerprint
@@ -1267,7 +1328,8 @@ def find_projected_hits(
             != current_runtime.namespace.namespace_key.projector_schema_version
         ):
             raise _invalid_continuation()
-        runtime = continuation_record.runtime
+        if runtime is not continuation_record.runtime:
+            raise _invalid_continuation()
     if type(limit) is not int or not 1 <= limit <= 100:
         raise ValueError("find: limit must be an integer from 1 through 100")
     if (
@@ -1849,6 +1911,52 @@ def find_projected_hits(
     )
 
 
+def find_projected_hits(
+    vault_root: Path,
+    runtime: ActiveProjectionRuntime,
+    *,
+    query: str,
+    limit: int,
+    scope: str = "vault",
+    mode: str,
+    graph: bool,
+    rerank: bool | None,
+    auto_rerank: bool = False,
+    prefer_compiled: bool = True,
+    prefer_active: bool = True,
+    rank_config: ranking_config.RankingConfig = ranking_config.DEFAULT_RANKING,
+    principal: RequestPrincipal,
+    purpose: str | None,
+    continuation: str | None = None,
+) -> ProjectedFindResult:
+    """Acquire one exact runtime pin before any projected request work."""
+
+    with _projection_runtime_request_scope(
+        Path(vault_root),
+        runtime,
+        continuation=continuation,
+    ) as (selected, continuation_record):
+        return _find_projected_hits_pinned(
+            Path(vault_root),
+            selected,
+            current_runtime=runtime,
+            continuation_record=continuation_record,
+            query=query,
+            limit=limit,
+            scope=scope,
+            mode=mode,
+            graph=graph,
+            rerank=rerank,
+            auto_rerank=auto_rerank,
+            prefer_compiled=prefer_compiled,
+            prefer_active=prefer_active,
+            rank_config=rank_config,
+            principal=principal,
+            purpose=purpose,
+            continuation=continuation,
+        )
+
+
 __all__ = [
     "ActiveProjectionRuntime",
     "ProjectedContinuationUnavailable",
@@ -1859,6 +1967,7 @@ __all__ = [
     "has_preactivated_projection_runtime",
     "load_active_projection_runtime",
     "preactivate_projection_runtime",
+    "projection_namespace_runtime_pins",
     "requires_fixed_projected_completion",
     "requires_projected_read_boundary",
 ]

@@ -298,6 +298,66 @@ def _signed_attestation_value(
     return value
 
 
+def _validate_attestation_shape(
+    attestation: ReplicaReadinessAttestation,
+    *,
+    now: int | None,
+) -> None:
+    if not isinstance(attestation, ReplicaReadinessAttestation) or attestation.version != 1:
+        raise ServingMembershipUnavailable
+    _integer(attestation.epoch)
+    _identifier(attestation.replica_id)
+    if attestation.state not in _STATES:
+        raise ServingMembershipUnavailable
+    _identifier(attestation.software_version)
+    _integer(attestation.schema_version)
+    _identifier(attestation.cell_id)
+    active_key_id = _identifier(attestation.active_key_id)
+    accepted_key_ids = tuple(_identifier(item) for item in attestation.accepted_key_ids)
+    signing_key_id = _identifier(attestation.signing_key_id)
+    attested_at = _integer(attestation.attested_at)
+    expires_at = _integer(attestation.expires_at)
+    if (
+        not 1 <= len(accepted_key_ids) <= 32
+        or accepted_key_ids != tuple(sorted(set(accepted_key_ids)))
+        or active_key_id not in accepted_key_ids
+        or signing_key_id != active_key_id
+        or attested_at >= expires_at
+        or expires_at - attested_at > MAX_ATTESTATION_TTL_SECONDS
+        or (now is not None and not attested_at <= now < expires_at)
+        or not isinstance(attestation.issuance_stopped, bool)
+        or not isinstance(attestation.no_in_flight, bool)
+        or (
+            attestation.state == "SERVING"
+            and (attestation.issuance_stopped or attestation.no_in_flight)
+        )
+        or (attestation.state == "DRAINING" and not attestation.issuance_stopped)
+    ):
+        raise ServingMembershipUnavailable
+    _digest(attestation.control_digest)
+    _digest(attestation.keyring_digest)
+
+
+def encode_replica_readiness_attestation(
+    attestation: ReplicaReadinessAttestation,
+    *,
+    verifier_keys: Mapping[str, bytes],
+) -> bytes:
+    """Return canonical authenticated bytes for one runtime readiness proof."""
+
+    _validate_attestation_shape(attestation, now=None)
+    encoded = json.dumps(
+        _signed_attestation_value(attestation, verifier_keys=verifier_keys),
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if not 1 <= len(encoded) <= MAX_MEMBERSHIP_BYTES:
+        raise ServingMembershipUnavailable
+    return encoded
+
+
 def _record_value(
     record: ServingMembershipEpoch,
     *,
@@ -449,6 +509,49 @@ def _parse_attestation(
     )
 
 
+def parse_replica_readiness_attestation(
+    raw: bytes,
+    *,
+    verifier_keys: Mapping[str, bytes],
+    now: int,
+    expected_epoch: int,
+    expected_cell_id: str,
+) -> ReplicaReadinessAttestation:
+    """Authenticate exact canonical bytes emitted by one admitted replica."""
+
+    try:
+        if not isinstance(raw, bytes) or not 1 <= len(raw) <= MAX_MEMBERSHIP_BYTES:
+            raise ServingMembershipUnavailable
+        current = _integer(now)
+        epoch = _integer(expected_epoch)
+        cell_id = _identifier(expected_cell_id)
+        value = json.loads(raw.decode("utf-8"), object_pairs_hook=_closed_object)
+        parsed = _parse_attestation(
+            value,
+            verifier_keys=verifier_keys,
+            now=current,
+            expected_epoch=epoch,
+            expected_cell_id=cell_id,
+        )
+        _validate_attestation_shape(parsed, now=current)
+        if encode_replica_readiness_attestation(
+            parsed,
+            verifier_keys=verifier_keys,
+        ) != raw:
+            raise ServingMembershipUnavailable
+        return parsed
+    except ServingMembershipUnavailable:
+        raise
+    except (
+        AttributeError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        TypeError,
+        ValueError,
+    ):
+        raise ServingMembershipUnavailable from None
+
+
 def parse_serving_membership(
     raw: bytes,
     *,
@@ -582,28 +685,14 @@ def _validate_record_shape(
         raise ServingMembershipUnavailable
     _identifier(record.signing_key_id)
     for item in record.replicas:
+        _validate_attestation_shape(item, now=now)
         if (
-            not isinstance(item, ReplicaReadinessAttestation)
-            or item.version != 1
-            or item.epoch != epoch
+            item.epoch != epoch
             or item.cell_id != record.cell_id
-            or item.state not in _STATES
-            or item.active_key_id not in item.accepted_key_ids
-            or item.signing_key_id != item.active_key_id
-            or tuple(item.accepted_key_ids)
-            != tuple(sorted(set(item.accepted_key_ids)))
             or item.attested_at > issued_at
             or item.expires_at < expires_at
-            or item.expires_at - item.attested_at > MAX_ATTESTATION_TTL_SECONDS
-            or (item.state == "SERVING" and (item.issuance_stopped or item.no_in_flight))
-            or (item.state == "DRAINING" and not item.issuance_stopped)
         ):
             raise ServingMembershipUnavailable
-        _identifier(item.replica_id)
-        _identifier(item.software_version)
-        _integer(item.schema_version)
-        _digest(item.control_digest)
-        _digest(item.keyring_digest)
 
 
 def evaluate_serving_membership(

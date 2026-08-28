@@ -128,6 +128,11 @@ _CELL_KUBERNETES_OBJECTS: Final[dict[str, tuple[str, str, str]]] = {
     "namespace": ("v1", "Namespace", ""),
     "vaultPvc": ("v1", "PersistentVolumeClaim", "{resource}-data"),
     "credentialSecret": ("v1", "Secret", "exomem-cell-credentials"),
+    "authorizationSessionSecret": (
+        "v1",
+        "Secret",
+        "exomem-authorization-session",
+    ),
     "serviceAccount": ("v1", "ServiceAccount", "{resource}"),
     "initRequestConfigMap": ("v1", "ConfigMap", "{resource}-init-request"),
     "providerOperationConfigMap": ("v1", "ConfigMap", "{operation_resource}"),
