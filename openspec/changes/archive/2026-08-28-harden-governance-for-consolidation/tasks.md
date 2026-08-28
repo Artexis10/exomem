@@ -309,7 +309,7 @@ made before both PRs and their combined verification are complete.
   version/id/key length/time/signature, identity mismatch, permissive POSIX mode or
   Windows ACL, policy/request/CLI/vault-provided values, and first-use generation all
   fail closed. Prove rows store external ids + key id + keyed verifier, never key/bearer.
-- [ ] 5.3 Add red authenticated standalone/hosted provisioning tests for atomic external
+- [x] 5.3 Add red authenticated standalone/hosted provisioning tests for atomic external
   registration of cell/logical-vault/keyring/storage/owner identity plus monotonic
   `governance_enrolled` and expected activation store id/epoch/digest. Prove false only
   after a trusted negative scan for governance workspace/activation state, irreversible
@@ -355,7 +355,7 @@ made before both PRs and their combined verification are complete.
 - [x] 5.9 Add red same-principal cross-session tests: tokens, grants, purpose, revoke, and
   close from session A are rejected or isolated in session B; missing/unresolved session
   refuses without consuming or writing anything.
-- [ ] 5.10 Implement transactional schema v4
+- [x] 5.10 Implement transactional schema v4
   `governance_authorization_sessions` with internal session id, keyed locator digest/
   verifier, verifier key id, credential generation, principal, issuer family, external
   cell/logical-vault/keyring ids, status, and lifecycle timestamps only, plus the shared
@@ -367,7 +367,7 @@ made before both PRs and their combined verification are complete.
   policy/projector/catalog tuple and predecessor chain. Its transaction also preserves
   old receipt rows/evidence but changes the active receipt append instance and label
   secret to fresh target-derived values.
-- [ ] 5.11 Implement strict external keyring/control loading, authenticated owner/hosted
+- [x] 5.11 Implement strict external keyring/control loading, authenticated owner/hosted
   provisioning, host/control-plane registry attachment with monotonic enrollment and
   activation-store tuple parity, copy collision, exclusive move/restore/clone rules, and
   no automatic key/cell identity or OPEN inference. Implement version-1 restore as the
@@ -377,7 +377,7 @@ made before both PRs and their combined verification are complete.
   publication only after that commit; every partial or conflicting state stays BLOCKED
   and recovery never rotates the staged identity/receipt instance or modifies the source
   registry.
-- [ ] 5.12 Integrate the serving-membership epoch with the existing deployment control
+- [x] 5.12 Integrate the serving-membership epoch with the existing deployment control
   plane/readiness surface: provisioner/cell control owns the Hosted record,
   `hosted_runtime.control_plane_readiness()` verifies/exposes content-free readiness, and
   the standalone host registry uses the same schema. Implement authenticated per-replica
@@ -395,7 +395,7 @@ made before both PRs and their combined verification are complete.
 - [x] 5.16 Add the generated `govern_memory(operation="session")` selector and explicit
   open/status/rotate/close argument validation; treat legacy handles only as bounded
   echoes after capability verification and never as first-use authority.
-- [ ] 5.17 Run session, keyring/control/registry, membership epoch, migration/downmigration,
+- [x] 5.17 Run session, keyring/control/registry, membership epoch, migration/downmigration,
   actual old-binary probe/fence, token, store, governance-tool, receipt, and crash-
   recovery suites and preserve exact red-before-green commands/results for standalone,
   hosted, and both supported OS custody paths. Include restore-session invalidation and
@@ -459,7 +459,7 @@ made before both PRs and their combined verification are complete.
   schema-fidelity tests for the consumed MCP placeholder, REST/Hosted protected header,
   CLI descriptor option, and session lifecycle; assert no bearer body/query/env/literal-
   argv or public authoritative principal/session parameter appears.
-- [ ] 6.13 Run real generated-surface parity plus installed-wheel E2E covering typed open,
+- [x] 6.13 Run real generated-surface parity plus installed-wheel E2E covering typed open,
   grant/declare, every content family, reconnect, restart, mixed-key v4 replica routing,
   rotate, cross-session refusal, close, invalid+malformed FastMCP precedence, and complete
   bearer-copy scrubbing.
@@ -615,11 +615,11 @@ made before both PRs and their combined verification are complete.
 
 ## 9. Integration Migration And Regression Gates
 
-- [ ] 9.1 Add an overlap fixture representing personal plus delegated compartments with
+- [x] 9.1 Add an overlap fixture representing personal plus delegated compartments with
   one dual-member Markdown page, one non-Markdown artifact, standing/session grants, and
   conflicting options; exercise get, recall, graph, Records, dataset, media, and
   governance inspection end to end.
-- [ ] 9.2 Add migration tests from every supported governance sidecar version, including
+- [x] 9.2 Add migration tests from every supported governance sidecar version, including
   exact current v3 active legacy grants/purposes/tokens and v4 authorization sessions;
   prove ordinary open leaves v3 unchanged, explicit v3→v4 atomically initializes
   bearer-free sessions plus immutable policy/catalog/active tuple from stable direct-
@@ -628,31 +628,31 @@ made before both PRs and their combined verification are complete.
   external registry/key/cell move/restore rules are conservative, and snapshot/offline
   v4→v3 closes session authority and mirrors the tuple's exact source before the real v3
   binary starts without erasing enrollment history.
-- [ ] 9.3 Update generic capability/help documentation and the hand-authored generic skill
+- [x] 9.3 Update generic capability/help documentation and the hand-authored generic skill
   scaffold only where the public session lifecycle or reserved-path remediation must be
   discoverable; keep all examples generic and pass the scaffold leak gate.
-- [ ] 9.4 Run focused governance coverage with model extras disabled:
+- [x] 9.4 Run focused governance coverage with model extras disabled:
   `uv run python -m pytest -q tests/test_governance_decisions.py tests/test_governance_membership.py tests/test_governance_policy.py tests/test_governance_store.py tests/test_govern_memory_tool.py tests/test_authorization_session_binding.py tests/test_reserved_admin_paths.py tests/test_get_payload.py tests/test_governance_oracle_closure.py`.
-- [ ] 9.5 Run surface, egress, Records, and media coverage:
+- [x] 9.5 Run surface, egress, Records, and media coverage:
   `uv run python -m pytest -q tests/test_governance_egress.py tests/test_governance_postfilter.py tests/test_governance_principal.py tests/test_governance_tokens.py tests/test_command_surface_retry.py tests/test_rest_api.py tests/test_rest_registry.py tests/test_hosted_private_routes.py tests/test_record_governance.py tests/test_media_processing.py tests/test_media_deletion_propagation.py`.
-- [ ] 9.6 Run governance overhead and retrieval latency gates, including
+- [x] 9.6 Run governance overhead and retrieval latency gates, including
   `tests/test_governance_overhead.py`, `tests/test_latency_gate.py`, and
   `scripts/semantic_write_latency.py --check`, plus the checked actual-wire hidden-corpus
   distribution gate; explain and fix any regression/security differential instead of
   weakening the ceilings or deleting timing fields.
-- [ ] 9.7 Run `uvx ruff check`, `git diff --check`, `uv lock --check`,
+- [x] 9.7 Run `uvx ruff check`, `git diff --check`, `uv lock --check`,
   `tests/test_scaffold_no_leak.py`, schema-fidelity/golden checks, and public-artifact
   validation; regenerate only artifacts intentionally changed by this contract.
-- [ ] 9.8 Run the lean full suite with embeddings and media extraction disabled, then the
+- [x] 9.8 Run the lean full suite with embeddings and media extraction disabled, then the
   installed-wheel product E2E and optional embeddings-marked retrieval suite on an
   equipped host; retain exact commands, versions, counts, and results as durable
   evidence.
-- [ ] 9.9 Run `openspec validate harden-governance-for-consolidation --strict` after the
+- [x] 9.9 Run `openspec validate harden-governance-for-consolidation --strict` after the
   implementation diff and tests agree with every scenario.
 
 ## 10. Independent Security Review And Recheck
 
-- [ ] 10.1 Have an independent security reviewer inspect the exact implementation diff
+- [x] 10.1 Have an independent security reviewer inspect the exact implementation diff
   against this proposal/design/spec set, explicitly attacking grant crossover, option
   last-write-wins/equal-purpose widening/meet laws and retired scrubber bypass, raw/
   provenance and structured-direct bypass, exact namespace/finite fixed variants/L5/
@@ -668,16 +668,16 @@ made before both PRs and their combined verification are complete.
   membership epoch/drain/rejoin/key rotation, v3-v4
   rollback, cross-session replay, canonical-envelope boundaries, and non-waivable exact-
   capacity actual-wire rank/graph/count/error/timing displacement.
-- [ ] 10.2 Record every finding durably with severity and exact file/test evidence; for
+- [x] 10.2 Record every finding durably with severity and exact file/test evidence; for
   each accepted finding, add a reproducing red test before the smallest implementation
   fix and rerun the focused plus regression gates.
-- [ ] 10.3 Require the same independent reviewer to recheck every finding against the
+- [x] 10.3 Require the same independent reviewer to recheck every finding against the
   amended exact diff and record explicit closure or a remaining blocker; no self-review
   or green CI substitutes for this gate.
 
 ## 11. Independent Verification And Evidence-Gated Closeout
 
-- [ ] 11.1 Have a separate independent verifier run the focused suites, lean/full suites,
+- [x] 11.1 Have a separate independent verifier run the focused suites, lean/full suites,
   latency/overhead plus normative 25ms/10%-ratio exact-capacity actual-wire gates, lint/
   privacy/schema and direct-source↔immutable-tuple v3↔v4 migration/downmigration/old-
   binary checks, external-enrollment stopped/warm deletion/corruption, internal-state
@@ -686,7 +686,7 @@ made before both PRs and their combined verification are complete.
   races, L6
   raw scrub-safe/secret fixtures, atomic MCP batch refusal, and strict OpenSpec validation from a clean environment; record exact
   outputs and identify any skipped optional lane.
-- [ ] 11.2 Have that verifier exercise real generated MCP stateless HTTP, REST, Hosted,
+- [x] 11.2 Have that verifier exercise real generated MCP stateless HTTP, REST, Hosted,
   and CLI flows across exact protected carriers, invalid+malformed installed-FastMCP
   precedence/log scans, typed issuance, reconnect/restart/mixed-key epoch replica routing,
   external cell copy collision/move/restore, find/get/Records/dataset/media/frame binding,
@@ -696,13 +696,13 @@ made before both PRs and their combined verification are complete.
   JSON-RPC batch zero-effects, plus
   same-input hidden-versus-absent matrices; require canonical-envelope byte equality and
   measured latency bounds where specified.
-- [ ] 11.3 Confirm no consolidation workflow is exposed until the prerequisite diff and
+- [x] 11.3 Confirm no consolidation workflow is exposed until the prerequisite diff and
   migrations are deployed, the review/recheck is closed, and independent verification is
   green.
-- [ ] 11.4 Only after tasks 10.1-11.3 have durable evidence, sync all six delta specs into
+- [x] 11.4 Only after tasks 10.1-11.3 have durable evidence, sync all six delta specs into
   the canonical capability specs and validate the canonical post-sync contract; do not
   edit canonical specs earlier to make validation pass.
-- [ ] 11.5 Only after implementation merge evidence and canonical sync, archive
+- [x] 11.5 Only after implementation merge evidence and canonical sync, archive
   `harden-governance-for-consolidation`, run strict validation over the archive/canonical
   state, and record the merge revision, review record, verifier record, and complete CI
   result in the archive closeout.
