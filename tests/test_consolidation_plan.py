@@ -5,11 +5,12 @@ import hashlib
 import json
 import os
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from exomem.governance import consolidation_plan
+from exomem.governance import consolidation_plan, consolidation_review
 
 RUN_ID = "00000000-0000-4000-8000-000000000001"
 OPERATION_ID = "00000000-0000-4000-8000-000000000002"
@@ -689,3 +690,265 @@ def test_plan_store_recovers_control_first_crash_without_changing_plan(
     monkeypatch.setattr(store, "_publish_missing", original_publish)
     assert store.persist(plan, expected_run_revision=1) == plan
     assert store.load(RUN_ID, plan_kind="cutover", plan_digest=plan.digest) == plan
+
+
+def _trusted_renderer() -> consolidation_review.TrustedRenderIdentity:
+    return consolidation_review.TrustedRenderIdentity(
+        owner_binding_digest=_digest("owner-binding"),
+        owner_principal_digest=_digest("owner-principal"),
+        authorization_session_digest=_digest("authorization-session"),
+        issuer="trusted-cli-host",
+        surface="cli",
+    )
+
+
+def _review() -> consolidation_review.CanonicalRenderReview:
+    return consolidation_review.begin_review(
+        _plan(),
+        identity=_trusted_renderer(),
+        issued_at=CREATED_AT,
+        expires_at=VALID_UNTIL,
+        nonce="render-session-000000000001",
+    )
+
+
+def test_render_session_is_bound_to_stored_plan_and_trusted_surface() -> None:
+    review = _review()
+
+    assert set(review.session.preimage) == {
+        "schema",
+        "run_id",
+        "plan_kind",
+        "plan_digest",
+        "control_basis_digest",
+        "rendering_definition_digest",
+        "impact_summary_digest",
+        "owner_binding_digest",
+        "owner_principal_digest",
+        "authorization_session_digest",
+        "issuer",
+        "surface",
+        "page_count",
+        "total_rows",
+        "issued_at",
+        "expires_at",
+        "nonce",
+    }
+    assert review.session.digest == (
+        "355cb885118f2794eedb193ca260b8a8811753cfefec77a53b2e3b9ff9bfe768"
+    )
+    assert review.state.preimage["next_page_ordinal"] == 0
+    assert b"governance_version" not in review.state.canonical_bytes
+    assert b"Notes/source.md" not in review.state.canonical_bytes
+
+
+def test_review_serves_and_acknowledges_only_the_exact_next_stored_page() -> None:
+    plan = _plan()
+    review = _review()
+
+    review, page = consolidation_review.serve_page(
+        review,
+        plan=plan,
+        identity=_trusted_renderer(),
+        page_ordinal=0,
+        served_at="2026-08-28T12:00:00.500Z",
+    )
+    assert page == consolidation_plan.render_plan_page(plan, page_ordinal=0)
+    assert review.state.preimage["pending_page_digest"] == page.digest
+    replayed, replayed_page = consolidation_review.serve_page(
+        review,
+        plan=plan,
+        identity=_trusted_renderer(),
+        page_ordinal=0,
+        served_at="2026-08-28T12:00:00.500Z",
+    )
+    assert replayed == review
+    assert replayed_page == page
+    for ordinal in (1, 5):
+        with pytest.raises(consolidation_review.ConsolidationReviewUnavailable):
+            consolidation_review.serve_page(
+                review,
+                plan=plan,
+                identity=_trusted_renderer(),
+                page_ordinal=ordinal,
+                served_at="2026-08-28T12:00:00.500Z",
+            )
+
+    acknowledgement = consolidation_review.build_acknowledgement(
+        review,
+        page=page,
+        identity=_trusted_renderer(),
+        issued_at="2026-08-28T12:00:01.000Z",
+        nonce="render-ack-000000000000001",
+    )
+    acknowledged = consolidation_review.acknowledge_page(
+        review,
+        plan=plan,
+        acknowledgement=acknowledgement,
+    )
+    assert acknowledged.state.preimage["next_page_ordinal"] == 1
+    assert acknowledged.state.preimage["pending_page_digest"] == ""
+    assert (
+        consolidation_review.acknowledge_page(
+            acknowledged,
+            plan=plan,
+            acknowledgement=acknowledgement,
+        )
+        == acknowledged
+    )
+
+
+def test_body_digest_or_cross_session_acknowledgement_cannot_create_coverage() -> None:
+    plan = _plan()
+    with pytest.raises(consolidation_review.ConsolidationReviewUnavailable):
+        consolidation_review.serve_page(
+            _review(),
+            plan=plan,
+            identity=replace(_trusted_renderer(), surface="hosted"),
+            page_ordinal=0,
+            served_at="2026-08-28T12:00:00.500Z",
+        )
+    review, page = consolidation_review.serve_page(
+        _review(),
+        plan=plan,
+        identity=_trusted_renderer(),
+        page_ordinal=0,
+        served_at="2026-08-28T12:00:00.500Z",
+    )
+
+    with pytest.raises(consolidation_review.ConsolidationReviewUnavailable):
+        consolidation_review.acknowledge_page(
+            review,
+            plan=plan,
+            acknowledgement={"page_digest": page.digest},
+        )
+    valid = consolidation_review.build_acknowledgement(
+        review,
+        page=page,
+        identity=_trusted_renderer(),
+        issued_at="2026-08-28T12:00:01.000Z",
+        nonce="render-ack-000000000000001",
+    )
+    for changed_identity in (
+        replace(_trusted_renderer(), owner_principal_digest=_digest("other-owner")),
+        replace(
+            _trusted_renderer(),
+            authorization_session_digest=_digest("other-session"),
+        ),
+        replace(_trusted_renderer(), surface="hosted"),
+    ):
+        forged = consolidation_review.build_acknowledgement(
+            review,
+            page=page,
+            identity=changed_identity,
+            issued_at="2026-08-28T12:00:01.000Z",
+            nonce="render-ack-000000000000001",
+        )
+        with pytest.raises(consolidation_review.ConsolidationReviewUnavailable):
+            consolidation_review.acknowledge_page(
+                review,
+                plan=plan,
+                acknowledgement=forged,
+            )
+    assert consolidation_review.acknowledge_page(
+        review,
+        plan=plan,
+        acknowledgement=valid,
+    )
+
+
+def test_completeness_exists_only_after_every_ordered_page_acknowledgement() -> None:
+    plan = _plan()
+    review = _review()
+    with pytest.raises(consolidation_review.ConsolidationReviewUnavailable):
+        consolidation_review.complete_review(
+            review,
+            plan=plan,
+            identity=_trusted_renderer(),
+            issued_at="2026-08-28T12:10:00.000Z",
+            expires_at=VALID_UNTIL,
+            nonce="completeness-000000000001",
+        )
+
+    page_digests = []
+    for ordinal in range(6):
+        review, page = consolidation_review.serve_page(
+            review,
+            plan=plan,
+            identity=_trusted_renderer(),
+            page_ordinal=ordinal,
+            served_at=f"2026-08-28T12:00:{ordinal:02d}.500Z",
+        )
+        page_digests.append(page.digest)
+        acknowledgement = consolidation_review.build_acknowledgement(
+            review,
+            page=page,
+            identity=_trusted_renderer(),
+            issued_at=f"2026-08-28T12:00:{ordinal + 1:02d}.000Z",
+            nonce=f"render-ack-{ordinal:020d}",
+        )
+        review = consolidation_review.acknowledge_page(
+            review,
+            plan=plan,
+            acknowledgement=acknowledgement,
+        )
+
+    completed, completeness = consolidation_review.complete_review(
+        review,
+        plan=plan,
+        identity=_trusted_renderer(),
+        issued_at="2026-08-28T12:10:00.000Z",
+        expires_at=VALID_UNTIL,
+        nonce="completeness-000000000001",
+    )
+    assert tuple(completeness.preimage["page_digests"]) == tuple(page_digests)
+    assert tuple(completeness.preimage["section_digests"]) == tuple(
+        section["content_digest"] for section in plan.preimage["rendering_definition"]["sections"]
+    )
+    assert completeness.preimage["total_pages"] == 6
+    assert completeness.preimage["total_rows"] == 7
+    assert completeness.preimage["impact_summary_digest"] == plan.impact_summary_digest
+    assert completed.state.preimage["completeness_digest"] == completeness.digest
+    replayed_review, replayed = consolidation_review.complete_review(
+        completed,
+        plan=plan,
+        identity=_trusted_renderer(),
+        issued_at="2026-08-28T12:10:00.000Z",
+        expires_at=VALID_UNTIL,
+        nonce="completeness-000000000001",
+    )
+    assert replayed_review == completed
+    assert replayed == completeness
+
+
+def test_review_refuses_plan_drift_expiry_and_changed_completion_payload() -> None:
+    plan = _plan()
+    review = _review()
+    changed_plan = consolidation_plan.materialize_plan(
+        {**_plan_input(), "nonce": "plan-00000000000000000002"},
+        materialization=_materialization(),
+    )
+    with pytest.raises(consolidation_review.ConsolidationReviewUnavailable):
+        consolidation_review.serve_page(
+            review,
+            plan=changed_plan,
+            identity=_trusted_renderer(),
+            page_ordinal=0,
+            served_at="2026-08-28T12:00:00.500Z",
+        )
+
+    review, page = consolidation_review.serve_page(
+        review,
+        plan=plan,
+        identity=_trusted_renderer(),
+        page_ordinal=0,
+        served_at="2026-08-28T12:00:00.500Z",
+    )
+    with pytest.raises(consolidation_review.ConsolidationReviewUnavailable):
+        consolidation_review.build_acknowledgement(
+            review,
+            page=page,
+            identity=_trusted_renderer(),
+            issued_at=VALID_UNTIL,
+            nonce="render-ack-000000000000001",
+        )
