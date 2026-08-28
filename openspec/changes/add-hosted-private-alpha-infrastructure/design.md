@@ -4,7 +4,7 @@ Exomem PR #227 implements a hosted single-vault cell and Substrate PR #32 implem
 
 The approved product boundary is one account/workspace/cell. Canonical knowledge remains Markdown and media inside an isolated Exomem process and volume; the shared Neon control plane stores commercial and operational metadata only. The first deployment serves the owner and at most five paid private-alpha accounts on one dedicated Hetzner K3s node. It accepts node-level downtime but declares and proves recovery targets.
 
-The full decision record is `docs/superpowers/specs/2026-07-14-exomem-hosted-private-alpha-infrastructure-design.md`. This artifact summarizes the implementation-driving decisions.
+This OpenSpec change is the authoritative decision record for the implementation-driving decisions.
 
 ## Goals / Non-Goals
 
