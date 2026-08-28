@@ -90,13 +90,6 @@ def test_initially_absent_epoch_rollback_durably_flushes_external_deletions(
     _isolated_graph_state: Path,
 ) -> None:
     relative, _source = _note(_isolated_graph_state, "external-rollback.md")
-    flushed: list[Path] = []
-    monkeypatch.setattr(
-        held_fs,
-        "flush_directory_path",
-        lambda path: flushed.append(Path(path)) or held_fs.HeldResult(value=None),
-        raising=False,
-    )
 
     epoch = graph_sync.prepare_deletion_epoch(_isolated_graph_state, [relative])
     assert epoch is not None
@@ -104,12 +97,27 @@ def test_initially_absent_epoch_rollback_durably_flushes_external_deletions(
     assert graph_sync.checkpoint_path(_isolated_graph_state).is_file()
     assert graph_sync.floor_path(_isolated_graph_state).is_file()
 
+    state_dir = state_paths.vault_state_dir(_isolated_graph_state)
+    acquired = held_fs.acquire(state_dir)
+    assert acquired.ok
+    with acquired.require() as filesystem:
+        filesystem_type = type(filesystem)
+        state_identity = filesystem.root_identity
+    real_flush = filesystem_type.flush_directory
+    flushed: list[held_fs.StableIdentity] = []
+
+    def observe_flush(filesystem, directory):  # noqa: ANN001
+        if directory.identity == state_identity:
+            flushed.append(directory.identity)
+        return real_flush(filesystem, directory)
+
+    monkeypatch.setattr(filesystem_type, "flush_directory", observe_flush)
+
     graph_sync.restore_deletion_epoch(epoch)
 
-    state_dir = state_paths.vault_state_dir(_isolated_graph_state)
     assert graph_sync.checkpoint_path(_isolated_graph_state).exists() is False
     assert graph_sync.floor_path(_isolated_graph_state).exists() is False
-    assert flushed == [state_dir, state_dir]
+    assert flushed == [state_identity, state_identity]
 
 
 def test_lifecycle_epoch_staging_never_marks_an_active_mutation_committed(

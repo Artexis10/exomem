@@ -2612,21 +2612,28 @@ def test_private_owner_unlink_closes_file_before_return(
     original_flush = filesystem_type.flush_directory
     original_parent = filesystem_type.parent
     parent_calls: list[tuple[str, str]] = []
+    target_unlinked = False
 
     def observe_unlink(filesystem, file):  # noqa: ANN001
-        events.append("unlink")
+        nonlocal target_unlinked
+        if getattr(file, "name", None) == target.name:
+            events.append("unlink")
+            target_unlinked = True
         return original_unlink(filesystem, file)
 
     def observe_close(file):  # noqa: ANN001
-        events.append("close")
+        if target_unlinked and getattr(file, "name", None) == target.name:
+            events.append("close")
         return original_close(file)
 
     def observe_flush(filesystem, directory):  # noqa: ANN001
-        events.append("flush")
+        if target_unlinked:
+            events.append("flush")
         return original_flush(filesystem, directory)
 
     def observe_parent(filesystem, relative, **kwargs):  # noqa: ANN001
-        parent_calls.append((str(relative), kwargs.get("access", "read")))
+        if str(relative) == target.parent.name:
+            parent_calls.append((str(relative), kwargs.get("access", "read")))
         return original_parent(filesystem, relative, **kwargs)
 
     monkeypatch.setattr(filesystem_type, "unlink", observe_unlink)
@@ -2943,17 +2950,29 @@ def test_owner_remove_flushes_the_retained_parent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from exomem import _held_fs_posix, held_fs
+    from exomem import held_fs
 
     target = state_paths.ensure_vault_state_dir(tmp_path) / ".graph-sync.json"
     target.write_bytes(b"checkpoint")
-    flushed: list[int] = []
 
     capabilities = held_fs.probe(tmp_path)
     assert capabilities.relative_operations
     reserved_paths._baseline_identity_catalogue(tmp_path)
 
-    monkeypatch.setattr(_held_fs_posix, "_fsync", flushed.append)
+    acquired = held_fs.acquire(target.parent)
+    assert acquired.ok
+    with acquired.require() as filesystem:
+        filesystem_type = type(filesystem)
+        state_identity = filesystem.root_identity
+    real_flush = filesystem_type.flush_directory
+    flushed: list[held_fs.StableIdentity] = []
+
+    def observe_flush(filesystem, directory):  # noqa: ANN001
+        if directory.identity == state_identity:
+            flushed.append(directory.identity)
+        return real_flush(filesystem, directory)
+
+    monkeypatch.setattr(filesystem_type, "flush_directory", observe_flush)
 
     with reserved_paths._subsystem_authority_scope("graph_sync"):
         assert reserved_paths._remove_owner_file(
@@ -2962,7 +2981,7 @@ def test_owner_remove_flushes_the_retained_parent(
             "graph-handoff",
         )
 
-    assert len(flushed) == 1
+    assert flushed == [state_identity]
     assert not target.exists()
 
 
@@ -3703,7 +3722,8 @@ def test_sqlite_owner_target_scope_retains_identity_without_delete_access(
     accesses: list[str] = []
 
     def observe_parent_access(self, relative, **kwargs):  # noqa: ANN001
-        parent_accesses.append((str(relative), kwargs.get("access", "read")))
+        if str(relative) == database.parent.name:
+            parent_accesses.append((str(relative), kwargs.get("access", "read")))
         return real_parent(self, relative, **kwargs)
 
     def observe_access(self, parent, leaf, **kwargs):  # noqa: ANN001

@@ -583,7 +583,7 @@ def test_unavailable_reset_quarantines_only_the_live_graph_set(tmp_path: Path) -
     companion.write_bytes(b"wal")
     receipt.parent.mkdir()
     receipt.write_bytes(b"receipt")
-    note.parent.mkdir()
+    note.parent.mkdir(parents=True)
     note.write_bytes(b"canonical")
 
     reset = graph_sync.isolate_unavailable_graph_lineage(tmp_path)
