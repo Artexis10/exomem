@@ -90,6 +90,73 @@ def _required(name: str):
     return value
 
 
+def _failover_target_candidate(
+    target: Path,
+    *,
+    operation_id: str,
+    owner: principal.RequestPrincipal,
+    now: int,
+):
+    return _required("prepare_local_failover_target_candidate")(
+        target,
+        operation_id=operation_id,
+        principal=owner,
+        now=now,
+    )
+
+
+def _quiesced_failover_basis(
+    tmp_path: Path,
+    *,
+    now: int,
+    export_operation_id: str,
+) -> tuple[
+    Path,
+    Path,
+    principal.RequestPrincipal,
+    consolidation_identity.ConsolidationCellIdentity,
+    authorization_custody.AuthorizationCustody,
+    hosted_portability.ExportResult,
+]:
+    source = _vault(tmp_path, "source")
+    target = tmp_path / "target"
+    owner = principal.owner_principal(surface="cli")
+    identity = _required("adopt_local_identity")(
+        source,
+        principal=owner,
+        now=now,
+    )
+    shutil.copytree(source, target)
+    serving = authorization_custody.load_authorization_custody(source, now=now + 1)
+    draining = authorization_custody.begin_standalone_attachment_drain(
+        source,
+        expected_control=serving.control,
+        now=now + 2,
+    )
+    drained = authorization_custody.acknowledge_standalone_attachment_drain(
+        source,
+        expected_control=draining.control,
+        now=now + 3,
+    )
+    exported = hosted_portability.export_quiesced_vault(
+        source,
+        tmp_path / "artifacts",
+        context=hosted_portability.PortabilityContext(
+            cell_id=identity.cell_id,
+            vault_id=identity.vault_id,
+            operation_id=export_operation_id,
+            created_at="2027-01-15T08:00:00+00:00",
+            operator_authorized=True,
+            lifecycle_state="quiesced",
+            routing_stopped=True,
+            active_mutations=0,
+            background_writers_stopped=True,
+            reads_allowed=True,
+        ),
+    )
+    return source, target, owner, identity, drained, exported
+
+
 def test_local_owner_adoption_generates_and_authenticates_private_identity(
     tmp_path: Path,
 ) -> None:
@@ -470,6 +537,26 @@ def test_owner_authorized_attachment_move_rebinds_root_but_preserves_identity(
         principal=owner,
         now=now,
     )
+    host_key = authorization_custody._load_host_control_key()
+    encoded = consolidation_identity._identity_value(
+        cell_id=before.cell_id,
+        vault_id=before.vault_id,
+        installation_id=before.installation_id,
+        installation_generation=2,
+        root_binding_id=before.root_binding_id,
+        machine_key_id=before.machine_key_id,
+        adoption_census_digest=before.adoption_census_digest,
+        created_at=before.created_at,
+        clone_of_vault_id="vault-source-lineage",
+        clone_of_installation_id="installation-v1-" + "a" * 64,
+        clone_of_snapshot_digest="b" * 64,
+    )
+    authorization_custody._replace_control_bytes(
+        before.identity_path,
+        expected=before.identity_path.read_bytes(),
+        target=consolidation_identity._encode_identity(encoded, key=host_key),
+    )
+    before = _required("load_local_identity")(source, now=now + 1)
     target = tmp_path / "target"
     shutil.copytree(source, target)
     serving = authorization_custody.load_authorization_custody(source, now=now + 1)
@@ -509,6 +596,9 @@ def test_owner_authorized_attachment_move_rebinds_root_but_preserves_identity(
     assert moved.installation_id == before.installation_id
     assert moved.installation_generation == before.installation_generation
     assert moved.adoption_census_digest == before.adoption_census_digest
+    assert moved.clone_of_vault_id == before.clone_of_vault_id
+    assert moved.clone_of_installation_id == before.clone_of_installation_id
+    assert moved.clone_of_snapshot_digest == before.clone_of_snapshot_digest
     assert moved.root_binding_id != before.root_binding_id
     assert moved.active_fence_digest != before.active_fence_digest
 
@@ -625,3 +715,944 @@ def test_two_rehearsal_clones_never_share_active_identity(
         == created[1].clone_of_installation_id
     )
     assert created[0].clone_of_snapshot_digest == created[1].clone_of_snapshot_digest
+
+
+def test_failover_transfer_preserves_logical_vault_and_fences_source(
+    tmp_path: Path,
+) -> None:
+    now = 1_800_000_000
+    source = _vault(tmp_path, "source")
+    target = tmp_path / "target"
+    owner = principal.owner_principal(surface="cli")
+    source_identity = _required("adopt_local_identity")(
+        source,
+        principal=owner,
+        now=now,
+    )
+    shutil.copytree(source, target)
+    serving = authorization_custody.load_authorization_custody(source, now=now + 1)
+    draining = authorization_custody.begin_standalone_attachment_drain(
+        source,
+        expected_control=serving.control,
+        now=now + 2,
+    )
+    drained = authorization_custody.acknowledge_standalone_attachment_drain(
+        source,
+        expected_control=draining.control,
+        now=now + 3,
+    )
+    exported = hosted_portability.export_quiesced_vault(
+        source,
+        tmp_path / "artifacts",
+        context=hosted_portability.PortabilityContext(
+            cell_id=source_identity.cell_id,
+            vault_id=source_identity.vault_id,
+            operation_id="failover-export-1",
+            created_at="2027-01-15T08:00:00+00:00",
+            operator_authorized=True,
+            lifecycle_state="quiesced",
+            routing_stopped=True,
+            active_mutations=0,
+            background_writers_stopped=True,
+            reads_allowed=True,
+        ),
+    )
+    prepare = _required("prepare_local_failover_identity_transfer")
+    complete = _required("complete_local_failover_identity_transfer")
+    parameters = inspect.signature(prepare).parameters
+    assert "vault_id" not in parameters
+    assert "installation_id" not in parameters
+    assert "target_installation_id" not in parameters
+    assert "target_challenge" not in parameters
+    assert "target_generation" not in parameters
+
+    candidate = _failover_target_candidate(
+        target,
+        operation_id="failover-transfer-1",
+        owner=owner,
+        now=now + 3,
+    )
+
+    transfer = prepare(
+        source,
+        target,
+        operation_id="failover-transfer-1",
+        target_candidate=candidate,
+        archive_path=exported.archive_path,
+        expected_control=drained.control,
+        principal=owner,
+        now=now + 3,
+    )
+    activated = complete(
+        source,
+        target,
+        transfer=transfer,
+        principal=owner,
+        now=now + 4,
+    )
+
+    assert transfer.schema == "vault-identity-transfer/v1"
+    assert transfer.operation_id == "failover-transfer-1"
+    assert transfer.source_installation_id == source_identity.installation_id
+    assert transfer.source_installation_generation == 1
+    assert transfer.target_installation_generation == 2
+    assert transfer.target_installation_id != source_identity.installation_id
+    assert transfer.target_challenge
+    assert transfer.target_installation_id == candidate.target_installation_id
+    assert transfer.target_challenge == candidate.target_challenge
+    assert transfer.archive_digest == exported.archive_sha256
+    assert transfer.census_digest == source_identity.adoption_census_digest
+    assert activated.vault_id == source_identity.vault_id
+    assert activated.installation_id == transfer.target_installation_id
+    assert activated.installation_generation == 2
+    assert activated.clone_of_vault_id is None
+    assert activated.clone_of_installation_id is None
+    assert activated.clone_of_snapshot_digest is None
+    assert _required("load_local_identity")(target, now=now + 4) == activated
+    with pytest.raises(consolidation_identity.ConsolidationIdentityUnavailable):
+        _required("load_local_identity")(source, now=now + 4)
+    with pytest.raises(authorization_custody.AuthorizationCustodyUnavailable):
+        authorization_custody.require_standalone_mutation_admission(
+            source,
+            now=now + 4,
+        )
+    shutil.rmtree(source)
+    replay = complete(
+        source,
+        target,
+        transfer=transfer,
+        principal=owner,
+        now=now + 5,
+    )
+    assert replay == activated
+
+
+def test_failover_preserves_authenticated_rehearsal_clone_lineage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 1_800_000_000
+    original = _vault(tmp_path, "original")
+    owner = principal.owner_principal(surface="cli")
+    _required("adopt_local_identity")(original, principal=owner, now=now)
+    source = tmp_path / "rehearsal-source"
+    shutil.copytree(original, source)
+    _select_custody_paths(tmp_path / "rehearsal-external", monkeypatch)
+    authorization_custody.provision_standalone_custody(source, now=now + 1)
+    source_identity = _required("create_rehearsal_clone_identity")(
+        original,
+        source,
+        principal=owner,
+        now=now + 1,
+    )
+    target = tmp_path / "failover-target"
+    shutil.copytree(source, target)
+    serving = authorization_custody.load_authorization_custody(source, now=now + 2)
+    draining = authorization_custody.begin_standalone_attachment_drain(
+        source,
+        expected_control=serving.control,
+        now=now + 3,
+    )
+    drained = authorization_custody.acknowledge_standalone_attachment_drain(
+        source,
+        expected_control=draining.control,
+        now=now + 4,
+    )
+    exported = hosted_portability.export_quiesced_vault(
+        source,
+        tmp_path / "artifacts",
+        context=hosted_portability.PortabilityContext(
+            cell_id=source_identity.cell_id,
+            vault_id=source_identity.vault_id,
+            operation_id="failover-clone-export",
+            created_at="2027-01-15T08:00:00+00:00",
+            operator_authorized=True,
+            lifecycle_state="quiesced",
+            routing_stopped=True,
+            active_mutations=0,
+            background_writers_stopped=True,
+            reads_allowed=True,
+        ),
+    )
+    candidate = _failover_target_candidate(
+        target,
+        operation_id="failover-clone-transfer",
+        owner=owner,
+        now=now + 4,
+    )
+    transfer = _required("prepare_local_failover_identity_transfer")(
+        source,
+        target,
+        operation_id="failover-clone-transfer",
+        target_candidate=candidate,
+        archive_path=exported.archive_path,
+        expected_control=drained.control,
+        principal=owner,
+        now=now + 4,
+    )
+    activated = _required("complete_local_failover_identity_transfer")(
+        source,
+        target,
+        transfer=transfer,
+        principal=owner,
+        now=now + 5,
+    )
+
+    assert activated.clone_of_vault_id == source_identity.clone_of_vault_id
+    assert (
+        activated.clone_of_installation_id
+        == source_identity.clone_of_installation_id
+    )
+    assert (
+        activated.clone_of_snapshot_digest
+        == source_identity.clone_of_snapshot_digest
+    )
+
+
+def test_failover_transfer_refuses_stale_export_even_when_roots_match(
+    tmp_path: Path,
+) -> None:
+    now = 1_800_000_000
+    source = _vault(tmp_path, "source")
+    target = tmp_path / "target"
+    owner = principal.owner_principal(surface="cli")
+    identity = _required("adopt_local_identity")(
+        source,
+        principal=owner,
+        now=now,
+    )
+    shutil.copytree(source, target)
+    serving = authorization_custody.load_authorization_custody(source, now=now + 1)
+    draining = authorization_custody.begin_standalone_attachment_drain(
+        source,
+        expected_control=serving.control,
+        now=now + 2,
+    )
+    drained = authorization_custody.acknowledge_standalone_attachment_drain(
+        source,
+        expected_control=draining.control,
+        now=now + 3,
+    )
+    exported = hosted_portability.export_quiesced_vault(
+        source,
+        tmp_path / "artifacts",
+        context=hosted_portability.PortabilityContext(
+            cell_id=identity.cell_id,
+            vault_id=identity.vault_id,
+            operation_id="failover-export-stale",
+            created_at="2027-01-15T08:00:00+00:00",
+            operator_authorized=True,
+            lifecycle_state="quiesced",
+            routing_stopped=True,
+            active_mutations=0,
+            background_writers_stopped=True,
+            reads_allowed=True,
+        ),
+    )
+    changed = "---\ntype: insight\n---\nchanged after the signed export\n"
+    (source / "Knowledge Base/Notes/identity.md").write_text(
+        changed,
+        encoding="utf-8",
+    )
+    (target / "Knowledge Base/Notes/identity.md").write_text(
+        changed,
+        encoding="utf-8",
+    )
+
+    with pytest.raises(consolidation_identity.ConsolidationIdentityUnavailable):
+        candidate = _failover_target_candidate(
+            target,
+            operation_id="failover-transfer-stale",
+            owner=owner,
+            now=now + 3,
+        )
+        _required("prepare_local_failover_identity_transfer")(
+            source,
+            target,
+            operation_id="failover-transfer-stale",
+            target_candidate=candidate,
+            archive_path=exported.archive_path,
+            expected_control=drained.control,
+            principal=owner,
+            now=now + 3,
+        )
+
+
+@pytest.mark.parametrize(
+    "crash_point",
+    (
+        "after-reservation",
+        "after-pending-record",
+        "after-target-identity",
+        "after-activation",
+        "activation-after-membership",
+        "activation-after-control",
+        "activation-after-registry",
+    ),
+)
+def test_failover_transfer_recovers_every_identity_publication_gap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    crash_point: str,
+) -> None:
+    now = 1_800_000_000
+    source = _vault(tmp_path, "source")
+    target = tmp_path / "target"
+    owner = principal.owner_principal(surface="cli")
+    identity = _required("adopt_local_identity")(
+        source,
+        principal=owner,
+        now=now,
+    )
+    shutil.copytree(source, target)
+    serving = authorization_custody.load_authorization_custody(source, now=now + 1)
+    draining = authorization_custody.begin_standalone_attachment_drain(
+        source,
+        expected_control=serving.control,
+        now=now + 2,
+    )
+    drained = authorization_custody.acknowledge_standalone_attachment_drain(
+        source,
+        expected_control=draining.control,
+        now=now + 3,
+    )
+    exported = hosted_portability.export_quiesced_vault(
+        source,
+        tmp_path / "artifacts",
+        context=hosted_portability.PortabilityContext(
+            cell_id=identity.cell_id,
+            vault_id=identity.vault_id,
+            operation_id=f"export-{crash_point}",
+            created_at="2027-01-15T08:00:00+00:00",
+            operator_authorized=True,
+            lifecycle_state="quiesced",
+            routing_stopped=True,
+            active_mutations=0,
+            background_writers_stopped=True,
+            reads_allowed=True,
+        ),
+    )
+    operation_id = f"transfer-{crash_point}"
+    candidate = _failover_target_candidate(
+        target,
+        operation_id=operation_id,
+        owner=owner,
+        now=now + 3,
+    )
+    transfer = _required("prepare_local_failover_identity_transfer")(
+        source,
+        target,
+        operation_id=operation_id,
+        target_candidate=candidate,
+        archive_path=exported.archive_path,
+        expected_control=drained.control,
+        principal=owner,
+        now=now + 3,
+    )
+    raised = False
+
+    def crash_once(point: str) -> None:
+        nonlocal raised
+        if point == crash_point and not raised:
+            raised = True
+            raise RuntimeError("simulated failover crash")
+
+    monkeypatch.setattr(
+        consolidation_identity,
+        "_failover_identity_barrier",
+        crash_once,
+    )
+    monkeypatch.setattr(
+        authorization_custody,
+        "_standalone_transition_barrier",
+        lambda point: crash_once(f"activation-{point}"),
+    )
+    with pytest.raises(consolidation_identity.ConsolidationIdentityUnavailable):
+        _required("complete_local_failover_identity_transfer")(
+            source,
+            target,
+            transfer=transfer,
+            principal=owner,
+            now=now + 4,
+        )
+    assert raised
+    with pytest.raises(authorization_custody.AuthorizationCustodyUnavailable):
+        authorization_custody.require_standalone_mutation_admission(
+            source,
+            now=now + 4,
+        )
+    if crash_point in {
+        "activation-after-membership",
+        "activation-after-control",
+    }:
+        with pytest.raises(authorization_custody.AuthorizationCustodyUnavailable):
+            authorization_custody.require_standalone_mutation_admission(
+                target,
+                now=now + 4,
+            )
+    else:
+        interrupted = authorization_custody.load_authorization_custody(
+            target,
+            now=now + 4,
+        )
+        assert interrupted.serving_membership is not None
+        expected_state = (
+            "SERVING"
+            if crash_point in {"after-activation", "activation-after-registry"}
+            else "DRAINING"
+        )
+        assert interrupted.serving_membership.replicas[0].state == expected_state
+    if crash_point in {
+        "after-reservation",
+        "after-pending-record",
+        "after-target-identity",
+    }:
+        with pytest.raises(consolidation_identity.ConsolidationIdentityUnavailable):
+            _required("load_local_identity")(target, now=now + 4)
+
+    monkeypatch.setattr(
+        consolidation_identity,
+        "_failover_identity_barrier",
+        lambda _point: None,
+    )
+    monkeypatch.setattr(
+        authorization_custody,
+        "_standalone_transition_barrier",
+        lambda _point: None,
+    )
+    recovered = _required("complete_local_failover_identity_transfer")(
+        source,
+        target,
+        transfer=transfer,
+        principal=owner,
+        now=now + 5,
+    )
+
+    assert recovered.vault_id == identity.vault_id
+    assert recovered.installation_id == transfer.target_installation_id
+    assert recovered.installation_generation == 2
+    assert _required("load_local_identity")(target, now=now + 5) == recovered
+
+
+def test_failover_recovers_durable_reservation_after_issuance_expiry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 1_800_000_000
+    source = _vault(tmp_path, "source")
+    target = tmp_path / "target"
+    owner = principal.owner_principal(surface="cli")
+    identity = _required("adopt_local_identity")(
+        source,
+        principal=owner,
+        now=now,
+    )
+    shutil.copytree(source, target)
+    serving = authorization_custody.load_authorization_custody(source, now=now + 1)
+    draining = authorization_custody.begin_standalone_attachment_drain(
+        source,
+        expected_control=serving.control,
+        now=now + 2,
+    )
+    drained = authorization_custody.acknowledge_standalone_attachment_drain(
+        source,
+        expected_control=draining.control,
+        now=now + 3,
+    )
+    exported = hosted_portability.export_quiesced_vault(
+        source,
+        tmp_path / "artifacts",
+        context=hosted_portability.PortabilityContext(
+            cell_id=identity.cell_id,
+            vault_id=identity.vault_id,
+            operation_id="failover-expiry-export",
+            created_at="2027-01-15T08:00:00+00:00",
+            operator_authorized=True,
+            lifecycle_state="quiesced",
+            routing_stopped=True,
+            active_mutations=0,
+            background_writers_stopped=True,
+            reads_allowed=True,
+        ),
+    )
+    candidate = _failover_target_candidate(
+        target,
+        operation_id="failover-expiry-transfer",
+        owner=owner,
+        now=now + 3,
+    )
+    transfer = _required("prepare_local_failover_identity_transfer")(
+        source,
+        target,
+        operation_id="failover-expiry-transfer",
+        target_candidate=candidate,
+        archive_path=exported.archive_path,
+        expected_control=drained.control,
+        principal=owner,
+        now=now + 3,
+    )
+
+    monkeypatch.setattr(
+        consolidation_identity,
+        "_failover_identity_barrier",
+        lambda point: (_ for _ in ()).throw(RuntimeError("crash"))
+        if point == "after-reservation"
+        else None,
+    )
+    with pytest.raises(consolidation_identity.ConsolidationIdentityUnavailable):
+        _required("complete_local_failover_identity_transfer")(
+            source,
+            target,
+            transfer=transfer,
+            principal=owner,
+            now=now + 4,
+        )
+    monkeypatch.setattr(
+        consolidation_identity,
+        "_failover_identity_barrier",
+        lambda _point: None,
+    )
+
+    recovered = _required("complete_local_failover_identity_transfer")(
+        source,
+        target,
+        transfer=transfer,
+        principal=owner,
+        now=transfer.expires_at + 1,
+    )
+    assert recovered.installation_id == transfer.target_installation_id
+    assert recovered.installation_generation == 2
+
+
+def test_failover_expiry_cannot_start_a_new_reservation(
+    tmp_path: Path,
+) -> None:
+    now = 1_800_000_000
+    source = _vault(tmp_path, "source")
+    target = tmp_path / "target"
+    owner = principal.owner_principal(surface="cli")
+    identity = _required("adopt_local_identity")(
+        source,
+        principal=owner,
+        now=now,
+    )
+    shutil.copytree(source, target)
+    serving = authorization_custody.load_authorization_custody(source, now=now + 1)
+    draining = authorization_custody.begin_standalone_attachment_drain(
+        source,
+        expected_control=serving.control,
+        now=now + 2,
+    )
+    drained = authorization_custody.acknowledge_standalone_attachment_drain(
+        source,
+        expected_control=draining.control,
+        now=now + 3,
+    )
+    exported = hosted_portability.export_quiesced_vault(
+        source,
+        tmp_path / "artifacts",
+        context=hosted_portability.PortabilityContext(
+            cell_id=identity.cell_id,
+            vault_id=identity.vault_id,
+            operation_id="failover-expiry-no-progress-export",
+            created_at="2027-01-15T08:00:00+00:00",
+            operator_authorized=True,
+            lifecycle_state="quiesced",
+            routing_stopped=True,
+            active_mutations=0,
+            background_writers_stopped=True,
+            reads_allowed=True,
+        ),
+    )
+    candidate = _failover_target_candidate(
+        target,
+        operation_id="failover-expiry-no-progress-transfer",
+        owner=owner,
+        now=now + 3,
+    )
+    transfer = _required("prepare_local_failover_identity_transfer")(
+        source,
+        target,
+        operation_id="failover-expiry-no-progress-transfer",
+        target_candidate=candidate,
+        archive_path=exported.archive_path,
+        expected_control=drained.control,
+        principal=owner,
+        now=now + 3,
+    )
+    before = authorization_custody.load_external_custody(target)
+    before_identity = identity.identity_path.read_bytes()
+    membership_path = Path(
+        os.environ[authorization_custody.MEMBERSHIP_FILE_ENV]
+    )
+    before_membership = membership_path.read_bytes()
+
+    with pytest.raises(consolidation_identity.ConsolidationIdentityUnavailable):
+        _required("complete_local_failover_identity_transfer")(
+            source,
+            target,
+            transfer=transfer,
+            principal=owner,
+            now=transfer.expires_at + 1,
+        )
+
+    after = authorization_custody.load_external_custody(target)
+    assert after.keyring == before.keyring
+    assert after.control == before.control
+    assert membership_path.read_bytes() == before_membership
+    assert identity.identity_path.read_bytes() == before_identity
+    with pytest.raises(consolidation_identity.ConsolidationIdentityUnavailable):
+        _required("load_local_identity")(target, now=now + 4)
+
+
+def test_failover_refuses_two_live_operations_for_one_source_fence(
+    tmp_path: Path,
+) -> None:
+    now = 1_800_000_000
+    source, target, owner, _identity, drained, exported = (
+        _quiesced_failover_basis(
+            tmp_path,
+            now=now,
+            export_operation_id="failover-double-prepare-export",
+        )
+    )
+    prepare = _required("prepare_local_failover_identity_transfer")
+    first_candidate = _failover_target_candidate(
+        target,
+        operation_id="failover-double-prepare-a",
+        owner=owner,
+        now=now + 3,
+    )
+    first = prepare(
+        source,
+        target,
+        operation_id="failover-double-prepare-a",
+        target_candidate=first_candidate,
+        archive_path=exported.archive_path,
+        expected_control=drained.control,
+        principal=owner,
+        now=now + 3,
+    )
+    second_candidate = _failover_target_candidate(
+        target,
+        operation_id="failover-double-prepare-b",
+        owner=owner,
+        now=now + 3,
+    )
+
+    with pytest.raises(consolidation_identity.ConsolidationIdentityUnavailable):
+        prepare(
+            source,
+            target,
+            operation_id="failover-double-prepare-b",
+            target_candidate=second_candidate,
+            archive_path=exported.archive_path,
+            expected_control=drained.control,
+            principal=owner,
+            now=now + 3,
+        )
+
+    assert (
+        prepare(
+            source,
+            target,
+            operation_id=first.operation_id,
+            target_candidate=first_candidate,
+            archive_path=exported.archive_path,
+            expected_control=drained.control,
+            principal=owner,
+            now=now + 3,
+        )
+        == first
+    )
+
+
+@pytest.mark.parametrize(
+    "crash_point",
+    ("after-membership", "after-control"),
+)
+@pytest.mark.parametrize(
+    "recovery_crash_point",
+    ("after-membership", "after-control"),
+)
+def test_failover_recovers_expired_activation_successor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    crash_point: str,
+    recovery_crash_point: str,
+) -> None:
+    now = 1_800_000_000
+    source, target, owner, _identity, drained, exported = (
+        _quiesced_failover_basis(
+            tmp_path,
+            now=now,
+            export_operation_id=f"failover-expired-activation-{crash_point}-export",
+        )
+    )
+    operation_id = f"failover-expired-activation-{crash_point}"
+    candidate = _failover_target_candidate(
+        target,
+        operation_id=operation_id,
+        owner=owner,
+        now=now + 3,
+    )
+    transfer = _required("prepare_local_failover_identity_transfer")(
+        source,
+        target,
+        operation_id=operation_id,
+        target_candidate=candidate,
+        archive_path=exported.archive_path,
+        expected_control=drained.control,
+        principal=owner,
+        now=now + 3,
+    )
+    raised = False
+
+    def crash_once(point: str) -> None:
+        nonlocal raised
+        if point == crash_point and not raised:
+            raised = True
+            raise RuntimeError("simulated activation crash")
+
+    monkeypatch.setattr(
+        authorization_custody,
+        "_standalone_transition_barrier",
+        crash_once,
+    )
+    with pytest.raises(consolidation_identity.ConsolidationIdentityUnavailable):
+        _required("complete_local_failover_identity_transfer")(
+            source,
+            target,
+            transfer=transfer,
+            principal=owner,
+            now=now + 4,
+        )
+    assert raised
+
+    membership_path = Path(
+        os.environ[authorization_custody.MEMBERSHIP_FILE_ENV]
+    )
+    expired_at = int(
+        json.loads(membership_path.read_text(encoding="utf-8"))["expires_at"]
+    )
+    recovery_raised = False
+
+    def crash_recovery_once(point: str) -> None:
+        nonlocal recovery_raised
+        if point == recovery_crash_point and not recovery_raised:
+            recovery_raised = True
+            raise RuntimeError("simulated recovery crash")
+
+    monkeypatch.setattr(
+        authorization_custody,
+        "_standalone_transition_barrier",
+        crash_recovery_once,
+    )
+    with pytest.raises(consolidation_identity.ConsolidationIdentityUnavailable):
+        _required("complete_local_failover_identity_transfer")(
+            source,
+            target,
+            transfer=transfer,
+            principal=owner,
+            now=expired_at + 1,
+        )
+    assert recovery_raised
+
+    monkeypatch.setattr(
+        authorization_custody,
+        "_standalone_transition_barrier",
+        lambda _point: None,
+    )
+    recovered = _required("complete_local_failover_identity_transfer")(
+        source,
+        target,
+        transfer=transfer,
+        principal=owner,
+        now=expired_at + 2,
+    )
+
+    assert recovered.installation_id == transfer.target_installation_id
+    active = authorization_custody.load_authorization_custody(
+        target,
+        now=expired_at + 2,
+    )
+    assert active.serving_membership is not None
+    assert active.serving_membership.replicas[0].state == "SERVING"
+
+
+def test_failover_operation_id_cannot_be_rebound_to_a_second_target(
+    tmp_path: Path,
+) -> None:
+    now = 1_800_000_000
+    source = _vault(tmp_path, "source")
+    first_target = tmp_path / "target-a"
+    second_target = tmp_path / "target-b"
+    owner = principal.owner_principal(surface="cli")
+    identity = _required("adopt_local_identity")(
+        source,
+        principal=owner,
+        now=now,
+    )
+    shutil.copytree(source, first_target)
+    shutil.copytree(source, second_target)
+    serving = authorization_custody.load_authorization_custody(source, now=now + 1)
+    draining = authorization_custody.begin_standalone_attachment_drain(
+        source,
+        expected_control=serving.control,
+        now=now + 2,
+    )
+    drained = authorization_custody.acknowledge_standalone_attachment_drain(
+        source,
+        expected_control=draining.control,
+        now=now + 3,
+    )
+    exported = hosted_portability.export_quiesced_vault(
+        source,
+        tmp_path / "artifacts",
+        context=hosted_portability.PortabilityContext(
+            cell_id=identity.cell_id,
+            vault_id=identity.vault_id,
+            operation_id="failover-export-operation-conflict",
+            created_at="2027-01-15T08:00:00+00:00",
+            operator_authorized=True,
+            lifecycle_state="quiesced",
+            routing_stopped=True,
+            active_mutations=0,
+            background_writers_stopped=True,
+            reads_allowed=True,
+        ),
+    )
+    prepare = _required("prepare_local_failover_identity_transfer")
+    first_candidate = _failover_target_candidate(
+        first_target,
+        operation_id="failover-operation-one",
+        owner=owner,
+        now=now + 3,
+    )
+    first = prepare(
+        source,
+        first_target,
+        operation_id="failover-operation-one",
+        target_candidate=first_candidate,
+        archive_path=exported.archive_path,
+        expected_control=drained.control,
+        principal=owner,
+        now=now + 3,
+    )
+    replay = prepare(
+        source,
+        first_target,
+        operation_id="failover-operation-one",
+        target_candidate=first_candidate,
+        archive_path=exported.archive_path,
+        expected_control=drained.control,
+        principal=owner,
+        now=now + 3,
+    )
+    assert replay == first
+
+    with pytest.raises(consolidation_identity.ConsolidationIdentityUnavailable):
+        second_candidate = _failover_target_candidate(
+            second_target,
+            operation_id=first.operation_id,
+            owner=owner,
+            now=now + 3,
+        )
+        prepare(
+            source,
+            second_target,
+            operation_id=first.operation_id,
+            target_candidate=second_candidate,
+            archive_path=exported.archive_path,
+            expected_control=drained.control,
+            principal=owner,
+            now=now + 3,
+        )
+
+
+def test_failover_rechecks_target_census_after_authority_reservation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 1_800_000_000
+    source = _vault(tmp_path, "source")
+    target = tmp_path / "target"
+    owner = principal.owner_principal(surface="cli")
+    identity = _required("adopt_local_identity")(
+        source,
+        principal=owner,
+        now=now,
+    )
+    shutil.copytree(source, target)
+    serving = authorization_custody.load_authorization_custody(source, now=now + 1)
+    draining = authorization_custody.begin_standalone_attachment_drain(
+        source,
+        expected_control=serving.control,
+        now=now + 2,
+    )
+    drained = authorization_custody.acknowledge_standalone_attachment_drain(
+        source,
+        expected_control=draining.control,
+        now=now + 3,
+    )
+    exported = hosted_portability.export_quiesced_vault(
+        source,
+        tmp_path / "artifacts",
+        context=hosted_portability.PortabilityContext(
+            cell_id=identity.cell_id,
+            vault_id=identity.vault_id,
+            operation_id="failover-export-reservation-race",
+            created_at="2027-01-15T08:00:00+00:00",
+            operator_authorized=True,
+            lifecycle_state="quiesced",
+            routing_stopped=True,
+            active_mutations=0,
+            background_writers_stopped=True,
+            reads_allowed=True,
+        ),
+    )
+    candidate = _failover_target_candidate(
+        target,
+        operation_id="failover-transfer-reservation-race",
+        owner=owner,
+        now=now + 3,
+    )
+    transfer = _required("prepare_local_failover_identity_transfer")(
+        source,
+        target,
+        operation_id="failover-transfer-reservation-race",
+        target_candidate=candidate,
+        archive_path=exported.archive_path,
+        expected_control=drained.control,
+        principal=owner,
+        now=now + 3,
+    )
+    original = authorization_custody.reserve_standalone_attachment_transfer
+
+    def drift_after_reservation(*args: object, **kwargs: object):
+        reserved = original(*args, **kwargs)
+        (target / "Knowledge Base/Notes/identity.md").write_text(
+            "---\ntype: insight\n---\ndrifted after reservation\n",
+            encoding="utf-8",
+        )
+        return reserved
+
+    monkeypatch.setattr(
+        authorization_custody,
+        "reserve_standalone_attachment_transfer",
+        drift_after_reservation,
+    )
+    with pytest.raises(consolidation_identity.ConsolidationIdentityUnavailable):
+        _required("complete_local_failover_identity_transfer")(
+            source,
+            target,
+            transfer=transfer,
+            principal=owner,
+            now=now + 4,
+        )
+    interrupted = authorization_custody.load_authorization_custody(
+        target,
+        now=now + 4,
+    )
+    assert interrupted.serving_membership is not None
+    assert interrupted.serving_membership.replicas[0].state == "DRAINING"
