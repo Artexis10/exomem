@@ -45,7 +45,7 @@ ACTIVE_DOCUMENTS = (
     (
         "",
         "/README.md",
-        "C:/README.md",
+        "C:" + "/README.md",
         "README\\.md",
         "README\x00.md",
         "./README.md",
