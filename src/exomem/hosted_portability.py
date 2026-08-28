@@ -1075,6 +1075,8 @@ def _require_manifest_shape(manifest: Any) -> dict[str, Any]:
             "UNSUPPORTED_CLASSIFICATION_VERSION", "classification registry version is not supported"
         )
     required = {
+        "schema_version",
+        "classification_version",
         "archive_format",
         "cell_id",
         "vault_id",
@@ -1085,8 +1087,8 @@ def _require_manifest_shape(manifest: Any) -> dict[str, Any]:
         "signature",
         "overall_digest",
     }
-    if not required.issubset(manifest):
-        _fail("INVALID_MANIFEST", "manifest is missing required fields")
+    if set(manifest) != required:
+        _fail("INVALID_MANIFEST", "manifest fields do not match the supported schema")
     if manifest["archive_format"] != ARCHIVE_FORMAT:
         _fail("UNSUPPORTED_ARCHIVE_FORMAT", "archive format is not supported")
     for field in ("cell_id", "vault_id", "operation_id"):
@@ -1104,6 +1106,7 @@ def _require_manifest_shape(manifest: Any) -> dict[str, Any]:
     overall = manifest["overall_digest"]
     if (
         not isinstance(overall, dict)
+        or set(overall) != {"algorithm", "value"}
         or overall.get("algorithm") != "sha256"
         or not isinstance(overall.get("value"), str)
         or not _SHA256_RE.fullmatch(overall["value"])

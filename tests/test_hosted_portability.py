@@ -91,6 +91,37 @@ def _raw_zip(
                 archive.writestr(info, body)
 
 
+def _rewrite_export_manifest(
+    source: Path,
+    destination: Path,
+    *,
+    unknown_at: str,
+) -> None:
+    with zipfile.ZipFile(source, "r") as archive:
+        entries = [(info.filename, archive.read(info), None) for info in archive.infolist()]
+    manifest_index = next(
+        index
+        for index, (name, _body, _mode) in enumerate(entries)
+        if name == portability.MANIFEST_NAME
+    )
+    manifest = json.loads(entries[manifest_index][1])
+    if unknown_at == "manifest":
+        manifest["unsupported_extension"] = "must-not-be-accepted"
+        digest_payload = dict(manifest)
+        digest_payload.pop("overall_digest")
+        manifest["overall_digest"]["value"] = portability._manifest_digest(digest_payload)
+    elif unknown_at == "overall_digest":
+        manifest["overall_digest"]["unsupported_extension"] = "not-covered-by-digest"
+    else:  # pragma: no cover - test helper misuse
+        raise AssertionError(f"unknown mutation target: {unknown_at}")
+    entries[manifest_index] = (
+        portability.MANIFEST_NAME,
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("utf-8"),
+        None,
+    )
+    _raw_zip(destination, entries)
+
+
 @pytest.mark.parametrize(
     ("path", "expected"),
     [
@@ -509,6 +540,47 @@ def test_archive_verification_rejects_unsupported_manifest_version(tmp_path: Pat
         portability.verify_export_archive(archive)
 
     assert _error_code(exc) == "UNSUPPORTED_MANIFEST_VERSION"
+
+
+@pytest.mark.parametrize("unknown_at", ["manifest", "overall_digest"])
+def test_restore_rejects_unknown_manifest_fields_without_mutating_inputs(
+    tmp_path: Path,
+    unknown_at: str,
+) -> None:
+    source = tmp_path / "source"
+    _seed_vault(source, "closed manifest")
+    exported = portability.export_quiesced_vault(
+        source,
+        tmp_path / "artifacts",
+        context=_context(),
+    )
+    archive = tmp_path / f"unknown-{unknown_at}.zip"
+    _rewrite_export_manifest(exported.archive_path, archive, unknown_at=unknown_at)
+    archive_before = archive.read_bytes()
+    restore_parent = tmp_path / "restore-parent"
+    _write(restore_parent / "sentinel.txt", "must remain unchanged\n")
+    destination = restore_parent / "candidate"
+    parent_before = {
+        path.relative_to(restore_parent).as_posix(): path.read_bytes()
+        for path in restore_parent.rglob("*")
+        if path.is_file()
+    }
+
+    with pytest.raises(portability.PortabilityError) as exc:
+        portability.prepare_restore(
+            archive,
+            destination,
+            context=_context(lifecycle_state="restore-staging"),
+        )
+
+    assert _error_code(exc) == "INVALID_MANIFEST"
+    assert archive.read_bytes() == archive_before
+    assert not destination.exists()
+    assert {
+        path.relative_to(restore_parent).as_posix(): path.read_bytes()
+        for path in restore_parent.rglob("*")
+        if path.is_file()
+    } == parent_before
 
 
 def test_manifest_rejects_a_non_null_signature_algorithm_even_without_value(
