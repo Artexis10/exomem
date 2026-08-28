@@ -65,6 +65,25 @@ def _vault(tmp_path: Path, name: str = "vault") -> Path:
     return root
 
 
+def _select_custody_paths(
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root.mkdir(mode=0o700)
+    monkeypatch.setenv(
+        authorization_custody.KEYRING_FILE_ENV,
+        str(root / "authorization-keyring.json"),
+    )
+    monkeypatch.setenv(
+        authorization_custody.CONTROL_FILE_ENV,
+        str(root / "authorization-control.json"),
+    )
+    monkeypatch.setenv(
+        authorization_custody.MEMBERSHIP_FILE_ENV,
+        str(root / "authorization-serving-membership.json"),
+    )
+
+
 def _required(name: str):
     value = getattr(consolidation_identity, name, None)
     assert callable(value), f"missing consolidation identity API: {name}"
@@ -492,3 +511,117 @@ def test_owner_authorized_attachment_move_rebinds_root_but_preserves_identity(
     assert moved.adoption_census_digest == before.adoption_census_digest
     assert moved.root_binding_id != before.root_binding_id
     assert moved.active_fence_digest != before.active_fence_digest
+
+
+def test_explicit_rehearsal_clone_gets_fresh_ids_and_authenticated_lineage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 1_800_000_000
+    source = _vault(tmp_path, "source")
+    owner = principal.owner_principal(surface="cli")
+    source_identity = _required("adopt_local_identity")(
+        source,
+        principal=owner,
+        now=now,
+    )
+    clone = tmp_path / "clone"
+    shutil.copytree(source, clone)
+    _select_custody_paths(tmp_path / "clone-external", monkeypatch)
+    authorization_custody.provision_standalone_custody(clone, now=now + 1)
+    create_clone = _required("create_rehearsal_clone_identity")
+    parameters = inspect.signature(create_clone).parameters
+    assert "vault_id" not in parameters
+    assert "installation_id" not in parameters
+    assert "clone_of_vault_id" not in parameters
+    assert "clone_of_snapshot_digest" not in parameters
+
+    cloned = create_clone(source, clone, principal=owner, now=now + 1)
+    replay = create_clone(source, clone, principal=owner, now=now + 1)
+
+    assert replay == cloned
+    assert cloned.vault_id != source_identity.vault_id
+    assert cloned.installation_id != source_identity.installation_id
+    assert cloned.clone_of_vault_id == source_identity.vault_id
+    assert cloned.clone_of_installation_id == source_identity.installation_id
+    assert cloned.clone_of_snapshot_digest == hosted_portability.canonical_vault_fingerprint(
+        source
+    )
+    assert cloned.adoption_census_digest == cloned.clone_of_snapshot_digest
+
+
+def test_rehearsal_clone_refuses_snapshot_drift_and_copied_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 1_800_000_000
+    source = _vault(tmp_path, "source")
+    owner = principal.owner_principal(surface="cli")
+    source_identity = _required("adopt_local_identity")(
+        source,
+        principal=owner,
+        now=now,
+    )
+    clone = tmp_path / "clone"
+    shutil.copytree(source, clone)
+    (clone / "Knowledge Base/Notes/drift.md").write_text(
+        "---\ntype: insight\n---\nnot the authenticated snapshot\n",
+        encoding="utf-8",
+    )
+    _select_custody_paths(tmp_path / "clone-external", monkeypatch)
+    provisioned = authorization_custody.provision_standalone_custody(
+        clone,
+        now=now + 1,
+    )
+    create_clone = _required("create_rehearsal_clone_identity")
+
+    with pytest.raises(consolidation_identity.ConsolidationIdentityUnavailable):
+        create_clone(source, clone, principal=owner, now=now + 1)
+
+    (clone / "Knowledge Base/Notes/drift.md").unlink()
+    target_path = consolidation_identity._local_identity_path(
+        provisioned.logical_vault_id
+    )
+    target_path.parent.mkdir(mode=0o700, exist_ok=True)
+    shutil.copyfile(source_identity.identity_path, target_path)
+    target_path.chmod(0o600)
+    with pytest.raises(consolidation_identity.ConsolidationIdentityUnavailable):
+        create_clone(source, clone, principal=owner, now=now + 1)
+
+
+def test_two_rehearsal_clones_never_share_active_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 1_800_000_000
+    source = _vault(tmp_path, "source")
+    owner = principal.owner_principal(surface="cli")
+    _required("adopt_local_identity")(source, principal=owner, now=now)
+    create_clone = _required("create_rehearsal_clone_identity")
+    created = []
+
+    for ordinal in (1, 2):
+        clone = tmp_path / f"clone-{ordinal}"
+        shutil.copytree(source, clone)
+        _select_custody_paths(tmp_path / f"clone-{ordinal}-external", monkeypatch)
+        authorization_custody.provision_standalone_custody(
+            clone,
+            now=now + ordinal,
+        )
+        created.append(
+            create_clone(
+                source,
+                clone,
+                principal=owner,
+                now=now + ordinal,
+            )
+        )
+
+    assert created[0].vault_id != created[1].vault_id
+    assert created[0].installation_id != created[1].installation_id
+    assert created[0].clone_of_vault_id == created[1].clone_of_vault_id
+    assert (
+        created[0].clone_of_installation_id
+        == created[1].clone_of_installation_id
+    )
+    assert created[0].clone_of_snapshot_digest == created[1].clone_of_snapshot_digest

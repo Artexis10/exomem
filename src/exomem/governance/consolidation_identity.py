@@ -217,7 +217,23 @@ def _identity_value(
     machine_key_id: str,
     adoption_census_digest: str,
     created_at: int,
+    clone_of_vault_id: str | None = None,
+    clone_of_installation_id: str | None = None,
+    clone_of_snapshot_digest: str | None = None,
 ) -> dict[str, object]:
+    clone_values = (
+        clone_of_vault_id,
+        clone_of_installation_id,
+        clone_of_snapshot_digest,
+    )
+    if any(value is None for value in clone_values) and any(
+        value is not None for value in clone_values
+    ):
+        raise ConsolidationIdentityUnavailable
+    if clone_of_vault_id is not None:
+        clone_of_vault_id = _identifier(clone_of_vault_id)
+        clone_of_installation_id = _identifier(clone_of_installation_id)
+        clone_of_snapshot_digest = _digest(clone_of_snapshot_digest)
     binding_digest = _root_binding_digest(root_binding_id)
     value: dict[str, object] = {
         "schema": IDENTITY_SCHEMA,
@@ -236,9 +252,9 @@ def _identity_value(
         "root_binding_digest": binding_digest,
         "machine_key_id": _identifier(machine_key_id),
         "adoption_census_digest": _digest(adoption_census_digest),
-        "clone_of_vault_id": None,
-        "clone_of_installation_id": None,
-        "clone_of_snapshot_digest": None,
+        "clone_of_vault_id": clone_of_vault_id,
+        "clone_of_installation_id": clone_of_installation_id,
+        "clone_of_snapshot_digest": clone_of_snapshot_digest,
         "created_at": _time(created_at),
         "authentication_algorithm": _AUTH_ALGORITHM,
     }
@@ -274,13 +290,24 @@ def _parse_identity(
         generation = _time(value["installation_generation"])
         if generation != 1:
             raise ConsolidationIdentityUnavailable
-        for optional in (
-            "clone_of_vault_id",
-            "clone_of_installation_id",
-            "clone_of_snapshot_digest",
+        clone_values = (
+            value["clone_of_vault_id"],
+            value["clone_of_installation_id"],
+            value["clone_of_snapshot_digest"],
+        )
+        if any(item is None for item in clone_values) and any(
+            item is not None for item in clone_values
         ):
-            if value[optional] is not None:
-                raise ConsolidationIdentityUnavailable
+            raise ConsolidationIdentityUnavailable
+        clone_of_vault_id = (
+            None if clone_values[0] is None else _identifier(clone_values[0])
+        )
+        clone_of_installation_id = (
+            None if clone_values[1] is None else _identifier(clone_values[1])
+        )
+        clone_of_snapshot_digest = (
+            None if clone_values[2] is None else _digest(clone_values[2])
+        )
         expected_digest = _record_digest(_without_commitments(value))
         if not hmac.compare_digest(_digest(value["record_digest"]), expected_digest):
             raise ConsolidationIdentityUnavailable
@@ -305,9 +332,9 @@ def _parse_identity(
             root_binding_digest=_digest(value["root_binding_digest"]),
             machine_key_id=_identifier(value["machine_key_id"]),
             adoption_census_digest=_digest(value["adoption_census_digest"]),
-            clone_of_vault_id=None,
-            clone_of_installation_id=None,
-            clone_of_snapshot_digest=None,
+            clone_of_vault_id=clone_of_vault_id,
+            clone_of_installation_id=clone_of_installation_id,
+            clone_of_snapshot_digest=clone_of_snapshot_digest,
             created_at=_time(value["created_at"]),
             authentication_algorithm=_AUTH_ALGORITHM,
             record_digest=_digest(value["record_digest"]),
@@ -400,6 +427,36 @@ def _assert_registered_local_identity(
         },
         host_key=host_key,
     )
+
+
+def _local_identity_for_root(
+    vault_root: Path,
+    *,
+    host_key: bytes,
+) -> ConsolidationCellIdentity:
+    binding = authorization_custody.standalone_attachment_id(vault_root)
+    matched: ConsolidationCellIdentity | None = None
+    try:
+        for path in sorted(
+            _local_identity_directory().iterdir(),
+            key=lambda item: item.name,
+        ):
+            if _LOCAL_IDENTITY_FILE.fullmatch(path.name) is None:
+                raise ConsolidationIdentityUnavailable
+            loaded = authorization_custody._load_private_artifact(  # noqa: SLF001
+                path,
+                maximum_bytes=authorization_custody.MAX_CUSTODY_FILE_BYTES,
+            )
+            identity = _parse_identity(loaded.data, key=host_key, expected_path=path)
+            if hmac.compare_digest(identity.root_binding_id, binding):
+                if matched is not None:
+                    raise ConsolidationIdentityUnavailable
+                matched = identity
+    except authorization_custody.AuthorizationCustodyUnavailable:
+        raise ConsolidationIdentityUnavailable from None
+    if matched is None:
+        raise ConsolidationIdentityUnavailable
+    return matched
 
 
 def _load_local_with_custody(
@@ -618,6 +675,114 @@ def rebind_local_identity(
         raise ConsolidationIdentityUnavailable from None
 
 
+def create_rehearsal_clone_identity(
+    source_vault_root: Path,
+    clone_vault_root: Path,
+    *,
+    principal: RequestPrincipal,
+    now: int,
+) -> ConsolidationCellIdentity:
+    """Create one traceable rehearsal identity without copying source authority."""
+
+    _require_local_owner(principal)
+    source = Path(source_vault_root)
+    clone = Path(clone_vault_root)
+    if source == clone:
+        raise ConsolidationIdentityUnavailable
+    try:
+        custody = authorization_custody.load_authorization_custody(clone, now=now)
+        with writer_lease.get_manager().consistency_guard(
+            source,
+            operation="consolidation-clone-source-snapshot",
+            holder_kind="consolidation-identity-control",
+        ):
+            with writer_lease.get_manager().mutation_guard(
+                clone,
+                operation="consolidation-clone-identity",
+                holder_kind="consolidation-identity-control",
+                attachment_control=True,
+                attachment_now=now,
+            ):
+                with writer_lease.get_manager().consistency_guard(
+                    _local_identity_directory(),
+                    operation="consolidation-clone-registry-write",
+                    holder_kind="consolidation-identity-registry",
+                ):
+                    authorization_custody.require_current_standalone_registry(
+                        custody,
+                        now=now,
+                        require_serving=True,
+                    )
+                    host_key = authorization_custody._load_host_control_key()  # noqa: SLF001
+                    source_identity = _local_identity_for_root(
+                        source,
+                        host_key=host_key,
+                    )
+                    if (
+                        source_identity.cell_id == custody.control.cell_id
+                        or source_identity.vault_id
+                        == custody.control.logical_vault_id
+                    ):
+                        raise ConsolidationIdentityUnavailable
+                    source_snapshot = _canonical_adoption_census(source)
+                    clone_snapshot = _canonical_adoption_census(clone)
+                    if not hmac.compare_digest(source_snapshot, clone_snapshot):
+                        raise ConsolidationIdentityUnavailable
+                    path = _local_identity_path(custody.control.logical_vault_id)
+                    if path.exists() or path.is_symlink():
+                        existing = _load_local_with_custody(
+                            clone,
+                            custody=custody,
+                            now=now,
+                        )
+                        if (
+                            existing.clone_of_vault_id
+                            != source_identity.vault_id
+                            or existing.clone_of_installation_id
+                            != source_identity.installation_id
+                            or existing.clone_of_snapshot_digest != source_snapshot
+                        ):
+                            raise ConsolidationIdentityUnavailable
+                        return existing
+                    machine_key_id = authorization_custody._host_control_key_id(  # noqa: SLF001
+                        host_key
+                    )
+                    value = _identity_value(
+                        cell_id=custody.control.cell_id,
+                        vault_id=custody.control.logical_vault_id,
+                        installation_id=_new_installation_id(),
+                        root_binding_id=custody.control.registry_attachment_id,
+                        machine_key_id=machine_key_id,
+                        adoption_census_digest=clone_snapshot,
+                        created_at=now,
+                        clone_of_vault_id=source_identity.vault_id,
+                        clone_of_installation_id=source_identity.installation_id,
+                        clone_of_snapshot_digest=source_snapshot,
+                    )
+                    authorization_custody._prepare_private_directory(path.parent)  # noqa: SLF001
+                    _assert_unique_local_claim(
+                        target_path=path,
+                        target_value=value,
+                        host_key=host_key,
+                    )
+                    authorization_custody._publish_private_artifact(  # noqa: SLF001
+                        path,
+                        _encode_identity(value, key=host_key),
+                        maximum_bytes=authorization_custody.MAX_CUSTODY_FILE_BYTES,
+                    )
+                    return _load_local_with_custody(
+                        clone,
+                        custody=custody,
+                        now=now,
+                    )
+    except ConsolidationIdentityUnavailable:
+        raise
+    except authorization_custody.AuthorizationCustodyUnavailable:
+        raise ConsolidationIdentityUnavailable from None
+    except (OSError, RuntimeError, TypeError, ValueError):
+        raise ConsolidationIdentityUnavailable from None
+
+
 def _hosted_root_binding(binding: Any) -> str:
     identities: list[dict[str, object]] = []
     try:
@@ -776,6 +941,7 @@ __all__ = [
     "ConsolidationIdentityUnavailable",
     "adopt_hosted_identity",
     "adopt_local_identity",
+    "create_rehearsal_clone_identity",
     "load_hosted_identity",
     "load_local_identity",
     "rebind_local_identity",
