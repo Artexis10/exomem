@@ -464,7 +464,7 @@ spec:
             volume.secret.defaultMode == 288) ||
           (volume.name == 'authorization-session-custody' && has(volume.emptyDir) &&
             volume.emptyDir.medium == 'Memory' &&
-            string(dyn(volume.emptyDir.sizeLimit)) == '256Ki')))
+            string(dyn(volume.emptyDir).sizeLimit) == '256Ki')))
       message: Serving pods may mount only their PVC and exact control-plane Secrets.
     - expression: >-
         !variables.inScope ||
