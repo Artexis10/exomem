@@ -246,3 +246,60 @@ def test_collection_dependent_actions_reject_a_missing_selector(
         plan_memory(tmp_path, action, **arguments)
 
     assert raised.value.code == "INVALID_PLAN_ARGUMENTS"
+
+
+def test_plan_memory_update_names_the_unexpected_argument(tmp_path: Path) -> None:
+    from exomem.plan_memory import plan_memory
+
+    with pytest.raises(OpError) as raised:
+        plan_memory(
+            tmp_path,
+            "update",
+            collection="Knowledge Base/Planning/Work/_collection.md",
+            plan_id="991acdd4-16b9-4396-8220-2cb37b7e8516",
+            expected_container_hash="a" * 64,
+            expected_item_version="b" * 64,
+            why="update",
+            changes={"status": "done"},
+            item={"title": "not allowed here"},
+        )
+
+    assert raised.value.code == "INVALID_PLAN_ARGUMENTS"
+    assert "unexpected for update: item" in raised.value.message
+    assert "not allowed here" not in raised.value.message
+
+
+def test_plan_memory_update_names_the_missing_argument(tmp_path: Path) -> None:
+    from exomem.plan_memory import plan_memory
+
+    with pytest.raises(OpError) as raised:
+        plan_memory(
+            tmp_path,
+            "update",
+            collection="Knowledge Base/Planning/Work/_collection.md",
+            plan_id="991acdd4-16b9-4396-8220-2cb37b7e8516",
+            expected_container_hash="a" * 64,
+            why="update",
+            changes={"status": "done"},
+        )
+
+    assert raised.value.code == "INVALID_PLAN_ARGUMENTS"
+    assert "missing for update: expected_item_version" in raised.value.message
+    assert "991acdd4-16b9-4396-8220-2cb37b7e8516" not in raised.value.message
+
+
+def test_plan_memory_query_view_names_the_excluded_shaping_field(tmp_path: Path) -> None:
+    from exomem.plan_memory import plan_memory
+
+    with pytest.raises(OpError) as raised:
+        plan_memory(
+            tmp_path,
+            "query",
+            collection="Knowledge Base/Planning/Work/_collection.md",
+            view="inbox",
+            columns=["title"],
+        )
+
+    assert raised.value.code == "INVALID_PLAN_ARGUMENTS"
+    assert "view excludes shaping fields: columns" in raised.value.message
+    assert "inbox" not in raised.value.message
