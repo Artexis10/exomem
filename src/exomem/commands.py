@@ -843,6 +843,28 @@ def op_bootstrap(
                 "review_reason": "every review decision records WHY as a closed code: lead the `why` with intentional:, false_positive:, handled:, deferred:, or too_frequent: followed by the free text. Anything else records unspecified",
                 "family_disposition": "when the user asks to stop hearing about a KIND of signal, quiet that family rather than lowering prominence, which silences everything: triage_memory(ref='exomem://review/family/<family>', action='quiet'|'off'|'normal', why='<code>: ...'). quiet drops it from the default review union and every carrier; off also drops it from explicit category review; normal restores it",
                 "family_disposition_reading": "a quiet family is silent, not clean. It stays reviewable on request, review_memory(mode='dispositions') lists what is quiet and why, and the audit still measures it — so a due-state block that omits a family is never evidence that family has nothing due",
+                # FULL only, and the omission from compact is a decision, not an
+                # oversight: compact sits 24 bytes under a ceiling whose own
+                # docstring pre-commits the next addition to TRIMMING compact
+                # rather than raising it. Carrying this clause in compact is the
+                # queued compact-bootstrap trim's to spend, so the byte-identical
+                # compact payload is pinned by test rather than left to drift.
+                **(
+                    {
+                        "destination_choice": (
+                            "choosing the destination is part of writing, not a reaction to an "
+                            "advisory. When a coherent durable thread emerges in conversation that "
+                            "sits outside the current page's declared scope, search for a focused "
+                            "existing destination and link it, or create one, at write time. "
+                            "Post-write structural advisories are the safety net for routing that "
+                            "was missed, never the primary mechanism: a page left to accumulate "
+                            "structural debt until a detector speaks has already cost the reader "
+                            "what the routing would have given them."
+                        )
+                    }
+                    if profile != "compact"
+                    else {}
+                ),
             },
             "note_type_recipes": {
                 "research-note": "Project-scoped finding with Question, Findings, and typed Relations.",

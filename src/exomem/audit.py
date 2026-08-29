@@ -147,6 +147,7 @@ ALL_CATEGORIES: tuple[str, ...] = (
     "supersession_integrity",
     "entity_type_unregistered",
     "unreflected_outcomes",
+    "scope_divergence_semantic",
 )
 OPTIONAL_CATEGORIES: tuple[str, ...] = (
     "relation_registry",
@@ -184,6 +185,15 @@ TYPED_SEMANTIC_CATEGORIES: tuple[str, ...] = (
 # opt-in only hides the queue from the people it exists for.
 EPISTEMIC_REVIEW_CATEGORIES: tuple[str, ...] = (
     "unfinished_experiments",
+    # Structural, not lifecycle — and it belongs here anyway, because this tuple's
+    # gate is BACKLOG PROFILE rather than category kind (see the note above). A
+    # geometric scope check meets an existing corpus with every page it will ever
+    # flag already written, which is the grandfathered population the opt-in rule
+    # exists to keep off the daily surface. It is registered, selectable, and
+    # triageable from the first run; it simply does not displace what is already
+    # there. Whether it graduates into the default union is a calibration
+    # decision, on evidence this change deliberately does not yet have.
+    "scope_divergence_semantic",
     # Same exclusion, a different reason for it, and the difference matters.
     # `unfinished_experiments` is held back by a grandfathered POPULATION;
     # `question_aging` is held back because its trigger is a THRESHOLD THIS
@@ -504,6 +514,8 @@ def audit(
         findings.extend(_check_supersession_integrity(vault_root, pages))
     if "corpus_contradictions" in selected:
         findings.extend(_check_corpus_contradictions(vault_root, pages, today=today))
+    if "scope_divergence_semantic" in selected:
+        findings.extend(_check_scope_divergence_semantic(vault_root, pages))
     if "relation_registry" in selected:
         findings.extend(_check_relation_registry(vault_root))
     if "relation_debt" in selected:
@@ -5147,6 +5159,151 @@ def _asserted_contradictions(
             )
         )
     return findings, keys
+
+
+def _scope_divergence_semantic_finding(
+    rel_path: str, advisory: dict
+) -> AuditFinding:
+    """One advisory -> one finding, with the ONE signal version this family uses.
+
+    The fingerprint a review decision binds to is composed by `review_state` from
+    the finding's category, path and `signal_version`; this is the only place the
+    latter is chosen, and it is composed over the SORTED LABEL TERMS rather than
+    the page's bytes. That is deliberate and it is the whole dismissal contract:
+    material change means the divergent group's vocabulary changed, so editing a
+    typo elsewhere on the page cannot resurrect advice somebody already put down,
+    and a genuinely different group cannot inherit the old decision.
+    """
+    from . import structure_promotion_semantic as sensor
+
+    skipped = advisory.get("skipped")
+    if skipped:
+        return AuditFinding(
+            category="scope_divergence_semantic",
+            severity="info",
+            path=rel_path,
+            detail=(
+                f"{advisory['units']} semantic units is over the "
+                f"{sensor.MAX_JUDGED_UNITS}-unit cap for the geometric scope check, "
+                "so this page was NOT judged for scope divergence."
+            ),
+            proposed_fix=(
+                "No action is implied. The page is too large for the pairwise pass; "
+                "splitting it for other reasons would also bring it back into range."
+            ),
+            meta={
+                "skipped": skipped,
+                "units": advisory["units"],
+                "signal_version": content_hash(skipped)[:16],
+            },
+        )
+
+    terms = list(advisory["cluster_terms"])
+    return AuditFinding(
+        category="scope_divergence_semantic",
+        severity="info",
+        path=rel_path,
+        detail=(
+            f"{advisory['off_scope_units']} durable units on this page form a group "
+            "that holds together on its own and sits apart from what the page says "
+            f"it is about ({', '.join(terms)})."
+        ),
+        proposed_fix=(
+            "Surfaced for REVIEW only — a measurement of how this page's material is "
+            "distributed, not a judgment that anything is wrong. If the group is its "
+            "own subject, a focused note is its home; if it belongs here, nothing "
+            "needs doing. Nothing is auto-moved or auto-written."
+        ),
+        meta={
+            "reasons": list(advisory["reasons"]),
+            "strength": advisory["strength"],
+            "off_scope_units": advisory["off_scope_units"],
+            "cluster_terms": terms,
+            "signal_version": content_hash("\n".join(terms))[:16],
+        },
+    )
+
+
+def _check_scope_divergence_semantic(
+    vault_root: Path,
+    pages: list[find_module.ParsedPage],
+) -> list[AuditFinding]:
+    """Corpus sweep for pages whose unit GEOMETRY has outgrown their declared scope.
+
+    The lexical write-time advisory (`structure_promotion`) compares vocabulary and
+    is blind when the divergent material wears the parent domain's words. This is
+    the semantic counterpart, and it runs here rather than at commit time for one
+    reason: this is where the vectors already are. Nothing is embedded, no model is
+    called, and no index is added — it reads rows the indexing pipeline already
+    wrote.
+
+    Cost is bounded by construction: EXACTLY ONE corpus-level unit-vector load per
+    sweep, never a per-page query. Pages with no stored vectors are skipped without
+    being judged, because absence of evidence must never become advice.
+    """
+    if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+        return []
+    eligible = {
+        page.rel_path: page for page in pages if _is_active_compiled_rw(vault_root, page)
+    }
+    if not eligible:
+        return []
+    try:
+        from . import embeddings as embeddings_module
+        from . import semantic_index
+        from . import structure_promotion_semantic as sensor
+    except ImportError as e:  # numpy is core, but stay defensive
+        log.debug("scope_divergence_semantic sweep unavailable (%s)", e)
+        return []
+
+    try:
+        grouped = embeddings_module.get_embedding_index(
+            vault_root
+        ).all_semantic_unit_vectors()
+    except Exception:  # noqa: BLE001 — a derived sidecar never breaks the audit
+        log.warning("unit-vector read failed; scope_divergence_semantic skipped", exc_info=True)
+        return []
+    if not grouped:
+        return []
+
+    corpus = sensor.destination_corpus(
+        {path: page.frontmatter for path, page in eligible.items()}
+    )
+    findings: list[AuditFinding] = []
+    for rel_path in sorted(eligible):
+        rows = grouped.get(rel_path)
+        if not rows:
+            continue  # no stored geometry -> not judged, never advised about
+        try:
+            state = semantic_index.build_parent_index_state(vault_root, rel_path)
+        except (OSError, ValueError):
+            # Unreadable or unparseable here means unjudgeable, not divergent.
+            continue
+        # Geometry may only be read against the parse it was written for. An
+        # anchored `unit_ref` is `{parent_ref}#{anchor}` and carries no content,
+        # so a page rewritten in place without reindexing still JOINS perfectly
+        # while its vectors describe deleted text — the sensor would relabel the
+        # group from stale geometry and new vocabulary, and because the label set
+        # is the fingerprint, that fabricated change REOPENS settled dismissals.
+        # The generation binds `parent_source_hash`, so any edit moves it. It also
+        # covers partial coverage: units added without reindexing shift the
+        # generation, and judging the vectored subset would measure mass and
+        # retained scope over a fraction of the page and call it the page's shape.
+        # Not judged until the pipeline catches up — absence semantics, D1.
+        if any(row.parent_generation != state.parent_generation for row in rows):
+            continue
+        advisory = sensor.detect(
+            sensor.shape_from_parse(
+                path=rel_path,
+                frontmatter=eligible[rel_path].frontmatter,
+                units=state.document.units,
+                vectors_by_ref={row.unit_ref: row.vector for row in rows},
+            ),
+            corpus=corpus,
+        )
+        if advisory is not None:
+            findings.append(_scope_divergence_semantic_finding(rel_path, advisory))
+    return findings
 
 
 def _check_corpus_contradictions(
