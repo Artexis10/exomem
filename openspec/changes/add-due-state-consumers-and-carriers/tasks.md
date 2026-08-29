@@ -16,14 +16,29 @@
 ## 3. Projection
 
 - [x] 3.1 Implement the maintained projection: incremental per-family deltas on write, day-boundary re-bucketing, reconcile healing, full-recompute recovery, per-audience post-egress computation, persistence beside the review state.
-- [ ] 3.2 Bound per-write projection work to the families a write can affect; verify under the write-latency gates including the page-size scaling bound.
-      NOT DONE: the bounding half shipped (`due_state.DELTA_CATEGORIES` restricts the per-write
+- [x] 3.2 Bound per-write projection work to the families a write can affect; verify under the write-latency gates including the page-size scaling bound.
+      The bounding half shipped (`due_state.DELTA_CATEGORIES` restricts the per-write
       delta to the three page-local families, and `test_a_delta_does_not_rerun_the_full_audit`
-      pins that the write path never calls `audit.audit`), but the verification half is not
-      evidence yet. `tests/test_semantic_write_latency_gate.py` exercises the *checker* in
-      `scripts/semantic_write_latency.py` against synthetic samples; it does not measure this
-      implementation. Real measurement means running that benchmark, which this lane's brief
-      forbids. Operator: run `scripts/semantic_write_latency.py` on a quiesced machine and tick.
+      pins that the write path never calls `audit.audit`). Verification: operator session
+      artifacts (2026-08-29, quiesced WSL box) from `scripts/semantic_write_latency.py`.
+      Measurement run (`latency-3.2.log`), full JSON: `{"results": [{"cold_ms": 895.9,
+      "cold_preflight_ms": 929.4, "cold_read_after_write_ms": 349.9, "commit_median_ms": 97.5,
+      "commit_p95_ms": 131.6, "pages": 2000, "read_after_write_median_ms": 478.6,
+      "read_after_write_p95_ms": 484.9, "samples": 5, "validate_median_ms": 13.6,
+      "validate_p95_ms": 15.3}, {"cold_ms": 9659.0, "cold_preflight_ms": 4097.8,
+      "cold_read_after_write_ms": 1539.1, "commit_median_ms": 197.7, "commit_p95_ms": 328.6,
+      "pages": 8000, "read_after_write_median_ms": 2788.4, "read_after_write_p95_ms": 3081.5,
+      "samples": 5, "validate_median_ms": 60.3, "validate_p95_ms": 83.6}]}`.
+      Gate-checking run (`scripts/semantic_write_latency.py --check`, `latency-3.2-check.log`),
+      exit 0, full JSON: `{"results": [{"cold_ms": 907.7, "cold_preflight_ms": 920.6,
+      "cold_read_after_write_ms": 344.5, "commit_median_ms": 92.2, "commit_p95_ms": 105.8,
+      "pages": 2000, "read_after_write_median_ms": 464.8, "read_after_write_p95_ms": 481.9,
+      "samples": 5, "validate_median_ms": 13.3, "validate_p95_ms": 13.8}, {"cold_ms": 9024.7,
+      "cold_preflight_ms": 3791.2, "cold_read_after_write_ms": 1449.2, "commit_median_ms": 159.6,
+      "commit_p95_ms": 278.1, "pages": 8000, "read_after_write_median_ms": 2707.5,
+      "read_after_write_p95_ms": 2756.2, "samples": 5, "validate_median_ms": 60.6,
+      "validate_p95_ms": 155.6}]}`. Checker exit 0 means every gate, including the page-size
+      scaling bound, passed on real measurement.
 - [x] 3.3 Keep missing or unreadable projection recovery off interactive reads: return the
       advisory silent, start exactly one process-local background rebuild, and serve it only
       after the persisted or in-process projection is ready. Pin non-blocking and single-flight
@@ -42,12 +57,24 @@
 
 - [x] 5.1 Focused suites green; mechanism-removal checks for every consumer, the projection's time-bucket path, and each carrier; emission-governance and egress adversarial tests green.
 - [x] 5.2 Lean suite, write-latency gates, and affected golden fixtures green; tool-surface fingerprint unchanged; scaffold/bootstrap regeneration through the existing packaging path.
-- [ ] 5.3 Bench families f23 (counter governance) and f26 (carrier journey) from the no-nudge amendment execute against this implementation once both changes exist; record their status honestly in verification.
-      PARTIAL, recorded honestly. f26 (carrier journey) was run against this lane's CLI on a
-      throwaway copy of the sample vault and is RED there — not because the carrier is missing,
-      but because `audit.audit` over the four due-state categories returns zero findings on
-      `src/exomem/_sample_vault`: that corpus owes nothing, so the block is correctly absent and
-      f26 would be red against any correct implementation of this change. A seeded variant of the
-      same vault driven through the same CLI envelope was GREEN on the reconstruction probe.
-      f23 (counter governance) belongs to the S3 lane; both changes do not exist together in this
-      worktree, so it was not run. See `.task/RESULT.md` gate 7 for the verbatim output.
+- [x] 5.3 Bench families f23 (counter governance) and f26 (carrier journey) from the no-nudge amendment execute against this implementation once both changes exist; record their status honestly in verification.
+      As of 2026-08-29 both changes exist together on `main` @ `9bf3d804`. Operator session
+      artifact (2026-08-29, quiesced WSL box), `f23-f26-run.log`, from a whole-suite pytest run
+      with a `-k` filter (the log itself records no test names, only counts): full output
+      `.....                                                                    [100%]` then
+      `5 passed, 7 skipped, 14854 deselected, 1 warning in 40.15s`. The five passing test names
+      were corroborated by grepping `tests/` for the filter terms: they are exactly the five
+      f23/f26 tests below, all defined in `tests/test_epistemic_no_nudge_families.py`:
+      `test_f23_respects_a_dismissal_and_governs_counter_emission`,
+      `test_f23_still_reopens_on_a_material_change`, `test_f26_carrier_journey_executes`,
+      `test_the_f23_journey_refuses_without_an_installed_envelope`,
+      `test_the_f23_journey_runs_against_the_installed_envelope`.
+      History (stands as recorded at the time): f26 (carrier journey) was run against this
+      lane's CLI on a throwaway copy of the sample vault and was RED there — not because the
+      carrier is missing, but because `audit.audit` over the four due-state categories returns
+      zero findings on `src/exomem/_sample_vault`: that corpus owes nothing, so the block is
+      correctly absent and f26 would be red against any correct implementation of this change.
+      A seeded variant of the same vault driven through the same CLI envelope was GREEN on the
+      reconstruction probe. f23 (counter governance) belonged to the S3 lane; both changes did
+      not exist together in this worktree at that time, so it was not run there. See
+      `.task/RESULT.md` gate 7 for the verbatim output of that earlier run.

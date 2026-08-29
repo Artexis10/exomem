@@ -634,7 +634,7 @@ unchanged-draft, hash-match, reason, or replay requirements.
 - **AND** the stored receipt remains underscore-only
 
 ### Requirement: One multiplexed Planning product command
-The product surface SHALL expose one `plan_memory` command rather than separate capture, horizon, hierarchy, manifest-lifecycle, or storage-specific tools. Its finite selector SHALL contain exactly nine actions: read-only `inspect`, `validate`, and `query`, plus mutating `create`, `add`, `update`, `triage`, `revise`, and `rebaseline`. Query SHALL cover bounded horizon/date/history/hierarchy/render/export-shaped responses through explicit arguments; generic derived-index repair and previewed structured-file migration SHALL remain under `maintain_memory`.
+The product surface SHALL expose one `plan_memory` command rather than separate capture, horizon, hierarchy, manifest-lifecycle, or storage-specific tools. Its finite selector SHALL contain exactly nine actions: read-only `inspect`, `validate`, and `query`, plus mutating `create`, `add`, `update`, `triage`, `revise`, and `rebaseline`. `inspect` without a collection SHALL return the Planning inventory; with a collection it SHALL inspect that collection. Query SHALL cover bounded horizon/date/history/hierarchy/render/export-shaped responses through explicit arguments; generic derived-index repair and previewed structured-file migration SHALL remain under `maintain_memory`.
 
 #### Scenario: Natural planning intent uses one front door
 - **WHEN** an agent receives “save this feature idea”, “file this bug for later”, “make this a quarterly initiative”, “what matters this week”, “show my multi-year outcomes”, or “revise this Planning collection”
@@ -648,6 +648,10 @@ The product surface SHALL expose one `plan_memory` command rather than separate 
 - **WHEN** an agent needs to validate, revise, or explicitly rebaseline an existing Planning collection manifest
 - **THEN** it uses the finite lifecycle actions on `plan_memory` rather than a generic file editor or storage-specific tool
 
+#### Scenario: Inventory before a collection is known
+- **WHEN** an agent calls `plan_memory(action="inspect")` with no collection
+- **THEN** the response is the bounded Planning inventory and nothing is created or resolved
+
 #### Scenario: Review does not hide inside query
 - **WHEN** a caller queries a plan that carries Records evidence descriptors
 - **THEN** `plan_memory` returns authored Planning state and descriptors without evaluating planned-versus-recorded progress or silently invoking epistemic `review_memory`
@@ -657,11 +661,11 @@ The generated signature SHALL expose exactly `action`, `collection`, `manifest_p
 
 | Action | Required | Optional and defaults |
 | --- | --- | --- |
-| `inspect` | `collection: string` | none |
+| `inspect` | none | `collection: string` — omitted returns the Planning inventory |
 | `validate` | create mode: `manifest_path: string`, `manifest_text: string`; revision mode: `collection: string`, `manifest_text: string` | none |
 | `create` | `manifest_path: string`, `manifest_text: string`, `why: string` | `scaffold: boolean=true` |
 | `query` | `collection: string` | `view: string`; existing structured `filters`, `columns`, `sort_by`, `aggregate`, `date_from`, `date_to`, `date_column`; `descending: boolean=false`; `limit: integer=100` capped at 1,000; `lifecycle: active|archived|all=active`; `hierarchy_mode: none|ancestors|descendants=none`; `hierarchy_depth: integer=3` capped at 8; `hierarchy_limit: integer=100` capped at 500; `continuation: string`; `include_agent_history: boolean=false`; `output_format: json|markdown|csv=json` |
-| `add` | `collection: string`, `item: object`, `why: string` | `plan_id: UUID`, `expected_container_hash: sha256`, `body: string=""` |
+| `add` | `collection: string`, `item: object`, `why: string` | `plan_id: UUID` — omitted derives the identity from the declared natural key when every key field is present, `expected_container_hash: sha256`, `body: string=""` |
 | `update` | `collection: string`, `plan_id: UUID`, `expected_container_hash: sha256`, `expected_item_version: sha256`, `why: string`, at least one of `changes` or `body` | `changes: non-empty object` using the Planning spec's exact null-as-delete rules; `body: complete string replacement` |
 | `triage` | `collection: string`, `plan_id: UUID`, `transition: non-empty object`, `expected_container_hash: sha256`, `expected_item_version: sha256`, `why: string` | none |
 | `revise` | `collection: string`, `manifest_text: string`, `expected_manifest_hash: sha256`, `expected_container_hash: sha256`, `why: string` | none |
@@ -672,6 +676,10 @@ The two `validate` forms SHALL be mutually exclusive and read-only. Revision-mod
 #### Scenario: Read action rejects mutation payload
 - **WHEN** `inspect`, `validate`, or `query` receives an argument outside its declared shape
 - **THEN** validation refuses rather than ignoring the ambiguous payload
+
+#### Scenario: Collection-bound actions do not treat inventory as a fallback
+- **WHEN** `query`, `add`, `update`, `triage`, `revise`, or `rebaseline` omits `collection`
+- **THEN** validation refuses, while `inspect` without a collection returns the inventory
 
 #### Scenario: Create refuses existing canonical files
 - **WHEN** the requested manifest target or its declared canonical source already exists, including an ordinary note at either target
@@ -2109,3 +2117,80 @@ returned.
 - **WHEN** the exact same generic reserved-path mutation is issued on each surface
 - **THEN** each returns the shared stable code/remediation, performs no write, and emits
   no resolved path or tree metadata
+
+### Requirement: Structured-collection mutations are due-state carriers
+
+`record_memory` `append` and `update` and `plan_memory` `add`, `update` and `triage` responses SHALL carry the bounded advisory due-state block under the same carrier contract and emission governance as page writes: the write applies its delta, the block is served through the release plane, emission is recorded once per delivered block, a batch scope delivers at most once, family dispositions apply, and an unreadable review state yields no block while the write still commits. The leaves SHALL reuse the shared due-state helpers rather than re-deriving any of it.
+
+#### Scenario: The append that opens a gap reports it
+
+- **WHEN** a record append joins an open Planning item for the first time
+- **THEN** that append's own response carries a due-state block counting one `unreflected_outcomes` item
+
+#### Scenario: A batch of appends delivers once
+
+- **WHEN** twelve appends run inside one batch scope
+- **THEN** at most one block is delivered and the emission ledger records one emission
+
+#### Scenario: Silence on an unreadable store
+
+- **WHEN** the review state cannot be read
+- **THEN** the append commits, the response carries no block, and no error is raised for the advisory
+
+### Requirement: Planned-versus-recorded review is discoverable in the tool surface
+
+The `review_memory` `mode` documentation in the generated tool surface SHALL list `plan-progress` with its one-line purpose, and the `plan_memory` description SHALL document the inventory form of `inspect`. The pinned tool-surface digest SHALL move once for both, with the packaged contract, the schema fixture, the release-identities fixture, the hosted generated locks and directory packets, and the ChatGPT plugin contract's pending digest regenerated together; no input parameter is added or removed.
+
+#### Scenario: An MCP client can find plan-progress
+
+- **WHEN** a client reads the `review_memory` tool description from the packaged contract
+- **THEN** `plan-progress` is listed among the modes
+
+#### Scenario: One pin move
+
+- **WHEN** the tool surface is regenerated for this change
+- **THEN** exactly one digest change is recorded and every generated consumer the repository gates agrees on it; the OpenAI directory packet binds a release input rather than the tool-surface pin and is regenerated at that release step
+
+### Requirement: Write-path advisories are suppressed for exactly-dismissed fingerprints
+
+Each write-path advisory — the near-duplicate warning, the contradiction-band warning, and the overlap warning — SHALL carry a stable review reference and a signal fingerprint derived from the advisory's endpoints and their content signal versions. Before emitting an advisory, the system SHALL consult the portable review state: an advisory whose exact `(review identity, fingerprint)` pair was dismissed SHALL NOT be emitted; a snoozed pair SHALL NOT be emitted before its expiry.
+
+A material change to the counterpart endpoint SHALL produce a different fingerprint, and the advisory SHALL then be emitted again. A change to the written page itself SHALL resurface a dismissed advisory only when it changes the detected signal class for the pair. Ranking drift, unrelated writes, the triggering write's own change to the written page, and repeated identical page states SHALL NOT change the fingerprint.
+
+Suppression SHALL be failure-isolated in the emitting direction: review state that cannot be read or parsed SHALL cause the advisory to be emitted, and SHALL NOT fail, delay, or alter the committed mutation.
+
+#### Scenario: A dismissed duplicate warning stays quiet on the next write
+
+- **WHEN** a near-duplicate advisory for a page pair is dismissed through triage, and a further write commits to the same page with the counterpart materially unchanged and the detected signal class unchanged
+- **THEN** the committed result carries no near-duplicate advisory for that pair
+- **AND** the mutation outcome, status, and path are unchanged from an emission-free write
+
+#### Scenario: A material change resurfaces the advisory
+
+- **WHEN** a previously dismissed advisory's counterpart page is materially edited, and a further write commits to the original page
+- **THEN** the advisory is emitted again with a new fingerprint
+- **AND** the earlier dismissal record does not suppress it
+
+#### Scenario: Unreadable review state fails open to emission
+
+- **WHEN** the portable review state cannot be read during a compiled write that would emit an advisory
+- **THEN** the advisory is emitted
+- **AND** the write commits with its existing terminal unchanged
+
+#### Scenario: A declared rival pair produces no duplicate advisory
+
+- **WHEN** a page pair carries a recorded competing-alternatives stance and a further write commits to either page
+- **THEN** no near-duplicate advisory is emitted for that pair
+- **AND** the suppression follows from the stance contract, not from a dismissal record
+
+### Requirement: Write feedback and the audit report the same relation-debt predicate
+
+The write-result feedback SHALL report relation debt using the same predicate as the audit's relation-debt category and the semantic connectivity lane: the presence of `sources:` provenance alone SHALL NOT clear the debt flag. The feedback SHALL report provenance presence as its own fact, distinct from debt, so a page with citations but no connections is described as exactly that.
+
+#### Scenario: A cited but unconnected page reports debt consistently
+
+- **WHEN** a compiled write commits to a page whose only outward reference is its `sources:` frontmatter, with no typed relations and no body wikilinks
+- **THEN** the write-result feedback reports relation debt
+- **AND** a subsequent audit reports the same page under the same debt condition
+- **AND** the feedback separately reports that provenance is present
+
