@@ -56,12 +56,10 @@ from .media_jobs import (
 from .vault import (
     MISSING_CONTENT_HASH,
     DeferredGraphCompletion,
-    PathGuard,
     PlannedWrite,
     batch_atomic_write,
     content_hash,
     post_commit_batch_fanout,
-    read_bounded_guarded_bytes,
 )
 from .writer_lease import get_manager
 
@@ -623,51 +621,48 @@ class MediaWorker:
             ):
                 floor_path = graph_sync.floor_path(self._vault_root)
                 checkpoint_path = graph_sync.checkpoint_path(self._vault_root)
-                floor_relative = floor_path.relative_to(self._vault_root).as_posix()
-                checkpoint_relative = checkpoint_path.relative_to(self._vault_root).as_posix()
                 try:
-                    floor_raw, floor_guard = read_bounded_guarded_bytes(
-                        self._vault_root,
-                        floor_relative,
+                    floor_raw = graph_sync._read_bounded_bytes(
+                        floor_path,
                         limit=graph_sync._FLOOR_READ_LIMIT,
+                        vault_root=self._vault_root,
                     )
                 except FileNotFoundError:
                     return
                 floor = graph_sync.GraphSyncGenerationFloor.parse(floor_raw)
                 if floor is None or floor.generation != token.checkpoint.generation:
                     return
+                floor_content = floor_raw.decode("utf-8")
                 try:
-                    checkpoint_raw, checkpoint_guard = read_bounded_guarded_bytes(
-                        self._vault_root,
-                        checkpoint_relative,
+                    checkpoint_raw = graph_sync._read_bounded_bytes(
+                        checkpoint_path,
                         limit=graph_sync._CHECKPOINT_READ_LIMIT,
+                        vault_root=self._vault_root,
                     )
                 except FileNotFoundError:
                     predecessor = None
-                    checkpoint_guard = PathGuard.capture(
-                        self._vault_root,
-                        checkpoint_relative,
-                        leaf_policy="absent",
-                    )
                     checkpoint_hash = MISSING_CONTENT_HASH
                 else:
                     predecessor = graph_sync.GraphSyncCheckpoint.parse(checkpoint_raw)
                     if predecessor is None:
                         return
-                    checkpoint_hash = checkpoint_guard.expected_content_hash
+                    checkpoint_hash = content_hash(checkpoint_raw.decode("utf-8"))
                 if predecessor != token.predecessor or checkpoint_hash is None:
                     return
                 batch_atomic_write(
                     [
                         PlannedWrite(
+                            floor_path,
+                            floor_content,
+                            expected_hash=content_hash(floor_content),
+                        ),
+                        PlannedWrite(
                             checkpoint_path,
                             token.checkpoint.render(),
-                            guard=checkpoint_guard,
                             expected_hash=checkpoint_hash,
                         )
                     ],
                     vault_root=self._vault_root,
-                    required_guards=(floor_guard,),
                     post_commit_fanout=False,
                 )
             completed = post_commit_batch_fanout(

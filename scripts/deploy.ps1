@@ -19,10 +19,12 @@ param(
     [string]$Extras = "embeddings,media",
     [string]$HealthUrl = "http://127.0.0.1:8765/health",
     [string]$NssmPath = "",
+    [string]$Vault = "",
 
     # Accelerator regression is a hard failure by default: a silent CPU-torch
     # downgrade is expensive to discover later. CPU-only hosts opt out.
     [switch]$AllowCpuTorch,
+    [switch]$ResumeStoppedTransition,
     [switch]$DryRun
 )
 
@@ -31,8 +33,55 @@ $RepoRoot = Split-Path -Parent $PSScriptRoot
 
 . "$PSScriptRoot\_service-common.ps1"
 
+$script:StateRootTransitionBegan = $false
+$workerBefore = 0
+$workerAfter = 0
+$resumingStoppedTransition = $false
+$transitionReceipt = $null
+$transitionIdentity = $null
+
+function Wait-ServiceState {
+    param([string]$Name, [string]$Target, [int]$TimeoutSec = 60)
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        $service = Get-Service -Name $Name -ErrorAction SilentlyContinue
+        if ($service -and $service.Status -eq $Target) { return }
+        Start-Sleep -Milliseconds 400
+    }
+    throw "Timed out waiting for $Name to reach $Target."
+}
+
+function Stop-FailedStateRootTransition {
+    if (-not $script:StateRootTransitionBegan) { return }
+    $observedWorker = Get-ExomemServiceWorkerPid -ServiceName $ServiceName
+    if ($observedWorker -and $observedWorker -ne $workerBefore) { $workerAfter = $observedWorker }
+    try {
+        Publish-ExomemFailedTransitionReceipt `
+            @transitionIdentity `
+            -ObservedWorkerPid $workerAfter | Out-Null
+    } catch {
+        Write-Host "Could not update the retained transition receipt: $($_.Exception.Message)" -ForegroundColor Red
+    }
+    sc.exe stop $ServiceName | Out-Null
+    try {
+        Wait-ServiceState -Name $ServiceName -Target 'Stopped' -TimeoutSec 30
+        $transitionReceipt = Read-ExomemTransitionReceipt @transitionIdentity
+        Assert-ExomemStoppedResumeAuthority -ServiceName $ServiceName -Receipt $transitionReceipt
+        Write-Host "State-root transition failed; service remains stopped." -ForegroundColor Yellow
+    } catch {
+        Write-Host "Could not prove the failed transition stopped the service: $($_.Exception.Message)" -ForegroundColor Red
+    }
+}
+
 function Fail($msg) {
+    Stop-FailedStateRootTransition
     Write-Host "DEPLOY FAILED: $msg" -ForegroundColor Red
+    exit 1
+}
+
+trap {
+    Stop-FailedStateRootTransition
+    Write-Host "DEPLOY FAILED: $($_.Exception.Message)" -ForegroundColor Red
     exit 1
 }
 
@@ -52,6 +101,28 @@ if (-not (Test-Path $servicePython)) {
 }
 
 Write-Host "Service interpreter: $servicePython" -ForegroundColor Cyan
+
+$serviceAppDirectory = Get-ExomemServiceAppDirectory -ServiceName $ServiceName
+if (-not $serviceAppDirectory) {
+    Fail "could not resolve the service AppDirectory; the shared dotenv state-root authority is unavailable."
+}
+$resolvedVault = if ($Vault) { $Vault } else { Get-ExomemDotenvValue -RepoRoot $serviceAppDirectory -Name "EXOMEM_VAULT_PATH" }
+if (-not $resolvedVault) { $resolvedVault = $env:EXOMEM_VAULT_PATH }
+if (-not $resolvedVault) {
+    Fail "no vault resolved (-Vault, .env, or EXOMEM_VAULT_PATH); offline state migration needs an explicit vault."
+}
+$bindingPath = Join-Path $serviceAppDirectory ".env"
+$managedStateRoot = Resolve-ExomemDotenvStateRootBinding -AppDirectory $serviceAppDirectory
+$endpoint = Get-ExomemServiceEndpoint -ServiceName $ServiceName
+$targetPort = [int]$endpoint.Port
+$transitionIdentity = @{
+    PythonPath = $servicePython
+    ServiceName = $ServiceName
+    BindingPath = $bindingPath
+    StateRoot = $managedStateRoot
+    VaultPath = $resolvedVault
+    TargetPort = $targetPort
+}
 
 function Get-Provenance {
     $raw = & $servicePython -m exomem install-info --json 2>$null
@@ -110,6 +181,21 @@ $torchBefore = Get-ExomemTorchVersion -PythonPath $servicePython
 $accelBefore = Test-ExomemAcceleratedTorch -PythonPath $servicePython
 
 $before = Get-Provenance
+$serviceState = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+if ($serviceState -and $serviceState.Status -eq 'Running') {
+    $workerBefore = Get-ExomemServiceWorkerPid -ServiceName $ServiceName
+    if (-not $workerBefore) {
+        Fail "could not capture the running service worker pid; refusing an unprovable offline migration window."
+    }
+    $listenerPidsBefore = @(Get-ExomemConfiguredListenerPids -ServiceName $ServiceName)
+} elseif ($ResumeStoppedTransition -and $serviceState -and $serviceState.Status -eq 'Stopped') {
+    $transitionReceipt = Read-ExomemTransitionReceipt @transitionIdentity
+    Assert-ExomemStoppedResumeAuthority -ServiceName $ServiceName -Receipt $transitionReceipt
+    $workerBefore = [int]$transitionReceipt.worker_pid
+    $resumingStoppedTransition = $true
+} else {
+    Fail "service must be running with a capturable worker for first entry; use -ResumeStoppedTransition only to continue a previously failed, proven-stopped transition."
+}
 if ($before) {
     Write-Host "Currently deployed: $($before.version) ($($before.install_source)), torch $torchBefore"
 } else {
@@ -121,7 +207,35 @@ if ($DryRun) {
     exit 0
 }
 
-# --- 2. Upgrade that environment ---------------------------------------------
+# --- 2. STATE-ROOT MAIN TRANSITION: stop/prove/install/migrate/doctor/start ---
+if (-not $resumingStoppedTransition) {
+    $transitionReceipt = New-ExomemTransitionReceipt @transitionIdentity `
+        -Port $targetPort `
+        -WorkerPid $workerBefore `
+        -ListenerPids $listenerPidsBefore
+}
+$script:StateRootTransitionBegan = $true
+if ($resumingStoppedTransition) {
+    Write-Host "`nContinuing the explicitly proven stopped transition ..." -ForegroundColor Cyan
+    Assert-ExomemStoppedResumeAuthority -ServiceName $ServiceName -Receipt $transitionReceipt
+} else {
+    Write-Host "`nStopping $ServiceName and proving the worker is gone ..." -ForegroundColor Cyan
+    sc.exe stop $ServiceName | Out-Null
+    if ($LASTEXITCODE -ne 0) { Fail "sc.exe stop returned $LASTEXITCODE." }
+    Wait-ServiceState -Name $ServiceName -Target 'Stopped'
+    Assert-ExomemServiceStopped `
+        -ServiceName $ServiceName `
+        -CapturedPids $transitionReceipt.proof_pids `
+        -Ports @($transitionReceipt.port, $transitionReceipt.target_port)
+}
+Set-ExomemTransitionReceiptPhase @transitionIdentity -Phase "stopped"
+$managedStateRoot = Ensure-ExomemDotenvStateRootBinding `
+    -AppDirectory $serviceAppDirectory `
+    -ExpectedStateRoot $transitionReceipt.state_root
+[Environment]::SetEnvironmentVariable("EXOMEM_STATE_ROOT", $managedStateRoot, "Process")
+Set-ExomemTransitionReceiptPhase @transitionIdentity -Phase "bound"
+
+# --- 3. Upgrade that environment while the service remains stopped ------------
 # Deliberately NOT `--upgrade`. `==$Version` pins exomem; `--upgrade` ADDITIONALLY
 # floats every transitive to its newest compatible release, which is not what a
 # version-pinned deploy is asking for. `sentence-transformers` is declared
@@ -141,6 +255,7 @@ $packagesBefore = Get-PackageSnapshot -PythonPath $servicePython
 Write-Host "`nUpgrading to exomem[$Extras]==$Version ..." -ForegroundColor Cyan
 & uv pip install --python $servicePython "exomem[$Extras]==$Version"
 if ($LASTEXITCODE -ne 0) { Fail "uv pip install returned $LASTEXITCODE." }
+Set-ExomemTransitionReceiptPhase @transitionIdentity -Phase "installed"
 
 # Whatever did move, say so. Silent drift is how both incidents stayed invisible
 # until a gate happened to trip on an unrelated check.
@@ -148,7 +263,7 @@ $packagesAfter = Get-PackageSnapshot -PythonPath $servicePython
 Write-Host ""
 Write-DependencyDrift -Before $packagesBefore -After $packagesAfter
 
-# --- 3. Accelerator regression gate ------------------------------------------
+# --- 4. Accelerator regression gate ------------------------------------------
 # The cu132 pin lives in the repo's [tool.uv.sources], which a PyPI-backed venv
 # cannot see, so an upgrade silently resolves the default CPU wheel on Windows.
 $after = Get-Provenance
@@ -170,16 +285,34 @@ if ($accelBefore -and -not $accelAfter) {
     Write-Host "Continuing: -AllowCpuTorch was passed." -ForegroundColor Yellow
 }
 
-# --- 4. Preflight, then restart ----------------------------------------------
-Write-Host "`nRunning doctor gate (profile: $Profile) ..." -ForegroundColor Cyan
-& $servicePython -m exomem doctor --profile $Profile | Out-Null
-if ($LASTEXITCODE -ne 0) { Fail "doctor preflight failed for profile '$Profile'." }
+# --- 5. Offline migrate, doctor, then start -----------------------------------
+Write-Host "`nMigrating machine-local state under the proven stop window ..." -ForegroundColor Cyan
+$migration = Invoke-ExomemNative -CommandArgs @(
+    $servicePython, "-m", "exomem", "maintain", "--vault", $resolvedVault,
+    "--migrate-state", "--offline", "--json"
+)
+if ($migration.ExitCode -ne 0) { Fail "offline state migration failed (exit $($migration.ExitCode))." }
+Set-ExomemTransitionReceiptPhase @transitionIdentity -Phase "migrated"
 
-Write-Host "Restarting service ..." -ForegroundColor Cyan
-& pwsh -NoProfile -File (Join-Path $PSScriptRoot "restart.ps1") -ServiceName $ServiceName -Profile $Profile
-if ($LASTEXITCODE -ne 0) { Fail "restart returned $LASTEXITCODE." }
+Write-Host "Running doctor gate (profile: $Profile) ..." -ForegroundColor Cyan
+$doctor = Invoke-ExomemNative -CommandArgs @(
+    $servicePython, "-m", "exomem", "doctor", "--profile", $Profile,
+    "--vault", $resolvedVault
+)
+if ($doctor.ExitCode -ne 0) { Fail "doctor preflight failed for profile '$Profile'." }
+Set-ExomemTransitionReceiptPhase @transitionIdentity -Phase "doctor-passed"
 
-# --- 5. Verify the RUNNING process, not the installer ------------------------
+Write-Host "Starting service ..." -ForegroundColor Cyan
+Set-ExomemTransitionReceiptPhase @transitionIdentity -Phase "starting"
+sc.exe start $ServiceName | Out-Null
+if ($LASTEXITCODE -ne 0) { Fail "sc.exe start returned $LASTEXITCODE." }
+Wait-ServiceState -Name $ServiceName -Target 'Running'
+$workerAfter = Get-ExomemServiceWorkerPid -ServiceName $ServiceName
+Set-ExomemTransitionReceiptPhase @transitionIdentity -Phase "starting" -ObservedPids @($workerAfter)
+Assert-ExomemServiceRestarted -Before $workerBefore -After $workerAfter -ServiceName $ServiceName
+Assert-ExomemListenerOwnedByWorker -ServiceName $ServiceName -WorkerPid $workerAfter
+
+# --- 6. Verify the RUNNING process and version -------------------------------
 # An installer that succeeded only proves the venv changed. The deploy is not
 # done until the live process serves the requested version.
 #
@@ -190,23 +323,13 @@ if ($LASTEXITCODE -ne 0) { Fail "restart returned $LASTEXITCODE." }
 # could not catch a stale process. The proof that the interpreter reloaded is
 # the worker-pid change asserted inside restart.ps1, which step 4 just ran.
 Write-Host "`nVerifying deployed version at $HealthUrl ..." -ForegroundColor Cyan
-$observed = $null
-$source = $null
-foreach ($attempt in 1..30) {
-    Start-Sleep -Seconds 2
-    try {
-        $resp = Invoke-RestMethod -Uri $HealthUrl -TimeoutSec 5 -ErrorAction Stop
-        $observed = $resp.version
-        $source = $resp.install_source
-        if ($observed -eq $Version) { break }
-    } catch {
-        continue
-    }
-}
-
-if ($observed -ne $Version) {
-    Fail "requested $Version but the running server reports '$observed'. The restart may not have taken effect."
-}
+$resp = Wait-ExomemHealthVersion -HealthUrl $HealthUrl -ExpectedVersion $Version -TimeoutSec 60
+$observed = [string]$resp.version
+$source = [string]$resp.install_source
+Set-ExomemTransitionReceiptPhase @transitionIdentity -Phase "started"
+Set-ExomemTransitionReceiptPhase @transitionIdentity -Phase "accepted"
+Remove-ExomemTransitionReceipt @transitionIdentity
 
 Write-Host ""
 Write-Host "Deployed $observed (install_source: $source, torch: $torchAfter)" -ForegroundColor Green
+$script:StateRootTransitionBegan = $false

@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Observability
 
 Structured logs, metrics, and correlation across exomem's MCP, REST, hosted,

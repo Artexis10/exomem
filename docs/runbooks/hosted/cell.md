@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Cell inspection and retry
 
 ## Preconditions

@@ -17,8 +17,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from .. import held_fs, reserved_paths
-from ..kbdir import kb_dirname
+from .. import held_fs, reserved_paths, state_paths
 from . import projections, schema_v4
 
 SCHEMA_USER_VERSION = 2
@@ -356,8 +355,7 @@ def variant_store_path(
             "projection namespace key is invalid"
         )
     return (
-        Path(vault_root)
-        / kb_dirname()
+        state_paths.vault_state_dir(vault_root)
         / ".authorization-projections"
         / key.namespace_id
         / _STORE_FILENAME
@@ -1448,15 +1446,19 @@ def collect_projection_namespaces(
     if not eligible:
         return ()
     root = Path(vault_root)
-    projection_root = f"{kb_dirname()}/.authorization-projections"
+    projection_state_root = state_paths.vault_state_dir(root)
+    projection_root = ".authorization-projections"
     collected: list[str] = []
     with reserved_paths._subsystem_authority_scope(_OWNER):
         with reserved_paths._identity_coordination_scope(
             root,
             descriptor_ids=(_DESCRIPTOR_ID,),
         ):
-            acquired = held_fs.acquire(root)
-            _held_refusal(acquired, "projection collection cannot acquire the vault")
+            acquired = held_fs.acquire(projection_state_root)
+            _held_refusal(
+                acquired,
+                "projection collection cannot acquire the external state root",
+            )
             with acquired.require() as filesystem:
                 for namespace_id in eligible:
                     namespace_relative = f"{projection_root}/{namespace_id}"

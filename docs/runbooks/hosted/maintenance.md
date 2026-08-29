@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Cell maintenance gate
 
 ## Preconditions

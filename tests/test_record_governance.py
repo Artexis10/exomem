@@ -975,7 +975,8 @@ def test_inspection_guard_reload_does_not_read_withheld_item_or_expose_its_path(
     monkeypatch.setattr(
         record_governance,
         "_authorize",
-        lambda root, path, *, receipt: path != hidden_rel and authorize(root, path, receipt=receipt),
+        lambda root, path, *, receipt, policy=None: path != hidden_rel
+        and authorize(root, path, receipt=receipt, policy=policy),
     )
 
     inspection = record_governance.inspect_collection(tmp_path, manifest)
@@ -1000,7 +1001,8 @@ def test_withheld_template_omits_inspection_lifecycle_guards(tmp_path: Path, mon
     monkeypatch.setattr(
         record_governance,
         "_authorize",
-        lambda root, path, *, receipt: path != template_rel and authorize(root, path, receipt=receipt),
+        lambda root, path, *, receipt, policy=None: path != template_rel
+        and authorize(root, path, receipt=receipt, policy=policy),
     )
 
     inspection = record_governance.inspect_collection(tmp_path, manifest)
@@ -1508,9 +1510,9 @@ def test_schema_link_projection_supports_exact_paths_and_caches_normalized_targe
     calls: list[tuple[str, bool]] = []
     original = record_governance._authorize
 
-    def watched(root: Path, relative: str, *, receipt: bool = False) -> bool:
+    def watched(root: Path, relative: str, *, receipt: bool = False, policy: object | None = None) -> bool:
         calls.append((relative, receipt))
-        return original(root, relative, receipt=receipt)
+        return original(root, relative, receipt=receipt, policy=policy)
 
     monkeypatch.setattr(record_governance, "_authorize", watched)
     with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
@@ -1654,9 +1656,9 @@ def test_schema_link_projection_records_authorized_target_disclosure(
     calls: list[tuple[str, bool]] = []
     original = record_governance._authorize
 
-    def watched(root: Path, relative: str, *, receipt: bool = False) -> bool:
+    def watched(root: Path, relative: str, *, receipt: bool = False, policy: object | None = None) -> bool:
         calls.append((relative, receipt))
-        return original(root, relative, receipt=receipt)
+        return original(root, relative, receipt=receipt, policy=policy)
 
     monkeypatch.setattr(record_governance, "_authorize", watched)
     with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):

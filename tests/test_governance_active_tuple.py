@@ -36,6 +36,7 @@ from exomem import (
     scene_frames,
     semantic_contract,
     semantic_writes,
+    state_paths,
     writer_lease,
 )
 from exomem import (
@@ -1289,6 +1290,121 @@ def test_govern_memory_v4_proposal_persists_exact_authority_binding(
         "ready_at": now + 1,
     }
     assert json.loads(membership_manifest) == binding["membership_manifest"]
+
+
+def _v4_snapshot_value(
+    documents: tuple[str, ...],
+    directories: tuple[str, ...],
+) -> dict[str, object]:
+    document_map = {relative: b"x" for relative in documents}
+    file_identity = {"device": 1, "inode": 1, "kind": "file", "link_count": 1}
+    directory_identity = {
+        "device": 1,
+        "inode": 2,
+        "kind": "directory",
+        "link_count": 1,
+    }
+    return {
+        "documents": [
+            {"path": relative, "bytes": "eA=="} for relative in documents
+        ],
+        "source_fingerprint": policy._document_fingerprint(document_map),
+        "conflict_set_digest": policy._path_set_digest(
+            b"exomem.governance-conflict-set.v1", ()
+        ),
+        "guard_generation": "guard",
+        "file_identities": [
+            {
+                "path": relative,
+                "identity": file_identity,
+                "sha256": hashlib.sha256(b"x").hexdigest(),
+            }
+            for relative in documents
+        ],
+        "directory_identities": [
+            {"path": relative, "identity": directory_identity}
+            for relative in directories
+        ],
+        "governance_root_identity": directory_identity,
+    }
+
+
+@pytest.mark.parametrize(
+    ("documents", "directories"),
+    (
+        (("foo",), ("foo/bar",)),
+        (("foo/bar/baz",), ("foo/bar",)),
+        ((), ("foo/bar",)),
+    ),
+    ids=("file-ancestor", "missing-document-ancestor", "missing-directory-ancestor"),
+)
+def test_v4_snapshot_decoder_refuses_impossible_directory_topology(
+    documents: tuple[str, ...],
+    directories: tuple[str, ...],
+) -> None:
+    from exomem.governance import tool as governance_tool
+    from exomem.governance.tool import GovernanceError
+
+    with pytest.raises(GovernanceError, match="directories"):
+        governance_tool._decoded_v4_authoring_snapshot(  # noqa: SLF001 - decoder fence
+            _v4_snapshot_value(documents, directories)
+        )
+
+
+def test_govern_memory_v4_proposal_replays_an_unchanged_authoring_companion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance.tool import GovernanceCrash, op_govern_memory
+
+    now = int(time.time())
+    vault = tmp_path / "vault"
+    _write_workspace(vault, _documents(ceiling=2))
+    readme = vault / "Knowledge Base" / "_Governance" / "README.md"
+    readme.write_bytes(b"# Governance authoring\n")
+    migration = _migrate_with_empty_projection_catalog(vault, now=now)
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    target_documents = {
+        relative: content.decode("utf-8")
+        for relative, content in _documents(ceiling=1)
+    }
+
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        proposed = op_govern_memory(
+            vault,
+            operation="propose",
+            principal=owner_principal(),
+            intent="Lower the external ceiling",
+            documents=target_documents,
+            target_ceiling=1,
+            now=now + 1,
+        )
+        with pytest.raises(GovernanceCrash, match="v4_after_mirror_write:1"):
+            op_govern_memory(
+                vault,
+                operation="commit",
+                principal=owner_principal(),
+                proposal_id=proposed["proposal_id"],
+                crash_at="v4_after_mirror_write:1",
+                now=now + 2,
+            )
+        replayed = op_govern_memory(
+            vault,
+            operation="commit",
+            principal=owner_principal(),
+            proposal_id=proposed["proposal_id"],
+            now=now + 3,
+        )
+
+    assert replayed["status"] == "committed"
+    assert replayed["mirror_status"] == "complete"
+    assert readme.read_bytes() == b"# Governance authoring\n"
 
 
 def test_govern_memory_v4_proposal_refuses_unprepared_model_measurements(
@@ -3824,11 +3940,12 @@ def test_never_enrolled_refuses_broken_activation_or_workspace_aliases(
         governance_enrolled=False,
         now=now,
     )
-    (kb / ".governance.sqlite").symlink_to(tmp_path / "missing-store")
+    state_dir = state_paths.ensure_vault_state_dir(vault)
+    (state_dir / ".governance.sqlite").symlink_to(tmp_path / "missing-store")
 
     assert policy.load(vault).blocked
 
-    (kb / ".governance.sqlite").unlink()
+    (state_dir / ".governance.sqlite").unlink()
     (kb / "_Governance").symlink_to(tmp_path / "missing-workspace", target_is_directory=True)
 
     assert policy.load(vault).blocked
@@ -3852,7 +3969,10 @@ def test_never_enrolled_refuses_orphaned_activation_store_family(
         governance_enrolled=False,
         now=now,
     )
-    (kb / f".governance.sqlite{suffix}").write_bytes(b"orphaned activation state")
+    state_dir = state_paths.ensure_vault_state_dir(vault)
+    (state_dir / f".governance.sqlite{suffix}").write_bytes(
+        b"orphaned activation state"
+    )
 
     assert policy.load(vault).blocked
 

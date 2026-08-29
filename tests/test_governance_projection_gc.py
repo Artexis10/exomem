@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from governance_projection_support import verified_namespace
 
+from exomem import state_paths
 from exomem.governance import (
     projection_gc,
     projection_runtime,
@@ -268,6 +269,10 @@ def test_exact_tuple_collector_retains_every_authoritative_pin(
     )
     stale_measurement.parent.mkdir(parents=True)
     stale_measurement.write_bytes(b"closed fixture")
+    external_state_root = state_paths.vault_state_dir(tmp_path)
+    stale_store = projection_store.variant_store_path(tmp_path, stale)
+    assert stale_store.is_relative_to(external_state_root)
+    assert not stale_store.is_relative_to(tmp_path)
 
     monkeypatch.setattr(
         projection_gc,
@@ -292,5 +297,5 @@ def test_exact_tuple_collector_retains_every_authoritative_pin(
     for key in (active, cursor, rollback):
         assert projection_store.variant_store_path(tmp_path, key).is_file()
     assert projection_store.variant_store_path(tmp_path, staged).is_file()
-    assert not projection_store.variant_store_path(tmp_path, stale).exists()
-    assert not projection_store.variant_store_path(tmp_path, stale).parent.exists()
+    assert not stale_store.exists()
+    assert not stale_store.parent.exists()

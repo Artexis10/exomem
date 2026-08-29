@@ -1,4 +1,11 @@
+<!-- authority:non-specification -->
+
+<!-- authority:implementation-reference -->
+
 # Competitive benchmark programme — full continuation handoff (2026-08-09)
+
+Historical execution context only. OpenSpec is the durable specification
+authority; this handoff records implementation state and evidence from that run.
 
 Audience: any successor orchestrator session (GPT-5.6 Sol via Codex CLI, or
 Claude). Self-contained: state, sources of truth, operating rules, work

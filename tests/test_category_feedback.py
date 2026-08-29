@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from conftest import initialize_vault_state_offline
 from starlette.testclient import TestClient
 
 from exomem import (
@@ -423,6 +424,7 @@ def _cross_surface_server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         REPO_ROOT / "src" / "exomem" / "_scaffold" / "_Schema",
         vault / "Knowledge Base" / "_Schema",
     )
+    initialize_vault_state_offline(vault, source="category feedback cross-surface fixture")
     monkeypatch.setattr(server, "load_dotenv", lambda *args, **kwargs: None)
     monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
     monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "leases"))

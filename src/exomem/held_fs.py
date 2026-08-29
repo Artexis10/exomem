@@ -270,6 +270,40 @@ def acquire(root: Path) -> HeldResult[HeldFilesystem]:
     return _backend().acquire(root, capability=probe(root))
 
 
+def flush_directory_path(path: Path) -> HeldResult[None]:
+    """Durably flush one exact no-follow directory path.
+
+    The ordinary held API flushes descendant handles.  External owner files
+    can live directly under the acquired anchor, where Windows deliberately
+    refuses an elevated root handle.  Reuse the platform's secure directory
+    open for that one root-level durability cut instead of silently skipping
+    it or importing migration code into owner operations.
+    """
+
+    from . import mutation_lock
+
+    try:
+        directory = Path(path)
+        if os.name == "nt":
+            mutation_lock._windows_flush_directory(directory)
+        else:
+            with mutation_lock._open_secure_directory(
+                directory, create=False
+            ) as retained:
+                if retained.fd is None:
+                    raise OSError("directory durability handle is unavailable")
+                os.fsync(retained.fd)
+        return HeldResult(value=None)
+    except OSError as error:
+        return HeldResult(
+            error=HeldFsError(
+                "IO_REFUSED",
+                "directory durability flush was refused",
+                cause=error,
+            )
+        )
+
+
 def reset_capability_cache_for_tests() -> None:
     """Clear process probe state for deterministic backend contract tests."""
     with _CAPABILITY_CACHE_LOCK:

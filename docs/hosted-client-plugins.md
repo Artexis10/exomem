@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Hosted client plugin candidates
 
 `plugins/hosted/definition.json` is the single tenant-neutral release input. It

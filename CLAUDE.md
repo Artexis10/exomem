@@ -83,6 +83,19 @@ by later work when refreshing a stale `MODIFIED` block, and run
 `openspec validate --all --strict` before and after the archive. A task-complete
 active change is archive debt and CI rejects it.
 
+## OpenSpec is the sole specification system
+
+<!-- spec-system:openspec-only -->
+
+Use `openspec/` for durable change proposals, designs, requirements, and task
+plans. Do not create, read as current authority, or revive
+`docs/superpowers/` or any parallel specification tree. Before deleting legacy
+planning documents, migrate any unique durable contract into the relevant
+existing OpenSpec artifact; leave routine implementation history to code,
+tests, runbooks, and Git. Routine restorative fixes and operational repair do
+not need a new OpenSpec change. New capabilities, contract changes, and
+non-trivial repairs do.
+
 ## Memory boundary
 
 Treat Claude, ChatGPT, Codex, and other assistants' native memory as short-term
@@ -182,3 +195,12 @@ only on a quiesced machine.
   `.deferred-index.sqlite` `full_upserts` and the graph state before
   diagnosing anything else; the fixed-era signature is full receipts at 0 and
   the graph converging within minutes of each write.
+- **Machine-local state lives OUTSIDE the vault** (openspec change
+  `relocate-machine-local-state`): the index stores, `.graph-sync*.json`,
+  receipts, deferred queue, and due/review projections resolve under
+  `EXOMEM_STATE_ROOT`, else `%LOCALAPPDATA%\exomem\state\<vault-key>` on
+  Windows. When inspecting a live cell, read them there — a `.sqlite` or
+  `.graph-sync*.json` found under `Knowledge Base/` on a migrated cell is a
+  dual-state leftover the doctor `state.placement` section will FAIL on
+  (`exomem maintain --adopt-state <which>` resolves it; never delete either
+  copy by hand).

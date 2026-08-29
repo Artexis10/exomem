@@ -158,6 +158,11 @@ generation parity from the immutable source byte map, never from a fresh workspa
 and SHALL fail closed rather than select mutable or historical bytes when the active tuple
 or external expected activation digest cannot be verified.
 
+Only canonical policy YAML beneath `scopes`, `rules`, or `grants` is mutable mirror
+input. A canonical safe non-operational companion captured in the reviewed workspace is
+immutable pass-through only: its exact path-to-bytes map must equal the target before
+planning or replay, and it produces no mirror effect or authority change.
+
 #### Scenario: Empty policy short-circuits
 
 - **WHEN** the protected external registry proves `governance_enrolled=false` with a

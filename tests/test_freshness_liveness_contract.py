@@ -45,6 +45,7 @@ from exomem import (
     index_sync,
     relation_registry,
     semantic_contract,
+    state_paths,
 )
 from exomem import find as find_module
 from exomem import vault as vault_module
@@ -460,12 +461,12 @@ def _drain_background_rebuilds(timeout: float = 20.0) -> None:
 
 def preserved_temporaries(root: Path) -> list[Path]:
     """Every retained `.graph-rebuild-*` artifact of a failed publication."""
-    kb = root / "Knowledge Base"
-    if not kb.is_dir():
+    state_dir = epistemic_graph.sidecar_path(root).parent
+    if not state_dir.is_dir():
         return []
     return sorted(
         candidate
-        for candidate in kb.iterdir()
+        for candidate in state_dir.iterdir()
         if vault_module.is_graph_rebuild_runtime_file_name(candidate.name)
     )
 
@@ -834,7 +835,8 @@ def test_watcher_seed_validation_does_not_resuspend_an_external_owner_publicatio
     from exomem.file_watcher import FileWatcher
 
     root = contract_vault
-    sidecar = root / ".graph.sqlite"
+    sidecar = state_paths.vault_state_dir(root) / ".graph.sqlite"
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
     sidecar.write_bytes(b"owner")
     suspend_calls: list[str] = []
     monkeypatch.setattr(epistemic_graph, "sidecar_path", lambda _root: sidecar)

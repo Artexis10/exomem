@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Capabilities
 
 This file is generated from `src/exomem/commands.py`.

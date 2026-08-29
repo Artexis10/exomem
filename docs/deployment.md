@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # exomem — remote deployment
 
 This guide covers the **remote tier**: running exomem as an always-on HTTP service
@@ -431,6 +433,85 @@ service name, so it keeps working across the rename. Verify with
 5. Save. claude.ai opens a GitHub login window → log in (only the user in
    `EXOMEM_GITHUB_USERNAME` is allowed) → approve consent → redirects back to
    claude.ai. The tools appear in the palette.
+
+## Machine-local state placement (and file-sync agents)
+
+Machine-local derived state — the semantic/lexical/graph index stores, the graph
+epoch and receipt records, the deferred-index queue, media-job and governance
+sidecars, due/review projections, and their rebuild scratch files — lives
+**outside the vault**, in a per-user, per-vault state root:
+
+1. `EXOMEM_STATE_ROOT` environment override (absolute path, used verbatim), else
+2. `%LOCALAPPDATA%\exomem\state` on Windows, else
+3. `$XDG_STATE_HOME/exomem/state` (default `~/.local/state/exomem/state`) on POSIX,
+
+with one subdirectory per vault, keyed by the vault's resolved path. The vault
+itself carries only user content, so a file-sync agent watching it (Syncthing,
+Dropbox, OneDrive, iCloud) has no index store, epoch file, lock, or rebuild
+scratch to hash, hold, or replace — the failure class that has caused
+whole-vault rebuild chains and warm-up stalls when live state synced between
+machines.
+
+Ordinary service and stateful CLI startup is read-only at this boundary. It
+never creates the state root, copies or removes a legacy file, resumes an
+interrupted transition, or upgrades a manifest. Until an explicit offline
+migration has completed, it refuses with
+`STATE_MIGRATION_OFFLINE_REQUIRED`. A complete manifest plus even one
+reintroduced legacy duplicate refuses the same way. `exomem doctor` names the
+local paths and conflict without exposing them in the public refusal.
+
+Every desktop upgrade is one fail-closed transition:
+**stop -> prove stopped/PID gone -> install target**, then
+**offline migrate -> doctor -> start -> prove new PID/version**. The stop proof
+checks both the SCM `Stopped` state and that the exact worker PID captured before
+the stop no longer exists; checking the NSSM parent after stopping cannot detect
+an orphan. Run the migration only from the target interpreter:
+
+```powershell
+pwsh -File scripts/upgrade.ps1 -Vault "C:\path\to\vault"
+# Or, inside a manually proven stop window:
+& $ServicePython -m exomem maintain --vault "C:\path\to\vault" `
+  --migrate-state --offline
+```
+
+The migration lock serializes two new migrators; it cannot exclude an older
+Exomem release that does not know the lock exists. That is why the proven stop
+window is mandatory. `-SkipRestart` is unavailable for this transition. Any
+failure leaves the service stopped, including migration, doctor, start,
+new-worker, and live-version failures. Fix the failure and rerun the whole
+transition; never start an old installed release against state already migrated
+by the target. If doctor reports two authorities, repeat the explicit offline
+command with `--adopt-state external` or `--adopt-state vault` only after
+deciding which copy to keep.
+
+Belt and braces for vaults that carried historical state or may run an older
+exomem again: keep sync-agent ignore patterns for the state families, e.g. in
+Syncthing's `.stignore`:
+
+```text
+.graph-sync*.json
+.graph-commit-receipts
+.graph-reset-*
+.graph-rebuild-*
+.graph-coordination
+.authorization-projections
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
+.lexical.sqlite.rebuild-*
+.deferred-index.json
+.media-jobs.json
+.idempotency.json
+.idempotency.jsonl
+.voice_profiles.json
+.due-state.json
+.review-state.json
+.media-worker.lock
+```
+
+After migration these names no longer exist under the vault, so the patterns
+are inert on current versions — they only protect against re-introduction.
 
 ## Deploying on a second machine (multi-host)
 

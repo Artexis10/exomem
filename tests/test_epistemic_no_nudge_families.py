@@ -56,6 +56,19 @@ SEQUENCE_TWO_FAMILIES = ("f20", "f21", "f22", "f23", "f24", "f25", "f26")
 LATER_WITHHELD_FAMILIES = ("f27",)
 
 
+def _seed_journey_vault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Seed one CLI journey under its own completed external state root."""
+
+    from epistemic.journeys import f26_carrier
+    from exomem import state_migration
+
+    state_root = tmp_path / "journey-state"
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(state_root))
+    vault = f26_carrier.seed_journey_vault(tmp_path / "vault", repo_root=ROOT)
+    assert state_migration.migration_completed(vault)
+    return vault
+
+
 @pytest.fixture
 def released(monkeypatch: pytest.MonkeyPatch) -> None:
     """Run as if the founder had acknowledged sequence 2.
@@ -706,7 +719,9 @@ def test_unreadable_help_refuses_rather_than_passing_the_argv_check_vacuously() 
         f26_carrier._required_options_from_usage("some unexpected help format\n")
 
 
-def test_the_journey_runs_against_the_installed_envelope(tmp_path: Path) -> None:
+def test_the_journey_runs_against_the_installed_envelope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """F5: the whole point is that this executes. So it executes.
 
     Every step is run against the discovered CLI, on a throwaway copy of the
@@ -723,7 +738,7 @@ def test_the_journey_runs_against_the_installed_envelope(tmp_path: Path) -> None
     except f26_carrier.EnvelopeNotDiscovered as error:
         pytest.skip(f"no installed CLI envelope: {error}")
 
-    vault = f26_carrier.seed_journey_vault(tmp_path / "vault", repo_root=ROOT)
+    vault = _seed_journey_vault(tmp_path, monkeypatch)
     captured = f26_carrier.capture_responses(envelope, vault=vault)
     assert set(captured) == {"mutation", "reconstruction"}
     assert all(payload.get("success") is True for payload in captured.values())
@@ -1164,7 +1179,7 @@ def test_the_f23_journey_runs_against_the_installed_envelope(
     from epistemic.journeys import f23_dismissal
 
     envelope = _lane_envelope(monkeypatch)
-    vault = f23_dismissal.seed_journey_vault(tmp_path / "vault", repo_root=ROOT)
+    vault = _seed_journey_vault(tmp_path, monkeypatch)
     run = f23_dismissal.run_journey(
         envelope,
         vault=vault,
@@ -1232,7 +1247,7 @@ def _f23_carrier_pages(vault: Path, count: int) -> list[str]:
 @pytest.mark.timeout(600)
 @pytest.mark.parametrize("scoped", [True, False])
 def test_the_batch_scope_is_what_keeps_the_counter_assertion_green(
-    tmp_path: Path, scoped: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scoped: bool
 ) -> None:
     """The mechanism-removal pair, at the level the mechanism operates on.
 
@@ -1264,7 +1279,7 @@ def test_the_batch_scope_is_what_keeps_the_counter_assertion_green(
 
     from exomem import commands, due_state
 
-    vault = f23_dismissal.seed_journey_vault(tmp_path / "vault", repo_root=ROOT)
+    vault = _seed_journey_vault(tmp_path, monkeypatch)
     commands.op_remember(
         vault,
         title=f23_dismissal.OPEN_TITLE,
@@ -1314,7 +1329,7 @@ def test_the_batch_scope_is_what_keeps_the_counter_assertion_green(
 
 
 def test_an_earlier_delivery_cannot_carry_a_later_batch_that_delivered_nothing(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The probe that used to score `pass` on somebody else's block.
 
@@ -1333,7 +1348,7 @@ def test_an_earlier_delivery_cannot_carry_a_later_batch_that_delivered_nothing(
 
     from exomem import commands, due_state
 
-    vault = f23_dismissal.seed_journey_vault(tmp_path / "vault", repo_root=ROOT)
+    vault = _seed_journey_vault(tmp_path, monkeypatch)
     commands.op_remember(
         vault,
         title=f23_dismissal.OPEN_TITLE,

@@ -168,7 +168,7 @@ def test_sweep_still_removes_the_graph_family_alongside_a_stale_lexical_one(
         created_paths=("Knowledge Base/Notes/example.md",),
     )
     vault_root = tmp_path
-    live = vault_root / "Knowledge Base" / ".graph.sqlite"
+    live = epistemic_graph.sidecar_path(vault_root)
     live.parent.mkdir(parents=True)
     graph_abandoned = graph_sync.temporary_sidecar_path(live, checkpoint)
     graph_abandoned.write_bytes(b"abandoned graph rebuild temp")
@@ -203,7 +203,7 @@ def test_a_family_level_unlink_failure_does_not_starve_the_other_family(
         created_paths=("Knowledge Base/Notes/example.md",),
     )
     vault_root = tmp_path
-    live = vault_root / "Knowledge Base" / ".graph.sqlite"
+    live = epistemic_graph.sidecar_path(vault_root)
     live.parent.mkdir(parents=True)
     graph_abandoned = graph_sync.temporary_sidecar_path(live, checkpoint)
     graph_abandoned.write_bytes(b"abandoned graph rebuild temp")

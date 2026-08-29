@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Manual cold standby (Windows)
 
 Manual cold standby is the middle option between accepting one-host downtime and

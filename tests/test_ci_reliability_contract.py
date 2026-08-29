@@ -29,7 +29,7 @@ FULL_CI_JOBS = {
 #: `retrieval-latency` job) they cover exactly the previous lean suite —
 #: pinned below by test_pr_tiers_partition_the_lean_suite_exactly.
 PR_TIER_JOBS = (
-    ("core-tests", 6, "core"),
+    ("core-tests", 8, "core"),
     ("harness-tests", 4, "harness"),
 )
 
@@ -749,3 +749,63 @@ def test_cross_platform_matrix_runs_nightly_and_manually_only() -> None:
         "windows-latest",
         "macos-latest",
     ]
+
+
+def test_release_evidence_automation_removes_both_manual_cranks() -> None:
+    """The release pipeline is self-driving without reintroducing the stampede.
+
+    ci.yml's release-evidence job stays a seconds-class check; the companion
+    workflow supplies the two automations that used to be manual cranks:
+    dispatching the full-tier evidence run (only on the explicit release
+    intent of enabling auto-merge — never per push to main, which is the
+    measured stampede test_expensive_ci_runs_nightly_and_manually_only pins),
+    and re-running the release PR's failed checks when eligible evidence
+    lands on main.
+    """
+    text = (ROOT / ".github/workflows/release-evidence-automation.yml").read_text(
+        encoding="utf-8"
+    )
+    workflow = yaml.safe_load(text)
+    triggers = _triggers(workflow)
+
+    assert triggers["pull_request"] == {"types": ["auto_merge_enabled"]}
+    # workflow_run matches on ci.yml's `name:`, not its filename — derive the
+    # expected value from ci.yml itself so renaming CI cannot silently kill
+    # the rerun trigger while this test stays green.
+    ci_name = yaml.safe_load(
+        (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    )["name"]
+    assert triggers["workflow_run"] == {"workflows": [ci_name], "types": ["completed"]}
+    assert set(triggers) == {"pull_request", "workflow_run"}
+
+    # Duplicate release intents (disable/re-enable auto-merge) must serialize
+    # so only one evidence dispatch can win the eligibility check.
+    assert "concurrency" in workflow
+    assert "release-evidence-automation-" in workflow["concurrency"]["group"]
+
+    jobs = workflow["jobs"]
+    assert set(jobs) == {"dispatch-evidence", "rerun-evidence-check"}
+
+    dispatch_if = " ".join(str(jobs["dispatch-evidence"]["if"]).split())
+    assert "auto_merge_enabled" not in dispatch_if  # gated by the trigger, not the if
+    assert "release-please--branches--main" in dispatch_if
+    assert "github.event_name == 'pull_request'" in dispatch_if
+
+    rerun_if = " ".join(str(jobs["rerun-evidence-check"]["if"]).split())
+    assert "workflow_run" in rerun_if
+    assert "'success'" in rerun_if
+    assert "'main'" in rerun_if
+    assert "workflow_dispatch" in rerun_if
+    assert "schedule" in rerun_if
+
+    # The dispatch job must never fire from pushes: only the two declared
+    # events exist, and neither is push/synchronize.
+    assert "synchronize" not in text
+    assert "push:" not in text
+
+    # Least privilege: actions write (dispatch + rerun), nothing more.
+    assert workflow["permissions"] == {
+        "actions": "write",
+        "contents": "read",
+        "pull-requests": "read",
+    }

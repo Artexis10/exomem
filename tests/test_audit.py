@@ -14,6 +14,7 @@ from exomem import attention as attention_module
 from exomem import audit as audit_module
 from exomem import commands
 from exomem import entity_types as entity_types_module
+from exomem import index_paths
 from exomem import review_state as review_state_module
 
 
@@ -711,7 +712,8 @@ def test_embedding_drift_flags_never_embedded_file(vault: Path) -> None:
     import sqlite3
 
     kb = vault / "Knowledge Base"
-    sidecar = kb / ".embeddings.sqlite"
+    sidecar = index_paths.sidecar_path(vault)
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
     embedded = kb / "Notes" / "Insights" / "progressive-disclosure-without-mode-fragmentation.md"
     embedded_rel = (
         "Knowledge Base/Notes/Insights/"

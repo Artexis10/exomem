@@ -446,6 +446,12 @@ async def test_live_plane_namespace_carries_the_fixed_helm_contract_annotations(
         def list_namespaced_config_map(self, namespace, *, label_selector):
             return SimpleNamespace(items=[])
 
+        def list_namespaced_pod(self, namespace, *, label_selector):
+            assert namespace == metadata.resource_name
+            assert "!exomem.io/storage-init" in label_selector
+            assert "!exomem.io/vault-fingerprint" in label_selector
+            return SimpleNamespace(items=[])
+
     class Missing:
         def __getattr__(self, name):
             def missing(*args, **kwargs):
@@ -482,6 +488,7 @@ async def test_live_plane_namespace_carries_the_fixed_helm_contract_annotations(
             transfer_hostname="transfer.example.invalid",
             protocol_version="1",
             release_version="0.22.0",
+            migration_mode="none",
         ),  # type: ignore[arg-type]
     )
     key = plane._key(metadata)
@@ -958,6 +965,7 @@ async def test_live_route_enable_reconciles_the_original_authenticated_helm_rele
         transfer_hostname="transfer.example.invalid",
         protocol_version="1",
         release_version="0.22.0",
+        migration_mode="none",
         runtime_target_for=lambda _request, *, v2: {
             "releaseVersion": "0.22.0",
             "protocolVersion": "1",
@@ -1234,6 +1242,12 @@ async def test_registry_requires_deployed_helm_record_in_addition_to_pvc() -> No
             assert label_selector == (f"owner=helm,name={metadata.resource_name},status=deployed")
             return SimpleNamespace(items=self.releases)
 
+        def list_namespaced_pod(self, namespace, *, label_selector):
+            assert namespace == metadata.resource_name
+            assert "!exomem.io/storage-init" in label_selector
+            assert "!exomem.io/vault-fingerprint" in label_selector
+            return SimpleNamespace(items=[])
+
     class Missing:
         def __getattr__(self, name):
             def missing(*args, **kwargs):
@@ -1333,6 +1347,10 @@ async def test_registry_distinguishes_absent_running_complete_and_failed_init_jo
         def list_namespaced_config_map(self, namespace, *, label_selector):
             return SimpleNamespace(items=[object()])
 
+        def list_namespaced_pod(self, namespace, *, label_selector):
+            assert namespace == metadata.resource_name
+            return SimpleNamespace(items=[])
+
     class Batch:
         def read_namespaced_job(self, name, namespace):
             if job is None:
@@ -1359,6 +1377,85 @@ async def test_registry_distinguishes_absent_running_complete_and_failed_init_jo
     assert snapshot.init_job_present is present
     assert snapshot.init_complete is complete
     assert snapshot.init_failed is failed
+
+
+@pytest.mark.asyncio
+async def test_registry_counts_desired_and_terminating_runtime_pods_for_stop_proof() -> None:
+    metadata = _metadata()
+    envelopes = cell_provider_recovery_envelopes(
+        IDENTITY_CODEC,
+        tenant_id=metadata.tenant_id,
+        cell_id=metadata.subject_id,
+        operation_id=metadata.operation_id,
+        fence_generation=metadata.fence_generation,
+        resource_name=metadata.resource_name,
+        operation_resource_name=provider_operation_resource_name(metadata.operation_id),
+    )
+
+    class Core:
+        selector = ""
+
+        def read_namespace(self, name):
+            return SimpleNamespace(
+                metadata=SimpleNamespace(
+                    annotations={
+                        **metadata.kubernetes_annotations,
+                        "exomem.io/recovery-envelope": envelopes["namespace"],
+                    }
+                )
+            )
+
+        def read_namespaced_persistent_volume_claim(self, name, namespace):
+            return SimpleNamespace(
+                metadata=SimpleNamespace(
+                    annotations={
+                        **metadata.kubernetes_annotations,
+                        "exomem.io/recovery-envelope": envelopes["vaultPvc"],
+                    }
+                )
+            )
+
+        def list_namespaced_config_map(self, namespace, *, label_selector):
+            return SimpleNamespace(items=[object()])
+
+        def list_namespaced_pod(self, namespace, *, label_selector):
+            self.selector = label_selector
+            return SimpleNamespace(
+                items=[SimpleNamespace(metadata=SimpleNamespace(deletion_timestamp="now"))]
+            )
+
+    class Apps:
+        def read_namespaced_stateful_set(self, name, namespace):
+            return SimpleNamespace(
+                metadata=SimpleNamespace(deletion_timestamp=None),
+                spec=SimpleNamespace(replicas=0),
+            )
+
+    class Missing:
+        def __getattr__(self, name):
+            def missing(*args, **kwargs):
+                raise _NotFound()
+
+            return missing
+
+    core = Core()
+    registry = KubernetesProviderRegistry(
+        core_v1=core,
+        apps_v1=Apps(),
+        batch_v1=Missing(),
+        custom_objects=Missing(),
+        identity_verifier=IDENTITY_CODEC.verifier(),
+    )
+
+    snapshot = await registry.inspect(metadata, metadata)
+
+    assert snapshot.runtime_desired_replicas == 0
+    assert snapshot.runtime_pods == 1
+    assert core.selector == (
+        "app.kubernetes.io/name=exomem-cell,"
+        f"exomem.io/cell={metadata.resource_name},"
+        "!exomem.io/storage-init,!exomem.io/vault-fingerprint"
+    )
 
 
 @pytest.mark.asyncio
@@ -1487,6 +1584,7 @@ def _init_recovery_config() -> SimpleNamespace:
         transfer_hostname="transfer.example.invalid",
         protocol_version="1",
         release_version="0.22.0",
+        migration_mode="none",
         runtime_target_for=lambda _request, *, v2: {
             "releaseVersion": "0.22.0",
             "protocolVersion": "1",
@@ -1763,6 +1861,7 @@ async def test_live_plane_requires_exact_reservation_before_namespace_or_release
             transfer_hostname="transfer.example.invalid",
             protocol_version="1",
             release_version="0.22.0",
+            migration_mode="none",
         ),  # type: ignore[arg-type]
     )
     key = plane._key(metadata)

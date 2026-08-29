@@ -295,7 +295,9 @@ def sidecar_path(vault_root: Path) -> Path:
     """Per-machine claim sidecar. Same dotfile placement rules as
     `.embeddings.sqlite`: outside `_Schema/`, ignored by Obsidian Sync, never
     bundled into a schema upload, rebuildable from the markdown source of truth."""
-    return vault_root / kb_dirname() / ".claims.sqlite"
+    from . import state_paths
+
+    return state_paths.vault_state_dir(vault_root) / ".claims.sqlite"
 
 
 # Only compiled CONCLUSIONS carry a claim worth comparing — mirror the exact

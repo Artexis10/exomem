@@ -962,6 +962,150 @@ def _check_graph_sync_state(vault_root: Path | None) -> DoctorCheck:
     )
 
 
+def _check_state_placement(vault_root: Path | None) -> DoctorCheck:
+    """Machine-local state placement: external root, marker, in-vault leftovers.
+
+    The registry's explicit external-state placement drives the leftover scan,
+    so a consumer that keeps writing a flagged family into the vault surfaces
+    here without this check learning any names. Dual state — in-vault copies
+    beside an external root — is a FAIL that names both paths and the explicit
+    remediation; nothing is ever preferred or deleted from a diagnosis path.
+    """
+    from . import state_migration, state_paths
+
+    if vault_root is None:
+        return _check(
+            "state.placement",
+            "pass",
+            "No vault configured; machine-local state placement not applicable.",
+        )
+    state_dir = state_paths.vault_state_dir(vault_root)
+    try:
+        leftovers = state_migration.scan_vault_state(vault_root)
+    except OSError:
+        return _check(
+            "state.placement",
+            "fail",
+            "The in-vault machine-local state location could not be inspected.",
+            "Restore read access to the vault and rerun `exomem doctor`; do not "
+            "adopt or delete either state authority while the scan is unavailable.",
+            details={
+                "state_root": str(state_dir),
+                "in_vault_state_root": str(Path(vault_root) / kb_dirname()),
+                "in_vault_scan": "unavailable",
+            },
+        )
+    try:
+        manifest = state_migration._load_manifest(state_dir, vault_root=vault_root)
+        manifest_error = None
+    except state_migration.StateMigrationManifestError as error:
+        manifest = None
+        manifest_error = error
+    if manifest is None:
+        migration_status = "invalid" if manifest_error is not None else "absent"
+    elif manifest["state"] != "complete":
+        migration_status = "in-progress"
+    elif tuple(manifest["descriptors"]) != state_migration._descriptor_ids():
+        migration_status = "stale"
+    else:
+        migration_status = "complete"
+    completed = migration_status == "complete"
+    details = {
+        "state_root": str(state_dir),
+        "migration_completed": completed,
+        "migration_status": migration_status,
+        "in_vault_leftovers": sorted(
+            str(path) for members in leftovers.values() for path in members
+        ),
+    }
+    if manifest_error is not None:
+        details["migration_manifest"] = str(manifest_error.path)
+        return _check(
+            "state.placement",
+            "fail",
+            "The external state migration manifest is unreadable or invalid.",
+            "Repair or explicitly adopt the state authority before restarting; "
+            "do not delete either copy based on an unreadable manifest.",
+            details=details,
+        )
+    if manifest is not None and (
+        manifest.get("governance_rollback") is not None
+        or manifest.get("governance_adoption") is not None
+    ):
+        details["governance_rollback"] = manifest.get("governance_rollback")
+        details["governance_adoption"] = manifest.get("governance_adoption")
+        return _check(
+            "state.placement",
+            "fail",
+            "A governance rollback or adoption marker is present; ordinary relocated startup is fenced.",
+            "Resume the offline governance rollback or explicitly adopt `governance-store=vault`; "
+            "do not delete either governance database.",
+            details=details,
+        )
+    if leftovers:
+        leftover_names = ", ".join(
+            sorted(path.name for members in leftovers.values() for path in members)
+        )
+        unexplained_external = False
+        if migration_status == "absent":
+            try:
+                unexplained_external = state_migration._external_state_present(state_dir)
+            except OSError:
+                return _check(
+                    "state.placement",
+                    "fail",
+                    "The external machine-local state root could not be inspected.",
+                    "Restore read access and rerun `exomem doctor`; do not adopt "
+                    "or delete either state authority while the scan is unavailable.",
+                    details=details,
+                )
+        if completed or unexplained_external:
+            return _check(
+                "state.placement",
+                "fail",
+                (
+                    "Machine-local state exists both under the vault "
+                    f"({Path(vault_root) / kb_dirname()}: {leftover_names}) and in "
+                    f"the external state root ({state_dir})."
+                ),
+                "Stop every writer, then run `exomem maintain --migrate-state "
+                "--offline --adopt-state external` to keep the "
+                "external state root and remove the in-vault copies, or "
+                "`exomem maintain --migrate-state --offline --adopt-state vault` "
+                "to discard the external "
+                "root and re-migrate from the vault.",
+                details=details,
+            )
+        return _check(
+            "state.placement",
+            "fail",
+            (
+                f"Machine-local state still lives under the vault ({leftover_names}); "
+                "ordinary startup refuses until an explicit offline migration completes."
+            ),
+            "Stop every process that can write this vault, then run `exomem maintain "
+            "--migrate-state --offline` before restarting Exomem.",
+            details=details,
+        )
+    if migration_status != "complete":
+        return _check(
+            "state.placement",
+            "fail",
+            "Machine-local state migration is required before startup "
+            f"(manifest status: {migration_status}).",
+            "Stop every process that can write this vault, then run `exomem maintain "
+            "--migrate-state --offline` before restarting Exomem.",
+            details=details,
+        )
+    return _check(
+        "state.placement",
+        "pass",
+        f"Machine-local state resolves to {state_dir}"
+        + (" (migration completed)." if completed else "."),
+        details=details,
+    )
+
+
 def _check_rebuild_temp_orphans(vault_root: Path | None) -> DoctorCheck:
     """Leaked rebuild-temporary files from interrupted background rebuilds.
 
@@ -1022,11 +1166,21 @@ def _check_rebuild_temp_orphans(vault_root: Path | None) -> DoctorCheck:
             details=details,
         )
 
-    kb = Path(vault_root) / kb_dirname()
+    from . import state_paths
+
+    # Rebuild temporaries are siblings of their store, which lives in the
+    # external state root now; the KB is still scanned for pre-relocation
+    # leftovers.
+    scan_roots = (
+        Path(vault_root) / kb_dirname(),
+        state_paths.vault_state_dir(vault_root),
+    )
     graph_orphans: list[Path] = []
     lexical_orphans: list[Path] = []
-    if kb.is_dir():
-        for entry in kb.iterdir():
+    for scan_root in scan_roots:
+        if not scan_root.is_dir():
+            continue
+        for entry in scan_root.iterdir():
             try:
                 if not entry.is_file():
                     continue
@@ -1416,8 +1570,9 @@ def _check_media_runtime(vault_root: Path | None) -> DoctorCheck | None:
             "media.runtime",
             "warn",
             "The durable media job store is unreadable.",
-            "Check permissions on Knowledge Base/.media-jobs.sqlite or remove the derived "
-            "sidecar and restart so pending evidence can be reconstructed.",
+            "Check permissions on .media-jobs.sqlite in the state root (see the "
+            "state.placement check) or remove the derived sidecar and restart so "
+            "pending evidence can be reconstructed.",
             details=status,
         )
     counts = status["counts"]
@@ -1681,7 +1836,9 @@ def _check_embedding_sidecar(vault_root: Path | None) -> DoctorCheck | None:
     """
     if vault_root is None:
         return None
-    sidecar = vault_root / kb_dirname() / ".embeddings.sqlite"
+    from . import index_paths
+
+    sidecar = index_paths.sidecar_path(vault_root)
     if not sidecar.exists():
         return _check(
             "embeddings.sidecar",
@@ -1707,9 +1864,7 @@ def _check_embedding_sidecar(vault_root: Path | None) -> DoctorCheck | None:
             "so it can't be probed.",
             f"Install it with `uv sync --extra {extra}` to enable hybrid search.",
         )
-    from . import embeddings
-
-    from . import model_cache
+    from . import embeddings, model_cache
 
     if not _model_cached(_hf_hub_dir(), model_cache.snapshot_dirname(embeddings.MODEL_NAME)):
         # doctor must never trigger a download — skip the live probe rather than
@@ -2900,6 +3055,7 @@ def doctor(
         _check_lexical(vault_root),
         _check_deferred_index_backlog(vault_root),
         _check_graph_sync_state(vault_root),
+        _check_state_placement(vault_root),
         _check_rebuild_temp_orphans(vault_root),
         _check_write_path_env_flags(vault_root),
         check_graph_recovery_age(vault_root),

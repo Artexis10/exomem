@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Exomem vs Basic Memory: graph-value comparison
 
 > **WITHDRAWN (2026-08-09) — historical internal diagnostic, not publishable.**

@@ -22,6 +22,7 @@ from exomem import (
     freshness,
     lexstore,
     media_jobs,
+    review_state,
     semantic_index,
     writer_lease,
 )
@@ -743,7 +744,7 @@ def test_reserved_path_cli_outcomes_are_presence_independent(
     vault: Path,
     capsys,
 ) -> None:
-    read_argv = ["read_memory", "Knowledge Base/.governance.sqlite", "--json"]
+    read_argv = ["read_memory", "Knowledge Base/_Consolidation/runs/run.json", "--json"]
     write_argv = [
         "manage_memory_file",
         "--operation",
@@ -757,7 +758,6 @@ def test_reserved_path_cli_outcomes_are_presence_independent(
 
     absent_read_code, absent_read_out, _ = _run(read_argv, capsys)
     absent_write_code, absent_write_out, _ = _run(write_argv, capsys)
-    (vault / "Knowledge Base" / ".governance.sqlite").write_bytes(b"private")
     private_run = vault / "Knowledge Base" / "_Consolidation" / "runs" / "run.json"
     private_run.parent.mkdir(parents=True)
     private_run.write_text("private", encoding="utf-8")
@@ -1027,7 +1027,7 @@ def test_simple_review_human_output_and_triage(vault: Path, capsys) -> None:
     assert code3 == 0, err3
     triage = json.loads(out3.strip().splitlines()[-1])["data"]
     assert triage["state"] == "dismissed"
-    assert (vault / "Knowledge Base/.review-state.json").exists()
+    assert review_state.state_path(vault).exists()
 
     code4, out4, err4 = _run(["review", "reopen", item["ref"], "--json"], capsys)
     assert code4 == 0, err4

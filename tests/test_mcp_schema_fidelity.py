@@ -29,6 +29,7 @@ import shutil
 from pathlib import Path
 
 import pytest
+from conftest import initialize_vault_state_offline
 from starlette.testclient import TestClient
 
 from exomem import project_keys as project_keys_module
@@ -55,6 +56,7 @@ def _build_server(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     """Build the server exactly as the fixture was captured (see module docstring)."""
     vault_root = tmp_path / "schema_vault"
     shutil.copytree(FIXTURE_VAULT, vault_root)
+    initialize_vault_state_offline(vault_root, source="MCP schema fixture")
     monkeypatch.setattr(server_module, "load_dotenv", lambda *a, **k: None)
     monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
     monkeypatch.setenv("EXOMEM_DISABLE_RELEVANCE_CHECK", "1")

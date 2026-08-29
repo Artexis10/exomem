@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # The Exomem terminal UI (`exomem tui`)
 
 A persistent, keyboard-first surface over the same product commands the CLI,

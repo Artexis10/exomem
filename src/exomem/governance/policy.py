@@ -438,6 +438,35 @@ def _mirror_relative_path(relative: str) -> bool:
     )
 
 
+def _authoring_snapshot_relative_path(relative: str) -> bool:
+    """Return whether ``relative`` is a canonical, non-operational authoring path."""
+
+    if (
+        not isinstance(relative, str)
+        or not relative
+        or "\\" in relative
+        or "\x00" in relative
+        or ":" in relative
+    ):
+        return False
+    parts = tuple(relative.split("/"))
+    return (
+        all(part not in {"", ".", ".."} for part in parts)
+        and not _is_operational_relative(relative)
+        and not any(is_conflict_copy(part) for part in parts)
+    )
+
+
+def _immutable_companion_documents(
+    documents: Mapping[str, bytes],
+) -> dict[str, bytes]:
+    return {
+        relative: content
+        for relative, content in documents.items()
+        if not _mirror_relative_path(relative)
+    }
+
+
 def _same_authoring_identity(
     observed: held_fs.StableIdentity | None,
     expected: held_fs.StableIdentity | None,
@@ -465,6 +494,8 @@ def _workspace_mirror_plan(
     reviewed_directories = dict(reviewed.directory_identities)
     observed_directories = dict(current.directory_identities)
     target_directories = {Path(relative).parent.as_posix() for relative in target}
+    if _immutable_companion_documents(prior) != _immutable_companion_documents(target):
+        return None
     if reviewed.governance_root_identity is not None and not _same_authoring_identity(
         current.governance_root_identity,
         reviewed.governance_root_identity,
@@ -540,7 +571,7 @@ def mirror_authoring_workspace(
         or any(
             not isinstance(relative, str)
             or not isinstance(content, bytes)
-            or not _mirror_relative_path(relative)
+            or not _authoring_snapshot_relative_path(relative)
             for relative, content in target_documents
         )
     ):

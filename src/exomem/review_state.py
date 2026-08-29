@@ -154,7 +154,9 @@ class ReviewDecision:
 
 
 def state_path(vault_root: Path) -> Path:
-    return Path(vault_root) / kb_dirname() / STATE_FILENAME
+    from . import state_paths
+
+    return state_paths.vault_state_dir(vault_root) / STATE_FILENAME
 
 
 def item_id(target_ref: str) -> str:

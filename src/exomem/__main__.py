@@ -561,7 +561,11 @@ def _backfill_media_main(argv: list[str]) -> int:
         return 2
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    from . import backfill
+    from . import backfill, state_migration
+
+    # Ordinary CLI entry is a read-only placement gate. Legacy state must be
+    # moved by the explicit offline maintenance command before stores open.
+    state_migration.require_vault_state_ready(Path(args.vault).expanduser())
 
     backfill.backfill_media(
         Path(args.vault).expanduser(),
@@ -629,6 +633,11 @@ def _index_main(argv: list[str]) -> int:
     # ~2,143 receipts in 40 minutes, of which draining re-embedded 3 files.
     # Contending is never the right move, so make it unrepresentable.
     from . import graph_sync as _graph_sync
+    from . import state_migration
+
+    # Placement must resolve before even the graph-owner probe reads its
+    # coordination state.
+    state_migration.require_vault_state_ready(Path(args.vault).expanduser())
 
     owner = _graph_sync.live_graph_owner(Path(args.vault).expanduser())
     if owner is not None:
@@ -642,6 +651,7 @@ def _index_main(argv: list[str]) -> int:
             file=sys.stderr,
         )
         return 2
+
     # Scope override flows through the env var the whole stack reads, so a single
     # source of truth governs the walk, the drift check, and freshness.
     if args.scope:
@@ -872,9 +882,11 @@ def _status_main(argv: list[str]) -> int:
     parser.add_argument("--json", action="store_true", help="emit stable JSON")
     args = parser.parse_args(argv)
 
-    from . import resource_status
+    from . import resource_status, state_migration
 
     vault_root = Path(args.vault).expanduser() if args.vault else None
+    if vault_root is not None:
+        state_migration.require_vault_state_ready(vault_root)
     status = resource_status.collect(vault_root)
     if args.json:
         print(json.dumps(status))
@@ -1035,6 +1047,12 @@ def _warm_main(argv: list[str]) -> int:
 
     from . import embedding_backend, embeddings
 
+    vault_root = Path(args.vault).expanduser() if args.vault else None
+    if vault_root is not None:
+        from . import state_migration
+
+        state_migration.require_vault_state_ready(vault_root)
+
     # Which models this install can actually load. The reranker and CLIP are
     # sentence-transformers models, so the `embeddings-onnx` lane withholds both
     # by design. Reporting their absence as a warm failure means a correct ONNX
@@ -1088,11 +1106,11 @@ def _warm_main(argv: list[str]) -> int:
     else:
         print("  CLIP: skipped (EXOMEM_DISABLE_CLIP)")
 
-    if args.vault:
+    if vault_root is not None:
         from . import warmup
 
         t0 = time.perf_counter()
-        warmup.warm_caches(Path(args.vault).expanduser())
+        warmup.warm_caches(vault_root)
         print(f"  lexical caches: warmed ({time.perf_counter() - t0:.1f}s)")
 
     if failed:
@@ -1118,11 +1136,14 @@ def _warm_main(argv: list[str]) -> int:
     return 0
 
 
-def _speaker_vault(args) -> Path | None:
-    """Vault root for the voice-profile store: --vault, else $EXOMEM_VAULT_PATH, else resolve."""
-    if args.vault:
-        return Path(args.vault).expanduser()
-    return None  # enroll_speaker resolves via EXOMEM_VAULT_PATH
+def _speaker_vault(args) -> Path:
+    """Resolve the vault and require completed external-state placement."""
+    from . import state_migration
+    from .vault import resolve_vault
+
+    root = Path(args.vault).expanduser() if args.vault else resolve_vault()
+    state_migration.require_vault_state_ready(root)
+    return root
 
 
 def _enroll_speaker_main(argv: list[str]) -> int:
@@ -2813,6 +2834,64 @@ def _simple_adopt_main(argv: list[str]) -> int:
     return _core_op_main(_with_json(core, args.json))
 
 
+def _run_offline_state_migration(
+    *,
+    vault: str | None,
+    adopt: str | None,
+):
+    """Run the sole state-mutating entrypoint under explicit offline authority."""
+
+    from . import state_migration
+    from .hosted_runtime import (
+        HostedBindingV2,
+        HostedCellConfig,
+        hosted_mode_enabled,
+    )
+
+    if hosted_mode_enabled():
+        from .hosted_restore import acquire_hosted_lifetime_lock
+
+        config = HostedCellConfig.from_env(require_provisioned=True)
+        if vault is not None and Path(vault).expanduser().resolve(strict=False) != (
+            config.vault_root.resolve(strict=False)
+        ):
+            raise ValueError("--vault must match the immutable hosted vault binding")
+        config.apply_process_environment()
+        binding = None
+        if config.requires_dynamic_security:
+            assert config.vault_id is not None
+            binding = HostedBindingV2(
+                cell_id=config.cell_id,
+                vault_id=config.vault_id,
+                vault_root=config.vault_root,
+                state_root=config.state_root,
+                log_root=config.log_root,
+                runtime_uid=config.runtime_uid,
+                runtime_gid=config.runtime_gid,
+            )
+        with acquire_hosted_lifetime_lock(config.state_root, binding=binding):
+            authority = state_migration.assert_offline_migration_authority(
+                source="hosted target-image offline migration job",
+            )
+            return state_migration.migrate_vault_state_offline(
+                config.vault_root,
+                authority=authority,
+                adopt=adopt,
+            )
+
+    from .vault import resolve_vault
+
+    vault_root = Path(vault).expanduser() if vault is not None else resolve_vault()
+    authority = state_migration.assert_offline_migration_authority(
+        source="exomem maintain --migrate-state --offline",
+    )
+    return state_migration.migrate_vault_state_offline(
+        vault_root,
+        authority=authority,
+        adopt=adopt,
+    )
+
+
 def _simple_maintain_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="exomem maintain",
@@ -2850,6 +2929,33 @@ def _simple_maintain_main(argv: list[str]) -> int:
         default=None,
         help="audit category (repeatable)",
     )
+    parser.add_argument(
+        "--vault",
+        help="vault whose machine-local state is being migrated offline",
+    )
+    parser.add_argument(
+        "--migrate-state",
+        action="store_true",
+        help="run the explicit machine-local state migration",
+    )
+    parser.add_argument(
+        "--offline",
+        action="store_true",
+        help="assert that every legacy writer has been stopped and proven gone",
+    )
+    parser.add_argument(
+        "--adopt-state",
+        dest="adopt_state",
+        choices=("vault", "external", "governance-store=vault"),
+        default=None,
+        help=(
+            "resolve a dual machine-local-state conflict by keeping one copy: "
+            "'external' removes the in-vault leftovers, 'vault' discards the "
+            "external state root before this explicit offline migration; "
+            "'governance-store=vault' re-externalizes only a completed v3 "
+            "rollback governance store"
+        ),
+    )
     parser.add_argument("--json", action="store_true", help="emit the shared JSON envelope")
     args = parser.parse_args(argv)
 
@@ -2857,6 +2963,45 @@ def _simple_maintain_main(argv: list[str]) -> int:
         parser.error("choose only one of --fix or --reconcile")
     if args.rebuild_graph and not args.reconcile:
         parser.error("--rebuild-graph requires --reconcile")
+    if args.offline and not args.migrate_state:
+        parser.error("--offline requires --migrate-state")
+    if args.vault and not args.migrate_state:
+        parser.error("--vault requires --migrate-state --offline")
+    if args.adopt_state and not args.migrate_state:
+        parser.error("--adopt-state requires --migrate-state --offline")
+    if args.migrate_state:
+        if not args.offline:
+            parser.error("--migrate-state requires --offline")
+        if args.fix or args.reconcile:
+            parser.error("--migrate-state cannot be combined with --fix or --reconcile")
+        try:
+            resolution = _run_offline_state_migration(
+                vault=args.vault,
+                adopt=args.adopt_state,
+            )
+        except (OSError, RuntimeError, ValueError) as error:
+            if args.json:
+                print(json.dumps({"success": False, "error": {"message": str(error)}}))
+            else:
+                print(f"Error: {error}", file=sys.stderr)
+            return 1
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "success": True,
+                        "data": {
+                            "state_root": str(resolution.state_dir),
+                            "migrated": resolution.migrated,
+                            "dual_state": resolution.dual_state,
+                            "adopted": args.adopt_state,
+                        },
+                    }
+                )
+            )
+        else:
+            print(f"Machine-local state is ready at {resolution.state_dir}")
+        return 0
     if args.fix:
         core = ["maintain_memory", "--mode", "fix"]
         if args.dry_run:
