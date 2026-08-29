@@ -432,6 +432,42 @@ def _state_root_shallow_snapshot(root: Path) -> tuple:
     return ("present", info.st_mtime_ns, children)
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _isolate_state_root_for_session(tmp_path_factory: pytest.TempPathFactory):
+    """A higher-scoped fixture must not write the real user state root either.
+
+    `_isolate_state_root` below is function-scoped, so it is simply not in
+    effect while a module- or session-scoped fixture *body* runs. One that
+    builds a vault there resolves `state_paths.state_store_root()` with no
+    override and writes the REAL platform root:
+    `tests/test_graph_value_benchmark.py`'s module-scoped `perfect_fixture`
+    did exactly that, leaving `<slug>-<digest>/.graph.sqlite` behind for the
+    rest of the session. Nothing failed at the point of the write, because no
+    function-scoped guard bracketed it; a later test that touched the same
+    directory inherited the assertion and was reported as the culprit.
+
+    Injecting at session scope also closes the window *between* tests. The
+    function-scoped guard's `undo()` now restores this session value instead
+    of unsetting the variable, so a write from a worker that outlived the test
+    that started it lands in a tmpdir rather than the user's real state root.
+
+    Deliberately a PRIVATE MonkeyPatch, for the reason the function-scoped
+    fixture documents: the shared `monkeypatch` object is function-scoped and
+    cannot hold a session-scoped patch anyway.
+    """
+    private = pytest.MonkeyPatch()
+    session_root = tmp_path_factory.mktemp("exomem-session-state-root")
+    private.setenv("EXOMEM_STATE_ROOT", str(session_root))
+    private.setenv(
+        "EXOMEM_WRITER_LEASE_STATE_DIR",
+        str(session_root / "writer-lease"),
+    )
+    try:
+        yield
+    finally:
+        private.undo()
+
+
 @pytest.fixture(autouse=True)
 def _isolate_state_root(tmp_path: Path):
     """No test writes the real user state root (task 1.5 of
