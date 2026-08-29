@@ -405,9 +405,18 @@ def _stop_leaked_graph_drain():
 #: Captured before any test can instrument the filesystem primitives: the
 #: guard below runs in autouse teardown, after test-scoped patches of
 #: `os.scandir`/`os.lstat` may still be mid-unwind, and the guard's own probe
-#: of the REAL platform root must never route through them.
+#: of the REAL platform root must never route through them. The `/proc` scan
+#: below extends the same discipline to its own primitives -- deliberately
+#: plain `os` calls rather than `pathlib.Path` methods, so a test patching
+#: `Path.iterdir`/`Path.read_bytes`/`Path.is_dir` cannot pollute or stall the
+#: triage scan either.
 _REAL_SCANDIR = os.scandir
 _REAL_LSTAT = os.lstat
+_REAL_OS_OPEN = os.open
+_REAL_OS_READ = os.read
+_REAL_OS_CLOSE = os.close
+_REAL_OS_READLINK = os.readlink
+_REAL_OS_PATH_ISDIR = os.path.isdir
 
 
 def _state_root_shallow_snapshot(root: Path) -> tuple:
@@ -422,14 +431,248 @@ def _state_root_shallow_snapshot(root: Path) -> tuple:
         return ("absent",)
     try:
         children = tuple(
-            sorted(
-                (entry.name, entry.stat().st_mtime_ns)
-                for entry in _REAL_SCANDIR(root)
-            )
+            sorted((entry.name, entry.stat().st_mtime_ns) for entry in _REAL_SCANDIR(root))
         )
     except OSError:
         children = ("unreadable",)
     return ("present", info.st_mtime_ns, children)
+
+
+def _state_root_drift_summary(before: tuple, after: tuple) -> str:
+    """A legible description of what changed between two
+    :func:`_state_root_shallow_snapshot` results, by entry name.
+
+    Split out from the assert purely for testability -- this function makes
+    no pass/fail decision and the guard's own comparison stays `after ==
+    before`, unchanged, regardless of what this reports. Four incidents on
+    2026-08-29 alone showed a triager the raw snapshot tuples
+    (`before=('present', 1788012082470890197, ...)`) and nothing else; naming
+    the added/removed/mtime-shifted entries is the whole point.
+    """
+    if before == after:
+        return "no drift detected"
+    before_present = before[0] == "present"
+    after_present = after[0] == "present"
+    if before_present and not after_present:
+        return "the root existed before and is gone now"
+    if after_present and not before_present:
+        return "the root did not exist before and exists now"
+    if not before_present and not after_present:
+        # Both "absent" yet the tuples differ, or one/both is some other
+        # sentinel shape entirely -- say so rather than guessing.
+        return f"before={before!r} after={after!r}"
+    before_children = before[2]
+    after_children = after[2]
+    if before_children == ("unreadable",) or after_children == ("unreadable",):
+        return "the root's children became readable/unreadable between snapshots"
+    before_map = dict(before_children)
+    after_map = dict(after_children)
+    added = sorted(set(after_map) - set(before_map))
+    removed = sorted(set(before_map) - set(after_map))
+    changed = sorted(
+        name for name in set(before_map) & set(after_map) if before_map[name] != after_map[name]
+    )
+    parts = []
+    if added:
+        parts.append("added: " + ", ".join(added))
+    if removed:
+        parts.append("removed: " + ", ".join(removed))
+    if changed:
+        parts.append("changed: " + ", ".join(changed))
+    if not parts:
+        return "the root directory's own mtime changed with no child differences"
+    return "; ".join(parts)
+
+
+def _read_proc_file(path: str, max_bytes: int = 4096) -> bytes | None:
+    """Read a `/proc` pseudo-file through import-time-captured `os`
+    primitives only -- never `pathlib.Path`, per the module header note.
+
+    Never raises: any failure (process exited mid-read, permission denied,
+    the path never existed) reports as "nothing read" to the caller, which is
+    always a best-effort triage consumer.
+    """
+    fd = None
+    try:
+        fd = _REAL_OS_OPEN(path, os.O_RDONLY)
+        return _REAL_OS_READ(fd, max_bytes)
+    except OSError:
+        return None
+    finally:
+        if fd is not None:
+            try:
+                _REAL_OS_CLOSE(fd)
+            except OSError:
+                pass
+
+
+def _process_ancestor_pids(start_pid: int) -> frozenset[int]:
+    """Every pid from `start_pid`'s parent up to pid 1, via `/proc/<pid>/stat`.
+
+    CI always runs pytest under a wrapper (`uv run ... python -m pytest`), so
+    the running process's own ancestor chain matches "pytest"/"exomem" on
+    every single run -- without exclusion, `_concurrent_process_candidates`
+    would report a "concurrent" hit unconditionally and mislead every
+    triager, every run, regardless of whether anything is actually
+    interfering.
+
+    `stat`'s comm field (2nd column, in parens) can itself contain spaces or
+    parens, so ppid is located from the LAST ')' rather than by naive
+    whitespace-splitting (proc(5)): the whitespace-separated fields after it
+    are state, ppid, pgrp, ... -- ppid is the 2nd of those.
+
+    Best-effort like the scan it supports: any failure simply stops the walk
+    where it is, returning whatever ancestors were already found.
+    """
+    ancestors: set[int] = set()
+    seen = {start_pid}
+    pid = start_pid
+    for _ in range(4096):  # hard cap: never loop forever on a corrupt chain
+        raw = _read_proc_file(f"/proc/{pid}/stat")
+        if not raw:
+            break
+        text = raw.decode("utf-8", "replace")
+        close = text.rfind(")")
+        if close == -1:
+            break
+        fields = text[close + 1 :].split()
+        if len(fields) < 2:
+            break
+        try:
+            ppid = int(fields[1])
+        except ValueError:
+            break
+        if ppid <= 0 or ppid in seen:
+            break
+        ancestors.add(ppid)
+        seen.add(ppid)
+        if ppid == 1:
+            break
+        pid = ppid
+    return frozenset(ancestors)
+
+
+def _best_effort_proc_cwd(pid: int) -> str:
+    """The best-effort cwd of `pid` -- the actually-useful triage datum (which
+    worktree's run this is) -- never the full argv."""
+    try:
+        return _REAL_OS_READLINK(f"/proc/{pid}/cwd")
+    except OSError:
+        return "unknown"
+
+
+def _matching_processes(exclude: frozenset[int]) -> tuple[tuple[int, str], ...]:
+    """All ``(pid, cmdline)`` for live processes outside ``exclude`` whose
+    cmdline contains "pytest" or "exomem".
+
+    Uncapped and unredacted -- :func:`_concurrent_process_candidates` applies
+    the cap and redaction on top of this. Split out so ancestor-exclusion and
+    third-party-detection can be tested directly, without the cap's
+    iteration-order sensitivity (``/proc`` readdir order is not guaranteed,
+    so which matches survive a cap is not deterministic on a busy box).
+
+    Per-entry failures are caught individually so one uncooperative ``/proc``
+    entry does not discard matches already found; the directory iteration
+    itself is wrapped a second time for the same reason.
+    """
+    if os.name != "posix":
+        return ()
+    found: list[tuple[int, str]] = []
+    try:
+        if not _REAL_OS_PATH_ISDIR("/proc"):
+            return ()
+        for entry in _REAL_SCANDIR("/proc"):
+            try:
+                if not entry.name.isdigit():
+                    continue
+                pid = int(entry.name)
+                if pid in exclude:
+                    continue
+                raw = _read_proc_file(f"/proc/{pid}/cmdline")
+                if not raw:
+                    continue
+                cmdline = raw.replace(b"\x00", b" ").strip().decode("utf-8", "replace")
+                if not cmdline:
+                    continue
+                if "pytest" in cmdline or "exomem" in cmdline:
+                    found.append((pid, cmdline))
+            except Exception:  # noqa: BLE001 -- one entry's failure must not discard matches already found; this scan is best-effort triage, never load-bearing for the assert.
+                continue
+    except Exception:  # noqa: BLE001 -- the whole scan is best-effort triage; a failure here returns whatever was already collected rather than aborting the guard itself.
+        pass
+    return tuple(found)
+
+
+#: Redacted candidate lines are capped; overflow is summarized rather than
+#: silently truncated.
+_CONCURRENT_CANDIDATE_CAP = 5
+
+
+def _candidate_exclusion_pids() -> frozenset[int]:
+    """The pids the candidate scan must never report: this process and its
+    full ancestor chain. Extracted as a named seam so a test can pin the
+    exclusion-set CONSTRUCTION itself -- absence from a capped render proves
+    nothing, and a weakened set here is exactly the mutation review caught.
+    """
+    own_pid = os.getpid()
+    return frozenset(_process_ancestor_pids(own_pid) | {own_pid})
+
+
+def _concurrent_process_candidates() -> tuple[str, ...]:
+    """Best-effort `/proc` scan for other live pytest/exomem processes.
+
+    Purely diagnostic triage, never load-bearing for the assert: the state
+    root is machine-global, so another worktree's pytest, a stray `-x` run,
+    or a foreign tmpdir can all trip the guard on files this diff never
+    touched. Deliberately POSIX-only (`/proc` has no Windows analogue) and
+    never raises -- a scan that finds nothing and a scan that fails outright
+    are reported identically by the caller (as "unavailable"), so a bare
+    empty tuple is the right shape for both.
+
+    Redaction: only the pid, the basename of argv[0], and a best-effort cwd
+    are ever reported -- never the raw argv line, which can carry secrets (an
+    ssh private-key path was captured live in review off an earlier,
+    unredacted render). The scan's own ancestor chain
+    (:func:`_process_ancestor_pids`) is excluded so a run's own `uv run ...
+    python -m pytest` wrapper never reports itself as "concurrent".
+    """
+    if os.name != "posix":
+        return ()
+    matches = _matching_processes(_candidate_exclusion_pids())
+    found = []
+    for pid, cmdline in matches[:_CONCURRENT_CANDIDATE_CAP]:
+        argv0 = cmdline.split(" ", 1)[0]
+        basename = argv0.rsplit("/", 1)[-1] or argv0
+        cwd = _best_effort_proc_cwd(pid)
+        found.append(f"pid {pid}: {basename} (matched: pytest|exomem, cwd: {cwd})")
+    if len(matches) > _CONCURRENT_CANDIDATE_CAP:
+        found.append(f"(+{len(matches) - _CONCURRENT_CANDIDATE_CAP} more)")
+    return tuple(found)
+
+
+_STATE_ROOT_GUARD_TRIAGE_HINT = (
+    "this also fires for cross-process interference, not just this diff: "
+    "another worktree's pytest, a stray -x run, or a foreign tmpdir can "
+    "touch this same machine-global root; check for concurrent pytest/exomem "
+    "processes and rerun this file solo before attributing the failure to "
+    "the code under test."
+)
+
+
+def _state_root_guard_message(real_root: Path, before: tuple, after: tuple) -> str:
+    """The guard's full assertion message: legible attribution first, the
+    triage hint, best-effort concurrent-process candidates, then the raw
+    snapshot tuples last (kept available, but secondary)."""
+    drift = _state_root_drift_summary(before, after)
+    candidates = _concurrent_process_candidates()
+    candidates_text = "; ".join(candidates) if candidates else "unavailable"
+    return (
+        f"a test touched the real user state root {real_root} ({drift}); "
+        "every fixture must stay under the injected EXOMEM_STATE_ROOT tmpdir. "
+        f"{_STATE_ROOT_GUARD_TRIAGE_HINT} "
+        f"concurrent candidates: {candidates_text}. "
+        f"raw snapshot (before={before!r}, after={after!r})"
+    )
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -509,11 +752,7 @@ def _isolate_state_root(tmp_path: Path):
         before = _state_root_shallow_snapshot(real_root)
         yield
         after = _state_root_shallow_snapshot(real_root)
-        assert after == before, (
-            f"a test touched the real user state root {real_root} "
-            f"(before={before}, after={after}); every fixture must stay under the "
-            "injected EXOMEM_STATE_ROOT tmpdir"
-        )
+        assert after == before, _state_root_guard_message(real_root, before, after)
     finally:
         if writer_lease_module is not None:
             writer_lease_module.reset_managers_for_tests()
