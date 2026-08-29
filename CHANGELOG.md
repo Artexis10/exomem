@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.65.0](https://github.com/Artexis10/exomem/compare/v0.64.2...v0.65.0) (2026-08-29)
+
+
+### Features
+
+* **governance:** harden governed consolidation ([#900](https://github.com/Artexis10/exomem/issues/900)) ([7c5a315](https://github.com/Artexis10/exomem/commit/7c5a315797340d89c07d74de6d61de9a1c0c3c9c))
+* **state:** relocate machine-local state outside the vault ([#917](https://github.com/Artexis10/exomem/issues/917)) ([1f80041](https://github.com/Artexis10/exomem/commit/1f8004163901fbee92958fec4ec54ba167bce6d0))
+
+
+### Bug Fixes
+
+* **state:** admit provably-fresh deployments at the readiness gate ([#931](https://github.com/Artexis10/exomem/issues/931)) ([37093dc](https://github.com/Artexis10/exomem/commit/37093dc9f0a761d216fa2f5459ca0b89685d75cb))
+
 ## [0.64.2](https://github.com/Artexis10/exomem/compare/v0.64.1...v0.64.2) (2026-08-27)
 
 
