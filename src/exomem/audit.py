@@ -105,6 +105,7 @@ from . import (
     source_closure,
     temporal,
 )
+from . import entity_recurrence as entity_recurrence_module
 from . import entity_types as entity_types_module
 from . import find as find_module
 from . import vault as vault_module
@@ -148,6 +149,7 @@ ALL_CATEGORIES: tuple[str, ...] = (
     "entity_type_unregistered",
     "unreflected_outcomes",
     "scope_divergence_semantic",
+    "entity_recurrence",
 )
 OPTIONAL_CATEGORIES: tuple[str, ...] = (
     "relation_registry",
@@ -202,6 +204,15 @@ EPISTEMIC_REVIEW_CATEGORIES: tuple[str, ...] = (
     # surface; a queue that fires on a number the product picked has not, and
     # admitting one would let a tuning decision quietly displace authored work.
     "question_aging",
+    # A third reason for the same exclusion, and the one this tuple's BACKLOG
+    # PROFILE gate was written for. A recurrence sensor meets an existing corpus
+    # in which every candidate it will ever name is ALREADY linked — the whole
+    # grandfathered population arrives on the first run. It is registered,
+    # selectable and triageable from that run; it simply does not displace a
+    # surface someone already relies on. Whether it graduates into the default
+    # union is a calibration decision, on evidence this change deliberately does
+    # not yet have (f21 stays withheld).
+    "entity_recurrence",
 )
 _SEMANTIC_AUDIT_CATEGORIES = frozenset({"semantic_contract_drift", *TYPED_SEMANTIC_CATEGORIES})
 _LEGACY_BACKLOG_CODE = "RELATION_DISPOSITION_MISSING"
@@ -516,6 +527,8 @@ def audit(
         findings.extend(_check_corpus_contradictions(vault_root, pages, today=today))
     if "scope_divergence_semantic" in selected:
         findings.extend(_check_scope_divergence_semantic(vault_root, pages))
+    if "entity_recurrence" in selected:
+        findings.extend(_check_entity_recurrence(vault_root, pages))
     if "relation_registry" in selected:
         findings.extend(_check_relation_registry(vault_root))
     if "relation_debt" in selected:
@@ -5304,6 +5317,160 @@ def _check_scope_divergence_semantic(
         if advisory is not None:
             findings.append(_scope_divergence_semantic_finding(rel_path, advisory))
     return findings
+
+
+def _entity_recurrence_finding(
+    candidate: entity_recurrence_module.Candidate,
+) -> AuditFinding:
+    """One recurring identity -> one finding, with the ONE signal version it uses.
+
+    The fingerprint a review decision binds to is composed by `review_state` from
+    the finding's category, path and `signal_version`; this is the only place the
+    latter is chosen, and it is composed over the IDENTITY rather than over any
+    page's bytes. That is the whole dismissal contract for this family: the
+    identity IS the signal, so "I have decided not to create this entity" survives
+    every incidental edit to every page that mentions it, and a different identity
+    can never inherit that decision. v1 deliberately defines no material-change
+    reopen — a candidate that grows from three mentioning pages to nine does not
+    re-raise a dismissal (design D4, PROVISIONAL, revisit with calibration).
+    """
+    near = [match["title"] for match in candidate.near_matches]
+    return AuditFinding(
+        category=entity_recurrence_module.KIND,
+        severity="info",
+        path=candidate.anchor,
+        # The mentioning pages ride `meta`, NOT the `paths` group field, and that
+        # is the dismissal contract rather than a stylistic choice (design D4).
+        # `review_state.fingerprint` folds a finding's `paths` into the item
+        # identity, so putting a list that grows every time somebody links the
+        # name again there would move the fingerprint on exactly the event v1
+        # says must not re-raise a settled candidate. `attention` carries `meta`
+        # into the reason payload, so the reader still sees every page.
+        detail=(
+            f"[[{candidate.candidate}]] is linked from {len(candidate.pages)} distinct "
+            "pages and resolves to neither a page nor a registry entity"
+            + (f" (nearest registry names: {', '.join(near)})" if near else "")
+        ),
+        proposed_fix=(
+            "Surfaced for REVIEW only — a count of how often the corpus reaches for "
+            "this name, not a judgment that an entity is missing. Check the "
+            "near-matches first: a recurring name is often one the registry already "
+            "holds under a different spelling, and an alias belongs on that page "
+            "rather than on a new one. If it is genuinely a new entity, creating it "
+            "is your call, as is creating the linked page itself. Nothing is "
+            "auto-created."
+        ),
+        meta={
+            "reasons": [entity_recurrence_module.REASON_UNRESOLVED_IDENTITY_RECURS],
+            "candidate": candidate.candidate,
+            "identity": candidate.identity,
+            # Two identities recurring across the same corpus routinely share an
+            # anchor — whichever page sorts smallest mentions both. Without a
+            # partition `attention` fuses them onto one review id, so ONE
+            # dismissal puts down several unrelated candidates and a THIRD
+            # identity arriving on that anchor changes the fused fingerprint and
+            # REOPENS the settled decision. The identity is the partition for the
+            # same reason it is the signal version: it is what a decision here is
+            # about. Same mechanism `prediction_window`, `question_aging`,
+            # `bridge_review` and `unreflected_outcomes` already use.
+            "review_partition": candidate.identity,
+            "pages": list(candidate.pages),
+            "page_count": len(candidate.pages),
+            "near_matches": [dict(match) for match in candidate.near_matches],
+            "signal_version": content_hash(candidate.identity)[:16],
+        },
+    )
+
+
+def _entity_recurrence_resolution_entries(
+    vault_root: Path,
+    pages: list[find_module.ParsedPage],
+) -> dict[str, str | None]:
+    """Path + title entries for an I/O-FREE wikilink resolver.
+
+    `WikilinkResolver(vault_root)` would re-read and YAML-parse every Markdown
+    file in the vault, which is precisely the second corpus scan this sweep must
+    not pay. Titles come from the pages the audit already parsed (`parse_page`
+    and the resolver derive a title through the same `resolve_display_title`, so
+    the title edges are the ones a full build would have produced); the walk adds
+    PATHS ONLY, opening no file, so links into curated sibling trees outside the
+    Knowledge Base resolve instead of reading as unwritten identities.
+
+    The residual gap is recorded rather than hidden: a page OUTSIDE the Knowledge
+    Base that is reachable only by its frontmatter title contributes no title
+    edge, so a bare-title link to it reads as unresolved. Closing it costs a read
+    of every file in the vault, which is the cost this sweep exists to avoid.
+    """
+    entries: dict[str, str | None] = {}
+    # `ParsedPage.rel_path` is derived through `resolve()`, and so is
+    # `WikilinkResolver._build`'s. The walk must agree with them or one file
+    # reaches the resolver under two spellings — two stem edges, two title
+    # candidates, and a bare name that looks ambiguous because of how it was
+    # enumerated rather than because of what the vault holds.
+    vault_resolved = vault_root.resolve()
+    for md_path in _walk_vault_md(vault_root):
+        try:
+            entries[md_path.resolve().relative_to(vault_resolved).as_posix()] = None
+        except (OSError, ValueError):
+            continue
+    for page in pages:
+        entries[str(page.rel_path)] = page.title
+    return entries
+
+
+def _check_entity_recurrence(
+    vault_root: Path,
+    pages: list[find_module.ParsedPage],
+) -> list[AuditFinding]:
+    """Corpus sweep for identities the vault keeps reaching for and never wrote.
+
+    The per-page link check (`forward_reference`) says "this page points at
+    something that does not exist"; it has never been able to say "and so do four
+    others". This counts across pages, which is the only place that arithmetic can
+    happen, and it runs here rather than at write time for one reason: this is
+    where the parsed bodies already are.
+
+    Cost is bounded by construction: EXACTLY ONE path-only vault walk per sweep
+    for the existence set, one registry index built from those same parsed pages,
+    and then one pass over the bodies. Nothing is embedded, no model is called,
+    and no `Entities/` glob runs per candidate. The sweep opens exactly one file —
+    the digest-cached entity-type registry — plus, for each identity that has
+    ALREADY cleared spread and the registry and whose name carries a dot, one
+    existence probe per distinct suffixed target. That probe is what stops the
+    sensor deciding from punctuation that `Node.js` or `Dr. Ines Roth` is a file.
+    """
+    if not pages:
+        return []
+    resolver = vault_module.WikilinkResolver.from_entries(
+        vault_root, _entity_recurrence_resolution_entries(vault_root, pages).items()
+    )
+    registry = entity_recurrence_module.registry_index(
+        pages, entity_types=entity_types_module.load_entity_types(vault_root)
+    )
+
+    def attachment_probe(target: str) -> bool:
+        """Is an ordinary file standing at this suffixed target?
+
+        The same two spellings `_check_wikilinks` probes — vault-rooted and
+        KB-relative — through the same `_ordinary_file_exists`, so the two agree
+        on what an attachment is.
+        """
+        normalized = target.removeprefix(kb_prefix()).lstrip("/")
+        return _ordinary_file_exists(
+            vault_root, vault_root / target.lstrip("/")
+        ) or _ordinary_file_exists(vault_root, vault_root / kb_dirname() / normalized)
+
+    return [
+        _entity_recurrence_finding(candidate)
+        for candidate in entity_recurrence_module.collect(
+            pages,
+            vault_root=vault_root,
+            resolver=resolver,
+            registry=registry,
+            indexable=lambda rel_path: access.is_indexable(vault_root, rel_path),
+            attachment_probe=attachment_probe,
+        )
+    ]
 
 
 def _check_corpus_contradictions(
