@@ -195,3 +195,12 @@ only on a quiesced machine.
   `.deferred-index.sqlite` `full_upserts` and the graph state before
   diagnosing anything else; the fixed-era signature is full receipts at 0 and
   the graph converging within minutes of each write.
+- **Machine-local state lives OUTSIDE the vault** (openspec change
+  `relocate-machine-local-state`): the index stores, `.graph-sync*.json`,
+  receipts, deferred queue, and due/review projections resolve under
+  `EXOMEM_STATE_ROOT`, else `%LOCALAPPDATA%\exomem\state\<vault-key>` on
+  Windows. When inspecting a live cell, read them there — a `.sqlite` or
+  `.graph-sync*.json` found under `Knowledge Base/` on a migrated cell is a
+  dual-state leftover the doctor `state.placement` section will FAIL on
+  (`exomem maintain --adopt-state <which>` resolves it; never delete either
+  copy by hand).

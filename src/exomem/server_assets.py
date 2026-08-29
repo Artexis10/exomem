@@ -126,6 +126,22 @@ def register_asset_routes(
             payload.update(deploy_provenance.provenance(include_local=False))
         except Exception:  # noqa: BLE001 — provenance must never fail the probe
             payload["version"] = "unknown"
+        # Content-free machine-local state placement.  This route is public:
+        # absolute roots belong only in the local doctor surface.
+        try:
+            from . import state_migration
+            from . import vault as vault_module
+
+            vault_root = vault_module.resolve_vault()
+            payload["state"] = {
+                "placement": "external-state",
+                "migration": state_migration.migration_status(vault_root),
+            }
+        except Exception:  # noqa: BLE001 — placement must never fail the probe
+            payload["state"] = {
+                "placement": "external-state",
+                "migration": "unavailable",
+            }
         return JSONResponse(
             payload,
             headers={"Cache-Control": "no-store"},

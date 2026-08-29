@@ -186,7 +186,7 @@ def test_processing_failure_sidecar_fans_out_after_commit_guard_release(
     checkpoint_path = graph_sync.checkpoint_path(vault)
     original_add_full = deferred_index.add_full
     original_batch = preserve.batch_atomic_write
-    original_read_artifact = media_worker.read_bounded_guarded_bytes
+    original_read_artifact = graph_sync._read_bounded_bytes
     original_publish_hook = vault_module._after_batch_destination_published
     token = None
     postlude_reads: list[str] = []
@@ -211,8 +211,7 @@ def test_processing_failure_sidecar_fans_out_after_commit_guard_release(
             token = result
         return result
 
-    def read_postlude_artifact(root, target, *args, **kwargs):  # noqa: ANN001
-        path = Path(root) / target
+    def read_postlude_artifact(path, *args, **kwargs):  # noqa: ANN001
         if (
             len(manager.guard_metadata) >= 2
             and not checkpoint_published
@@ -220,7 +219,7 @@ def test_processing_failure_sidecar_fans_out_after_commit_guard_release(
         ):
             assert manager.depth > 0
             postlude_reads.append("floor" if Path(path) == floor_path else "predecessor")
-        return original_read_artifact(root, target, *args, **kwargs)
+        return original_read_artifact(path, *args, **kwargs)
 
     def observe_checkpoint_inside_postlude(destination: Path) -> None:
         nonlocal checkpoint_published, checkpoint_replaced
@@ -243,7 +242,7 @@ def test_processing_failure_sidecar_fans_out_after_commit_guard_release(
         deferred_index, "add_full_receipts", admit_full_receipts, raising=False
     )
     monkeypatch.setattr(preserve, "batch_atomic_write", capture_token)
-    monkeypatch.setattr(media_worker, "read_bounded_guarded_bytes", read_postlude_artifact)
+    monkeypatch.setattr(graph_sync, "_read_bounded_bytes", read_postlude_artifact)
     monkeypatch.setattr(
         vault_module,
         "_after_batch_destination_published",
@@ -336,7 +335,7 @@ def test_media_deferred_postlude_reenters_the_mutation_coordinator(
     manager = _RecordingMutationManager(vault)
     floor = graph_sync.floor_path(vault)
     checkpoint = graph_sync.checkpoint_path(vault)
-    original_read_artifact = media_worker.read_bounded_guarded_bytes
+    original_read_artifact = graph_sync._read_bounded_bytes
     original_publish_hook = vault_module._after_batch_destination_published
     postlude_reads: list[str] = []
     checkpoint_replaced = False
@@ -351,12 +350,11 @@ def test_media_deferred_postlude_reenters_the_mutation_coordinator(
     )
     monkeypatch.setattr(media_worker, "get_manager", lambda: manager)
 
-    def read_artifact_inside_postlude(root, target, *args, **kwargs):  # noqa: ANN001
-        path = Path(root) / target
+    def read_artifact_inside_postlude(path, *args, **kwargs):  # noqa: ANN001
         if len(manager.guard_metadata) >= 2 and Path(path) in {floor, checkpoint}:
             assert manager.depth > 0
             postlude_reads.append("floor" if Path(path) == floor else "predecessor")
-        return original_read_artifact(root, target, *args, **kwargs)
+        return original_read_artifact(path, *args, **kwargs)
 
     def observe_checkpoint_inside_postlude(destination: Path) -> None:
         nonlocal checkpoint_replaced
@@ -371,7 +369,7 @@ def test_media_deferred_postlude_reenters_the_mutation_coordinator(
         return True
 
     monkeypatch.setattr(
-        media_worker, "read_bounded_guarded_bytes", read_artifact_inside_postlude
+        graph_sync, "_read_bounded_bytes", read_artifact_inside_postlude
     )
     monkeypatch.setattr(
         vault_module,
@@ -636,13 +634,30 @@ def test_external_floor_and_checkpoint_swaps_after_media_cas_do_not_pair_stale_t
     floor_path = graph_sync.floor_path(vault)
     checkpoint_path = graph_sync.checkpoint_path(vault)
     original_batch = media_worker.batch_atomic_write
+    original_snapshot = vault_module._capture_batch_snapshot
     fanout_calls: list[object] = []
     swapped = False
+    postlude_active = False
+    postlude_batches = 0
 
-    def replace_after_cas(writes, **kwargs):  # noqa: ANN001
+    def capture_postlude_batch(writes, **kwargs):  # noqa: ANN001
+        nonlocal postlude_active, postlude_batches
+        postlude_batches += 1
+        floor_write, checkpoint_write = writes
+        assert kwargs["vault_root"] == vault
+        assert floor_write.path == floor_path
+        assert floor_write.content == floor_path.read_text(encoding="utf-8")
+        assert floor_write.expected_hash == content_hash(floor_write.content)
+        assert checkpoint_write.path == checkpoint_path
+        postlude_active = True
+        try:
+            return original_batch(writes, **kwargs)
+        finally:
+            postlude_active = False
+
+    def replace_after_hash_check(path: Path):
         nonlocal swapped
-        [write] = writes
-        if write.path == checkpoint_path and not swapped:
+        if postlude_active and Path(path) == floor_path and not swapped:
             swapped = True
             old_floor = graph_sync.read_floor(vault)
             old_checkpoint = graph_sync.read_checkpoint(vault)
@@ -663,9 +678,9 @@ def test_external_floor_and_checkpoint_swaps_after_media_cas_do_not_pair_stale_t
             checkpoint_swap.write_text(replacement_checkpoint.render(), encoding="utf-8")
             os.replace(floor_swap, floor_path)
             os.replace(checkpoint_swap, checkpoint_path)
-            replace_after_cas.floor = replacement_floor
-            replace_after_cas.checkpoint = replacement_checkpoint
-        return original_batch(writes, **kwargs)
+            replace_after_hash_check.floor = replacement_floor
+            replace_after_hash_check.checkpoint = replacement_checkpoint
+        return original_snapshot(path)
 
     monkeypatch.setattr(
         extract,
@@ -674,7 +689,8 @@ def test_external_floor_and_checkpoint_swaps_after_media_cas_do_not_pair_stale_t
             text="external race transcript", media_type="audio", engine="test"
         ),
     )
-    monkeypatch.setattr(media_worker, "batch_atomic_write", replace_after_cas)
+    monkeypatch.setattr(media_worker, "batch_atomic_write", capture_postlude_batch)
+    monkeypatch.setattr(vault_module, "_capture_batch_snapshot", replace_after_hash_check)
     monkeypatch.setattr(
         media_worker,
         "post_commit_batch_fanout",
@@ -690,9 +706,10 @@ def test_external_floor_and_checkpoint_swaps_after_media_cas_do_not_pair_stale_t
     )
 
     assert outcome.state == "complete"
+    assert postlude_batches == 1
     assert swapped
-    assert graph_sync.read_floor(vault) == replace_after_cas.floor
-    assert graph_sync.read_checkpoint(vault) == replace_after_cas.checkpoint
+    assert graph_sync.read_floor(vault) == replace_after_hash_check.floor
+    assert graph_sync.read_checkpoint(vault) == replace_after_hash_check.checkpoint
     assert fanout_calls == []
     assert deferred_index.snapshot_full(vault) == [deferred_index.DeferredReceipt(rel, 1)]
 

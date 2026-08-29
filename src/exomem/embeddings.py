@@ -3,8 +3,8 @@
 Loads `BAAI/bge-base-en-v1.5` lazily (heavy import — torch +
 sentence-transformers stays off the keyword-mode hot path). Chunks each
 KB page paragraph-wise with title prepended, normalizes vectors so
-cosine = dot product, and persists to a per-machine sqlite sidecar at
-`<vault>/Knowledge Base/.embeddings.sqlite`.
+cosine = dot product, and persists to a per-machine sqlite sidecar
+(`.embeddings.sqlite` under the machine-local state root; see `state_paths`).
 
 Sidecar lives outside `_Schema/` deliberately:
 - Dotfile → Obsidian Sync ignores it (each machine maintains its own)

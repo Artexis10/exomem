@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from . import state_paths
 from .kbdir import kb_dirname
 
 INDEX_SCOPES = ("kb", "vault")
@@ -15,17 +16,17 @@ SKIP_MARKDOWN_NAMES = frozenset({"log.md", "index.md"})
 
 def sidecar_path(vault_root: Path) -> Path:
     """Per-machine text embedding sidecar path."""
-    return vault_root / kb_dirname() / ".embeddings.sqlite"
+    return state_paths.vault_state_dir(vault_root) / ".embeddings.sqlite"
 
 
 def clip_sidecar_path(vault_root: Path) -> Path:
     """Per-machine CLIP image/video vector sidecar path."""
-    return vault_root / kb_dirname() / ".clip.sqlite"
+    return state_paths.vault_state_dir(vault_root) / ".clip.sqlite"
 
 
 def governance_sidecar_path(vault_root: Path) -> Path:
     """Per-machine governance compiled-policy sidecar path (inspection only)."""
-    return vault_root / kb_dirname() / ".governance.sqlite"
+    return state_paths.vault_state_dir(vault_root) / ".governance.sqlite"
 
 
 def kb_index_root(vault_root: Path) -> Path:

@@ -65,6 +65,114 @@ function Get-ExomemServicePython {
     return $application
 }
 
+function Get-ExomemServiceAppDirectory {
+    <# Return NSSM's dotenv/application directory without reading its contents. #>
+    param([string]$ServiceName)
+
+    if (-not $ServiceName) { return $null }
+    $key = "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName\Parameters"
+    try {
+        $parameters = Get-ItemProperty -Path $key -ErrorAction Stop
+    } catch {
+        return $null
+    }
+    if (-not ($parameters.PSObject.Properties.Name -contains "AppDirectory")) {
+        return $null
+    }
+    $directory = [Environment]::ExpandEnvironmentVariables([string]$parameters.AppDirectory)
+    if (-not $directory -or -not (Test-Path -LiteralPath $directory -PathType Container)) {
+        return $null
+    }
+    return $directory
+}
+
+function Get-ExomemDefaultManagedStateRoot {
+    <# Pin the installer/operator user's platform default for LocalSystem too. #>
+    $base = if ($env:LOCALAPPDATA) {
+        $env:LOCALAPPDATA
+    } else {
+        Join-Path $env:USERPROFILE "AppData\Local"
+    }
+    return Join-Path $base "exomem\state"
+}
+
+function Get-ExomemDotenvStateRootBinding {
+    <# Read and validate the existing managed binding without changing it. #>
+    param([string]$AppDirectory)
+
+    $envPath = Join-Path $AppDirectory ".env"
+    if (-not (Test-Path -LiteralPath $envPath -PathType Leaf)) {
+        throw "The managed service dotenv is missing; cannot bind EXOMEM_STATE_ROOT."
+    }
+    $observed = @()
+    foreach ($line in Get-Content -LiteralPath $envPath) {
+        if ($line -match '^\s*EXOMEM_STATE_ROOT\s*=\s*(.*)\s*$') {
+            $value = $Matches[1].Trim()
+            if (($value.StartsWith('"') -and $value.EndsWith('"')) -or ($value.StartsWith("'") -and $value.EndsWith("'"))) {
+                $value = $value.Substring(1, $value.Length - 2)
+            }
+            $observed += $value
+        }
+    }
+    if ($observed.Count -gt 1 -and @($observed | Select-Object -Unique).Count -ne 1) {
+        throw "The managed dotenv contains conflicting EXOMEM_STATE_ROOT bindings."
+    }
+    if (-not $observed.Count) { return "" }
+    $bound = [string]$observed[-1]
+    if (-not [System.IO.Path]::IsPathFullyQualified($bound)) {
+        throw "The managed EXOMEM_STATE_ROOT binding must be absolute."
+    }
+    return [System.IO.Path]::GetFullPath($bound)
+}
+
+function Resolve-ExomemDotenvStateRootBinding {
+    <# Select the sticky binding without writing it. #>
+    param(
+        [string]$AppDirectory,
+        [string]$PreferredRoot = ""
+    )
+
+    $existing = Get-ExomemDotenvStateRootBinding -AppDirectory $AppDirectory
+    $selected = if ($existing) { $existing } elseif ($PreferredRoot) { $PreferredRoot } else { Get-ExomemDefaultManagedStateRoot }
+    if (-not [System.IO.Path]::IsPathFullyQualified($selected)) {
+        throw "The managed EXOMEM_STATE_ROOT binding must be absolute."
+    }
+    return [System.IO.Path]::GetFullPath($selected)
+}
+
+function Ensure-ExomemDotenvStateRootBinding {
+    <#
+      Persist one no-secret-output state-root authority in the service dotenv.
+      python-dotenv loads AppDirectory/.env with override=True before readiness,
+      so this exact value is shared by LocalSystem and the operator-run target
+      interpreter without writing the admin-only NSSM registry key.
+    #>
+    param(
+        [string]$AppDirectory,
+        [string]$ExpectedStateRoot = ""
+    )
+
+    $envPath = Join-Path $AppDirectory ".env"
+    $existing = Get-ExomemDotenvStateRootBinding -AppDirectory $AppDirectory
+    $bound = Resolve-ExomemDotenvStateRootBinding -AppDirectory $AppDirectory -PreferredRoot $ExpectedStateRoot
+    if ($ExpectedStateRoot) {
+        $expected = [System.IO.Path]::GetFullPath($ExpectedStateRoot)
+        if ($bound -ne $expected) {
+            throw "The managed EXOMEM_STATE_ROOT binding does not match the durable transition receipt."
+        }
+    }
+    if (-not $existing) {
+        $raw = [System.IO.File]::ReadAllText($envPath)
+        $prefix = if ($raw.Length -eq 0 -or $raw.EndsWith("`n") -or $raw.EndsWith("`r")) { "" } else { "`r`n" }
+        [System.IO.File]::AppendAllText(
+            $envPath,
+            "${prefix}EXOMEM_STATE_ROOT=$bound`r`n",
+            [System.Text.UTF8Encoding]::new($false)
+        )
+    }
+    return $bound
+}
+
 function Get-ExomemServiceRoot {
     <#
     .SYNOPSIS
@@ -596,6 +704,240 @@ function Assert-ExomemVisibleCliVersions {
     }
 }
 
+function Get-ExomemListenerPidsForPort {
+    param([int]$Port)
+
+    try {
+        $netstat = Get-Command netstat -ErrorAction Stop
+    } catch {
+        throw "Listener enumeration for port $Port is unavailable: $($_.Exception.Message)"
+    }
+
+    $previousExitCode = $global:LASTEXITCODE
+    $global:LASTEXITCODE = 0
+    try {
+        $lines = @(& $netstat -ano -p tcp 2>$null)
+        $exitCode = $global:LASTEXITCODE
+    } catch {
+        throw "Listener enumeration for port $Port failed: $($_.Exception.Message)"
+    } finally {
+        $global:LASTEXITCODE = $previousExitCode
+    }
+    if ($netstat.CommandType -eq 'Application' -and $exitCode -ne 0) {
+        throw "Listener enumeration for port $Port failed with exit code $exitCode."
+    }
+
+    $pids = @()
+    foreach ($line in $lines) {
+        $fields = @(([string]$line).Trim() -split '\s+')
+        if ($fields.Count -lt 2 -or $fields[0] -ne 'TCP') { continue }
+        if ($fields[1] -notmatch ":$Port$") { continue }
+        if ($fields.Count -lt 4 -or $fields[3] -ne 'LISTENING') { continue }
+        $candidate = 0
+        if ($fields.Count -lt 5 -or -not [int]::TryParse($fields[-1], [ref]$candidate) -or $candidate -le 0) {
+            throw "Listener enumeration for port $Port found a LISTENING socket without an attributable process id."
+        }
+        $pids += $candidate
+    }
+    return @($pids | Sort-Object -Unique)
+}
+
+function Get-ExomemConfiguredListenerPids {
+    param([string]$ServiceName = "exomem")
+
+    $endpoint = Get-ExomemServiceEndpoint -ServiceName $ServiceName
+    return @(Get-ExomemListenerPidsForPort -Port $endpoint.Port)
+}
+
+$script:ExomemTransitionReceiptTool = Join-Path $PSScriptRoot "service-transition-receipt.py"
+
+function Get-ExomemTransitionReceiptPath {
+    param([string]$ServiceName = "exomem")
+
+    if ($ServiceName -notmatch '^[A-Za-z0-9_.@-]+$') {
+        throw "Service identity is invalid for a transition receipt."
+    }
+    $root = if ($env:EXOMEM_TRANSITION_RECEIPT_ROOT) {
+        $env:EXOMEM_TRANSITION_RECEIPT_ROOT
+    } else {
+        Join-Path $env:LOCALAPPDATA "exomem\transitions"
+    }
+    if (-not [System.IO.Path]::IsPathFullyQualified($root)) {
+        throw "Transition receipt root must be absolute."
+    }
+    return Join-Path ([System.IO.Path]::GetFullPath($root)) "$ServiceName.json"
+}
+
+function Invoke-ExomemTransitionReceiptTool {
+    param(
+        [string]$PythonPath,
+        [string[]]$Arguments
+    )
+
+    if (-not (Test-Path -LiteralPath $script:ExomemTransitionReceiptTool -PathType Leaf)) {
+        throw "Transition receipt tool is missing."
+    }
+    $command = @($PythonPath, $script:ExomemTransitionReceiptTool) + $Arguments
+    $result = Invoke-ExomemNative -Quiet -CommandArgs $command
+    if ($result.ExitCode -ne 0) {
+        $detail = ($result.Lines -join " ").Trim()
+        if (-not $detail) { $detail = "transition receipt operation failed" }
+        throw $detail
+    }
+    return @($result.Lines)
+}
+
+function Get-ExomemTransitionReceiptIdentityArguments {
+    param(
+        [string]$ServiceName,
+        [string]$BindingPath,
+        [string]$StateRoot,
+        [string]$VaultPath,
+        [int]$TargetPort
+    )
+
+    return @(
+        "--path", (Get-ExomemTransitionReceiptPath -ServiceName $ServiceName),
+        "--service-id", $ServiceName,
+        "--binding-path", $BindingPath,
+        "--state-root", $StateRoot,
+        "--vault", $VaultPath,
+        "--target-port", [string]$TargetPort
+    )
+}
+
+function New-ExomemTransitionReceipt {
+    param(
+        [string]$PythonPath,
+        [string]$ServiceName,
+        [string]$BindingPath,
+        [string]$StateRoot,
+        [string]$VaultPath,
+        [int]$Port,
+        [int]$TargetPort,
+        [int]$WorkerPid,
+        [int[]]$ListenerPids = @()
+    )
+
+    $identityParameters = @{
+        ServiceName = $ServiceName; BindingPath = $BindingPath; StateRoot = $StateRoot
+        VaultPath = $VaultPath; TargetPort = $TargetPort
+    }
+    $identity = Get-ExomemTransitionReceiptIdentityArguments @identityParameters
+    $arguments = @("create") + $identity + @(
+        "--port", [string]$Port, "--worker-pid", [string]$WorkerPid
+    )
+    foreach ($listenerPid in @($ListenerPids)) {
+        $arguments += @("--listener-pid", [string]$listenerPid)
+    }
+    Invoke-ExomemTransitionReceiptTool -PythonPath $PythonPath -Arguments $arguments | Out-Null
+    return Read-ExomemTransitionReceipt -PythonPath $PythonPath @identityParameters
+}
+
+function Read-ExomemTransitionReceipt {
+    param(
+        [string]$PythonPath,
+        [string]$ServiceName,
+        [string]$BindingPath,
+        [string]$StateRoot,
+        [string]$VaultPath,
+        [int]$TargetPort
+    )
+
+    $identity = Get-ExomemTransitionReceiptIdentityArguments `
+        -ServiceName $ServiceName `
+        -BindingPath $BindingPath `
+        -StateRoot $StateRoot `
+        -VaultPath $VaultPath `
+        -TargetPort $TargetPort
+    $lines = Invoke-ExomemTransitionReceiptTool -PythonPath $PythonPath -Arguments (@("verify") + $identity + @("--json"))
+    try {
+        return (($lines -join "`n") | ConvertFrom-Json -ErrorAction Stop)
+    } catch {
+        throw "Transition receipt verifier returned invalid JSON."
+    }
+}
+
+function Set-ExomemTransitionReceiptPhase {
+    param(
+        [string]$PythonPath,
+        [string]$ServiceName,
+        [string]$BindingPath,
+        [string]$StateRoot,
+        [string]$VaultPath,
+        [int]$TargetPort,
+        [string]$Phase,
+        [int[]]$ObservedPids = @()
+    )
+
+    $identityParameters = @{
+        ServiceName = $ServiceName; BindingPath = $BindingPath; StateRoot = $StateRoot
+        VaultPath = $VaultPath; TargetPort = $TargetPort
+    }
+    $arguments = @("phase") + (Get-ExomemTransitionReceiptIdentityArguments @identityParameters) + @("--phase", $Phase)
+    foreach ($observedPid in @($ObservedPids)) {
+        if ($observedPid) { $arguments += @("--observed-pid", [string]$observedPid) }
+    }
+    Invoke-ExomemTransitionReceiptTool -PythonPath $PythonPath -Arguments $arguments | Out-Null
+}
+
+function Publish-ExomemFailedTransitionReceipt {
+    param(
+        [string]$PythonPath,
+        [string]$ServiceName,
+        [string]$BindingPath,
+        [string]$StateRoot,
+        [string]$VaultPath,
+        [int]$TargetPort,
+        [int]$ObservedWorkerPid = 0
+    )
+
+    $identity = @{
+        PythonPath = $PythonPath; ServiceName = $ServiceName; BindingPath = $BindingPath
+        StateRoot = $StateRoot; VaultPath = $VaultPath; TargetPort = $TargetPort
+    }
+    $receipt = Read-ExomemTransitionReceipt @identity
+    $observedPids = @(@($ObservedWorkerPid) | Where-Object { $_ })
+    if (@("starting", "started") -contains [string]$receipt.phase) {
+        $proofPhase = [string]$receipt.phase
+        foreach ($port in @($receipt.port, $receipt.target_port) | Where-Object { $_ } | Select-Object -Unique) {
+            $observedPids += @(Get-ExomemListenerPidsForPort -Port $port)
+        }
+        $observedPids = @($observedPids | Where-Object { $_ } | Select-Object -Unique)
+        Set-ExomemTransitionReceiptPhase @identity -Phase $proofPhase -ObservedPids $observedPids
+        $receipt = Read-ExomemTransitionReceipt @identity
+        foreach ($observedPid in $observedPids) {
+            if (@($receipt.proof_pids) -notcontains $observedPid) {
+                throw "The durable failed-start process proof is incomplete; the receipt remains non-resumable."
+            }
+        }
+        Set-ExomemTransitionReceiptPhase @identity -Phase "failed"
+    } else {
+        $observedPids = @($observedPids | Where-Object { $_ } | Select-Object -Unique)
+        Set-ExomemTransitionReceiptPhase @identity -Phase "failed" -ObservedPids $observedPids
+    }
+    return Read-ExomemTransitionReceipt @identity
+}
+
+function Remove-ExomemTransitionReceipt {
+    param(
+        [string]$PythonPath,
+        [string]$ServiceName,
+        [string]$BindingPath,
+        [string]$StateRoot,
+        [string]$VaultPath,
+        [int]$TargetPort
+    )
+
+    $identity = Get-ExomemTransitionReceiptIdentityArguments `
+        -ServiceName $ServiceName `
+        -BindingPath $BindingPath `
+        -StateRoot $StateRoot `
+        -VaultPath $VaultPath `
+        -TargetPort $TargetPort
+    Invoke-ExomemTransitionReceiptTool -PythonPath $PythonPath -Arguments (@("clear") + $identity) | Out-Null
+}
+
 function Get-ExomemServiceWorkerPid {
     <#
     .SYNOPSIS
@@ -609,20 +951,172 @@ function Get-ExomemServiceWorkerPid {
     param([string]$ServiceName = "exomem")
 
     if ($env:OS -ne "Windows_NT") { return 0 }
+    $childPid = 0
     try {
         $service = Get-CimInstance Win32_Service -Filter "Name='$ServiceName'" -ErrorAction Stop
     } catch {
-        return 0
+        $service = $null
     }
-    if (-not $service -or -not $service.ProcessId) { return 0 }
+    if ($service -and $service.ProcessId) {
+        try {
+            $child = Get-CimInstance Win32_Process -Filter "ParentProcessId=$($service.ProcessId)" -ErrorAction Stop |
+                Select-Object -First 1
+            if ($child) { $childPid = [int]$child.ProcessId }
+        } catch {
+            $childPid = 0
+        }
+    }
+    if ($childPid) { return $childPid }
+
+    # Ordinary deploy tokens may read the service registry and control the SCM
+    # while CIM child enumeration is denied. The bound TCP listener remains a
+    # closed observable: a unique pid on the service's configured port is the
+    # worker to capture. Ambiguous or unreadable output stays a refusal (0).
     try {
-        $child = Get-CimInstance Win32_Process -Filter "ParentProcessId=$($service.ProcessId)" -ErrorAction Stop |
-            Select-Object -First 1
+        $pids = @(Get-ExomemConfiguredListenerPids -ServiceName $ServiceName)
     } catch {
         return 0
     }
-    if (-not $child) { return 0 }
-    return [int]$child.ProcessId
+    if ($pids.Count -ne 1) { return 0 }
+    return [int]$pids[0]
+}
+
+function Assert-ExomemServiceStopped {
+    <#
+    .SYNOPSIS
+      Prove that the service is stopped and its Python worker pid is gone.
+    .DESCRIPTION
+      The state-root migration lock is invisible to legacy releases.  A
+      successful stop command is therefore not migration authority: the SCM
+      state and the actual child process must both be absent before any wheel
+      is replaced or legacy state is copied.
+    #>
+    param(
+        [string]$ServiceName = "exomem",
+        [int]$Before = 0,
+        [int]$After = 0,
+        [int[]]$CapturedPids = @(),
+        [int[]]$Ports = @()
+    )
+
+    $service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+    if (-not $service -or $service.Status -ne 'Stopped') {
+        $observed = if ($service) { [string]$service.Status } else { "missing" }
+        throw "Service '$ServiceName' is not proven stopped (SCM state: $observed). Offline state migration is refused."
+    }
+    if (-not $CapturedPids.Count) {
+        $CapturedPids = @($Before, $After) | Where-Object { $_ } | Select-Object -Unique
+    }
+    if (-not $CapturedPids.Count) {
+        throw "Service '$ServiceName' has no captured pre-stop worker pid. Offline state migration cannot prove the legacy writer is gone."
+    }
+    foreach ($captured in @($CapturedPids) | Where-Object { $_ } | Select-Object -Unique) {
+        $oldWorker = Get-Process -Id $captured -ErrorAction SilentlyContinue
+        if ($oldWorker) {
+            throw "Service '$ServiceName' reports stopped but captured worker pid $captured is still alive. Offline state migration is refused."
+        }
+    }
+    foreach ($port in @($Ports) | Where-Object { $_ } | Select-Object -Unique) {
+        $listeners = @(Get-ExomemListenerPidsForPort -Port $port)
+        if ($listeners.Count) {
+            throw "Service '$ServiceName' is stopped but listener port $port is still owned by pid(s): $($listeners -join ', '). Offline state migration is refused."
+        }
+    }
+    Write-Host "Service stopped and every captured process pid is gone: $ServiceName"
+}
+
+function Assert-ExomemStoppedResumeAuthority {
+    <# Prove an explicitly requested recovery of a transition already left stopped. #>
+    param(
+        [string]$ServiceName = "exomem",
+        [Parameter(Mandatory = $true)]
+        [object]$Receipt
+    )
+
+    $service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+    if (-not $service -or $service.Status -ne 'Stopped') {
+        $observed = if ($service) { [string]$service.Status } else { "missing" }
+        throw "Service '$ServiceName' is not proven stopped (SCM state: $observed). Stopped-transition recovery is refused."
+    }
+    if (-not $Receipt -or $Receipt.service_id -ne $ServiceName) {
+        throw "An exact durable transition receipt is required. Stopped-transition recovery is refused."
+    }
+    if (@("starting", "started") -contains [string]$Receipt.phase) {
+        throw "The transition receipt records an incomplete start with no complete process proof. Stopped-transition recovery is refused."
+    }
+    foreach ($captured in @($Receipt.proof_pids) | Select-Object -Unique) {
+        if ($captured -and (Get-Process -Id $captured -ErrorAction SilentlyContinue)) {
+            throw "Service '$ServiceName' reports stopped but captured transition pid $captured is still alive. Stopped-transition recovery is refused."
+        }
+    }
+    foreach ($port in @($Receipt.port, $Receipt.target_port) | Where-Object { $_ } | Select-Object -Unique) {
+        $listeners = @(Get-ExomemListenerPidsForPort -Port $port)
+        if ($listeners.Count -ne 0) {
+            throw "Service '$ServiceName' is stopped but listener port $port is still owned by pid(s): $($listeners -join ', '). Stopped-transition recovery is refused."
+        }
+    }
+    Write-Host "Explicit stopped-transition recovery authority proven: $ServiceName"
+}
+
+function Assert-ExomemListenerOwnedByWorker {
+    param(
+        [string]$ServiceName = "exomem",
+        [int]$WorkerPid,
+        [int]$TimeoutSec = 60
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    do {
+        $listeners = @(Get-ExomemConfiguredListenerPids -ServiceName $ServiceName)
+        if ($listeners.Count -eq 1 -and [int]$listeners[0] -eq $WorkerPid) {
+            Write-Host "Configured listener belongs to the selected worker: $WorkerPid"
+            return
+        }
+        if ($listeners.Count -ne 0) {
+            throw "The configured listener is not owned by the newly selected service worker pid $WorkerPid."
+        }
+        Start-Sleep -Milliseconds 250
+    } while ((Get-Date) -lt $deadline)
+    throw "The newly selected service worker pid $WorkerPid never bound the configured listener."
+}
+
+function Wait-ExomemHealthVersion {
+    param(
+        [string]$HealthUrl,
+        [string]$ExpectedVersion,
+        [int]$TimeoutSec = 60
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    $observed = $null
+    do {
+        try {
+            $response = Invoke-RestMethod -Uri $HealthUrl -TimeoutSec 5 -ErrorAction Stop
+            $observed = [string]$response.version
+            if ($observed -eq $ExpectedVersion) { return $response }
+        } catch {
+            $observed = $null
+        }
+        Start-Sleep -Milliseconds 250
+    } while ((Get-Date) -lt $deadline)
+    throw "The live health version '$observed' does not equal target interpreter version '$ExpectedVersion'."
+}
+
+function Assert-ExomemConfiguredPortUnbound {
+    param(
+        [string]$ServiceName = "exomem",
+        [int]$Port = 0
+    )
+
+    $listeners = if ($Port) {
+        @(Get-ExomemListenerPidsForPort -Port $Port)
+    } else {
+        @(Get-ExomemConfiguredListenerPids -ServiceName $ServiceName)
+    }
+    if ($listeners.Count -ne 0) {
+        throw "The configured service listener is already owned by pid(s): $($listeners -join ', '). Offline initialization is refused."
+    }
+    Write-Host "Configured service listener is unbound: $ServiceName"
 }
 
 function Assert-ExomemServiceRestarted {

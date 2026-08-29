@@ -103,16 +103,25 @@ def refresh_shipped_schema(vault_root: Path) -> list[str]:
     return refreshed
 
 
-def init_vault(vault_root: Path, *, force: bool = False) -> dict:
+def init_vault(
+    vault_root: Path,
+    *,
+    force: bool = False,
+    initialize_state: bool = True,
+) -> dict:
     """Create `<vault_root>/Knowledge Base/` with the starter scaffold.
 
     Copies the bundled scaffold (index.md, log.md, _Schema/) and lays down the
     typed folder tree. Raises ``FileExistsError`` if `Knowledge Base/` already
     exists, unless ``force=True`` (which overlays the scaffold without deleting
-    any existing files).
+    any existing files). A genuinely new vault also receives its empty external
+    state manifest. Callers building a renameable staging vault must pass
+    ``initialize_state=False`` and initialize state only after publication,
+    because the per-vault state key binds the final vault path.
     """
     vault_root = Path(vault_root)
     kb = vault_root / kb_dirname()
+    fresh_vault = not kb.exists()
     if kb.exists() and not force:
         raise FileExistsError(
             f"{kb} already exists. Pass force=True to overlay the scaffold "
@@ -177,6 +186,17 @@ def init_vault(vault_root: Path, *, force: bool = False) -> dict:
     ensure_manifest(vault_root)
     if activation_missing:
         created.append(activation_path.relative_to(vault_root).as_posix())
+
+    if fresh_vault and initialize_state:
+        from . import state_migration
+
+        authority = state_migration.assert_offline_migration_authority(
+            source="fresh vault initialization",
+        )
+        state_migration.migrate_vault_state_offline(
+            vault_root,
+            authority=authority,
+        )
 
     return {"vault": str(vault_root), "kb": str(kb), "created": created}
 

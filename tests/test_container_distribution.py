@@ -327,9 +327,14 @@ def test_unix_upgrade_script_exists_and_verifies_the_live_version() -> None:
     assert "doctor --profile" in upgrade
     assert "/health" in upgrade
     assert "version mismatch" in upgrade
-    # Both service managers, since the same repo serves macOS and Linux.
-    assert "launchctl kickstart" in upgrade
-    assert "systemctl --user restart" in upgrade
+    assert 'exomem_stop_service "$SERVICE_ID"' in upgrade
+    assert 'exomem_start_service "$UNIT_FILE" "$SERVICE_ID"' in upgrade
+    assert 'exomem_assert_service_restarted "$WORKER_BEFORE" "$WORKER_AFTER"' in upgrade
+
+    # Both service managers remain behind the selected-identity helper.
+    common = _read("scripts/_service-common.sh")
+    assert 'launchctl kickstart "gui/$(id -u)/$service_id"' in common
+    assert 'systemctl --user start "$service_id"' in common
 
 
 def test_unix_restart_gates_doctor_on_the_service_venv() -> None:

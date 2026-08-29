@@ -1665,7 +1665,10 @@ def test_warm_cli_vault_flag_also_warms_lexical_caches(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
     """`exomem warm --vault <path>` also runs warmup.warm_caches for that vault."""
+    from conftest import initialize_vault_state_offline
+
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    initialize_vault_state_offline(tmp_path, source="warm CLI fixture")
     monkeypatch.setattr(embeddings, "get_model", lambda: object())
     monkeypatch.setattr(embeddings, "get_reranker", lambda: object())
     calls: list[Path] = []

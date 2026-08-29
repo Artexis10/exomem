@@ -538,6 +538,42 @@ def test_batch_atomic_write_uses_private_workspaces_and_fans_out_once(
     assert not [path for path in tmp_path.iterdir() if path.name.endswith(".bak")]
 
 
+def test_batch_atomic_write_rechecks_expected_hash_after_snapshot_race(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A replacement between preflight and snapshot cannot become the CAS source."""
+    target = tmp_path / "target.md"
+    target.write_text("original", encoding="utf-8")
+    replacement = tmp_path / "replacement.md"
+    original_snapshot = vault_module._capture_batch_snapshot
+    swapped = False
+
+    def replace_before_snapshot(path: Path):
+        nonlocal swapped
+        if Path(path) == target and not swapped:
+            replacement.write_text("concurrent replacement", encoding="utf-8")
+            os.replace(replacement, target)
+            swapped = True
+        return original_snapshot(path)
+
+    monkeypatch.setattr(vault_module, "_capture_batch_snapshot", replace_before_snapshot)
+
+    with pytest.raises(vault_module.ContentHashMismatchError):
+        vault_module.batch_atomic_write(
+            [
+                vault_module.PlannedWrite(
+                    target,
+                    "stale writer",
+                    expected_hash=vault_module.content_hash("original"),
+                )
+            ],
+            vault_root=tmp_path,
+        )
+
+    assert swapped
+    assert target.read_text(encoding="utf-8") == "concurrent replacement"
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows binary-read regression")
 def test_batch_rollback_preserves_crlf_bytes_on_windows(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

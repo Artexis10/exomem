@@ -33,6 +33,21 @@ from exomem import semantic_contract as semantic_contract_module
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_VAULT = REPO_ROOT / "tests" / "fixtures"
 
+
+def initialize_vault_state_offline(vault_root: Path, *, source: str) -> None:
+    """Initialize one explicitly constructed fixture through the offline seam.
+
+    This is deliberately opt-in rather than an autouse repair: tests that
+    exercise legacy or unready placement must retain the production refusal.
+    """
+    from exomem import state_migration
+
+    authority = state_migration.assert_offline_migration_authority(source=source)
+    state_migration.migrate_vault_state_offline(vault_root, authority=authority)
+    state_migration.reset_state_resolution_cache_for_tests()
+    state_migration.require_vault_state_ready(vault_root)
+
+
 # The benchmark package (benchmarks/membench) deliberately lives outside src/
 # and outside the wheel/sdist; tests reach it via this guarded path insert.
 _BENCHMARKS_DIR = REPO_ROOT / "benchmarks"
@@ -387,6 +402,88 @@ def _stop_leaked_graph_drain():
     graph_drain._DEBT.clear()
 
 
+#: Captured before any test can instrument the filesystem primitives: the
+#: guard below runs in autouse teardown, after test-scoped patches of
+#: `os.scandir`/`os.lstat` may still be mid-unwind, and the guard's own probe
+#: of the REAL platform root must never route through them.
+_REAL_SCANDIR = os.scandir
+_REAL_LSTAT = os.lstat
+
+
+def _state_root_shallow_snapshot(root: Path) -> tuple:
+    """A cheap fingerprint of the real user state root: existence, the root's
+    own mtime, and its immediate children. Deep content writes into a
+    pre-existing per-vault directory escape this — the primary isolation is
+    the injected EXOMEM_STATE_ROOT; this guard is belt-and-braces against a
+    consumer that composes the real platform root itself."""
+    try:
+        info = _REAL_LSTAT(root)
+    except OSError:
+        return ("absent",)
+    try:
+        children = tuple(
+            sorted(
+                (entry.name, entry.stat().st_mtime_ns)
+                for entry in _REAL_SCANDIR(root)
+            )
+        )
+    except OSError:
+        children = ("unreadable",)
+    return ("present", info.st_mtime_ns, children)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_state_root(tmp_path: Path):
+    """No test writes the real user state root (task 1.5 of
+    relocate-machine-local-state, mirroring the EXOMEM_VAULT_PATH rule below).
+
+    Every test runs with EXOMEM_STATE_ROOT injected at a unique sibling of its
+    tmp_path. The sibling is load-bearing: many tests use tmp_path itself as a
+    vault, so nesting the state root below it violates the production placement
+    boundary and makes those tests fail for the fixture's topology. The guard
+    then asserts the real platform default root was not touched: a consumer
+    that composes %LOCALAPPDATA%/XDG itself instead of consulting the
+    `state_paths` seam would write outside the injected root and trip it.
+
+    Deliberately a PRIVATE MonkeyPatch instance: the function-scoped
+    `monkeypatch` fixture is one shared object, so a test that calls
+    `monkeypatch.undo()` mid-test (several do) would strip this isolation
+    along with its own patches and re-point the placement seam at the real
+    platform root for the rest of the test.
+    """
+    private = pytest.MonkeyPatch()
+    state_root = tmp_path.with_name(f"{tmp_path.name}-exomem-state-root")
+    private.setenv("EXOMEM_STATE_ROOT", str(state_root))
+    private.setenv(
+        "EXOMEM_WRITER_LEASE_STATE_DIR",
+        str(state_root / "writer-lease"),
+    )
+    writer_lease_module = None
+    try:
+        try:
+            from exomem import state_paths, writer_lease
+        except ImportError:
+            # Red-first window: the seam module does not exist yet, so nothing
+            # can resolve the real platform root through it either.
+            yield
+            return
+        writer_lease_module = writer_lease
+        writer_lease.reset_managers_for_tests()
+        real_root = state_paths.platform_default_state_root()
+        before = _state_root_shallow_snapshot(real_root)
+        yield
+        after = _state_root_shallow_snapshot(real_root)
+        assert after == before, (
+            f"a test touched the real user state root {real_root} "
+            f"(before={before}, after={after}); every fixture must stay under the "
+            "injected EXOMEM_STATE_ROOT tmpdir"
+        )
+    finally:
+        if writer_lease_module is not None:
+            writer_lease_module.reset_managers_for_tests()
+        private.undo()
+
+
 @pytest.fixture(autouse=True)
 def _process_env_isolation():
     """Restore os.environ after every test.
@@ -609,6 +706,7 @@ def vault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Copy tests/fixtures/ into a tmp dir; return it as the vault root."""
     dest = tmp_path / "vault"
     shutil.copytree(FIXTURE_VAULT, dest)
+    initialize_vault_state_offline(dest, source="canonical vault fixture")
     monkeypatch.setenv("EXOMEM_VAULT_PATH", str(dest))
     # Clear find's in-process cache so previous test runs don't bleed in.
     find_module.clear_cache()

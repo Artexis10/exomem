@@ -29,7 +29,7 @@ FULL_CI_JOBS = {
 #: `retrieval-latency` job) they cover exactly the previous lean suite —
 #: pinned below by test_pr_tiers_partition_the_lean_suite_exactly.
 PR_TIER_JOBS = (
-    ("core-tests", 6, "core"),
+    ("core-tests", 8, "core"),
     ("harness-tests", 4, "harness"),
 )
 

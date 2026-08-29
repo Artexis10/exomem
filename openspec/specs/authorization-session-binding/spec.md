@@ -448,9 +448,13 @@ session, expires all session grants/purposes/withhold tokens bound to them, remo
 the v4 table/columns/indexes, mirrors the active tuple's exact policy-generation source bytes
 to `_Governance` under the cooperative whole-tree fence, recompiles them to prove parity,
 verifies every remaining v3 table against the exact v3 schema, and sets
-`user_version=3`. The old binary SHALL be started only after that proof.
-No in-place application downgrade may ignore v4 rows. After either rollback, a caller
-must open a fresh session under the active release.
+`user_version=3`. Both paths SHALL use the state-placement rollback protocol: calculate
+and publish `D0` before COMMIT, commit the sole terminal receipt-head transition into
+`D1`, align the legacy sidecar to `D1`, then advance the schema fence last. Its immutable
+rollback marker binds schema-fence generation and, for backup restore, exact plan and
+source-store digests so replay does not depend on the retained backup artifact. No
+in-place application downgrade may ignore v4 rows. After either rollback, a caller must
+open a fresh session under the active release.
 
 #### Scenario: Exact v3 migrates to bearer-free v4
 
@@ -476,8 +480,9 @@ must open a fresh session under the active release.
 - **WHEN** operators run the offline v4→v3 rollback path against a copied fixture
 - **THEN** all v4 session-bound authority is closed/expired, the remaining database matches
   the exact v3 schema and receipts, `_Governance` exactly represents the former pointed
-  generation, and the actual v3 binary starts without treating an arbitrary legacy
-  handle as live authority
+  generation, the predecessor sidecar is `D1`-aligned after its initial `D0`
+  publication, and the actual v3 binary starts without treating an arbitrary
+  legacy handle as live authority
 
 ### Requirement: Authorization State Is Bound To One Internal Session
 

@@ -54,7 +54,9 @@ def _sqlite_connect_owned(
 
 
 def store_path(vault_root: Path) -> Path:
-    return vault_root / kb_dirname() / ".deferred-index.sqlite"
+    from . import state_paths
+
+    return state_paths.vault_state_dir(vault_root) / ".deferred-index.sqlite"
 
 
 def _connect_readonly(vault_root: Path) -> sqlite3.Connection:
@@ -1199,7 +1201,9 @@ def _status(vault_root: Path | None, *, table: str) -> dict[str, Any]:
 
 
 def _embedding_sidecar(vault_root: Path) -> Path:
-    return vault_root / kb_dirname() / ".embeddings.sqlite"
+    from . import index_paths
+
+    return index_paths.sidecar_path(vault_root)
 
 
 def _file_identity(path: Path) -> tuple[int, int, int, int]:

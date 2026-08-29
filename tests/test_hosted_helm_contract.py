@@ -94,6 +94,23 @@ def _find(documents: list[dict], kind: str, name: str) -> dict:
     raise AssertionError(f"missing {kind}/{name}")
 
 
+def test_storage_init_env_contract_allows_only_the_two_exact_operator_forms() -> None:
+    """Keep the offline migration exception narrower than the serving env contract."""
+    text = (PLATFORM / "templates" / "tenant-admission.yaml").read_text(encoding="utf-8")
+
+    # One normal init environment entry, or the ordered two-entry offline migration
+    # form.  The value/valueFrom checks make a secret/config-map based lookalike
+    # and an extra/misordered environment entry fail the CEL expression.
+    assert "size(object.spec.containers[0].env) == 1" in text
+    assert "size(object.spec.containers[0].env) == 2" in text
+    assert "object.spec.containers[0].env[0].name == 'EXOMEM_LOG_DIR'" in text
+    assert "object.spec.containers[0].env[0].value == '/dev'" in text
+    assert "!has(object.spec.containers[0].env[0].valueFrom)" in text
+    assert "object.spec.containers[0].env[1].name == 'EXOMEM_HOSTED_OFFLINE_STATE_MIGRATION'" in text
+    assert "object.spec.containers[0].env[1].value == '1'" in text
+    assert "!has(object.spec.containers[0].env[1].valueFrom)" in text
+
+
 def test_platform_dependencies_and_first_party_images_are_immutable() -> None:
     chart = yaml.safe_load((PLATFORM / "Chart.yaml").read_text(encoding="utf-8"))
     dependencies = {item["name"]: item for item in chart["dependencies"]}
@@ -2433,7 +2450,10 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
             "--request-file",
             "/run/exomem/operator-requests/init.json",
         ]
-        assert container["env"] == [{"name": "EXOMEM_LOG_DIR", "value": "/dev"}]
+        assert container["env"] == [
+            {"name": "EXOMEM_LOG_DIR", "value": "/dev"},
+            {"name": "EXOMEM_HOSTED_OFFLINE_STATE_MIGRATION", "value": "1"},
+        ]
     else:
         assert workload["spec"]["template"]["metadata"]["annotations"] == {
             "exomem.io/authorization-session-revision": "a" * 64
@@ -2615,6 +2635,12 @@ def test_cell_schema_rejects_mutable_image_and_non_fixed_limits() -> None:
         "restore",
         "serve",
     ]
+    assert "migrationMode" in schema["required"]
+    assert schema["properties"]["migrationMode"]["enum"] == [
+        "none",
+        "binding-v1-to-v2",
+        "state-root-v1",
+    ]
     assert schema["properties"]["provisionMode"]["enum"] == ["serve", "restore-candidate"]
     assert '"transferHostname"' not in json.dumps(schema["properties"]["routes"])
 
@@ -2681,7 +2707,53 @@ def test_cell_chart_migrate_mode_renders_only_the_bounded_init_job() -> None:
         "DAC_OVERRIDE",
         "FOWNER",
     ]
+    assert "EXOMEM_HOSTED_OFFLINE_STATE_MIGRATION" not in {
+        item["name"] for item in container["env"]
+    }
     assert not any(document.get("kind") == "Service" for document in documents)
+
+
+def test_fresh_initialize_always_enables_empty_state_manifest_creation() -> None:
+    documents = _render(
+        CELL,
+        CELL / "values.initialize.yaml",
+        namespace="cell-alpha-test",
+        extra_args=(
+            "--set",
+            "workloadMode=initialize",
+            "--set",
+            "migrationMode=none",
+        ),
+    )
+
+    job = _find(documents, "Job", "cell-alpha-init")
+    env = {
+        item["name"]: item.get("value")
+        for item in job["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+    assert env["EXOMEM_HOSTED_OFFLINE_STATE_MIGRATION"] == "1"
+
+
+def test_cell_state_root_migration_mode_enables_only_the_offline_state_migrator() -> None:
+    documents = _render(
+        CELL,
+        CELL / "values.initialize.yaml",
+        namespace="cell-alpha-test",
+        extra_args=(
+            "--set",
+            "workloadMode=migrate",
+            "--set",
+            "migrationMode=state-root-v1",
+        ),
+    )
+
+    job = _find(documents, "Job", "cell-alpha-init")
+    env = {
+        item["name"]: item.get("value")
+        for item in job["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+    assert env["EXOMEM_HOSTED_OFFLINE_STATE_MIGRATION"] == "1"
+    assert not any(document.get("kind") == "StatefulSet" for document in documents)
 
 
 def test_cell_chart_rejects_mismatched_runtime_and_provider_cell_ids(tmp_path: Path) -> None:

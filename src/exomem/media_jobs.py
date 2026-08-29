@@ -19,7 +19,6 @@ from pathlib import Path
 from typing import Any
 
 from . import held_fs, reserved_paths
-from .kbdir import kb_dirname
 
 PENDING = "pending"
 RUNNING = "running"
@@ -257,11 +256,15 @@ def is_guarded_sidecar_sharing_violation(
 
 
 def job_store_path(vault_root: Path) -> Path:
-    return vault_root / kb_dirname() / ".media-jobs.sqlite"
+    from . import state_paths
+
+    return state_paths.vault_state_dir(vault_root) / ".media-jobs.sqlite"
 
 
 def worker_lock_path(vault_root: Path) -> Path:
-    return vault_root / kb_dirname() / ".media-worker.lock"
+    from . import state_paths
+
+    return state_paths.vault_state_dir(vault_root) / ".media-worker.lock"
 
 
 @dataclass(frozen=True)
@@ -1013,9 +1016,10 @@ def _sqlite_sidecar_exists(sidecars: tuple[Path, Path]) -> bool:
 
 def _diagnostic_snapshot_rows(
     path: Path,
+    *,
+    vault_root: Path,
 ) -> tuple[list[Any], Any, list[Any], list[Any], list[Any]]:
     target = Path(os.path.abspath(path))
-    vault_root = target.parent.parent
     with reserved_paths._subsystem_authority_scope("media_jobs"):
         with reserved_paths._identity_coordination_scope(
             vault_root,
@@ -1083,7 +1087,9 @@ def status(
         return empty
     try:
         if diagnostic_snapshot:
-            rows, runtime, errors, jobs, reconciliation_rows = _diagnostic_snapshot_rows(path)
+            rows, runtime, errors, jobs, reconciliation_rows = _diagnostic_snapshot_rows(
+                path, vault_root=Path(vault_root)
+            )
         else:
             store = MediaJobStore(vault_root, create=False)
             conn = store._connect(readonly=True)

@@ -2565,6 +2565,7 @@ def test_empty_batch_does_not_mark_a_commit(tmp_path: Path) -> None:
 def test_completed_result_receipt_failure_is_committed_uncertain(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    (tmp_path / "Knowledge Base").mkdir()
     target = tmp_path / "note.md"
     calls = 0
     manager = LeaseManager(LeaseConfig(state_dir=tmp_path / "state"))

@@ -18,8 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeAlias, cast
 
-from .. import reserved_paths
-from ..kbdir import kb_dirname
+from .. import reserved_paths, state_paths
 from . import projected_graph, projected_retrieval, projection_store, projections
 
 SCHEMA_USER_VERSION = 1
@@ -192,8 +191,7 @@ def measurement_store_path(vault_root: Path, family: MeasurementFamilyKey) -> Pa
             "measurement family key is invalid"
         )
     return (
-        Path(vault_root)
-        / kb_dirname()
+        state_paths.vault_state_dir(vault_root)
         / ".authorization-projections"
         / family.namespace_key.namespace_id
         / "measurements"

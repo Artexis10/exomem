@@ -34,6 +34,7 @@ import pytest
 
 from exomem import due_state as due_state_module
 from exomem import find as find_module
+from exomem import state_paths
 from exomem.governance import egress as egress_module
 from exomem.governance.principal import RequestPrincipal, request_scope
 
@@ -169,7 +170,7 @@ def test_a_full_recompute_persists_state_beside_the_review_state(vault: Path) ->
 
     path = due_state_module.state_path(vault)
     assert path.exists()
-    assert path.parent == (vault / "Knowledge Base")
+    assert path.parent == state_paths.vault_state_dir(vault)
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert payload["version"] == due_state_module.SCHEMA_VERSION
     assert payload["computed_on"] == TODAY.isoformat()

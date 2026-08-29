@@ -16,9 +16,11 @@ Built against the repo fixture vault with the same deterministic env as
 from __future__ import annotations
 
 import asyncio
+import shutil
 from pathlib import Path
 
 import pytest
+from conftest import initialize_vault_state_offline
 
 from exomem import commands as commands_module
 from exomem import server as server_module
@@ -27,14 +29,17 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_VAULT = REPO_ROOT / "tests" / "fixtures"
 
 
-def _build_server(monkeypatch: pytest.MonkeyPatch):
+def _build_server(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    vault_root = tmp_path / "annotation-vault"
+    shutil.copytree(FIXTURE_VAULT, vault_root)
+    initialize_vault_state_offline(vault_root, source="MCP annotation fixture")
     monkeypatch.setattr(server_module, "load_dotenv", lambda *a, **k: None)
     monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
     monkeypatch.setenv("EXOMEM_DISABLE_RELEVANCE_CHECK", "1")
     monkeypatch.setenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", "1")
     monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
     monkeypatch.delenv("EXOMEM_DISABLE_TIER2", raising=False)
-    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(FIXTURE_VAULT))
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault_root))
     return server_module.build_server(require_auth=False)
 
 
@@ -48,21 +53,21 @@ def _live_annotations(mcp) -> dict[str, dict | None]:
     return out
 
 
-def test_every_tool_is_annotated(monkeypatch: pytest.MonkeyPatch) -> None:
-    ann = _live_annotations(_build_server(monkeypatch))
+def test_every_tool_is_annotated(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    ann = _live_annotations(_build_server(monkeypatch, tmp_path))
     missing = [name for name, a in ann.items() if not a]
     assert not missing, f"tools missing MCP annotations: {sorted(missing)}"
 
 
-def test_open_world_hint_false_for_all(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_open_world_hint_false_for_all(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     # exomem operates on a closed local vault and reaches no external systems.
-    ann = _live_annotations(_build_server(monkeypatch))
+    ann = _live_annotations(_build_server(monkeypatch, tmp_path))
     open_world = [n for n, a in ann.items() if not a or a.get("openWorldHint") is not False]
     assert not open_world, f"tools not marked closed-world: {sorted(open_world)}"
 
 
-def test_read_only_hint_matches_registry(monkeypatch: pytest.MonkeyPatch) -> None:
-    ann = _live_annotations(_build_server(monkeypatch))
+def test_read_only_hint_matches_registry(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    ann = _live_annotations(_build_server(monkeypatch, tmp_path))
     for cmd in commands_module.PRODUCT_COMMANDS:
         if "mcp" not in cmd.surfaces:
             continue  # note: hand-registered for MCP, checked below
@@ -72,8 +77,10 @@ def test_read_only_hint_matches_registry(monkeypatch: pytest.MonkeyPatch) -> Non
         )
 
 
-def test_destructive_hint_only_for_overwrite_ops(monkeypatch: pytest.MonkeyPatch) -> None:
-    ann = _live_annotations(_build_server(monkeypatch))
+def test_destructive_hint_only_for_overwrite_ops(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    ann = _live_annotations(_build_server(monkeypatch, tmp_path))
     for cmd in commands_module.PRODUCT_COMMANDS:
         if "mcp" not in cmd.surfaces or cmd.read_only:
             continue
@@ -83,16 +90,16 @@ def test_destructive_hint_only_for_overwrite_ops(monkeypatch: pytest.MonkeyPatch
         )
 
 
-def test_ask_memory_is_a_safe_read(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_ask_memory_is_a_safe_read(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     # The public recall command remains a safe read.
-    a = _live_annotations(_build_server(monkeypatch))["ask_memory"]
+    a = _live_annotations(_build_server(monkeypatch, tmp_path))["ask_memory"]
     assert a["readOnlyHint"] is True
     assert a["destructiveHint"] is False
     assert a["openWorldHint"] is False
 
 
-def test_no_hand_registered_tools(monkeypatch: pytest.MonkeyPatch) -> None:
-    ann = _live_annotations(_build_server(monkeypatch))
+def test_no_hand_registered_tools(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    ann = _live_annotations(_build_server(monkeypatch, tmp_path))
     assert set(commands_module.HAND_REGISTERED_EXCEPTIONS) == set()
     assert "mint_upload_token" not in ann
     assert "mint_download_token" not in ann

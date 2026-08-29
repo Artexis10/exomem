@@ -49,6 +49,7 @@ def _clean_env(home: Path, vault: Path) -> dict[str, str]:
             "EXOMEM_DISABLE_FILE_WATCHER": "1",
             "EXOMEM_DISABLE_MODE_WATCH": "1",
             "EXOMEM_CONFIG_PATH": str(home / "exomem-config.json"),
+            "EXOMEM_STATE_ROOT": str(home / "state"),
             # Logs are the one piece of process state `resolve_log_dir()` puts
             # somewhere machine-global rather than under HOME (#569), so
             # isolating HOME is not enough: an installed server started here
@@ -1723,9 +1724,11 @@ def _installed_stdio(args: argparse.Namespace) -> int:
             state=state,
         )
     )
-    refs_sidecar = vault / "Knowledge Base" / ".refs.sqlite"
+    from exomem import epistemic_graph, memory_refs
+
+    refs_sidecar = memory_refs.sidecar_path(vault)
     refs_sidecar.unlink(missing_ok=True)
-    graph_sidecar = vault / "Knowledge Base" / ".graph.sqlite"
+    graph_sidecar = epistemic_graph.sidecar_path(vault)
     graph_sidecar.unlink(missing_ok=True)
     record_item = vault / state["records"]["item_path"]
     item_text = record_item.read_text(encoding="utf-8")

@@ -804,7 +804,10 @@ def test_doctor_unknown_profile_exits_2(capsys) -> None:
 
 
 def _sidecar(vault: Path) -> Path:
-    p = vault / "Knowledge Base" / ".embeddings.sqlite"
+    from exomem import index_paths
+
+    p = index_paths.sidecar_path(vault)
+    p.parent.mkdir(parents=True, exist_ok=True)
     p.touch()
     return p
 

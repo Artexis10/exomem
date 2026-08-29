@@ -707,7 +707,9 @@ def full_release_filter(vault_root: Path) -> Callable[[str], bool]:
     return allowed
 
 
-def _authorize(root: Path, relative: str, *, receipt: bool = False) -> bool:
+def _authorize(
+    root: Path, relative: str, *, receipt: bool = False, policy: Any | None = None
+) -> bool:
     if access.refuse_if_excluded(root, relative):
         return False
     return (
@@ -715,6 +717,7 @@ def _authorize(root: Path, relative: str, *, receipt: bool = False) -> bool:
             root,
             relative,
             receipt_decision="release_authorized" if receipt else None,
+            policy=policy,
         )
         == egress.LEVEL_FULL
     )
@@ -729,14 +732,17 @@ class _LinkProjector:
     admitted: Mapping[str, bool]
     candidate_index_complete: bool | None
     verdicts: dict[str, bool]
+    policy: Any | None
 
     @classmethod
-    def create(cls, root: Path, manifest: collections.CollectionManifest) -> _LinkProjector:
+    def create(
+        cls, root: Path, manifest: collections.CollectionManifest, *, policy: Any | None = None
+    ) -> _LinkProjector:
         # Keep the common numeric/event query path independent of vault-wide
         # link lookup. Even link-bearing collections defer that lookup until a
         # bare title or memory identity actually needs it.
         empty = vault.WikilinkResolver.from_entries(root, ())
-        return cls(root, manifest, empty, {}, {}, None, {})
+        return cls(root, manifest, empty, {}, {}, None, {}, policy)
 
     def _candidate_index_available(self) -> bool:
         if self.candidate_index_complete is not None:
@@ -765,7 +771,7 @@ class _LinkProjector:
             # The resolver's title and identity indexes must not learn from a
             # path that this principal cannot read. Otherwise a hidden name or
             # duplicate identity can change an otherwise public link result.
-            allowed = _authorize(self.root, relative)
+            allowed = _authorize(self.root, relative, policy=self.policy)
             admitted[relative] = allowed
             if not allowed:
                 continue
@@ -901,7 +907,9 @@ class _LinkProjector:
             return self.verdicts[relative]
         if relative in self.admitted and not self.admitted[relative]:
             return self._remember(relative, False)
-        return self._remember(relative, _authorize(self.root, relative, receipt=True))
+        return self._remember(
+            relative, _authorize(self.root, relative, receipt=True, policy=self.policy)
+        )
 
     def _remember(self, target: str, allowed: bool) -> bool:
         if target in self.verdicts:
@@ -961,14 +969,15 @@ def _resolve_released_collection(
     selector: str | Path | collections.CollectionManifest,
     *,
     receipt: bool,
+    policy: Any | None = None,
 ) -> collections.CollectionManifest:
     path = selector.path if isinstance(selector, collections.CollectionManifest) else selector
     manifest = collections.resolve_collection(
         root,
         path,
-        authorize_path=lambda relative: _authorize(root, relative, receipt=receipt),
+        authorize_path=lambda relative: _authorize(root, relative, receipt=receipt, policy=policy),
     )
-    if not _authorize(root, manifest.path, receipt=receipt):
+    if not _authorize(root, manifest.path, receipt=receipt, policy=policy):
         raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
     return manifest
 
@@ -983,7 +992,8 @@ def query_collection(
     """Query released Records only; authorization happens before adapter parsing."""
     root = Path(vault_root)
     with egress.disclosure_boundary(root, "record_query", join_existing=True) as collector:
-        manifest = _resolve_released_collection(root, collection, receipt=True)
+        policy = egress.policy_module.load(root)
+        manifest = _resolve_released_collection(root, collection, receipt=True, policy=policy)
         if manifest.semantic_profile != semantic_profile:
             error_code = (
                 "RECORDS_PROFILE_REQUIRED"
@@ -994,16 +1004,16 @@ def query_collection(
                 error_code,
                 "collection profile is not available",
             )
-        if not _authorize(root, manifest.storage.source, receipt=True):
+        if not _authorize(root, manifest.storage.source, receipt=True, policy=policy):
             raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
-        links = _LinkProjector.create(root, manifest)
+        links = _LinkProjector.create(root, manifest, policy=policy)
         view = kwargs.get("view")
         if view is not None:
             _authorize_saved_view(root, manifest, view, links)
         result = record_formats.query_collection(
             root,
             manifest,
-            authorize_path=lambda path: _authorize(root, path, receipt=True),
+            authorize_path=lambda path: _authorize(root, path, receipt=True, policy=policy),
             project_values=links,
             project_child_value=links.project_presentation_value,
             **kwargs,
