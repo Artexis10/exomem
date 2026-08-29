@@ -8,6 +8,7 @@ that published proof.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import logging
@@ -16,6 +17,7 @@ import sqlite3
 import stat
 import tempfile
 import threading
+import time
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -38,6 +40,16 @@ _ROLLBACK_OPERATIONS = frozenset({
 })
 _LOCK_NAME = ".state-migration.lock"
 _COPY_CHUNK = 4 * 1024 * 1024
+_BOOTSTRAP_LOCK_TIMEOUT_SECONDS = 5.0
+
+
+class _MigrationLockBusy(TimeoutError):
+    """The bounded migration-lock wait expired with the lock still held.
+
+    A distinct type so the bootstrap's contention handling can never claim a
+    genuine `TimeoutError` from filesystem I/O (`ETIMEDOUT` on a network
+    mount raises the same builtin) as lock contention.
+    """
 _MANIFEST_STATES = frozenset({"in-progress", "complete"})
 _FAMILY_STATES = frozenset({"pending", "published", "complete"})
 
@@ -302,12 +314,18 @@ def migration_status(vault_root: Path) -> str:
     return state
 
 
-def require_vault_state_ready(vault_root: Path) -> StateResolution:
-    """Read-only admission gate for service and stateful CLI startup.
+def require_vault_state_ready(
+    vault_root: Path, *, _after_bootstrap: bool = False
+) -> StateResolution:
+    """Admission gate for service and stateful CLI startup.
 
-    This gate never creates a directory, takes the migration lock, copies,
-    unlinks, resumes, adopts, or upgrades state.  Any state that needs one of
-    those transitions receives the same stable offline-required refusal.
+    This gate never copies, unlinks, resumes, adopts, or upgrades family
+    state; any state needing one of those transitions receives the same
+    stable offline-required refusal.  Its single mutation is the fresh
+    bootstrap in `_bootstrap_fresh_state`: when the manifest is absent and
+    both authorities are provably empty, it creates the external root and
+    writes the first empty complete manifest — there are no bytes a refusal
+    could protect, only a first run it would break.
     """
 
     vault_root = Path(vault_root)
@@ -319,10 +337,14 @@ def require_vault_state_ready(vault_root: Path) -> StateResolution:
     try:
         state_paths.validate_hosted_state_directory(state_dir)
     except FileNotFoundError as error:
+        if not _after_bootstrap and _bootstrap_fresh_state(vault_root, state_dir):
+            return require_vault_state_ready(vault_root, _after_bootstrap=True)
         raise StateMigrationOfflineRequired("hosted state directory is absent") from error
 
     manifest = _load_manifest(state_dir, vault_root=vault_root)
     if manifest is None:
+        if not _after_bootstrap and _bootstrap_fresh_state(vault_root, state_dir):
+            return require_vault_state_ready(vault_root, _after_bootstrap=True)
         raise StateMigrationOfflineRequired("migration manifest is absent")
     if (
         manifest.get("governance_rollback") is not None
@@ -342,6 +364,95 @@ def require_vault_state_ready(vault_root: Path) -> StateResolution:
     with _RESOLUTION_LOCK:
         _RESOLUTION_CACHE[key] = resolution
     return resolution
+
+
+def _bootstrap_fresh_state(vault_root: Path, state_dir: Path) -> bool:
+    """Write the first empty complete manifest for a provably-fresh deployment.
+
+    The offline-required refusal exists to protect bytes from being moved,
+    preferred, or deleted without an operator-asserted stop window.  A
+    deployment whose vault carries zero legacy members and whose external
+    root carries zero state has no bytes to protect: refusing it does not
+    fail closed, it fails onboarding (`docker run` boots the server directly
+    against a just-initialized vault).  Only that zero-byte case bootstraps;
+    every other manifest-absent shape keeps the refusal.  The emptiness is
+    re-verified under the migration lock, and — because that lock serializes
+    only new migrators and is never exclusion of an older writer — the
+    manifest write is additionally fenced: both authorities are re-scanned
+    after publishing, and the manifest is rolled back if any bytes appeared.
+    """
+
+    created_root = False
+    admitted = False
+    try:
+        if scan_vault_state(vault_root) or _external_state_present(state_dir):
+            return False
+        created_root = not state_dir.exists()
+        state_paths.ensure_vault_state_dir(vault_root)
+        with _migration_lock(
+            state_dir, timeout_seconds=_BOOTSTRAP_LOCK_TIMEOUT_SECONDS
+        ):
+            if _load_manifest(state_dir, vault_root=vault_root) is not None:
+                return True
+            if not scan_vault_state(vault_root) and not _external_state_present(
+                state_dir
+            ):
+                manifest = _new_manifest(vault_root, _descriptor_ids())
+                manifest["state"] = "complete"
+                for family in manifest["families"].values():
+                    family["status"] = "complete"
+                _write_manifest(state_dir, manifest)
+                # The migration lock serializes only new migrators; an old
+                # release that ignores it can land legacy bytes between the
+                # re-verification above and the manifest write. Fence the
+                # write: re-scan both authorities after publishing and roll
+                # the manifest back rather than leave a false-complete
+                # authority whose remediation would discard foreign bytes.
+                # A scan that cannot run verified nothing — treat "cannot
+                # verify" as "did not verify" and retract.
+                try:
+                    landed = bool(scan_vault_state(vault_root)) or bool(
+                        _external_state_present(state_dir)
+                    )
+                except (OSError, StateMigrationManifestError):
+                    landed = True
+                if landed:
+                    _manifest_path(state_dir).unlink(missing_ok=True)
+                    _fsync_directory(state_dir)
+                else:
+                    admitted = True
+    except _MigrationLockBusy:
+        log.error(
+            "fresh-state bootstrap refused: another migrator holds the "
+            "migration lock"
+        )
+        return False
+    except (OSError, StateMigrationManifestError):
+        # An uninspectable side is not proof of absence; keep the refusal.
+        _discard_bootstrap_residue(state_dir, created_root)
+        return False
+    if admitted:
+        log.info("fresh machine-local state root bootstrapped for startup admission")
+        return True
+    _discard_bootstrap_residue(state_dir, created_root)
+    return False
+
+
+def _discard_bootstrap_residue(state_dir: Path, created_root: bool) -> None:
+    """Best-effort removal of a root the refused bootstrap itself created.
+
+    Only the empty directory is ever removed — `rmdir`, never a recursive
+    delete — so a lock file another process may hold open, and anything
+    unexpected, keeps the directory. A failure to remove is swallowed: the
+    residue is manifest bookkeeping that no emptiness proof counts as state.
+    """
+
+    if not created_root:
+        return
+    try:
+        os.rmdir(state_dir)
+    except OSError:
+        pass
 
 
 def migrate_vault_state_offline(
@@ -1163,7 +1274,7 @@ def _write_manifest_cas(state_dir: Path, manifest: Mapping[str, Any], *, expecte
 
 
 @contextmanager
-def governance_rollback_session(vault_root: Path) -> Iterator["GovernanceRollbackSession"]:
+def governance_rollback_session(vault_root: Path) -> Iterator[GovernanceRollbackSession]:
     """One held migration-lock session for v1 begin or v2 replay coordinators."""
     root = Path(vault_root)
     state_dir = state_paths.vault_state_dir(root)
@@ -1288,6 +1399,20 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
+def _is_manifest_bookkeeping(name: str) -> bool:
+    """Manifest, lock, and manifest staging files are never external state.
+
+    `_write_manifest` stages through `.{MANIFEST_NAME}.<random>.tmp` in the
+    state root; a process killed mid-write orphans that staging file with no
+    chance to clean it up. Counting the orphan as state would permanently
+    refuse the very fresh deployment whose crash created it.
+    """
+
+    if name in {MANIFEST_NAME, _LOCK_NAME}:
+        return True
+    return name.startswith(f".{MANIFEST_NAME}.") and name.endswith(".tmp")
+
+
 def _external_state_present(state_dir: Path) -> bool:
     try:
         entries = os.scandir(state_dir)
@@ -1296,11 +1421,22 @@ def _external_state_present(state_dir: Path) -> bool:
     except OSError as error:
         raise OSError("external state root cannot be inspected") from error
     with entries:
-        return any(entry.name not in {MANIFEST_NAME, _LOCK_NAME} for entry in entries)
+        return any(not _is_manifest_bookkeeping(entry.name) for entry in entries)
 
 
 @contextmanager
-def _migration_lock(state_dir: Path) -> Iterator[None]:
+def _migration_lock(
+    state_dir: Path, *, timeout_seconds: float | None = None
+) -> Iterator[None]:
+    """Serialize new migrators; optionally give up after a bounded wait.
+
+    `timeout_seconds=None` blocks until acquired — the offline migrator's
+    behavior, where the operator asserted the stop window and waiting for a
+    sibling migrator is correct. Startup admission passes a bounded budget
+    instead: startup must never block indefinitely on a lock, so contention
+    raises `TimeoutError` and the caller refuses.
+    """
+
     path = Path(state_dir) / _LOCK_NAME
     handle = path.open("a+b")
     locked = False
@@ -1311,16 +1447,49 @@ def _migration_lock(state_dir: Path) -> Iterator[None]:
             handle.flush()
             os.fsync(handle.fileno())
         handle.seek(0)
+        deadline = (
+            None if timeout_seconds is None else time.monotonic() + timeout_seconds
+        )
         if os.name == "nt":
             import msvcrt
 
-            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
-            locked = True
+            if deadline is None:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+                locked = True
+            else:
+                while True:
+                    try:
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                        locked = True
+                        break
+                    except OSError as error:
+                        # Only contention retries; a genuine lock-machinery
+                        # failure must not be diagnosed as a held lock.
+                        if error.errno not in (errno.EACCES, errno.EDEADLK):
+                            raise
+                        if time.monotonic() >= deadline:
+                            raise _MigrationLockBusy(
+                                "the state migration lock is held by another migrator"
+                            ) from None
+                        time.sleep(0.2)
         else:
             import fcntl
 
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            locked = True
+            if deadline is None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                locked = True
+            else:
+                while True:
+                    try:
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        locked = True
+                        break
+                    except BlockingIOError:
+                        if time.monotonic() >= deadline:
+                            raise _MigrationLockBusy(
+                                "the state migration lock is held by another migrator"
+                            ) from None
+                        time.sleep(0.2)
         yield
     finally:
         try:

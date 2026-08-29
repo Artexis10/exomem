@@ -157,8 +157,10 @@ def _hosted_state_root_for(directory: Path) -> Path | None:
 def validate_hosted_state_directory(directory: Path) -> None:
     """Read-only, held validation of an existing hosted vault-state leaf.
 
-    Ordinary startup must never create or repair state.  When hosted mode is
-    bound, retain the provisioned root and open both descendant components
+    Ordinary startup never creates or repairs family state; the readiness
+    gate's fresh bootstrap is the one admission that creates anything, and it
+    writes only the first empty manifest over proven emptiness.  When hosted
+    mode is bound, retain the provisioned root and open both descendant components
     relative to that handle with no-follow semantics.  Missing components are
     reported distinctly so the readiness gate can issue its stable offline
     migration refusal.

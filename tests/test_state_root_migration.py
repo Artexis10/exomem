@@ -1757,3 +1757,263 @@ def test_target_adjacent_scratch_is_not_migrated(tmp_path: Path) -> None:
     state_dir = state_paths.vault_state_dir(vault)
     assert not (state_dir / batch.name).exists()
     assert not (state_dir / held.name).exists()
+
+
+def test_fresh_deployment_admits_without_offline_migration(tmp_path: Path) -> None:
+    """A provably-fresh deployment admits directly: zero bytes on either side.
+
+    The docker onboarding path boots the server against a just-initialized
+    vault with no external root and no manifest anywhere. There is nothing an
+    offline stop window could protect, so the read-only gate bootstraps the
+    first empty complete manifest itself instead of refusing.
+    """
+    from exomem import state_migration, state_paths
+    from exomem.kbdir import kb_dirname
+
+    vault = tmp_path / "vault"
+    (vault / kb_dirname() / "Notes").mkdir(parents=True)
+    (vault / kb_dirname() / "Notes" / "a-note.md").write_text("# note\n", encoding="utf-8")
+    _reset_resolution_cache()
+
+    resolution = state_migration.require_vault_state_ready(vault)
+
+    assert resolution.state_dir == state_paths.vault_state_dir(vault)
+    assert resolution.dual_state is False
+    manifest = json.loads(
+        (resolution.state_dir / state_migration.MANIFEST_NAME).read_text(encoding="utf-8")
+    )
+    assert manifest["state"] == "complete"
+    assert manifest["vault_identity"] == state_paths.vault_state_key(vault)
+    # The bootstrap is idempotent and the cached resolution stays admissible.
+    assert state_migration.require_vault_state_ready(vault) == resolution
+
+
+def test_admission_still_refuses_legacy_vault_state_without_manifest(tmp_path: Path) -> None:
+    """Legacy in-vault bytes without a manifest keep the offline-required refusal."""
+    from exomem import state_migration
+    from exomem.kbdir import kb_dirname
+
+    vault = tmp_path / "vault"
+    kb = vault / kb_dirname()
+    kb.mkdir(parents=True)
+    (kb / ".governance.sqlite").write_bytes(b"legacy-governance-bytes")
+    _reset_resolution_cache()
+
+    with pytest.raises(state_migration.StateMigrationOfflineRequired):
+        state_migration.require_vault_state_ready(vault)
+    assert (kb / ".governance.sqlite").read_bytes() == b"legacy-governance-bytes"
+
+
+def test_admission_still_refuses_external_state_without_manifest(tmp_path: Path) -> None:
+    """External-root bytes without a manifest are unexplained: refuse, never bless."""
+    from exomem import state_migration, state_paths
+    from exomem.kbdir import kb_dirname
+
+    vault = tmp_path / "vault"
+    (vault / kb_dirname()).mkdir(parents=True)
+    state_dir = state_paths.vault_state_dir(vault)
+    state_dir.mkdir(parents=True)
+    (state_dir / ".graph.sqlite").write_bytes(b"unexplained-external-bytes")
+    _reset_resolution_cache()
+
+    with pytest.raises(state_migration.StateMigrationOfflineRequired):
+        state_migration.require_vault_state_ready(vault)
+    assert (state_dir / ".graph.sqlite").read_bytes() == b"unexplained-external-bytes"
+
+
+def test_bootstrap_fences_state_that_lands_after_the_manifest_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The migration lock is not exclusion of an older writer: bytes that land
+    after the bootstrap's manifest write must roll the manifest back, never
+    leave a false-complete authority whose remediation discards them."""
+    from exomem import state_migration, state_paths
+    from exomem.kbdir import kb_dirname
+
+    vault = tmp_path / "vault"
+    kb = vault / kb_dirname()
+    kb.mkdir(parents=True)
+    _reset_resolution_cache()
+
+    real_scan = state_migration.scan_vault_state
+    calls = {"n": 0}
+
+    def racing_scan(vault_root: Path) -> dict[str, tuple[Path, ...]]:
+        calls["n"] += 1
+        if calls["n"] >= 3:  # pre-lock, under-lock pass; the fence sees the race
+            return {"governance-store": (kb / ".governance.sqlite",)}
+        return real_scan(vault_root)
+
+    monkeypatch.setattr(state_migration, "scan_vault_state", racing_scan)
+
+    with pytest.raises(state_migration.StateMigrationOfflineRequired):
+        state_migration.require_vault_state_ready(vault)
+
+    state_dir = state_paths.vault_state_dir(vault)
+    assert not (state_dir / state_migration.MANIFEST_NAME).exists(), (
+        "a lost old-writer race left a false-complete manifest behind"
+    )
+
+
+def test_bootstrap_under_lock_recheck_catches_state_between_scan_and_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Task 2.11's under-lock re-verification: an unclassified external entry
+    that lands between the pre-lock scan and the lock keeps the refusal, and
+    keeps it WITHOUT ever publishing a manifest — the write-fence would also
+    retract, but publishing a complete authority over known-dirty state even
+    transiently is what the under-lock check exists to prevent."""
+    from exomem import state_migration, state_paths
+    from exomem.kbdir import kb_dirname
+
+    vault = tmp_path / "vault"
+    (vault / kb_dirname()).mkdir(parents=True)
+    state_dir = state_paths.vault_state_dir(vault)
+    state_dir.mkdir(parents=True)
+    _reset_resolution_cache()
+
+    real_load = state_migration._load_manifest
+    calls = {"n": 0}
+
+    def racing_load(target: Path, *, vault_root: Path):
+        calls["n"] += 1
+        if calls["n"] == 2:  # the bootstrap's under-lock manifest read
+            (Path(target) / "stray.bin").write_bytes(b"foreign-bytes")
+        return real_load(target, vault_root=vault_root)
+
+    monkeypatch.setattr(state_migration, "_load_manifest", racing_load)
+    real_write = state_migration._write_manifest
+    writes: list[Path] = []
+
+    def spying_write(target: Path, manifest) -> None:
+        writes.append(Path(target))
+        real_write(target, manifest)
+
+    monkeypatch.setattr(state_migration, "_write_manifest", spying_write)
+
+    with pytest.raises(state_migration.StateMigrationOfflineRequired):
+        state_migration.require_vault_state_ready(vault)
+
+    assert not (state_dir / state_migration.MANIFEST_NAME).exists()
+    assert (state_dir / "stray.bin").read_bytes() == b"foreign-bytes"
+    assert writes == [], (
+        "the under-lock re-check must refuse BEFORE any manifest is published"
+    )
+
+
+def test_orphaned_manifest_staging_temp_does_not_brick_fresh_admission(
+    tmp_path: Path,
+) -> None:
+    """A crash during `_write_manifest` orphans `.{MANIFEST}.*.tmp` staging in
+    the state root; that bookkeeping must never count as external state, or
+    the crashed fresh deployment can never admit again."""
+    from exomem import state_migration, state_paths
+    from exomem.kbdir import kb_dirname
+
+    vault = tmp_path / "vault"
+    (vault / kb_dirname()).mkdir(parents=True)
+    state_dir = state_paths.vault_state_dir(vault)
+    state_dir.mkdir(parents=True)
+    stray = state_dir / f".{state_migration.MANIFEST_NAME}.deadbeef.tmp"
+    stray.write_bytes(b"interrupted staging bytes")
+    _reset_resolution_cache()
+
+    resolution = state_migration.require_vault_state_ready(vault)
+
+    assert resolution.dual_state is False
+    manifest = json.loads(
+        (state_dir / state_migration.MANIFEST_NAME).read_text(encoding="utf-8")
+    )
+    assert manifest["state"] == "complete"
+
+
+def test_bootstrap_refuses_promptly_when_the_migration_lock_is_held(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Startup must never block unboundedly on the migration lock: contention
+    refuses within the bounded budget instead of hanging the boot."""
+    import time as time_module
+
+    from exomem import state_migration, state_paths
+    from exomem.kbdir import kb_dirname
+
+    vault = tmp_path / "vault"
+    (vault / kb_dirname()).mkdir(parents=True)
+    state_dir = state_paths.vault_state_dir(vault)
+    state_dir.mkdir(parents=True)
+    _reset_resolution_cache()
+    monkeypatch.setattr(state_migration, "_BOOTSTRAP_LOCK_TIMEOUT_SECONDS", 0.5)
+
+    held = threading.Event()
+    release = threading.Event()
+
+    def holder() -> None:
+        with state_migration._migration_lock(state_dir):
+            held.set()
+            release.wait(timeout=30)
+
+    thread = threading.Thread(target=holder, daemon=True)
+    thread.start()
+    assert held.wait(timeout=10), "lock holder thread never acquired the lock"
+    try:
+        started = time_module.monotonic()
+        with pytest.raises(state_migration.StateMigrationOfflineRequired):
+            state_migration.require_vault_state_ready(vault)
+        elapsed = time_module.monotonic() - started
+        assert elapsed < 5, f"bounded lock wait took {elapsed:.1f}s"
+    finally:
+        release.set()
+        thread.join(timeout=10)
+
+
+def test_bootstrap_retracts_the_manifest_when_the_fence_scan_itself_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fence scan that cannot run verified nothing: the just-published
+    manifest must be retracted, never left as a false-complete authority."""
+    from exomem import state_migration, state_paths
+    from exomem.kbdir import kb_dirname
+
+    vault = tmp_path / "vault"
+    (vault / kb_dirname()).mkdir(parents=True)
+    _reset_resolution_cache()
+
+    real_scan = state_migration.scan_vault_state
+    calls = {"n": 0}
+
+    def failing_fence_scan(vault_root: Path) -> dict[str, tuple[Path, ...]]:
+        calls["n"] += 1
+        if calls["n"] >= 3:  # pre-lock and under-lock pass; the fence's scan dies
+            raise OSError("vault became uninspectable during the fence")
+        return real_scan(vault_root)
+
+    monkeypatch.setattr(state_migration, "scan_vault_state", failing_fence_scan)
+
+    with pytest.raises(state_migration.StateMigrationOfflineRequired):
+        state_migration.require_vault_state_ready(vault)
+
+    state_dir = state_paths.vault_state_dir(vault)
+    assert not (state_dir / state_migration.MANIFEST_NAME).exists(), (
+        "an unverifiable fence left a false-complete manifest behind"
+    )
+
+
+def test_bootstrap_that_cannot_publish_a_manifest_refuses_rather_than_recursing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The re-entry after a bootstrap is bounded: when the written manifest is
+    not visible to the next read, the gate refuses instead of re-bootstrapping
+    forever."""
+    from exomem import state_migration
+    from exomem.kbdir import kb_dirname
+
+    vault = tmp_path / "vault"
+    (vault / kb_dirname()).mkdir(parents=True)
+    _reset_resolution_cache()
+
+    monkeypatch.setattr(
+        state_migration, "_write_manifest", lambda state_dir, manifest: None
+    )
+
+    with pytest.raises(state_migration.StateMigrationOfflineRequired):
+        state_migration.require_vault_state_ready(vault)

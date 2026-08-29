@@ -56,17 +56,43 @@ remain under a quiescent vault.
 ### Requirement: State migration requires explicit offline authority and is never lossy
 
 Before a service or stateful CLI consumer opens an external-state family, it
-SHALL call a read-only readiness gate. That gate SHALL NOT create directories,
-copy or delete bytes, take the migration lock, resume interrupted work, adopt an
-authority, or upgrade a manifest. It SHALL refuse with the stable path-free
+SHALL call a read-only readiness gate. That gate SHALL NOT copy or delete
+family bytes, resume interrupted work, adopt an authority, or upgrade a
+manifest. It SHALL refuse with the stable path-free
 `STATE_MIGRATION_OFFLINE_REQUIRED` code when the manifest is absent,
 in-progress, stale relative to the descriptor registry, complete while any
 legacy duplicate remains, or carries an active or complete governance rollback
-marker.
+marker — with one bootstrap exception: when the manifest is absent, the vault
+carries zero legacy external-state members, and the external root carries zero
+state, the gate SHALL admit by creating the external root and durably writing
+the first empty complete manifest under the migration lock, re-verifying both
+emptiness proofs under that lock before writing. Because that lock is never
+exclusion of an older writer, the bootstrap SHALL additionally fence the
+manifest write: re-scan both authorities after publishing and durably roll the
+manifest back if any state appeared, keeping the refusal. The bootstrap SHALL
+acquire the migration lock with a bounded wait and refuse on contention rather
+than block startup, and its own bookkeeping (manifest, lock file, manifest
+staging temporaries) SHALL never count as external state. A refusal there
+protects no bytes and instead fails first-run onboarding (a container boots
+the server directly over a just-initialized vault). An uninspectable side is
+not proof of absence and SHALL keep the refusal; every other manifest-absent
+shape SHALL keep the refusal.
+
+#### Scenario: A provably-fresh deployment admits without offline ceremony
+
+- **WHEN** a service or stateful CLI starts over a vault with zero legacy external-state members, an external root holding no state (or no root at all), and no migration manifest
+- **THEN** the readiness gate creates the external root and durably writes the first empty complete manifest under the migration lock
+- **AND** startup admits and builds regenerable state fresh in the external root
+- **AND** a legacy member, unexplained external state, or an uninspectable side observed before or under the lock keeps the `STATE_MIGRATION_OFFLINE_REQUIRED` refusal
+- **AND** state that lands after the manifest write is fenced: the bootstrap re-scans both authorities, durably rolls the manifest back, and keeps the refusal
 
 All state placement mutation SHALL require an explicit offline migration
 authority and SHALL be reachable only through
-`exomem maintain --migrate-state --offline`. Deployment SHALL prove every
+`exomem maintain --migrate-state --offline` — the fresh bootstrap above is the
+single exception, and it is not placement mutation: it moves, copies, and
+deletes no family bytes, publishes only the first empty complete manifest over
+proven emptiness, and un-publishes that manifest when the proof is invalidated.
+Deployment SHALL prove every
 legacy writer stopped independently of the migration lock; that lock serializes
 only new migrators and SHALL NOT be treated as exclusion of an older writer.
 The offline migrator SHALL durably record its versioned manifest and per-family
@@ -77,9 +103,10 @@ invalid manifests, and unexplained dual authority SHALL fail closed.
 
 #### Scenario: Ordinary startup refuses without mutating legacy state
 
-- **WHEN** a service or stateful CLI starts over a vault whose migration manifest is absent, in-progress, or stale
+- **WHEN** a service or stateful CLI starts over a vault whose migration manifest is in-progress or stale, or absent while legacy in-vault members or external state exist
 - **THEN** it refuses with `STATE_MIGRATION_OFFLINE_REQUIRED`
-- **AND** it does not create the external root, copy or unlink a source, resume progress, or rewrite the manifest
+- **AND** it does not copy or unlink a source, resume progress, or rewrite the manifest
+- **AND** it leaves no external root behind beyond, at worst, a refused bootstrap attempt's empty directory and released lock file, which never count as state
 
 #### Scenario: A legacy WAL writer remains authoritative until the stop window
 
@@ -217,7 +244,7 @@ invalid manifests, and unexplained dual authority SHALL fail closed.
 #### Scenario: An adopted vault regenerates on a new machine
 
 - **WHEN** a vault is moved to a machine that has no state root for it
-- **THEN** the explicit offline initialization writes a complete empty manifest
+- **THEN** the explicit offline initialization writes a complete empty manifest, or the readiness gate's fresh-deployment bootstrap writes the same manifest when startup arrives first over the proven-empty pair
 - **AND** the admitted system builds fresh state from vault content for every regenerable family without requiring the old machine's runtime state
 
 ### Requirement: Deployment proves an offline writer-free transition

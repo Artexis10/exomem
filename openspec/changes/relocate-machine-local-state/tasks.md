@@ -87,6 +87,13 @@
       phase (or retains non-resumable `starting`). Make hosted rollout prove
       fresh zero-pod state and return route/commit failures to target-image zero
       with routes closed.
+- [x] 2.11 Admit provably-fresh deployments without offline ceremony: when the
+      manifest is absent and both the vault legacy scan and the external root
+      are provably empty, the readiness gate bootstraps the first empty
+      complete manifest under the migration lock (re-verifying emptiness under
+      the lock); every other manifest-absent shape keeps the refusal. Repairs
+      first-run onboarding — the docker smoke boots the server directly over a
+      just-initialized vault and fail-closed startup broke it deterministically.
 
 ## 3. Verification and delivery
 
