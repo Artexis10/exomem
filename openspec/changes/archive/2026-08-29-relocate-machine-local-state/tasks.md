@@ -97,15 +97,22 @@
 
 ## 3. Verification and delivery
 
-- [ ] 3.1 Focused placement, migration, hosted, portability, privacy and
+- [x] 3.1 Focused placement, migration, hosted, portability, privacy and
       publication-atomicity suites + lint + strict OpenSpec validation, including
       the current D0/D1 governance rollback crash matrix and real old-v3 proof.
-- [ ] 3.2 Independent adversarial review of the current rollback implementation
+- [x] 3.2 Independent adversarial review of the current rollback implementation
       and its D0/D1/fence evidence; resolve findings.
-- [ ] 3.3 Release and deploy to personal and POLLY cells; verify exact package
+- [x] 3.3 Release and deploy to personal and POLLY cells; verify exact package
       and service process, path-free health/readiness, detailed doctor state,
       clean quiescent leftover scan, restart durability, and real retrieval.
-- [ ] 3.4 Unpause the personal Knowledge Base Syncthing folder only after the
+      (0.65.0 released and deployed 2026-08-29: both cells report
+      version=0.65.0, placement=external-state, migration=complete, readiness
+      200 with graph_sync current; the personal cell recovered from a cold
+      stop with a malformed graph checkpoint to ready within the bounded
+      window. Doctor detail was captured during the migration window; the
+      user-token doctor limitation against a service-owned root is filed as
+      a follow-up defect, #933.)
+- [x] 3.4 Unpause the personal Knowledge Base Syncthing folder only after the
       migrated cell is quiescent; verify no persistent state reappears and the
       cell continues serving steadily while sync is active.
-- [ ] 3.5 Sync and archive this change after shipped evidence is complete.
+- [x] 3.5 Sync and archive this change after shipped evidence is complete.
