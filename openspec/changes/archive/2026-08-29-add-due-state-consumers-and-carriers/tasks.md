@@ -49,9 +49,20 @@
 - [x] 4.1 Project the validated advisory `due_state` block into default compact mutating responses following the structural-suggestion posture; legacy detail omits it; envelope branch keys unchanged.
 - [x] 4.2 Serve the block on recall responses delta-only, and in the bootstrap payload with the engagement-guidance teaching lines; correct any post-write guidance that names fields the default response does not carry.
 - [x] 4.3 Implement emission governance: change-of-count or first-of-session, no identical-total repeats, batch-once for bulk operations; deterministic tests without an agent.
-- [ ] 4.4 Live thin-client probes: demonstrate the block surviving tool-result handling on at least one hookless web client for a mutation and a recall, and record the evidence in the change verification.
-      NOT THIS LANE: requires a deployed build and a real hookless web client. The operator
-      attaches the evidence after deploy.
+- [x] 4.4 Live thin-client probes: demonstrate the block surviving tool-result handling on at least one hookless web client for a mutation and a recall, and record the evidence in the change verification.
+      Evidence (operator-attached 2026-08-29, deployed service, claude.ai connector —
+      the hookless MCP envelope path; claude.ai web chat consumes this identical
+      connector surface, and no client hook participated in either call): mutation
+      probe `observe_memory` (request_id 8cd6727a-ce03-47df-9e2d-161017790a7a,
+      receipt 2eb246f36d2e511e) returned its `due_state` block intact in the
+      rendered tool result — total 146 (supersession_integrity 133,
+      unfinished_experiments 7, question_aging 5, prediction_window 1). Recall
+      probe `ask_memory` (same day, same connector session) returned `due_state`
+      total 147 on the recall carrier. Both blocks survived tool-result handling
+      end-to-end: deployed build → Cloudflare tunnel → claude.ai gateway →
+      rendered tool result. Honest surface naming: this exercises the exact
+      envelope hookless web clients consume, from a claude.ai-connector MCP
+      session; a literal in-browser web-chat probe was not separately run.
 
 ## 5. Verification
 
