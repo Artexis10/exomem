@@ -770,11 +770,9 @@ def op_bootstrap(
                     "title-first citation"
                 ),
                 "reason in the agent",
-                "use connect_memory(operation='suggest-links' or 'suggest-relations') before important compiled writes",
-                "remember or replace_memory for page-level conclusions; observe_memory for one semantic unit; edit_memory for other small page corrections",
                 (
-                    "read the returned warnings and follow up on unresolved links "
-                    "or duplicate warnings; write_feedback needs "
+                    "after a write, read the returned warnings and follow up on "
+                    "unresolved links or duplicate warnings; write_feedback needs "
                     "response_detail='full', and suggestions additionally need "
                     "remember(suggestions=true)"
                 ),
@@ -843,27 +841,29 @@ def op_bootstrap(
                 "review_reason": "every review decision records WHY as a closed code: lead the `why` with intentional:, false_positive:, handled:, deferred:, or too_frequent: followed by the free text. Anything else records unspecified",
                 "family_disposition": "when the user asks to stop hearing about a KIND of signal, quiet that family rather than lowering prominence, which silences everything: triage_memory(ref='exomem://review/family/<family>', action='quiet'|'off'|'normal', why='<code>: ...'). quiet drops it from the default review union and every carrier; off also drops it from explicit category review; normal restores it",
                 "family_disposition_reading": "a quiet family is silent, not clean. It stays reviewable on request, review_memory(mode='dispositions') lists what is quiet and why, and the audit still measures it — so a due-state block that omits a family is never evidence that family has nothing due",
-                # FULL only, and the omission from compact is a decision, not an
-                # oversight: compact sits 24 bytes under a ceiling whose own
-                # docstring pre-commits the next addition to TRIMMING compact
-                # rather than raising it. Carrying this clause in compact is the
-                # queued compact-bootstrap trim's to spend, so the byte-identical
-                # compact payload is pinned by test rather than left to drift.
-                **(
-                    {
-                        "destination_choice": (
-                            "choosing the destination is part of writing, not a reaction to an "
-                            "advisory. When a coherent durable thread emerges in conversation that "
-                            "sits outside the current page's declared scope, search for a focused "
-                            "existing destination and link it, or create one, at write time. "
-                            "Post-write structural advisories are the safety net for routing that "
-                            "was missed, never the primary mechanism: a page left to accumulate "
-                            "structural debt until a detector speaks has already cost the reader "
-                            "what the routing would have given them."
-                        )
-                    }
-                    if profile != "compact"
-                    else {}
+                # Carried by EVERY profile. It was full-only while compact sat 24
+                # bytes under its ceiling; the queued compact-bootstrap trim has
+                # since paid for it out of redundancy elsewhere in the payload, and
+                # compact is the payload a hookless client receives, which is the
+                # surface with no detector-aware skill behind it. Compact states
+                # the same rule in fewer words -- both halves, the write-time
+                # routing act and the advisory as the net rather than the
+                # mechanism; full keeps its own wording unchanged.
+                "destination_choice": (
+                    "choose the destination at write time: when a coherent durable thread "
+                    "emerges outside the current page's declared scope, search for a focused "
+                    "existing destination, or create one, and link it. Post-write structural "
+                    "advisories are the safety net for missed routing, never the primary "
+                    "mechanism"
+                    if profile == "compact"
+                    else "choosing the destination is part of writing, not a reaction to an "
+                    "advisory. When a coherent durable thread emerges in conversation that "
+                    "sits outside the current page's declared scope, search for a focused "
+                    "existing destination and link it, or create one, at write time. "
+                    "Post-write structural advisories are the safety net for routing that "
+                    "was missed, never the primary mechanism: a page left to accumulate "
+                    "structural debt until a detector speaks has already cost the reader "
+                    "what the routing would have given them."
                 ),
             },
             "note_type_recipes": {
@@ -969,14 +969,10 @@ def op_bootstrap(
                 "args": {"detail": "compact", "rerank": False},
                 "when": "normal cheap product recall",
             },
-            "metadata_lookup": {
-                "tool": "ask_memory",
-                "args": {"detail": "compact", "rerank": False},
-                "when": "caller needs the richer find filters or compact stubs",
-            },
             "reasoning_lookup": {
                 "tool": "ask_memory",
                 "args": {"deep": True},
+                "when": "synthesis over bounded context",
             },
             "adopt_existing_vault": {
                 "tool": "adopt_vault",
@@ -1018,14 +1014,6 @@ def op_bootstrap(
             },
         },
         "performance_profiles": {
-            "normal": {
-                "ask_memory_args": {"detail": "compact", "rerank": False},
-                "interpretation": "cheap product recall; follow with read_memory if needed",
-            },
-            "reasoning": {
-                "ask_memory_args": {"deep": True},
-                "interpretation": "bounded context assembly for synthesis",
-            },
             "diagnostics": {
                 "ask_memory_args": {"include_timings": True, "rerank": True},
                 "interpretation": (
@@ -1073,11 +1061,7 @@ def op_bootstrap(
                 },
             },
             "retry_examples": [
-                "try synonyms and singular/plural forms",
-                "try adjacent domain terms",
-                "try scope='vault' if Knowledge Base recall is sparse",
                 "use adopt_vault(mode='scan-only') before proposing migration/copy actions",
-                "try ask_memory(deep=true) for synthesis instead of many read_memory calls",
             ],
         },
         "product_commands": product_tool_catalog(

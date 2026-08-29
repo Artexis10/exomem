@@ -184,6 +184,105 @@ from exomem import commands
 #:
 #: 24 bytes is not headroom. The next addition trims or argues, and this branch
 #: has no claim on the argument: it spent 79 of the 103 bytes main left.
+#:
+#: TRIMMED, and this time the trim is the whole change rather than the price of
+#: one. The pre-write destination-choice clause landed in the FULL contract only
+#: and the canonical spec recorded the hook in as many words -- "the compact
+#: payload remains byte-identical until the queued compact-bootstrap trim admits
+#: the clause" -- with a test pinning that absence so it could not drift. This is
+#: that trim. The clause is now carried by every profile, and the ceiling did not
+#: move.
+#:
+#: Method is the one the two entries above set, and nothing here departs from it:
+#: bytes come back from REDUNDANCY -- text the payload already states somewhere
+#: else -- and pins moved WITH their text rather than being loosened around it.
+#: Six passages, 864 bytes, each measured on the final tree by restoring it alone:
+#:
+#:   workflow.loop suggest-links step       105  the same call is
+#:                                               `authoring_contract.canonical_loop`
+#:                                               step 5 on the draft, and
+#:                                               `preflight.connect_memory` names it
+#:                                               as the standard pre-write check
+#:   workflow.loop write-routing step       141  the four routes it listed ARE
+#:                                               `authoring_contract.route_by_intent`,
+#:                                               and each of the four is separately
+#:                                               pinned there
+#:   three retry_examples                   127  synonyms, adjacent terms and
+#:                                               scope='vault' are `workflow.miss_rule`,
+#:                                               which states all three as the rule
+#:                                               rather than as examples of it. One
+#:                                               fragment went with them that miss_rule
+#:                                               does NOT restate -- see below
+#:   one retry_example                       77  deep=true for synthesis is
+#:                                               canonical_loop step 2 and
+#:                                               `tool_defaults.reasoning_lookup`
+#:   tool_defaults.metadata_lookup          156  the same tool with byte-identical args
+#:                                               as `normal_lookup`; the richer filters
+#:                                               it pointed at are spelled out in
+#:                                               `search_guidance.semantic_recall`
+#:   performance_profiles normal, reasoning 258  each repeated one `tool_defaults`
+#:                                               row's args. `normal` also restated
+#:                                               that row's `when`; `reasoning` did
+#:                                               not, because that row carried no
+#:                                               `when` at all -- its interpretation
+#:                                               survives in canonical_loop step 2,
+#:                                               and this delivery ADDS the missing
+#:                                               `when` to the row itself so the
+#:                                               spec's three-lookup scenario still
+#:                                               reads all three from `tool_defaults`
+#:                                               (+42 B). The diagnostics profile stays
+#:
+#: One fragment left the payload UNRESTATED, and the ruling is deliberate rather
+#: than an oversight. "try synonyms and singular/plural forms" went out with the
+#: three retry examples, and miss_rule covers "synonyms" but not the morphological
+#: half: a plural is not a synonym. It is dropped as a sub-case of the synonym
+#: retry tactic, not as a rule -- the shipped skill scaffold still teaches
+#: morphological retry in references/operations.md, so the tactic is not lost to
+#: the product, only to this payload. Restoring it means widening miss_rule, which
+#: costs bytes this change does not have; it is the FIRST candidate to restore when
+#: a future trim frees them.
+#:
+#: What did NOT leave: no rule, no landing, no consequence, no named non-outcome,
+#: no route, and no command name reachable nowhere else. connect_memory, remember,
+#: replace_memory, observe_memory and edit_memory all keep their routes. The fifth
+#: retry example survives on the same test: scan-only BEFORE proposing a migration
+#: or copy is a guard, and nothing else in the payload states it.
+#:
+#: The clause costs compact 316 bytes in a condensed wording, 290 characters
+#: against full's 512, and both halves of the rule survive the condensation --
+#: destination choice happens at write time, by finding a focused existing
+#: destination or creating one; the post-write advisory is the safety net for
+#: missed routing, never the primary mechanism. Full's wording is untouched.
+#:
+#: Two of the cuts left a seam, and closing them is part of the same delivery
+#: rather than a later patch: the reasoning row's missing `when` above (+42 B),
+#: and the loop's last step, which said "read the returned warnings" after the
+#: step naming the write had gone. It now opens "after a write" (+15 B), which
+#: supplies the antecedent the cut removed.
+#:
+#: 61,376 - 864 + 316 + 57 = 60,885, measured. That is 515 bytes of headroom and
+#: the first time since the fourth raise that this payload has sat clear of
+#: HEADROOM_WARNING_BYTES. The margin is load-bearing in both directions:
+#: restoring any ONE of the six passages while keeping the clause puts compact
+#: back inside the warning band -- 410, 374, 388, 438, 359 and 257 bytes of
+#: headroom respectively -- so nothing here was cut for margin that was not
+#: needed. `MINIMUM_SAVING_RATIO` is untouched; the saving moved 35.32% -> 35.29%,
+#: because the redundant passages were shared text and full lost them too.
+#:
+#: Two larger redundancies were found and NOT taken. They are recorded here so
+#: the next trim starts from them instead of rediscovering them.
+#: `authoring_contract.semantic_units.contract` is the top-level
+#: `semantic_authoring` projection repeated in full -- 9,042 bytes, the single
+#: largest duplication in this payload -- and `tool_catalog` is `product_commands`
+#: repeated, 1,602 more. Neither is prose. Both are published payload KEYS a
+#: client may read, and the nested projection is pinned by name in
+#: test_bootstrap.py, so taking either means deleting a pin or withdrawing a key:
+#: a surface decision, not a trim. `records.software_rule` was rejected on a
+#: different ground -- it does restate `planning.execution_truth_boundary`, but it
+#: is that boundary stated INSIDE the Records contract, and it is pinned there.
+#:
+#: 515 bytes is spendable budget, not licence. The next addition of this size
+#: argues for itself the way the raises above had to.
 COMPACT_BYTE_CEILING = 61_400
 
 #: The defect was compact and full being near-identical. A profile that does not

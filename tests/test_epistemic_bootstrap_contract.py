@@ -453,20 +453,30 @@ def test_destination_choice_names_no_tool(vault: Path) -> None:
     assert "(" not in clause and "_memory" not in clause
 
 
-def test_compact_payload_stays_byte_identical_without_the_clause(vault: Path) -> None:
-    """The clause is FULL-only, and that is a budget decision with a paper trail.
+def test_compact_payload_carries_the_destination_choice_clause(vault: Path) -> None:
+    """Named replacement for `test_compact_payload_stays_byte_identical_without_the_clause`.
 
-    Compact sits 24 bytes under a ceiling whose own docstring pre-commits the next
-    addition to TRIMMING compact rather than raising it. Carrying this clause in
-    compact belongs to the queued compact-bootstrap trim; until then compact must
-    not grow by a single byte on its account.
+    That pin held the clause out of compact and named its own successor: compact
+    sat 24 bytes under a ceiling whose docstring pre-commits the next addition to
+    TRIMMING compact rather than raising it, so carriage "belongs to the queued
+    compact-bootstrap trim". This is that delivery. The clause is now paid for out
+    of trimmed redundancy rather than deferred, so the pin flips from absence to
+    carriage rather than being deleted: compact carries the teaching, condensed
+    wording allowed, and both halves of the rule must survive the condensation.
     """
-    compact = commands.op_bootstrap(vault, profile="compact")
-    assert "destination_choice" not in compact["authoring_contract"]["post_write"]
+    clause = _post_write(vault, "compact")["destination_choice"]
 
-    without = json.dumps(compact)
-    # Full and diagnostics DO carry it, so the omission is a profile decision
-    # rather than the clause having been dropped altogether.
+    # Half one -- the routing act, at write time, against the declared scope.
+    assert "at write time" in clause
+    assert "declared scope" in clause
+    assert "existing destination" in clause and "create one" in clause
+    # Half two -- the detector is the net, never the mechanism.
+    assert "safety net" in clause
+    assert "never the primary mechanism" in clause
+    # Compact is the payload a hookless surface receives, which is exactly where
+    # `_filter_bootstrap_payload` deletes a string naming an unavailable command.
+    assert "(" not in clause and "_memory" not in clause
+
+    # Admission is not a move: full and diagnostics still carry it too.
     for profile in ("full", "diagnostics"):
         assert "destination_choice" in _post_write(vault, profile)
-    assert "destination_choice" not in without
