@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.66.0](https://github.com/Artexis10/exomem/compare/v0.65.0...v0.66.0) (2026-08-29)
+
+
+### Features
+
+* **audit:** add the semantic scope-divergence sensor ([#953](https://github.com/Artexis10/exomem/issues/953)) ([0f72ef6](https://github.com/Artexis10/exomem/commit/0f72ef6b0ce55f67189e9475fcc82a602d1d81fd))
+* **records:** surface observed field vocabulary on collection inspect ([#950](https://github.com/Artexis10/exomem/issues/950)) ([ebd87a3](https://github.com/Artexis10/exomem/commit/ebd87a3da7aaa09854f25ecaa5a974a2544f9c06))
+
+
+### Bug Fixes
+
+* **hosted:** keep parity artifacts release-synced ([#907](https://github.com/Artexis10/exomem/issues/907)) ([9bf3d80](https://github.com/Artexis10/exomem/commit/9bf3d8042aeda396fb84a71419fb298f6ae4c522))
+* name the offending arguments in Planning and Records refusals ([#948](https://github.com/Artexis10/exomem/issues/948)) ([06efe92](https://github.com/Artexis10/exomem/commit/06efe929df25732aefe688c4e0100ebb3323d083))
+
 ## [0.65.0](https://github.com/Artexis10/exomem/compare/v0.64.2...v0.65.0) (2026-08-29)
 
 
