@@ -769,8 +769,19 @@ def test_release_evidence_automation_removes_both_manual_cranks() -> None:
     triggers = _triggers(workflow)
 
     assert triggers["pull_request"] == {"types": ["auto_merge_enabled"]}
-    assert triggers["workflow_run"] == {"workflows": ["CI"], "types": ["completed"]}
+    # workflow_run matches on ci.yml's `name:`, not its filename — derive the
+    # expected value from ci.yml itself so renaming CI cannot silently kill
+    # the rerun trigger while this test stays green.
+    ci_name = yaml.safe_load(
+        (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    )["name"]
+    assert triggers["workflow_run"] == {"workflows": [ci_name], "types": ["completed"]}
     assert set(triggers) == {"pull_request", "workflow_run"}
+
+    # Duplicate release intents (disable/re-enable auto-merge) must serialize
+    # so only one evidence dispatch can win the eligibility check.
+    assert "concurrency" in workflow
+    assert "release-evidence-automation-" in workflow["concurrency"]["group"]
 
     jobs = workflow["jobs"]
     assert set(jobs) == {"dispatch-evidence", "rerun-evidence-check"}

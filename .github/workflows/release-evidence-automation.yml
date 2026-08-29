@@ -35,6 +35,13 @@ permissions:
   contents: read
   pull-requests: read
 
+# A disable/re-enable pair (or a double-click) fires auto_merge_enabled twice;
+# without serialization both jobs can pass the eligibility check before either
+# dispatch is visible, yielding two full-tier runs. Queue, don't cancel — a
+# cancelled rerun job would drop the re-run silently.
+concurrency:
+  group: release-evidence-automation-${{ github.event.pull_request.number || github.event.workflow_run.head_sha }}
+
 jobs:
   dispatch-evidence:
     name: dispatch evidence run on release intent
@@ -54,6 +61,8 @@ jobs:
             echo "main has moved past the release base; release-please will resync and re-trigger"
             exit 0
           fi
+          # per_page=100, newest-first: BASE_SHA is main's tip (verified just
+          # above), so its runs are on the first page — no pagination needed.
           eligible=$(gh api "repos/${{ github.repository }}/actions/workflows/ci.yml/runs?branch=main&per_page=100" \
             --jq "[.workflow_runs[] | select((.event == \"workflow_dispatch\" or .event == \"schedule\") and .head_sha == \"$BASE_SHA\" and (.conclusion == \"success\" or .status == \"queued\" or .status == \"in_progress\"))] | length")
           if test "$eligible" -ge 1; then
@@ -91,8 +100,11 @@ jobs:
             echo "release PR base $base_sha does not match evidence revision $EVIDENCE_SHA; skipping"
             exit 0
           fi
+          # head_sha is both a query param and a jq filter: if the API ever
+          # ignores the param, the filter still prevents re-running an
+          # unrelated PR's failing run.
           run_id=$(gh api "repos/${{ github.repository }}/actions/workflows/ci.yml/runs?event=pull_request&head_sha=$head_sha&per_page=10" \
-            --jq '[.workflow_runs[] | select(.status == "completed" and .conclusion == "failure")] | .[0].id // empty')
+            --jq "[.workflow_runs[] | select(.head_sha == \"$head_sha\" and .status == \"completed\" and .conclusion == \"failure\")] | .[0].id // empty")
           if test -z "$run_id"; then
             echo "no completed failing CI run on the release PR head; nothing to re-run"
             exit 0
