@@ -415,3 +415,58 @@ def test_levels_that_never_self_capture_are_untouched(vault: Path) -> None:
         capture = prominence.CONTRACTS[level].capture.lower()
         assert "method" not in capture
         assert "ask" in capture, level
+
+
+# ------------------------------------------------- pre-write destination choice
+
+
+def _post_write(vault: Path, profile: str) -> dict:
+    return commands.op_bootstrap(vault, profile=profile)["authoring_contract"]["post_write"]
+
+
+def test_full_contract_teaches_pre_write_destination_choice(vault: Path) -> None:
+    """Routing a divergent thread is a write-time act, not a reply to a detector.
+
+    The semantic scope-divergence sensor is a safety net for routing that was
+    missed. An agent taught only the net will let a page accumulate structural
+    debt until something fires, which is the 2026-08-29 shape the sensor exists to
+    catch and this clause exists to prevent.
+    """
+    clause = _post_write(vault, "full")["destination_choice"]
+
+    assert "at write time" in clause
+    assert "declared scope" in clause
+    # The routing act itself: find an existing home or make one.
+    assert "existing destination" in clause and "create one" in clause
+    # And the ordering against the detector, explicitly.
+    assert "safety net" in clause
+    assert "never the primary mechanism" in clause
+
+
+def test_destination_choice_names_no_tool(vault: Path) -> None:
+    """`_filter_bootstrap_payload` deletes strings naming an unavailable command.
+
+    A hookless surface is exactly where this clause matters most, so it must not
+    be the kind of string that silently vanishes there.
+    """
+    clause = _post_write(vault, "full")["destination_choice"]
+    assert "(" not in clause and "_memory" not in clause
+
+
+def test_compact_payload_stays_byte_identical_without_the_clause(vault: Path) -> None:
+    """The clause is FULL-only, and that is a budget decision with a paper trail.
+
+    Compact sits 24 bytes under a ceiling whose own docstring pre-commits the next
+    addition to TRIMMING compact rather than raising it. Carrying this clause in
+    compact belongs to the queued compact-bootstrap trim; until then compact must
+    not grow by a single byte on its account.
+    """
+    compact = commands.op_bootstrap(vault, profile="compact")
+    assert "destination_choice" not in compact["authoring_contract"]["post_write"]
+
+    without = json.dumps(compact)
+    # Full and diagnostics DO carry it, so the omission is a profile decision
+    # rather than the clause having been dropped altogether.
+    for profile in ("full", "diagnostics"):
+        assert "destination_choice" in _post_write(vault, profile)
+    assert "destination_choice" not in without

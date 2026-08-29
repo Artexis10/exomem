@@ -6,7 +6,9 @@ operating contract instead of guessing conventions: a read-only `bootstrap`
 operation that returns workflow guidance, tool defaults, performance profiles,
 and search guidance as structured JSON, without inspecting or summarizing any
 private vault content.
+
 ## Requirements
+
 ### Requirement: Agent Bootstrap Contract
 The system SHALL expose a read-only `bootstrap` operation that returns a versioned operating contract for agents using Exomem without a native skill. The contract MUST be deterministic, structured JSON and MUST NOT inspect or summarize private vault content. Its entity-capture section SHALL list the active vault-aware entity type IDs and explain that unknown recurring types are registered only through the governed save leaf with a rationale.
 
@@ -603,6 +605,21 @@ The bootstrap engagement guidance SHALL teach that a dismissal carries a reason 
 - **THEN** the engagement guidance lists the reason codes
 - **AND** names the family review reference form and the three disposition actions
 - **AND** the payload size remains under the compact ceiling
+
+### Requirement: The agent contract teaches pre-write destination choice
+
+The full bootstrap contract SHALL teach that choosing the destination is part of writing,
+not a reaction to advisories: when a coherent durable thread emerges in conversation
+that sits outside the current page's declared scope, the agent searches for a focused
+existing destination or creates and links a focused child note, rather than letting
+the current page accumulate structural debt until a detector fires.
+
+#### Scenario: A divergent thread gets a home before the detector must speak
+
+- **WHEN** the full bootstrap contract teaches capture routing
+- **THEN** it states that an emerging coherent durable thread outside the current page's declared scope is routed to a focused existing or new destination at write time
+- **AND** it states that post-write structural advisories are the safety net for missed routing, not the primary mechanism
+- **AND** the compact payload remains byte-identical until the queued compact-bootstrap trim admits the clause
 
 ### Requirement: The capture predicate covers stated intent and observed outcomes
 

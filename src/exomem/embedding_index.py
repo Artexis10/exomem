@@ -169,6 +169,26 @@ class SemanticUnitVectorHit(NamedTuple):
     cosine: float
 
 
+class SemanticUnitVectorRow(NamedTuple):
+    """One stored unit vector as the corpus-level read returns it.
+
+    `parent_generation` travels with the geometry on purpose: a consumer that
+    reads these vectors against a NEWER parse of the same page would be reading
+    deleted text, and an anchored `unit_ref` is content-independent so the join
+    alone cannot detect that.
+    """
+
+    unit_ref: str
+    source_order: int
+    vector: np.ndarray
+    parent_generation: str
+
+
+#: Rows per batch in the corpus-level unit-vector read. Bounds the result set a
+#: single SELECT materialises; it is not a limit on what the read returns.
+SEMANTIC_UNIT_READ_BATCH = 2_000
+
+
 class EmbeddingIndex:
     """Per-vault sqlite sidecar holding chunk-level vectors.
 
@@ -1124,6 +1144,73 @@ class EmbeddingIndex:
             parent_path: (frozenset(generations), frozenset(unit_refs))
             for parent_path, (generations, unit_refs) in grouped.items()
         }
+
+    def all_semantic_unit_vectors(
+        self, *, batch_size: int = SEMANTIC_UNIT_READ_BATCH
+    ) -> dict[str, list[SemanticUnitVectorRow]]:
+        """Every stored unit vector, grouped by parent path, in ONE corpus read.
+
+        The audit's semantic scope-divergence sensor needs a page's unit geometry,
+        and nothing here could supply it: `all_vectors()` is the CHUNK matrix
+        (`metadata[i] = (file_path, chunk_idx)`), and `search_semantic_units` is a
+        kNN query whose hit type carries a cosine but no vector. This is the
+        missing bulk read, and it is deliberately the ONLY one — a per-page
+        `WHERE parent_path = ?` across a sweep is the shape this exists to prevent.
+
+        Read-only, and NOT wired into `_cache`: that cache is keyed by
+        `(file_path, chunk_idx)` and patched by chunk-path deltas, so admitting
+        unit rows would either corrupt its splice arithmetic or silently serve a
+        stale generation. A sweep pays one honest load instead.
+
+        Paginated by the table's own primary key `(parent_path, unit_key)` so a
+        large corpus never materialises one unbounded result set.
+
+        A row whose blob is not a readable full-width vector is DROPPED, and that
+        includes a blob whose length is not a whole number of float32s —
+        `np.frombuffer` raises on those before any shape check could run, and an
+        escaping raise would cost every OTHER page in the corpus its judgment
+        rather than just the corrupt row. Rebuildable derived data never fails a
+        sweep closed.
+        """
+        if not self.path.exists():
+            return {}
+        limit = max(1, int(batch_size))
+        grouped: dict[str, list[SemanticUnitVectorRow]] = {}
+        conn = self._connect()
+        try:
+            cursor = ("", "")
+            while True:
+                rows = conn.execute(
+                    "SELECT parent_path, unit_key, unit_ref, source_order, vector, "
+                    "parent_generation "
+                    "FROM semantic_unit_vectors WHERE (parent_path, unit_key) > (?, ?) "
+                    "ORDER BY parent_path, unit_key LIMIT ?",
+                    (*cursor, limit),
+                ).fetchall()
+                if not rows:
+                    break
+                for parent_path, _unit_key, unit_ref, source_order, blob, generation in rows:
+                    try:
+                        vector = np.frombuffer(blob, dtype=np.float32)
+                    except (ValueError, TypeError):
+                        # Truncated or non-buffer blob: this row is unreadable, the
+                        # rest of the corpus is not.
+                        continue
+                    if vector.shape != (VECTOR_DIM,):
+                        continue
+                    grouped.setdefault(str(parent_path), []).append(
+                        SemanticUnitVectorRow(
+                            str(unit_ref), int(source_order), vector, str(generation)
+                        )
+                    )
+                cursor = (str(rows[-1][0]), str(rows[-1][1]))
+                if len(rows) < limit:
+                    break
+        finally:
+            conn.close()
+        for unit_rows in grouped.values():
+            unit_rows.sort(key=lambda row: (row.source_order, row.unit_ref))
+        return grouped
 
     def _projected_source_snapshot(
         self,
