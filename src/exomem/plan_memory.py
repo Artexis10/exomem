@@ -331,20 +331,31 @@ def _validate_arguments(action: object, values: dict[str, Any]) -> None:
     if not isinstance(action, str) or action not in ACTIONS:
         _invalid_arguments()
     supplied = {name for name, value in values.items() if value is not None}
-    if not _REQUIRED_FIELDS[action] <= supplied or not supplied <= _ACTION_FIELDS[action]:
-        _invalid_arguments()
+    missing = _REQUIRED_FIELDS[action] - supplied
+    surplus = supplied - _ACTION_FIELDS[action]
+    if missing or surplus:
+        parts = []
+        if surplus:
+            parts.append(f"unexpected for {action}: " + ", ".join(sorted(surplus)))
+        if missing:
+            parts.append(f"missing for {action}: " + ", ".join(sorted(missing)))
+        _invalid_arguments("; ".join(parts))
     if action == "query" and values["view"] is not None and supplied & _VIEW_SHAPING_FIELDS:
-        _invalid_arguments()
+        offending = sorted(supplied & _VIEW_SHAPING_FIELDS)
+        _invalid_arguments("view excludes shaping fields: " + ", ".join(offending))
     if action == "validate" and (
         (values["collection"] is None) == (values["manifest_path"] is None)
     ):
-        _invalid_arguments()
+        _invalid_arguments("validate requires exactly one of: collection, manifest_path")
     if action == "update" and values["changes"] is None and values["body"] is None:
-        _invalid_arguments()
+        _invalid_arguments("update requires at least one of: changes, body")
 
 
-def _invalid_arguments() -> Never:
-    raise OpError("INVALID_PLAN_ARGUMENTS", "arguments do not match the selected Planning action")
+def _invalid_arguments(detail: str | None = None) -> Never:
+    message = "arguments do not match the selected Planning action"
+    if detail:
+        message = f"{message}: {detail}"
+    raise OpError("INVALID_PLAN_ARGUMENTS", message)
 
 
 def _public_error_code(error: CollectionError) -> str:

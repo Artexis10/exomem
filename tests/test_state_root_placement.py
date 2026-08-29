@@ -700,3 +700,31 @@ def test_shipped_guidance_does_not_name_relocated_state_as_in_vault() -> None:
         for path in shipped
     }
     assert not {path: tokens for path, tokens in violations.items() if tokens}
+
+
+@pytest.fixture(scope="module")
+def _state_root_seen_by_a_module_scoped_fixture() -> Path:
+    """Resolve the seam from inside a MODULE-scoped fixture body.
+
+    `_isolate_state_root` in `conftest.py` is function-scoped, so it is not in
+    effect here. Without the session-scoped injection beside it, this returns
+    the REAL per-user platform root -- which is exactly how
+    `test_graph_value_benchmark.py`'s module-scoped `perfect_fixture` came to
+    write `.graph.sqlite` and `.lexical.sqlite` into the developer's own state
+    directory, and then to be blamed on whichever later test next touched it.
+    """
+    from exomem import state_paths
+
+    return state_paths.state_store_root()
+
+
+def test_higher_scoped_fixtures_resolve_inside_the_injected_state_root(
+    _state_root_seen_by_a_module_scoped_fixture: Path,
+) -> None:
+    """The injection covers every fixture scope, not just function scope."""
+    from exomem import state_paths
+
+    assert (
+        _state_root_seen_by_a_module_scoped_fixture
+        != state_paths.platform_default_state_root()
+    )
