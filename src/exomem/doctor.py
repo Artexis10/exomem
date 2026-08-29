@@ -774,7 +774,25 @@ def _check_lexical(vault_root: Path | None) -> DoctorCheck:
     if vault_root is None:
         return _check("dep.fts5-lexical", "pass", "FTS5 + trigram are available.")
     side = lexstore.lexical_path(vault_root)
-    if not side.exists():
+    try:
+        present = side.exists()
+    except OSError as error:
+        # `Path.exists` re-raises `PermissionError` rather than swallowing it
+        # (only ENOENT/ENOTDIR-class errors are ignored), and a sidecar under a
+        # state root owned by another principal raises exactly that -- which
+        # crashed the whole of `exomem doctor` during the 2026-08 incident, at
+        # the moment its diagnosis was most needed. Reporting it as a finding is
+        # the fix; `os.path.exists`, which returns a confident False here, is
+        # not -- an inaccessible sidecar is not an absent one.
+        return _check(
+            "dep.fts5-lexical",
+            "warn",
+            f"The lexical sidecar could not be inspected ({error.strerror or error}); "
+            "lanes fall back to the in-process paths.",
+            "Rerun as the principal that owns the machine-local state root — see "
+            "the `state.dacl` check for the exact posture and repair.",
+        )
+    if not present:
         return _check(
             "dep.fts5-lexical",
             "pass",
@@ -825,12 +843,14 @@ def _check_deferred_index_backlog(vault_root: Path | None) -> DoctorCheck:
     from . import index_sync, lexstore
 
     sidecar = lexstore.lexical_path(vault_root)
-    if sidecar.exists():
-        try:
+    try:
+        # `exists()` itself raises under a state root owned by another
+        # principal, so the probe has to sit inside the same guard as the read.
+        if sidecar.exists():
             details["indexed_pages"] = _lexical_page_count(sidecar)
-        except (OSError, sqlite3.Error):
-            # The lexical health check owns the unreadable-sidecar diagnostic.
-            pass
+    except (OSError, sqlite3.Error):
+        # The lexical health check owns the unreadable-sidecar diagnostic.
+        pass
     status = index_sync.deferred_work_status(vault_root)
     for queue in ("semantic_upserts", "full_upserts"):
         details[queue] = int(status.get(queue, {}).get("count", 0))
@@ -1106,6 +1126,231 @@ def _check_state_placement(vault_root: Path | None) -> DoctorCheck:
     )
 
 
+def _check_state_root_dacl(vault_root: Path | None) -> DoctorCheck:
+    """FAIL when the state root's DACL is wrong for the principal that RUNS it.
+
+    `state.placement` answers "is state in the right PLACE"; this answers "will
+    the principal that runs against it accept it". They came apart during the
+    2026-08 rollout: an offline migration under the operator's token left the
+    root carrying the user's ACE, the LocalSystem service then rejected it as
+    `unsafe` on every catalog proof, lexical repair and graph recovery, and
+    doctor -- which saw a correctly-placed, migration-complete root -- reported
+    nothing wrong for the whole outage.
+
+    Judged against the RUNTIME principal, not the calling token. That is not a
+    refinement, it is the difference between shipping and not: the private-DACL
+    model is token-relative, so a correct LocalSystem root
+    (`D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)`) reads as `unsafe` to every operator
+    who inspects it -- measured, not assumed. Judging by the caller would make
+    this check FAIL on every healthy Windows service install, including inside
+    `upgrade.ps1`'s own doctor gate, which runs as the operator.
+
+    The calling token's own access is reported too, but as detail rather than as
+    a verdict: an operator who cannot open a service-owned root is looking at
+    normal, and the maintenance pre-flight is what refuses their work.
+
+    Read-only and never repairing: silently rewriting a DACL is exactly what the
+    private-state model exists to prevent.
+    """
+    from . import state_paths
+
+    if vault_root is None:
+        return _check(
+            "state.dacl",
+            "pass",
+            "No vault configured; the machine-local state root was not inspected.",
+        )
+    try:
+        posture = state_paths.inspect_state_root(vault_root)
+    except (OSError, ValueError) as error:
+        # `state_root` deliberately included even here: a finding that cannot
+        # name the path it failed on is not actionable from a remote report.
+        try:
+            location = str(state_paths.vault_state_dir(vault_root))
+        except (OSError, ValueError):
+            location = "unresolved"
+        return _check(
+            "state.dacl",
+            "fail",
+            "The machine-local state root's access posture could not be determined.",
+            "Rerun `exomem doctor` as the principal that owns the state root; do "
+            "not adopt, re-ACL or delete state while the posture is unknown.",
+            details={"state_root": location, "error": type(error).__name__},
+        )
+    details: dict[str, object] = {
+        "state_root": str(posture.directory),
+        "present": posture.present,
+        "accessible": posture.accessible,
+        "unopenable_reason": posture.unopenable_reason,
+        "dacl_verdict": posture.verdict,
+        "runtime_dacl_verdict": posture.runtime_verdict,
+        "child_dacl_verdict": posture.child_verdict,
+        "child_sampled": posture.child_sampled,
+        "expected_trustees": list(posture.expected),
+        "runtime_expected_trustees": list(posture.runtime_expected),
+        "runtime_principal": posture.runtime_principal_source,
+        "observed": posture.observed,
+    }
+    # A repair rendered for THIS token is worse than none when the principal
+    # that will run against the root is unknown: following it re-introduces the
+    # ACL ping-pong that cost most of a day.
+    unresolved_note = (
+        " The principal that runs against this root could not be established "
+        f"({posture.runtime_principal_source}), so no ACL repair is offered — "
+        "establish the service account first."
+    )
+    repair = (
+        unresolved_note
+        if posture.runtime_principal_unresolved
+        else (posture.remediation or "")
+    )
+    if not posture.present:
+        return _check(
+            "state.dacl",
+            "pass",
+            f"No machine-local state root yet at {posture.directory}; it is created "
+            "private to the principal that will run against it.",
+            details=details,
+        )
+    if posture.alias_path:
+        # A junction, or a file where the root should be. Real, and refused at
+        # the private-state boundary -- but no ACL repairs it, so reporting it
+        # as a principal problem hands the operator a useless `icacls`.
+        return _check(
+            "state.dacl",
+            "fail",
+            (
+                f"The machine-local state root ({posture.directory}) is a "
+                f"{(posture.unopenable_reason or '').replace('-', ' ')} rather than a "
+                "real directory; the private-state boundary refuses to open it."
+            ),
+            "Replace the alias with a real directory (or repoint EXOMEM_STATE_ROOT); "
+            "this is not repairable with an ACL change.",
+            details=details,
+        )
+    if posture.unopenable_for_unknown_reason:
+        # Neither a principal nor an alias explains it -- a sharing violation, a
+        # not-ready device. Un-evaluated is its own state, never a pass.
+        return _check(
+            "state.dacl",
+            "fail",
+            (
+                f"The machine-local state root ({posture.directory}) could not be "
+                f"opened ({posture.unopenable_reason}), so its posture is unverified "
+                "and maintenance against it is refused."
+            ),
+            "Resolve what is holding the directory (a running writer, a "
+            "disconnected device), then rerun `exomem doctor`.",
+            details=details,
+        )
+    # Derived from the validator's own vocabulary, never restated here: a
+    # literal would keep passing if the verdict names ever changed.
+    from .mutation_lock import _WINDOWS_DACL_UNSAFE
+
+    if posture.child_verdict == _WINDOWS_DACL_UNSAFE:
+        # The root can read `private` over state that is not. Protecting a
+        # directory converts its children's inherited ACEs to explicit ones, so
+        # a seal that only wrote the entry leaves every file the migration just
+        # moved in readable and writable by the old principal -- reported as a
+        # pass, which is worse than an honest "unsealed".
+        return _check(
+            "state.dacl",
+            "fail",
+            (
+                f"The machine-local state root ({posture.directory}) is private, but "
+                "state INSIDE it is not: sampled children carry ACEs the principal "
+                f"that runs against it ({posture.runtime_principal_source}) rejects."
+            ),
+            (
+                unresolved_note
+                if posture.runtime_principal_unresolved
+                else (
+                    "Re-apply the private DACL so inheritance is recomputed across "
+                    "the tree, in a stop window: " + repair
+                )
+            ),
+            details=details,
+        )
+    if posture.runtime_verdict == _WINDOWS_DACL_UNSAFE:
+        return _check(
+            "state.dacl",
+            "fail",
+            (
+                f"The machine-local state root ({posture.directory}) carries a DACL "
+                "the principal that runs against it "
+                f"({posture.runtime_principal_source}) rejects, so every "
+                "private-state boundary behind it fails closed: catalog proofs, "
+                "lexical repair and graph recovery all refuse, with no progress."
+            ),
+            # Rendered for the RUNTIME principal, so following it does not flip
+            # the other principal into failure the way the incident's manual
+            # toggling did. It does end this process's own access when the
+            # runtime principal is a service account — that is the intended end
+            # state, so say so rather than let it read as a surprise.
+            unresolved_note
+            if posture.runtime_principal_unresolved
+            else (
+                "Do this in a stop window: stop the service, re-ACL the root with "
+                + repair
+                + ", then start it. The root is then private to the service account, "
+                "so run later maintenance as that account rather than re-ACLing back "
+                "and forth."
+            ),
+            details=details,
+        )
+    if posture.runtime_verdict is None and posture.runtime_expected:
+        # The descriptor could not be read, so the trustee set is UNKNOWN, not
+        # proven good. An un-evaluated item is not a pass.
+        return _check(
+            "state.dacl",
+            "warn",
+            f"The machine-local state root ({posture.directory}) could not have its "
+            "security descriptor read, so its trustees are unverified.",
+            "Rerun `exomem doctor` as the principal that owns the state root.",
+            details=details,
+        )
+    if not posture.runtime_expected:
+        # No DACL model evaluated (POSIX). Saying "private to this principal"
+        # here would report an un-evaluated item as a proven one, which is the
+        # failure mode this check exists to end.
+        return _check(
+            "state.dacl",
+            "pass",
+            f"The machine-local state root ({posture.directory}) is reachable; this "
+            "platform has no cross-principal DACL model to evaluate.",
+            details=details,
+        )
+    caller_note = (
+        ""
+        if posture.accessible
+        else (
+            " This process cannot open it, which is expected when the service runs "
+            "as a different principal; run maintenance as that principal."
+        )
+    )
+    # Say what was NOT checked. Once a root is sealed the operator's listing is
+    # denied, so the sampler examines nothing and the verdict describes the
+    # directory entry alone. A pass that reads as "this is private" while the
+    # contents were never looked at is the confidently-green report that cost a
+    # day in the original incident.
+    contents_note = (
+        f" Contents verified across {posture.child_sampled} sampled child(ren)."
+        if posture.child_sampled
+        else (
+            " Contents were NOT evaluated (this process cannot list the root), so "
+            "this verdict covers the directory entry only."
+        )
+    )
+    return _check(
+        "state.dacl",
+        "pass",
+        f"The machine-local state root ({posture.directory}) is private to the "
+        f"principal that runs against it ({posture.runtime_principal_source}; "
+        f"verdict: {posture.runtime_verdict}).{caller_note}{contents_note}",
+        details=details,
+    )
+
+
 def _check_rebuild_temp_orphans(vault_root: Path | None) -> DoctorCheck:
     """Leaked rebuild-temporary files from interrupted background rebuilds.
 
@@ -1177,10 +1422,23 @@ def _check_rebuild_temp_orphans(vault_root: Path | None) -> DoctorCheck:
     )
     graph_orphans: list[Path] = []
     lexical_orphans: list[Path] = []
+    unreadable: list[Path] = []
     for scan_root in scan_roots:
-        if not scan_root.is_dir():
+        try:
+            if not scan_root.is_dir():
+                continue
+            entries = list(scan_root.iterdir())
+        except OSError:
+            # A state root governed by another principal denies the listing
+            # outright, and `is_dir()` does not screen it out -- stat succeeds
+            # through the parent's traverse while `iterdir` is refused. Left
+            # unguarded this crashed `exomem doctor` one check after the
+            # `state.dacl` finding that named the cause. An un-scanned root is
+            # not an empty one, so it is collected and reported rather than
+            # skipped into a confident "no orphans found".
+            unreadable.append(scan_root)
             continue
-        for entry in scan_root.iterdir():
+        for entry in entries:
             try:
                 if not entry.is_file():
                     continue
@@ -1226,26 +1484,58 @@ def _check_rebuild_temp_orphans(vault_root: Path | None) -> DoctorCheck:
     details["total_bytes"] = total_bytes
     details["stale_count"] = stale_count
     details["stale_bytes"] = stale_bytes
+    details["unreadable_roots"] = [str(path) for path in unreadable]
     mb = total_bytes / (1024 * 1024)
     stale_mb = stale_bytes / (1024 * 1024)
     age_minutes = vault_module.REBUILD_TEMP_STALE_AGE_SECONDS // 60
 
-    if count == 0:
+    def _with_unreadable(verdict: DoctorCheck) -> DoctorCheck:
+        """Merge the un-scanned roots into a verdict computed from what WAS scanned.
+
+        Never downgrades. Short-circuiting on `unreadable` before computing the
+        verdict turned a real leak into a warn -- 5+ stale orphans in the vault
+        plus an unlistable state root reported `warn`, and `DoctorReport.success`
+        gates on `fail`, so the leak stopped failing the run. The un-scanned root
+        makes a finding LESS certain, not less severe.
+        """
+        if not unreadable:
+            return verdict
+        roots = ", ".join(str(path) for path in unreadable)
+        suffix = (
+            f" Rebuild temporaries could not be inspected under {roots}; any orphans "
+            "there are uncounted, so this count is a floor."
+        )
+        remediation = verdict.remediation or ""
+        joiner = " " if remediation else ""
         return _check(
+            verdict.id,
+            "warn" if verdict.status == "pass" else verdict.status,
+            verdict.message + suffix,
+            remediation
+            + joiner
+            + (
+                "Rerun as the principal that owns the machine-local state root — see "
+                "the `state.dacl` check for the exact posture and repair."
+            ),
+            details=verdict.details,
+        )
+
+    if count == 0:
+        return _with_unreadable(_check(
             "rebuild_temp.orphans",
             "pass",
             "No orphaned rebuild temporaries found.",
             details=details,
-        )
+        ))
     if stale_count == 0:
-        return _check(
+        return _with_unreadable(_check(
             "rebuild_temp.orphans",
             "pass",
             f"{count} rebuild temporary file(s) totaling {mb:.1f} MB present, none "
             f"older than {age_minutes} minutes — likely an in-flight rebuild, not "
             "an orphan.",
             details=details,
-        )
+        ))
     remediation = (
         f"Stop the exomem service, then run `{_REBUILD_VECTORS_CMD}` "
         "out-of-process (it reads the vault from EXOMEM_VAULT_PATH, not "
@@ -1261,7 +1551,7 @@ def _check_rebuild_temp_orphans(vault_root: Path | None) -> DoctorCheck:
         stale_count > _REBUILD_TEMP_ORPHAN_FAIL_COUNT
         or stale_bytes > _REBUILD_TEMP_ORPHAN_FAIL_BYTES
     ):
-        return _check(
+        return _with_unreadable(_check(
             "rebuild_temp.orphans",
             "fail",
             f"{stale_count} rebuild temporary file(s) older than {age_minutes} "
@@ -1269,23 +1559,23 @@ def _check_rebuild_temp_orphans(vault_root: Path | None) -> DoctorCheck:
             f"interrupted rebuilds ({summary}).",
             remediation,
             details=details,
-        )
+        ))
     if stale_count > 1:
-        return _check(
+        return _with_unreadable(_check(
             "rebuild_temp.orphans",
             "warn",
             f"{stale_count} rebuild temporary file(s) older than {age_minutes} "
             f"minutes, totaling {stale_mb:.1f} MB ({summary}).",
             remediation,
             details=details,
-        )
-    return _check(
+        ))
+    return _with_unreadable(_check(
         "rebuild_temp.orphans",
         "pass",
         f"{stale_count} rebuild temporary file older than {age_minutes} minutes, "
         f"totaling {stale_mb:.1f} MB (below the warn threshold).",
         details=details,
-    )
+    ))
 
 
 def _check_write_path_env_flags(vault_root: Path | None) -> DoctorCheck:
@@ -3056,6 +3346,7 @@ def doctor(
         _check_deferred_index_backlog(vault_root),
         _check_graph_sync_state(vault_root),
         _check_state_placement(vault_root),
+        _check_state_root_dacl(vault_root),
         _check_rebuild_temp_orphans(vault_root),
         _check_write_path_env_flags(vault_root),
         check_graph_recovery_age(vault_root),

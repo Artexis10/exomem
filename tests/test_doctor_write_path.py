@@ -596,9 +596,12 @@ def test_new_checks_are_wired_into_the_ordered_report(
     assert "rebuild_temp.orphans" in ids
     assert "write_path.env_flags" in ids
     i = ids.index("deferred_index_backlog")
-    assert ids[i + 1 : i + 5] == [
+    # `state.dacl` sits immediately after `state.placement`: place first, then
+    # whether the principal running this can actually reach that place.
+    assert ids[i + 1 : i + 6] == [
         "graph_sync.state",
         "state.placement",
+        "state.dacl",
         "rebuild_temp.orphans",
         "write_path.env_flags",
     ]

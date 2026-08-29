@@ -376,6 +376,22 @@ class _SecureDirectory:
             self._close_windows_handle(self.windows_handles.pop())
 
 
+class WindowsReparsePointError(OSError):
+    """The opened entry is a reparse point (symlink/junction), which is refused.
+
+    An `OSError` subclass so every existing `except OSError` keeps catching it.
+    It exists so a caller can tell "this path is an alias" from "another
+    principal denied me": both used to surface as a bare `OSError` here, and a
+    junction standing in for the state root was then diagnosed as a
+    cross-principal DACL problem with an `icacls` remediation that cannot fix
+    it.
+    """
+
+
+class WindowsPathTypeError(OSError):
+    """The entry exists but is a file where a directory was required, or vice versa."""
+
+
 def _windows_open_path(
     path: Path,
     *,
@@ -424,9 +440,9 @@ def _windows_open_path(
         if not get_info(handle, 9, ctypes.byref(info), ctypes.sizeof(info)):
             raise OSError(_windows_last_error(ctypes), f"cannot inspect {path.name}")
         if info.attributes & 0x400:  # FILE_ATTRIBUTE_REPARSE_POINT
-            raise OSError("reparse points are not allowed")
+            raise WindowsReparsePointError("reparse points are not allowed")
         if bool(info.attributes & 0x10) != directory:
-            raise OSError("unexpected path type")
+            raise WindowsPathTypeError("unexpected path type")
     except BaseException:
         kernel32.CloseHandle(handle)
         raise
@@ -684,8 +700,26 @@ def _windows_private_dacl_sddl(sid: str) -> str:
     )
 
 
-def _windows_apply_dacl_sddl(path: Path, sddl: str) -> None:
-    """Apply one native SDDL DACL without shelling out through a localized tool."""
+def _windows_apply_dacl_sddl(path: Path, sddl: str, *, propagate: bool = False) -> None:
+    """Apply one native SDDL DACL without shelling out through a localized tool.
+
+    ``propagate`` picks the API, and the choice is load-bearing for any entry
+    that already has children. ``SetFileSecurityW`` writes the one object and
+    leaves existing children alone -- and because protecting a DACL strips the
+    parent's inheritance, Windows CONVERTS each child's previously-inherited
+    ACEs into explicit ones so they survive. Measured on a state root sealed to
+    SYSTEM: the child went from ``(A;ID;FA;;;<user>)`` to ``(A;;FA;;;<user>)``
+    and stayed fully readable and writable by the operator, while the directory
+    itself refused a listing -- a root that LOOKS sealed over state that is not.
+
+    ``SetNamedSecurityInfoW`` recomputes inheritance across the tree instead, so
+    the same child became ``AI(A;ID;FA;;;SY)(A;ID;FA;;;BA)`` and every operator
+    read, write and create was denied.
+
+    Creation paths keep the cheaper call deliberately: the directory their own
+    ``mkdir`` just made has no children to propagate to, and they are the
+    long-tested idempotency and writer-lease paths.
+    """
     import ctypes
     from ctypes import wintypes
 
@@ -698,19 +732,43 @@ def _windows_apply_dacl_sddl(path: Path, sddl: str) -> None:
     if not convert(sddl, 1, ctypes.byref(descriptor), None):
         raise OSError(_windows_last_error(ctypes), "cannot build Windows runtime DACL")
     try:
-        set_security = advapi32.SetFileSecurityW
-        set_security.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.LPVOID]
-        set_security.restype = wintypes.BOOL
+        # DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION
         dacl_information = 0x00000004 | 0x80000000
-        if not set_security(str(path), dacl_information, descriptor):
-            raise OSError(_windows_last_error(ctypes), "cannot protect Windows runtime DACL")
+        if not propagate:
+            set_security = advapi32.SetFileSecurityW
+            set_security.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.LPVOID]
+            set_security.restype = wintypes.BOOL
+            if not set_security(str(path), dacl_information, descriptor):
+                raise OSError(_windows_last_error(ctypes), "cannot protect Windows runtime DACL")
+            return
+        dacl = wintypes.LPVOID()
+        present = wintypes.BOOL()
+        defaulted = wintypes.BOOL()
+        get_dacl = advapi32.GetSecurityDescriptorDacl
+        get_dacl.argtypes = [
+            wintypes.LPVOID, ctypes.POINTER(wintypes.BOOL),
+            ctypes.POINTER(wintypes.LPVOID), ctypes.POINTER(wintypes.BOOL),
+        ]
+        get_dacl.restype = wintypes.BOOL
+        if not get_dacl(descriptor, ctypes.byref(present), ctypes.byref(dacl),
+                        ctypes.byref(defaulted)):
+            raise OSError(_windows_last_error(ctypes), "cannot read Windows runtime DACL")
+        set_named = advapi32.SetNamedSecurityInfoW
+        set_named.argtypes = [
+            wintypes.LPWSTR, ctypes.c_int, wintypes.DWORD, wintypes.LPVOID,
+            wintypes.LPVOID, wintypes.LPVOID, wintypes.LPVOID,
+        ]
+        set_named.restype = wintypes.DWORD
+        result = set_named(str(path), 1, dacl_information, None, None, dacl, None)
+        if result:
+            raise OSError(result, "cannot protect Windows runtime DACL tree")
     finally:
         kernel32.LocalFree(descriptor)
 
 
-def _windows_apply_private_dacl(path: Path, sid: str) -> None:
+def _windows_apply_private_dacl(path: Path, sid: str, *, propagate: bool = False) -> None:
     """Set a protected inheritable DACL on a newly-created runtime directory."""
-    _windows_apply_dacl_sddl(path, _windows_private_dacl_sddl(sid))
+    _windows_apply_dacl_sddl(path, _windows_private_dacl_sddl(sid), propagate=propagate)
 
 
 def _windows_tighten_private_directory(
@@ -949,6 +1007,648 @@ def _validate_windows_runtime_entry(
     finally:
         if opened_here:
             _windows_close_handle(handle)
+
+
+#: Service names to try, in order, when resolving the runtime principal. Mirrors
+#: `$script:ExomemServiceNames` in `scripts/_service-common.ps1`; `kb-mcp` is the
+#: pre-rename name still registered on boxes provisioned before the rename.
+_WINDOWS_SERVICE_NAMES = ("exomem", "kb-mcp")
+
+#: Account names the SCM accepts for the built-in service principals, casefolded.
+#: `LookupAccountName` resolves most of these, but `LocalSystem` -- the spelling
+#: the SCM itself stores for SYSTEM -- is not an account name it knows, so the
+#: fixed map is the authority for these and lookup is only the fallback.
+_WINDOWS_SERVICE_ACCOUNT_SIDS = {
+    "localsystem": "S-1-5-18",
+    ".\\localsystem": "S-1-5-18",
+    "nt authority\\system": "S-1-5-18",
+    "nt authority\\localservice": "S-1-5-19",
+    "nt authority\\local service": "S-1-5-19",
+    "nt authority\\networkservice": "S-1-5-20",
+    "nt authority\\network service": "S-1-5-20",
+}
+
+
+@dataclass(frozen=True)
+class WindowsRuntimePrincipal:
+    """The principal whose private DACL the machine-local state root should carry.
+
+    Not the calling token. The private-DACL model is token-relative, so a state
+    root written by an operator's offline migration is `unsafe` to the
+    LocalSystem service that then has to read it -- which is manifestation 1 of
+    #933, and cost a day of toggling ACLs back and forth. The runtime principal
+    is whoever will actually RUN against this root, and it is a fact about the
+    machine, not about whoever happens to be typing.
+
+    Resolved from the SCM registry, the same hive and the same non-elevated read
+    `scripts/_service-common.ps1` already documents as "the single source of
+    truth" for the service's interpreter. `ObjectName` sits beside the
+    `Parameters\\Application` value it reads.
+
+    With no service installed the runtime principal IS the current token, and
+    every path stays byte-identical to the single-principal behaviour. An
+    unreadable or unrecognised entry degrades to the current token and SAYS so
+    through `source`: a guessed principal would trade one cross-principal
+    failure for another, silently.
+    """
+
+    sid: str
+    #: `service:<name>` when the SCM answered; `current-token` when no service is
+    #: installed; `current-token (<why>)` when a service exists but its principal
+    #: could not be established. Never omitted -- it is what makes a degraded
+    #: resolution visible instead of indistinguishable from a clean one.
+    source: str
+    #: The vault this principal's service is configured to serve, when one could
+    #: be established. `None` for a pinned or current-token principal, and also
+    #: when the service exists but its binding is unreadable -- callers must read
+    #: that as "do not act", never as "no binding exists".
+    bound_vault: str | None = None
+
+    @property
+    def authoritative(self) -> bool:
+        """True only for a principal established from an authority, not inferred.
+
+        Gates the seal. A principal that merely defaulted to the current token --
+        including one that defaulted BECAUSE the registry was unreadable -- must
+        never authorise re-ACLing anything, or an unreadable hive would quietly
+        rewrite the root to the wrong principal.
+
+        Named for what it asserts. It was `resolved_from_service`, which was
+        untrue for the `pinned:` case it also admits.
+        """
+        return self.source.startswith(("service:", "pinned:"))
+
+    def seals_vault(self, vault_root: str | os.PathLike[str]) -> bool:
+        """Whether this principal may seal *vault_root*'s state root.
+
+        The seal's whole justification is a user-token flow preparing the root
+        THE SERVICE WILL RUN AGAINST. A machine that merely has a service
+        registered says nothing about an unrelated vault, and sealing on that
+        basis handed a brand-new `exomem init` vault to LocalSystem and locked
+        the operator out of the state root it had just made for them.
+
+        An explicitly pinned principal is an operator instruction about this
+        invocation, so it needs no binding. A service principal needs one, and
+        an unreadable binding refuses.
+        """
+        if not self.authoritative:
+            return False
+        if self.source.startswith("pinned:"):
+            return True
+        return self.bound_vault is not None and _same_vault(self.bound_vault, vault_root)
+
+
+#: `ERROR_FILE_NOT_FOUND` / `ERROR_PATH_NOT_FOUND`. The registry raises these for
+#: a key that is not there, which is the ordinary "no service installed" answer.
+#: Every other error means the read FAILED, which is a different fact.
+_WINDOWS_REGISTRY_ABSENT = frozenset({2, 3})
+
+
+def _windows_service_object_name(name: str) -> str | None:
+    """Read one service's configured account from the SCM hive.
+
+    Returns None only when the service is genuinely ABSENT. A read that FAILED
+    -- permissions, a corrupt hive, a redirected view -- raises instead, because
+    the two are different facts and collapsing them is how a correctly sealed
+    root got a `current-token` principal, a FAIL, and an `icacls` that would
+    have granted the operator and broken the service.
+    """
+    import winreg
+
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE,
+            f"SYSTEM\\CurrentControlSet\\Services\\{name}",
+        ) as key:
+            value, _kind = winreg.QueryValueEx(key, "ObjectName")
+    except OSError as error:
+        if getattr(error, "winerror", None) in _WINDOWS_REGISTRY_ABSENT:
+            return None
+        raise
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _windows_service_bound_vault(name: str) -> str | None:
+    r"""The vault path one installed service is configured to serve, or None.
+
+    Resolution mirrors `scripts/upgrade.ps1` (~:120) exactly, because the two
+    have to agree about which cell is which: the managed dotenv in the service's
+    NSSM `AppDirectory` first, then the `AppEnvironmentExtra` NSSM injects. The
+    dotenv wins because python-dotenv loads it with `override=True` before
+    readiness, so it is what the running service actually reads.
+
+    Never raises, and never returns a value it had to guess at. `None` means
+    "this service's vault could not be established", which callers must treat as
+    "do not act", not as "no binding exists".
+    """
+    import winreg
+
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE,
+            f"SYSTEM\\CurrentControlSet\\Services\\{name}\\Parameters",
+        ) as key:
+            try:
+                app_directory, _kind = winreg.QueryValueEx(key, "AppDirectory")
+            except OSError:
+                app_directory = None
+            try:
+                extra, _kind = winreg.QueryValueEx(key, "AppEnvironmentExtra")
+            except OSError:
+                extra = None
+    except OSError:
+        return None
+    if isinstance(app_directory, str) and app_directory.strip():
+        dotenv = Path(app_directory.strip()) / ".env"
+        try:
+            lines = dotenv.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            lines = []
+        for line in reversed(lines):
+            match = re.match(r"\s*EXOMEM_VAULT_PATH\s*=\s*(.*?)\s*$", line)
+            if match:
+                value = match.group(1).strip().strip("\"'")
+                if value:
+                    return value
+    # NSSM stores this as REG_MULTI_SZ; only ever read the one key out of it.
+    # The rest of that block carries service secrets and must not be surfaced.
+    if isinstance(extra, list):
+        for item in extra:
+            if isinstance(item, str) and item.startswith("EXOMEM_VAULT_PATH="):
+                value = item.split("=", 1)[1].strip().strip("\"'")
+                if value:
+                    return value
+    return None
+
+
+def _same_vault(left: str | os.PathLike[str], right: str | os.PathLike[str]) -> bool:
+    """Whether two spellings name the same vault, by the state key's own rule.
+
+    Derived from `state_paths.vault_state_key`'s normalization rather than
+    restated: two paths that map to the same state key ARE the same vault by
+    definition, so comparing keys cannot drift from the placement seam.
+    """
+    from .state_paths import vault_state_key
+
+    try:
+        return vault_state_key(Path(left)) == vault_state_key(Path(right))
+    except (OSError, ValueError):
+        return False
+
+
+def _windows_sid_for_account(account: str) -> str | None:
+    """Resolve one account name to its SID string, or None when unresolvable."""
+    fixed = _WINDOWS_SERVICE_ACCOUNT_SIDS.get(account.casefold())
+    if fixed is not None:
+        return fixed
+    import ctypes
+    from ctypes import wintypes
+
+    advapi32 = _windows_library(ctypes, "advapi32")
+    lookup = advapi32.LookupAccountNameW
+    lookup.argtypes = [
+        wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.LPVOID,
+        ctypes.POINTER(wintypes.DWORD), wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(wintypes.DWORD),
+    ]
+    lookup.restype = wintypes.BOOL
+    sid_size = wintypes.DWORD(0)
+    domain_size = wintypes.DWORD(0)
+    use = wintypes.DWORD(0)
+    lookup(None, account, None, ctypes.byref(sid_size), None,
+           ctypes.byref(domain_size), ctypes.byref(use))
+    if not sid_size.value:
+        return None
+    sid_buffer = ctypes.create_string_buffer(sid_size.value)
+    domain_buffer = ctypes.create_unicode_buffer(domain_size.value)
+    if not lookup(None, account, sid_buffer, ctypes.byref(sid_size), domain_buffer,
+                  ctypes.byref(domain_size), ctypes.byref(use)):
+        return None
+    convert = advapi32.ConvertSidToStringSidW
+    convert.argtypes = [wintypes.LPVOID, ctypes.POINTER(wintypes.LPWSTR)]
+    convert.restype = wintypes.BOOL
+    text = wintypes.LPWSTR()
+    if not convert(sid_buffer, ctypes.byref(text)):
+        return None
+    try:
+        return str(text.value)
+    finally:
+        _windows_library(ctypes, "kernel32").LocalFree(text)
+
+
+#: Explicit override for the runtime principal. `current-token` pins the
+#: single-principal behaviour; anything else must be a literal SID. Two callers
+#: need it and neither is exotic: an operator doing maintenance inside a stop
+#: window with the service disabled, and the test suite -- which must not change
+#: behaviour based on whether the developer's machine happens to have an
+#: `exomem` service registered, since that would make the suite's verdict a
+#: property of the box rather than of the code.
+ENV_RUNTIME_PRINCIPAL = "EXOMEM_RUNTIME_PRINCIPAL"
+
+
+def resolve_windows_runtime_principal(
+    *, service_names: tuple[str, ...] = _WINDOWS_SERVICE_NAMES
+) -> WindowsRuntimePrincipal:
+    """Whose private DACL the state root should carry on this machine.
+
+    Never guesses. Every failure to establish a SERVICE principal degrades to
+    the current token with the reason recorded in `source`, because a wrong
+    principal is worse than a conservative one: it would lock out the operator
+    AND fail the service.
+
+    It can still raise `OSError` from `_windows_current_user_sid`, which is the
+    one question with no honest fallback -- a process that cannot establish its
+    own identity has nothing to degrade TO. Callers that must not fail catch it.
+    """
+    current = _windows_current_user_sid()
+    override = os.environ.get(ENV_RUNTIME_PRINCIPAL, "").strip()
+    if override:
+        if override.casefold() == "current-token":
+            # `pinned:` and NOT `current-token (...)`: the parenthesised form is
+            # reserved for a principal that DEGRADED to this token, and callers
+            # withhold the token-relative repair on seeing it. A deliberate pin
+            # is the opposite of a degradation and must not read as one.
+            return WindowsRuntimePrincipal(sid=current, source="pinned:current-token")
+        if re.fullmatch(r"S-1-[0-9-]+", override):
+            return WindowsRuntimePrincipal(sid=override, source=f"pinned:{override}")
+        return WindowsRuntimePrincipal(
+            sid=current,
+            source=f"current-token ({ENV_RUNTIME_PRINCIPAL}={override!r} is not a SID)",
+        )
+    degraded: str | None = None
+    for name in service_names:
+        try:
+            account = _windows_service_object_name(name)
+        except OSError as error:
+            # A read that FAILED, not an absent service. Degrading silently here
+            # made a correctly-sealed cell look misconfigured and prescribed the
+            # repair that breaks it.
+            degraded = f"service {name!r} registry read failed ({error})"
+            continue
+        if account is None:
+            continue
+        try:
+            sid = _windows_sid_for_account(account)
+        except OSError:
+            sid = None
+        if sid is None:
+            degraded = f"service {name!r} account {account!r} is unresolvable"
+            continue
+        return WindowsRuntimePrincipal(
+            sid=sid,
+            source=f"service:{name}",
+            bound_vault=_windows_service_bound_vault(name),
+        )
+    if degraded is not None:
+        return WindowsRuntimePrincipal(sid=current, source=f"current-token ({degraded})")
+    return WindowsRuntimePrincipal(sid=current, source="current-token")
+
+
+@dataclass(frozen=True)
+class WindowsDirectoryPosture:
+    """What the CURRENT process token can do with one private directory.
+
+    The private-DACL model is relative to the calling token
+    (`_windows_private_dacl_trustees` puts that token's own SID first), so the
+    same directory is `private` to the principal that created it and `unsafe`
+    to any other. That is correct for a single-principal install and is exactly
+    the cross-principal defect when a LocalSystem service and an operator's CLI
+    share one machine-local state root: whichever principal did not create it
+    fails, and until now it failed as a traceback from deep inside whatever
+    operation happened to touch state first.
+
+    This type is the read-only vocabulary for reporting that condition instead
+    of raising it. It never repairs and never opens anything for write.
+
+    It carries TWO verdicts because the two questions operators actually ask are
+    different. "Can I work here?" is about the calling token. "Is this cell
+    configured correctly?" is about the RUNTIME principal -- and answering the
+    second with the first makes a healthy LocalSystem install permanently red to
+    every operator, since a correct `D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)` root is
+    `unsafe` to anyone who is not SYSTEM. Measured, not assumed.
+    """
+
+    path: Path
+    #: This token can open the directory itself.
+    accessible: bool
+    #: Why the open failed, when it did: `access-denied` (the cross-principal
+    #: case), `reparse-point`, `unexpected-path-type`, `missing`, `unopenable`.
+    #: None when it succeeded. Collapsing these lost the difference between "a
+    #: principal denied me" and "this is a junction" -- and only the first has an
+    #: `icacls` repair.
+    unopenable_reason: str | None
+    #: `private` / `inherited` / `unsafe` as THIS TOKEN's validator judges it,
+    #: or None when the descriptor could not be read at all.
+    verdict: str | None
+    #: The same judgement made for the runtime principal. Equal to `verdict`
+    #: whenever they are the same principal.
+    runtime_verdict: str | None
+    #: The worst verdict among a sample of the root's CHILDREN, judged for the
+    #: runtime principal, or None when there was nothing readable to judge. The
+    #: root's own descriptor cannot answer whether the state inside it is
+    #: private, and a sealed-looking root over readable state is worse than an
+    #: honestly unsealed one.
+    child_verdict: str | None
+    #: How many children that verdict is based on. 0 with a None verdict means
+    #: the contents were NOT EVALUATED, which callers must say out loud rather
+    #: than report as privacy.
+    child_sampled: int
+    #: The observed SDDL, when readable. An object's OWNER keeps READ_CONTROL,
+    #: so a root this user created but re-ACLed to SY/BA still reports its
+    #: descriptor -- which is what makes a remote report actionable.
+    observed: str | None
+    #: The full-access trustees THIS TOKEN's validator requires.
+    expected: tuple[str, ...]
+    #: The full-access trustees the RUNTIME principal's validator requires.
+    runtime_expected: tuple[str, ...]
+    #: The runtime principal, and how it was established.
+    runtime_principal: WindowsRuntimePrincipal
+    #: The exact non-recursive repair, rendered for the RUNTIME principal -- the
+    #: DACL this root is supposed to end up carrying. Rendering it for the
+    #: calling token instead is what produced #933's day of toggling: following
+    #: it on a service install writes a root the service then rejects forever.
+    remediation: str
+
+
+def inspect_windows_private_directory(
+    path: Path, *, runtime_principal: WindowsRuntimePrincipal | None = None
+) -> WindowsDirectoryPosture | None:
+    """Describe one private directory's posture. Read-only; does not repair.
+
+    Returns None off Windows (the POSIX branch has no DACL model) and None when
+    the entry is absent -- an absent root is not a cross-principal root, and
+    conflating them would make every fresh install look like the defect.
+
+    Raises only if the CURRENT TOKEN's own identity cannot be established
+    (`_windows_current_user_sid`, or an invalid SID reaching
+    `_windows_private_dacl_trustees`). Everything about the directory itself is
+    reported rather than raised; it is only the question "who am I" that has no
+    honest answer to report.
+    """
+    if os.name != "nt":
+        return None
+    target = Path(path)
+    if not os.path.lexists(target):
+        return None
+    sid = _windows_current_user_sid()
+    principal = runtime_principal or resolve_windows_runtime_principal()
+    expected = _windows_private_dacl_trustees(sid)
+    runtime_expected = _windows_private_dacl_trustees(principal.sid)
+    remediation = _windows_private_dacl_repair_command(
+        target, principal.sid, directory=True
+    )
+    # Read the descriptor by path first: it survives the loss of directory
+    # access that makes the handle open fail, so the two probes answer
+    # different questions and the descriptor one must not be skipped when the
+    # other fails.
+    try:
+        observed: str | None = _windows_dacl_sddl(target)
+    except OSError:
+        observed = None
+
+    def _verdict(for_sid: str) -> str | None:
+        if observed is None:
+            return None
+        return _windows_private_dacl_verdict(observed, for_sid, directory=True)
+
+    accessible = True
+    unopenable_reason: str | None = None
+    try:
+        handle = _windows_open_path(target, directory=True)
+    except WindowsReparsePointError:
+        accessible, unopenable_reason = False, "reparse-point"
+    except WindowsPathTypeError:
+        accessible, unopenable_reason = False, "unexpected-path-type"
+    except FileNotFoundError:
+        accessible, unopenable_reason = False, "missing"
+    except OSError as error:
+        accessible = False
+        # `_windows_open_path` passes the raw Windows error through as `errno`,
+        # so ACCESS_DENIED arrives as 5 rather than as EACCES.
+        unopenable_reason = (
+            "access-denied" if error.errno in {5, errno.EACCES} else "unopenable"
+        )
+    else:
+        _windows_close_handle(handle)
+    child_verdict, child_sampled = _windows_child_dacl_verdict(target, principal.sid)
+    return WindowsDirectoryPosture(
+        path=target,
+        accessible=accessible,
+        unopenable_reason=unopenable_reason,
+        verdict=_verdict(sid),
+        runtime_verdict=_verdict(principal.sid),
+        child_verdict=child_verdict,
+        child_sampled=child_sampled,
+        observed=observed,
+        expected=expected,
+        runtime_expected=runtime_expected,
+        runtime_principal=principal,
+        remediation=remediation,
+    )
+
+
+#: How many children to sample when asking whether the state INSIDE a private
+#: root is private too. A sample, not a sweep: this runs inside `doctor`, the
+#: root can hold thousands of index pages, and one foreign ACE is as damning as
+#: a hundred. `sorted` so the sample is the same set run to run rather than
+#: whatever order the filesystem happened to hand back.
+_WINDOWS_CHILD_DACL_SAMPLE = 16
+
+
+def _windows_sample_children(directory: Path) -> list[Path] | None:
+    """A stable sample of one directory's children, or None when unlistable.
+
+    `sorted` so the sample is the same set run to run rather than whatever order
+    the filesystem happened to hand back. None and [] are different answers:
+    None means the listing was refused, [] means there is genuinely nothing
+    there, and only the second licenses a claim about the contents.
+    """
+    if os.name != "nt":
+        return None
+    try:
+        return sorted(Path(directory).iterdir())[:_WINDOWS_CHILD_DACL_SAMPLE]
+    except OSError:
+        return None
+
+
+def _windows_child_dacl_verdict(
+    directory: Path, sid: str, *, children: list[Path] | None = None
+) -> tuple[str | None, int]:
+    """Worst verdict among a sample of the directory's children, and its size.
+
+    The root's own descriptor cannot answer whether the STATE is private.
+    Protecting a directory converts its children's inherited ACEs to explicit
+    ones, so a root that reports `private` can sit over files any other
+    principal still reads and writes -- which is the exact hazard this module's
+    placement docstring opens with, and it read as `pass`.
+
+    The count is returned, not implied. A `None` verdict with 0 sampled means
+    the contents were NOT EVALUATED -- the normal case for an operator looking
+    at a service-owned root, whose listing is denied -- and a caller that
+    reports privacy without saying so is making exactly the confidently-green
+    claim this check exists to stop.
+
+    `children` lets a caller supply paths it enumerated earlier. The seal needs
+    that: after it writes, its own listing is denied, but child DESCRIPTORS stay
+    readable by path because the owner keeps `READ_CONTROL`.
+    """
+    if os.name != "nt":
+        return (None, 0)
+    sample = children if children is not None else _windows_sample_children(directory)
+    if sample is None:
+        return (None, 0)
+    seen: list[str] = []
+    for child in sample:
+        try:
+            child_sddl = _windows_dacl_sddl(child)
+            # Inside the guard: `Path.is_dir` SWALLOWS `OSError`, so a denied
+            # child directory would silently be judged with the file flag-set.
+            is_directory = child.is_dir()
+        except OSError:
+            continue
+        seen.append(_windows_private_dacl_verdict(child_sddl, sid, directory=is_directory))
+    if not seen:
+        return (None, 0)
+    # One rule, ordered worst-first. This was a short-circuit on `unsafe` plus an
+    # accumulator, and the accumulator only ever escalated to `inherited` -- so
+    # with the short-circuit removed an `unsafe` child that did not sort first
+    # was silently dropped. A single ranking cannot develop that seam.
+    for verdict in (
+        _WINDOWS_DACL_UNSAFE,
+        _WINDOWS_DACL_INHERITED,
+        _WINDOWS_DACL_PRIVATE,
+    ):
+        if verdict in seen:
+            return (verdict, len(seen))
+    return (seen[0], len(seen))
+
+
+class WindowsRuntimePrincipalUnresolved(RuntimeError):
+    """The runtime principal could not be established, so nothing was re-ACLed.
+
+    Deliberately not a silent no-op. Sealing to a GUESSED principal is the one
+    outcome worse than not sealing: it locks the operator out AND leaves the
+    service failing closed, which is the pair of failures #933 is about.
+    """
+
+
+def seal_windows_state_root_for_runtime_principal(
+    state_dir: Path,
+    *,
+    vault_root: Path | None = None,
+    runtime_principal: WindowsRuntimePrincipal | None = None,
+) -> WindowsRuntimePrincipal | None:
+    """Leave one state root carrying the RUNTIME principal's private DACL.
+
+    Called at the END of a user-token flow that created or recreated the root,
+    never at creation: the creating token has to be able to write the state into
+    it first, and a root sealed to LocalSystem up front is one its own migrator
+    can no longer open.
+
+    Returns the principal it sealed for, or None when there was nothing to do:
+    POSIX, an absent root, a runtime principal that IS the current token, or --
+    the case that matters -- a vault this machine's service is not bound to.
+    That last one is not a nicety. Resolving a principal from the machine's
+    service registry says nothing about WHICH vault that service serves, so
+    without the binding check an `exomem init` of a brand-new unrelated vault
+    handed its state root to LocalSystem and locked the operator out of the
+    directory it had just made for them.
+
+    Refuses rather than guessing when the principal is unresolved, refuses to
+    touch a root this process does not own, and refuses an aliased root: the
+    seal is the one DACL write that never opened a handle, so without its own
+    check it would happily protect a junction and leave the real root untouched
+    while reporting success.
+    """
+    if os.name != "nt":
+        return None
+    target = Path(state_dir)
+    if not os.path.lexists(target):
+        return None
+    principal = runtime_principal or resolve_windows_runtime_principal()
+    current = _windows_current_user_sid()
+    if principal.sid.casefold() == current.casefold():
+        return None
+    if not principal.authoritative:
+        raise WindowsRuntimePrincipalUnresolved(principal.source)
+    if vault_root is not None and not principal.seals_vault(vault_root):
+        # Two very different skips, and they must not look alike in a log. One
+        # is correct and expected; the other is a SILENT MISS on the upgrade
+        # path -- the service's own vault going unsealed because its binding
+        # could not be read.
+        if principal.bound_vault is None:
+            logger.warning(
+                "not sealing %s: the %s binding could not be read, so this vault "
+                "cannot be confirmed as the one it serves",
+                target, principal.source,
+            )
+        else:
+            logger.info(
+                "not sealing %s: %s is bound to a different vault (%s)",
+                target, principal.source, principal.bound_vault,
+            )
+        return None
+    # Open it the way every other private-state boundary does, so a reparse
+    # point or a non-directory is refused here too rather than silently sealed.
+    try:
+        _windows_close_handle(_windows_open_path(target, directory=True))
+    except (WindowsReparsePointError, WindowsPathTypeError):
+        raise
+    except OSError:
+        # Unopenable. If it is ALREADY exactly what this call would write, that
+        # is a repeat call on a sealed root, and a seal has to be idempotent:
+        # the first version raised a raw `[Errno 5]` from here on the second
+        # call. Anything else is a real failure and still propagates.
+        try:
+            already = _windows_private_dacl_is_valid(
+                _windows_dacl_sddl(target), principal.sid, directory=True
+            )
+        except OSError:
+            already = False
+        if already:
+            return None
+        raise
+    observed = _windows_dacl_sddl(target)
+    if not _windows_owner_admits_current_user(_windows_sddl_owner(observed), current):
+        raise WindowsRuntimePrincipalUnresolved(
+            f"this process does not own {target}; refusing to re-ACL it"
+        )
+    # Enumerate BEFORE the write, while the listing is still permitted. After
+    # the seal this token cannot list the root, but child descriptors stay
+    # readable by path because the owner keeps `READ_CONTROL` -- so this is the
+    # only moment at which the contents can be named for later verification.
+    children = _windows_sample_children(target)
+    # `propagate` is load-bearing, not a flag. Protecting the entry alone makes
+    # Windows convert each child's inherited ACEs into explicit ones, so every
+    # file the migration just moved in stays readable and writable by this token
+    # behind a directory that merely LOOKS sealed.
+    _windows_apply_private_dacl(target, principal.sid, propagate=True)
+    # Prove the write took, judged by the same validator the runtime principal
+    # will use. Read by path: the seal has just removed this token's own access,
+    # so a fresh handle open would fail on a root that is now exactly correct.
+    sealed = _windows_dacl_sddl(target)
+    if not _windows_private_dacl_is_valid(sealed, principal.sid, directory=True):
+        raise WindowsRuntimeDaclError(
+            target,
+            _windows_private_dacl_repair_command(target, principal.sid, directory=True),
+            observed=sealed,
+            expected=_windows_private_dacl_trustees(principal.sid),
+        )
+    # And prove it took on the CONTENTS, which is what the seal actually claims
+    # to have fixed. Checking only the entry would report success over a partial
+    # propagation -- a child directory carrying its own protected DACL stays
+    # `unsafe` for the runtime principal and inheritance never reaches it.
+    child_verdict, _sampled = _windows_child_dacl_verdict(
+        target, principal.sid, children=children
+    )
+    if child_verdict == _WINDOWS_DACL_UNSAFE:
+        raise WindowsRuntimeDaclError(
+            target,
+            _windows_private_dacl_repair_command(target, principal.sid, directory=True),
+            observed=f"root sealed, but contents remain {child_verdict}",
+            expected=_windows_private_dacl_trustees(principal.sid),
+        )
+    return principal
 
 
 def prepare_windows_idempotency_runtime_paths(state_dir: Path, owners_dir: Path) -> None:

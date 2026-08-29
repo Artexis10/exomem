@@ -467,6 +467,12 @@ def migrate_vault_state_offline(
     if adopt is not None and adopt not in (*_ADOPT_CHOICES, _GOVERNANCE_VAULT_ADOPTION):
         raise ValueError(f"--adopt-state must be one of {_ADOPT_CHOICES}")
     vault_root = Path(vault_root)
+    # Before the lock, before any adoption, before `ensure_vault_state_dir`: an
+    # offline migration under the operator's token against a root the service
+    # owns cannot succeed, and `scripts/upgrade.ps1` learned that as `[Errno 5]
+    # cannot safely open Obsidian-<key>` part-way through an upgrade whose
+    # service was already stopped.
+    state_paths.assert_state_root_accessible(vault_root)
     state_dir = state_paths.vault_state_dir(vault_root)
     if adopt == _GOVERNANCE_VAULT_ADOPTION:
         return _adopt_governance_store_from_vault_offline(vault_root)
@@ -491,7 +497,45 @@ def migrate_vault_state_offline(
             "a complete manifest has legacy in-vault duplicates",
         )
     require_vault_state_ready(vault_root)
+    _seal_state_root_for_runtime_principal(vault_root)
     return resolution
+
+
+def _seal_state_root_for_runtime_principal(vault_root: Path) -> None:
+    """Leave the migrated root carrying the DACL its RUNTIME principal validates.
+
+    The last act of the migration, deliberately after `require_vault_state_ready`:
+    the migrating token has to be able to read and write the root right up to
+    here, and sealing it to LocalSystem any earlier locks the migration out of
+    its own destination.
+
+    This is what closes manifestation 1. `upgrade.ps1` runs this step under the
+    operator's token; without the seal the root keeps the operator's ACE, and the
+    LocalSystem service that starts immediately afterwards rejects it as `unsafe`
+    on every catalog proof, lexical repair and graph recovery -- refusing forever
+    at ~0 CPU, which is the outage.
+
+    A no-op when the runtime principal IS the current token, so a machine with no
+    service installed behaves exactly as it did before. Never guesses: an
+    unresolved principal leaves the DACL alone and logs why, because sealing to
+    the wrong principal locks out the operator AND the service at once.
+    """
+    try:
+        sealed = state_paths.seal_state_root_for_runtime_principal(vault_root)
+    except Exception as error:  # noqa: BLE001 - the migration itself has succeeded
+        # Never fatal here. The state is migrated and readable by the migrating
+        # token; a failed seal is a posture the `state.dacl` doctor check reports
+        # and an operator can repair, not a reason to unwind a completed move.
+        log.warning(
+            "machine-local state root not sealed to the runtime principal: %s", error
+        )
+        return
+    if sealed is not None:
+        log.info(
+            "machine-local state root sealed to runtime principal %s (%s)",
+            sealed.sid,
+            sealed.source,
+        )
 
 
 def _resolve_locked(vault_root: Path, state_dir: Path) -> StateResolution:
