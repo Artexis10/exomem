@@ -47,6 +47,7 @@ _INSPECTION_KEYS = frozenset(
         "saved_views",
         "lifecycle_guards",
         "presentation",
+        "observed_values",
     }
 )
 _INSPECTION_VIEW_QUERY_KEYS = frozenset(
@@ -155,6 +156,47 @@ def _inspection_json(value: Any, *, depth: int = 0, nodes: list[int] | None = No
 
 def _inspection_field_name(value: Any) -> str | None:
     return _inspection_string(value, maximum=128)
+
+
+def _inspection_observed_values(value: Any) -> dict[str, dict[str, Any]] | None:
+    """Re-validate the free-string vocabulary summary before it reaches egress."""
+    if not isinstance(value, Mapping) or len(value) > collections._MAX_SCHEMA_FIELDS:
+        return None
+    normalized: dict[str, dict[str, Any]] = {}
+    for name, summary in value.items():
+        field = _inspection_field_name(name)
+        if (
+            field is None
+            or not isinstance(summary, Mapping)
+            or set(summary) != {"values", "truncated"}
+            or type(summary.get("truncated")) is not bool
+            or not isinstance(summary.get("values"), list)
+            or len(summary["values"]) > record_formats._MAX_OBSERVED_VALUES
+        ):
+            return None
+        entries: list[dict[str, Any]] = []
+        for entry in summary["values"]:
+            if not isinstance(entry, Mapping) or set(entry) != {
+                "value",
+                "count",
+                "value_truncated",
+            }:
+                return None
+            # Deliberately looser than the producer's 120-CHARACTER cut: this is a
+            # byte ceiling on a string that may be 120 wide characters, so it must
+            # not double as a re-assertion of the cut.
+            observed = _inspection_string(entry.get("value"), maximum=512)
+            count, cut = entry.get("count"), entry.get("value_truncated")
+            if observed is None or type(count) is not int or count < 1 or type(cut) is not bool:
+                return None
+            # Distinctness is NOT asserted here: two distinct values sharing the
+            # display window collapse to the same display string, and both are
+            # flagged. The invariant lives at the producer instead --
+            # _observed_field_values keys its counter on the full stripped
+            # value, so one entry per distinct full value is structural.
+            entries.append({"value": observed, "count": count, "value_truncated": cut})
+        normalized[field] = {"values": entries, "truncated": summary["truncated"]}
+    return normalized
 
 
 def _inspection_legacy_identifier(value: Any) -> str | None:
@@ -472,6 +514,12 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
     snapshot = payload.get("snapshot")
     if snapshot is not None and _inspection_hash(snapshot) is None:
         return None
+    observed_values = payload.get("observed_values")
+    normalized_observed = (
+        None if observed_values is None else _inspection_observed_values(observed_values)
+    )
+    if observed_values is not None and normalized_observed is None:
+        return None
     contract, legacy = payload.get("contract"), payload.get("legacy")
     if kind == "collection":
         if legacy is not None or not isinstance(contract, Mapping):
@@ -555,6 +603,7 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
             or path is None
             or legacy.get("inspect_only") is not True
             or snapshot is not None
+            or normalized_observed is not None
             or normalized_versions
             or normalized_views
             or status != "not_applicable"
@@ -615,6 +664,7 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
             else {}
         ),
         **({"lifecycle_guards": dict(guards)} if guards is not None else {}),
+        **({"observed_values": normalized_observed} if normalized_observed is not None else {}),
     }
     return result
 
@@ -652,6 +702,7 @@ egress.register_projector(
         "saved_views",
         "lifecycle_guards",
         "presentation",
+        "observed_values",
     ),
     validator=_validate_record_inspection,
 )
@@ -1228,6 +1279,13 @@ def inspect_collection(
                 "audit": _inspection_audit(audit),
                 "saved_views": saved_views,
                 "lifecycle_guards": guards,
+                # Item-derived, so it rides the same authorized item pass the rest
+                # of this payload does; nothing recomputes it from unfiltered bytes.
+                **(
+                    {"observed_values": dict(inspection.observed_values)}
+                    if inspection.observed_values is not None
+                    else {}
+                ),
                 **(
                     {"presentation": _presentation_inspection(inspection.presentation, manifest)}
                     if (

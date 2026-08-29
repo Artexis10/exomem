@@ -41,6 +41,12 @@ _MAX_RECORDS = 10_000
 _MAX_CHILD_ROWS = 10_000
 _MAX_CHILD_FIELDS = 16
 _MAX_PRESENTATION_BLOCK_BYTES = 256 * 1024
+#: A free-string field carries no declared vocabulary, so inspection reports the
+#: values already in use. Both bounds are payload ceilings, not sampling limits:
+#: every loaded item is counted at full value, and the cap only stops the emitted
+#: distinct-value list from growing with the collection.
+_MAX_OBSERVED_VALUES = 20
+_MAX_OBSERVED_VALUE_CHARS = 120
 _EXPANDED_METADATA_FIELDS = frozenset({"parent_record_id", "child_field", "child_index"})
 _PRESENTATION_OPEN = re.compile(
     r"(?m)^<!-- exomem-record-presentation:v1 digest=sha256:([0-9a-f]{64}) -->\r?$"
@@ -1650,6 +1656,9 @@ class CollectionInspection:
     diagnostics: tuple[collections.CollectionDiagnostic, ...]
     record_count: int = 0
     presentation: tuple[dict[str, Any], ...] = ()
+    #: `None` when no item pass ran, so an unreadable collection never reports an
+    #: empty vocabulary as if it had been swept.
+    observed_values: Mapping[str, dict[str, Any]] | None = None
 
 
 def inspect_collection(
@@ -1711,7 +1720,64 @@ def inspect_collection(
         diagnostics=tuple(diagnostics),
         record_count=len(parsed.records),
         presentation=presentation,
+        observed_values=_observed_field_values(manifest, parsed.records),
     )
+
+
+def _observed_field_values(
+    manifest: collections.CollectionManifest,
+    records: Sequence[Record],
+) -> dict[str, dict[str, Any]]:
+    """Summarize the vocabulary free-string fields already carry.
+
+    A declared `enum` IS the vocabulary, so those fields are left alone. The pass
+    reads only the records the adapter already authorized and parsed; a value that
+    reached no released item cannot reach this summary.
+
+    Two decisions are load-bearing and easy to get subtly wrong:
+
+    * The counter is keyed on the FULL surrounding-whitespace-stripped value, never
+      on the display form. Keying on the cut value silently merges two distinct terms
+      that happen to share a 120-character prefix into one entry with a summed count,
+      which is a wrong answer rather than a bounded one. Two distinct values may
+      therefore emit the same display string; `value_truncated` is what says so.
+    * Selection is by frequency, decided AFTER the whole pass, because the payload
+      presents the values in frequency order and a first-seen cap would silently
+      drop the collection's most common term. The intermediate counter holds
+      references into records the adapter already materialized, so it adds no state
+      the read did not already carry.
+    """
+    names = [
+        name
+        for name, spec in manifest.schema.fields.items()
+        if spec.type == "string" and not spec.enum
+    ]
+    counts: dict[str, dict[str, int]] = {name: {} for name in names}
+    for record in records:
+        for name in names:
+            value = record.values.get(name)
+            if type(value) is not str:
+                continue
+            text = value.strip()
+            if not text:
+                continue
+            observed = counts[name]
+            observed[text] = observed.get(text, 0) + 1
+    summary: dict[str, dict[str, Any]] = {}
+    for name in names:
+        ranked = sorted(counts[name].items(), key=lambda entry: (-entry[1], entry[0]))
+        summary[name] = {
+            "values": [
+                {
+                    "value": value[:_MAX_OBSERVED_VALUE_CHARS],
+                    "count": count,
+                    "value_truncated": len(value) > _MAX_OBSERVED_VALUE_CHARS,
+                }
+                for value, count in ranked[:_MAX_OBSERVED_VALUES]
+            ],
+            "truncated": len(ranked) > _MAX_OBSERVED_VALUES,
+        }
+    return summary
 
 
 def _inspect_presentation(
