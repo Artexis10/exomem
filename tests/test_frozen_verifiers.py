@@ -11,6 +11,8 @@ runs on a box with no cross-encoder weights and no `nli` extra installed.
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
 from exomem import claims
@@ -100,6 +102,23 @@ def _pin(digest: str, *, label_map_version: str = "v1") -> tuple:
             fixture_set="stance-v1",
         ),
     )
+
+
+def test_every_refusal_cause_comes_from_the_closed_vocabulary() -> None:
+    """The reason vocabulary is load-bearing, not decoration.
+
+    Read off the compiled admission function, so a new refusal path that invents
+    its own prose cause is caught here rather than reaching the diagnostic
+    surface as an unrecognised word.
+    """
+    reasons = {
+        const
+        for const in claims.verifier_admission.__code__.co_consts
+        if isinstance(const, str) and const.islower() and "-" in const and " " not in const
+    }
+    assert reasons, "no reason literals found — has the admission been restructured?"
+    assert reasons <= claims.VERIFIER_REFUSAL_REASONS | {"admitted"}
+    assert "admitted" not in claims.VERIFIER_REFUSAL_REASONS
 
 
 def test_pin_registry_is_an_immutable_repository_artifact() -> None:
@@ -361,6 +380,29 @@ def test_one_red_fixture_refuses_the_pair(tmp_path, monkeypatch) -> None:
     assert admission.reason == "fixtures-failed"
     assert first.claim_a in admission.detail
     assert claims.verifier_polarity("Caching helps", "Caching hurts") is None
+
+
+def test_a_label_map_change_without_a_version_bump_refuses(tmp_path, monkeypatch) -> None:
+    """The spec's re-verification scenario, exercised on the real mechanism.
+
+    Move v1's thresholds without bumping the version. Admission re-runs the
+    fixture set against the CURRENT map, so the stale pair fails there — the
+    only way a threshold change can ride in is by staying green on the very
+    fixtures that justified the pin.
+    """
+    _admit(tmp_path, monkeypatch, _oracle_predict())
+    assert claims.verifier_admission().admitted is True
+
+    claims.reset_verifier_cache()
+    drifted = dataclasses.replace(
+        claims.get_label_map("v1"), contradict_min=0.999, duplicate_min=0.999
+    )
+    monkeypatch.setitem(claims._LABEL_MAPS, "v1", drifted)
+
+    admission = claims.verifier_admission()
+    assert admission.admitted is False
+    assert admission.reason == "fixtures-failed"
+    assert admission.label_map_version == "v1"
 
 
 def test_absent_extra_refuses_as_a_missing_dependency(tmp_path, monkeypatch) -> None:
