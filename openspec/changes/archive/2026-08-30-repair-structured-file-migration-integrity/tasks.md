@@ -19,4 +19,4 @@
 
 - [x] 4.1 Run focused lifecycle, structured-file, Planning, Records, governance, and Unicode suites plus Ruff and strict OpenSpec validation.
 - [x] 4.2 Repeat the human-readable migration on a fresh Markdown-only vault copy and verify post-apply audit status, zero UUID projection drift for migrated collections, meaningful bodies, valid links, and empty second previews.
-- [ ] 4.3 Update canonical specs, archive the completed change, and deliver the implementation through a draft pull request with verification evidence.
+- [x] 4.3 Update canonical specs, archive the completed change, and deliver the implementation through a draft pull request with verification evidence.
