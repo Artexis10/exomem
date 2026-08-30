@@ -833,3 +833,32 @@ def test_a_dismissed_entry_stays_dismissed_when_a_label_arrives(
 
     assert finding.meta["polarity"] == "contradict"
     assert fingerprint_of(finding) == before
+
+
+# ---------------- 5.1 fixture-set precision (claimed against fixtures ONLY) ----------------
+
+
+def test_the_declared_heuristic_failures_are_real() -> None:
+    """The `heuristic_fails` flags are checked against the actual heuristic.
+
+    The precision table in tasks.md 5.1 is derived from these flags, so without
+    this pin the table could drift into fiction while staying green.
+    """
+    for pair in claims.VERIFICATION_FIXTURES["stance-v1"]:
+        verdict = claims._heuristic_polarity(pair.claim_a, pair.claim_b)
+        assert (verdict.label != pair.expected) == pair.heuristic_fails, (
+            pair.claim_a,
+            pair.expected,
+            verdict.label,
+            pair.heuristic_fails,
+        )
+
+
+def test_an_admitted_verifier_answers_every_fixture(tmp_path, monkeypatch) -> None:
+    """Admission's own bar, and the table's upper arm: every pair or nothing."""
+    _admit(tmp_path, monkeypatch, _oracle_predict())
+    assert claims.verifier_admission().admitted is True
+    for pair in claims.VERIFICATION_FIXTURES["stance-v1"]:
+        result = claims.verifier_polarity(pair.claim_a, pair.claim_b)
+        assert result is not None
+        assert result.label == pair.expected

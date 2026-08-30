@@ -70,7 +70,7 @@ the task is ticked, not estimated.
     to a planted, digest-resolvable model still yields `reason="no-pin"`, and
     `VERIFIER_PINS` is unchanged) and structural (`_active_pin.__code__.co_names`
     contains no `environ`/`getenv`, and its constants hold no `EXOMEM_*` literal).
-  - **`VERIFIER_PINS` ships EMPTY** — see the unticked follow-up under §5.
+  - **`VERIFIER_PINS` ships EMPTY** — see the unticked follow-up 6.1.
 
 - [x] 1.3 Knob fate: `EXOMEM_CLAIM_POLARITY_NLI` default-off pin;
   `EXOMEM_CLAIM_NLI_MODEL` retired — a set value selects nothing and is
@@ -120,6 +120,10 @@ the task is ticked, not estimated.
     `fixtures-failed` on one miss — partial evidence is none.
   - The `heuristic_fails` flags are not decoration: each was checked against the
     real `_heuristic_polarity` (table in 5.1); every declared flag matches.
+  - **Not delivered here:** the CI job that runs these fixtures against a REAL
+    model with the extra installed — see the unticked follow-up 6.2 (blocked:
+    `.github/**` is guarded in this lane, and there is no pin for it to verify
+    until 6.1).
 
 - [x] 1.5 Input-shape pin: the verifier accepts exactly a claim-text pair;
   structural test that no prompt/template path exists behind the seam.
@@ -405,8 +409,79 @@ the task is ticked, not estimated.
 
 ## 5. Acceptance
 
-- [ ] 5.1 Fixture-set precision table recorded here (heuristic vs verifier on
+- [x] 5.1 Fixture-set precision table recorded here (heuristic vs verifier on
   the golden pairs), claimed against fixtures only; no f22 bench claim while
   sequence 2 is withheld.
+  - **Fixture-set precision table** — `stance-v1`, 9 golden pairs. Generated from
+    `claims.VERIFICATION_FIXTURES` and the real `claims._heuristic_polarity`;
+    the flags behind it are pinned by `test_the_declared_heuristic_failures_are_real`.
+
+    | Fixture shape | Expected | Retired lexical heuristic | Correct |
+    | --- | --- | --- | --- |
+    | genuine contradiction, shared vocabulary | contradict | contradict | yes |
+    | genuine contradiction across differing surface forms | contradict | unrelated | **no** |
+    | restatement, near-identical surface | duplicate | duplicate | yes |
+    | restatement, reordered surface | duplicate | refine | **no** |
+    | same stance, added detail | refine | refine | yes |
+    | concordant evidence: antonym vocabulary, one stance | refine | contradict | **no** |
+    | concordant evidence: negation parity differs, one stance | refine | contradict | **no** |
+    | disjoint topics | unrelated | unrelated | yes |
+    | disjoint topics, shared house vocabulary | unrelated | unrelated | yes |
+
+    **Heuristic: 5/9 (55.6%). Admitted verifier: 9/9 (100%).**
+
+  - **What that second number is, stated honestly.** 9/9 is not a measurement of
+    a real cross-encoder — it is the ADMISSION BAR. A verifier that misses one
+    pair is refused, so any verifier that ever labels a queue entry scores 9/9 on
+    this set by construction. The claim this slice makes is therefore narrow and
+    exact: *a labelled queue entry came from a verifier that answered every
+    fixture, where the retired heuristic answers 5 of 9* — and the two shapes the
+    heuristic gets wrong most consequentially are the concordant-evidence pairs,
+    which it calls `contradict`. That is the f22 concordant-twin failure, and it
+    is precisely the precision cost the proposal names.
+  - **No bench claim.** Nothing here is claimed against f22 or any other
+    benchmark family; f22 stays withheld until sequence 2 is acknowledged. The
+    fixture set is the only evidence surface this slice claims on.
+  - **Mechanism-removal proof for the table's honesty** — scratch mutant dropping
+    one `heuristic_fails=True` flag:
+    ```
+    E           AssertionError: ('Batching does not hurt focus.', 'refine', 'contradict', False)
+    E           assert ('contradict' != 'refine') == False
+    FAILED tests/test_frozen_verifiers.py::test_the_declared_heuristic_failures_are_real
+    ```
+    Reverted: `48 passed in 0.15s`.
+
 - [ ] 5.2 `openspec validate --all --strict` green; scoped suites green; full
   suite at the completion boundary attributed against the origin/main baseline.
+
+## 6. Follow-ups — explicitly NOT delivered in this slice
+
+These are unticked on purpose. Each names why it could not be done here and
+what closing it requires; none of them is a stub, a skip, or a placeholder in
+code.
+
+- [ ] 6.1 **Ship a real pin.** `claims.VERIFIER_PINS` is EMPTY. A pin's
+  `weights_sha256` is the sha256 of the model's resolved snapshot as it sits in
+  the local HuggingFace cache, and no cross-encoder weights could be resolved in
+  this environment (no network model downloads available; `sentence_transformers`
+  and `torch` are not installed here). A digest is never guessed, so the registry
+  ships with the FORMAT and no occupant, and the verifier is refused
+  (`reason="no-pin"`) on every path. Everything downstream is exercised through
+  injected fake verifiers and planted wrong-digest fixtures, which is why the
+  admission machinery is fully tested with an empty registry.
+  **To close:** on a box with the `nli` extra installed and the intended
+  cross-encoder resident, run
+  `claims.resolve_weights_digest("<model>")`, add a `VerifierPin(model_name=…,
+  weights_sha256=<that digest>, label_map_version="v1", fixture_set="stance-v1")`
+  in a reviewed diff, and confirm `verifier_admission().admitted` — which will
+  itself re-run the nine fixtures against the real weights. If the real model
+  does not answer all nine, that is a finding about the model or about label map
+  v1, not a reason to relax the bar.
+- [ ] 6.2 **CI job that runs the fixture set with the extra installed.**
+  BLOCKED in this lane: it requires editing `.github/**`, which is a guarded
+  path this lane must not touch. The fixture set itself runs in CI today as part
+  of `tests/test_frozen_verifiers.py` (against injected verifiers); what is
+  missing is a job that installs `--extra nli`, resolves the pinned weights, and
+  runs the same fixtures against the REAL model. That job is only meaningful once
+  6.1 lands, since with an empty registry there is nothing for it to verify.
+  **To close:** add the job alongside 6.1, gated on the pin existing.
