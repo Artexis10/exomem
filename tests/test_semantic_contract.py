@@ -207,6 +207,41 @@ def test_compiled_type_normalization_drives_eligibility_for_all_types(
 
 
 @pytest.mark.parametrize(
+    ("path", "extra"),
+    (
+        ("Knowledge Base/Notes/Research/Records/archive-architecture.md", ""),
+        ("Knowledge Base/Notes/Research/Records/archive.md", "tags: [hub]"),
+        ("Knowledge Base/Notes/Research/Records/archive-snapshot.md", ""),
+    ),
+)
+def test_exempt_compiled_page_keeps_valid_destination_structure(
+    tmp_path: Path, path: str, extra: str
+) -> None:
+    state = _state(
+        tmp_path,
+        path,
+        _source(page_type="research-note", project="records", extra=extra),
+    )
+
+    assert semantic_contract.compiled_intent(state) is True
+    assert semantic_contract.compiled_structure_finding(state) is None
+    assert semantic_contract.requires_semantic_unit(state) is False
+
+
+def test_tag_only_exemption_cannot_hide_noncompiled_type(tmp_path: Path) -> None:
+    state = _state(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/ordinary.md",
+        _source(page_type="memo", extra="tags: [hub]"),
+    )
+
+    finding = semantic_contract.compiled_structure_finding(state)
+
+    assert finding is not None
+    assert finding.code == "COMPILED_TYPE_MISMATCH"
+
+
+@pytest.mark.parametrize(
     ("path", "page_type", "code"),
     (
         ("Knowledge Base/Notes/Insights/missing.md", "memo", "COMPILED_TYPE_MISMATCH"),
