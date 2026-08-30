@@ -6892,7 +6892,7 @@ def op_schema_memory(
     current content hash.
 
     Args:
-        operation: infer, validate, diff, or save-entity-types.
+        operation: infer, validate, diff, save-entity-types, or a workflow-contract operation.
         name: Lowercase contract slug; required only for `subject="contract"`.
         subject: `contract`, `categories`, `relations`, or `traversal-profiles`.
         project: Optional project scope for inference.
@@ -7195,6 +7195,7 @@ def _workflow_contract_schema_operation(
     include_model_suggestions: bool,
 ) -> dict:
     """Route the workflow subject through its one code-owned family implementation."""
+    family = workflow_contracts_module.registered_families()[workflow_contracts_module.FAMILY]
     if (
         save
         or project is not None
@@ -7244,7 +7245,7 @@ def _workflow_contract_schema_operation(
                 inspected = workflow_contracts_module.inspect_contract(vault_root, name)
                 return {"subject": "workflow-contracts", "valid": True, "findings": [], **inspected}
             try:
-                contract = workflow_contracts_module.parse_proposal(proposal or {})
+                contract = family.parser(proposal or {})
             except workflow_contracts_module.WorkflowContractError as error:
                 return {
                     "subject": "workflow-contracts",
@@ -7263,7 +7264,7 @@ def _workflow_contract_schema_operation(
                 return invalid
             return {
                 "subject": "workflow-contracts",
-                **workflow_contracts_module.resolve_contracts(
+                **family.resolver(
                     vault_root, context, name=name, proposal=proposal
                 ),
             }
@@ -7275,7 +7276,7 @@ def _workflow_contract_schema_operation(
                 or context is not None
             ):
                 return invalid
-            contract = workflow_contracts_module.parse_proposal(proposal)
+            contract = family.parser(proposal)
             if name:
                 inspected = workflow_contracts_module.inspect_contract(vault_root, name)
                 if inspected["contract"]["contract_id"] != contract.contract_id:
@@ -7319,7 +7320,7 @@ def _workflow_contract_schema_operation(
                 or (name is None and expected_hash is not None)
             ):
                 return invalid
-            contract = workflow_contracts_module.parse_proposal(proposal)
+            contract = family.parser(proposal)
             result = {
                 "subject": "workflow-contracts",
                 "saved": workflow_contracts_module.save_contract(
@@ -7340,7 +7341,7 @@ def _workflow_contract_schema_operation(
             ):
                 return invalid
             inspected = workflow_contracts_module.inspect_contract(vault_root, name)
-            contract = workflow_contracts_module.parse_proposal(inspected["contract"])
+            contract = family.parser(inspected["contract"])
             result = {
                 "subject": "workflow-contracts",
                 "saved": workflow_contracts_module.save_contract(

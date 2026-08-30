@@ -95,7 +95,7 @@ def refresh_shipped_schema(vault_root: Path) -> list[str]:
         return []
     from . import workflow_contracts
 
-    workflow_contracts.ensure_migration_marker(vault_root, review_required=True)
+    workflow_contracts.ensure_migration_marker(vault_root)
     refreshed: list[str] = []
     writes: list[PlannedWrite] = []
     for src in shipped_schema_sources():

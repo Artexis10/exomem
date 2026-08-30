@@ -76,7 +76,7 @@ def test_workflow_save_refuses_a_symlinked_schema_ancestor(tmp_path: Path) -> No
     }
     assert workflow_contracts.resolve_contracts(tmp_path, {}) == {
         "resolved": False,
-        "code": "WORKFLOW_CONTRACT_INVALID_INVENTORY",
+        "code": "WORKFLOW_CONTRACT_MIGRATION_INDETERMINATE",
     }
 
     with pytest.raises(
@@ -100,6 +100,16 @@ def test_workflow_v1_rejects_bool_and_controls_but_accepts_canonical_uuid_versio
 
     version_one = _proposal(contract_id="123e4567-e89b-12d3-a456-426614174000")
     assert workflow_contracts.parse_proposal(version_one).contract_id == version_one["contract_id"]
+
+
+def test_workflow_v1_rejects_short_or_non_ascii_ownership_tokens() -> None:
+    from exomem import workflow_contracts
+
+    for token in ("a.", "tool.é"):
+        proposal = _proposal()
+        proposal["companions"][0]["owns"] = [token]
+        with pytest.raises(workflow_contracts.WorkflowContractError):
+            workflow_contracts.parse_proposal(proposal)
 
 
 def test_workflow_renderer_quotes_user_display_data(tmp_path: Path) -> None:
@@ -293,3 +303,26 @@ def test_review_required_marker_blocks_implicit_standalone_but_not_explicit(tmp_
     assert (
         workflow_contracts.resolve_contracts(tmp_path, {}, name="@standalone")["resolved"] is True
     )
+
+
+def test_invalid_marker_blocks_every_resolver_branch(tmp_path: Path) -> None:
+    from exomem import workflow_contracts
+
+    marker = workflow_contracts.migration_marker_path(tmp_path)
+    marker.parent.mkdir(parents=True)
+    marker.write_text("bad: marker\n", encoding="utf-8")
+    proposal = _proposal()
+
+    for kwargs in ({}, {"name": "@standalone"}, {"proposal": proposal}):
+        assert workflow_contracts.resolve_contracts(tmp_path, {}, **kwargs) == {
+            "resolved": False,
+            "code": "WORKFLOW_CONTRACT_MIGRATION_INDETERMINATE",
+        }
+
+
+def test_every_shipped_skill_forbids_automatic_records_to_planning_transitions() -> None:
+    scaffold = Path(__file__).parents[1] / "src" / "exomem" / "_scaffold" / "_Schema"
+    for skill in scaffold.rglob("SKILL.md"):
+        text = skill.read_text(encoding="utf-8")
+        if "outcome" in text.lower() or "record" in text.lower():
+            assert "append the record, then transition" not in text.lower(), skill

@@ -52,7 +52,12 @@ _FIELDS = (
 )
 _PRESENTATION_OPEN = "<!-- exomem:workflow-contract-presentation:start -->"
 _PRESENTATION_CLOSE = "<!-- exomem:workflow-contract-presentation:end -->"
-_RENDERER_TEMPLATE_VERSION = 1
+_RENDERER_TEMPLATE = {
+    "version": 1,
+    "heading": "## Workflow contract: {title}",
+    "scope": "This active policy applies to {scope}.",
+    "records": "Records holds observed outcomes; it never completes Planning automatically.",
+}
 
 
 class WorkflowContractError(ValueError):
@@ -129,7 +134,7 @@ def portable_projection() -> dict[str, Any]:
         "context_semantics": {"missing": "unknown", "null": "known-absent"},
         "precedence": ("explicit", "scoped", "default", "builtin"),
         "argument_semantics": "exact-v1",
-        "renderer_template_version": _RENDERER_TEMPLATE_VERSION,
+        "renderer_template": _RENDERER_TEMPLATE,
     }
     return {
         **semantic,
@@ -303,11 +308,11 @@ def render_presentation(contract: WorkflowContract) -> str:
         (
             _PRESENTATION_OPEN,
             "<!-- Derived from workflow-contract frontmatter; refresh restores this block. -->",
-            f"## Workflow contract: {_quoted(contract.title)}",
+            _RENDERER_TEMPLATE["heading"].format(title=_quoted(contract.title)),
             "",
-            f"This active policy applies to {selected}.",
+            _RENDERER_TEMPLATE["scope"].format(scope=selected),
             ownership,
-            "Records holds observed outcomes; it never completes Planning automatically.",
+            _RENDERER_TEMPLATE["records"],
             _PRESENTATION_CLOSE,
         )
     )
@@ -468,6 +473,8 @@ def inspect_contract(vault_root: Path, name: str) -> dict[str, Any]:
 def inventory_contracts(vault_root: Path) -> dict[str, Any]:
     migration = migration_required(vault_root)
     contracts, findings, limited = _scan(vault_root)
+    if not findings:
+        findings.extend(_unsupported_family_findings(vault_root))
     if limited:
         return {"valid": False, "code": "WORKFLOW_CONTRACT_SCAN_LIMIT", "findings": findings}
     summaries = [
@@ -497,6 +504,32 @@ def inventory_contracts(vault_root: Path) -> dict[str, Any]:
     return result
 
 
+def _unsupported_family_findings(vault_root: Path) -> list[dict[str, str]]:
+    root = contract_directory(vault_root).parent
+    probe = root / ".workflow-family-scan-guard"
+    try:
+        try:
+            _absent_guard(vault_root, probe)
+        except PathGuardError as error:
+            if error.code != "PATH_GUARD_CHANGED":
+                raise
+            PathGuard.capture(
+                Path(vault_root), probe.relative_to(vault_root).as_posix(), leaf_policy="stable"
+            )
+    except PathGuardError:
+        return [{"code": "WORKFLOW_CONTRACT_INVALID", "detail": "unsafe family directory"}]
+    if not root.is_dir():
+        return []
+    return [
+        {
+            "code": "WORKFLOW_CONTRACT_UNSUPPORTED_FAMILY",
+            "path": path.relative_to(vault_root).as_posix(),
+        }
+        for path in sorted(root.iterdir(), key=lambda item: item.name.casefold())[:32]
+        if path.name != FAMILY and path.is_dir() and not path.is_symlink()
+    ]
+
+
 def resolve_contracts(
     vault_root: Path,
     context: Mapping[str, str | None] | None,
@@ -506,6 +539,8 @@ def resolve_contracts(
 ) -> dict[str, Any]:
     normalized = _context(context)
     migration = migration_required(vault_root)
+    if migration is None:
+        return _refusal("WORKFLOW_CONTRACT_MIGRATION_INDETERMINATE")
     if name and proposal is not None:
         return _refusal("WORKFLOW_CONTRACT_INVALID_ARGUMENTS")
     if name == "@standalone":
@@ -521,12 +556,15 @@ def resolve_contracts(
     if limited:
         return _refusal("WORKFLOW_CONTRACT_SCAN_LIMIT")
     if name:
+        if any(item["code"] == "WORKFLOW_CONTRACT_DUPLICATE_IDENTITY" for item in findings):
+            return _refusal("WORKFLOW_CONTRACT_DUPLICATE_IDENTITY")
         matches = [
             (contract, path, source) for contract, path, source in contracts if contract.key == name
         ]
         if not matches:
-            if findings:
-                return _refusal("WORKFLOW_CONTRACT_INVALID", finding=findings[0])
+            invalid = next((item for item in findings if item.get("key") == name), None)
+            if invalid is not None:
+                return _refusal("WORKFLOW_CONTRACT_INVALID", finding=invalid)
             return _refusal("WORKFLOW_CONTRACT_NOT_FOUND")
         if len(matches) != 1:
             return _refusal("WORKFLOW_CONTRACT_DUPLICATE_IDENTITY")
@@ -543,7 +581,7 @@ def resolve_contracts(
     ]
     defaults = [item for item in active if not any(item[0].data["scope"].values())]
     if len(defaults) > 1:
-        return _refusal("WORKFLOW_CONTRACT_AMBIGUOUS", candidates=[item[0].key for item in defaults])
+        return _refusal("WORKFLOW_CONTRACT_AMBIGUOUS", candidates=_candidates(defaults))
     viable: list[tuple[WorkflowContract, Path, str, int]] = []
     for contract, path, source in active:
         matching = 0
@@ -574,17 +612,17 @@ def resolve_contracts(
         winners = [item for item in viable if item[3] == maximum]
         if len(winners) != 1:
             return _refusal(
-                "WORKFLOW_CONTRACT_AMBIGUOUS", candidates=[item[0].key for item in winners]
+                "WORKFLOW_CONTRACT_AMBIGUOUS", candidates=_candidates(winners)
             )
-        contract, path, source, _ = winners[0]
-        return _resolved(vault_root, contract, normalized, "scoped", path, source)
+        contract, path, source, specificity = winners[0]
+        return _resolved(
+            vault_root, contract, normalized, "scoped", path, source, specificity=specificity
+        )
     if defaults:
         contract, path, source = defaults[0]
         return _resolved(vault_root, contract, normalized, "default", path, source)
-    if migration is True:
+    if migration is True and not active:
         return _refusal("WORKFLOW_CONTRACT_MIGRATION_REQUIRED")
-    if migration is None:
-        return _refusal("WORKFLOW_CONTRACT_MIGRATION_INDETERMINATE")
     return _builtin(normalized)
 
 
@@ -666,11 +704,19 @@ def _scan(
             frontmatter = _frontmatter(source)
             contracts.append((parse_proposal(frontmatter), path, source))
         except (UnicodeDecodeError, yaml.YAMLError, WorkflowContractError):
+            key = None
+            try:
+                envelope = _frontmatter(raw.decode("utf-8"))
+                if isinstance(envelope.get("key"), str):
+                    key = envelope["key"]
+            except (UnicodeDecodeError, yaml.YAMLError, WorkflowContractError):
+                pass
             findings.append(
                 {
                     "code": "WORKFLOW_CONTRACT_INVALID",
                     "detail": "invalid contract",
                     "path": path.relative_to(vault_root).as_posix(),
+                    **({"key": key} if key is not None else {}),
                 }
             )
     identities = (
@@ -834,7 +880,12 @@ def _companions(value: Any, mode: str) -> None:
         ):
             raise WorkflowContractError("WORKFLOW_CONTRACT_INVALID", "companion ownership")
         for token in owns:
-            if not isinstance(token, str) or not _OWNERSHIP.fullmatch(token) or token in owned:
+            if (
+                not isinstance(token, str)
+                or not 3 <= len(token.encode("ascii", "ignore")) == len(token) <= 128
+                or not _OWNERSHIP.fullmatch(token)
+                or token in owned
+            ):
                 raise WorkflowContractError("WORKFLOW_CONTRACT_INVALID", "companion ownership")
             owned.add(token)
         keys.append(item["key"])
@@ -870,6 +921,13 @@ def _refusal(code: str, **detail: Any) -> dict[str, Any]:
     return {"resolved": False, "code": code, **detail}
 
 
+def _candidates(items: list[tuple[Any, ...]]) -> list[dict[str, str]]:
+    return [
+        {"key": item[0].key, "contract_id": item[0].contract_id}
+        for item in items[:16]
+    ]
+
+
 def _builtin(
     context: dict[str, tuple[str, str | None]], *, source: str = "builtin"
 ) -> dict[str, Any]:
@@ -892,6 +950,8 @@ def _resolved(
     source: str,
     path: Path | None,
     raw: str | None,
+    *,
+    specificity: int | None = None,
 ) -> dict[str, Any]:
     result = {
         "resolved": True,
@@ -918,6 +978,8 @@ def _resolved(
     if path is not None and raw is not None:
         result["path"] = path.relative_to(vault_root).as_posix()
         result["source_hash"] = source_hash(raw)
+    if specificity is not None:
+        result["specificity"] = specificity
     return result
 
 
