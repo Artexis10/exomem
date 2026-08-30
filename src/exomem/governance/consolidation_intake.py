@@ -35,6 +35,9 @@ _PRIVATE_PROOF_REF = re.compile(
 _PRIVATE_OBJECT_REF = re.compile(
     r"exomem-consolidation-object://sha256/([0-9a-f]{64})\Z"
 )
+_PRIVATE_PREIMAGE_REF = re.compile(
+    r"exomem-consolidation-preimage://sha256/([0-9a-f]{64})\Z"
+)
 
 
 class ConsolidationIntakeUnavailable(RuntimeError):
@@ -251,7 +254,7 @@ class PrivateConsolidationArtifactStore:
 
     def _ensure(self) -> None:
         _ensure_private_directory(self.root)
-        for name in ("archives", "proofs", "objects"):
+        for name in ("archives", "proofs", "objects", "preimages"):
             _ensure_private_directory(self.root / name)
 
     def _object_path(self, digest: str) -> Path:
@@ -312,6 +315,14 @@ class PrivateConsolidationArtifactStore:
             suffix=".json",
         )
 
+    def resolve_preimage(self, reference: str) -> Path:
+        return self._resolve(
+            reference,
+            pattern=_PRIVATE_PREIMAGE_REF,
+            directory="preimages",
+            suffix=".json",
+        )
+
     def _install(self, staged: Path, destination: Path, expected_digest: str) -> None:
         _ensure_private_directory(destination.parent)
         try:
@@ -338,6 +349,46 @@ class PrivateConsolidationArtifactStore:
             raise
         except OSError:
             raise ConsolidationIntakeUnavailable from None
+
+    def install_object_file(self, staged: Path, *, expected_digest: str) -> str:
+        """Install one independently staged immutable object and return its opaque ref."""
+
+        if not isinstance(staged, Path) or _PRIVATE_OBJECT_REF.fullmatch(
+            f"exomem-consolidation-object://sha256/{expected_digest}"
+        ) is None:
+            raise ConsolidationIntakeUnavailable
+        self._ensure()
+        self._install(staged, self._object_path(expected_digest), expected_digest)
+        return f"exomem-consolidation-object://sha256/{expected_digest}"
+
+    def install_preimage_bytes(self, payload: bytes) -> str:
+        """Publish one canonical preimage manifest after all objects are durable."""
+
+        if not isinstance(payload, bytes) or not payload:
+            raise ConsolidationIntakeUnavailable
+        self._ensure()
+        digest = hashlib.sha256(payload).hexdigest()
+        temporary: Path | None = None
+        try:
+            descriptor, raw_path = tempfile.mkstemp(prefix=".preimage-", dir=self.root)
+            temporary = Path(raw_path)
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            self._install(
+                temporary,
+                self.root / "preimages" / f"{digest}.json",
+                digest,
+            )
+        except ConsolidationIntakeUnavailable:
+            raise
+        except OSError:
+            raise ConsolidationIntakeUnavailable from None
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+        return f"exomem-consolidation-preimage://sha256/{digest}"
 
 
 def _request_refs(request: ConsolidationIntakeRequest) -> tuple[str, str]:
