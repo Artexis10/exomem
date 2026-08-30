@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.67.1](https://github.com/Artexis10/exomem/compare/v0.67.0...v0.67.1) (2026-08-30)
+
+
+### Bug Fixes
+
+* **hosted:** align provisioned namespace with authorization session contract ([#980](https://github.com/Artexis10/exomem/issues/980)) ([cfcb422](https://github.com/Artexis10/exomem/commit/cfcb422c4c370a3575949a109cab640f2d286757))
+* **mutation-lock:** guard the contention deque against concurrent mutation ([#994](https://github.com/Artexis10/exomem/issues/994)) ([3cc5f58](https://github.com/Artexis10/exomem/commit/3cc5f58950ec547826925e15671c7433e9c8958e))
+* **semantic:** preserve compiled destinations for exempt notes ([#991](https://github.com/Artexis10/exomem/issues/991)) ([6f4d99a](https://github.com/Artexis10/exomem/commit/6f4d99ae33b71e2da7932006a57710ba278d6a0c))
+* **timings:** attribute the three stages that wrote no interval ([#990](https://github.com/Artexis10/exomem/issues/990)) ([307a213](https://github.com/Artexis10/exomem/commit/307a2131851591c524a7afffb0e6dc2c027cb38b))
+
+
+### Performance
+
+* **recall:** score then mask under an allowed-paths filter ([#989](https://github.com/Artexis10/exomem/issues/989)) ([206909a](https://github.com/Artexis10/exomem/commit/206909a432c6b2a6012afacf1b3b77475b9d1088))
+
 ## [0.67.0](https://github.com/Artexis10/exomem/compare/v0.66.0...v0.67.0) (2026-08-30)
 
 
