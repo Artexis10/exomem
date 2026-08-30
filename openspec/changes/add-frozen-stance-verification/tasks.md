@@ -227,20 +227,108 @@ the task is ticked, not estimated.
 
 ## 3. Queue enrichment (design D2, D3)
 
-- [ ] 3.1 Modify `audit._pair_polarity` and its rendering in place: enrichment
+- [x] 3.1 Modify `audit._pair_polarity` and its rendering in place: enrichment
   only through the admitted verifier (`polarity_method: "nli"` plus digest and
   label-map version keys); the heuristic fallback never reaches queue
   metadata; bounded by the surfaced set (`EXOMEM_CONTRADICTION_TOP_N`);
   per-entry soft-fail recorded. Red-first with an injected fake verifier, plus
   a refused-verifier pin that no heuristic-method label is written.
-- [ ] 3.2 Invariance pins: `signal_version`, provenance, ordering, cap and
+  - **Evidence (red, before implementation)** —
+    `pytest tests/test_frozen_verifiers.py -q`:
+    ```
+    >       audit_module._enrich_contradiction_polarity(tmp_path, [finding])
+    E       AttributeError: module 'exomem.audit' has no attribute '_enrich_contradiction_polarity'
+    FAILED tests/test_frozen_verifiers.py::test_admitted_verifier_writes_the_label_with_digest_and_label_map
+    FAILED tests/test_frozen_verifiers.py::test_refused_verifier_writes_no_heuristic_label
+    FAILED tests/test_frozen_verifiers.py::test_claim_level_gate_off_enriches_nothing
+    FAILED tests/test_frozen_verifiers.py::test_enrichment_is_bounded_by_the_surfaced_set
+    FAILED tests/test_frozen_verifiers.py::test_one_raising_pair_leaves_that_entry_unenriched_and_the_pass_completes
+    FAILED tests/test_frozen_verifiers.py::test_a_stale_label_is_dropped_not_served
+    FAILED tests/test_frozen_verifiers.py::test_a_current_label_is_attached - Att...
+    FAILED tests/test_frozen_verifiers.py::test_asserted_pairs_carry_no_model_polarity_label
+    FAILED tests/test_frozen_verifiers.py::test_enrichment_touches_no_competing_alternatives_stance_key
+    FAILED tests/test_frozen_verifiers.py::test_labelling_changes_no_signal_version_provenance_order_or_cap
+    FAILED tests/test_frozen_verifiers.py::test_a_dismissed_entry_stays_dismissed_when_a_label_arrives
+    11 failed, 35 passed in 0.24s
+    ```
+  - **Evidence (green, after implementation)** — same command: `46 passed in 0.14s`
+  - Audit regression: `pytest tests/test_audit_corpus_contradictions.py
+    tests/test_audit_contradiction_order.py tests/test_authored_contradictions.py
+    tests/test_epistemic_review_queues.py tests/test_attention.py
+    tests/test_context_pack.py -q` → `170 passed, 1 skipped in 12.77s`.
+  - `audit._pair_polarity` modified in place: it now consults
+    `claims.verifier_admission()` and `claims.verifier_polarity()` only, returns
+    the digest and label-map version alongside the label, and no longer swallows
+    exceptions (swallowing made a soft-failed entry indistinguishable from an
+    unlabelled one). `claims.classify_polarity` — the heuristic-bearing seam — is
+    no longer reachable from the queue at all.
+  - `audit._enrich_contradiction_polarity` is the single channel, called from
+    `corpus_contradictions` over the already-ordered, already-capped `findings`
+    list and BEFORE the omitted-count summary is appended, so the cap accounting
+    is never in its reach. Per-entry `try/except` records a degraded count and
+    continues; the injected-raise test shows the bad entry unenriched and the
+    good one labelled in the same pass.
+  - Refused-verifier pin: gate on, registry empty → the finding's `meta` is
+    byte-identical, no key starting with `polarity` exists, and the rendered
+    detail carries no claim-level clause.
+
+- [x] 3.2 Invariance pins: `signal_version`, provenance, ordering, cap and
   omitted count unchanged by label arrival; a dismissed entry stays dismissed.
   Mechanism-removal proof for each pin on a scratch mutant.
-- [ ] 3.3 Staleness binding: the label records the `signal_version` it was
+  - **Evidence (red, before implementation)** — included in the 3.1 red run:
+    `FAILED …::test_labelling_changes_no_signal_version_provenance_order_or_cap`
+    and `FAILED …::test_a_dismissed_entry_stays_dismissed_when_a_label_arrives`.
+  - **Evidence (green)** — `46 passed in 0.14s`.
+  - **Mechanism-removal proof, one scratch mutant per pin** (each applied to
+    `src/exomem/audit.py`, run, reverted):
+
+    | Mutant | Pin that went red |
+    | --- | --- |
+    | labelling also writes `meta["signal_version"]` | `…no_signal_version_provenance_order_or_cap`, `…dismissed_entry_stays_dismissed`, `…writes_the_label_with_digest_and_label_map` (3 failed, 43 passed) |
+    | labelling also writes `meta["provenance"] = "nli"` | `…no_signal_version_provenance_order_or_cap` (1 failed, 45 passed) |
+    | labelling calls `findings.reverse()` | `…no_signal_version_provenance_order_or_cap` (1 failed, 45 passed) |
+    | labelling rewrites the omitted-count summary's detail | `…no_signal_version_provenance_order_or_cap` (1 failed, 45 passed) |
+
+    Reverted: `46 passed in 0.14s`. A first ordering mutant
+    (`findings.sort(key=…polarity != "contradict")`) left the list order
+    unchanged for this fixture and so proved nothing; it was replaced with
+    `findings.reverse()`, which does reorder and does go red — recorded here
+    because an ineffective mutant is not a passed pin.
+  - The dismissal pin composes the entry's real `review_state.fingerprint` before
+    and after enrichment and asserts equality, so "a dismissed entry stays
+    dismissed" is checked through the machinery that actually binds a decision,
+    not through a proxy.
+
+- [x] 3.3 Staleness binding: the label records the `signal_version` it was
   computed against and is dropped, not served, on mismatch. Red-first.
-- [ ] 3.4 Asserted pairs carry no model polarity label; the recorded
+  - **Evidence (red, before implementation)** — included in the 3.1 red run:
+    `FAILED …::test_a_stale_label_is_dropped_not_served` and
+    `FAILED …::test_a_current_label_is_attached` (`AttributeError: module
+    'exomem.audit' has no attribute '_attach_polarity_label'`).
+  - **Evidence (green)** — `46 passed in 0.14s`.
+  - `audit._attach_polarity_label(finding, label)` is the seam: the label carries
+    the `signal_version` it was computed against, a mismatch returns `False` with
+    `meta` and `detail` untouched, and a match writes `polarity_signal_version`
+    alongside the rest. Within one sweep the two always agree because the label
+    is computed straight after the entry's signal version is read; the guard is
+    what keeps that true for any label reaching an entry from anywhere else (a
+    cache, a persisted record, a future asynchronous labeller).
+
+- [x] 3.4 Asserted pairs carry no model polarity label; the recorded
   competing-alternatives stance contract is untouched by enrichment.
   Red-first.
+  - **Evidence (red, before implementation)** — included in the 3.1 red run:
+    `FAILED …::test_asserted_pairs_carry_no_model_polarity_label` and
+    `FAILED …::test_enrichment_touches_no_competing_alternatives_stance_key`.
+  - **Evidence (green)** — `46 passed in 0.14s`.
+  - Enrichment skips any finding whose `meta["provenance"]` is not `"proximity"`,
+    so an authored `contradicts` edge is never labelled — the author's assertion
+    outranks a model's guess, and a label there would be the server forming an
+    opinion about which side is right.
+  - The competing-alternatives stance is untouched by construction: the second
+    test seeds an unrelated `stance` key on a proximity entry and asserts the
+    exact set of keys enrichment adds is the six-key polarity namespace, with the
+    stance value unchanged.
 
 ## 4. Packaging and diagnostics
 

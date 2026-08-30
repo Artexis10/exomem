@@ -5092,25 +5092,130 @@ def _claim_level_enabled() -> bool:
 
 
 def _pair_polarity(vault_root: Path, a: str, b: str) -> dict | None:
-    """Claim-level polarity for one flagged pair, or None (best-effort).
+    """Claim-level polarity for one flagged pair, through the ADMITTED verifier only.
 
-    Pulls each page's stored/live claim (`claims.claim_text_for_page`) and runs
-    `claims.classify_polarity`. Returns `{label, score, method}` or None when a
-    claim is missing / the check fails — the audit finding then degrades to the
-    proximity-only detail. Never raises into the sweep.
+    Returns `{label, score, method, model_digest, label_map_version}` or None.
+    None when either claim is missing, or — the important case — when the frozen
+    verifier is not admitted: the entry then carries NO label at all. The lexical
+    heuristic is never consulted here. It had no admission control, which is the
+    seam the ratified authority-and-effects matrix names non-compliant, so it may
+    not produce queue metadata under any method name.
+
+    Deliberately does NOT swallow exceptions: a forward pass that blows up on one
+    pair is the caller's to record as a degraded entry, and swallowing it here
+    would make a soft-failed entry indistinguishable from an unlabelled one.
     """
-    try:
-        from . import claims
+    from . import claims
 
-        claim_a = claims.claim_text_for_page(vault_root, a)
-        claim_b = claims.claim_text_for_page(vault_root, b)
-        if not claim_a or not claim_b:
-            return None
-        res = claims.classify_polarity(claim_a, claim_b)
-        return {"label": res.label, "score": res.score, "method": res.method}
-    except Exception as e:  # noqa: BLE001
-        log.debug("audit pair polarity failed for (%s, %s): %s", a, b, e)
+    admission = claims.verifier_admission()
+    if not admission.admitted:
+        log.debug(
+            "contradiction polarity unavailable (%s): %s",
+            admission.reason,
+            admission.detail,
+        )
         return None
+    claim_a = claims.claim_text_for_page(vault_root, a)
+    claim_b = claims.claim_text_for_page(vault_root, b)
+    if not claim_a or not claim_b:
+        return None
+    result = claims.verifier_polarity(claim_a, claim_b)
+    if result is None:
+        return None
+    return {
+        "label": result.label,
+        "score": result.score,
+        "method": result.method,
+        "model_digest": admission.model_digest,
+        "label_map_version": admission.label_map_version,
+    }
+
+
+def _attach_polarity_label(finding: AuditFinding, label: dict) -> bool:
+    """Attach one admitted label to one finding, or drop it as stale. Returns
+    whether it was attached.
+
+    The label records the `signal_version` it was computed against, and a label
+    whose recorded version differs from the entry's is DROPPED, not served: a
+    verdict about one state of two pages says nothing about another, and serving
+    it anyway would be the one way labelling could mislead a reader. Within a
+    single sweep the two always agree, because the label is computed right after
+    the entry's signal version is read — this guard is what keeps that true for
+    any label reaching an entry from anywhere else.
+
+    Attaching NEVER touches `signal_version`, `provenance`, `priority`, or any
+    other key: it only adds the polarity namespace and appends the rendered note.
+    """
+    meta = finding.meta
+    if meta is None:
+        return False
+    if label.get("signal_version") != meta.get("signal_version"):
+        log.debug(
+            "dropping stale polarity label for %s (computed against %s, entry is %s)",
+            finding.paths,
+            label.get("signal_version"),
+            meta.get("signal_version"),
+        )
+        return False
+    meta["polarity"] = label["label"]
+    meta["polarity_score"] = label["score"]
+    meta["polarity_method"] = label["method"]
+    meta["polarity_model_digest"] = label["model_digest"]
+    meta["polarity_label_map_version"] = label["label_map_version"]
+    meta["polarity_signal_version"] = label["signal_version"]
+    finding.detail += (
+        f" Claim-level check: likely {label['label'].upper()} "
+        f"(via {label['method']}, label map {label['label_map_version']})."
+    )
+    return True
+
+
+def _enrich_contradiction_polarity(
+    vault_root: Path, findings: list[AuditFinding]
+) -> None:
+    """Attach admitted-verifier polarity labels to the SURFACED contradiction set.
+
+    The single admitted channel (design D3). Four properties hold by
+    construction rather than by configuration:
+
+    - **Bounded.** It runs over the list it is handed, which the caller has
+      already ordered and capped at `EXOMEM_CONTRADICTION_TOP_N`, so enrichment
+      can never widen the work the sweep does.
+    - **Proximity only.** An asserted pair is skipped: the author's `contradicts`
+      edge outranks a model's guess, and a label on it would be the server
+      forming an opinion about which side is right.
+    - **Additive.** Nothing here writes `signal_version`, `provenance`,
+      `priority`, ordering, or the omitted-count summary. A dismissal cannot
+      resurface because a label arrived.
+    - **Failure-isolated per entry.** An exception leaves that entry unenriched
+      and recorded as degraded; the pass continues.
+    """
+    if not findings or not _claim_level_enabled():
+        return
+    degraded = 0
+    for finding in findings:
+        meta = finding.meta
+        if not meta or meta.get("provenance") != "proximity":
+            continue
+        paths = finding.paths or []
+        if len(paths) != 2:
+            continue
+        try:
+            label = _pair_polarity(vault_root, paths[0], paths[1])
+        except Exception as error:  # noqa: BLE001 — one bad pair never aborts the pass
+            degraded += 1
+            log.debug("polarity enrichment degraded for %s: %s", paths, error)
+            continue
+        if label is None:
+            continue
+        label["signal_version"] = meta.get("signal_version")
+        _attach_polarity_label(finding, label)
+    if degraded:
+        log.info(
+            "contradiction polarity enrichment degraded on %d of %d surfaced entr(ies)",
+            degraded,
+            len(findings),
+        )
 
 
 _ASSERTED_FIX = (
@@ -5630,22 +5735,11 @@ def _proximity_contradictions(
     capped = top_n > 0 and len(scored) > top_n
     shown = scored[:top_n] if capped else scored
 
-    # Sharpen PROXIMITY → POLARITY on the surfaced (already-capped) pairs. Opt-in
-    # via EXOMEM_CLAIM_LEVEL; off → `_pair_polarity` returns None so every finding
-    # is byte-identical to baseline. Bounded by top_n (shown is already capped).
-    claim_level = _claim_level_enabled()
-
     findings: list[AuditFinding] = []
     for same_family, priority, a, b, cos, dormancy in shown:
         family_note = (
             " Same-family adjacency (likely architecture-cluster noise) — demoted."
             if same_family
-            else ""
-        )
-        polarity = _pair_polarity(vault_root, a, b) if claim_level else None
-        polarity_note = (
-            f" Claim-level check: likely {polarity['label'].upper()} (via {polarity['method']})."
-            if polarity
             else ""
         )
         meta = {
@@ -5658,10 +5752,6 @@ def _proximity_contradictions(
             "same_family": same_family,
             "provenance": "proximity",
         }
-        if polarity:
-            meta["polarity"] = polarity["label"]
-            meta["polarity_score"] = polarity["score"]
-            meta["polarity_method"] = polarity["method"]
         findings.append(
             AuditFinding(
             category="corpus_contradictions",
@@ -5670,7 +5760,7 @@ def _proximity_contradictions(
             detail=(
                 f"Active conclusion overlaps active conclusion {b!r} "
                 f"(cosine {round(cos, 4)}) — close enough to restate, refine, or "
-                f"contradict. Do they conflict?{family_note}{polarity_note}"
+                f"contradict. Do they conflict?{family_note}"
             ),
             proposed_fix=(
                 "Surfaced for REVIEW only — a proximity measurement, not an asserted "
@@ -5682,6 +5772,13 @@ def _proximity_contradictions(
             meta=meta,
             )
         )
+
+    # Sharpen PROXIMITY → POLARITY on the surfaced (already-capped) pairs, and
+    # only there. Opt-in via EXOMEM_CLAIM_LEVEL and the verifier's own admission;
+    # refused → no label at all, so every finding stays byte-identical to
+    # baseline. Runs before the omitted-count summary is appended, so the cap
+    # accounting is never in the enrichment's reach.
+    _enrich_contradiction_polarity(vault_root, findings)
 
     if capped:
         omitted = len(scored) - top_n

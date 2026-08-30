@@ -487,3 +487,349 @@ def test_verifier_output_is_drawn_from_the_label_maps_closed_set(tmp_path, monke
         assert result is not None
         assert result.label in claims.POLARITY_LABELS
         assert result.method == "nli"
+
+
+# ---------------- 3.x queue enrichment (design D2, D3) ----------------
+
+from exomem import audit as audit_module  # noqa: E402
+
+#: Two pages whose claims are a fixture pair, so the oracle labels them.
+_PAGE_A = "Knowledge Base/Notes/Insights/ttl-reduces.md"
+_PAGE_B = "Knowledge Base/Notes/Insights/ttl-increases.md"
+
+
+def _contradiction_fixture() -> claims.FixturePair:
+    return next(
+        pair
+        for pair in claims.VERIFICATION_FIXTURES["stance-v1"]
+        if pair.expected == "contradict" and not pair.heuristic_fails
+    )
+
+
+def _wire_claim_texts(monkeypatch, texts: dict[str, str]) -> None:
+    monkeypatch.setattr(
+        claims,
+        "claim_text_for_page",
+        lambda vault_root, rel_path, *, index=None: texts.get(rel_path),
+    )
+
+
+def _proximity_finding(
+    a: str = _PAGE_A,
+    b: str = _PAGE_B,
+    *,
+    signal_version: str = "aaaaaaaaaaaaaaaa",
+    cosine: float = 0.86,
+    priority: float = 0.91,
+) -> audit_module.AuditFinding:
+    return audit_module.AuditFinding(
+        category="corpus_contradictions",
+        severity="info",
+        path=a,
+        detail=(
+            f"Active conclusion overlaps active conclusion {b!r} (cosine {cosine}) "
+            "— close enough to restate, refine, or contradict. Do they conflict?"
+        ),
+        proposed_fix="Surfaced for REVIEW only — a proximity measurement.",
+        paths=[a, b],
+        meta={
+            "signal_version": signal_version,
+            "cosine": cosine,
+            "priority": priority,
+            "dormancy": 0.5,
+            "same_family": False,
+            "provenance": "proximity",
+        },
+    )
+
+
+def _asserted_finding(a: str = _PAGE_A, b: str = _PAGE_B) -> audit_module.AuditFinding:
+    return audit_module.AuditFinding(
+        category="corpus_contradictions",
+        severity="info",
+        path=a,
+        detail=f"Authored `contradicts` edge with {b!r} — you asserted these conflict.",
+        proposed_fix="Surfaced for REVIEW only.",
+        paths=[a, b],
+        meta={
+            "signal_version": "bbbbbbbbbbbbbbbb",
+            "provenance": "asserted",
+            "relation_type": "contradicts",
+        },
+    )
+
+
+def _omitted_summary() -> audit_module.AuditFinding:
+    return audit_module.AuditFinding(
+        category="corpus_contradictions",
+        severity="info",
+        path="Knowledge Base",
+        detail="7 more lower-priority/same-family contradiction pair(s) not shown.",
+        proposed_fix="Work the surfaced pairs first.",
+    )
+
+
+def _enrichable(tmp_path, monkeypatch, *, predict=None) -> None:
+    """Admit the verifier, wire the two pages' claims, open the claim-level gate."""
+    fixture = _contradiction_fixture()
+    _admit(tmp_path, monkeypatch, predict or _oracle_predict())
+    _wire_claim_texts(monkeypatch, {_PAGE_A: fixture.claim_a, _PAGE_B: fixture.claim_b})
+    monkeypatch.setenv("EXOMEM_CLAIM_LEVEL", "1")
+
+
+# ---- 3.1 the admitted verifier is the only enrichment channel ----
+
+
+def test_admitted_verifier_writes_the_label_with_digest_and_label_map(
+    tmp_path, monkeypatch
+) -> None:
+    _enrichable(tmp_path, monkeypatch)
+    digest = claims.verifier_admission().model_digest
+    findings = [_proximity_finding()]
+
+    audit_module._enrich_contradiction_polarity(tmp_path, findings)
+
+    meta = findings[0].meta
+    assert meta["polarity"] == "contradict"
+    assert meta["polarity_method"] == "nli"
+    assert meta["polarity_model_digest"] == digest
+    assert meta["polarity_label_map_version"] == "v1"
+    assert meta["polarity_signal_version"] == meta["signal_version"]
+    assert 0.0 <= meta["polarity_score"] <= 1.0
+    assert "CONTRADICT" in findings[0].detail
+
+
+def test_refused_verifier_writes_no_heuristic_label(tmp_path, monkeypatch) -> None:
+    """The heuristic never wears the verifier's name — and never appears at all."""
+    fixture = _contradiction_fixture()
+    _wire_claim_texts(monkeypatch, {_PAGE_A: fixture.claim_a, _PAGE_B: fixture.claim_b})
+    monkeypatch.setenv("EXOMEM_CLAIM_LEVEL", "1")
+    monkeypatch.setenv("EXOMEM_CLAIM_POLARITY_NLI", "1")
+    monkeypatch.setattr(claims, "VERIFIER_PINS", ())
+    findings = [_proximity_finding()]
+    before = dict(findings[0].meta)
+
+    audit_module._enrich_contradiction_polarity(tmp_path, findings)
+
+    assert findings[0].meta == before
+    assert not any(key.startswith("polarity") for key in findings[0].meta)
+    assert "Claim-level check" not in findings[0].detail
+
+
+def test_claim_level_gate_off_enriches_nothing(tmp_path, monkeypatch) -> None:
+    _enrichable(tmp_path, monkeypatch)
+    monkeypatch.delenv("EXOMEM_CLAIM_LEVEL", raising=False)
+    findings = [_proximity_finding()]
+    before = dict(findings[0].meta)
+
+    audit_module._enrich_contradiction_polarity(tmp_path, findings)
+
+    assert findings[0].meta == before
+
+
+def test_enrichment_is_bounded_by_the_surfaced_set(tmp_path, monkeypatch) -> None:
+    """Bounded by construction: it runs over the already-capped list it is given,
+    so it can never widen the work the sweep does."""
+    calls: list = []
+    _enrichable(tmp_path, monkeypatch, predict=_oracle_predict(calls=calls))
+    claims.verifier_admission()
+    calls.clear()
+    findings = [
+        _proximity_finding(signal_version=f"sig{index:013d}") for index in range(3)
+    ]
+
+    audit_module._enrich_contradiction_polarity(tmp_path, findings)
+
+    assert len(calls) == 3
+    assert all(finding.meta["polarity"] == "contradict" for finding in findings)
+
+
+def test_one_raising_pair_leaves_that_entry_unenriched_and_the_pass_completes(
+    tmp_path, monkeypatch
+) -> None:
+    fixture = _contradiction_fixture()
+    _enrichable(tmp_path, monkeypatch)
+    claims.verifier_admission()
+    monkeypatch.setattr(
+        claims,
+        "verifier_polarity",
+        _exploding_on(fixture.claim_a, "Knowledge Base/Notes/Insights/boom.md"),
+    )
+    _wire_claim_texts(
+        monkeypatch,
+        {
+            _PAGE_A: fixture.claim_a,
+            _PAGE_B: fixture.claim_b,
+            "Knowledge Base/Notes/Insights/boom.md": "boom",
+        },
+    )
+    good = _proximity_finding()
+    bad = _proximity_finding(a="Knowledge Base/Notes/Insights/boom.md", b=_PAGE_B)
+
+    audit_module._enrich_contradiction_polarity(tmp_path, [bad, good])
+
+    assert "polarity" not in bad.meta
+    assert good.meta["polarity"] == "contradict"
+
+
+def _exploding_on(ok_claim: str, _boom_path: str):
+    def verifier_polarity(claim_a, claim_b):
+        if claim_a != ok_claim:
+            raise RuntimeError("forward pass exploded on this pair")
+        return claims.PolarityResult("contradict", 0.99, "nli")
+
+    return verifier_polarity
+
+
+# ---- 3.3 staleness binding ----
+
+
+def test_a_stale_label_is_dropped_not_served() -> None:
+    finding = _proximity_finding(signal_version="1111111111111111")
+    label = {
+        "label": "contradict",
+        "score": 0.9,
+        "method": "nli",
+        "model_digest": "d" * 64,
+        "label_map_version": "v1",
+        "signal_version": "2222222222222222",
+    }
+    before = dict(finding.meta)
+
+    assert audit_module._attach_polarity_label(finding, label) is False
+    assert finding.meta == before
+    assert "Claim-level check" not in finding.detail
+
+
+def test_a_current_label_is_attached() -> None:
+    finding = _proximity_finding(signal_version="1111111111111111")
+    label = {
+        "label": "refine",
+        "score": 0.7,
+        "method": "nli",
+        "model_digest": "d" * 64,
+        "label_map_version": "v1",
+        "signal_version": "1111111111111111",
+    }
+
+    assert audit_module._attach_polarity_label(finding, label) is True
+    assert finding.meta["polarity"] == "refine"
+    assert finding.meta["polarity_signal_version"] == "1111111111111111"
+
+
+# ---- 3.4 asserted pairs ----
+
+
+def test_asserted_pairs_carry_no_model_polarity_label(tmp_path, monkeypatch) -> None:
+    """The author's assertion outranks a model's guess."""
+    _enrichable(tmp_path, monkeypatch)
+    asserted = _asserted_finding()
+    before = dict(asserted.meta)
+
+    audit_module._enrich_contradiction_polarity(tmp_path, [asserted])
+
+    assert asserted.meta == before
+    assert asserted.meta["provenance"] == "asserted"
+    assert "Claim-level check" not in asserted.detail
+
+
+def test_enrichment_touches_no_competing_alternatives_stance_key(
+    tmp_path, monkeypatch
+) -> None:
+    """The reader-recorded pair stance is a triage disposition under its own
+    contract; enrichment writes only into the polarity namespace."""
+    _enrichable(tmp_path, monkeypatch)
+    finding = _proximity_finding()
+    finding.meta["stance"] = "competing"
+    before = dict(finding.meta)
+
+    audit_module._enrich_contradiction_polarity(tmp_path, [finding])
+
+    added = set(finding.meta) - set(before)
+    assert added == {
+        "polarity",
+        "polarity_score",
+        "polarity_method",
+        "polarity_model_digest",
+        "polarity_label_map_version",
+        "polarity_signal_version",
+    }
+    assert finding.meta["stance"] == "competing"
+
+
+# ---- 3.2 invariance pins ----
+
+
+def test_labelling_changes_no_signal_version_provenance_order_or_cap(
+    tmp_path, monkeypatch
+) -> None:
+    _enrichable(tmp_path, monkeypatch)
+    findings = [
+        _proximity_finding(signal_version="sig0000000000001", priority=0.95),
+        _proximity_finding(signal_version="sig0000000000002", priority=0.80),
+        _asserted_finding(),
+        _omitted_summary(),
+    ]
+    before = [
+        (
+            finding.path,
+            tuple(finding.paths or ()),
+            (finding.meta or {}).get("signal_version"),
+            (finding.meta or {}).get("provenance"),
+            (finding.meta or {}).get("priority"),
+            finding.proposed_fix,
+        )
+        for finding in findings
+    ]
+    omitted_detail = findings[-1].detail
+
+    audit_module._enrich_contradiction_polarity(tmp_path, findings)
+
+    after = [
+        (
+            finding.path,
+            tuple(finding.paths or ()),
+            (finding.meta or {}).get("signal_version"),
+            (finding.meta or {}).get("provenance"),
+            (finding.meta or {}).get("priority"),
+            finding.proposed_fix,
+        )
+        for finding in findings
+    ]
+    assert after == before                       # order, identity, ranking, provenance
+    assert findings[-1].detail == omitted_detail  # cap and omitted-count accounting
+    assert len(findings) == 4                     # nothing added, nothing dropped
+    # And the labels really did arrive, so the pins above are not vacuous.
+    assert findings[0].meta["polarity"] == "contradict"
+    assert findings[1].meta["polarity"] == "contradict"
+
+
+def test_a_dismissed_entry_stays_dismissed_when_a_label_arrives(
+    tmp_path, monkeypatch
+) -> None:
+    """A triage decision binds to the entry's fingerprint, which is composed from
+    the signal version the label may not change."""
+    from exomem import review_state
+
+    _enrichable(tmp_path, monkeypatch)
+    finding = _proximity_finding()
+
+    def fingerprint_of(entry):
+        meta = entry.meta or {}
+        return review_state.fingerprint(
+            target_ref=entry.path,
+            categories=[entry.category],
+            reasons=[
+                {
+                    "category": entry.category,
+                    "meta": {"signal_version": meta.get("signal_version")},
+                }
+            ],
+            related_refs=list(entry.paths or []),
+        )
+
+    before = fingerprint_of(finding)
+    audit_module._enrich_contradiction_polarity(tmp_path, [finding])
+
+    assert finding.meta["polarity"] == "contradict"
+    assert fingerprint_of(finding) == before
