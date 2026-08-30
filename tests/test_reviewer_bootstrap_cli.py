@@ -979,6 +979,8 @@ def test_run_seeds_exact_fixture_after_cell_ready_and_before_credentials(
 
     assert events.index("run-owner-status") < events.index("seed-fixture")
     assert events.index("seed-fixture") < events.index("run-sibling-stage-claude")
+    sibling = next(call for call in cp.calls if call["label"] == "run-sibling-stage-claude")
+    assert sibling["body"]["expiresAt"] == _run_context()["stageExpiresAt"]
     receipt = json.loads((tmp_path / "reviewer-fixture-seed.json").read_text())
     assert receipt == {
         "fixture_version": "v2",

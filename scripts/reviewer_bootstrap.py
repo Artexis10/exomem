@@ -882,7 +882,6 @@ def run(
     locks: dict,
     openai_connector: str,
     openai_redirect_override: list[str] | None = None,
-    stage_minutes: int = DEFAULT_STAGE_MINUTES,
 ) -> None:
     """Prepare and verify the reviewer fixture before sealing provider credentials."""
     resource = f"{cp.base_url}/api/exomem/mcp/v1"
@@ -1080,7 +1079,11 @@ def run(
                 "action": "create-stage",
                 "candidateId": context["candidateId"],
                 "platform": platform,
-                "expiresAt": stamp(timedelta(minutes=stage_minutes)),
+                # All stages in this review share one hard window. Recomputing
+                # from a CLI default here silently shortened a 150-minute
+                # bootstrap to 55 minutes unless the operator repeated the
+                # prepare-only flag on `run`.
+                "expiresAt": context["stageExpiresAt"],
                 "packageSha256": package,
                 "archiveSha256": archive,
                 "compatibilitySha256": locks["compatibility"],
@@ -1340,7 +1343,6 @@ def main() -> int:
         locks,
         args.openai_connector,
         args.openai_redirect,
-        args.stage_minutes,
     )
     return 0
 
