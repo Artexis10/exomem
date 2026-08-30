@@ -1006,6 +1006,8 @@ def _join_with_timeout(q: queue.Queue, timeout: float) -> None:
     deadline = time.monotonic() + timeout
     while q.unfinished_tasks and time.monotonic() < deadline:
         time.sleep(0.02)
+    if q.unfinished_tasks:
+        raise TimeoutError("media worker queue did not drain")
 
 
 def _idle_seconds() -> float:

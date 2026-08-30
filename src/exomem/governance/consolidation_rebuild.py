@@ -20,11 +20,14 @@ DERIVATIVE_REBUILD_TERMINAL_SCHEMA = (
     "exomem.consolidation-derivative-rebuild-terminal/v1"
 )
 DERIVATIVE_COMPONENTS = (
+    # Media comes first because rebuilding configured scene-frame derivatives can
+    # fan out incremental text/graph updates.  The complete rebuilds below replace
+    # that incidental state from the final destination corpus.
+    "media",
     "lexical",
     "embedding",
     "semantic-unit",
     "graph",
-    "media",
     "freshness",
     "identity",
     "review",

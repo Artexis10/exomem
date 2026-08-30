@@ -555,7 +555,7 @@ binds that reference and observed digest; no caller field selects K.
   metadata, journal, receipt, and acknowledgement seam. State may be prior,
   prepared, or final only; a mixed/third state stays sealed and never produces a
   false whole-saga atomicity claim.
-- [ ] 7.5 Add red rebuild tests proving lexical, embedding, semantic-unit, graph,
+- [x] 7.5 Add red rebuild tests proving lexical, embedding, semantic-unit, graph,
   media, freshness, identity, and review derivatives are recreated only from
   canonical destination bytes after all content batches, source-derived databases
   are never installed, and canonical bytes cannot be changed by rebuild.

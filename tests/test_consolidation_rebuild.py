@@ -57,11 +57,11 @@ def test_rebuild_runs_the_closed_component_set_after_every_batch_is_final(
     )
 
     assert tuple(component for component, _root, _digest in calls) == (
+        "media",
         "lexical",
         "embedding",
         "semantic-unit",
         "graph",
-        "media",
         "freshness",
         "identity",
         "review",
@@ -129,7 +129,7 @@ def test_rebuild_stops_on_the_first_canonical_byte_change(tmp_path: Path) -> Non
             rebuild_component=rebuild,
         )
 
-    assert calls == ["lexical", "embedding", "semantic-unit"]
+    assert calls == ["media", "lexical", "embedding", "semantic-unit"]
 
 
 @pytest.mark.parametrize(
