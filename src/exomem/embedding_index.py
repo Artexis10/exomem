@@ -934,6 +934,19 @@ class EmbeddingIndex:
             scores = np.where(mask, scores, -np.inf)
         # argpartition is O(N), then sort the top-k slice.
         top_idx = np.argpartition(-scores, k_eff - 1)[:k_eff]
+        if mask is not None and not bool(mask[top_idx].all()):
+            # An ineligible row won a slot, which masking alone cannot prevent:
+            # `-(-inf)` is `+inf`, and numpy orders NaN ABOVE `+inf`, so when the
+            # query embeds to NaN (a zero-norm or broken vector) every eligible
+            # score is NaN and the masked rows partition first. Reachable only
+            # with non-finite scores, but eligibility is a governance boundary
+            # rather than a ranking preference, so it must not depend on
+            # arithmetic holding. Fall back to selecting among the eligible rows
+            # only — the pre-#951 computation exactly, on the rows it would have
+            # had — which restores both the row and its true score.
+            eligible_idx = np.flatnonzero(mask)
+            sub = scores[eligible_idx]
+            top_idx = eligible_idx[np.argpartition(-sub, k_eff - 1)[:k_eff]]
         top_idx = top_idx[np.argsort(-scores[top_idx])]
         top = [(metadata[i][0], metadata[i][1], float(scores[i])) for i in top_idx]
         # numpy-lite: hydrate only the winners' texts (PK point-lookups).
@@ -974,8 +987,14 @@ class EmbeddingIndex:
             and cached.allowed_paths == key
         ):
             return cached.mask, cached.eligible
+        # Build from `key`, NOT from `allowed_paths`. The caller's set is mutable
+        # and callers do mutate it, so reading it a second time here can cache a
+        # mask under a key that does not describe it: snapshot {a}, another thread
+        # adds b, the mask admits b, and the entry is filed under {a}. Restoring
+        # the set to {a} then serves that stale mask for the rest of the session.
+        # Membership on the frozenset costs the same and closes the window.
         mask = np.fromiter(
-            (path in allowed_paths for path, _chunk in metadata),
+            (path in key for path, _chunk in metadata),
             dtype=bool,
             count=len(metadata),
         )

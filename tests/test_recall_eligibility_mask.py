@@ -517,3 +517,152 @@ def test_the_spy_would_actually_catch_a_reintroduced_slice(tmp_path, monkeypatch
         "matmul and the guard above is dead."
     )
     assert scored_rows != [len(metadata)]
+
+
+# --------------------------------------------------------------------------- #
+# Found by adversarial review of this branch, 2026-08-30. All three reproduced
+# against the real methods before being fixed; these pin them shut.
+# --------------------------------------------------------------------------- #
+
+
+class _MutatingSet(set):
+    """Adds `late` to itself the first time membership is tested.
+
+    Stands in for another thread mutating the caller's allowed set between the
+    memo taking its frozenset snapshot and the mask being built. Deterministic
+    where a real race would not be.
+    """
+
+    def __init__(self, initial, late: str) -> None:
+        super().__init__(initial)
+        self._late = late
+        self._fired = False
+
+    def __contains__(self, item) -> bool:
+        if not self._fired:
+            self._fired = True
+            set.add(self, self._late)
+        return set.__contains__(self, item)
+
+
+def test_a_set_mutated_during_the_mask_build_cannot_poison_the_memo(tmp_path):
+    """The cached mask must describe the key it is filed under.
+
+    The memo snapshots `frozenset(allowed_paths)` and is looked up by that
+    content. If the mask were built by reading the caller's live set a second
+    time, a mutation in between would file a mask admitting `b.md` under the key
+    `{a.md}` — and every later query that legitimately asks for `{a.md}` would
+    be served it.
+    """
+    rng = np.random.default_rng(30)
+    vault = _fresh_vault(tmp_path)
+    index, paths = _populated(vault, rng, files=6, per_file=1)
+    late = paths[1]
+    allowed = _MutatingSet({paths[0]}, late)
+
+    mask, eligible = index._eligibility_mask(index.all_vectors()[0], allowed)
+
+    metadata, _ = index.all_vectors()
+    admitted = {metadata[i][0] for i in np.flatnonzero(mask)}
+    assert admitted == {paths[0]}, f"mask admits {admitted}, but is filed under {{{paths[0]}}}"
+    assert eligible == 1
+    assert set(index._mask_cache.allowed_paths) == {paths[0]}
+
+
+def test_a_poisoned_memo_cannot_be_served_to_a_later_honest_query(tmp_path):
+    """End-to-end form of the above: the later query gets only what it asked for."""
+    rng = np.random.default_rng(31)
+    vault = _fresh_vault(tmp_path)
+    index, paths = _populated(vault, rng, files=6, per_file=1)
+    query = _unit_query(rng)
+
+    index.search(query, 6, allowed_paths=_MutatingSet({paths[0]}, paths[1]))
+    hits = index.search(query, 6, allowed_paths={paths[0]})
+
+    assert [h[0] for h in hits] == [paths[0]]
+
+
+def test_a_nan_query_never_returns_an_ineligible_row(tmp_path):
+    """Eligibility is a governance boundary, not a ranking preference.
+
+    Masking alone cannot hold it: `-(-inf)` is `+inf`, and numpy orders NaN
+    ABOVE `+inf`, so when the query embeds to NaN every eligible score is NaN
+    and the masked rows partition first. The pre-#951 slice could not do this
+    because ineligible rows were never in the array.
+    """
+    rng = np.random.default_rng(32)
+    vault = _fresh_vault(tmp_path)
+    index, paths = _populated(vault, rng, files=4, per_file=1)
+    nan_query = np.full(768, np.nan, dtype=np.float32)
+
+    hits = index.search(nan_query, 1, allowed_paths={paths[0]})
+
+    assert [h[0] for h in hits] == [paths[0]]
+
+
+def test_no_infinite_score_can_escape_search(tmp_path):
+    """`find_candidates.py` publishes these scores with `"range": [-1.0, 1.0]`.
+
+    A `-inf` leaking out is not merely ugly: it is consumed downstream as a
+    cosine, and it made a whole vector lane drop out in review.
+    """
+    rng = np.random.default_rng(33)
+    vault = _fresh_vault(tmp_path)
+    index, paths = _populated(vault, rng, files=4, per_file=1)
+    allowed = {paths[0]}
+
+    for query in (np.full(768, np.nan, dtype=np.float32), _unit_query(rng)):
+        for k in (1, 4, 50):
+            for hit in index.search(query, k, allowed_paths=allowed):
+                assert not np.isinf(hit[3]), f"infinite score {hit[3]} escaped at k={k}"
+
+
+def test_every_returned_row_is_eligible_under_pathological_scores(tmp_path):
+    """Sweep the shapes that break the -inf ordering, at several k."""
+    rng = np.random.default_rng(34)
+    vault = _fresh_vault(tmp_path)
+    index, paths = _populated(vault, rng, files=10, per_file=2)
+    allowed = set(paths[:3])
+    queries = [
+        np.full(768, np.nan, dtype=np.float32),
+        np.zeros(768, dtype=np.float32),
+        np.full(768, np.inf, dtype=np.float32),
+    ]
+
+    for query in queries:
+        for k in (1, 3, 6, 20):
+            hits = index.search(query, k, allowed_paths=allowed)
+            assert all(h[0] in allowed for h in hits), (
+                f"ineligible row returned for k={k}: {[h[0] for h in hits]}"
+            )
+            assert len(hits) <= 6  # 3 files x 2 chunks is the eligible ceiling
+
+
+def test_exact_ties_may_pick_a_different_equally_scoring_row(tmp_path):
+    """DOCUMENTED DIVERGENCE, not a guarantee — the one place this is not bit-identical.
+
+    `argpartition`'s choice among EXACTLY equal scores depends on the array it
+    is given, so masking the full array can select a different tied row than
+    slicing the eligible ones did. Neither order is defined: pre-#951's choice
+    was equally an artifact of layout, and numpy makes no stability promise.
+
+    Reachable only for genuinely identical content (the same note captured
+    twice), and every candidate scores the same, so no ranking quality moves.
+    This test asserts the invariant that DOES hold — an eligible row at the
+    top score — so a future change that resolves ties deterministically will
+    not have to fight it.
+    """
+    vault = _fresh_vault(tmp_path)
+    index = embeddings.EmbeddingIndex(vault)
+    identical = _sparse_rows([(0, 1.0)])[0]
+    names = ["blocked-a.md", "blocked-b.md", "eligible-a.md", "eligible-b.md"]
+    for name in names:
+        index.upsert_file(name, [f"{name} chunk"], identical.reshape(1, -1), 1.0)
+    allowed = {"eligible-a.md", "eligible-b.md"}
+    query = _sparse_rows([(0, 1.0)])[0]
+
+    hits = index.search(query, 1, allowed_paths=allowed)
+
+    assert len(hits) == 1
+    assert hits[0][0] in allowed
+    assert hits[0][3] == pytest.approx(1.0, abs=SCORE_TOLERANCE)
