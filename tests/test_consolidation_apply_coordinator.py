@@ -197,6 +197,108 @@ def _reopen_after_prior_apply(seal_store) -> None:
     assert opened.revision == 14
 
 
+def test_apply_refuses_missing_policy_bundle_before_sealing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance import (
+        consolidation_admission,
+        consolidation_apply_coordinator,
+        consolidation_authority,
+        consolidation_plan_store,
+        consolidation_seal,
+        receipts,
+    )
+
+    vault, artifact_store = _destination(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        consolidation_apply_coordinator,
+        "_policy_verification_timestamp",
+        lambda: T1,
+    )
+    predecessor = _append_token_reservation(vault)
+    snapshot = consolidation_fingerprints.load_local_destination_snapshot(vault, now=123)
+
+    monkeypatch.setattr(
+        consolidation_plan_store.ConsolidationPlanStore,
+        "load",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            digest=PLAN_DIGEST,
+            control_basis=SimpleNamespace(digest=CONTROL_BASIS_DIGEST),
+            preimage={
+                "run_id": RUN_ID,
+                "plan_kind": "cutover",
+                "destination_snapshot_fingerprint": snapshot.digest,
+                "expected_destination_preimage_census_digest": (snapshot.canonical_census_digest),
+                "nonce": "apply-policy-bundle-nonce",
+            },
+        ),
+    )
+
+    def missing_bundle(*_args, **_kwargs):
+        raise consolidation_plan_store.ConsolidationPlanStoreUnavailable("PLAN_STORE_CORRUPT")
+
+    monkeypatch.setattr(
+        consolidation_plan_store.ConsolidationPlanStore,
+        "load_policy_bundle",
+        missing_bundle,
+    )
+    seal_store = consolidation_seal.ConsolidationSealStore(vault)
+    seal_store.initialize_open(vault_binding_digest=VAULT_BINDING, recorded_at=T0)
+    admission = consolidation_admission.ConsolidationAdmission(
+        vault,
+        vault_binding_digest=VAULT_BINDING,
+    )
+    authority = consolidation_authority.issue_authority(
+        vault_binding_digest=VAULT_BINDING,
+        run_id=RUN_ID,
+        operation_id=OPERATION_ID,
+        journal_digest=JOURNAL_DIGEST,
+        phase="sealing",
+        action="apply",
+    )
+    record_count = len(receipts.event_records(vault))
+    with admission.admit_mutation() as mutation:
+        control = admission.convert_control_mutation(
+            mutation,
+            authority=authority,
+            run_id=RUN_ID,
+            operation_id=OPERATION_ID,
+            journal_digest=JOURNAL_DIGEST,
+            request_digest=REQUEST_DIGEST,
+            phase="sealing",
+            action="apply",
+        )
+        with pytest.raises(
+            consolidation_apply_coordinator.ConsolidationApplyPreparationUnavailable
+        ):
+            consolidation_apply_coordinator.prepare_apply_through_preimage(
+                vault_root=vault,
+                admission=admission,
+                control=control,
+                artifact_store=artifact_store,
+                token_reservation_event_id=str(predecessor["event_id"]),
+                token_reservation_payload_digest=str(
+                    predecessor["consolidation_event"]["payload_digest"]
+                ),
+                vault_binding_digest=VAULT_BINDING,
+                run_id=RUN_ID,
+                operation_id=OPERATION_ID,
+                journal_digest=JOURNAL_DIGEST,
+                request_digest=REQUEST_DIGEST,
+                plan_digest=PLAN_DIGEST,
+                principal_contexts=(),
+                sealed_at=T1,
+                drained_at=T2,
+                preimage_ready_at=T3,
+                now=123,
+                timeout=2.0,
+            )
+
+    assert seal_store.load(vault_binding_digest=VAULT_BINDING).kind == "open"
+    assert len(receipts.event_records(vault)) == record_count
+
+
 @pytest.mark.parametrize("crash_before_preimage_ready", [False, True])
 @pytest.mark.parametrize("reopened_after_prior_apply", [False, True])
 def test_apply_preparation_receipt_chains_seal_drain_and_exact_preimage(
@@ -210,14 +312,22 @@ def test_apply_preparation_receipt_chains_seal_drain_and_exact_preimage(
         consolidation_apply_coordinator,
         consolidation_authority,
         consolidation_plan_store,
+        consolidation_policy,
         consolidation_seal,
         receipts,
     )
 
     vault, artifact_store = _destination(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        consolidation_apply_coordinator,
+        "_policy_verification_timestamp",
+        lambda: T1,
+    )
     predecessor = _append_token_reservation(vault)
     snapshot = consolidation_fingerprints.load_local_destination_snapshot(vault, now=123)
     loaded_plans: list[tuple[str, str, str]] = []
+    loaded_bundles: list[tuple[str, str, str]] = []
+    revalidated_bundles: list[object] = []
 
     def load_plan(_store, run_id, *, plan_kind, plan_digest):
         loaded_plans.append((run_id, plan_kind, plan_digest))
@@ -228,16 +338,41 @@ def test_apply_preparation_receipt_chains_seal_drain_and_exact_preimage(
                 "run_id": RUN_ID,
                 "plan_kind": "cutover",
                 "destination_snapshot_fingerprint": snapshot.digest,
-                "expected_destination_preimage_census_digest": (
-                    snapshot.canonical_census_digest
-                ),
+                "expected_destination_preimage_census_digest": (snapshot.canonical_census_digest),
+                "nonce": "apply-policy-bundle-nonce",
             },
         )
+
+    policy_bundle = SimpleNamespace(destination_vault_id="vault-apply-preparation")
+
+    def load_policy_bundle(_store, run_id, *, plan_kind, plan_digest):
+        loaded_bundles.append((run_id, plan_kind, plan_digest))
+        return policy_bundle
+
+    def revalidate_policy(_vault, bundle, **kwargs):
+        assert kwargs == {
+            "principal_contexts": (),
+            "destination_vault_id": "vault-apply-preparation",
+            "expected_nonce": "apply-policy-bundle-nonce",
+            "verified_at": T1,
+        }
+        revalidated_bundles.append(bundle)
+        return bundle
 
     monkeypatch.setattr(
         consolidation_plan_store.ConsolidationPlanStore,
         "load",
         load_plan,
+    )
+    monkeypatch.setattr(
+        consolidation_plan_store.ConsolidationPlanStore,
+        "load_policy_bundle",
+        load_policy_bundle,
+    )
+    monkeypatch.setattr(
+        consolidation_policy,
+        "revalidate_destination_policy",
+        revalidate_policy,
     )
     seal_store = consolidation_seal.ConsolidationSealStore(vault)
     seal_store.initialize_open(vault_binding_digest=VAULT_BINDING, recorded_at=T0)
@@ -270,6 +405,7 @@ def test_apply_preparation_receipt_chains_seal_drain_and_exact_preimage(
         "journal_digest": JOURNAL_DIGEST,
         "request_digest": REQUEST_DIGEST,
         "plan_digest": PLAN_DIGEST,
+        "principal_contexts": (),
         "sealed_at": T1,
         "drained_at": T2,
         "preimage_ready_at": T3,
@@ -341,6 +477,8 @@ def test_apply_preparation_receipt_chains_seal_drain_and_exact_preimage(
     assert result is not None
     assert loaded_plans
     assert set(loaded_plans) == {(RUN_ID, "cutover", PLAN_DIGEST)}
+    assert set(loaded_bundles) == {(RUN_ID, "cutover", PLAN_DIGEST)}
+    assert revalidated_bundles and set(map(id, revalidated_bundles)) == {id(policy_bundle)}
     assert result.seal_state.phase == "preimage-ready"
     assert result.preimage.manifest_digest == result.preimage_plan.manifest_digest
     assert result.preimage.binding.semantic_predecessor_event_id == (
@@ -348,8 +486,7 @@ def test_apply_preparation_receipt_chains_seal_drain_and_exact_preimage(
     )
     assert (vault / "Knowledge Base/Notes/destination.md").read_bytes() == before
     assert [
-        record["consolidation_event"]["kind"]
-        for record in receipts.event_records(vault)[-6:]
+        record["consolidation_event"]["kind"] for record in receipts.event_records(vault)[-6:]
     ] == [
         "seal-intent",
         "seal-intent",

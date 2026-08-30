@@ -9,6 +9,7 @@ documents against the exact live authoring snapshot.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import secrets
 import unicodedata
@@ -33,7 +34,7 @@ _SOURCE_AUTHORITY_REVIEW_DOMAIN = b"exomem.source-authority-review/v1"
 _ATTESTATION_SET_DOMAIN = b"exomem.destination-principal-attestation-set/v1"
 _DOCUMENT_SET_DOMAIN = b"exomem.consolidation-destination-documents/v1"
 _AUTHORING_SNAPSHOT_DOMAIN = b"exomem.consolidation-authoring-snapshot/v1"
-_PLAN_DOMAIN = b"exomem.consolidation-destination-policy-plan/v1"
+_PLAN_DOMAIN = DESTINATION_POLICY_PLAN_SCHEMA.encode("ascii")
 
 _TRUSTED_SURFACES = frozenset({"cli", "hosted", "mcp", "rest"})
 _SOURCE_AUTHORITY_KINDS = frozenset(
@@ -61,6 +62,7 @@ _RFC3339_MILLISECONDS = re.compile(
 _MAX_SAFE_INTEGER = (1 << 53) - 1
 _MAX_DOCUMENTS = 1024
 _MAX_DOCUMENT_BYTES = 1 << 20
+_MAX_POLICY_BUNDLE_BYTES = 16 * 1024 * 1024
 
 __all__ = [
     "DESTINATION_POLICY_PLAN_SCHEMA",
@@ -71,7 +73,10 @@ __all__ = [
     "SourceAuthorityReviewArtifact",
     "VerifiedDestinationPrincipalAttestation",
     "compile_destination_policy",
+    "canonical_destination_policy_bundle",
+    "destination_policy_bundle_digest",
     "issue_destination_principal_attestation",
+    "parse_destination_policy_bundle",
     "principal_attestation_set_digest",
     "revalidate_destination_policy",
     "source_authority_review_digest",
@@ -124,6 +129,7 @@ class SourceAuthorityReviewArtifact:
 class DestinationPolicyPlan:
     schema: str
     destination_vault_id: str
+    nonce: str
     prospective: policy.ProspectiveCompile
     document_edits: tuple[tuple[str, str | None], ...]
     document_set_digest: str
@@ -528,6 +534,262 @@ def _authoring_snapshot_digest(snapshot: policy.AuthoringSnapshot) -> str:
     return _framed_digest(_AUTHORING_SNAPSHOT_DOMAIN, value)
 
 
+def _integer(value: object) -> int:
+    if type(value) is not int or not 0 <= value <= _MAX_SAFE_INTEGER:
+        _fail()
+    return value
+
+
+def _mapping(value: object, fields: frozenset[str]) -> Mapping[str, object]:
+    if not isinstance(value, Mapping) or frozenset(value) != fields:
+        _fail()
+    return value
+
+
+def _policy_path(value: object) -> str:
+    path = _text(value)
+    parsed = PurePosixPath(path)
+    if (
+        not path
+        or len(path.encode("utf-8")) > 4096
+        or "\\" in path
+        or parsed.is_absolute()
+        or parsed.as_posix() != path
+        or any(part in {"", ".", ".."} for part in parsed.parts)
+    ):
+        _fail()
+    return path
+
+
+def _document_rows(documents: Sequence[tuple[str, bytes]]) -> list[dict[str, object]]:
+    if len(documents) > _MAX_DOCUMENTS:
+        _fail()
+    rows: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for raw_path, raw in documents:
+        path = _policy_path(raw_path)
+        if path in seen or not isinstance(raw, bytes) or len(raw) > _MAX_DOCUMENT_BYTES:
+            _fail()
+        try:
+            content = _text(raw.decode("utf-8"))
+        except UnicodeDecodeError:
+            _fail()
+        if content.encode("utf-8") != raw:
+            _fail()
+        seen.add(path)
+        rows.append(
+            {
+                "path": path,
+                "content": content,
+                "byte_size": len(raw),
+                "sha256": hashlib.sha256(raw).hexdigest(),
+            }
+        )
+    if tuple(row["path"] for row in rows) != tuple(sorted(seen)):
+        _fail()
+    return rows
+
+
+def _parse_document_rows(value: object) -> tuple[tuple[str, bytes], ...]:
+    if not isinstance(value, list) or len(value) > _MAX_DOCUMENTS:
+        _fail()
+    documents: list[tuple[str, bytes]] = []
+    for raw in value:
+        item = _mapping(
+            raw,
+            frozenset({"path", "content", "byte_size", "sha256"}),
+        )
+        path = _policy_path(item["path"])
+        content = _text(item["content"])
+        encoded = content.encode("utf-8")
+        if (
+            len(encoded) > _MAX_DOCUMENT_BYTES
+            or _integer(item["byte_size"]) != len(encoded)
+            or _digest(item["sha256"]) != hashlib.sha256(encoded).hexdigest()
+        ):
+            _fail()
+        documents.append((path, encoded))
+    if tuple(path for path, _raw in documents) != tuple(sorted({path for path, _raw in documents})):
+        _fail()
+    return tuple(documents)
+
+
+def _stable_identity_from_value(value: object) -> StableIdentity:
+    item = _mapping(
+        value,
+        frozenset({"device", "inode", "kind", "link_count"}),
+    )
+    return StableIdentity(
+        device=_integer(item["device"]),
+        inode=_integer(item["inode"]),
+        kind=_identifier(item["kind"]),
+        link_count=_integer(item["link_count"]),
+    )
+
+
+def _authoring_snapshot_value(snapshot: policy.AuthoringSnapshot) -> dict[str, object]:
+    root: dict[str, object]
+    if snapshot.governance_root_identity is None:
+        root = {"state": "absent"}
+    else:
+        root = {
+            "state": "present",
+            "identity": _stable_identity_value(snapshot.governance_root_identity),
+        }
+    file_paths = tuple(_policy_path(item.path) for item in snapshot.file_identities)
+    directory_paths = tuple(_policy_path(path) for path, _identity in snapshot.directory_identities)
+    file_identities = [
+        {
+            "path": path,
+            "sha256": _digest(item.sha256),
+            "identity": _stable_identity_value(item.identity),
+        }
+        for path, item in zip(file_paths, snapshot.file_identities, strict=True)
+    ]
+    directory_identities = [
+        {
+            "path": checked_path,
+            "identity": _stable_identity_value(identity),
+        }
+        for checked_path, (_path, identity) in zip(
+            directory_paths,
+            snapshot.directory_identities,
+            strict=True,
+        )
+    ]
+    if file_paths != tuple(sorted(set(file_paths))) or directory_paths != tuple(
+        sorted(set(directory_paths))
+    ):
+        _fail()
+    return {
+        "documents": _document_rows(snapshot.documents),
+        "source_fingerprint": _digest(snapshot.source_fingerprint),
+        "conflict_set_digest": _digest(snapshot.conflict_set_digest),
+        "guard_generation": _text(snapshot.guard_generation),
+        "file_identities": file_identities,
+        "directory_identities": directory_identities,
+        "governance_root": root,
+    }
+
+
+def _parse_authoring_snapshot(value: object) -> policy.AuthoringSnapshot:
+    item = _mapping(
+        value,
+        frozenset(
+            {
+                "documents",
+                "source_fingerprint",
+                "conflict_set_digest",
+                "guard_generation",
+                "file_identities",
+                "directory_identities",
+                "governance_root",
+            }
+        ),
+    )
+    documents = _parse_document_rows(item["documents"])
+    raw_files = item["file_identities"]
+    raw_directories = item["directory_identities"]
+    if not isinstance(raw_files, list) or not isinstance(raw_directories, list):
+        _fail()
+    files: list[policy.AuthoringFileIdentity] = []
+    for raw in raw_files:
+        row = _mapping(raw, frozenset({"path", "sha256", "identity"}))
+        files.append(
+            policy.AuthoringFileIdentity(
+                path=_policy_path(row["path"]),
+                sha256=_digest(row["sha256"]),
+                identity=_stable_identity_from_value(row["identity"]),
+            )
+        )
+    directories: list[tuple[str, StableIdentity]] = []
+    for raw in raw_directories:
+        row = _mapping(raw, frozenset({"path", "identity"}))
+        directories.append(
+            (_policy_path(row["path"]), _stable_identity_from_value(row["identity"]))
+        )
+    if tuple(item.path for item in files) != tuple(sorted({item.path for item in files})) or tuple(
+        path for path, _identity in directories
+    ) != tuple(sorted({path for path, _identity in directories})):
+        _fail()
+    raw_root = item["governance_root"]
+    if raw_root == {"state": "absent"}:
+        root = None
+    else:
+        root_row = _mapping(raw_root, frozenset({"state", "identity"}))
+        if root_row["state"] != "present":
+            _fail()
+        root = _stable_identity_from_value(root_row["identity"])
+    snapshot = policy.AuthoringSnapshot(
+        documents=documents,
+        source_fingerprint=_digest(item["source_fingerprint"]),
+        conflict_set_digest=_digest(item["conflict_set_digest"]),
+        guard_generation=_text(item["guard_generation"]),
+        file_identities=tuple(files),
+        directory_identities=tuple(directories),
+        governance_root_identity=root,
+    )
+    if _authoring_snapshot_value(snapshot) != value:
+        _fail()
+    return snapshot
+
+
+def _document_edit_rows(
+    edits: Sequence[tuple[str, str | None]],
+) -> list[dict[str, object]]:
+    checked = _document_edits(dict(edits))
+    if tuple(edits) != checked:
+        _fail()
+    rows: list[dict[str, object]] = []
+    for path, content in checked:
+        if content is None:
+            rows.append({"path": path, "state": "absent"})
+        else:
+            encoded = content.encode("utf-8")
+            rows.append(
+                {
+                    "path": path,
+                    "state": "present",
+                    "content": content,
+                    "byte_size": len(encoded),
+                    "sha256": hashlib.sha256(encoded).hexdigest(),
+                }
+            )
+    return rows
+
+
+def _parse_document_edits(value: object) -> tuple[tuple[str, str | None], ...]:
+    if not isinstance(value, list) or len(value) > _MAX_DOCUMENTS:
+        _fail()
+    edits: dict[str, str | None] = {}
+    for raw in value:
+        if not isinstance(raw, Mapping) or raw.get("state") not in {"absent", "present"}:
+            _fail()
+        if raw["state"] == "absent":
+            row = _mapping(raw, frozenset({"path", "state"}))
+            content = None
+        else:
+            row = _mapping(
+                raw,
+                frozenset({"path", "state", "content", "byte_size", "sha256"}),
+            )
+            content = _text(row["content"])
+            encoded = content.encode("utf-8")
+            if (
+                _integer(row["byte_size"]) != len(encoded)
+                or _digest(row["sha256"]) != hashlib.sha256(encoded).hexdigest()
+            ):
+                _fail()
+        path = _policy_path(row["path"])
+        if path in edits:
+            _fail()
+        edits[path] = content
+    checked = _document_edits(edits)
+    if _document_edit_rows(checked) != value:
+        _fail()
+    return checked
+
+
 def _requirements(compiled: policy.Policy) -> dict[str, set[str]]:
     required: dict[str, set[str]] = {}
     for rule in compiled.rules:
@@ -570,6 +832,306 @@ def _requirements_tuple(
         (principal_id, tuple(sorted(purposes)))
         for principal_id, purposes in sorted(requirements.items())
     )
+
+
+def _policy_bundle_value(plan: DestinationPolicyPlan) -> dict[str, object]:
+    if (
+        not isinstance(plan, DestinationPolicyPlan)
+        or plan.schema != DESTINATION_POLICY_PLAN_SCHEMA
+        or not isinstance(plan.prospective, policy.ProspectiveCompile)
+        or not isinstance(plan.prospective.snapshot, policy.AuthoringSnapshot)
+    ):
+        _fail()
+    vault_id = _identifier(plan.destination_vault_id)
+    nonce = _identifier(plan.nonce)
+    snapshot = plan.prospective.snapshot
+    target_documents = plan.prospective.target_documents
+    compiled = policy.compile_documents(dict(target_documents))
+    requirements = {
+        _identifier(principal_id): set(_purposes(purposes))
+        for principal_id, purposes in plan.principal_requirements
+    }
+    attestations_by_principal = {
+        attestation.principal_id: attestation for attestation in plan.attestations
+    }
+    if (
+        plan.prospective.policy != compiled
+        or plan.document_edits != _document_edits(dict(plan.document_edits))
+        or plan.document_set_digest != _document_set_digest(target_documents)
+        or plan.authoring_snapshot_digest != _authoring_snapshot_digest(snapshot)
+        or plan.source_authority
+        != tuple(sorted(plan.source_authority, key=lambda item: item.object_ref))
+        or plan.source_authority_review_digest
+        != source_authority_review_digest(plan.source_authority)
+        or plan.attestations != tuple(sorted(plan.attestations, key=lambda item: item.principal_id))
+        or plan.principal_attestation_set_digest
+        != principal_attestation_set_digest(plan.attestations)
+        or len(attestations_by_principal) != len(plan.attestations)
+        or set(attestations_by_principal) != set(requirements)
+        or any(
+            attestation.destination_vault_id != vault_id
+            or attestation.nonce != nonce
+            or not requirements[principal_id] <= set(attestation.purposes)
+            for principal_id, attestation in attestations_by_principal.items()
+        )
+        or _requirements_tuple(requirements) != plan.principal_requirements
+        or any(
+            not purposes <= requirements.get(principal_id, set())
+            for principal_id, purposes in _requirements(compiled).items()
+        )
+        or tuple(sorted(requirements)) != plan.named_principals
+    ):
+        _fail()
+    return {
+        "schema": plan.schema,
+        "destination_vault_id": vault_id,
+        "nonce": nonce,
+        "prospective": {
+            "snapshot": _authoring_snapshot_value(snapshot),
+            "target_documents": _document_rows(target_documents),
+            "policy_fingerprint": _digest(compiled.fingerprint),
+        },
+        "document_edits": _document_edit_rows(plan.document_edits),
+        "document_set_digest": _digest(plan.document_set_digest),
+        "authoring_snapshot_digest": _digest(plan.authoring_snapshot_digest),
+        "source_authority": _source_authority_value(plan.source_authority),
+        "source_authority_review_digest": _digest(plan.source_authority_review_digest),
+        "attestations": _attestation_value(plan.attestations),
+        "principal_attestation_set_digest": _digest(plan.principal_attestation_set_digest),
+        "principal_requirements": [
+            {"principal_id": principal_id, "purposes": list(purposes)}
+            for principal_id, purposes in plan.principal_requirements
+        ],
+        "named_principals": list(plan.named_principals),
+    }
+
+
+def _source_authority_from_value(value: object) -> tuple[SourceAuthorityReviewArtifact, ...]:
+    if not isinstance(value, list) or len(value) > 4096:
+        _fail()
+    artifacts: list[SourceAuthorityReviewArtifact] = []
+    for raw in value:
+        item = _mapping(
+            raw,
+            frozenset(
+                {
+                    "object_ref",
+                    "object_kind",
+                    "object_sha256",
+                    "bundle_sha256",
+                    "provenance_ref",
+                }
+            ),
+        )
+        artifacts.append(
+            SourceAuthorityReviewArtifact(
+                object_ref=_reference(item["object_ref"]),
+                object_kind=_identifier(item["object_kind"]),
+                object_sha256=_digest(item["object_sha256"]),
+                bundle_sha256=_digest(item["bundle_sha256"]),
+                provenance_ref=_reference(item["provenance_ref"]),
+            )
+        )
+    ordered = tuple(sorted(artifacts, key=lambda item: item.object_ref))
+    if _source_authority_value(ordered) != value:
+        _fail()
+    return ordered
+
+
+def _attestations_from_value(
+    value: object,
+) -> tuple[DestinationPrincipalAttestation, ...]:
+    if not isinstance(value, list) or len(value) > 1024:
+        _fail()
+    attestations: list[DestinationPrincipalAttestation] = []
+    fields = frozenset(
+        {
+            "schema",
+            "destination_vault_id",
+            "issuer_family",
+            "surface",
+            "principal_id",
+            "purposes",
+            "issued_at",
+            "expires_at",
+            "authentication_binding_digest",
+            "nonce",
+            "fingerprint",
+        }
+    )
+    for raw in value:
+        item = _mapping(raw, fields)
+        purposes = item["purposes"]
+        if not isinstance(purposes, list):
+            _fail()
+        attestations.append(
+            DestinationPrincipalAttestation(
+                schema=_text(item["schema"]),
+                destination_vault_id=_identifier(item["destination_vault_id"]),
+                issuer_family=_identifier(item["issuer_family"]),
+                surface=_text(item["surface"]),
+                principal_id=_identifier(item["principal_id"]),
+                purposes=_purposes(purposes),
+                issued_at=_timestamp(item["issued_at"])[0],
+                expires_at=_timestamp(item["expires_at"])[0],
+                authentication_binding_digest=_digest(item["authentication_binding_digest"]),
+                nonce=_identifier(item["nonce"]),
+                fingerprint=_digest(item["fingerprint"]),
+            )
+        )
+    ordered = tuple(sorted(attestations, key=lambda item: item.principal_id))
+    if _attestation_value(ordered) != value:
+        _fail()
+    return ordered
+
+
+def _requirements_from_value(
+    value: object,
+) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    if not isinstance(value, list) or len(value) > 1024:
+        _fail()
+    rows: list[tuple[str, tuple[str, ...]]] = []
+    for raw in value:
+        item = _mapping(raw, frozenset({"principal_id", "purposes"}))
+        purposes = item["purposes"]
+        if not isinstance(purposes, list):
+            _fail()
+        rows.append((_identifier(item["principal_id"]), _purposes(purposes)))
+    requirements = tuple(rows)
+    if requirements != _requirements_tuple(
+        {principal_id: set(purposes) for principal_id, purposes in requirements}
+    ):
+        _fail()
+    return requirements
+
+
+def _policy_plan_from_value(value: object) -> DestinationPolicyPlan:
+    item = _mapping(
+        value,
+        frozenset(
+            {
+                "schema",
+                "destination_vault_id",
+                "nonce",
+                "prospective",
+                "document_edits",
+                "document_set_digest",
+                "authoring_snapshot_digest",
+                "source_authority",
+                "source_authority_review_digest",
+                "attestations",
+                "principal_attestation_set_digest",
+                "principal_requirements",
+                "named_principals",
+            }
+        ),
+    )
+    if item["schema"] != DESTINATION_POLICY_PLAN_SCHEMA:
+        _fail()
+    prospective_value = _mapping(
+        item["prospective"],
+        frozenset({"snapshot", "target_documents", "policy_fingerprint"}),
+    )
+    snapshot = _parse_authoring_snapshot(prospective_value["snapshot"])
+    target_documents = _parse_document_rows(prospective_value["target_documents"])
+    compiled = policy.compile_documents(dict(target_documents))
+    if compiled.fingerprint != _digest(prospective_value["policy_fingerprint"]):
+        _fail()
+    prospective = policy.ProspectiveCompile(
+        snapshot=snapshot,
+        target_documents=target_documents,
+        policy=compiled,
+    )
+    source_authority = _source_authority_from_value(item["source_authority"])
+    attestations = _attestations_from_value(item["attestations"])
+    requirements = _requirements_from_value(item["principal_requirements"])
+    named = item["named_principals"]
+    if not isinstance(named, list):
+        _fail()
+    named_principals = tuple(_identifier(principal_id) for principal_id in named)
+    preliminary = DestinationPolicyPlan(
+        schema=DESTINATION_POLICY_PLAN_SCHEMA,
+        destination_vault_id=_identifier(item["destination_vault_id"]),
+        nonce=_identifier(item["nonce"]),
+        prospective=prospective,
+        document_edits=_parse_document_edits(item["document_edits"]),
+        document_set_digest=_digest(item["document_set_digest"]),
+        authoring_snapshot_digest=_digest(item["authoring_snapshot_digest"]),
+        source_authority=source_authority,
+        source_authority_review_digest=_digest(item["source_authority_review_digest"]),
+        attestations=attestations,
+        principal_attestation_set_digest=_digest(item["principal_attestation_set_digest"]),
+        principal_requirements=requirements,
+        named_principals=named_principals,
+        digest="0" * 64,
+    )
+    if _policy_bundle_value(preliminary) != value:
+        _fail()
+    return DestinationPolicyPlan(
+        schema=preliminary.schema,
+        destination_vault_id=preliminary.destination_vault_id,
+        nonce=preliminary.nonce,
+        prospective=preliminary.prospective,
+        document_edits=preliminary.document_edits,
+        document_set_digest=preliminary.document_set_digest,
+        authoring_snapshot_digest=preliminary.authoring_snapshot_digest,
+        source_authority=preliminary.source_authority,
+        source_authority_review_digest=preliminary.source_authority_review_digest,
+        attestations=preliminary.attestations,
+        principal_attestation_set_digest=preliminary.principal_attestation_set_digest,
+        principal_requirements=preliminary.principal_requirements,
+        named_principals=preliminary.named_principals,
+        digest=_plan_digest(preliminary),
+    )
+
+
+def canonical_destination_policy_bundle(plan: DestinationPolicyPlan) -> bytes:
+    """Return the exact canonical bytes whose framed digest authorizes apply."""
+
+    value = _policy_bundle_value(plan)
+    if plan.digest != _framed_digest(_PLAN_DOMAIN, value):
+        _fail()
+    return _canonical(value)
+
+
+def destination_policy_bundle_digest(plan: DestinationPolicyPlan) -> str:
+    """Return the outside digest of one exact canonical policy bundle."""
+
+    canonical_destination_policy_bundle(plan)
+    return plan.digest
+
+
+def parse_destination_policy_bundle(raw: bytes) -> DestinationPolicyPlan:
+    """Parse only exact canonical stored destination-policy bundle bytes."""
+
+    if not isinstance(raw, bytes) or not 1 <= len(raw) <= _MAX_POLICY_BUNDLE_BYTES:
+        _fail()
+
+    def object_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, item in pairs:
+            normalized = _text(key)
+            if normalized in result:
+                _fail()
+            result[normalized] = item
+        return result
+
+    def invalid_number(_value: str) -> NoReturn:
+        _fail()
+
+    try:
+        parsed = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=object_pairs,
+            parse_float=invalid_number,
+            parse_constant=invalid_number,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
+        _fail()
+    plan = _policy_plan_from_value(parsed)
+    if canonical_destination_policy_bundle(plan) != raw:
+        _fail()
+    return plan
 
 
 def _principal_map(principals: Sequence[RequestPrincipal]) -> dict[str, RequestPrincipal]:
@@ -619,25 +1181,7 @@ def _verify_attestation_set(
 
 
 def _plan_digest(plan: DestinationPolicyPlan) -> str:
-    snapshot = plan.prospective.snapshot
-    value = {
-        "schema": plan.schema,
-        "destination_vault_id": plan.destination_vault_id,
-        "source_fingerprint": snapshot.source_fingerprint,
-        "conflict_set_digest": snapshot.conflict_set_digest,
-        "guard_generation": snapshot.guard_generation,
-        "document_set_digest": plan.document_set_digest,
-        "authoring_snapshot_digest": plan.authoring_snapshot_digest,
-        "policy_fingerprint": plan.prospective.policy.fingerprint,
-        "source_authority_review_digest": plan.source_authority_review_digest,
-        "principal_attestation_set_digest": plan.principal_attestation_set_digest,
-        "principal_requirements": [
-            {"principal_id": principal_id, "purposes": list(purposes)}
-            for principal_id, purposes in plan.principal_requirements
-        ],
-        "named_principals": list(plan.named_principals),
-    }
-    return _framed_digest(_PLAN_DOMAIN, value)
+    return _framed_digest(_PLAN_DOMAIN, _policy_bundle_value(plan))
 
 
 def compile_destination_policy(
@@ -675,6 +1219,7 @@ def compile_destination_policy(
     plan = DestinationPolicyPlan(
         schema=DESTINATION_POLICY_PLAN_SCHEMA,
         destination_vault_id=vault_id,
+        nonce=_identifier(expected_nonce),
         prospective=prospective,
         document_edits=edits,
         document_set_digest=_document_set_digest(prospective.target_documents),
@@ -690,6 +1235,7 @@ def compile_destination_policy(
     return DestinationPolicyPlan(
         schema=plan.schema,
         destination_vault_id=plan.destination_vault_id,
+        nonce=plan.nonce,
         prospective=plan.prospective,
         document_edits=plan.document_edits,
         document_set_digest=plan.document_set_digest,
@@ -719,6 +1265,7 @@ def revalidate_destination_policy(
         not isinstance(plan, DestinationPolicyPlan)
         or plan.schema != DESTINATION_POLICY_PLAN_SCHEMA
         or plan.destination_vault_id != _identifier(destination_vault_id)
+        or plan.nonce != _identifier(expected_nonce)
         or plan.digest != _plan_digest(plan)
         or plan.source_authority_review_digest
         != source_authority_review_digest(plan.source_authority)

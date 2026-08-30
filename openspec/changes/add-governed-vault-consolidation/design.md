@@ -796,7 +796,8 @@ preimage has these required fields:
 - exact content actions, expected before hashes, planned after hashes, and
   journal batch partition digest;
 - exact canonical policy documents, prospective policy fingerprint, bridge and
-  exact-release approval fingerprints;
+  exact-release approval fingerprints, plus the digest of the exact canonical
+  destination-policy bundle from which those values were reviewed;
 - fresh destination owner/principal attestation-set digest;
 - representative principal x purpose x item disclosure-matrix digest;
 - positive/negative verification-plan digest;
@@ -811,6 +812,27 @@ preimage has these required fields:
   change, batch, rollback consequence, surviving-copy obligation, and unresolved
   count; and
 - plan creation time, plan validity deadline, and a fresh plan nonce.
+
+For a cutover plan, the owner-only plan directory also contains immutable
+`policy-bundle.json`: the canonical bytes of
+`exomem.consolidation-destination-policy/v1`. The bundle carries the exact
+destination vault binding, prospective compile target and authoring snapshot,
+document edits and document-set digest, source-authority review records/digest,
+fresh principal attestations and attestation-set digest, principal requirements,
+and named principals. Its framed-JCS digest is outside those bytes; the cutover
+plan binds it as `policy_bundle_digest`. The bundle deliberately contains no
+`plan_digest`, avoiding a digest cycle. `plan.json`, `control-basis.json`, and
+`policy-bundle.json` are one immutable stored cutover-plan object: missing,
+partial, changed, non-canonical, digest-mismatched, or legacy unbound state is a
+closed refusal rather than authority reconstructed from caller fields.
+
+At apply and every recovery continuation, the server loads those exact stored
+bundle bytes, cross-checks their digest, destination binding, policy documents,
+prospective policy fingerprint, principal-attestation-set digest, and plan
+nonce against the stored plan, then reruns prospective compilation and fresh
+destination-principal/session attestation validation. This check completes
+before any governance policy mutation. A caller-supplied bundle, digest-only
+claim, or freshly reconstructed approximation cannot authorize publication.
 
 Every consolidation source-export claim, cutover, rollback, rendering,
 retirement, event, and fingerprint object uses one canonical encoding: RFC 8785 JSON Canonicalization
@@ -1018,16 +1040,17 @@ The exact order is:
    token-reservation event as the apply journal's
    separate current predecessor, acquire exclusive writer/lifecycle authority,
    revalidate that predecessor, then seal and drain the destination. Revalidate
-   the source artifact, both snapshots, principal attestations, conflict
-   decisions, and complete plan preimage without comparing the current global
-   receipt head/full mutable run control tree to their materialization-time
-   values.
+   the source artifact, both snapshots, the exact stored destination-policy
+   bundle and its fresh principal attestations, conflict decisions, and complete
+   plan preimage without comparing the current global receipt head/full mutable
+   run control tree to their materialization-time values. Missing, changed, or
+   unbound policy-bundle bytes refuse before governance mutation.
 2. Materialize a full content-addressed destination preimage in private artifact
    storage. Verify every entry and bind its manifest digest to the approved
    destination census before continuing.
-3. Activate the approved restrictive destination policy through the existing
-   governance journal/marker/critical-receipt protocol. The seal remains the
-   outer floor.
+3. Activate only the exact stored and revalidated restrictive destination-policy
+   bundle through the existing governance journal/marker/critical-receipt
+   protocol. The seal remains the outer floor.
 4. Publish exact content actions in bounded deterministic batches through
    `batch_atomic_write`. Each batch has prior/prepared/final fingerprints,
    receipt-first intent, a durable run-journal transition, and idempotent exact

@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem.governance import consolidation_plan, consolidation_review
+from exomem.governance import consolidation_plan, consolidation_policy, consolidation_review
 
 RUN_ID = "00000000-0000-4000-8000-000000000001"
 OPERATION_ID = "00000000-0000-4000-8000-000000000002"
@@ -40,11 +40,15 @@ def _policy_document() -> dict[str, object]:
     }
 
 
-def _plan_input() -> dict[str, object]:
+def _plan_input(
+    policy_bundle: consolidation_policy.DestinationPolicyPlan | None = None,
+    *,
+    plan_kind: str = "cutover",
+) -> dict[str, object]:
     value = {
         "schema": "exomem.consolidation-plan/v1",
         "protocol_version": 1,
-        "plan_kind": "cutover",
+        "plan_kind": plan_kind,
         "run_id": RUN_ID,
         "run_mode": "cloned-rehearsal",
         "source_snapshot_fingerprint": _digest("source-snapshot"),
@@ -72,6 +76,7 @@ def _plan_input() -> dict[str, object]:
         ],
         "journal_batch_partition_digest": _digest("batch-partition"),
         "policy_documents": [_policy_document()],
+        "policy_bundle_digest": _digest("policy-bundle"),
         "prospective_policy_fingerprint": _digest("prospective-policy"),
         "bridge_fingerprints": [_digest("bridge")],
         "exact_release_approval_fingerprints": [_digest("release")],
@@ -119,6 +124,11 @@ def _plan_input() -> dict[str, object]:
         "valid_until": VALID_UNTIL,
         "nonce": NONCE,
     }
+    if policy_bundle is not None:
+        value["policy_bundle_digest"] = policy_bundle.digest
+        value["prospective_policy_fingerprint"] = policy_bundle.prospective.policy.fingerprint
+        value["principal_attestation_set_digest"] = policy_bundle.principal_attestation_set_digest
+        value["nonce"] = policy_bundle.nonce
     value["rendering_definition"] = consolidation_plan.derive_rendering_definition(value)
     return value
 
@@ -135,9 +145,14 @@ def _materialization(
     )
 
 
-def _plan(*, basis_run_revision: int = 7) -> consolidation_plan.CanonicalConsolidationPlan:
+def _plan(
+    *,
+    basis_run_revision: int = 7,
+    policy_bundle: consolidation_policy.DestinationPolicyPlan | None = None,
+    plan_kind: str = "cutover",
+) -> consolidation_plan.CanonicalConsolidationPlan:
     return consolidation_plan.materialize_plan(
-        _plan_input(),
+        _plan_input(policy_bundle, plan_kind=plan_kind),
         materialization=_materialization(basis_run_revision=basis_run_revision),
     )
 
@@ -160,6 +175,7 @@ EXPECTED_TOP_LEVEL_FIELDS = {
     "content_actions",
     "journal_batch_partition_digest",
     "policy_documents",
+    "policy_bundle_digest",
     "prospective_policy_fingerprint",
     "bridge_fingerprints",
     "exact_release_approval_fingerprints",
@@ -198,26 +214,26 @@ def test_plan_has_one_closed_cross_runtime_canonical_vector() -> None:
 
     assert set(plan.preimage) == EXPECTED_TOP_LEVEL_FIELDS
     assert set(plan.control_basis.preimage) == EXPECTED_CONTROL_BASIS_FIELDS
-    assert plan.digest == "8a999da89e1ffea6fc39a5be071f11b697733674f98b383a2786a25bc52819e8"
+    assert plan.digest == "b6ae9ea26b3cd08ba4a96bee788bb7d9b73645aebe605db0d3d516a8d7d2602f"
     assert plan.plan_input_set_digest == (
-        "1c2498af2ee36226a2d8a2f492a4a701c26ec18a8b5d7ac0f2f8d5de19689b76"
+        "6b4a6d9c7dd1e7517accc478d7da79e7783157b8b002bdeadc09af174d53a201"
     )
     assert plan.control_basis.digest == (
-        "9d34ae072e4bb0a1210ed7b5ce64d112978d2f295af84bf38c2852a7c39aadb5"
+        "d26eaaeecbb6f8162cc72d8a483330c72144be8ca8ab5f8381e01f6bcd3c2726"
     )
     assert plan.impact_summary_digest == (
         "e6ec13c6d5a662678910a04d60d67cc095480b907cb8f30751399977ac6ec46f"
     )
     assert plan.rendering_definition_digest == (
-        "f156fef8cac9c177c52b17038bb16be32ee3e3cac680cf9d115c6f8c25dd6d57"
+        "aa0c600a14463a3a773ace9fa492cb067daa46ff091e75ea4f676ab435bee7eb"
     )
-    assert len(plan.canonical_bytes) == 5178
+    assert len(plan.canonical_bytes) == 5268
     assert hashlib.sha256(plan.canonical_bytes).hexdigest() == (
-        "863fbd64bc8ede83bea2cbc6a090bd5d448e177c6487ee5a20a553bb54305443"
+        "6f685f0f0436fdbbc995ff6476c2b7e33b2af91734771e705682d4ca38683529"
     )
-    assert len(plan.framed_bytes) == 5218
+    assert len(plan.framed_bytes) == 5308
     assert plan.framed_bytes[:40].hex() == (
-        "0000001c65786f6d656d2e636f6e736f6c69646174696f6e2d706c616e2f7631000000000000143a"
+        "0000001c65786f6d656d2e636f6e736f6c69646174696f6e2d706c616e2f76310000000000001494"
     )
     assert b"plan_digest" not in plan.canonical_bytes
     assert b"control_basis_digest" in plan.canonical_bytes
@@ -440,6 +456,7 @@ def _mutate_rendering(value: dict[str, object]) -> None:
         _mutate_action,
         _replace_digest("journal_batch_partition_digest"),
         _mutate_policy,
+        _replace_digest("policy_bundle_digest"),
         _replace_digest("prospective_policy_fingerprint"),
         lambda value: value["bridge_fingerprints"].append(_digest("bridge-2")),
         lambda value: value["exact_release_approval_fingerprints"].append(_digest("release-2")),
@@ -510,7 +527,7 @@ def test_rendering_definition_is_derived_from_the_exact_plan_rows() -> None:
         plan.preimage["rendering_definition"]
     ) == consolidation_plan.canonical_closed_jcs(definition)
     assert consolidation_plan.render_plan_page(plan, page_ordinal=0).digest == (
-        "2b001af5360c42fcbf94f1d6003d77c32961aea966be4e9815ec820f020a857a"
+        "8bf88aeab633924885b5a995f3d131f5cf15c3af80f6c03d9168a94f475b65cf"
     )
 
     injected = copy.deepcopy(draft)
@@ -600,6 +617,25 @@ def _create_run(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     consolidation_run_state.ConsolidationRunStore(vault).create(identity, (item,))
 
 
+def _policy_bundle(
+    vault: Path,
+    *,
+    name: str = 'Résumé "review"',
+) -> consolidation_policy.DestinationPolicyPlan:
+    document = _policy_document()
+    content = str(document["content"]).replace('Résumé "review"', name)
+    return consolidation_policy.compile_destination_policy(
+        vault,
+        documents={str(document["path"]): content},
+        source_authority=(),
+        attestations=(),
+        principal_contexts=(),
+        destination_vault_id="vault-destination-01",
+        expected_nonce=NONCE,
+        verified_at=CREATED_AT,
+    )
+
+
 def test_owner_only_plan_store_reloads_exact_bytes_and_replays_idempotently(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -608,12 +644,35 @@ def test_owner_only_plan_store_reloads_exact_bytes_and_replays_idempotently(
 
     vault = tmp_path / "vault"
     _create_run(vault, monkeypatch)
-    plan = _plan(basis_run_revision=1)
+    policy_bundle = _policy_bundle(vault)
+    plan = _plan(basis_run_revision=1, policy_bundle=policy_bundle)
     store = consolidation_plan_store.ConsolidationPlanStore(vault)
 
-    first = store.persist(plan, expected_run_revision=1)
-    assert store.persist(plan, expected_run_revision=1) == first
+    with pytest.raises(consolidation_plan_store.ConsolidationPlanStoreUnavailable):
+        store.persist(
+            plan,
+            policy_bundle=_policy_bundle(vault, name="Changed review"),
+            expected_run_revision=1,
+        )
+
+    first = store.persist(
+        plan,
+        policy_bundle=policy_bundle,
+        expected_run_revision=1,
+    )
+    assert (
+        store.persist(
+            plan,
+            policy_bundle=policy_bundle,
+            expected_run_revision=1,
+        )
+        == first
+    )
     assert store.load(RUN_ID, plan_kind="cutover", plan_digest=plan.digest) == plan
+    assert (
+        store.load_policy_bundle(RUN_ID, plan_kind="cutover", plan_digest=plan.digest)
+        == policy_bundle
+    )
     plan_dir = (
         vault
         / "Knowledge Base"
@@ -627,6 +686,7 @@ def test_owner_only_plan_store_reloads_exact_bytes_and_replays_idempotently(
     assert sorted(path.name for path in plan_dir.iterdir()) == [
         "control-basis.json",
         "plan.json",
+        "policy-bundle.json",
     ]
     if os.name != "nt":
         assert plan_dir.stat().st_mode & 0o777 == 0o700
@@ -634,6 +694,10 @@ def test_owner_only_plan_store_reloads_exact_bytes_and_replays_idempotently(
 
     restarted = consolidation_plan_store.ConsolidationPlanStore(vault)
     assert restarted.load(RUN_ID, plan_kind="cutover", plan_digest=plan.digest) == plan
+    assert (
+        restarted.load_policy_bundle(RUN_ID, plan_kind="cutover", plan_digest=plan.digest)
+        == policy_bundle
+    )
 
 
 def test_plan_store_refuses_wrong_run_revision_or_partial_state(
@@ -644,12 +708,23 @@ def test_plan_store_refuses_wrong_run_revision_or_partial_state(
 
     vault = tmp_path / "vault"
     _create_run(vault, monkeypatch)
-    plan = _plan(basis_run_revision=1)
+    policy_bundle = _policy_bundle(vault)
+    plan = _plan(basis_run_revision=1, policy_bundle=policy_bundle)
     store = consolidation_plan_store.ConsolidationPlanStore(vault)
 
     with pytest.raises(consolidation_plan_store.ConsolidationPlanStoreUnavailable):
-        store.persist(plan, expected_run_revision=2)
-    store.persist(plan, expected_run_revision=1)
+        store.persist(
+            plan,
+            policy_bundle=policy_bundle,
+            expected_run_revision=2,
+        )
+    with pytest.raises(consolidation_plan_store.ConsolidationPlanStoreUnavailable):
+        store.persist(plan, expected_run_revision=1)
+    store.persist(
+        plan,
+        policy_bundle=policy_bundle,
+        expected_run_revision=1,
+    )
     control_path = (
         vault
         / "Knowledge Base"
@@ -674,7 +749,8 @@ def test_plan_store_recovers_control_first_crash_without_changing_plan(
 
     vault = tmp_path / "vault"
     _create_run(vault, monkeypatch)
-    plan = _plan(basis_run_revision=1)
+    policy_bundle = _policy_bundle(vault)
+    plan = _plan(basis_run_revision=1, policy_bundle=policy_bundle)
     store = consolidation_plan_store.ConsolidationPlanStore(vault)
     original_publish = store._publish_missing
 
@@ -685,11 +761,104 @@ def test_plan_store_recovers_control_first_crash_without_changing_plan(
 
     monkeypatch.setattr(store, "_publish_missing", crash_before_plan)
     with pytest.raises(consolidation_plan_store.ConsolidationPlanStoreUnavailable):
-        store.persist(plan, expected_run_revision=1)
+        store.persist(
+            plan,
+            policy_bundle=policy_bundle,
+            expected_run_revision=1,
+        )
 
     monkeypatch.setattr(store, "_publish_missing", original_publish)
-    assert store.persist(plan, expected_run_revision=1) == plan
+    assert (
+        store.persist(
+            plan,
+            policy_bundle=policy_bundle,
+            expected_run_revision=1,
+        )
+        == plan
+    )
     assert store.load(RUN_ID, plan_kind="cutover", plan_digest=plan.digest) == plan
+
+
+@pytest.mark.parametrize("replacement", [None, b"{}"])
+def test_plan_store_refuses_missing_or_changed_policy_bundle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replacement: bytes | None,
+) -> None:
+    from exomem.governance import consolidation_plan_store
+
+    vault = tmp_path / "vault"
+    _create_run(vault, monkeypatch)
+    policy_bundle = _policy_bundle(vault)
+    plan = _plan(basis_run_revision=1, policy_bundle=policy_bundle)
+    store = consolidation_plan_store.ConsolidationPlanStore(vault)
+    store.persist(
+        plan,
+        policy_bundle=policy_bundle,
+        expected_run_revision=1,
+    )
+    path = (
+        vault
+        / "Knowledge Base"
+        / "_Consolidation"
+        / "runs"
+        / RUN_ID
+        / "plans"
+        / "cutover"
+        / plan.digest
+        / "policy-bundle.json"
+    )
+    if replacement is None:
+        path.unlink()
+    else:
+        path.write_bytes(replacement)
+
+    with pytest.raises(consolidation_plan_store.ConsolidationPlanStoreUnavailable):
+        store.load(RUN_ID, plan_kind="cutover", plan_digest=plan.digest)
+
+
+def test_plan_store_binds_only_executable_policy_documents(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance import consolidation_plan_store
+
+    vault = tmp_path / "vault"
+    _create_run(vault, monkeypatch)
+    governance = vault / "Knowledge Base" / "_Governance"
+    governance.mkdir(parents=True)
+    (governance / "README.md").write_text("Authoring guidance only.\n", encoding="utf-8")
+    policy_bundle = _policy_bundle(vault)
+    plan = _plan(basis_run_revision=1, policy_bundle=policy_bundle)
+    store = consolidation_plan_store.ConsolidationPlanStore(vault)
+
+    assert (
+        store.persist(
+            plan,
+            policy_bundle=policy_bundle,
+            expected_run_revision=1,
+        )
+        == plan
+    )
+    assert store.load(RUN_ID, plan_kind="cutover", plan_digest=plan.digest) == plan
+
+
+@pytest.mark.parametrize("plan_kind", ["rollback", "retirement"])
+def test_non_cutover_plan_store_replay_does_not_require_policy_bundle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    plan_kind: str,
+) -> None:
+    from exomem.governance import consolidation_plan_store
+
+    vault = tmp_path / "vault"
+    _create_run(vault, monkeypatch)
+    plan = _plan(basis_run_revision=1, plan_kind=plan_kind)
+    store = consolidation_plan_store.ConsolidationPlanStore(vault)
+
+    assert store.persist(plan, expected_run_revision=1) == plan
+    assert store.persist(plan, expected_run_revision=1) == plan
+    assert store.load(RUN_ID, plan_kind=plan_kind, plan_digest=plan.digest) == plan
 
 
 def _trusted_renderer() -> consolidation_review.TrustedRenderIdentity:
@@ -735,7 +904,7 @@ def test_render_session_is_bound_to_stored_plan_and_trusted_surface() -> None:
         "nonce",
     }
     assert review.session.digest == (
-        "355cb885118f2794eedb193ca260b8a8811753cfefec77a53b2e3b9ff9bfe768"
+        "d5b0891f67fe6db97c60f5fc0cbc650aa281a0c921abac2574e14b7226cb103c"
     )
     assert review.state.preimage["next_page_ordinal"] == 0
     assert b"governance_version" not in review.state.canonical_bytes
@@ -966,9 +1135,11 @@ def _stored_review(
 
     vault = tmp_path / "vault"
     _create_run(vault, monkeypatch)
-    plan = _plan(basis_run_revision=1)
+    policy_bundle = _policy_bundle(vault)
+    plan = _plan(basis_run_revision=1, policy_bundle=policy_bundle)
     consolidation_plan_store.ConsolidationPlanStore(vault).persist(
         plan,
+        policy_bundle=policy_bundle,
         expected_run_revision=1,
     )
     review = consolidation_review.begin_review(
@@ -1286,7 +1457,7 @@ def test_approval_token_binds_exact_plan_completeness_and_confirmation() -> None
         "expires_at": "2026-08-28T12:30:00.000Z",
         "signing_key_id": "approval-key-01",
     }
-    assert token.digest == "49fe7fa8efb483f4eaee44a24bbad09ed8139dac1ee17da3ba9edca00393d522"
+    assert token.digest == "acf440d4b21fbe930d2e782d6c1b9b305a2ce36a4fb176278a402848eae668a0"
     assert (
         consolidation_approval.verify_approval(
             token.wire,

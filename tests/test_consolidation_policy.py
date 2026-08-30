@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -136,6 +137,38 @@ def test_destination_principal_attestation_has_one_fixed_vector() -> None:
     )
     assert verified.attestation == attestation
     assert verified.verified_at == VERIFIED_AT
+
+
+def test_destination_policy_bundle_is_one_exact_canonical_round_trip(tmp_path: Path) -> None:
+    plan = consolidation_policy.compile_destination_policy(
+        _vault(tmp_path),
+        documents=_documents(),
+        source_authority=(_review(),),
+        attestations=(_attestation(),),
+        principal_contexts=(_principal(),),
+        destination_vault_id=DESTINATION_VAULT_ID,
+        expected_nonce=NONCE,
+        verified_at=VERIFIED_AT,
+    )
+
+    raw = consolidation_policy.canonical_destination_policy_bundle(plan)
+    parsed = json.loads(raw)
+
+    assert parsed["schema"] == "exomem.consolidation-destination-policy/v1"
+    assert parsed["nonce"] == NONCE
+    assert "digest" not in parsed
+    assert "plan_digest" not in parsed
+    assert len(raw) == 3330
+    assert hashlib.sha256(raw).hexdigest() == (
+        "1e6c6476b332f65fed44c2a1088518b14debcd713dcb9961b7de25e3b90d7b7e"
+    )
+    assert plan.digest == "3194d49690ff9e7c924077323f99f766641a157afee28850bda65cc1cd72cde6"
+    assert consolidation_policy.parse_destination_policy_bundle(raw) == plan
+    assert consolidation_policy.destination_policy_bundle_digest(plan) == plan.digest
+
+    changed = raw.replace(b'"destination-vault"', b'"destination-other"')
+    with pytest.raises(consolidation_policy.DestinationPolicyUnavailable):
+        consolidation_policy.parse_destination_policy_bundle(changed)
 
 
 @pytest.mark.parametrize(

@@ -305,6 +305,14 @@
   to equal the plan-time values.
 - [ ] 5.5 Implement canonical plan assembly over immutable run objects, persisting the
   complete preimage owner-only and returning bounded pages plus stable digests/counts.
+  For cutover, canonicalize and co-persist the exact reviewed
+  `exomem.consolidation-destination-policy/v1` as immutable
+  `policy-bundle.json`, bind its outside digest as `policy_bundle_digest` in the
+  plan/input basis, and make missing/partial/non-canonical/tampered/legacy-unbound
+  bundle state a closed refusal. Apply/recovery must load those exact bytes,
+  cross-bind destination/nonce/documents/policy/attestations to the stored plan,
+  and rerun prospective compile plus fresh principal-session validation before
+  governance mutation.
   Materialize `control_basis_digest` and the closed successor-automaton digest,
   persist every declared event predecessor, and bind the current executor
   predecessor separately at token reservation/apply without hashing mutable
@@ -562,6 +570,8 @@ binds that reference and observed digest; no caller field selects K.
 - [ ] 7.6 Implement the saga coordinator over the existing governance transaction,
   receipt-first critical-event, writer boundary, and bounded
   `batch_atomic_write` primitives. Persist phase/action fingerprints before effects,
+  activate only the exact stored and freshly revalidated destination-policy
+  bundle bound by the approved cutover plan,
   reserve the approval JTI/operation once, keep the typed consolidation seal
   throughout ordinary publication, use only the phase-bound routing-stopped
   suspension for exact-cell transport verification, and treat the first committed

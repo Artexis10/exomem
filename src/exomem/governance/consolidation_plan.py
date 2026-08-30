@@ -92,6 +92,7 @@ _BASE_FIELDS = frozenset(
         "content_actions",
         "journal_batch_partition_digest",
         "policy_documents",
+        "policy_bundle_digest",
         "prospective_policy_fingerprint",
         "bridge_fingerprints",
         "exact_release_approval_fingerprints",
@@ -680,6 +681,7 @@ def _render_section_rows(
     )
     policy_fingerprints: Mapping[str, object] = {
         "row_kind": "policy-fingerprints",
+        "policy_bundle_digest": value["policy_bundle_digest"],
         "prospective_policy_fingerprint": value["prospective_policy_fingerprint"],
         "bridge_fingerprints": tuple(_sequence(value["bridge_fingerprints"], maximum=4096)),
         "exact_release_approval_fingerprints": tuple(
@@ -768,6 +770,7 @@ def derive_rendering_definition(
     _validate_verification(source["verification_plan"])
     _validate_rollback(source["rollback_contingency"])
     _validate_retention(source["source_retention"])
+    _digest(source["policy_bundle_digest"])
     _digest(source["prospective_policy_fingerprint"])
     source["content_actions"] = actions
     source["policy_documents"] = documents
@@ -831,6 +834,7 @@ def _validate_base(value: Mapping[str, object]) -> dict[str, object]:
         "path_map_digest",
         "dependency_map_digest",
         "journal_batch_partition_digest",
+        "policy_bundle_digest",
         "prospective_policy_fingerprint",
         "principal_attestation_set_digest",
         "disclosure_matrix_digest",
@@ -1208,13 +1212,16 @@ def parse_journal_batch_partition(raw: bytes) -> CanonicalObject:
             "final_fingerprint",
         ):
             _digest(batch[field])
-        if len(
-            {
-                batch["prior_fingerprint"],
-                batch["prepared_fingerprint"],
-                batch["final_fingerprint"],
-            }
-        ) != 3:
+        if (
+            len(
+                {
+                    batch["prior_fingerprint"],
+                    batch["prepared_fingerprint"],
+                    batch["final_fingerprint"],
+                }
+            )
+            != 3
+        ):
             _fail()
         seen_actions += count
     if seen_actions != action_count:

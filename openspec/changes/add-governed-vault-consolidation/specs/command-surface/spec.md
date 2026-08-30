@@ -519,6 +519,12 @@ missing, inapplicable, or additional fields SHALL be refused:
 | `rollback_options` | `target_kind={pre-cutover,post-cutover-forward}`, `target_snapshot_ref`, `target_snapshot_digest`, `expected_current_census_digest`, `treatment_set_ref`, `treatment_set_digest`, `surviving_copy_ledger_digest`, `expected_retirement_state_digest` | none |
 | `retirement_options` | `archive_disposition={retain,transfer,external-destruction}`, `archive_artifact_ref`, `archive_artifact_digest`, `archive_terms_digest`, `post_retirement_rollback_mode={pre-cutover-reversible,forward-only}`, `source_retention_proof_ref`, `source_retention_proof_digest`, `surviving_copy_ledger_digest`, `retained_irrecoverable_statement_digest` | transfer requires `custodian_receipt_ref`,`custodian_receipt_digest`; forward-only requires `forward_snapshot_ref`,`forward_snapshot_digest` |
 
+For cutover, `expected_policy_bundle_digest` SHALL resolve to the exact
+owner-only canonical `policy-bundle.json` co-persisted with the immutable plan.
+The stored plan SHALL bind that digest and apply SHALL cross-check the bundle's
+destination, nonce, policy documents/fingerprint, and principal-attestation set;
+a caller-supplied digest without those exact stored bytes is not authority.
+
 Every digest/ref uses the common bounds above. For external destruction,
 source-retention proof describes the current copy only and SHALL not satisfy the
 post-effect ledger; for forward-only, the forward snapshot must. Inapplicable
