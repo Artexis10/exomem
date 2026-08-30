@@ -131,7 +131,8 @@ and one nested closed schema named
 `exomem.consolidation-event/<kind>/v1`. Every nested role SHALL require exactly
 `schema`, `kind`, `run_id`, `operation_id`, `phase`, `record_role`,
 `effect_ordinal`, `request_digest`, `prior_digest`, `target_digest`,
-`semantic_parent_event_id`, `semantic_parent_payload_digest`, and
+closed digest-only `evidence`, `evidence_digest`, `semantic_parent_event_id`,
+`semantic_parent_payload_digest`, and
 `payload_digest`; it SHALL require exactly the applicable one of
 `batch_ordinal`, `rebuild_ordinal`, `probe_ordinal`, or `page_ordinal`, require
 `prepared_digest` only for a kind with a distinct prepared state, and forbid
@@ -141,6 +142,21 @@ ordinal SHALL be an integer in `0..2^31-1`. An `intent` SHALL forbid
 lowercase hex and all ids SHALL follow the outer-id grammar below. Nested
 `record_role` SHALL equal outer `phase`; every consolidation record SHALL set
 outer `durable=true`, and any mismatch SHALL fail validation/recovery.
+
+`evidence` and `evidence_digest` SHALL be required for every kind. `evidence`
+SHALL be one exact closed object with schema
+`exomem.consolidation-event-evidence/<kind>/v1`, matching `kind`, and only the
+named 64-lowercase-hex digest fields applicable to that event's disposition,
+checkpoint, JTI, rendering/coverage, impact summary, verification basis,
+forward snapshot, surviving-copy ledger, or permanent fence. It SHALL contain
+no plaintext, path, ref, principal, credential, token, timestamp, count, enum,
+or caller extension. `evidence_digest` SHALL equal SHA-256 over
+the common length-framing contract with ASCII domain
+`exomem.consolidation-event-evidence/<kind>/v1` and those exact evidence bytes.
+The nested payload therefore exposes only field names and digests while the
+underlying proof bodies remain owner-protected. An unknown, missing,
+mismatched, or unvalidated kind-specific evidence object blocks intent
+construction, append, verification, and recovery.
 
 Exactly when an intent's committed target would create a successor context,
 that intent and its matching committed or aborted terminal SHALL additionally
@@ -160,7 +176,7 @@ nested object excluding `payload_digest`. The deterministic outer intent
 `exomem.consolidation-event-id/<kind>/v1` over the closed intent identity:
 `schema`, `kind`, `run_id`, `operation_id`, `phase`, `record_role=intent`, all
 applicable ordinals, `request_digest`, `prior_digest`, optional
-`prepared_digest`, `target_digest`, `semantic_parent_event_id`, and
+`prepared_digest`, `target_digest`, `evidence_digest`, `semantic_parent_event_id`, and
 `semantic_parent_payload_digest`. The physical receipt `prev`, outer sequence,
 timestamp, record hash, and nested `payload_digest` SHALL NOT enter this
 identity. The terminal outer id SHALL be exactly
