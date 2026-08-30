@@ -145,21 +145,99 @@ the task is ticked, not estimated.
 
 ## 3. Adaptation (design D4)
 
-- [ ] 3.1 Quiet-offer derivation from durable manual-origin dismissal records
+- [x] 3.1 Quiet-offer derivation from durable manual-origin dismissal records
   (event count, monotonic, automatic origin excluded): third event arms exactly
   one offer; `quiet_offered_at` recorded; cleared only by explicit family reset
   to `normal`; a decline without reset never re-offers. Red-first through the
   review-state store, incl. a records-not-live-index pin (deleting the
   dismissed items does not disarm the offer) and a no-usage-signals structural
   pin (the derivation reads review-state records only).
-- [ ] 3.2 The offer changes nothing by itself: disposition unchanged until an
+
+  Evidence (red) — `pytest tests/test_delegation_envelope_adaptation.py -q`,
+  before any of section 3 was implemented:
+
+  ```
+  FAILED …::test_the_third_manual_dismissal_arms_exactly_one_offer
+  FAILED …::test_an_automatic_origin_decision_never_counts
+  FAILED …::test_the_count_is_taken_from_the_records_not_the_live_index
+  FAILED …::test_the_offer_is_recorded_durably_against_the_family
+  FAILED …::test_a_decline_without_a_reset_never_re_offers
+  FAILED …::test_quieting_the_family_keeps_the_offer_marker
+  FAILED …::test_an_explicit_reset_clears_the_slate_and_one_new_offer_may_appear
+  FAILED …::test_the_derivation_reads_review_state_records_and_nothing_else
+  FAILED …::test_the_offer_changes_nothing_by_itself
+  FAILED …::test_the_schema_version_moved_once
+  FAILED …::test_a_previous_schema_store_is_migrated_on_load_and_rewritten_on_write
+  FAILED …::test_a_dismissal_record_carries_the_family_that_produced_the_signal
+  FAILED …::test_the_family_slate_holds_an_offer_while_the_disposition_is_normal
+  13 failed, 3 passed in 3.29s
+  ```
+
+  Evidence (green) — same command: `16 passed in 3.88s`.
+
+  Two design points the tests forced and that are worth reading before changing
+  anything here. **Events are counted by `item_id`, not by record**: one triage
+  decision fans out across every component signal a fused item holds, so
+  counting records charged one family three events for one dismissal. **An offer
+  needs a surfacing to ride on**: a family with nothing left to show has none,
+  which is why the fixture keeps a sixth item permanently open — otherwise "no
+  second offer" would mean "there was nothing to offer".
+- [x] 3.2 The offer changes nothing by itself: disposition unchanged until an
   explicit decision lands. Red-first.
-- [ ] 3.3 Review-state schema migration: dismissal records gain family
+
+  Evidence (red) — `test_the_offer_changes_nothing_by_itself` in the 13-failure
+  run above. Evidence (green) — in the `16 passed` run. With the offer standing,
+  the family's disposition is still `normal`, the same items are still open, the
+  family is still on the daily surface, and every envelope class disposition is
+  byte-identical (`envelope.resolved()` compared before and after).
+  `test_repeated_surfacing_without_triage_adapts_nothing` pins the other half:
+  six surfacings with no triage arm nothing and leave no slate.
+- [x] 3.3 Review-state schema migration: dismissal records gain family
   attribution and the family slate gains a durable `quiet_offered_at` slot
   that survives a `normal` disposition; one version bump, previous-schema
   files migrated on load and rewritten on next write, newer schema refused by
   an older runtime with a named error. Red-first on all three behaviours over
   fixture files at both versions.
+
+  Evidence (red) — `test_the_schema_version_moved_once`,
+  `test_a_previous_schema_store_is_migrated_on_load_and_rewritten_on_write`,
+  `test_a_dismissal_record_carries_the_family_that_produced_the_signal` and
+  `test_the_family_slate_holds_an_offer_while_the_disposition_is_normal` in the
+  13-failure run above. Green in the `16 passed` run.
+
+  One bump: `SCHEMA_VERSION` 2 -> 3, `_READABLE_SCHEMA_VERSIONS` `{1,2}` ->
+  `{1,2,3}`. A v2 file migrates in memory on load (its records simply carry no
+  `family`, and an unattributed record counts for nothing — the store cannot
+  invent an attribution it never had) and is rewritten as v3 on the next write;
+  a v4 file is refused with `REVIEW_STATE_INVALID: unsupported review state
+  schema`, which is exactly how a v2 runtime now refuses a v3 file.
+
+  Two existing pins restated the old version as a literal and were repaired to
+  DERIVE it from `review_state.SCHEMA_VERSION`, per this repository's own rule
+  that a pin reads its expected value from the canonical source:
+  `tests/test_review_state_scaling.py::test_the_store_has_no_schema_retention_or_compaction_today`
+  and `::test_a_previous_schema_store_keeps_its_decisions`. Both green
+  (`18 passed in 5.00s`); neither assertion was weakened.
+
+  Known boundary, stated rather than discovered later: family attribution is
+  written where the caller can NAME the family — the review-item path
+  (`apply_for_item`), which covers every registered attention family. Triage of
+  a write-advisory ref (`near-duplicate`, `contradiction-band`, `overlap`) does
+  not carry its kind through the ref, so those records stay unattributed and
+  their families never arm an offer. Attributing them needs the kind on the
+  advisory identity, which is a change to that surface rather than to this one.
+
+  Regression scope run after the migration:
+  `pytest tests/test_attention.py tests/test_review_state.py
+  tests/test_review_dispositions.py tests/test_review_reason_and_origin.py
+  tests/test_review_state_scaling.py tests/test_review_context.py
+  tests/test_first_surfaced_ledger.py tests/test_corpus_aware.py
+  tests/test_relation_queue.py tests/test_epistemic_review_queues.py -q`
+  -> `234 passed, 4 skipped` (skips are `sentence_transformers`, absent by
+  design in this environment), plus
+  `tests/test_due_state_*.py tests/test_relation_queue_commands.py
+  tests/test_adoption_proposals.py tests/test_epistemic_bootstrap_contract.py`
+  -> `197 passed`.
 
 ## 4. The dispositions view and the agent contract (design D5; command-surface delta)
 

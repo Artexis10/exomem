@@ -16,12 +16,20 @@ from .kbdir import kb_dirname
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 2
-#: Schemas this runtime can READ. A v1 file is migrated in memory on load and
-#: rewritten as v2 on the next write; anything newer is refused, which is the
-#: correct fail-closed posture for a vault-local file whose writers upgrade
-#: together (see the `add-nag-governance-and-metrics-capture` design, D7).
-_READABLE_SCHEMA_VERSIONS = frozenset({1, 2})
+SCHEMA_VERSION = 3
+#: Schemas this runtime can READ. An older file is migrated in memory on load
+#: and rewritten at the current version on the next write; anything newer is
+#: refused, which is the correct fail-closed posture for a vault-local file
+#: whose writers upgrade together (see the `add-nag-governance-and-metrics-capture`
+#: design, D7).
+#:
+#: v3 adds two things the envelope's adaptation needs and v2 had nowhere to put:
+#: `family` on a decision record, and a family SLATE that exists even while the
+#: family's disposition is `normal` — because `normal` is the absence of a
+#: disposition record, so there was previously no durable place to record that a
+#: quiet offer had already been made. A v2 file migrates forward silently; a v2
+#: RUNTIME refuses a v3 file, which is the point of the bump.
+_READABLE_SCHEMA_VERSIONS = frozenset({1, 2, 3})
 STATE_FILENAME = ".review-state.json"
 #: Raised from 4 MiB with the sectioned schema, and MEASURED rather than picked.
 #:
@@ -94,6 +102,12 @@ REASON_CODES: tuple[str, ...] = (
     "unspecified",
 )
 DEFAULT_REASON = "unspecified"
+#: Manual dismissal EVENTS in one family that arm exactly one offer to quiet it.
+#: An event is one triage decision on one item, counted by `item_id` rather than
+#: by record: a fused item fans a decision out across every component signal it
+#: holds, so counting records would charge one family two or three events for a
+#: single thing the user put down once.
+QUIET_OFFER_DISMISSALS = 3
 #: Who wrote a record: a person through the explicit triage surface, or the
 #: runtime itself. The manual-maintenance metric is the count of `manual`
 #: records in a window, so this has to be on every record rather than inferred.
@@ -476,20 +490,54 @@ def apply_for_item(
     store = ReviewStateStore(vault_root)
     review_id = str(review_id or getattr(item, "item_id", None) or "")
     fused = str(getattr(item, "fingerprint", None) or "")
-    result = store.apply(review_id, fused, action=action, until=until, why=why, now=now)
     if str(action or "").strip().lower() == "reopen":
-        return result
-    components = list(component_fingerprints(vault_root, item))
+        # No fan-out and no attribution to compute: `apply` clears every record
+        # under the item id, component records included.
+        return store.apply(review_id, fused, action=action, until=until, why=why, now=now)
+
+    pairs = list(component_fingerprints(vault_root, item, with_category=True))
     # Signals that share this identity but are not folded into the fused item,
     # because they come from registered-but-opt-in queues the default surface
     # does not show. `attention.item_by_ref` attaches them; without this, a ref
     # published by a due-state count could be "dismissed" while the count that
     # published it carried on, or while a different signal was put down instead.
-    components.extend(getattr(item, "triage_components", None) or [])
-    for component in dict.fromkeys(components):
+    pairs.extend(getattr(item, "triage_components", None) or [])
+    family_by_fingerprint: dict[str, str] = {}
+    for category, value in pairs:
+        if value not in family_by_fingerprint and category:
+            family_by_fingerprint[value] = str(category)
+
+    # The fused record is attributed only when it IS a component -- which is the
+    # single-family case, where the two identities coincide. A fused item flagged
+    # by two families is deliberately left unattributed: charging it to either
+    # one would invent an event in a family the user did not decide about, and
+    # each family already gets its own component record.
+    fused_family = family_by_fingerprint.get(fused)
+    if fused_family is None:
+        categories = list(getattr(item, "categories", None) or [])
+        if len(categories) == 1:
+            fused_family = str(categories[0])
+    result = store.apply(
+        review_id,
+        fused,
+        action=action,
+        until=until,
+        why=why,
+        now=now,
+        family=fused_family,
+    )
+    for component in dict.fromkeys(value for _category, value in pairs):
         if component == fused:
             continue
-        store.apply(review_id, component, action=action, until=until, why=why, now=now)
+        store.apply(
+            review_id,
+            component,
+            action=action,
+            until=until,
+            why=why,
+            now=now,
+            family=family_by_fingerprint.get(component),
+        )
     return result
 
 
@@ -587,6 +635,7 @@ class ReviewStateStore:
         why: str | None = None,
         now: dt.datetime | None = None,
         origin: str = MANUAL,
+        family: str | None = None,
     ) -> dict[str, Any]:
         action = str(action or "").strip().lower()
         if action not in VALID_ACTIONS:
@@ -625,6 +674,15 @@ class ReviewStateStore:
                     "origin": origin if origin in ORIGINS else MANUAL,
                     "updated_at": timestamp,
                 }
+                # Only when the caller can actually name it. The store keys on
+                # `review_id:fingerprint` and has no opinion about which queue
+                # produced a signal, so a guess here would be a second, weaker
+                # opinion about signal identity in the one module that must have
+                # exactly one -- and it would fabricate adaptation events the
+                # user never created. Absent means "unattributed", which counts
+                # for nothing rather than for something plausible.
+                if family:
+                    record["family"] = str(family)
                 records[key] = record
                 decision = record
             _compact_if_due(payload, now=moment, path=self.path)
@@ -701,10 +759,76 @@ class ReviewStateStore:
                 "updated_at": timestamp,
                 "origin": origin if origin in ORIGINS else MANUAL,
             }
+            # The quiet offer is made ONCE and is cleared only by an explicit
+            # reset to `normal`, which clears the whole slate above. Accepting
+            # the offer must not re-arm it, so a quiet/off write carries the
+            # marker forward instead of replacing the row wholesale.
+            previous = dispositions.get(family)
+            if isinstance(previous, dict) and previous.get("quiet_offered_at"):
+                stored["quiet_offered_at"] = previous["quiet_offered_at"]
             dispositions[family] = stored
             _compact_if_due(payload, now=moment, path=self.path)
             self._write(payload)
         return dict(stored)
+
+    def arm_quiet_offer(
+        self,
+        family: str,
+        *,
+        now: dt.datetime | None = None,
+        known: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """Arm exactly one offer to quiet `family`, or answer None.
+
+        The offer is EARNED by three manual dismissal events in the family and
+        is made once. It changes nothing: the family's disposition stays
+        `normal` and every carrier keeps showing it until a person decides
+        otherwise. What is recorded is the fact that the offer was made
+        (`quiet_offered_at`), so declining it by saying nothing is durable — a
+        decline that re-offered on the next surfacing would be the nag this
+        whole programme exists to remove.
+
+        `known` is a payload the caller already loaded this pass. The steady
+        state is "no offer is due", which must cost no lock and no second read;
+        the check is repeated under the lock before writing, because the
+        caller's snapshot may predate a decision recorded in between.
+        """
+        family = str(family or "")
+        payload = known if known is not None else self.load()
+        if not _quiet_offer_due(payload, family):
+            return None
+        moment = (now or dt.datetime.now(dt.UTC)).astimezone(dt.UTC)
+        timestamp = _stamp(moment)
+        with _LOCK:
+            payload = self.load()
+            if not _quiet_offer_due(payload, family):
+                return None
+            slate = payload["dispositions"].get(family)
+            row: dict[str, Any] = dict(slate) if isinstance(slate, dict) else {
+                "family": family,
+                "disposition": "normal",
+                "reason": DEFAULT_REASON,
+                "why": None,
+                # The RUNTIME armed this, not a person. The decision it invites
+                # will carry `manual` when somebody actually makes it.
+                "origin": AUTOMATIC,
+                "updated_at": timestamp,
+            }
+            row["quiet_offered_at"] = timestamp
+            payload["dispositions"][family] = row
+            _compact_if_due(payload, now=moment, path=self.path)
+            self._write(payload)
+        return {
+            "family": family,
+            "ref": family_ref(family),
+            "offered_at": timestamp,
+            "manual_dismissals": manual_dismissal_events(payload, family),
+            "offer": (
+                "three items of this family have been put down by hand. It can be "
+                "quieted with a reason whenever you want; nothing changes until you "
+                "say so, and a quiet family stays reviewable on request"
+            ),
+        }
 
     # ------------------------------------------------------------------
     # retention and compaction
@@ -836,6 +960,67 @@ def manual_records_since(payload: dict[str, Any] | None, *, since: dt.datetime) 
         if stamped is not None and stamped >= since:
             total += 1
     return total
+
+
+def manual_dismissal_events(payload: dict[str, Any] | None, family: str) -> int:
+    """Manual dismissal EVENTS recorded against one family. Monotonic by design.
+
+    Taken from the durable decision records and from nothing else. The count
+    therefore never decreases when the dismissed items later vanish from the
+    vault — a tidy-up must not disarm an offer somebody already earned — and
+    `automatic`-origin records are excluded, because the runtime's own decisions
+    are not a person asking to be left alone.
+
+    Counted by `item_id`, not by record: one triage decision on a fused item
+    fans out across every component signal it holds, so counting records would
+    charge one family several events for one thing the user put down once.
+
+    Usage logs, query history, read counts and every other engagement measure
+    are NOT inputs here and must never become ones. That is a rule about the
+    input, not about this implementation.
+    """
+    wanted = str(family or "")
+    if not wanted:
+        return 0
+    events: set[str] = set()
+    for record in ((payload or {}).get("records") or {}).values():
+        if not isinstance(record, dict):
+            continue
+        if record.get("action") != "dismiss":
+            continue
+        if record.get("origin", MANUAL) != MANUAL:
+            continue
+        if str(record.get("family") or "") != wanted:
+            continue
+        events.add(str(record.get("item_id") or ""))
+    events.discard("")
+    return len(events)
+
+
+def quiet_offered_at(payload: dict[str, Any] | None, family: str) -> str | None:
+    """When this family was offered a quiet, if it ever was."""
+    row = ((payload or {}).get("dispositions") or {}).get(str(family or ""))
+    if not isinstance(row, dict):
+        return None
+    value = row.get("quiet_offered_at")
+    return str(value) if value else None
+
+
+def _quiet_offer_due(payload: dict[str, Any] | None, family: str) -> bool:
+    """Whether one offer is earned, unmade, and still meaningful.
+
+    Three conditions, and all three are load-bearing: the family must not have
+    been offered one already (it is made once), it must not already be quiet or
+    off (there is nothing left to offer), and the manual dismissal events must
+    have reached the threshold.
+    """
+    if not family:
+        return False
+    if quiet_offered_at(payload, family) is not None:
+        return False
+    if disposition_for(family, payload=payload) != "normal":
+        return False
+    return manual_dismissal_events(payload, family) >= QUIET_OFFER_DISMISSALS
 
 
 def manual_dismissals_by_family(

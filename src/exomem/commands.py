@@ -6074,6 +6074,13 @@ def _dispositions_view(vault_root: Path) -> dict:
         record = dispositions[family]
         if not isinstance(record, dict):
             continue
+        if str(record.get("disposition") or "") not in {"quiet", "off"}:
+            # A slate-only row: the family carries a durable `quiet_offered_at`
+            # while its disposition is still `normal`. It is not a decision and
+            # must not be listed as one -- this view answers "what have I
+            # quieted", and a row saying `normal` would be an answer to a
+            # different question.
+            continue
         rows.append(
             {
                 "family": family,
