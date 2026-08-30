@@ -147,17 +147,83 @@ the task is ticked, not estimated.
 
 ## 2. Write path (design D3; command-surface delta)
 
-- [ ] 2.1 Remove the `_refine_contradictions` invocation and function, the
+- [x] 2.1 Remove the `_refine_contradictions` invocation and function, the
   `contradiction-band` partition, `_POLARITY_CLAUSE`, and the dead
   `DupCandidate.polarity` / `polarity_score` / `polarity_method` fields from
   `corpus_aware.py`. Red-first: gate-off byte-identity pin on warnings, then
   a gate-on pin that the advisory kind set is {near-duplicate, overlap} with
   no polarity clause; write-latency gates unchanged.
-- [ ] 2.2 Update the named suites with the change, red-first:
+  - **Evidence (red, before implementation)** —
+    `pytest tests/test_claims.py::test_detect_contradictions_attaches_no_polarity_even_when_gated tests/test_claims.py::test_write_path_carries_no_polarity_mechanism_at_all -q`:
+    ```
+    >       assert not hasattr(out[0], "polarity")
+    E       AssertionError: assert not True
+    E        +  where True = hasattr(DupCandidate(path='Knowledge Base/Notes/Insights/caching.md', title='Caching improves latency', cosine=0.85, polarity='contradict', polarity_score=0.7, polarity_method='heuristic'), 'polarity')
+    >       assert not hasattr(corpus_aware, "_refine_contradictions")
+    E       AssertionError: assert not True
+    E        +  where True = hasattr(corpus_aware, '_refine_contradictions')
+    FAILED tests/test_claims.py::test_detect_contradictions_attaches_no_polarity_even_when_gated
+    FAILED tests/test_claims.py::test_write_path_carries_no_polarity_mechanism_at_all
+    2 failed in 0.17s
+    ```
+  - **Evidence (green, after implementation)** — `pytest tests/test_claims.py
+    tests/test_write_advisory_suppression.py tests/test_frozen_verifiers.py -q`
+    → `93 passed, 1 skipped in 4.42s`
+  - **Gate-off byte-identity pin**: `test_detect_contradictions_gate_off_stays_byte_identical`
+    and `test_overlap_warning_byte_identical_without_polarity` hold the exact
+    pre-feature `as_dict()` payload and warning string.
+  - **Gate-on pin**: with `EXOMEM_CLAIM_LEVEL=1` the candidate has no `polarity`
+    attribute at all, `as_dict()` is the baseline three keys, the warning carries
+    no clause, and `detected_overlap_advisory_groups` yields the single
+    `("overlap", …)` group.
+  - Removed from `src/exomem/corpus_aware.py`: `_refine_contradictions` (function
+    and its invocation in `detect_contradictions`), `_POLARITY_CLAUSE`, the
+    `contradiction-band` partition (now one overlap branch), the
+    `DupCandidate.polarity` / `polarity_score` / `polarity_method` fields and
+    their `as_dict` branch, and `contradiction-band` from `_WRITE_ADVISORY_KINDS`
+    (which `review_state.registered_families()` assembles from, so the retired
+    name cannot linger there either).
+  - Broad write-path regression (add, attention, audit contradiction order +
+    corpus, authored contradictions, corpus_aware, corpus context cache, edit,
+    no-nudge families, review queues, note, note suggestions, replace, review
+    dispositions, review state, write advisory suppression, claims, frozen
+    verifiers): `499 passed, 6 skipped in 63.16s`.
+  - **Write-latency gates unchanged** — `pytest tests/test_latency_gate.py -q`
+    (untouched file): `7 passed in 71.47s`. The path only got shorter.
+
+- [x] 2.2 Update the named suites with the change, red-first:
   `tests/test_write_advisory_suppression.py` contradiction-band suppression
   cases become retired-kind cases (old dismissal does not suppress the
   overlap identity — the stated one-time resurfacing), and
   `tests/test_claims.py` gate-on write-path pins move to the queue channel.
+  - **Evidence (red, before implementation)** — `pytest tests/test_claims.py
+    tests/test_write_advisory_suppression.py -q` with the suites updated and the
+    source untouched:
+    ```
+    E         Extra items in the left set:
+    E         'contradiction-band'
+    tests/test_write_advisory_suppression.py:514: AssertionError
+    FAILED tests/test_claims.py::test_detect_contradictions_attaches_no_polarity_even_when_gated
+    FAILED tests/test_claims.py::test_write_path_carries_no_polarity_mechanism_at_all
+    FAILED tests/test_write_advisory_suppression.py::test_contradiction_band_kind_is_retired
+    3 failed, 55 passed, 1 skipped in 4.07s
+    ```
+  - **Evidence (green, after implementation)** — same command:
+    `56 passed, 1 skipped` within the `93 passed, 1 skipped in 4.42s` run above.
+  - `tests/test_write_advisory_suppression.py`: the contradiction-band
+    suppression case became two retired-kind cases —
+    `test_contradiction_band_kind_is_retired` (the kind is gone from
+    `_WRITE_ADVISORY_KINDS` and from `review_state.registered_families()`, and
+    minting one raises) and
+    `test_dismissed_contradiction_band_identity_does_not_suppress_the_overlap_advisory`,
+    which records a real dismissal against the retired identity (reconstructed
+    through the live formula with the kind briefly re-admitted, so it is exactly
+    what a pre-retirement record is keyed by), shows the pair resurfacing once
+    under the overlap identity, and then shows it suppressible there. `_candidate`
+    lost its `polarity` parameter.
+  - `tests/test_claims.py`: the gate-on write-path pins moved off the write path.
+    The heuristic's own unit tests stay — the heuristic is retired from QUEUE
+    ENRICHMENT, not deleted, and it is the comparison arm of the 5.1 table.
 
 ## 3. Queue enrichment (design D2, D3)
 
