@@ -6093,6 +6093,8 @@ def _dispositions_view(vault_root: Path) -> dict:
                 "manual_dismissals": counts.get(family, 0),
             }
         )
+    from . import envelope as envelope_module
+
     return {
         "dispositions": rows,
         "registered_families": sorted(review_state_module.registered_families()),
@@ -6102,6 +6104,21 @@ def _dispositions_view(vault_root: Path) -> dict:
             "still reviewable by naming its category. It is not evidence the family "
             "is clean."
         ),
+        # A structurally SEPARATE block, never rows mixed into the one above.
+        # The two vocabularies share the word `off` and mean different things by
+        # it, and a reader looking at one list has no way to tell which is which:
+        # a family `off` is a review-state decision about one KIND of signal, an
+        # envelope `off` is "the agent does not initiate this CLASS of action".
+        "envelope": {
+            **envelope_module.resolved(),
+            "note": (
+                "Action classes, not signal families. An envelope `off` means the "
+                "agent does not initiate that class on its own; it never blocks an "
+                "explicit request. A family `off` is the review-state decision "
+                "listed above. A ceiling is product law: no level, override or "
+                "adaptation authorizes behaviour above it."
+            ),
+        },
     }
 
 

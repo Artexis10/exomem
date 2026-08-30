@@ -241,10 +241,36 @@ the task is ticked, not estimated.
 
 ## 4. The dispositions view and the agent contract (design D5; command-surface delta)
 
-- [ ] 4.1 `review_memory(mode="dispositions")` gains the structurally separate
+- [x] 4.1 `review_memory(mode="dispositions")` gains the structurally separate
   envelope block (class, ceiling, disposition/marker, provenance). If the
   recorded response contract or packaged digest moves, follow the documented
   two-phase rollout and record it here. Red-first pin on the two-block shape.
+
+  Evidence (red) — `pytest tests/test_delegation_envelope_surfaces.py -q`:
+
+  ```
+  >       before = commands.op_review_memory(vault, mode="dispositions")["envelope"]["classes"]
+  E       KeyError: 'envelope'
+  FAILED …::test_the_dispositions_view_carries_two_structurally_separate_blocks
+  FAILED …::test_the_view_says_which_off_is_which
+  FAILED …::test_the_envelope_block_is_present_even_when_no_family_is_quiet
+  FAILED …::test_a_family_decision_moves_no_envelope_class
+  4 failed in 1.05s
+  ```
+
+  Evidence (green) — same command: `4 passed in 0.77s`.
+
+  **No rollout was needed.** The change is additive to a response BODY; no tool
+  input schema moved and the packaged tool-surface digest did not move:
+  `pytest tests/test_mcp_schema_fidelity.py tests/test_tool_surface_contract.py
+  tests/test_review_dispositions.py tests/test_command_surface_retry.py -q`
+  -> `124 passed`. The two-phase response-contract rollout therefore does not
+  apply to this landing.
+
+  One behaviour changed in the family block and it is deliberate: a slate-only
+  row (a family carrying `quiet_offered_at` while its disposition is still
+  `normal`) is filtered OUT. This view answers "what have I quieted", and a row
+  reading `normal` would be an answer to a different question.
 - [ ] 4.2 Bootstrap + scaffold/plugin SKILL.md copies + hookless
   custom-instructions block teach the decider protocol and how to discover the
   registered family vocabulary; ≤ 50 lines per carrier, counted by test;
