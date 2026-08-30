@@ -1166,15 +1166,11 @@ def test_the_f23_journey_runs_against_the_installed_envelope(
     genuine engine restarts. If no envelope is installed the test says so and
     skips; an in-process run would measure the library rather than the runtime.
 
-    **The two halves get different verdicts, and that is the point.** The
-    dismissal half must pass. The counter half must report `unsupported`: no
-    product leaf reaches `due_state.block_for_write` (measured — see
-    `.task/measurements/leaf_carrier_counts.py`), so the bulk batch delivers no
-    block, its emission delta across the snapshot pair is 0, and a `pass` here
-    would be the assertion agreeing that twelve writes produced no repeat when
-    nothing was ever produced to repeat. Asserting `unsupported` pins the honest
-    verdict AND fails the day a leaf starts carrying, which is when the family
-    becomes decidable and someone must revisit this.
+    Both halves must now pass. The bulk leaf still reaches
+    `due_state.block_for_write` zero times, but it carries one batch block from
+    `due_state.block_for_batch` at the invocation terminal. That makes the
+    counter assertion decidable on an emission delta of one against twelve
+    governed writes.
     """
 
     from epistemic.journeys import f23_dismissal
@@ -1194,11 +1190,11 @@ def test_the_f23_journey_runs_against_the_installed_envelope(
     ledger = run.later.item("surface-due_state_counters")
     assert ledger is not None and ledger.raw["projection"] == "complete"
     assert int(ledger.raw["writes"]) == f23_dismissal.BULK_DOCUMENTS
-    # The measured zero, recorded rather than smoothed: nothing was delivered,
-    # so the served denominator is 0 and no emission happened.
-    assert int(ledger.raw["emissions"]) == 0
-    # Informational, and 0 here only because this vault never delivered at all.
-    assert int(ledger.raw["due_total"]) == 0
+    # The operation leaf delivers one batch block, never one per governed write.
+    assert int(ledger.raw["emissions"]) == 1
+    # The dismissed probe stays closed; the still-open probe keeps the delivered
+    # block non-vacuous. The adopted Source pages themselves add no due items.
+    assert int(ledger.raw["due_total"]) == 1
 
     context = AssertionContext(
         snapshot=run.later, prior=run.prior, subject=run.subject, family="f23"
@@ -1207,13 +1203,11 @@ def test_the_f23_journey_runs_against_the_installed_envelope(
     assert dismissal.outcome == "pass", dismissal.evidence
 
     counters = resolve("counter_emission_not_repeated_per_write")(context)
-    assert counters.outcome == "unsupported", counters.evidence
-    # The evidence must name WHY it could not decide, or an `unsupported` is
-    # indistinguishable from a projector that simply did not look. The reason
-    # is the zero emission DELTA across the batch, not the persisted
-    # `due_total`, which says nothing about this batch either way.
-    assert "delivered 0 block(s)" in counters.evidence, counters.evidence
-    assert str(f23_dismissal.BULK_DOCUMENTS) in counters.evidence, counters.evidence
+    assert counters.outcome == "pass", counters.evidence
+    assert "emitted 1 counters block(s)" in counters.evidence, counters.evidence
+    assert (
+        f"batch of {f23_dismissal.BULK_DOCUMENTS} write(s)" in counters.evidence
+    ), counters.evidence
 
 
 def _f23_carrier_pages(vault: Path, count: int) -> list[str]:
