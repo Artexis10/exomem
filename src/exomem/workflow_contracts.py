@@ -50,13 +50,24 @@ _FIELDS = (
     "capture",
     "planning_transition",
 )
-_PRESENTATION_OPEN = "<!-- exomem:workflow-contract-presentation:start -->"
-_PRESENTATION_CLOSE = "<!-- exomem:workflow-contract-presentation:end -->"
 _RENDERER_TEMPLATE = {
     "version": 1,
+    "open": "<!-- exomem:workflow-contract-presentation:start -->",
+    "close": "<!-- exomem:workflow-contract-presentation:end -->",
+    "derived_notice": "<!-- Derived from workflow-contract frontmatter; refresh restores this block. -->",
     "heading": "## Workflow contract: {title}",
     "scope": "This active policy applies to {scope}.",
+    "all_scope": "all work",
+    "standalone_ownership": "Planning holds the complete durable work hierarchy.",
+    "companion_ownership": "Planning retains durable intent; declared companion ownership is {companions}.",
+    "companion_separator": "; ",
+    "companion_overflow": "; … (+{remaining})",
+    "list_separator": ", ",
+    "list_overflow": ", … (+{remaining})",
+    "display_value": "{name} ({owns})",
+    "item_cap": 4,
     "records": "Records holds observed outcomes; it never completes Planning automatically.",
+    "max_bytes": 4096,
 }
 
 
@@ -287,44 +298,58 @@ def canonical_content(contract: WorkflowContract, authored_body: str = "") -> st
 def render_presentation(contract: WorkflowContract) -> str:
     scope = contract.data["scope"]
     selected = (
-        ", ".join(
+        _RENDERER_TEMPLATE["list_separator"].join(
             f"{dimension}: {_quoted_values(values)}" for dimension, values in scope.items() if values
         )
-        or "all work"
+        or _RENDERER_TEMPLATE["all_scope"]
     )
     if contract.data["planning"]["mode"] == "standalone":
-        ownership = "Planning holds the complete durable work hierarchy."
+        ownership = _RENDERER_TEMPLATE["standalone_ownership"]
     else:
-        companions = "; ".join(
-            f"{_quoted(item['name'])} ({_quoted_values(item['owns'])})"
-            for item in contract.data["companions"][:4]
+        cap = _RENDERER_TEMPLATE["item_cap"]
+        companions = _RENDERER_TEMPLATE["companion_separator"].join(
+            _RENDERER_TEMPLATE["display_value"].format(
+                name=_quoted(item["name"]), owns=_quoted_values(item["owns"])
+            )
+            for item in contract.data["companions"][:cap]
         )
-        if len(contract.data["companions"]) > 4:
-            companions += f"; … (+{len(contract.data['companions']) - 4})"
-        ownership = (
-            f"Planning retains durable intent; declared companion ownership is {companions}."
+        if len(contract.data["companions"]) > cap:
+            companions += _RENDERER_TEMPLATE["companion_overflow"].format(
+                remaining=len(contract.data["companions"]) - cap
+            )
+        ownership = _RENDERER_TEMPLATE["companion_ownership"].format(
+            companions=companions
         )
-    return "\n".join(
+    rendered = "\n".join(
         (
-            _PRESENTATION_OPEN,
-            "<!-- Derived from workflow-contract frontmatter; refresh restores this block. -->",
+            _RENDERER_TEMPLATE["open"],
+            _RENDERER_TEMPLATE["derived_notice"],
             _RENDERER_TEMPLATE["heading"].format(title=_quoted(contract.title)),
             "",
             _RENDERER_TEMPLATE["scope"].format(scope=selected),
             ownership,
             _RENDERER_TEMPLATE["records"],
-            _PRESENTATION_CLOSE,
+            _RENDERER_TEMPLATE["close"],
         )
     )
+    if len(rendered.encode("utf-8")) > _RENDERER_TEMPLATE["max_bytes"]:
+        raise WorkflowContractError("WORKFLOW_CONTRACT_INVALID", "presentation exceeds bound")
+    return rendered
 
 
 def _quoted(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
-def _quoted_values(values: list[str], *, cap: int = 4) -> str:
-    rendered = ", ".join(_quoted(value) for value in values[:cap])
-    return rendered if len(values) <= cap else f"{rendered}, … (+{len(values) - cap})"
+def _quoted_values(values: list[str]) -> str:
+    cap = _RENDERER_TEMPLATE["item_cap"]
+    rendered = _RENDERER_TEMPLATE["list_separator"].join(_quoted(value) for value in values[:cap])
+    return (
+        rendered
+        if len(values) <= cap
+        else rendered
+        + _RENDERER_TEMPLATE["list_overflow"].format(remaining=len(values) - cap)
+    )
 
 
 def save_contract(
@@ -473,8 +498,9 @@ def inspect_contract(vault_root: Path, name: str) -> dict[str, Any]:
 def inventory_contracts(vault_root: Path) -> dict[str, Any]:
     migration = migration_required(vault_root)
     contracts, findings, limited = _scan(vault_root)
-    if not findings:
-        findings.extend(_unsupported_family_findings(vault_root))
+    if not any(item.get("detail") == "unsafe contract directory" for item in findings):
+        findings = _unsupported_family_findings(vault_root) + findings
+    findings = findings[:32]
     if limited:
         return {"valid": False, "code": "WORKFLOW_CONTRACT_SCAN_LIMIT", "findings": findings}
     summaries = [
@@ -520,14 +546,28 @@ def _unsupported_family_findings(vault_root: Path) -> list[dict[str, str]]:
         return [{"code": "WORKFLOW_CONTRACT_INVALID", "detail": "unsafe family directory"}]
     if not root.is_dir():
         return []
-    return [
-        {
-            "code": "WORKFLOW_CONTRACT_UNSUPPORTED_FAMILY",
-            "path": path.relative_to(vault_root).as_posix(),
-        }
-        for path in sorted(root.iterdir(), key=lambda item: item.name.casefold())[:32]
-        if path.name != FAMILY and path.is_dir() and not path.is_symlink()
-    ]
+    findings: list[dict[str, str]] = []
+    try:
+        entries = sorted(root.iterdir(), key=lambda item: item.name.casefold())
+    except OSError:
+        return [{"code": "WORKFLOW_CONTRACT_INVALID", "detail": "unsafe family directory"}]
+    for path in entries:
+        if path.name == FAMILY:
+            continue
+        try:
+            path.lstat()
+        except OSError:
+            return [{"code": "WORKFLOW_CONTRACT_INVALID", "detail": "unsafe family directory"}]
+        if path.is_symlink():
+            return [{"code": "WORKFLOW_CONTRACT_INVALID", "detail": "unsafe family directory"}]
+        if path.is_dir():
+            findings.append(
+                {
+                    "code": "WORKFLOW_CONTRACT_UNSUPPORTED_FAMILY",
+                    "path": path.relative_to(vault_root).as_posix(),
+                }
+            )
+    return findings[:32]
 
 
 def resolve_contracts(
@@ -556,8 +596,6 @@ def resolve_contracts(
     if limited:
         return _refusal("WORKFLOW_CONTRACT_SCAN_LIMIT")
     if name:
-        if any(item["code"] == "WORKFLOW_CONTRACT_DUPLICATE_IDENTITY" for item in findings):
-            return _refusal("WORKFLOW_CONTRACT_DUPLICATE_IDENTITY")
         matches = [
             (contract, path, source) for contract, path, source in contracts if contract.key == name
         ]
@@ -569,6 +607,8 @@ def resolve_contracts(
         if len(matches) != 1:
             return _refusal("WORKFLOW_CONTRACT_DUPLICATE_IDENTITY")
         contract, path, source = matches[0]
+        if sum(item[0].contract_id == contract.contract_id for item in contracts) != 1:
+            return _refusal("WORKFLOW_CONTRACT_DUPLICATE_IDENTITY")
         if contract.lifecycle != "active":
             return _refusal("WORKFLOW_CONTRACT_INACTIVE")
         return _resolved(vault_root, contract, normalized, "explicit", path, source)
@@ -656,7 +696,7 @@ def _scan(
     candidates = [
         path
         for path in sorted(root.glob("*.md"), key=lambda value: value.name.casefold())
-        if path.is_file()
+        if path.is_file() or path.is_symlink()
     ]
     visible_paths = _released_paths(vault_root, candidates) if released_only else set(candidates)
     contracts: list[tuple[WorkflowContract, Path, str]] = []
@@ -730,7 +770,7 @@ def _scan(
         findings.append(
             {"code": "WORKFLOW_CONTRACT_DUPLICATE_IDENTITY", "detail": "duplicate active identity"}
         )
-    return contracts, findings[:32], False
+    return contracts, findings, False
 
 
 def _contract_storage_guard(vault_root: Path) -> None:
@@ -791,13 +831,13 @@ def _body(source: str) -> str:
 
 
 def _without_presentation(body: str) -> str:
-    start = body.find(_PRESENTATION_OPEN)
+    start = body.find(_RENDERER_TEMPLATE["open"])
     if start < 0:
         return body
-    end = body.find(_PRESENTATION_CLOSE, start)
+    end = body.find(_RENDERER_TEMPLATE["close"], start)
     if end < 0:
         return body
-    return body[:start] + body[end + len(_PRESENTATION_CLOSE) :]
+    return body[:start] + body[end + len(_RENDERER_TEMPLATE["close"]) :]
 
 
 def _semantic_bytes(data: Mapping[str, Any]) -> bytes:
