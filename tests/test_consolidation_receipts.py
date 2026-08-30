@@ -39,6 +39,7 @@ def vault(tmp_path: Path) -> Path:
 _EVIDENCE_FIELDS = {
     "start": ("identity_binding_digest", "run_request_digest"),
     "intake": ("archive_attestation_digest", "intake_manifest_digest"),
+    "preimage": ("preimage_manifest_digest",),
     "content-batch": ("batch_manifest_digest", "classification_digest"),
     "complete": ("completion_digest", "verification_basis_digest"),
     "render-page": (
@@ -199,6 +200,28 @@ def test_intent_identity_and_payload_digest_are_exact_framed_jcs_vectors() -> No
     )
     assert event.phase == "intent"
     assert _intent() == event
+
+
+def test_preimage_receipt_requires_its_distinct_prepared_manifest_state() -> None:
+    from exomem.governance import consolidation_receipts
+
+    event = _intent(
+        kind="preimage",
+        phase="preimage",
+        batch_ordinal=None,
+    )
+
+    assert event.payload["prepared_digest"] == PREPARED_DIGEST
+    with pytest.raises(
+        consolidation_receipts.ConsolidationReceiptUnavailable,
+        match="^CONSOLIDATION_RECEIPT_UNAVAILABLE$",
+    ):
+        _intent(
+            kind="preimage",
+            phase="preimage",
+            batch_ordinal=None,
+            prepared_digest=None,
+        )
 
 
 def test_every_kind_binds_its_owner_protected_evidence_bundle() -> None:

@@ -102,7 +102,9 @@ _ORDINAL_FIELD = {
     "render-page": "page_ordinal",
     "render-ack": "page_ordinal",
 }
-_PREPARED_KINDS = frozenset({"content-batch", "rollback-restore-batch"})
+_PREPARED_KINDS = frozenset(
+    {"preimage", "content-batch", "rollback-restore-batch"}
+)
 _CONDITIONAL_SUCCESSOR_KINDS = frozenset({"reconcile", "repair-terminal"})
 _REQUIRED_SUCCESSOR_KINDS = frozenset(
     {

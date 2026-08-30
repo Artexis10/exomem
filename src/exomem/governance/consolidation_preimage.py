@@ -61,7 +61,10 @@ __all__ = [
     "DestinationPreimageBinding",
     "DestinationPreimageEntry",
     "DestinationPreimageLimits",
+    "DestinationPreimagePlan",
     "materialize_local_destination_preimage",
+    "materialize_planned_destination_preimage",
+    "plan_local_destination_preimage",
     "verify_destination_preimage",
 ]
 
@@ -112,6 +115,17 @@ class DestinationPreimage:
     entries: tuple[DestinationPreimageEntry, ...]
     manifest_digest: str
     manifest_ref: str
+
+
+@dataclass(frozen=True, slots=True)
+class DestinationPreimagePlan:
+    binding: DestinationPreimageBinding
+    limits: DestinationPreimageLimits
+    entry_count: int
+    total_bytes: int
+    entries: tuple[DestinationPreimageEntry, ...]
+    manifest_bytes: bytes
+    manifest_digest: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -247,6 +261,82 @@ def _manifest_value(
         "total_bytes": total,
         "entries": [_entry_dict(item) for item in entries],
     }
+
+
+def _planned_entries(
+    materials: tuple[_MaterialSource, ...],
+) -> tuple[DestinationPreimageEntry, ...]:
+    return tuple(
+        DestinationPreimageEntry(
+            path=item.entry.path,
+            size=item.entry.size,
+            sha256=item.entry.sha256,
+            artifact_ref=(
+                "exomem-consolidation-object://sha256/" f"{item.entry.sha256}"
+            ),
+        )
+        for item in materials
+    )
+
+
+def _plan(value: object) -> DestinationPreimagePlan:
+    if not isinstance(value, DestinationPreimagePlan):
+        _fail()
+    binding = _binding(value.binding)
+    limits = _limits(value.limits)
+    if not isinstance(value.entries, tuple) or not all(
+        isinstance(item, DestinationPreimageEntry) for item in value.entries
+    ):
+        _fail()
+    checked_entries: list[DestinationPreimageEntry] = []
+    for item in value.entries:
+        path = _path(item.path)
+        size = _integer(item.size)
+        digest = _digest(item.sha256)
+        artifact_ref = item.artifact_ref
+        match = (
+            _OBJECT_REF.fullmatch(artifact_ref)
+            if isinstance(artifact_ref, str)
+            else None
+        )
+        if match is None or match.group(1) != digest:
+            _fail()
+        checked_entries.append(
+            DestinationPreimageEntry(
+                path=path,
+                size=size,
+                sha256=digest,
+                artifact_ref=artifact_ref,
+            )
+        )
+    entries = tuple(checked_entries)
+    manifest_bytes = _canonical(_manifest_value(binding, entries))
+    if (
+        not isinstance(value.manifest_bytes, bytes)
+        or value.manifest_bytes != manifest_bytes
+        or len(manifest_bytes) > _MAX_MANIFEST_BYTES
+        or _digest(value.manifest_digest) != hashlib.sha256(manifest_bytes).hexdigest()
+        or _integer(value.entry_count) != len(entries)
+        or _integer(value.total_bytes) != sum(item.size for item in entries)
+    ):
+        _fail()
+    parsed = json.loads(manifest_bytes)
+    checked = _result_from_value(
+        parsed,
+        manifest_digest=value.manifest_digest,
+        manifest_ref=f"exomem-consolidation-preimage://sha256/{value.manifest_digest}",
+    )
+    if checked.binding != binding or checked.entries != entries:
+        _fail()
+    return DestinationPreimagePlan(
+        binding=binding,
+        limits=limits,
+        entry_count=checked.entry_count,
+        total_bytes=checked.total_bytes,
+        entries=checked.entries,
+        manifest_bytes=manifest_bytes,
+        manifest_digest=value.manifest_digest,
+    )
 
 
 def _available_bytes(path: Path) -> int:
@@ -463,7 +553,7 @@ def _result_from_value(
     )
 
 
-def materialize_local_destination_preimage(
+def plan_local_destination_preimage(
     vault_root: Path | str,
     *,
     binding: DestinationPreimageBinding,
@@ -471,8 +561,8 @@ def materialize_local_destination_preimage(
     now: int,
     portability_limits: hosted_portability.PortabilityLimits | None = None,
     resource_limits: DestinationPreimageLimits | None = None,
-) -> DestinationPreimage:
-    """Copy and publish one complete plan-bound destination preimage."""
+) -> DestinationPreimagePlan:
+    """Plan exact preimage bytes without creating or changing private artifacts."""
 
     checked_binding = _binding(binding)
     checked_limits = _limits(resource_limits or DestinationPreimageLimits())
@@ -480,13 +570,13 @@ def materialize_local_destination_preimage(
         _fail()
     root = Path(vault_root)
     try:
-        first_snapshot, census, materials = _sample_material(
+        snapshot, census, materials = _sample_material(
             root,
             now=now,
             portability_limits=portability_limits,
         )
         if (
-            first_snapshot.digest != checked_binding.destination_snapshot_fingerprint
+            snapshot.digest != checked_binding.destination_snapshot_fingerprint
             or census.digest != checked_binding.destination_census_digest
             or len(materials) > checked_limits.max_files
         ):
@@ -494,56 +584,21 @@ def materialize_local_destination_preimage(
         total_bytes = sum(item.entry.size for item in materials)
         if total_bytes > checked_limits.max_total_bytes:
             _fail()
-        planned_entries = tuple(
-            DestinationPreimageEntry(
-                path=item.entry.path,
-                size=item.entry.size,
-                sha256=item.entry.sha256,
-                artifact_ref=(
-                    "exomem-consolidation-object://sha256/"
-                    f"{item.entry.sha256}"
-                ),
-            )
-            for item in materials
-        )
+        planned_entries = _planned_entries(materials)
         manifest_bytes = _canonical(_manifest_value(checked_binding, planned_entries))
         if len(manifest_bytes) > _MAX_MANIFEST_BYTES:
             _fail()
         required = total_bytes + len(manifest_bytes) + checked_limits.minimum_free_bytes
         if required > _MAX_SAFE_INTEGER or _available_bytes(artifact_store.root) < required:
             _fail()
-
-        artifact_store._ensure()  # noqa: SLF001 - shared private-store boundary
-        transaction = Path(tempfile.mkdtemp(prefix=".preimage-build-", dir=artifact_store.root))
-        os.chmod(transaction, 0o700)
-        try:
-            for ordinal, (material, planned) in enumerate(
-                zip(materials, planned_entries, strict=True)
-            ):
-                staged = transaction / f"{ordinal:06d}.object"
-                _write_material(material, staged)
-                artifact_ref = artifact_store.install_object_file(
-                    staged,
-                    expected_digest=material.entry.sha256,
-                )
-                if artifact_ref != planned.artifact_ref:
-                    _fail()
-                staged.unlink(missing_ok=True)
-
-            final_snapshot, final_census, _final_material = _sample_material(
-                root,
-                now=now,
-                portability_limits=portability_limits,
-            )
-            if final_snapshot != first_snapshot or final_census != census:
-                _fail()
-            manifest_ref = artifact_store.install_preimage_bytes(manifest_bytes)
-        finally:
-            shutil.rmtree(transaction, ignore_errors=True)
-        return verify_destination_preimage(
-            manifest_ref,
+        return DestinationPreimagePlan(
             binding=checked_binding,
-            artifact_store=artifact_store,
+            limits=checked_limits,
+            entry_count=len(planned_entries),
+            total_bytes=total_bytes,
+            entries=planned_entries,
+            manifest_bytes=manifest_bytes,
+            manifest_digest=hashlib.sha256(manifest_bytes).hexdigest(),
         )
     except ConsolidationPreimageUnavailable:
         raise
@@ -557,6 +612,127 @@ def materialize_local_destination_preimage(
         ValueError,
     ):
         _fail()
+
+
+def materialize_planned_destination_preimage(
+    vault_root: Path | str,
+    *,
+    plan: DestinationPreimagePlan,
+    artifact_store: consolidation_intake.PrivateConsolidationArtifactStore,
+    now: int,
+    portability_limits: hosted_portability.PortabilityLimits | None = None,
+) -> DestinationPreimage:
+    """Publish only the exact bytes committed by a read-only preimage plan."""
+
+    checked_plan = _plan(plan)
+    if not isinstance(artifact_store, consolidation_intake.PrivateConsolidationArtifactStore):
+        _fail()
+    root = Path(vault_root)
+    try:
+        first_snapshot, census, materials = _sample_material(
+            root,
+            now=now,
+            portability_limits=portability_limits,
+        )
+        if (
+            first_snapshot.digest
+            != checked_plan.binding.destination_snapshot_fingerprint
+            or census.digest != checked_plan.binding.destination_census_digest
+            or _planned_entries(materials) != checked_plan.entries
+            or len(materials) > checked_plan.limits.max_files
+            or sum(item.entry.size for item in materials)
+            > checked_plan.limits.max_total_bytes
+        ):
+            _fail()
+        required = (
+            checked_plan.total_bytes
+            + len(checked_plan.manifest_bytes)
+            + checked_plan.limits.minimum_free_bytes
+        )
+        if required > _MAX_SAFE_INTEGER or _available_bytes(artifact_store.root) < required:
+            _fail()
+
+        artifact_store._ensure()  # noqa: SLF001 - shared private-store boundary
+        transaction = Path(tempfile.mkdtemp(prefix=".preimage-build-", dir=artifact_store.root))
+        os.chmod(transaction, 0o700)
+        try:
+            for ordinal, (material, planned) in enumerate(
+                zip(materials, checked_plan.entries, strict=True)
+            ):
+                staged = transaction / f"{ordinal:06d}.object"
+                _write_material(material, staged)
+                artifact_ref = artifact_store.install_object_file(
+                    staged,
+                    expected_digest=material.entry.sha256,
+                )
+                if artifact_ref != planned.artifact_ref:
+                    _fail()
+                staged.unlink(missing_ok=True)
+
+            final_snapshot, final_census, final_materials = _sample_material(
+                root,
+                now=now,
+                portability_limits=portability_limits,
+            )
+            if (
+                final_snapshot != first_snapshot
+                or final_census != census
+                or _planned_entries(final_materials) != checked_plan.entries
+            ):
+                _fail()
+            manifest_ref = artifact_store.install_preimage_bytes(
+                checked_plan.manifest_bytes
+            )
+        finally:
+            shutil.rmtree(transaction, ignore_errors=True)
+        result = verify_destination_preimage(
+            manifest_ref,
+            binding=checked_plan.binding,
+            artifact_store=artifact_store,
+        )
+        if result.manifest_digest != checked_plan.manifest_digest:
+            _fail()
+        return result
+    except ConsolidationPreimageUnavailable:
+        raise
+    except (
+        consolidation_fingerprints.ConsolidationFingerprintUnavailable,
+        consolidation_intake.ConsolidationIntakeUnavailable,
+        hosted_portability.PortabilityError,
+        OSError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+    ):
+        _fail()
+
+
+def materialize_local_destination_preimage(
+    vault_root: Path | str,
+    *,
+    binding: DestinationPreimageBinding,
+    artifact_store: consolidation_intake.PrivateConsolidationArtifactStore,
+    now: int,
+    portability_limits: hosted_portability.PortabilityLimits | None = None,
+    resource_limits: DestinationPreimageLimits | None = None,
+) -> DestinationPreimage:
+    """Plan, copy, and publish one complete destination preimage."""
+
+    plan = plan_local_destination_preimage(
+        vault_root,
+        binding=binding,
+        artifact_store=artifact_store,
+        now=now,
+        portability_limits=portability_limits,
+        resource_limits=resource_limits,
+    )
+    return materialize_planned_destination_preimage(
+        vault_root,
+        plan=plan,
+        artifact_store=artifact_store,
+        now=now,
+        portability_limits=portability_limits,
+    )
 
 
 def verify_destination_preimage(

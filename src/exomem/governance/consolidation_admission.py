@@ -921,7 +921,103 @@ class ConsolidationAdmission:
         # cross-replica lifecycle/fencing layer to resolve the configuration.
         _fail("CONSOLIDATION_ADMISSION_DOMAIN_CONFLICT")
 
-    def seal_and_drain(
+    def begin_seal(
+        self,
+        *,
+        control: object,
+        authority: object,
+        run_id: str,
+        operation_id: str,
+        journal_digest: str,
+        sealed_at: str,
+        expected_revision: int,
+        timeout: float = 5.0,
+    ) -> ConsolidationAdmissionSnapshot:
+        """Persist the exact seal intent before any participant is drained."""
+
+        if (
+            not isinstance(timeout, (int, float))
+            or isinstance(timeout, bool)
+            or not math.isfinite(float(timeout))
+            or timeout < 0
+        ):
+            raise ValueError("consolidation seal timeout must be finite and non-negative")
+
+        try:
+            consolidation_authority.require_authority(
+                authority,
+                vault_binding_digest=self.vault_binding_digest,
+                run_id=run_id,
+                operation_id=operation_id,
+                journal_digest=journal_digest,
+                phase="sealing",
+                action="apply",
+            )
+        except consolidation_authority.ConsolidationAuthorityUnavailable:
+            _fail("CONSOLIDATION_AUTHORITY_UNAVAILABLE")
+        control_participant = self._require_control(
+            control,
+            run_id=run_id,
+            operation_id=operation_id,
+            journal_digest=journal_digest,
+        )
+        if (
+            type(expected_revision) is not int
+            or expected_revision < 0
+            or expected_revision > _MAX_SAFE_INTEGER
+        ):
+            _fail("CONSOLIDATION_SEAL_UNAVAILABLE")
+        deadline = time.monotonic() + float(timeout)
+        control_id = operation_id.replace("-", "")
+        try:
+            with self._coordinator(
+                "control",
+                control_id,
+                timeout=self._remaining(deadline),
+            ).hold(
+                request_id=control_id,
+                operation="seal_intent",
+                holder_kind="reserved-state",
+                publish_holder_metadata=False,
+            ):
+                with self._gate(timeout=self._remaining(deadline)).hold(
+                    request_id=control_id,
+                    operation="seal_intent",
+                    holder_kind="reserved-state",
+                    publish_holder_metadata=False,
+                ):
+                    self._require_durable_control(control_participant)
+                    current = self._load_state()
+                    if current.kind == "consolidation-sealed":
+                        if (
+                            current.phase == "sealing"
+                            and current.run_id == run_id
+                            and current.operation_id == operation_id
+                            and current.journal_digest == journal_digest
+                            and current.sealed_at == sealed_at
+                            and current.revision == expected_revision + 1
+                        ):
+                            return self._snapshot_from(
+                                current,
+                                self._load_participants(),
+                            )
+                        _fail("CONSOLIDATION_SEAL_UNAVAILABLE")
+                    try:
+                        state = self._store.begin_consolidation(
+                            vault_binding_digest=self.vault_binding_digest,
+                            run_id=run_id,
+                            operation_id=operation_id,
+                            journal_digest=journal_digest,
+                            sealed_at=sealed_at,
+                            expected_revision=expected_revision,
+                        )
+                    except consolidation_seal.ConsolidationSealUnavailable:
+                        _fail("CONSOLIDATION_SEAL_UNAVAILABLE")
+                    return self._snapshot_from(state, self._load_participants())
+        except OpError:
+            _fail("CONSOLIDATION_DRAIN_BUSY")
+
+    def drain_and_seal(
         self,
         *,
         control: object,
@@ -935,7 +1031,7 @@ class ConsolidationAdmission:
         timeout: float,
         stoppers: Sequence[Callable[[], object]] = (),
     ) -> ConsolidationAdmissionSnapshot:
-        """Persist intent, close admission, drain every process, then seal."""
+        """Drain every non-control participant, then persist the sealed terminal."""
 
         if (
             not isinstance(timeout, (int, float))
@@ -958,7 +1054,6 @@ class ConsolidationAdmission:
             )
         except consolidation_authority.ConsolidationAuthorityUnavailable:
             _fail("CONSOLIDATION_AUTHORITY_UNAVAILABLE")
-
         control_participant = self._require_control(
             control,
             run_id=run_id,
@@ -971,7 +1066,6 @@ class ConsolidationAdmission:
             or expected_revision > _MAX_SAFE_INTEGER
         ):
             _fail("CONSOLIDATION_SEAL_UNAVAILABLE")
-
         deadline = time.monotonic() + float(timeout)
         control_id = operation_id.replace("-", "")
         try:
@@ -981,44 +1075,35 @@ class ConsolidationAdmission:
                 timeout=self._remaining(deadline),
             ).hold(
                 request_id=control_id,
-                operation="seal_and_drain",
+                operation="seal_drain",
                 holder_kind="reserved-state",
                 publish_holder_metadata=False,
             ):
-                with self._gate(timeout=self._remaining(deadline)).hold(
-                    request_id=control_id,
-                    operation="seal_intent",
-                    holder_kind="reserved-state",
-                    publish_holder_metadata=False,
+                current = self._load_state()
+                if current.kind == "consolidation-sealed" and current.phase == "sealed":
+                    if (
+                        current.run_id == run_id
+                        and current.operation_id == operation_id
+                        and current.journal_digest == journal_digest
+                        and current.sealed_at == sealed_at
+                        and current.recorded_at == completed_at
+                        and current.revision == expected_revision + 1
+                    ):
+                        return self._snapshot_from(current, ())
+                    _fail("CONSOLIDATION_SEAL_UNAVAILABLE")
+                if (
+                    current.kind != "consolidation-sealed"
+                    or current.phase != "sealing"
+                    or current.run_id != run_id
+                    or current.operation_id != operation_id
+                    or current.journal_digest != journal_digest
+                    or current.sealed_at != sealed_at
+                    or current.revision != expected_revision
                 ):
-                    self._require_durable_control(control_participant)
-                    current = self._load_state()
-                    if current.kind == "consolidation-sealed" and current.phase == "sealed":
-                        if (
-                            current.run_id == run_id
-                            and current.operation_id == operation_id
-                            and current.journal_digest == journal_digest
-                            and current.sealed_at == sealed_at
-                            and current.recorded_at == completed_at
-                            and current.revision == expected_revision + 2
-                        ):
-                            return self._snapshot_from(current, ())
-                        _fail("CONSOLIDATION_SEAL_UNAVAILABLE")
-                    try:
-                        state = self._store.begin_consolidation(
-                            vault_binding_digest=self.vault_binding_digest,
-                            run_id=run_id,
-                            operation_id=operation_id,
-                            journal_digest=journal_digest,
-                            sealed_at=sealed_at,
-                            expected_revision=expected_revision,
-                        )
-                    except consolidation_seal.ConsolidationSealUnavailable:
-                        _fail("CONSOLIDATION_SEAL_UNAVAILABLE")
+                    _fail("CONSOLIDATION_SEAL_UNAVAILABLE")
 
                 for stopper in tuple(stoppers):
                     self._stop_background(stopper, deadline=deadline)
-
                 while True:
                     participants = tuple(
                         participant
@@ -1038,7 +1123,8 @@ class ConsolidationAdmission:
                 ):
                     self._require_durable_control(control_participant)
                     if any(
-                        participant.kind != "control" for participant in self._load_participants()
+                        participant.kind != "control"
+                        for participant in self._load_participants()
                     ):
                         _fail("CONSOLIDATION_DRAIN_BUSY")
                     try:
@@ -1048,7 +1134,7 @@ class ConsolidationAdmission:
                             action="apply",
                             target_phase="sealed",
                             recorded_at=completed_at,
-                            expected_revision=state.revision,
+                            expected_revision=expected_revision,
                         )
                     except consolidation_seal.ConsolidationSealUnavailable:
                         _fail("CONSOLIDATION_SEAL_UNAVAILABLE")
@@ -1057,6 +1143,74 @@ class ConsolidationAdmission:
                 _fail("CONSOLIDATION_DRAIN_TIMEOUT")
             _fail("CONSOLIDATION_DRAIN_BUSY")
         return self._snapshot_from(state, ())
+
+    def seal_and_drain(
+        self,
+        *,
+        control: object,
+        authority: object,
+        run_id: str,
+        operation_id: str,
+        journal_digest: str,
+        sealed_at: str,
+        completed_at: str,
+        expected_revision: int,
+        timeout: float,
+        stoppers: Sequence[Callable[[], object]] = (),
+    ) -> ConsolidationAdmissionSnapshot:
+        """Persist intent, close admission, drain every process, then seal."""
+        if (
+            not isinstance(timeout, (int, float))
+            or isinstance(timeout, bool)
+            or not math.isfinite(float(timeout))
+            or timeout < 0
+        ):
+            raise ValueError("consolidation drain timeout must be finite and non-negative")
+        if not all(callable(stopper) for stopper in stoppers):
+            raise TypeError("consolidation background stoppers must be callable")
+        if (
+            type(expected_revision) is not int
+            or expected_revision < 0
+            or expected_revision > _MAX_SAFE_INTEGER
+        ):
+            _fail("CONSOLIDATION_SEAL_UNAVAILABLE")
+        deadline = time.monotonic() + float(timeout)
+        current = self._load_state()
+        if current.kind == "consolidation-sealed" and current.phase == "sealed":
+            return self.drain_and_seal(
+                control=control,
+                authority=authority,
+                run_id=run_id,
+                operation_id=operation_id,
+                journal_digest=journal_digest,
+                sealed_at=sealed_at,
+                completed_at=completed_at,
+                expected_revision=expected_revision + 1,
+                timeout=self._remaining(deadline),
+                stoppers=stoppers,
+            )
+        sealing = self.begin_seal(
+            control=control,
+            authority=authority,
+            run_id=run_id,
+            operation_id=operation_id,
+            journal_digest=journal_digest,
+            sealed_at=sealed_at,
+            expected_revision=expected_revision,
+            timeout=self._remaining(deadline),
+        )
+        return self.drain_and_seal(
+            control=control,
+            authority=authority,
+            run_id=run_id,
+            operation_id=operation_id,
+            journal_digest=journal_digest,
+            sealed_at=sealed_at,
+            completed_at=completed_at,
+            expected_revision=sealing.state.revision,
+            timeout=self._remaining(deadline),
+            stoppers=stoppers,
+        )
 
 
 __all__ = [

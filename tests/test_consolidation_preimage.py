@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 import importlib.util
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -165,7 +166,6 @@ def test_materializes_every_canonical_destination_byte_and_publishes_manifest_la
     assert all("_Consolidation/" not in path for path in paths)
     assert all(".graph-commit-receipts/" not in path for path in paths)
     assert "Knowledge Base/.graph.sqlite" not in paths
-
     policy = next(
         entry
         for entry in result.entries
@@ -175,6 +175,64 @@ def test_materializes_every_canonical_destination_byte_and_publishes_manifest_la
     assert result.entry_count == len(result.entries)
     assert result.total_bytes == sum(entry.size for entry in result.entries)
 
+
+def test_preimage_plan_is_read_only_then_materializes_only_its_exact_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, vault, store, binding = _prepared(tmp_path, monkeypatch)
+
+    planned = module.plan_local_destination_preimage(
+        vault,
+        binding=binding,
+        artifact_store=store,
+        now=123,
+    )
+
+    assert planned.binding == binding
+    assert planned.manifest_digest == hashlib.sha256(planned.manifest_bytes).hexdigest()
+    assert not store.root.exists()
+
+    result = module.materialize_planned_destination_preimage(
+        vault,
+        plan=planned,
+        artifact_store=store,
+        now=123,
+    )
+    assert result.manifest_digest == planned.manifest_digest
+    assert result.entries == planned.entries
+    assert module.verify_destination_preimage(
+        result.manifest_ref,
+        binding=binding,
+        artifact_store=store,
+    ) == result
+
+
+def test_malformed_preimage_plan_refuses_before_private_artifact_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, vault, store, binding = _prepared(tmp_path, monkeypatch)
+    planned = module.plan_local_destination_preimage(
+        vault,
+        binding=binding,
+        artifact_store=store,
+        now=123,
+    )
+    malformed = replace(
+        planned,
+        entries=(replace(planned.entries[0], size=True), *planned.entries[1:]),
+    )
+
+    with pytest.raises(module.ConsolidationPreimageUnavailable):
+        module.materialize_planned_destination_preimage(
+            vault,
+            plan=malformed,
+            artifact_store=store,
+            now=123,
+        )
+
+    assert not store.root.exists()
 
 def test_preimage_objects_are_independent_of_later_destination_mutation(
     tmp_path: Path,
