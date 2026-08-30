@@ -413,3 +413,107 @@ def test_mask_memo_survives_a_reload_only_by_being_rebuilt(tmp_path):
 
     _assert_same_answer(before, after)
     assert index._mask_cache is not None
+
+
+# --------------------------------------------------------------------------- #
+# Structural guard: every test above asserts an ANSWER, so all of them stay
+# green if someone reintroduces `matrix[keep]` — the slice is a pure latency
+# defect, not a ranking one. Nothing else in the suite can catch it either:
+# tests/test_latency_gate.py is deliberately model-free, so it never reaches
+# the vector lane, and its ceilings are catastrophic-blowup backstops rather
+# than a ratchet. So assert the mechanism directly.
+# --------------------------------------------------------------------------- #
+
+
+class _ScoredRowSpy(np.ndarray):
+    """An ndarray that records the row count of every matrix it matmuls.
+
+    `__array_finalize__` hands the SAME list to every array derived from this
+    one, so a fancy-index copy (`matrix[keep]`) records into it too — which is
+    precisely the regression this catches: the copy reports the eligible count
+    where the fix reports the full row count.
+    """
+
+    def __array_finalize__(self, obj) -> None:
+        if obj is None:
+            return
+        self.scored_rows = getattr(obj, "scored_rows", None)
+
+    def __matmul__(self, other):
+        if self.ndim == 2 and self.scored_rows is not None:
+            self.scored_rows.append(self.shape[0])
+        return super().__matmul__(other)
+
+
+def _spy_on_scored_rows(index, monkeypatch) -> list[int]:
+    """Make `index.all_vectors()` hand back a spying view of the same matrix."""
+    metadata, matrix = index.all_vectors()
+    scored_rows: list[int] = []
+    spy = matrix.view(_ScoredRowSpy)
+    spy.scored_rows = scored_rows
+    monkeypatch.setattr(index, "all_vectors", lambda: (metadata, spy))
+    return scored_rows
+
+
+def test_the_filtered_scan_scores_every_row_rather_than_a_copied_subset(
+    tmp_path, monkeypatch
+):
+    """The #951 guard: one BLAS pass over the WHOLE matrix, no `matrix[keep]`.
+
+    A reintroduced slice would score only the eligible rows and every
+    correctness test in this file would still pass.
+    """
+    rng = np.random.default_rng(9510)
+    vault = _fresh_vault(tmp_path)
+    index, paths = _populated(vault, rng, files=40, per_file=5)
+    metadata, _ = index.all_vectors()
+    total_rows = len(metadata)
+    allowed = set(paths[:8])  # 8 of 40 files -> 40 of 200 rows eligible
+
+    scored_rows = _spy_on_scored_rows(index, monkeypatch)
+    hits = index.search(_unit_query(rng), 10, allowed_paths=allowed)
+
+    assert len(hits) == 10
+    assert scored_rows == [total_rows], (
+        f"the filtered scan scored {scored_rows} rows of {total_rows}. "
+        "Scoring fewer means the matrix was sliced before the matmul — that is "
+        "the #951 copy, and it costs ~10x on a real vault."
+    )
+
+
+def test_the_unfiltered_scan_also_scores_every_row(tmp_path, monkeypatch):
+    """Control: without a filter there was never a slice, so the count matches."""
+    rng = np.random.default_rng(9511)
+    vault = _fresh_vault(tmp_path)
+    index, _paths = _populated(vault, rng, files=40, per_file=5)
+    metadata, _ = index.all_vectors()
+
+    scored_rows = _spy_on_scored_rows(index, monkeypatch)
+    index.search(_unit_query(rng), 10, allowed_paths=None)
+
+    assert scored_rows == [len(metadata)]
+
+
+def test_the_spy_would_actually_catch_a_reintroduced_slice(tmp_path, monkeypatch):
+    """The guard's own guard — prove the spy fails on the pre-#951 code.
+
+    A structural assertion is only worth its line count if it can fail. This
+    runs `_search_pre_951` (the verbatim slice, transcribed from
+    `git show 9bf3d804`) through the same spy and shows it reports the eligible
+    count instead of the full one.
+    """
+    rng = np.random.default_rng(9512)
+    vault = _fresh_vault(tmp_path)
+    index, paths = _populated(vault, rng, files=40, per_file=5)
+    metadata, _ = index.all_vectors()
+    allowed = set(paths[:8])
+
+    scored_rows = _spy_on_scored_rows(index, monkeypatch)
+    _search_pre_951(index, _unit_query(rng), 10, allowed_paths=allowed)
+
+    assert scored_rows == [40], (
+        "the transcribed pre-#951 slice should score only the 40 eligible rows; "
+        f"got {scored_rows}. If this changed, the spy no longer observes the "
+        "matmul and the guard above is dead."
+    )
+    assert scored_rows != [len(metadata)]
