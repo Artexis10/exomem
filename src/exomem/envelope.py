@@ -105,6 +105,27 @@ FOUNDER_GATE: str = (
     "ratification may ever create one"
 )
 
+#: The confirm-required contract, served rather than implied.
+#:
+#: Three tiers bind it: this marker, the agent contract's in-conversation
+#: confirmation, and the server-side gates that exist today. Only two of the
+#: four `restructure_execution` surfaces HAVE a server-side gate, and the
+#: contract says so instead of letting an agent infer one — v1 adds no new
+#: confirmation parameter, because that is a tool-schema change behind the
+#: documented two-phase rollout.
+#:
+#: Command-free on purpose, exactly like the epistemic commitments:
+#: `commands._filter_bootstrap_payload` deletes any string naming a command the
+#: active surface cannot call, and a ceiling that vanished on a reduced surface
+#: would be a ceiling nobody was told about.
+CONFIRM_REQUIRED: str = (
+    "restructure_execution is confirm-required at every level: obtain explicit user "
+    "confirmation before a restructure application, supersession commit, entity "
+    "creation or deletion. Deletion has a server-side confirm parameter and adoption "
+    "apply is preview-first; supersession and entity creation have no server-side "
+    "gate today — named future work, not an implied one"
+)
+
 _CONFIG_KEY = "envelope"
 
 
@@ -217,12 +238,18 @@ def resolved(level: str | None = None, surface: str | None = None) -> dict:
                 "provenance": "governance-owned",
             }
             continue
-        if action_class in overrides:
-            provenance = "override"
-            disposition = overrides[action_class]
-        elif action_class in FIXED:
+        if action_class in FIXED:
+            # BEFORE the override lookup, deliberately. `stored_overrides`
+            # already drops a stored value for a fixed class, so this branch is
+            # the second of two independent refusals — and it is the one on the
+            # path that actually reaches a client. A ceiling that held only
+            # because the storage reader happened to filter correctly would be
+            # an accident rather than product law.
             provenance = "fixed"
             disposition = FIXED[action_class]
+        elif action_class in overrides:
+            provenance = "override"
+            disposition = overrides[action_class]
         else:
             provenance = "derived"
             disposition = derived[action_class]
@@ -231,7 +258,11 @@ def resolved(level: str | None = None, surface: str | None = None) -> dict:
             "disposition": disposition,
             "provenance": provenance,
         }
-    served: dict = {"level": resolved_level, "classes": classes}
+    served: dict = {
+        "level": resolved_level,
+        "classes": classes,
+        "confirm_required": CONFIRM_REQUIRED,
+    }
     if ignored:
         # Present only when there is something to report. An always-present empty
         # list would spend bytes on every session start to say nothing, and this
