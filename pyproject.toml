@@ -85,6 +85,17 @@ embeddings-onnx = [
     "huggingface-hub>=0.24",  # resolves the published ONNX export from the hub cache
     "sqlite-vec>=0.1.6",
 ]
+# The frozen stance verifier's cross-encoder (claims.VERIFIER_PINS). Optional and
+# default-off twice over: it is in no profile's extra set, so no install path pulls
+# it in, and it still does nothing until EXOMEM_CLAIM_POLARITY_NLI is set AND a
+# repository pin's digest matches the resident weights. Absent, the verifier tier
+# refuses to ABSENCE — review-queue entries carry no model polarity label, and every
+# other surface is byte-identical to a build with no verifier tier at all. Install
+# with `uv sync --extra nli`.
+nli = [
+    "sentence-transformers>=2.7",
+    "torch>=2.12",
+]
 # Server-side media extraction (transduction, not a brain): ASR for audio/video,
 # OCR for images, text for PDFs, MarkItDown for office/html docs. Optional so a lean box
 # runs without it — the code

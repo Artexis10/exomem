@@ -332,12 +332,76 @@ the task is ticked, not estimated.
 
 ## 4. Packaging and diagnostics
 
-- [ ] 4.1 `nli` optional extra in `pyproject.toml`; uninstalled degrades
+- [x] 4.1 `nli` optional extra in `pyproject.toml`; uninstalled degrades
   byte-identically; doctor reports the verifier tier's status (absent /
   admitted / refused-with-reason, including an ignored
   `EXOMEM_CLAIM_NLI_MODEL`) without failing warm.
-- [ ] 4.2 Docs: README degradation-modes table gains the verifier row; the
+  - **Evidence (red, before implementation)** —
+    `pytest tests/test_doctor_frozen_verifier.py -q`:
+    ```
+    >       assert "verifier.frozen_stance" in {check.id for check in report.checks}
+    E       AssertionError: assert 'verifier.frozen_stance' in {'cli.entrypoint', 'command.registry', 'deferred_index_backlog', 'dep.fts5-lexical', 'env.file', 'graph_sync.state', ...}
+    FAILED tests/test_doctor_frozen_verifier.py::test_nli_is_a_default_off_optional_extra
+    FAILED tests/test_doctor_frozen_verifier.py::test_uninstalled_extra_is_invisible_apart_from_the_diagnostic_surface
+    FAILED tests/test_doctor_frozen_verifier.py::test_doctor_reports_the_absent_tier_without_failing_warm
+    FAILED tests/test_doctor_frozen_verifier.py::test_doctor_names_an_ignored_retired_model_knob
+    FAILED tests/test_doctor_frozen_verifier.py::test_doctor_reports_a_refusal_with_its_reason_and_still_does_not_fail
+    FAILED tests/test_doctor_frozen_verifier.py::test_the_verifier_tier_never_reports_fail
+    FAILED tests/test_doctor_frozen_verifier.py::test_the_check_is_wired_into_the_doctor_report
+    7 failed in 2.96s
+    ```
+  - **Evidence (green, after implementation)** — same command: `7 passed in 2.93s`.
+    Doctor regression: `pytest tests/test_doctor_frozen_verifier.py
+    tests/test_doctor.py tests/test_doctor_write_path.py -q` →
+    `115 passed, 1 skipped in 7.77s`.
+  - **Lock parity** — `uv lock` regenerated `uv.lock` for the new extra, and
+    `uv sync --check --locked --no-dev --active --offline --no-cache --inexact`
+    (the command `doctor._check_editable_lock_parity` runs) reports
+    `Would make no changes`. `uv lock` strips the
+    `# x-release-please-version` marker from the `exomem` entry in `uv.lock`;
+    it was restored by hand, so the lock diff is only the `nli` extra.
+  - `pyproject.toml` gains the `nli` extra (sentence-transformers + torch on the
+    same cu132 index the `embeddings` extra uses). Default-off twice over: it is
+    in no profile's extra set (`doctor._profile_extras` never names it, pinned by
+    test), and it still does nothing until the gate is set AND a pin matches.
+  - `doctor._check_frozen_verifier()` (`verifier.frozen_stance`) reports
+    admitted / off / refused-with-reason and never returns `fail` — the tier is
+    optional and default-off, so reporting its absence as a failure would only
+    train an operator to ignore doctor. It warns exactly where a stated intent is
+    unmet: the gate is on but the verifier is refused, or a value sits in the
+    retired `EXOMEM_CLAIM_NLI_MODEL` knob, which the message and remediation both
+    name. It stays inside doctor's never-fetches guarantee: admission resolves
+    the digest from the local cache and refuses before any load when nothing is
+    resident, so the only reachable load is offline-first over resident weights.
+  - **Uninstalled degrades byte-identically** — this whole suite runs with
+    `sentence_transformers` genuinely absent (the test asserts that, so it cannot
+    pass vacuously): `verifier_polarity` returns None and a proximity finding's
+    `meta` and `detail` come back identical after an enrichment pass.
+
+- [x] 4.2 Docs: README degradation-modes table gains the verifier row; the
   hosted-inference-boundary doc cross-references the admission rule.
+  - `README.md`: the Configuration table gains `EXOMEM_CLAIM_LEVEL` and
+    `EXOMEM_CLAIM_POLARITY_NLI`, followed by a note that `EXOMEM_CLAIM_NLI_MODEL`
+    is retired and reported as ignored by doctor. A **Degradation modes** table
+    is added — the file had none, so it was created rather than extended, with
+    the pre-existing tiers (semantic search, media extraction, sqlite-vec)
+    stated alongside the new verifier row. The verifier row says what absence
+    means concretely: no model polarity label at all, never a substitute label
+    under the verifier's name; every other surface byte-identical; only doctor
+    names it.
+  - `docs/hosted-inference-boundary.md`: a new section, "The one model-backed
+    tier that exists, and the rule it runs under", placed before the standing
+    costs. It states the tier is local-only, that hosted activation is not
+    pre-authorized by that document, and that the admission rule — pinned
+    identity, refusal-degrades-to-absence, fixed classification input,
+    provenance-marked review-queue-only output — is the shape any model-backed
+    tier must take, inherited by every hosted candidate in its table. It points
+    at the `frozen-verifiers` capability spec for the normative statement.
+  - Docs/packaging-sensitive suites unaffected: `pytest
+    tests/test_scaffold_no_leak.py tests/test_package_skills.py
+    tests/test_memorybench_setup.py tests/test_product_flow_benchmark.py -q` →
+    `42 passed, 11 skipped in 6.73s` (the skips are the absent pinned Bun
+    toolchain, as on the baseline).
 
 ## 5. Acceptance
 

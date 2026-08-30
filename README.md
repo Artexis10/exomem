@@ -485,6 +485,24 @@ The server reads environment variables or a `.env` file. The main ones are:
 | `EXOMEM_ASR_BACKEND` | ASR engine: `mlx` (Apple Silicon Metal GPU, needs the `media-mlx` extra) or `faster-whisper` (CUDA/CPU). Default auto-selects MLX on Apple Silicon, else faster-whisper. |
 | `EXOMEM_MLX_WHISPER_MODEL` | HF repo for the MLX ASR model (default `mlx-community/whisper-large-v3-mlx`; use `mlx-community/whisper-large-v3-turbo` for speed). |
 | `EXOMEM_TESSERACT_CMD` | Path to the `tesseract` binary if not auto-discovered. |
+| `EXOMEM_CLAIM_LEVEL` | `1` enables the claim-level subsystem (default off). |
+| `EXOMEM_CLAIM_POLARITY_NLI` | `1` opts into the frozen stance verifier (default off). It still runs only if a repository pin matches the resident weights. |
+
+`EXOMEM_CLAIM_NLI_MODEL` is **retired**. Model identity comes only from the
+in-repo pin registry; a value left in it selects nothing and is reported as
+ignored by `exomem doctor`.
+
+### Degradation modes
+
+Optional tiers are absent by default and degrade to silence, not to a
+substitute. What "absent" means, per tier:
+
+| Tier | Install | When absent |
+| --- | --- | --- |
+| Semantic search | `--extra embeddings` | Keyword/BM25 retrieval; every surface still answers. |
+| Media extraction | `--extra media` | Server-side OCR/ASR/PDF extraction is skipped; the model-driven upload `text` path still works. |
+| Vector KNN (`sqlite-vec`) | with `embeddings` | Exact in-memory scan over the same vectors; identical results, more work. |
+| Frozen stance verifier | `--extra nli` | Review-queue entries carry **no** model polarity label — never a differently-produced label under the verifier's name. Write responses, rankings, and every other surface are byte-identical to a build with no verifier tier at all; only `exomem doctor` names the absence. The verifier runs only under a pinned weights digest, a versioned label map, and a green fixture set, and it labels review-queue entries only. |
 
 Legacy `EXOMEM_*` names (from the project's former working name, exomem) remain
 honored: each is promoted to its `EXOMEM_*` equivalent at startup, with an

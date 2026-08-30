@@ -37,6 +37,31 @@ projection) before it earns a proposal.
 | Multimodal extraction | OCR/ASR for clients without media extras | Multimodal family: PNG/PDF-only facts become answerable (factual_qa pass on those queries goes from unsupported/fail to pass) with citation identity intact |
 | Batch evaluation | Running this benchmark's judge phases server-side | Judge N-sample variance unchanged vs desk-side backends; no credential ever enters the runner (file-handshake preserved) |
 
+## The one model-backed tier that exists, and the rule it runs under
+
+The frozen stance verifier (claim polarity on the contradiction review queue)
+is the only model-backed verifier in the product, and it is **local-only**;
+hosted activation is a separate decision this document does not pre-authorize.
+It is not an exception to the pure-substrate rule — it is the shape any
+model-backed tier has to take to be admissible at all, and any hosted
+inference proposal above inherits it:
+
+- A **pinned identity**: a repository pin naming the model, the sha256 digest
+  of its resolved weights, the label-map version, and the fixture set that
+  verified that pair. No runtime configuration, environment value, or vault
+  content may add, select, or alter a pin.
+- **Refusal degrades to absence.** Gate unset, digest mismatch, missing
+  weights, missing dependency, or a red fixture set means no label — never a
+  differently-produced label wearing the verifier's name.
+- **A fixed classification input.** Two claim texts enter as a classification
+  pair; there is no prompt assembly and no generation, so vault text never
+  reaches instruction position.
+- **Provenance-marked review-queue output only.** Labels carry their method,
+  model digest, and label-map version, and never enter note canon, decisions,
+  retrieval, ranking, policy, or any synchronous write path.
+
+See the `frozen-verifiers` capability spec for the normative statement.
+
 ## Standing costs any proposal must price in
 
 Added latency and infrastructure cost; a larger privacy surface (content
