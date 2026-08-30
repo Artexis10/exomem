@@ -619,6 +619,12 @@ def collect_candidates(
             else:
                 # Fallback: the pre-existing 1-hop outbound-wikilink expansion,
                 # byte-identical to the pre-change ordering. Do not refactor.
+                # `graph.expand` is reported by BOTH branches, and the manual
+                # timers this replaced split the fallback at exactly this point:
+                # `graph.resolver` was resolver construction only, and everything
+                # after it was `graph.expand`. Wrapping the whole branch in one
+                # `graph.resolver` span both drops a stage other code reads and
+                # bills the expansion loop as resolver time.
                 with _span(timings, "graph.resolver"):
                     resolver = (
                         get_query_resolver(
@@ -626,6 +632,7 @@ def collect_candidates(
                         )
                         if graph_seeds else None
                     )
+                with _span(timings, "graph.expand"):
                     seen_target = set()
                     for seed_rel in graph_seeds:
                         page = page_of(seed_rel)
