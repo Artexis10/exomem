@@ -306,6 +306,12 @@ def test_the_once_withheld_red_fixture_loads_after_acknowledgment() -> None:
 
     scenario = load_scenario(FIXTURES / "red-sequence3-withheld-family.yaml")
     assert scenario.family_id == "f27"
+    # The fixture is deliberately minimal — one turn, not a conformant f27
+    # phase — but it must not carry the one dangerous shape: a turn with no
+    # seed snapshot before it, which would be scored against a previous arm's
+    # post-run vault if a sweep ever picked it up.
+    (phase,) = scenario.phases
+    assert [op.op for op in phase.ops[:2]] == ["configure", "snapshot"]
 
 
 def test_the_shipped_f27_scenario_loads_now_the_receipt_is_acknowledged() -> None:
@@ -375,6 +381,28 @@ def test_the_shipped_scenario_replays_the_corpus_turn_for_turn() -> None:
             SEQUENCE_THREE_ASSERTIONS
         )
         assert {expectation.subject for expectation in phase.expect} == {CORPUS_ID}
+
+
+def test_the_manifest_amendment_status_follows_the_receipt(monkeypatch) -> None:
+    """Both branches of the derived status, so the pending arm outlives its era.
+
+    Sequence 3 is acknowledged, so the live branch is the released one; the
+    pending branch stays reachable because sequence 2 proves the mechanism is
+    not retired, and a future amendment will need it verbatim.
+    """
+
+    from epistemic.journeys import f27_replay as journey
+
+    released = journey.amendment_status()
+    assert released["amendment_sequence"] == 3
+    assert released["amendment_acknowledged"] is True
+    assert "comparative claim" in released["claim_status"]
+    assert "expected-partial" in released["claim_status"]
+
+    monkeypatch.setattr(journey, "withheld_family_ids", lambda _root: frozenset({"f27"}))
+    pending = journey.amendment_status()
+    assert pending["amendment_acknowledged"] is False
+    assert "not a comparative claim" in pending["claim_status"]
 
 
 def test_the_turn_for_turn_pin_refuses_a_phase_missing_its_seed_op(
@@ -1362,6 +1390,12 @@ def test_the_full_offline_path_runs_for_both_arms(tmp_path) -> None:
 
     report = json.loads((out / "report.json").read_text(encoding="utf-8"))
     manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    # The artifact states the receipt's own acknowledgment status, derived —
+    # not remembered. Hardcoding it already lied once (review finding, 2026-08-30).
+    assert manifest["amendment_sequence"] == 3
+    assert manifest["amendment_acknowledged"] is True
+    assert "not a comparative claim" not in manifest["claim_status"]
+    assert "expected-partial" in manifest["claim_status"]
     by_arm = {row["arm"]: row for row in report["arms"]}
     assert by_arm["hookless"]["coverage"]["intent"] == {
         "landed": 4,

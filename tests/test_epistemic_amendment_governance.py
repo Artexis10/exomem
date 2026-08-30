@@ -669,7 +669,7 @@ def test_the_acknowledged_amendment_releases_its_own_families() -> None:
     ``AmendmentAcknowledgmentPendingError`` before 2026-08-15 now returns. It
     withholds nothing *of sequence 1*; sequence 2 is a separate, still-pending
     receipt and is refused by
-    :func:`test_the_loader_gate_releases_sequence_one_and_withholds_sequence_two`
+    :func:`test_the_loader_gate_releases_sequences_one_and_three_and_withholds_two`
     below, so the old name for this test — ``withholds_nothing`` — became a claim
     it never made.
     """
@@ -686,6 +686,9 @@ def test_the_acknowledged_amendment_releases_its_own_families() -> None:
     for family_id in AMENDED_FAMILIES:
         require_amended_families_released(identity, (family_id,))
     require_amended_families_released(identity, ("f01", *AMENDED_FAMILIES))
+    # Sequence 3 releases through the same identity-level call (spec: the
+    # refusal covers run-manifest construction too, not only the loader).
+    require_amended_families_released(identity, SEQUENCE_THREE_FAMILIES)
 
 
 def test_the_pending_refusal_is_still_armed_for_a_future_amendment() -> None:

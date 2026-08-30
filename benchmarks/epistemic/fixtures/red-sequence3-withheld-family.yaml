@@ -16,6 +16,8 @@ phases:
       - op: configure
         ref: hookless-maximal
         detail: "no plugin; prominence maximal"
+      - op: snapshot
+        ref: s-hookless-seed
       - op: agent_turn
         ref: t01-take-on-two
         detail: "This week I'm taking on the Batch layout draft."
