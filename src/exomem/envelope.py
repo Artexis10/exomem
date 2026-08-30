@@ -119,11 +119,28 @@ FOUNDER_GATE: str = (
 #: active surface cannot call, and a ceiling that vanished on a reduced surface
 #: would be a ceiling nobody was told about.
 CONFIRM_REQUIRED: str = (
-    "restructure_execution is confirm-required at every level: obtain explicit user "
-    "confirmation before a restructure application, supersession commit, entity "
-    "creation or deletion. Deletion has a server-side confirm parameter and adoption "
-    "apply is preview-first; supersession and entity creation have no server-side "
-    "gate today — named future work, not an implied one"
+    "the confirm-required surfaces are restructure application, supersession commit, "
+    "entity creation and deletion. Deletion has a server-side confirm parameter and "
+    "adoption apply is preview-first; supersession and entity creation have no "
+    "server-side gate today — named future work, not an implied one"
+)
+
+#: The protocol the agent contract teaches, per action the agent is about to
+#: take. Four moves, in order, and the order is the mechanism: an agent that
+#: checks the disposition before naming the class has already decided which
+#: cell it is reading from.
+#:
+#: Command-free for the same reason as everything else served here.
+DECIDER_PROTOCOL: tuple[str, ...] = (
+    "name the action class before acting; an unclassified action has no envelope "
+    "cell and therefore no authority",
+    "check the ceiling: an intent above it becomes a proposal, never an act",
+    "check the disposition — off: do not initiate, though an explicit request is "
+    "never blocked; advisory: surface it in the user's own language and stop; "
+    "silent: act, narrating as the prominence contract says; confirm or "
+    "confirm-shortcut: obtain the confirmation first, a confirm-shortcut being an "
+    "inline one-action approval of that one item",
+    "record the outcome through triage, so the decision is durable and countable",
 )
 
 _CONFIG_KEY = "envelope"
@@ -261,7 +278,11 @@ def resolved(level: str | None = None, surface: str | None = None) -> dict:
     served: dict = {
         "level": resolved_level,
         "classes": classes,
+        "protocol": list(DECIDER_PROTOCOL),
         "confirm_required": CONFIRM_REQUIRED,
+        # Named, so the agent does not improvise a refusal -- or, worse,
+        # improvise a consent -- when a user asks for standing delegation.
+        "founder_gate": FOUNDER_GATE,
     }
     if ignored:
         # Present only when there is something to report. An always-present empty

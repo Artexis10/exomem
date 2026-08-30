@@ -96,3 +96,136 @@ def test_a_family_decision_moves_no_envelope_class(config, vault: Path) -> None:
 
     after = commands.op_review_memory(vault, mode="dispositions")["envelope"]["classes"]
     assert after == before
+
+
+# --------------------------------------------------- 4.2 the taught contract
+
+
+REPO = Path(__file__).resolve().parents[1]
+SCAFFOLD_SKILL = REPO / "src/exomem/_scaffold/_Schema/SKILL.md"
+PLUGIN_SKILL = REPO / "plugins/claude-code/skills/exomem/SKILL.md"
+HOOKLESS_DOC = REPO / "docs/prominence.md"
+#: The heading each prose carrier files the teaching under. One name, so a
+#: carrier that renames its section fails the count rather than silently
+#: measuring zero lines and passing.
+TEACHING_HEADING = "## What Exomem does on its own"
+#: D5. Fifty TOTAL across four carriers was arithmetic that could not hold six
+#: classes, four dispositions and a protocol; per-carrier is the honest budget.
+LINE_BUDGET = 50
+
+
+def _markdown_section(path: Path, heading: str) -> list[str]:
+    """The lines of one `##` section, heading excluded, blanks excluded."""
+    lines = path.read_text(encoding="utf-8").splitlines()
+    try:
+        start = lines.index(heading)
+    except ValueError:  # pragma: no cover - the assertion below reports it
+        return []
+    body: list[str] = []
+    for line in lines[start + 1 :]:
+        if line.startswith("## "):
+            break
+        if line.strip():
+            body.append(line)
+    return body
+
+
+def _payload_lines(block: object, prefix: str = "") -> list[str]:
+    """One measured line per scalar leaf of the served envelope block.
+
+    A served payload has no lines of its own, so the budget needs a definition
+    rather than a guess. One line per leaf is the measure a reader actually
+    pays for: it counts every distinct thing the client is told and is stable
+    under reformatting.
+    """
+    if isinstance(block, dict):
+        out: list[str] = []
+        for key, value in block.items():
+            out.extend(_payload_lines(value, f"{prefix}{key}."))
+        return out
+    if isinstance(block, (list, tuple)):
+        out = []
+        for index, value in enumerate(block):
+            out.extend(_payload_lines(value, f"{prefix}{index}."))
+        return out
+    return [f"{prefix.rstrip('.')}: {block}"]
+
+
+def _bootstrap_envelope(vault: Path) -> dict:
+    return commands.op_bootstrap(vault, profile="compact")["engagement"]["envelope"]
+
+
+def _carriers(vault: Path) -> dict[str, list[str]]:
+    return {
+        "compact_bootstrap": _payload_lines(_bootstrap_envelope(vault)),
+        "scaffold_skill": _markdown_section(SCAFFOLD_SKILL, TEACHING_HEADING),
+        "plugin_skill": _markdown_section(PLUGIN_SKILL, TEACHING_HEADING),
+        "hookless_instructions": _markdown_section(HOOKLESS_DOC, TEACHING_HEADING),
+    }
+
+
+def test_every_carrier_teaches_the_envelope_within_its_line_budget(
+    config, vault: Path
+) -> None:
+    for name, lines in _carriers(vault).items():
+        assert lines, f"{name} carries no envelope teaching at all"
+        assert len(lines) <= LINE_BUDGET, (
+            f"{name} spends {len(lines)} measured lines, over the {LINE_BUDGET} budget"
+        )
+
+
+def test_every_carrier_states_the_decider_protocol(config, vault: Path) -> None:
+    """Name the class, check the ceiling, honour the disposition, record it."""
+    for name, lines in _carriers(vault).items():
+        text = "\n".join(lines).lower()
+        assert "action class" in text or "class" in text, name
+        assert "ceiling" in text, name
+        assert "proposal" in text, f"{name} does not say an above-ceiling intent is a proposal"
+        for disposition in ("off", "advisory", "silent", "confirm"):
+            assert disposition in text, f"{name} does not name the {disposition} disposition"
+        assert "triage" in text, f"{name} does not say to record the outcome"
+
+
+def test_every_carrier_names_the_founder_gate(config, vault: Path) -> None:
+    """Unnamed, an agent improvises a refusal — or worse, improvises consent."""
+    for name, lines in _carriers(vault).items():
+        text = "\n".join(lines).lower()
+        assert "founder" in text, name
+        assert "restructure" in text, name
+
+
+def test_compact_bootstrap_names_all_six_classes_with_ceiling_and_provenance(
+    config, vault: Path
+) -> None:
+    served = _bootstrap_envelope(vault)
+    text = "\n".join(_payload_lines(served)).lower()
+
+    for action_class in envelope.ACTION_CLASSES:
+        assert action_class in text, action_class
+    assert "governance" in text, "disclosure must be marked governance-owned"
+    for provenance in ("fixed", "derived"):
+        assert provenance in text
+
+
+def test_the_hookless_block_defers_to_the_served_envelope(config, vault: Path) -> None:
+    """It must not restate a table that the server already answers for.
+
+    A pasted block is the one carrier nobody re-pastes when the product moves,
+    so a hardcoded table there is a table that goes stale in every account that
+    ever used it.
+    """
+    section = "\n".join(_markdown_section(HOOKLESS_DOC, TEACHING_HEADING)).lower()
+
+    assert "bootstrap" in section
+    assert "engagement" in section
+    # Not a table: the six ids are the thing the server reports, so restating
+    # them here is exactly the drift this defers away from.
+    restated = [name for name in envelope.ACTION_CLASSES if name in section]
+    assert restated == [], f"the pasted block restates the class table: {restated}"
+
+
+def test_the_plugin_skill_copy_matches_the_scaffold(config, vault: Path) -> None:
+    """Two committed copies of one teaching is the drift hazard this repo keeps hitting."""
+    assert _markdown_section(PLUGIN_SKILL, TEACHING_HEADING) == _markdown_section(
+        SCAFFOLD_SKILL, TEACHING_HEADING
+    )

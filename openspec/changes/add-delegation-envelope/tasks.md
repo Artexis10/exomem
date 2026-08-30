@@ -271,12 +271,73 @@ the task is ticked, not estimated.
   row (a family carrying `quiet_offered_at` while its disposition is still
   `normal`) is filtered OUT. This view answers "what have I quieted", and a row
   reading `normal` would be an answer to a different question.
-- [ ] 4.2 Bootstrap + scaffold/plugin SKILL.md copies + hookless
+- [x] 4.2 Bootstrap + scaffold/plugin SKILL.md copies + hookless
   custom-instructions block teach the decider protocol and how to discover the
   registered family vocabulary; ≤ 50 lines per carrier, counted by test;
   compact payload measured before/after and recorded here within the
   `COMPACT_BYTE_CEILING` discipline. Scaffold no-leak and skill-sync tests
   stay green.
+
+  Evidence (red) — `pytest tests/test_delegation_envelope_surfaces.py -q`:
+
+  ```
+  >       assert "bootstrap" in section
+  E       AssertionError: assert 'bootstrap' in ''
+  FAILED …::test_every_carrier_teaches_the_envelope_within_its_line_budget
+  FAILED …::test_every_carrier_states_the_decider_protocol
+  FAILED …::test_every_carrier_names_the_founder_gate
+  FAILED …::test_the_hookless_block_defers_to_the_served_envelope
+  4 failed, 6 passed in 1.19s
+  ```
+
+  Evidence (green) — same command: `10 passed in 1.08s`.
+
+  **Measured lines per carrier** (budget 50; the served payload has no lines of
+  its own, so its measure is one line per scalar leaf — every distinct thing the
+  client is told):
+
+  | Carrier | Measured lines |
+  |---|---|
+  | compact bootstrap (`engagement.envelope`) | 25 |
+  | scaffold `SKILL.md` (`## What Exomem does on its own`) | 46 |
+  | plugin `SKILL.md` (same section, generated from the scaffold) | 46 |
+  | hookless custom-instructions block (`docs/prominence.md`, same heading) | 26 |
+
+  **Measured compact bytes.** Before 60,885 — exactly the figure the previous
+  ceiling entry recorded, so nothing else moved in between. After **62,756**:
+  **+1,871**, itemised as `classes` 610, `protocol` 622, `confirm_required` 323,
+  `founder_gate` 204, `level` 20, plus 75 for the `family_disposition_reading`
+  amendment that names the registered-family vocabulary and the envelope.
+
+  `COMPACT_BYTE_CEILING` 61,400 -> **63,300**, with the full argument and the
+  itemisation written into the constant's own docstring as that discipline
+  requires. 544 bytes of headroom, just clear of `HEADROOM_WARNING_BYTES`.
+  `MINIMUM_SAVING_RATIO` untouched; the saving moved 35.29% -> 34.60%. Two
+  trims were taken first out of this change's own text: `confirm_required` no
+  longer restates protocol step 3's "obtain the confirmation first" (-80 B), and
+  `ignored` is emitted only when a stored value could not be used rather than as
+  an always-present empty list (-15 B per session).
+
+  One neighbouring pin moved and it is recorded rather than nudged:
+  `tests/test_record_public_surface.py::test_compact_bootstrap_puts_record_route_before_semantic_authoring`
+  asserted `"record"` appears within the first 8,192 bytes. That offset is a
+  PROXY for "reachable early" — the real ordering property is the relative
+  assertion beside it — and `engagement` precedes the action catalogue by
+  design, so the proxy was re-cut to 10 KiB (still the first sixth of the
+  payload) with the reason in the test.
+
+  Scaffold no-leak and skill-sync green:
+  `pytest tests/test_plugin_sync.py tests/test_scaffold_no_leak.py
+  tests/test_package_skills.py -q` -> `28 passed`. The generated
+  `plugins/claude-code/skills/exomem/SKILL.md` was refreshed with
+  `exomem package-skills --plugin-root plugins/claude-code`; the version field
+  in `plugin.json` was left at its committed value, which that test excludes
+  from comparison because it legitimately differs between a checkout and a
+  release build. Wider bootstrap/skill scope:
+  `pytest tests/test_bootstrap.py tests/test_epistemic_bootstrap_contract.py
+  tests/test_bootstrap_capabilities.py tests/test_record_public_surface.py
+  tests/test_install_skill.py tests/test_workflow_skills.py … -q`
+  -> `118 passed` with the one re-cut pin above.
 
 ## 5. Acceptance (spec round-trip)
 

@@ -283,7 +283,71 @@ from exomem import commands
 #:
 #: 515 bytes is spendable budget, not licence. The next addition of this size
 #: argues for itself the way the raises above had to.
-COMPACT_BYTE_CEILING = 61_400
+#:
+#: Raised a FIFTH time, and it argues for itself the way that line demanded.
+#: Measured on this tree with the same method: the floor at 61,400 was 60,885 --
+#: exactly what the trim above recorded, so nothing else moved in between. The
+#: delegation envelope adds 1,871 bytes, taking compact to 62,756:
+#:
+#:   engagement.envelope.classes    610  six action classes, each with its
+#:                                       ceiling, its disposition or the
+#:                                       governance-owned marker, and whether the
+#:                                       disposition is fixed, derived or
+#:                                       overridden
+#:   engagement.envelope.protocol   622  the four-move decider protocol: name the
+#:                                       class, check the ceiling, honour the
+#:                                       disposition, record the outcome
+#:   …confirm_required              323  which surfaces are confirm-required, and
+#:                                       which of them actually have a
+#:                                       server-side gate today
+#:   …founder_gate                  204  the standing-delegation refusal, by name
+#:   …level                          20  the level the derivation came from
+#:   post_write.family_disposition_
+#:     reading                       75  the dispositions view lists the
+#:                                       registered family vocabulary and the
+#:                                       envelope, not only what is quiet
+#:
+#: Why the bytes earn their place, and this is the strongest case any raise here
+#: has had. Before this payload, a hookless client received a contract about how
+#: EAGER Exomem should be and nothing at all about what it is ALLOWED to do on
+#: its own. An agent with no ceilings has to invent them, and the two ways it
+#: invents are both defects the no-nudge programme exists to prevent: it treats a
+#: permissive level as permission to act, or it asks about everything. The
+#: ceilings are product law and the payload is the only place a generic MCP
+#: client ever learns they exist. `founder_gate` is 204 bytes that stop an agent
+#: improvising either a refusal or a CONSENT when a user asks for standing
+#: delegation, which is the one request in this contract that must never be
+#: granted by improvisation.
+#:
+#: What was cut before this number was accepted. `confirm_required` opened by
+#: restating "obtain explicit user confirmation first", which IS protocol step 3;
+#: it now opens by naming the four surfaces instead (-80 B, no rule lost, both
+#: halves of the server-side-gap statement intact). `ignored` is emitted only
+#: when a stored value could not be used, rather than as an always-present empty
+#: list (-15 B on every ordinary session). The class rows carry no `range` key:
+#: the range is enforced at write time and refused by name, so serving it would
+#: be documentation of an error message.
+#:
+#: What was NOT cut, and why. The per-class `ceiling` (132 B across six rows)
+#: repeats a constant table, and it stays: a client that has to look the ceiling
+#: up elsewhere is a client that will act without one. The `confirm-shortcut`
+#: gloss inside protocol step 3 stays because without it the word reads as
+#: "skip the confirmation", which is exactly the misreading the disposition's
+#: definition exists to prevent.
+#:
+#: The new ceiling is 63,300: 544 bytes of headroom, just clear of
+#: HEADROOM_WARNING_BYTES, and deliberately less than the 515-plus-1,871 this
+#: raise consumed. `MINIMUM_SAVING_RATIO` is untouched; the saving moved
+#: 35.29% -> 34.60%, because bytes added to compact make compact resemble full a
+#: little more, and it stays far above the 15% floor.
+#:
+#: The two large redundancies recorded above -- the 9,042-byte
+#: `authoring_contract.semantic_units.contract` duplication and the 1,602-byte
+#: `tool_catalog` -- are STILL the place the next trim starts. Neither is prose
+#: and both are surface decisions rather than trims, which is why this change did
+#: not take them; but a payload carrying 10.6 KB of duplication has no business
+#: raising this ceiling a sixth time before it takes one of them.
+COMPACT_BYTE_CEILING = 63_300
 
 #: The defect was compact and full being near-identical. A profile that does not
 #: measurably differ from full is not a profile.
