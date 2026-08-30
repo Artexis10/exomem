@@ -1390,38 +1390,39 @@ def find(
                 failed_out=failed,
             )
     else:
-        hits = _find_semantic(
-            vault_root,
-            query=query,
-            query_norm=query_norm,
-            types=types,
-            projects=projects,
-            tags=tags,
-            speakers=speakers,
-            file_types=file_types,
-            exclude_file_types=exclude_file_types,
-            limit=limit,
-            scope=walk_scope,
-            mode=mode,
-            graph=graph,
-            rerank=rerank,
-            rerank_max_candidates=rerank_max_candidates,
-            auto_rerank=auto_rerank,
-            temporal=temporal,
-            intent=intent,
-            prefer_compiled=prefer_compiled,
-            prefer_active=prefer_active,
-            prefer_used=prefer_used,
-            config=resolved_config,
-            timings=timings,
-            snapshot=snapshot,
-            page_memo=page_memo,
-            degraded_out=degraded,
-            failed_out=failed,
-            eligible_paths=eligible_paths,
-            recall_scope="kb" if scope == "kb-only" else "vault",
-            retrieval_trace=retrieval_trace,
-        )
+        with _span(timings, "semantic.search"):
+            hits = _find_semantic(
+                vault_root,
+                query=query,
+                query_norm=query_norm,
+                types=types,
+                projects=projects,
+                tags=tags,
+                speakers=speakers,
+                file_types=file_types,
+                exclude_file_types=exclude_file_types,
+                limit=limit,
+                scope=walk_scope,
+                mode=mode,
+                graph=graph,
+                rerank=rerank,
+                rerank_max_candidates=rerank_max_candidates,
+                auto_rerank=auto_rerank,
+                temporal=temporal,
+                intent=intent,
+                prefer_compiled=prefer_compiled,
+                prefer_active=prefer_active,
+                prefer_used=prefer_used,
+                config=resolved_config,
+                timings=timings,
+                snapshot=snapshot,
+                page_memo=page_memo,
+                degraded_out=degraded,
+                failed_out=failed,
+                eligible_paths=eligible_paths,
+                recall_scope="kb" if scope == "kb-only" else "vault",
+                retrieval_trace=retrieval_trace,
+            )
 
     if retrieval_trace is not None and (mode == "keyword" or not query_norm):
         retrieval_trace.record_keyword_hits(hits, filter_only=not query_norm)
@@ -1888,6 +1889,7 @@ def _vector_unit_candidates(
     allowed_parent_paths: set[str],
     degraded_out: list[str] | None,
     failed_out: list[str] | None,
+    timings: FindTimings | None,
 ) -> tuple[list[Any], dict[str, Any], str]:
     """Return bounded vector candidates without opening every Markdown parent."""
     model_name = "BAAI/bge-base-en-v1.5"
@@ -1908,7 +1910,8 @@ def _vector_unit_candidates(
         from . import embeddings
 
         index = embeddings.get_embedding_index(vault_root)
-        query_vector = embeddings.embed_texts([query], is_query=True)[0]
+        with _span(timings, "vector.unit.embed"):
+            query_vector = embeddings.embed_texts([query], is_query=True)[0]
         hits = index.search_semantic_units(
             query_vector,
             k=candidate_limit,
@@ -2173,6 +2176,7 @@ def _find_semantic_units(
             allowed_parent_paths=snapshot.recall_paths(scope),
             degraded_out=degraded_out,
             failed_out=failed_out,
+            timings=timings,
         )
         if (
             vector_allowed_refs is not None
@@ -3274,136 +3278,132 @@ def _find_semantic(
     )
     hits: list[Hit] = []
     seen: set[str] = set()
-    _filter_t0 = time.perf_counter()
-    for rel_path, _score in fused:
-        if rel_path in seen:
-            continue
-        seen.add(rel_path)
-        if rel_path.rsplit("/", 1)[-1].lower() in _NAVIGATION_BASENAMES:
-            continue
-        # Final egress guard: stale/non-projected sidecars can nominate paths,
-        # but they must not cause a raw Record to be hydrated even transiently.
-        if not recall_policy.is_recall_candidate(vault_root, vault_root / rel_path):
-            continue
-        page = _page_of(rel_path)
-        if page is None:
-            continue
-        if eligible_paths is not None and rel_path not in eligible_paths:
-            continue
-        if not _passes_filters(
-            page,
-            vault_root=vault_root,
-            types=types,
-            projects=projects,
-            tags=tags,
-            speakers=speakers,
-            file_types=file_types,
-            exclude_file_types=exclude_file_types,
-        ):
-            continue
-        keyword_excerpt = _make_excerpt(page, query_norm)
-        if (
-            rel_path not in vector_paths
-            and rel_path not in graph_set
-            and rel_path not in keyword_set
-            and rel_path not in clip_set
-            and rel_path not in frame_attribution
-            and keyword_excerpt is None
-        ):
-            # No literal match, not a graph hop, not vector-ranked, not in
-            # the keyword scan. Try stem match before dropping — recovers
-            # morphology ("regulation" matching a "regulator" page). With the
-            # semantic lanes absent (see flag above) the gate relaxes from
-            # all-stems to a strict majority of the query's words anchored by
-            # at least one content word, so BM25's own top-ranked evidence
-            # survives interrogative phrasing without function-word overlap
-            # alone retaining junk.
-            if semantic_lanes_absent:
-                present, total, content_present = _stem_word_coverage(
-                    page, degraded_query_words
-                )
-                stems_ok = 2 * present > total and content_present > 0
-            else:
-                stems_ok = _stem_tokens_present(page, query_norm)
-            if not stems_ok:
+    with _span(timings, "filter_hits"):
+        for rel_path, _score in fused:
+            if rel_path in seen:
                 continue
-            keyword_excerpt = _stem_anchored_excerpt(page, query_norm)
-        elif (
-            rel_path in graph_set or rel_path in clip_set or rel_path in frame_attribution
-        ) and keyword_excerpt is None:
-            # Graph-hop neighbour, CLIP visual match, or frame-collapsed parent:
-            # no all-tokens-present requirement (the reason for surfacing is
-            # connectivity / visual similarity / a child frame's text, not this
-            # page's lexical overlap). Prefer the matched frame's OCR text as the
-            # "why", else the sidecar's leading body.
-            attr = frame_attribution.get(rel_path)
-            if attr is not None:
-                fpage = _CACHE.get(vault_root / (attr[0] + ".md"), vault_root)
-                if fpage is not None:
-                    keyword_excerpt = _make_excerpt(fpage, query_norm)
-            if keyword_excerpt is None:
-                body = page.body.strip()
-                keyword_excerpt = _collapse(body[:EXCERPT_MAX_LEN]) if body else ""
-        chunk = chunk_text_by_path.get(rel_path)
-        excerpt = _semantic_excerpt(page, query_norm, chunk, keyword_excerpt)
-        is_graph_only = (
-            rel_path in graph_set
-            and rel_path not in vector_rank_by_path
-            and rel_path not in bm25_rank_by_path
-        )
-        hit_activation: float | None = None
-        hit_usage_mult: float | None = None
-        if usage_map:
-            from . import usage as usage_module
+            seen.add(rel_path)
+            if rel_path.rsplit("/", 1)[-1].lower() in _NAVIGATION_BASENAMES:
+                continue
+            # Final egress guard: stale/non-projected sidecars can nominate paths,
+            # but they must not cause a raw Record to be hydrated even transiently.
+            if not recall_policy.is_recall_candidate(vault_root, vault_root / rel_path):
+                continue
+            page = _page_of(rel_path)
+            if page is None:
+                continue
+            if eligible_paths is not None and rel_path not in eligible_paths:
+                continue
+            if not _passes_filters(
+                page,
+                vault_root=vault_root,
+                types=types,
+                projects=projects,
+                tags=tags,
+                speakers=speakers,
+                file_types=file_types,
+                exclude_file_types=exclude_file_types,
+            ):
+                continue
+            keyword_excerpt = _make_excerpt(page, query_norm)
+            if (
+                rel_path not in vector_paths
+                and rel_path not in graph_set
+                and rel_path not in keyword_set
+                and rel_path not in clip_set
+                and rel_path not in frame_attribution
+                and keyword_excerpt is None
+            ):
+                # No literal match, not a graph hop, not vector-ranked, not in
+                # the keyword scan. Try stem match before dropping — recovers
+                # morphology ("regulation" matching a "regulator" page). With the
+                # semantic lanes absent (see flag above) the gate relaxes from
+                # all-stems to a strict majority of the query's words anchored by
+                # at least one content word, so BM25's own top-ranked evidence
+                # survives interrogative phrasing without function-word overlap
+                # alone retaining junk.
+                if semantic_lanes_absent:
+                    present, total, content_present = _stem_word_coverage(
+                        page, degraded_query_words
+                    )
+                    stems_ok = 2 * present > total and content_present > 0
+                else:
+                    stems_ok = _stem_tokens_present(page, query_norm)
+                if not stems_ok:
+                    continue
+                keyword_excerpt = _stem_anchored_excerpt(page, query_norm)
+            elif (
+                rel_path in graph_set or rel_path in clip_set or rel_path in frame_attribution
+            ) and keyword_excerpt is None:
+                # Graph-hop neighbour, CLIP visual match, or frame-collapsed parent:
+                # no all-tokens-present requirement (the reason for surfacing is
+                # connectivity / visual similarity / a child frame's text, not this
+                # page's lexical overlap). Prefer the matched frame's OCR text as the
+                # "why", else the sidecar's leading body.
+                attr = frame_attribution.get(rel_path)
+                if attr is not None:
+                    fpage = _CACHE.get(vault_root / (attr[0] + ".md"), vault_root)
+                    if fpage is not None:
+                        keyword_excerpt = _make_excerpt(fpage, query_norm)
+                if keyword_excerpt is None:
+                    body = page.body.strip()
+                    keyword_excerpt = _collapse(body[:EXCERPT_MAX_LEN]) if body else ""
+            chunk = chunk_text_by_path.get(rel_path)
+            excerpt = _semantic_excerpt(page, query_norm, chunk, keyword_excerpt)
+            is_graph_only = (
+                rel_path in graph_set
+                and rel_path not in vector_rank_by_path
+                and rel_path not in bm25_rank_by_path
+            )
+            hit_activation: float | None = None
+            hit_usage_mult: float | None = None
+            if usage_map:
+                from . import usage as usage_module
 
-            hit_activation = usage_map.get(usage_module.canon(rel_path))
-            if hit_activation is not None:
-                hit_usage_mult = usage_module.usage_multiplier(hit_activation, config)
-        attr = frame_attribution.get(rel_path)
-        hit = Hit(
-            path=page.rel_path,
-            type=page.page_type,
-            scope=page.scope,
-            title=page.title,
-            updated=page.updated,
-            excerpt=excerpt or "",
-            media_type=page.media_type,
-            media_file=page.media_file,
-            status=page.status,
-            superseded_by=page.superseded_by,
-            bm25_rank=bm25_rank_by_path.get(rel_path),
-            vector_rank=vector_rank_by_path.get(rel_path),
-            vector_score=vector_score_by_path.get(rel_path),
-            clip_rank=clip_rank_by_path.get(rel_path),
-            clip_score=clip_score_by_path.get(rel_path),
-            clip_frame_ts=clip_frame_ts_by_path.get(rel_path),
-            graph_hop=is_graph_only,
-            graph_in_degree=graph_in_degree_by_path.get(rel_path, 0),
-            graph_provenance=graph_provenance_by_path.get(rel_path),
-            keyword_rank=keyword_rank_by_path.get(rel_path),
-            activation=hit_activation,
-            usage_boost_applied=hit_usage_mult,
-            scene_frame=attr[0] if attr else None,
-            scene_frame_ts=attr[1] if attr else None,
-            snapshot_hash=page.snapshot_hash,
-        )
-        hit.transcript_ts = _transcript_ts_for_hit(page, chunk, query_norm)
-        if hit.scene_frame is None and page.media_type == "video" and page.media_file:
-            # A localized match on a video — CLIP keyframe first (existing), else a
-            # timed-transcript match — attaches the nearest PERSISTED frame so the
-            # moment is viewable, not just timestamped.
-            anchor_ts = hit.clip_frame_ts if hit.clip_frame_ts is not None else hit.transcript_ts
-            if anchor_ts is not None:
-                nf = scene_frames.nearest_frame(vault_root, page.media_file, anchor_ts)
-                if nf is not None:
-                    hit.scene_frame, hit.scene_frame_ts = nf
-        hits.append(hit)
-        if len(hits) >= target_n:
-            break
-    if timings is not None:
-        timings.stages.setdefault("filter_hits", {})["ms"] = round(
-            (time.perf_counter() - _filter_t0) * 1000.0, 3
-        )
+                hit_activation = usage_map.get(usage_module.canon(rel_path))
+                if hit_activation is not None:
+                    hit_usage_mult = usage_module.usage_multiplier(hit_activation, config)
+            attr = frame_attribution.get(rel_path)
+            hit = Hit(
+                path=page.rel_path,
+                type=page.page_type,
+                scope=page.scope,
+                title=page.title,
+                updated=page.updated,
+                excerpt=excerpt or "",
+                media_type=page.media_type,
+                media_file=page.media_file,
+                status=page.status,
+                superseded_by=page.superseded_by,
+                bm25_rank=bm25_rank_by_path.get(rel_path),
+                vector_rank=vector_rank_by_path.get(rel_path),
+                vector_score=vector_score_by_path.get(rel_path),
+                clip_rank=clip_rank_by_path.get(rel_path),
+                clip_score=clip_score_by_path.get(rel_path),
+                clip_frame_ts=clip_frame_ts_by_path.get(rel_path),
+                graph_hop=is_graph_only,
+                graph_in_degree=graph_in_degree_by_path.get(rel_path, 0),
+                graph_provenance=graph_provenance_by_path.get(rel_path),
+                keyword_rank=keyword_rank_by_path.get(rel_path),
+                activation=hit_activation,
+                usage_boost_applied=hit_usage_mult,
+                scene_frame=attr[0] if attr else None,
+                scene_frame_ts=attr[1] if attr else None,
+                snapshot_hash=page.snapshot_hash,
+            )
+            hit.transcript_ts = _transcript_ts_for_hit(page, chunk, query_norm)
+            if hit.scene_frame is None and page.media_type == "video" and page.media_file:
+                # A localized match on a video — CLIP keyframe first (existing), else a
+                # timed-transcript match — attaches the nearest PERSISTED frame so the
+                # moment is viewable, not just timestamped.
+                anchor_ts = hit.clip_frame_ts if hit.clip_frame_ts is not None else hit.transcript_ts
+                if anchor_ts is not None:
+                    nf = scene_frames.nearest_frame(vault_root, page.media_file, anchor_ts)
+                    if nf is not None:
+                        hit.scene_frame, hit.scene_frame_ts = nf
+            hits.append(hit)
+            if len(hits) >= target_n:
+                break
 
     # Resolve the rerank decision. An explicit rerank=True/False always wins;
     # otherwise (rerank is None) auto_rerank consults should_rerank on the built
@@ -3450,113 +3450,108 @@ def _find_semantic(
     scorer_input_count = 0
     unscored_tail_count = max(0, len(hits) - rerank_candidate_limit)
     if do_rerank and hits:
-        _rerank_t0 = time.perf_counter()
-        rerank_prefix = hits[:rerank_candidate_limit]
-        scorer_input_count = len(rerank_prefix)
-        try:
-            from . import embeddings as emb
+        with _span(timings, "rerank"):
+            rerank_prefix = hits[:rerank_candidate_limit]
+            scorer_input_count = len(rerank_prefix)
+            try:
+                from . import embeddings as emb
 
-            # Best passage for each hit: the matched chunk when we have one,
-            # else the leading body slice.
-            passages: list[str] = []
-            for h in rerank_prefix:
-                ctext = chunk_text_by_path.get(h.path)
-                if ctext:
-                    passages.append(ctext)
-                else:
-                    pg = _page_of(h.path)
-                    body = (pg.body if pg else "") or h.excerpt
-                    passages.append(body[:1500])  # CrossEncoder caps at 512 tokens
-            scores = emb.rerank_pairs(query, passages)
-            if len(scores) != len(rerank_prefix):
-                raise ValueError("reranker returned a score count that does not match its inputs")
-            score_updates: list[
-                tuple[
-                    Hit,
-                    int,
-                    float,
-                    float,
-                    list[dict[str, float | str]] | None,
-                ]
-            ] = []
-            for input_rank, (h, s) in enumerate(zip(rerank_prefix, scores, strict=True), start=1):
-                raw_score = float(s)
-                adjusted = raw_score
-                chain: list[dict[str, float | str]] | None = (
-                    [] if retrieval_trace is not None else None
+                # Best passage for each hit: the matched chunk when we have one,
+                # else the leading body slice.
+                passages: list[str] = []
+                for h in rerank_prefix:
+                    ctext = chunk_text_by_path.get(h.path)
+                    if ctext:
+                        passages.append(ctext)
+                    else:
+                        pg = _page_of(h.path)
+                        body = (pg.body if pg else "") or h.excerpt
+                        passages.append(body[:1500])  # CrossEncoder caps at 512 tokens
+                scores = emb.rerank_pairs(query, passages)
+                if len(scores) != len(rerank_prefix):
+                    raise ValueError("reranker returned a score count that does not match its inputs")
+                score_updates: list[
+                    tuple[
+                        Hit,
+                        int,
+                        float,
+                        float,
+                        list[dict[str, float | str]] | None,
+                    ]
+                ] = []
+                for input_rank, (h, s) in enumerate(zip(rerank_prefix, scores, strict=True), start=1):
+                    raw_score = float(s)
+                    adjusted = raw_score
+                    chain: list[dict[str, float | str]] | None = (
+                        [] if retrieval_trace is not None else None
+                    )
+                    if prefer_compiled:
+                        factor = _type_multiplier(h.type, config)
+                        before = adjusted
+                        adjusted *= factor
+                        if chain is not None:
+                            chain.append(
+                                {
+                                    "name": "type",
+                                    "factor": factor,
+                                    "before": before,
+                                    "after": adjusted,
+                                }
+                            )
+                    if prefer_active:
+                        factor = _status_multiplier(h.status, config)
+                        before = adjusted
+                        adjusted *= factor
+                        if chain is not None:
+                            chain.append(
+                                {
+                                    "name": "status",
+                                    "factor": factor,
+                                    "before": before,
+                                    "after": adjusted,
+                                }
+                            )
+                    if usage_map and h.usage_boost_applied:
+                        factor = h.usage_boost_applied
+                        before = adjusted
+                        adjusted *= factor
+                        if chain is not None:
+                            chain.append(
+                                {
+                                    "name": "usage",
+                                    "factor": factor,
+                                    "before": before,
+                                    "after": adjusted,
+                                }
+                            )
+                    score_updates.append((h, input_rank, raw_score, adjusted, chain))
+                # Commit annotations only after every returned score and multiplier
+                # has been validated. A late conversion/application failure must
+                # leave the fused fallback free of partial reranker evidence.
+                for h, input_rank, raw_score, adjusted, chain in score_updates:
+                    h.rerank_input_rank = input_rank
+                    h.rerank_raw_score = raw_score
+                    h.rerank_score = adjusted
+                    if chain is not None:
+                        h.rerank_multiplier_chain = chain
+                hits = _order_reranked_prefix(
+                    hits,
+                    prefix_count=len(rerank_prefix),
                 )
-                if prefer_compiled:
-                    factor = _type_multiplier(h.type, config)
-                    before = adjusted
-                    adjusted *= factor
-                    if chain is not None:
-                        chain.append(
-                            {
-                                "name": "type",
-                                "factor": factor,
-                                "before": before,
-                                "after": adjusted,
-                            }
-                        )
-                if prefer_active:
-                    factor = _status_multiplier(h.status, config)
-                    before = adjusted
-                    adjusted *= factor
-                    if chain is not None:
-                        chain.append(
-                            {
-                                "name": "status",
-                                "factor": factor,
-                                "before": before,
-                                "after": adjusted,
-                            }
-                        )
-                if usage_map and h.usage_boost_applied:
-                    factor = h.usage_boost_applied
-                    before = adjusted
-                    adjusted *= factor
-                    if chain is not None:
-                        chain.append(
-                            {
-                                "name": "usage",
-                                "factor": factor,
-                                "before": before,
-                                "after": adjusted,
-                            }
-                        )
-                score_updates.append((h, input_rank, raw_score, adjusted, chain))
-            # Commit annotations only after every returned score and multiplier
-            # has been validated. A late conversion/application failure must
-            # leave the fused fallback free of partial reranker evidence.
-            for h, input_rank, raw_score, adjusted, chain in score_updates:
-                h.rerank_input_rank = input_rank
-                h.rerank_raw_score = raw_score
-                h.rerank_score = adjusted
-                if chain is not None:
-                    h.rerank_multiplier_chain = chain
-            hits = _order_reranked_prefix(
-                hits,
-                prefix_count=len(rerank_prefix),
-            )
-            rerank_outcome = {"decision": "ran", "reason": "ran"}
-        except ImportError as e:
-            log.warning("rerank requested but reranker unavailable: %s", e)
-            if timings is not None:
-                timings.error("rerank", e)
-            rerank_outcome = {
-                "decision": "unavailable",
-                "reason": "dependency_unavailable",
-            }
-        except Exception as e:  # noqa: BLE001 - optional reranker must soft-fail.
-            log.warning("rerank failed: %s; returning fused order", e)
-            if timings is not None:
-                timings.error("rerank", e)
-            rerank_outcome = {"decision": "failed", "reason": "runtime_failure"}
-        finally:
-            if timings is not None:
-                timings.stages.setdefault("rerank", {})["ms"] = round(
-                    (time.perf_counter() - _rerank_t0) * 1000.0, 3
-                )
+                rerank_outcome = {"decision": "ran", "reason": "ran"}
+            except ImportError as e:
+                log.warning("rerank requested but reranker unavailable: %s", e)
+                if timings is not None:
+                    timings.error("rerank", e)
+                rerank_outcome = {
+                    "decision": "unavailable",
+                    "reason": "dependency_unavailable",
+                }
+            except Exception as e:  # noqa: BLE001 - optional reranker must soft-fail.
+                log.warning("rerank failed: %s; returning fused order", e)
+                if timings is not None:
+                    timings.error("rerank", e)
+                rerank_outcome = {"decision": "failed", "reason": "runtime_failure"}
 
     _set_rerank_timing_profile(
         timings,
