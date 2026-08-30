@@ -92,10 +92,10 @@ class PolicyFirstPublicationResult:
 class BatchJournal(Protocol):
     """Durable receipt-first journal boundary supplied by the full coordinator."""
 
-    def prepare_batch(self, batch: ContentBatch) -> None:
+    def prepare_batch(self, batch: ContentBatch) -> object:
         """Persist the exact intent/prepared transition before publication."""
 
-    def commit_batch(self, batch: ContentBatch) -> None:
+    def commit_batch(self, batch: ContentBatch) -> object:
         """Persist the exact final/terminal transition after publication."""
 
 
