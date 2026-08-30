@@ -84,6 +84,9 @@ def refresh_shipped_schema(vault_root: Path) -> list[str]:
     kb = vault_root / kb_dirname()
     if not kb.is_dir():
         return []
+    from . import workflow_contracts
+
+    workflow_contracts.ensure_migration_marker(vault_root, review_required=True)
     refreshed: list[str] = []
     for src in shipped_schema_sources():
         # `_Schema/SKILL.md` -> `<vault>/.exomem/schema/SKILL.md`. The scaffold
@@ -129,6 +132,9 @@ def init_vault(
         )
 
     created: list[str] = []
+    from . import workflow_contracts
+
+    workflow_contracts.ensure_migration_marker(vault_root, review_required=not fresh_vault)
     # The product-owned markdown lands outside the note namespace; everything
     # else -- index.md, log.md, the typed tree, and the per-vault YAML registries
     # that also live under `_Schema/` -- is the user's and stays in the Knowledge
@@ -149,9 +155,7 @@ def init_vault(
             dest.mkdir(parents=True, exist_ok=True)
             continue
         dest.parent.mkdir(parents=True, exist_ok=True)
-        if dest.exists() and (
-            not force or scaffold_rel == Path("Entities") / "index.md"
-        ):
+        if dest.exists() and (not force or scaffold_rel == Path("Entities") / "index.md"):
             continue
         shutil.copy2(src, dest)
         created.append(dest.relative_to(vault_root).as_posix())
@@ -170,9 +174,7 @@ def init_vault(
         current = entity_index.read_text(encoding="utf-8")
         refreshed = indexes._refresh_entities_subindex_text(
             current,
-            counts_by_type=indexes._count_entities(
-                kb / "Entities", registry=entity_registry
-            ),
+            counts_by_type=indexes._count_entities(kb / "Entities", registry=entity_registry),
             registry=entity_registry,
         )
         refreshed = render_wikilinks_for_vault(refreshed, vault_root)

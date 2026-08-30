@@ -2796,11 +2796,23 @@ def test_conditional_mixed_selectors_are_in_the_same_registry() -> None:
         "infer": "save-conditional",
         "validate": "structure",
         "diff": "structure",
+        "inventory": "structure",
+        "inspect": "structure",
+        "resolve": "structure",
+        "preview": "structure",
+        "save": "mutation",
+        "refresh": "mutation",
     }
     schema = product["schema_memory"]
     assert commands.invocation_is_read_only(schema, {"operation": "infer"})
     assert not commands.invocation_is_read_only(schema, {"operation": "infer", "save": True})
     assert commands.invocation_is_read_only(schema, {"operation": "validate"})
+    assert commands.invocation_is_read_only(
+        schema, {"operation": "resolve", "subject": "workflow-contracts"}
+    )
+    assert not commands.invocation_is_read_only(
+        schema, {"operation": "save", "subject": "workflow-contracts"}
+    )
     with pytest.raises(RuntimeError, match="RECEIPT_OUTCOME_MISSING"):
         commands.invocation_is_read_only(schema, {"operation": "future-schema-mode"})
 

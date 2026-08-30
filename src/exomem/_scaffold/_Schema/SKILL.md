@@ -46,9 +46,10 @@ Planning and Records use separate semantic profiles on one structured-collection
 substrate. Planning owns durable intent and prioritisation. Records do not infer
 goals, completion, medical conclusions, or personal judgments. A collection may
 hold opaque links between a plan and a bounded Records query, but does not resolve
-or duplicate the other side. For software work, OpenSpec and the repository own
-accepted change contracts and execution truth; git, specs, tests, and code remain
-the authority.
+or duplicate the other side. A resolved workflow contract may declare a companion
+owner for execution artifacts; without one, Planning works standalone. Companion
+references remain opaque, and governance, tool availability, and external
+permissions remain separate from the declaration.
 
 ## Proactive engagement
 

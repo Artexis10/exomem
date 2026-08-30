@@ -1,0 +1,702 @@
+"""Code-owned parsing, storage, and resolution for workflow contracts."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import unicodedata
+from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+from uuid import UUID
+
+import yaml
+
+from .kbdir import kb_dirname
+from .vault import sanitize_title_filename
+
+FAMILY = "workflow"
+SCHEMA_VERSION = 1
+MAX_FILE_BYTES = 64 * 1024
+MAX_FILES = 512
+MAX_SCAN_BYTES = 8 * 1024 * 1024
+MAX_SUMMARIES = 128
+_KEY = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$")
+_PROJECT = re.compile(r"^[a-z][a-z0-9-]{0,40}$")
+_OWNERSHIP = re.compile(r"^[a-z][a-z0-9_-]{0,31}(?:\.[a-z][a-z0-9_-]{0,31})+$")
+_FIELDS = (
+    "type",
+    "contract_id",
+    "schema_version",
+    "key",
+    "title",
+    "lifecycle",
+    "scope",
+    "planning",
+    "companions",
+    "capture",
+    "planning_transition",
+)
+_PRESENTATION_OPEN = "<!-- exomem:workflow-contract-presentation:start -->"
+_PRESENTATION_CLOSE = "<!-- exomem:workflow-contract-presentation:end -->"
+
+
+class WorkflowContractError(ValueError):
+    """A stable workflow-contract refusal."""
+
+    def __init__(self, code: str, detail: str = "") -> None:
+        self.code = code
+        super().__init__(f"{code}: {detail}" if detail else code)
+
+
+@dataclass(frozen=True)
+class WorkflowContract:
+    data: dict[str, Any]
+
+    @property
+    def contract_id(self) -> str:
+        return self.data["contract_id"]
+
+    @property
+    def key(self) -> str:
+        return self.data["key"]
+
+    @property
+    def title(self) -> str:
+        return self.data["title"]
+
+    @property
+    def lifecycle(self) -> str:
+        return self.data["lifecycle"]
+
+    @property
+    def fingerprint(self) -> str:
+        return hashlib.sha256(_semantic_bytes(self.data)).hexdigest()
+
+    def as_dict(self) -> dict[str, Any]:
+        return json.loads(json.dumps(self.data))
+
+
+@dataclass(frozen=True)
+class ContractFamily:
+    """Code-owned family metadata; vault data never registers behavior."""
+
+    key: str
+    schema_versions: tuple[int, ...]
+
+
+_FAMILIES = {FAMILY: ContractFamily(key=FAMILY, schema_versions=(SCHEMA_VERSION,))}
+
+
+def registered_families() -> dict[str, ContractFamily]:
+    """Return the fixed product registry without exposing a mutation path."""
+    return dict(_FAMILIES)
+
+
+def portable_projection() -> dict[str, Any]:
+    """The stable, vault-independent workflow protocol shared by public surfaces."""
+    invariants = {
+        "planning": "intended future state",
+        "records": "observed outcomes and event history",
+        "governance": "governance and egress remain authoritative",
+        "external_references": "opaque; never proof of external state or capability",
+    }
+    semantic = {
+        "family": FAMILY,
+        "schema_version": SCHEMA_VERSION,
+        "operations": ("inventory", "inspect", "validate", "resolve", "preview", "save", "refresh"),
+        "invariants": invariants,
+        "builtin_fallback": {"planning": {"mode": "standalone"}, "companions": []},
+    }
+    return {
+        **semantic,
+        "digest": hashlib.sha256(_semantic_bytes(semantic)).hexdigest(),
+    }
+
+
+def contract_directory(vault_root: Path) -> Path:
+    return Path(vault_root) / kb_dirname() / "_Schema" / "contracts" / FAMILY
+
+
+def migration_marker_path(vault_root: Path) -> Path:
+    return Path(vault_root) / kb_dirname() / "_Schema" / "workflow-contract-migration.yaml"
+
+
+def ensure_migration_marker(vault_root: Path, *, review_required: bool) -> dict[str, Any]:
+    """Create the semantic migration marker before changing a shipped scaffold."""
+    path = migration_marker_path(vault_root)
+    if path.exists() or path.is_symlink():
+        if path.is_symlink() or not path.is_file():
+            raise WorkflowContractError("WORKFLOW_CONTRACT_MIGRATION_INDETERMINATE")
+        try:
+            marker = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, yaml.YAMLError) as error:
+            raise WorkflowContractError("WORKFLOW_CONTRACT_MIGRATION_INDETERMINATE") from error
+        if (
+            not isinstance(marker, dict)
+            or set(marker) != {"schema_version", "review_required"}
+            or marker["schema_version"] != 1
+            or type(marker["review_required"]) is not bool
+        ):
+            raise WorkflowContractError("WORKFLOW_CONTRACT_MIGRATION_INDETERMINATE")
+        return marker
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(
+        f"schema_version: 1\nreview_required: {'true' if review_required else 'false'}\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    os.replace(temporary, path)
+    return {"schema_version": 1, "review_required": review_required}
+
+
+def migration_required(vault_root: Path) -> bool | None:
+    """Return review state, or ``None`` when a marker cannot be trusted."""
+    path = migration_marker_path(vault_root)
+    if not path.exists():
+        return None
+    try:
+        return bool(ensure_migration_marker(vault_root, review_required=True)["review_required"])
+    except WorkflowContractError:
+        return None
+
+
+def parse_proposal(proposal: Mapping[str, Any]) -> WorkflowContract:
+    """Validate an exact v1 proposal; reads never repair user-authored data."""
+    if not isinstance(proposal, Mapping) or tuple(proposal) != _FIELDS:
+        raise WorkflowContractError(
+            "WORKFLOW_CONTRACT_INVALID", "proposal must have exact v1 fields"
+        )
+    data = {key: proposal[key] for key in _FIELDS}
+    if data["type"] != "workflow-contract" or data["schema_version"] != SCHEMA_VERSION:
+        raise WorkflowContractError(
+            "WORKFLOW_CONTRACT_INVALID", "unsupported type or schema version"
+        )
+    _uuid(data["contract_id"])
+    _token(data["key"], "key")
+    _text(data["title"], "title")
+    if data["lifecycle"] not in {"active", "archived"}:
+        raise WorkflowContractError("WORKFLOW_CONTRACT_INVALID", "lifecycle")
+    _scope(data["scope"])
+    if not isinstance(data["planning"], Mapping) or set(data["planning"]) != {"mode"}:
+        raise WorkflowContractError("WORKFLOW_CONTRACT_INVALID", "planning")
+    mode = data["planning"].get("mode")
+    if mode not in {"standalone", "companion"}:
+        raise WorkflowContractError("WORKFLOW_CONTRACT_INVALID", "planning mode")
+    _companions(data["companions"], mode)
+    _capture(data["capture"])
+    if data["planning_transition"] not in {"explicit-only", "propose-after-outcome"}:
+        raise WorkflowContractError("WORKFLOW_CONTRACT_INVALID", "planning transition")
+    return WorkflowContract(data)
+
+
+def canonical_content(contract: WorkflowContract, authored_body: str = "") -> str:
+    frontmatter = yaml.safe_dump(
+        contract.as_dict(),
+        sort_keys=False,
+        allow_unicode=True,
+        default_flow_style=False,
+        width=4096,
+    ).rstrip("\n")
+    presentation = render_presentation(contract)
+    authored = _without_presentation(authored_body)
+    if authored and not authored.endswith("\n"):
+        authored += "\n"
+    return f"---\n{frontmatter}\n---\n\n{presentation}\n{authored}"
+
+
+def render_presentation(contract: WorkflowContract) -> str:
+    scope = contract.data["scope"]
+    selected = (
+        ", ".join(
+            f"{dimension}: {', '.join(values)}" for dimension, values in scope.items() if values
+        )
+        or "all work"
+    )
+    if contract.data["planning"]["mode"] == "standalone":
+        ownership = "Planning holds the complete durable work hierarchy."
+    else:
+        companions = "; ".join(
+            f"{item['name']} ({', '.join(item['owns'])})" for item in contract.data["companions"]
+        )
+        ownership = (
+            f"Planning retains durable intent; declared companion ownership is {companions}."
+        )
+    return "\n".join(
+        (
+            _PRESENTATION_OPEN,
+            "<!-- Derived from workflow-contract frontmatter; refresh restores this block. -->",
+            f"## Workflow contract: {contract.title}",
+            "",
+            f"This active policy applies to {selected}.",
+            ownership,
+            "Records holds observed outcomes; it never completes Planning automatically.",
+            _PRESENTATION_CLOSE,
+        )
+    )
+
+
+def save_contract(
+    vault_root: Path,
+    contract: WorkflowContract,
+    *,
+    why: str,
+    name: str | None = None,
+    expected_hash: str | None = None,
+) -> dict[str, Any]:
+    if not isinstance(why, str) or not why.strip():
+        raise WorkflowContractError("WORKFLOW_CONTRACT_INVALID_ARGUMENTS", "why is required")
+    root = contract_directory(vault_root)
+    root.mkdir(parents=True, exist_ok=True)
+    if root.is_symlink():
+        raise WorkflowContractError("WORKFLOW_CONTRACT_INVALID", "contract directory is a symlink")
+    existing = _find_by_key(vault_root, name or contract.key)
+    if name is not None:
+        if existing is None:
+            raise WorkflowContractError("WORKFLOW_CONTRACT_NOT_FOUND")
+        old_contract, path, source = existing
+        if expected_hash is None or source_hash(source) != expected_hash:
+            raise WorkflowContractError("WORKFLOW_CONTRACT_STALE")
+        if old_contract.contract_id != contract.contract_id:
+            raise WorkflowContractError(
+                "WORKFLOW_CONTRACT_INVALID", "contract identity is immutable"
+            )
+        content = canonical_content(contract, _body(source))
+    else:
+        duplicate = _find_by_key(vault_root, contract.key)
+        if duplicate is not None:
+            raise WorkflowContractError("WORKFLOW_CONTRACT_PATH_CONFLICT", "key already exists")
+        filename = sanitize_title_filename(contract.title, max_length=100) or contract.key
+        path = root / f"{filename}.md"
+        if path.exists() or path.is_symlink():
+            raise WorkflowContractError(
+                "WORKFLOW_CONTRACT_PATH_CONFLICT", "title path already exists"
+            )
+        content = canonical_content(contract)
+    path.write_text(content, encoding="utf-8", newline="\n")
+    return {
+        "key": contract.key,
+        "contract_id": contract.contract_id,
+        "path": path.relative_to(vault_root).as_posix(),
+        "content": content,
+        "content_hash": source_hash(content),
+        "fingerprint": contract.fingerprint,
+    }
+
+
+def inspect_contract(vault_root: Path, name: str) -> dict[str, Any]:
+    found = _find_by_key(vault_root, name)
+    if found is None:
+        raise WorkflowContractError("WORKFLOW_CONTRACT_NOT_FOUND")
+    contract, path, source = found
+    return {
+        "contract": contract.as_dict(),
+        "path": path.relative_to(vault_root).as_posix(),
+        "content_hash": source_hash(source),
+        "fingerprint": contract.fingerprint,
+        "presentation_drift": render_presentation(contract) not in _body(source),
+    }
+
+
+def inventory_contracts(vault_root: Path) -> dict[str, Any]:
+    contracts, findings, limited = _scan(vault_root)
+    if limited:
+        return {"valid": False, "code": "WORKFLOW_CONTRACT_SCAN_LIMIT", "findings": findings}
+    summaries = [
+        {
+            "key": contract.key,
+            "contract_id": contract.contract_id,
+            "title": contract.title,
+            "lifecycle": contract.lifecycle,
+            "scope": contract.data["scope"],
+            "fingerprint": contract.fingerprint,
+        }
+        for contract, _path, _source in contracts
+        if contract.lifecycle == "active"
+    ]
+    summaries.sort(key=lambda item: item["key"])
+    result = {
+        "valid": not findings,
+        "summaries": summaries[:MAX_SUMMARIES],
+        "total": len(summaries),
+        "truncated": len(summaries) > MAX_SUMMARIES,
+        "findings": findings[:32],
+    }
+    if not summaries and migration_required(vault_root) is True:
+        result["status"] = "workflow_contract_migration_required"
+    elif (
+        not summaries
+        and migration_marker_path(vault_root).exists()
+        and migration_required(vault_root) is None
+    ):
+        result["status"] = "WORKFLOW_CONTRACT_MIGRATION_INDETERMINATE"
+    return result
+
+
+def resolve_contracts(
+    vault_root: Path,
+    context: Mapping[str, str | None] | None,
+    *,
+    name: str | None = None,
+    proposal: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    normalized = _context(context)
+    if name and proposal is not None:
+        return _refusal("WORKFLOW_CONTRACT_INVALID_ARGUMENTS")
+    if name == "@standalone":
+        return _builtin(normalized, source="explicit")
+    if proposal is not None:
+        try:
+            return _resolved(
+                vault_root, parse_proposal(proposal), normalized, "ephemeral", None, None
+            )
+        except WorkflowContractError as error:
+            return _refusal(error.code)
+    contracts, findings, limited = _scan(vault_root)
+    if limited:
+        return _refusal("WORKFLOW_CONTRACT_SCAN_LIMIT")
+    if name:
+        matches = [
+            (contract, path, source) for contract, path, source in contracts if contract.key == name
+        ]
+        if not matches:
+            return _refusal("WORKFLOW_CONTRACT_NOT_FOUND")
+        if len(matches) != 1:
+            return _refusal("WORKFLOW_CONTRACT_DUPLICATE_IDENTITY")
+        contract, path, source = matches[0]
+        if contract.lifecycle != "active":
+            return _refusal("WORKFLOW_CONTRACT_INACTIVE")
+        return _resolved(vault_root, contract, normalized, "explicit", path, source)
+    if findings:
+        return _refusal("WORKFLOW_CONTRACT_INVALID_INVENTORY")
+    active = [
+        (contract, path, source)
+        for contract, path, source in contracts
+        if contract.lifecycle == "active"
+    ]
+    viable: list[tuple[WorkflowContract, Path, str, int]] = []
+    for contract, path, source in active:
+        matching = 0
+        unknown = False
+        ruled_out = False
+        for context_key, scope_key in (
+            ("project", "projects"),
+            ("domain", "domains"),
+            ("activity", "activities"),
+        ):
+            selectors = contract.data["scope"][scope_key]
+            state, value = normalized[context_key]
+            if not selectors:
+                continue
+            if state == "unknown":
+                unknown = True
+            elif value is None or value not in selectors:
+                ruled_out = True
+                break
+            else:
+                matching += 1
+        if not ruled_out and unknown and any(contract.data["scope"].values()):
+            return _refusal("WORKFLOW_CONTRACT_CONTEXT_INCOMPLETE")
+        if not ruled_out and matching:
+            viable.append((contract, path, source, matching))
+    if viable:
+        maximum = max(item[3] for item in viable)
+        winners = [item for item in viable if item[3] == maximum]
+        if len(winners) != 1:
+            return _refusal("WORKFLOW_CONTRACT_AMBIGUOUS")
+        contract, path, source, _ = winners[0]
+        return _resolved(vault_root, contract, normalized, "scoped", path, source)
+    defaults = [item for item in active if not any(item[0].data["scope"].values())]
+    if len(defaults) > 1:
+        return _refusal("WORKFLOW_CONTRACT_AMBIGUOUS")
+    if defaults:
+        contract, path, source = defaults[0]
+        return _resolved(vault_root, contract, normalized, "default", path, source)
+    if migration_required(vault_root) is True:
+        return _refusal("WORKFLOW_CONTRACT_MIGRATION_REQUIRED")
+    if migration_required(vault_root) is None and migration_marker_path(vault_root).exists():
+        return _refusal("WORKFLOW_CONTRACT_MIGRATION_INDETERMINATE")
+    return _builtin(normalized)
+
+
+def source_hash(source: str) -> str:
+    return hashlib.sha256(source.encode("utf-8")).hexdigest()
+
+
+def _scan(
+    vault_root: Path,
+) -> tuple[list[tuple[WorkflowContract, Path, str]], list[dict[str, str]], bool]:
+    root = contract_directory(vault_root)
+    if not root.exists():
+        return [], [], False
+    if root.is_symlink() or not root.is_dir():
+        return (
+            [],
+            [{"code": "WORKFLOW_CONTRACT_INVALID", "detail": "unsafe contract directory"}],
+            False,
+        )
+    candidates = [
+        path
+        for path in sorted(root.glob("*.md"), key=lambda value: value.name.casefold())
+        if path.is_file()
+    ]
+    visible_paths = _released_paths(vault_root, candidates)
+    contracts: list[tuple[WorkflowContract, Path, str]] = []
+    findings: list[dict[str, str]] = []
+    scanned = 0
+    for path in candidates:
+        if path not in visible_paths:
+            continue
+        if path.is_symlink() or not path.is_file():
+            findings.append({"code": "WORKFLOW_CONTRACT_INVALID", "detail": "unsafe contract path"})
+            continue
+        scanned += 1
+        try:
+            raw = path.read_bytes()
+        except OSError:
+            findings.append({"code": "WORKFLOW_CONTRACT_INVALID", "detail": "unreadable contract"})
+            continue
+        if (
+            scanned > MAX_FILES
+            or sum(len(item[2].encode("utf-8")) for item in contracts) + len(raw) > MAX_SCAN_BYTES
+        ):
+            return (
+                [],
+                [{"code": "WORKFLOW_CONTRACT_SCAN_LIMIT", "detail": "scan bound exceeded"}],
+                True,
+            )
+        if len(raw) > MAX_FILE_BYTES:
+            findings.append(
+                {"code": "WORKFLOW_CONTRACT_INVALID", "detail": "contract exceeds file bound"}
+            )
+            continue
+        try:
+            source = raw.decode("utf-8")
+            frontmatter = _frontmatter(source)
+            contracts.append((parse_proposal(frontmatter), path, source))
+        except (UnicodeDecodeError, yaml.YAMLError, WorkflowContractError):
+            findings.append({"code": "WORKFLOW_CONTRACT_INVALID", "detail": "invalid contract"})
+    keys = [
+        contract.key for contract, _path, _source in contracts if contract.lifecycle == "active"
+    ]
+    ids = [
+        contract.contract_id
+        for contract, _path, _source in contracts
+        if contract.lifecycle == "active"
+    ]
+    if len(keys) != len(set(keys)) or len(ids) != len(set(ids)):
+        findings.append(
+            {"code": "WORKFLOW_CONTRACT_DUPLICATE_IDENTITY", "detail": "duplicate active identity"}
+        )
+    return contracts, findings[:32], False
+
+
+def _released_paths(vault_root: Path, candidates: list[Path]) -> set[Path]:
+    """Apply the ordinary egress decision before any inventory-derived result."""
+    if not candidates:
+        return set()
+    from .governance import egress
+
+    entries = [{"path": candidate.relative_to(vault_root).as_posix()} for candidate in candidates]
+    projected = egress.filter_withheld_entries(vault_root, {"items": entries})
+    allowed = projected.get("items", []) if isinstance(projected, Mapping) else []
+    return {
+        Path(vault_root) / item["path"]
+        for item in allowed
+        if isinstance(item, Mapping) and isinstance(item.get("path"), str)
+    }
+
+
+def _find_by_key(vault_root: Path, key: str) -> tuple[WorkflowContract, Path, str] | None:
+    contracts, _findings, _limited = _scan(vault_root)
+    matches = [item for item in contracts if item[0].key == key]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _frontmatter(source: str) -> dict[str, Any]:
+    if not source.startswith("---\n"):
+        raise WorkflowContractError("WORKFLOW_CONTRACT_INVALID", "frontmatter missing")
+    closing = source.find("\n---\n", 4)
+    if closing < 0:
+        raise WorkflowContractError("WORKFLOW_CONTRACT_INVALID", "frontmatter not closed")
+    loaded = yaml.safe_load(source[4:closing])
+    if not isinstance(loaded, dict):
+        raise WorkflowContractError("WORKFLOW_CONTRACT_INVALID", "frontmatter is not mapping")
+    return loaded
+
+
+def _body(source: str) -> str:
+    closing = source.find("\n---\n", 4)
+    return source[closing + 5 :] if closing >= 0 else ""
+
+
+def _without_presentation(body: str) -> str:
+    start = body.find(_PRESENTATION_OPEN)
+    if start < 0:
+        return body
+    end = body.find(_PRESENTATION_CLOSE, start)
+    if end < 0:
+        return body
+    return body[:start] + body[end + len(_PRESENTATION_CLOSE) :]
+
+
+def _semantic_bytes(data: Mapping[str, Any]) -> bytes:
+    return json.dumps(data, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode(
+        "utf-8"
+    )
+
+
+def _uuid(value: Any) -> None:
+    if not isinstance(value, str):
+        raise WorkflowContractError("WORKFLOW_CONTRACT_INVALID", "contract id")
+    try:
+        parsed = UUID(value)
+    except (ValueError, AttributeError):
+        raise WorkflowContractError("WORKFLOW_CONTRACT_INVALID", "contract id") from None
+    if str(parsed) != value or parsed.version != 4:
+        raise WorkflowContractError("WORKFLOW_CONTRACT_INVALID", "contract id")
+
+
+def _text(value: Any, field: str) -> None:
+    if not isinstance(value, str) or not value or len(value.encode("utf-8")) > 128:
+        raise WorkflowContractError("WORKFLOW_CONTRACT_INVALID", field)
+    if value != unicodedata.normalize("NFKC", value).strip() or any(
+        ord(char) < 32 for char in value
+    ):
+        raise WorkflowContractError("WORKFLOW_CONTRACT_INVALID", field)
+
+
+def _token(value: Any, field: str, *, project: bool = False) -> None:
+    pattern = _PROJECT if project else _KEY
+    if (
+        not isinstance(value, str)
+        or len(value.encode("ascii", "ignore")) != len(value)
+        or not pattern.fullmatch(value)
+    ):
+        raise WorkflowContractError("WORKFLOW_CONTRACT_INVALID", field)
+    if not project and len(value) > 64:
+        raise WorkflowContractError("WORKFLOW_CONTRACT_INVALID", field)
+
+
+def _sorted_tokens(value: Any, field: str, *, project: bool = False) -> None:
+    if not isinstance(value, list) or len(value) > 16 or value != sorted(value):
+        raise WorkflowContractError("WORKFLOW_CONTRACT_INVALID", field)
+    if len(value) != len(set(value)):
+        raise WorkflowContractError("WORKFLOW_CONTRACT_INVALID", field)
+    for token in value:
+        _token(token, field, project=project)
+
+
+def _scope(value: Any) -> None:
+    if not isinstance(value, Mapping) or tuple(value) != ("projects", "domains", "activities"):
+        raise WorkflowContractError("WORKFLOW_CONTRACT_INVALID", "scope")
+    _sorted_tokens(value["projects"], "scope.projects", project=True)
+    _sorted_tokens(value["domains"], "scope.domains")
+    _sorted_tokens(value["activities"], "scope.activities")
+
+
+def _companions(value: Any, mode: str) -> None:
+    if (
+        not isinstance(value, list)
+        or len(value) > 8
+        or (mode == "standalone" and value)
+        or (mode == "companion" and not value)
+    ):
+        raise WorkflowContractError("WORKFLOW_CONTRACT_INVALID", "companions")
+    keys: list[str] = []
+    owned: set[str] = set()
+    for item in value:
+        if not isinstance(item, Mapping) or tuple(item) != ("key", "name", "owns"):
+            raise WorkflowContractError("WORKFLOW_CONTRACT_INVALID", "companion")
+        _token(item["key"], "companion key")
+        _text(item["name"], "companion name")
+        owns = item["owns"]
+        if (
+            not isinstance(owns, list)
+            or not owns
+            or len(owns) > 16
+            or owns != sorted(owns)
+            or len(owns) != len(set(owns))
+        ):
+            raise WorkflowContractError("WORKFLOW_CONTRACT_INVALID", "companion ownership")
+        for token in owns:
+            if not isinstance(token, str) or not _OWNERSHIP.fullmatch(token) or token in owned:
+                raise WorkflowContractError("WORKFLOW_CONTRACT_INVALID", "companion ownership")
+            owned.add(token)
+        keys.append(item["key"])
+    if keys != sorted(keys) or len(keys) != len(set(keys)):
+        raise WorkflowContractError("WORKFLOW_CONTRACT_INVALID", "companion order")
+
+
+def _capture(value: Any) -> None:
+    if not isinstance(value, Mapping) or tuple(value) != ("durable_intent", "observed_outcomes"):
+        raise WorkflowContractError("WORKFLOW_CONTRACT_INVALID", "capture")
+    if any(value[key] not in {"explicit", "proactive"} for key in value):
+        raise WorkflowContractError("WORKFLOW_CONTRACT_INVALID", "capture")
+
+
+def _context(context: Mapping[str, str | None] | None) -> dict[str, tuple[str, str | None]]:
+    if context is None:
+        context = {}
+    if not isinstance(context, Mapping) or set(context) - {"project", "domain", "activity"}:
+        raise WorkflowContractError("WORKFLOW_CONTRACT_INVALID_ARGUMENTS", "context")
+    normalized: dict[str, tuple[str, str | None]] = {}
+    for key, project in (("project", True), ("domain", False), ("activity", False)):
+        if key not in context:
+            normalized[key] = ("unknown", None)
+        elif context[key] is None:
+            normalized[key] = ("absent", None)
+        else:
+            _token(context[key], key, project=project)
+            normalized[key] = ("known", context[key])
+    return normalized
+
+
+def _refusal(code: str) -> dict[str, Any]:
+    return {"resolved": False, "code": code}
+
+
+def _builtin(
+    context: dict[str, tuple[str, str | None]], *, source: str = "builtin"
+) -> dict[str, Any]:
+    return {
+        "resolved": True,
+        "source": source,
+        "context": context,
+        "decision": {"planning": {"mode": "standalone"}, "companions": []},
+        "explanation": "Planning owns intended future state and Records holds observed outcomes.",
+    }
+
+
+def _resolved(
+    vault_root: Path,
+    contract: WorkflowContract,
+    context: dict[str, tuple[str, str | None]],
+    source: str,
+    path: Path | None,
+    raw: str | None,
+) -> dict[str, Any]:
+    result = {
+        "resolved": True,
+        "source": source,
+        "context": context,
+        "contract_id": contract.contract_id,
+        "key": contract.key,
+        "title": contract.title,
+        "fingerprint": contract.fingerprint,
+        "decision": {
+            "planning": contract.data["planning"],
+            "companions": contract.data["companions"],
+            "capture": contract.data["capture"],
+            "planning_transition": contract.data["planning_transition"],
+        },
+        "explanation": render_presentation(contract),
+    }
+    if path is not None and raw is not None:
+        result["path"] = path.relative_to(vault_root).as_posix()
+        result["source_hash"] = source_hash(raw)
+    return result

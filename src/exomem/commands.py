@@ -102,6 +102,7 @@ from . import set_frontmatter_field as set_frontmatter_field_module
 from . import set_take as set_take_module
 from . import structured_files as structured_files_module
 from . import traversal_profiles as traversal_profiles_module
+from . import workflow_contracts as workflow_contracts_module
 from . import workflow_skills as workflow_skills_module
 from .command_surface import (
     DESTRUCTIVE_OPS,  # noqa: F401 - re-exported for server.py
@@ -388,6 +389,42 @@ def op_bootstrap(
     active_product_names = frozenset(active_descriptor.product_commands)
     requested_workflow = workflow.strip() if workflow and workflow.strip() else "general"
     selected_packs = knowledge_packs_module.selected_pack_state(vault_root)
+    workflow_inventory = workflow_contracts_module.inventory_contracts(vault_root)
+    workflow_summaries = workflow_inventory.get("summaries", [])
+    workflow_defaults = [item for item in workflow_summaries if not any(item["scope"].values())]
+    workflow_scoped = [item for item in workflow_summaries if any(item["scope"].values())]
+    workflow_portable = workflow_contracts_module.portable_projection()
+    workflow_portable_identity = {
+        key: workflow_portable[key] for key in ("family", "schema_version", "digest")
+    }
+    if profile == "compact":
+        workflow_contract_projection = workflow_portable_identity
+        selected_packs = {**selected_packs, "workflow_contract": workflow_portable_identity}
+    elif "schema_memory" in active_product_names:
+        workflow_contract_projection = {
+            "invariants": workflow_portable["invariants"],
+            "portable": workflow_portable,
+            "resolution_available": True,
+            "route": {
+                "tool": "schema_memory",
+                "subject": "workflow-contracts",
+                "operation": "resolve",
+            },
+            "default": workflow_defaults[:1],
+            "scoped": workflow_scoped[:8],
+            "total": workflow_inventory.get("total", 0),
+            "truncated": bool(workflow_inventory.get("truncated", False)),
+            "findings": workflow_inventory.get("findings", []),
+        }
+    else:
+        workflow_contract_projection = {
+            "invariants": workflow_portable["invariants"],
+            "portable": workflow_portable,
+            "resolution_available": False,
+            "status": "workflow_resolution_unavailable"
+            if workflow_summaries
+            else "builtin_standalone",
+        }
     entity_type_registry = entity_types_module.load_entity_types(vault_root)
     source_taxonomy_projection = _source_taxonomy_projection(vault_root, profile=profile)
     simple_actions = simple_action_catalog(selected_packs, available_tools=active_product_names)
@@ -478,9 +515,10 @@ def op_bootstrap(
                     "published, failed; route: record_memory"
                 ),
                 "pairing_rule": (
-                    "an outcome on an open committed Planning item is one landing, "
-                    "two consequences: record then transition, once. A tentative "
-                    "claim is not an event, elapsed time not an outcome"
+                    "an outcome on an open Planning item is recorded once. A user may "
+                    "then request a guarded Planning transition; otherwise review may "
+                    "propose one. A tentative claim is not an event, and elapsed time "
+                    "is not an outcome"
                 ),
             },
             "capture_examples": (
@@ -488,7 +526,8 @@ def op_bootstrap(
                 "events, and current state here without waiting for a magic save or log verb. "
                 "Resolve one compatible collection before append or update; if none fits, "
                 "describe and propose a concise collection before validate and explicit create. "
-                "Paired: one append then one plan triage, once."
+                "A recorded outcome never closes Planning automatically; propose or perform "
+                "a guarded transition only with explicit user intent."
             ),
             "review_rule": (
                 "Review may compare planned intent with recorded reality; it must not make "
@@ -507,8 +546,9 @@ def op_bootstrap(
                 "templates, migrations, or canonical data."
             ),
             "software_rule": (
-                "Exomem Planning owns durable intent and prioritisation; OpenSpec, git, tests, "
-                "and code own accepted software contracts and execution truth."
+                "Exomem Planning owns durable intent and prioritisation; a resolved workflow "
+                "contract may declare companion-owned execution artifacts without asserting "
+                "their availability or state."
             ),
         }
     else:
@@ -557,8 +597,8 @@ def op_bootstrap(
             "neither resolves, evaluates, or updates Planning automatically."
         ),
         "execution_truth_boundary": (
-            "Planning owns durable intent and prioritisation. OpenSpec defines accepted product "
-            "contracts; repositories, git, tests, and code own software execution truth."
+            "Planning owns durable intent and prioritisation. A resolved workflow contract "
+            "may declare companion ownership, while external execution truth remains opaque."
         ),
     }
     # The doctrine every client tier has to receive. The shipped skill scaffold
@@ -701,6 +741,7 @@ def op_bootstrap(
         "records": records_contract,
         "semantic_authoring": semantic_authoring_projection,
         "planning": planning_contract,
+        "workflow_contracts": workflow_contract_projection,
         "epistemic_contract": epistemic_contract,
         "memory_model": {
             "built_in_ai_memory": (
@@ -6817,6 +6858,7 @@ def op_schema_memory(
     proposal: dict | None = None,
     why: str | None = None,
     include_model_suggestions: bool = False,
+    context: Mapping[str, str | None] | None = None,
 ) -> dict:
     """Infer, validate, diff, or save governed memory schemas.
 
@@ -6844,6 +6886,22 @@ def op_schema_memory(
     """
     operation = operation.strip().lower()
     subject = subject.strip().lower()
+    if subject == "workflow-contracts":
+        return _workflow_contract_schema_operation(
+            vault_root,
+            operation=operation,
+            name=name,
+            proposal=proposal,
+            expected_hash=expected_hash,
+            why=why,
+            context=context,
+            save=save,
+            project=project,
+            page_type=page_type,
+            strict=strict,
+            compare_to=compare_to,
+            include_model_suggestions=include_model_suggestions,
+        )
     if operation == "save-entity-types":
         if proposal is None or not isinstance(proposal, dict):
             raise ValueError("INCOMPLETE_ENTITY_TYPE_PROPOSAL: save requires a reviewed proposal")
@@ -7094,6 +7152,176 @@ def op_schema_memory(
         )
         return result
     raise ValueError("INVALID_SCHEMA_OPERATION: operation must be infer, validate, or diff")
+
+
+def _workflow_contract_schema_operation(
+    vault_root: Path,
+    *,
+    operation: str,
+    name: str | None,
+    proposal: dict | None,
+    expected_hash: str | None,
+    why: str | None,
+    context: Mapping[str, str | None] | None,
+    save: bool,
+    project: str | None,
+    page_type: str | None,
+    strict: bool,
+    compare_to: str | None,
+    include_model_suggestions: bool,
+) -> dict:
+    """Route the workflow subject through its one code-owned family implementation."""
+    if (
+        save
+        or project is not None
+        or page_type is not None
+        or strict
+        or compare_to is not None
+        or include_model_suggestions
+    ):
+        return {"resolved": False, "code": "WORKFLOW_CONTRACT_INVALID_ARGUMENTS"}
+    invalid = {"resolved": False, "code": "WORKFLOW_CONTRACT_INVALID_ARGUMENTS"}
+    try:
+        if operation == "inventory":
+            if (
+                name is not None
+                or proposal is not None
+                or expected_hash is not None
+                or why is not None
+                or context is not None
+            ):
+                return invalid
+            return {
+                "subject": "workflow-contracts",
+                **workflow_contracts_module.inventory_contracts(vault_root),
+            }
+        if operation == "inspect":
+            if (
+                not name
+                or proposal is not None
+                or expected_hash is not None
+                or why is not None
+                or context is not None
+            ):
+                return invalid
+            return {
+                "subject": "workflow-contracts",
+                **workflow_contracts_module.inspect_contract(vault_root, name),
+            }
+        if operation == "validate":
+            if (
+                expected_hash is not None
+                or why is not None
+                or context is not None
+                or bool(name) == bool(proposal)
+            ):
+                return invalid
+            if name:
+                inspected = workflow_contracts_module.inspect_contract(vault_root, name)
+                return {"subject": "workflow-contracts", "valid": True, "findings": [], **inspected}
+            try:
+                contract = workflow_contracts_module.parse_proposal(proposal or {})
+            except workflow_contracts_module.WorkflowContractError as error:
+                return {
+                    "subject": "workflow-contracts",
+                    "valid": False,
+                    "findings": [{"code": error.code}],
+                }
+            return {
+                "subject": "workflow-contracts",
+                "valid": True,
+                "findings": [],
+                "proposal": contract.as_dict(),
+                "fingerprint": contract.fingerprint,
+            }
+        if operation == "resolve":
+            if expected_hash is not None or why is not None:
+                return invalid
+            return {
+                "subject": "workflow-contracts",
+                **workflow_contracts_module.resolve_contracts(
+                    vault_root, context, name=name, proposal=proposal
+                ),
+            }
+        if operation == "preview":
+            if (
+                proposal is None
+                or expected_hash is not None
+                or why is not None
+                or context is not None
+            ):
+                return invalid
+            contract = workflow_contracts_module.parse_proposal(proposal)
+            if name:
+                inspected = workflow_contracts_module.inspect_contract(vault_root, name)
+                if inspected["contract"]["contract_id"] != contract.contract_id:
+                    return {"resolved": False, "code": "WORKFLOW_CONTRACT_INVALID"}
+                source = (Path(vault_root) / inspected["path"]).read_text(encoding="utf-8")
+                content = workflow_contracts_module.canonical_content(
+                    contract, workflow_contracts_module._body(source)
+                )
+                return {
+                    "subject": "workflow-contracts",
+                    "content": content,
+                    "current_hash": inspected["content_hash"],
+                    "fingerprint": contract.fingerprint,
+                    "path": inspected["path"],
+                }
+            filename = vault.sanitize_title_filename(contract.title, max_length=100) or contract.key
+            return {
+                "subject": "workflow-contracts",
+                "content": workflow_contracts_module.canonical_content(contract),
+                "current_hash": None,
+                "fingerprint": contract.fingerprint,
+                "path": (
+                    workflow_contracts_module.contract_directory(vault_root) / f"{filename}.md"
+                )
+                .relative_to(vault_root)
+                .as_posix(),
+            }
+        if operation == "save":
+            if (
+                proposal is None
+                or not why
+                or context is not None
+                or (name is not None and expected_hash is None)
+            ):
+                return invalid
+            contract = workflow_contracts_module.parse_proposal(proposal)
+            result = {
+                "subject": "workflow-contracts",
+                "saved": workflow_contracts_module.save_contract(
+                    vault_root, contract, why=why, name=name, expected_hash=expected_hash
+                ),
+            }
+            from .writer_lease import mark_active_mutation_committed
+
+            mark_active_mutation_committed()
+            return result
+        if operation == "refresh":
+            if (
+                not name
+                or proposal is not None
+                or not expected_hash
+                or not why
+                or context is not None
+            ):
+                return invalid
+            inspected = workflow_contracts_module.inspect_contract(vault_root, name)
+            contract = workflow_contracts_module.parse_proposal(inspected["contract"])
+            result = {
+                "subject": "workflow-contracts",
+                "saved": workflow_contracts_module.save_contract(
+                    vault_root, contract, why=why, name=name, expected_hash=expected_hash
+                ),
+            }
+            from .writer_lease import mark_active_mutation_committed
+
+            mark_active_mutation_committed()
+            return result
+    except workflow_contracts_module.WorkflowContractError as error:
+        return {"resolved": False, "code": error.code}
+    return invalid
 
 
 def op_reclassify_source(
