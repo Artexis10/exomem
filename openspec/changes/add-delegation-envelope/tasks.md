@@ -45,6 +45,12 @@ the task is ticked, not estimated.
   pin (the derivation reads review-state records only).
 - [ ] 3.2 The offer changes nothing by itself: disposition unchanged until an
   explicit decision lands. Red-first.
+- [ ] 3.3 Review-state schema migration: dismissal records gain family
+  attribution and the family slate gains a durable `quiet_offered_at` slot
+  that survives a `normal` disposition; one version bump, previous-schema
+  files migrated on load and rewritten on next write, newer schema refused by
+  an older runtime with a named error. Red-first on all three behaviours over
+  fixture files at both versions.
 
 ## 4. The dispositions view and the agent contract (design D5; command-surface delta)
 

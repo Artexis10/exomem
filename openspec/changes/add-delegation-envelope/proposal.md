@@ -74,7 +74,14 @@ class wiring are re-reviewed against the landed text before implementation.
   SKILL.md copies, tests. If the recorded dispositions-view response contract
   or packaged digest moves, the documented two-phase response-contract rollout
   applies.
-- Not affected: review-state schema (dispositions are reused as-is), hooks
+- Review-state schema IS affected: adaptation counts dismissal events "from
+  the records themselves", which requires family attribution on dismissal
+  records, and `quiet_offered_at` needs a durable slot that exists even while
+  the family's disposition is `normal` (today `normal` is represented by the
+  absence of a record). Both land as one versioned schema migration under the
+  attention-queue migration discipline (previous-schema files migrate on load;
+  a newer schema refuses on an older runtime).
+- Not affected: hooks
   (presets unchanged), governance plane (cross-boundary disclosure stays
   where it is), tool input schemas (no new commands, no new parameters —
   inspection rides `review_memory(mode="dispositions")` and `bootstrap`), and
