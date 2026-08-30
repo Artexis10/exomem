@@ -952,7 +952,7 @@ def _lifecycle_mutation(
             root, current, authorize_path=record_governance.full_release_filter(root)
         )
         if action == "revise":
-            if chain.status not in {"baseline", "ok"}:
+            if chain.status not in {"baseline", "ok", "acknowledged_gap"}:
                 raise collections.CollectionError(
                     "RECORD_AUDIT_GAP", "revision requires continuous audit history"
                 )
@@ -1738,7 +1738,9 @@ def _reconstruct_audit_chain(
             if predecessor is None:
                 gaps.append("missing-parent:" + cursor["parent_id"])
                 break
-            if cursor.get("operation") == "rebaseline" and cursor.get("continuity") is False:
+            if cursor.get("operation") in {"rebaseline", "plan_rebaseline"} and cursor.get(
+                "continuity"
+            ) is False:
                 discontinuities.append(
                     {
                     "provenance_continuity": False,

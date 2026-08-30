@@ -387,6 +387,30 @@ def test_planning_revision_and_rebaseline_require_exact_current_guards_and_gaps(
         why="acknowledge the exact direct edit",
     )
     assert receipt["operation"] == "rebaseline"
+    checkpoint = inspect(tmp_path, manifest_path)
+    assert checkpoint["audit"]["status"] == "acknowledged_gap"
+
+    proposal = (tmp_path / manifest_path).read_text(encoding="utf-8").replace(
+        "title: Planning work", "title: Reader friendly planning", 1
+    )
+    revision = validate(
+        tmp_path,
+        mode="revision",
+        collection=manifest_path,
+        manifest_text=proposal,
+    )
+    revised = revise(
+        tmp_path,
+        manifest_path,
+        manifest_text=proposal,
+        **revision["lifecycle_guards"],
+        why="make the collection title reader friendly",
+    )
+
+    restarted = inspect(tmp_path, manifest_path)
+    assert revised["operation"] == "revise"
+    assert restarted["audit"]["status"] == "acknowledged_gap"
+    assert restarted["audit"]["discontinuities"] == checkpoint["audit"]["discontinuities"]
 
 
 @pytest.mark.parametrize("horizon", ["now", "next", "later"])
