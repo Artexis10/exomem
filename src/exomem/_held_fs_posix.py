@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import errno
+import hashlib
 import os
 import posix as _native
 import secrets
@@ -414,6 +415,27 @@ class PosixHeldFilesystem(HeldFilesystem):
             while chunk := _read(checked.descriptor, 65536):
                 chunks.append(chunk)
             return HeldResult(value=b"".join(chunks))
+        except OSError as error:
+            return HeldResult(error=_error(error))
+
+    def sha256(self, file: HeldFile) -> HeldResult[str]:
+        try:
+            checked = self._check_file(file)
+            before = _fstat(checked.descriptor)
+            _lseek(checked.descriptor, 0, os.SEEK_SET)
+            digest = hashlib.sha256()
+            while chunk := _read(checked.descriptor, 65536):
+                digest.update(chunk)
+            after = _fstat(checked.descriptor)
+            if (
+                _identity(before) != _identity(after)
+                or before.st_size != after.st_size
+                or before.st_mtime_ns != after.st_mtime_ns
+                or before.st_ctime_ns != after.st_ctime_ns
+            ):
+                raise OSError(errno.ESTALE, "held file changed while hashing")
+            checked.check()
+            return HeldResult(value=digest.hexdigest())
         except OSError as error:
             return HeldResult(error=_error(error))
 

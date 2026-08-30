@@ -9,13 +9,16 @@ remain separate layers built on these immutable batch descriptors.
 
 from __future__ import annotations
 
+import hashlib
+import os
 import re
 from collections.abc import Callable, Iterable, Mapping
+from contextlib import ExitStack
 from dataclasses import dataclass
-from pathlib import Path
-from typing import NoReturn, Protocol
+from pathlib import Path, PurePosixPath
+from typing import Literal, NoReturn, Protocol
 
-from .. import vault
+from .. import held_fs, vault
 from . import consolidation_plan
 
 POLICY_ACTIVATION_TERMINAL_SCHEMA = (
@@ -41,10 +44,12 @@ _BATCH_FIELDS = frozenset(
 __all__ = [
     "POLICY_ACTIVATION_TERMINAL_SCHEMA",
     "BatchJournal",
+    "BatchStateObservation",
     "ContentBatch",
     "PolicyActivationTerminal",
     "PolicyFirstPublicationResult",
     "PolicyFirstPublicationUnavailable",
+    "classify_content_batch_state",
     "publish_policy_first",
 ]
 
@@ -82,6 +87,15 @@ class ContentBatch:
 
 
 @dataclass(frozen=True, slots=True)
+class BatchStateObservation:
+    """Content-free exact-state classification for one canonical batch."""
+
+    batch_ordinal: int
+    action_count: int
+    state: Literal["prior", "final", "equivalent", "mixed"]
+
+
+@dataclass(frozen=True, slots=True)
 class PolicyFirstPublicationResult:
     policy_terminal: PolicyActivationTerminal
     partition_digest: str
@@ -91,6 +105,9 @@ class PolicyFirstPublicationResult:
 
 class BatchJournal(Protocol):
     """Durable receipt-first journal boundary supplied by the full coordinator."""
+
+    def batch_status(self, batch: ContentBatch) -> str:
+        """Return the exact durable status for this immutable batch."""
 
     def prepare_batch(self, batch: ContentBatch) -> object:
         """Persist the exact intent/prepared transition before publication."""
@@ -175,6 +192,154 @@ def _content_batches(
     return tuple(batches)
 
 
+def _observed_file_state(
+    filesystem: held_fs.HeldFilesystem,
+    stack: ExitStack,
+    destination_path: str,
+) -> tuple[str, str]:
+    path = PurePosixPath(destination_path)
+    parent_path = path.parent.as_posix()
+    parent_result = filesystem.parent(parent_path)
+    if parent_result.error is not None:
+        if parent_result.error.code == "MISSING":
+            return "absent", "0" * 64
+        _fail()
+    parent = stack.enter_context(parent_result.require())
+    file_result = filesystem.file(parent, path.name)
+    if file_result.error is not None:
+        if file_result.error.code == "MISSING":
+            return "absent", "0" * 64
+        _fail()
+    file = stack.enter_context(file_result.require())
+    if file.identity.kind != "file" or file.identity.link_count != 1:
+        _fail()
+    return "present", _digest(filesystem.sha256(file).require())
+
+
+def _matches_action_state(
+    action: Mapping[str, object],
+    observed: tuple[str, str],
+    *,
+    prefix: Literal["expected_before", "planned_after"],
+) -> bool:
+    return observed == (action[f"{prefix}_state"], action[f"{prefix}_sha256"])
+
+
+def _validated_batch_writes(
+    *,
+    vault_root: Path,
+    actions: tuple[Mapping[str, object], ...],
+    writes: Iterable[vault.PlannedWrite],
+) -> tuple[vault.PlannedWrite, ...]:
+    root = Path(os.path.abspath(vault_root))
+    required = {
+        str(action["destination_path"]): action
+        for action in actions
+        if (
+            action["planned_after_state"] == "present"
+            and (
+                action["expected_before_state"] != action["planned_after_state"]
+                or action["expected_before_sha256"] != action["planned_after_sha256"]
+            )
+        )
+    }
+    checked: dict[str, vault.PlannedWrite] = {}
+    for write in writes:
+        if not isinstance(write, vault.PlannedWrite):
+            _fail()
+        try:
+            relative = Path(os.path.abspath(write.path)).relative_to(root).as_posix()
+        except ValueError:
+            _fail()
+        action = required.get(relative)
+        if action is None or relative in checked:
+            _fail()
+        if isinstance(write.content, str):
+            content_digest = hashlib.sha256(write.content.encode("utf-8")).hexdigest()
+        elif isinstance(write.content, vault.PreparedBinaryContent):
+            content_digest = _digest(write.content.sha256)
+        else:  # pragma: no cover - PlannedWrite carries the closed content union
+            _fail()
+        expected_missing = action["expected_before_state"] == "absent"
+        expected_hash = (
+            vault.MISSING_CONTENT_HASH
+            if expected_missing
+            else action["expected_before_sha256"]
+        )
+        if (
+            content_digest != action["planned_after_sha256"]
+            or write.expected_hash != expected_hash
+            or write.create_only is not expected_missing
+        ):
+            _fail()
+        checked[relative] = write
+    if frozenset(checked) != frozenset(required):
+        _fail()
+    return tuple(checked[path] for path in required)
+
+
+def classify_content_batch_state(
+    *,
+    vault_root: Path,
+    content_actions: object,
+    batch: ContentBatch,
+) -> BatchStateObservation:
+    """Classify canonical destinations as exact prior/final or unsafe mixed state."""
+
+    try:
+        actions = consolidation_plan.validate_content_actions(content_actions)
+        partition = consolidation_plan.derive_journal_batch_partition(actions)
+        batches = _content_batches(partition)
+        if not 0 <= batch.ordinal < len(batches) or batches[batch.ordinal] != batch:
+            _fail()
+        selected = tuple(
+            action for action in actions if action["batch_ordinal"] == batch.ordinal
+        )
+        if (
+            len(selected) != batch.action_count
+            or selected[0]["ordinal"] != batch.first_action_ordinal
+            or selected[-1]["ordinal"] != batch.last_action_ordinal
+            or len({action["destination_path"] for action in selected}) != len(selected)
+        ):
+            _fail()
+        with ExitStack() as stack:
+            filesystem = stack.enter_context(held_fs.acquire(Path(vault_root)).require())
+            observed = tuple(
+                _observed_file_state(
+                    filesystem,
+                    stack,
+                    str(action["destination_path"]),
+                )
+                for action in selected
+            )
+            prior = all(
+                _matches_action_state(action, state, prefix="expected_before")
+                for action, state in zip(selected, observed, strict=True)
+            )
+            final = all(
+                _matches_action_state(action, state, prefix="planned_after")
+                for action, state in zip(selected, observed, strict=True)
+            )
+    except PolicyFirstPublicationUnavailable:
+        raise
+    except (held_fs.HeldFsError, OSError, ValueError):
+        _fail()
+    state: Literal["prior", "final", "equivalent", "mixed"]
+    if prior and final:
+        state = "equivalent"
+    elif prior:
+        state = "prior"
+    elif final:
+        state = "final"
+    else:
+        state = "mixed"
+    return BatchStateObservation(
+        batch_ordinal=batch.ordinal,
+        action_count=batch.action_count,
+        state=state,
+    )
+
+
 def publish_policy_first(
     *,
     content_actions: object,
@@ -197,14 +362,49 @@ def publish_policy_first(
     )
     committed: list[int] = []
     for batch in batches:
-        journal.prepare_batch(batch)
-        writes = tuple(materialize_batch(batch))
-        vault.batch_atomic_write(
-            writes,
+        status = journal.batch_status(batch)
+        if status not in {"prior", "prepared", "final"}:
+            _fail()
+        observation = classify_content_batch_state(
             vault_root=Path(vault_root),
-            post_commit_fanout=False,
+            content_actions=content_actions,
+            batch=batch,
         )
-        journal.commit_batch(batch)
+        if status == "final":
+            if observation.state not in {"final", "equivalent"}:
+                _fail()
+        elif status == "prepared" and observation.state in {"final", "equivalent"}:
+            journal.commit_batch(batch)
+        else:
+            if observation.state not in {"prior", "equivalent"}:
+                _fail()
+            if status == "prior":
+                journal.prepare_batch(batch)
+            if observation.state != "equivalent":
+                actions = consolidation_plan.validate_content_actions(content_actions)
+                selected = tuple(
+                    action
+                    for action in actions
+                    if action["batch_ordinal"] == batch.ordinal
+                )
+                writes = _validated_batch_writes(
+                    vault_root=Path(vault_root),
+                    actions=selected,
+                    writes=materialize_batch(batch),
+                )
+                vault.batch_atomic_write(
+                    writes,
+                    vault_root=Path(vault_root),
+                    post_commit_fanout=False,
+                )
+                observation = classify_content_batch_state(
+                    vault_root=Path(vault_root),
+                    content_actions=content_actions,
+                    batch=batch,
+                )
+                if observation.state not in {"final", "equivalent"}:
+                    _fail()
+            journal.commit_batch(batch)
         committed.append(batch.ordinal)
     return PolicyFirstPublicationResult(
         policy_terminal=terminal,

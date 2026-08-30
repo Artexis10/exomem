@@ -173,6 +173,11 @@ class HeldFilesystem:
     def read(self, file: HeldFile) -> HeldResult[bytes]:
         raise NotImplementedError
 
+    def sha256(self, file: HeldFile) -> HeldResult[str]:
+        """Hash one retained regular file without materializing it in memory."""
+
+        raise NotImplementedError
+
     def write(self, file: HeldFile, data: bytes) -> HeldResult[None]:
         raise NotImplementedError
 

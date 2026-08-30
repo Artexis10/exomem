@@ -99,6 +99,7 @@ def test_create_persists_exact_prior_state_and_restarts(tmp_path: Path) -> None:
     assert created.publication_boundary_ordinal == 0
     assert created.publication_boundary_committed is False
     assert tuple(item.status for item in created.batches) == ("prior", "prior")
+    assert store.batch_status(_batch(0)) == "prior"
     assert _store(vault).load() == created
 
 
@@ -117,11 +118,13 @@ def test_prepare_and_commit_are_cas_revisioned_and_exactly_replayable(
     assert prepared.revision == initial.revision + 1
     assert tuple(item.status for item in prepared.batches) == ("prepared", "prior")
     assert store.prepare_batch(_batch(0)) == prepared
+    assert _store(vault).batch_status(_batch(0)) == "prepared"
 
     final = store.commit_batch(_batch(0))
     assert final.revision == prepared.revision + 1
     assert tuple(item.status for item in final.batches) == ("final", "prior")
     assert final.publication_boundary_committed is True
+    assert store.batch_status(_batch(0)) == "final"
     assert _store(vault).commit_batch(_batch(0)) == final
 
     second_prepared = _store(vault).prepare_batch(_batch(1))
