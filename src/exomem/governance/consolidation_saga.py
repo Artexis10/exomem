@@ -16,10 +16,13 @@ from collections.abc import Callable, Iterable, Mapping
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Literal, NoReturn, Protocol
+from typing import TYPE_CHECKING, Literal, NoReturn, Protocol
 
-from .. import held_fs, vault
-from . import consolidation_plan
+from .. import held_fs, reserved_paths, vault
+from . import consolidation_plan, consolidation_receipts
+
+if TYPE_CHECKING:
+    from . import consolidation_effect_coordinator
 
 POLICY_ACTIVATION_TERMINAL_SCHEMA = (
     "exomem.consolidation-policy-activation-terminal/v1"
@@ -51,6 +54,7 @@ __all__ = [
     "PolicyFirstPublicationUnavailable",
     "classify_content_batch_state",
     "publish_policy_first",
+    "publish_content_batch_receipt_first",
 ]
 
 
@@ -278,6 +282,32 @@ def _validated_batch_writes(
     return tuple(checked[path] for path in required)
 
 
+def _validated_batch_removals(
+    *,
+    vault_root: Path,
+    actions: tuple[Mapping[str, object], ...],
+) -> tuple[tuple[str, held_fs.StableIdentity, str], ...]:
+    removals: list[tuple[str, held_fs.StableIdentity, str]] = []
+    for action in actions:
+        before = action["expected_before_state"]
+        after = action["planned_after_state"]
+        kind = action["action"]
+        if after == "absent":
+            if before != "present" or kind != "remove":
+                _fail()
+            relative = str(action["destination_path"])
+            try:
+                identity = reserved_paths.inspect_generic_file(vault_root, relative)
+            except reserved_paths.ReservedPathLeafError:
+                _fail()
+            removals.append(
+                (relative, identity, _digest(action["expected_before_sha256"]))
+            )
+        elif kind == "remove":
+            _fail()
+    return tuple(removals)
+
+
 def classify_content_batch_state(
     *,
     vault_root: Path,
@@ -411,4 +441,139 @@ def publish_policy_first(
         partition_digest=partition.digest,
         publication_boundary_ordinal=batches[0].ordinal,
         committed_batch_ordinals=tuple(committed),
+    )
+
+
+def _content_batch_classification_digest(batch: ContentBatch) -> str:
+    value = {
+        "schema": "exomem.consolidation-content-batch-classification/v1",
+        "batch_ordinal": batch.ordinal,
+        "action_set_digest": batch.action_set_digest,
+        "prior_fingerprint": batch.prior_fingerprint,
+        "prepared_fingerprint": batch.prepared_fingerprint,
+        "final_fingerprint": batch.final_fingerprint,
+    }
+    encoded = consolidation_plan.canonical_closed_jcs(value)
+    domain = b"exomem.consolidation-content-batch-classification/v1"
+    framed = (
+        len(domain).to_bytes(4, "big")
+        + domain
+        + len(encoded).to_bytes(8, "big")
+        + encoded
+    )
+    return hashlib.sha256(framed).hexdigest()
+
+
+def publish_content_batch_receipt_first(
+    *,
+    content_actions: object,
+    batch: ContentBatch,
+    event: consolidation_receipts.ConsolidationEvent,
+    journal: consolidation_effect_coordinator.ConsolidationEffectJournalStore,
+    vault_root: Path,
+    materialize_batch: Callable[[ContentBatch], Iterable[vault.PlannedWrite]],
+    timestamp: str | None = None,
+) -> consolidation_effect_coordinator.EffectExecutionResult:
+    """Publish one real content batch through the receipt-first effect engine."""
+
+    from . import consolidation_effect_coordinator
+
+    partition = consolidation_plan.derive_journal_batch_partition(content_actions)
+    batches = _content_batches(partition)
+    if (
+        not isinstance(batch, ContentBatch)
+        or not 0 <= batch.ordinal < len(batches)
+        or batches[batch.ordinal] != batch
+        or not isinstance(event, consolidation_receipts.ConsolidationEvent)
+    ):
+        _fail()
+    try:
+        payload = consolidation_receipts.validate_nested(
+            event.payload,
+            outer_phase="intent",
+        )
+    except consolidation_receipts.ConsolidationReceiptUnavailable:
+        _fail()
+    evidence = payload.get("evidence")
+    if (
+        payload.get("kind") != "content-batch"
+        or payload.get("phase") != "publishing"
+        or payload.get("batch_ordinal") != batch.ordinal
+        or payload.get("prior_digest") != batch.prior_fingerprint
+        or payload.get("prepared_digest") != batch.prepared_fingerprint
+        or payload.get("target_digest") != batch.final_fingerprint
+        or not isinstance(evidence, Mapping)
+        or evidence.get("batch_manifest_digest") != batch.action_set_digest
+        or evidence.get("classification_digest")
+        != _content_batch_classification_digest(batch)
+    ):
+        _fail()
+
+    def classify_observation(
+        *,
+        equivalent_as: Literal["prior", "target"],
+    ) -> consolidation_effect_coordinator.EffectObservation:
+        observed = classify_content_batch_state(
+            vault_root=Path(vault_root),
+            content_actions=content_actions,
+            batch=batch,
+        )
+        if observed.state == "prior" or (
+            observed.state == "equivalent" and equivalent_as == "prior"
+        ):
+            return consolidation_effect_coordinator.EffectObservation(
+                state="prior",
+                digest=batch.prior_fingerprint,
+            )
+        if observed.state in {"final", "equivalent"}:
+            return consolidation_effect_coordinator.EffectObservation(
+                state="target",
+                digest=batch.final_fingerprint,
+            )
+        return consolidation_effect_coordinator.EffectObservation(
+            state="mixed",
+            digest=_content_batch_classification_digest(batch),
+        )
+
+    def classify() -> consolidation_effect_coordinator.EffectObservation:
+        return classify_observation(equivalent_as="target")
+
+    def classify_unprepared() -> consolidation_effect_coordinator.EffectObservation:
+        return classify_observation(equivalent_as="prior")
+
+    def apply() -> None:
+        actions = consolidation_plan.validate_content_actions(content_actions)
+        selected = tuple(
+            action for action in actions if action["batch_ordinal"] == batch.ordinal
+        )
+        writes = _validated_batch_writes(
+            vault_root=Path(vault_root),
+            actions=selected,
+            writes=materialize_batch(batch),
+        )
+        removals = _validated_batch_removals(
+            vault_root=Path(vault_root),
+            actions=selected,
+        )
+        vault.batch_atomic_write(
+            writes,
+            vault_root=Path(vault_root),
+            post_commit_fanout=False,
+        )
+        for relative, identity, expected_sha256 in removals:
+            reserved_paths.unlink_generic_file(
+                Path(vault_root),
+                relative,
+                expected_identity=identity,
+                expected_sha256=expected_sha256,
+            )
+
+    return consolidation_effect_coordinator._execute_effect(  # noqa: SLF001
+        vault_root=Path(vault_root),
+        event=event,
+        journal=journal,
+        classify=classify,
+        classify_unprepared=classify_unprepared,
+        apply_effect=apply,
+        timestamp=timestamp,
     )
