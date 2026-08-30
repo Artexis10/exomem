@@ -82,6 +82,18 @@ from _hosted_candidate_locks import read_lock  # noqa: E402 - script dir inserte
 #: The count below is therefore advisory. The authority is the server, which
 #: answers `register_pinned` with a bare 400 when the partition is genuinely full.
 OPERATOR_CLIENT_BOUND = 96
+#: The staged release owns the whole review window: `run` takes the assignment's
+#: expiry from it, so everything after `prepare` -- provisioning, every platform's
+#: clean-client run, and `observe`/`sign`/`import` for each -- has to finish
+#: inside it. 55 minutes was hardcoded here while the runbook told the operator to
+#: size the window for the platforms actually being promoted, and warned in the
+#: same breath not to fit two platforms into thirty minutes. Provisioning alone
+#: has been observed at 8m20s. The control plane bounds a staged release at 7
+#: days, so the number below is this script's choice, not a limit.
+DEFAULT_STAGE_MINUTES = 55
+#: Below this there is no honest room for provisioning plus one clean-client run.
+MIN_STAGE_MINUTES = 20
+MAX_STAGE_MINUTES = 7 * 24 * 60
 LOOPBACK_REDIRECT = "http://localhost:47831/callback"
 CLAUDE_CIMD_CLIENT_ID = "https://claude.ai/oauth/mcp-oauth-client-metadata"
 CLAUDE_CIMD_REDIRECT = "https://claude.ai/api/mcp/auth_callback"
@@ -760,6 +772,7 @@ def prepare(
     email: str,
     locks: dict,
     existing_client_id: str | None = None,
+    stage_minutes: int = DEFAULT_STAGE_MINUTES,
 ) -> dict:
     """Create stage, pinned client and invite. Spends nothing irreversible."""
     # First, because `run` cannot create the OpenAI sibling stage without it and
@@ -777,7 +790,7 @@ def prepare(
         client_id=client_id,
         redirect_uris=[LOOPBACK_REDIRECT],
     )
-    stage_expires_at = stamp(timedelta(minutes=55))
+    stage_expires_at = stamp(timedelta(minutes=stage_minutes))
 
     status, stage = cp.call(
         "POST",
@@ -869,6 +882,7 @@ def run(
     locks: dict,
     openai_connector: str,
     openai_redirect_override: list[str] | None = None,
+    stage_minutes: int = DEFAULT_STAGE_MINUTES,
 ) -> None:
     """Prepare and verify the reviewer fixture before sealing provider credentials."""
     resource = f"{cp.base_url}/api/exomem/mcp/v1"
@@ -1066,7 +1080,7 @@ def run(
                 "action": "create-stage",
                 "candidateId": context["candidateId"],
                 "platform": platform,
-                "expiresAt": stamp(timedelta(minutes=55)),
+                "expiresAt": stamp(timedelta(minutes=stage_minutes)),
                 "packageSha256": package,
                 "archiveSha256": archive,
                 "compatibilitySha256": locks["compatibility"],
@@ -1217,6 +1231,17 @@ def main() -> int:
         "every candidate that does not happen to match it, and the digests it "
         "produces fail server-side rather than here.",
     )
+    parser.add_argument(
+        "--stage-minutes",
+        type=int,
+        default=DEFAULT_STAGE_MINUTES,
+        metavar="N",
+        help="life of the staged release, which is the whole review window: "
+        f"provisioning plus a clean-client run per platform plus observe/sign/import "
+        f"for each must fit inside it (default {DEFAULT_STAGE_MINUTES}, "
+        f"{MIN_STAGE_MINUTES}-{MAX_STAGE_MINUTES}). Size it for the platforms being "
+        "promoted; two platforms do not fit in the default.",
+    )
     parser.add_argument("--email", help="reviewer alias, required for prepare")
     parser.add_argument(
         "--existing-client-id",
@@ -1247,6 +1272,13 @@ def main() -> int:
         print("EXOMEM_PUBLIC_BASE_URL and EXOMEM_ADMIN_TOKEN must be set", file=sys.stderr)
         return 2
 
+    if not MIN_STAGE_MINUTES <= args.stage_minutes <= MAX_STAGE_MINUTES:
+        print(
+            f"--stage-minutes must be between {MIN_STAGE_MINUTES} and {MAX_STAGE_MINUTES}",
+            file=sys.stderr,
+        )
+        return 2
+
     cp = ControlPlane(base_url, admin_token, args.state_dir)
     locks = load_locks(args.repo, args.profile)
 
@@ -1263,16 +1295,29 @@ def main() -> int:
             print("\nrefusing to prepare while preflight is red")
             return 1
         print("\nprepare:")
-        context = prepare(cp, args.candidate_id, args.email, locks, args.existing_client_id)
+        context = prepare(
+            cp,
+            args.candidate_id,
+            args.email,
+            locks,
+            args.existing_client_id,
+            args.stage_minutes,
+        )
         print(f"  stage   {context['stageId']}")
         print(f"  client  {context['oauthClientId']}")
         print(f"  invite  {context['inviteId']}")
         print(f"\n  Invite sent to {args.email}.")
+        # The staged release is already expiring, so say when rather than leaving
+        # the operator to add minutes to the time they ran this.
+        print(f"  The review window closes at {context['stageExpiresAt']}")
+        print(f"  ({args.stage_minutes} minutes from now). Everything after `run` --")
+        print("  provisioning, every clean-client run, observe/sign/import -- is inside it.")
         print("  Nothing irreversible has been spent: the invite keeps its full expiry")
         print("  until `run` creates the authority. Fetch the token from the email's")
         print("  text/plain part (the tracked HTML link drops the URL fragment), then:")
         print(f"\n    {sys.argv[0]} run --candidate-id {args.candidate_id} \\")
-        print(f"      --state-dir {args.state_dir} --token <token>")
+        print(f"      --state-dir {args.state_dir} --profile {args.profile} \\")
+        print(f"      --repo {args.repo} --token <token> --openai-connector <id>")
         return 0
 
     if not args.token:
@@ -1288,7 +1333,15 @@ def main() -> int:
         return 2
     context = json.loads((args.state_dir / "bootstrap-context.json").read_text())
     print("run:")
-    run(cp, context, args.token, locks, args.openai_connector, args.openai_redirect)
+    run(
+        cp,
+        context,
+        args.token,
+        locks,
+        args.openai_connector,
+        args.openai_redirect,
+        args.stage_minutes,
+    )
     return 0
 
 

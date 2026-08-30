@@ -566,6 +566,60 @@ def test_prepare_keeps_fresh_client_generation_as_the_default(monkeypatch, tmp_p
     assert all(call["label"] != "preflight-reuse-client" for call in cp.calls)
 
 
+def test_prepare_sizes_the_staged_release_from_stage_minutes(monkeypatch, tmp_path) -> None:
+    """The staged release is the whole review window, so its length is an input.
+
+    `run` takes the assignment's expiry from it, so provisioning, every platform's
+    clean-client run and each `observe`/`sign`/`import` have to fit inside it.
+    """
+    module = _load_module()
+    monkeypatch.setattr(module, "attach_openai_locks", lambda *_: None)
+    cp = _prepare_cp(tmp_path)
+
+    before = module.utc_now()
+    context = module.prepare(
+        cp, "cand-1", "reviewer@example.invalid", _locks(), None, 150
+    )
+    after = module.utc_now()
+
+    stage_call = next(call for call in cp.calls if call["label"] == "prepare-stage")
+    expiry = module.parse_stamp(stage_call["body"]["expiresAt"])
+    # `stamp` truncates to whole seconds, so the lower bound loses up to one.
+    assert before + module.timedelta(minutes=150, seconds=-1) <= expiry
+    assert expiry <= after + module.timedelta(minutes=150)
+    assert context["stageExpiresAt"] == stage_call["body"]["expiresAt"]
+
+
+@pytest.mark.parametrize("minutes", (0, 19, 7 * 24 * 60 + 1))
+def test_main_refuses_a_stage_window_outside_the_bounds(minutes: int, monkeypatch) -> None:
+    module = _load_module()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "reviewer_bootstrap.py",
+            "preflight",
+            "--candidate-id",
+            "c",
+            "--state-dir",
+            "/tmp/s",
+            "--profile",
+            "hosted-alpha-agent-v1",
+            "--stage-minutes",
+            str(minutes),
+        ],
+    )
+    monkeypatch.setenv("EXOMEM_PUBLIC_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("EXOMEM_ADMIN_TOKEN", "token")
+
+    def _no_control_plane(*_a, **_k):
+        raise AssertionError("bounds must be checked before any control-plane call")
+
+    monkeypatch.setattr(module, "ControlPlane", _no_control_plane)
+
+    assert module.main() == 2
+
+
 def test_prepare_reuses_only_the_explicit_exact_disabled_client(monkeypatch, tmp_path) -> None:
     module = _load_module()
     monkeypatch.setattr(module, "attach_openai_locks", lambda *_: None)
