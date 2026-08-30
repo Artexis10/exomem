@@ -1268,8 +1268,18 @@ def append_event(
     event_id: str | None = None,
     timestamp: str | None = None,
     critical: bool = False,
+    _report_adoption: bool = False,
 ) -> dict[str, Any]:
     """Append one validated receipt, failing closed if its anchor is stale."""
+    if type(_report_adoption) is not bool:
+        raise ReceiptError("receipt adoption-report flag must be boolean")
+
+    def result(record: Mapping[str, Any], *, adopted: bool) -> dict[str, Any]:
+        returned = dict(record)
+        if _report_adoption:
+            returned["_adopted"] = adopted
+        return returned
+
     _validate_event(event_type, phase, payload)
     if event_id is not None and not _valid_event_id(event_type, phase, event_id):
         raise ReceiptError("receipt event id is not opaque for its event phase")
@@ -1338,7 +1348,7 @@ def append_event(
                             (actual_seq, actual_hash, instance_id),
                         )
                     conn.commit()
-                    return tail
+                    return result(tail, adopted=True)
                 raise ReceiptError("receipt anchor is stale; reconcile before append")
             if event_type == "consolidation":
                 try:
@@ -1358,7 +1368,7 @@ def append_event(
             if event_id is not None and critical:
                 existing = _matching_existing_event(instance_dir, eid, event_type, phase, payload)
                 if existing is not None:
-                    return existing
+                    return result(existing, adopted=True)
             path = _month_path(vault_root, instance_id, timestamp)
             if tail is not None and path.name < Path(tail["_path"]).name:
                 raise ReceiptError("backdated receipt month rotation is refused")
@@ -1405,7 +1415,7 @@ def append_event(
             _crash_point("after_sidecar_commit")
             if event_type == "critical" and phase in {"committed", "aborted"}:
                 _crash_point("after_terminal_append")
-            return record
+            return result(record, adopted=False)
 
 
 def critical_event_id(operation_identity: Any) -> str:

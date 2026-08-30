@@ -47,6 +47,7 @@ _HELD_PUBLICATION_RE = re.compile(
     re.ASCII,
 )
 _DRIVE_RE = re.compile(r"^[a-zA-Z]:")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$", re.ASCII)
 
 
 class PathDisposition(StrEnum):
@@ -966,9 +967,21 @@ def unlink_generic_file(
     value: object,
     *,
     expected_identity: held_fs.StableIdentity | None = None,
+    expected_sha256: str | None = None,
     identities: IdentityCatalogue | None = None,
 ) -> None:
-    """Remove one exact ordinary file through its retained parent and leaf."""
+    """Remove one exact ordinary file through its retained parent and leaf.
+
+    When supplied, ``expected_sha256`` is checked on the same retained file
+    handle that is consumed by the unlink.  This closes the in-place rewrite
+    race that an identity-only guard cannot detect.
+    """
+
+    if expected_sha256 is not None and (
+        not isinstance(expected_sha256, str)
+        or _SHA256_RE.fullmatch(expected_sha256) is None
+    ):
+        raise ReservedPathLeafError("CONTENT_CHANGED")
 
     with _generic_identity_catalogue_scope(
         vault_root, value, identities=identities
@@ -977,6 +990,7 @@ def unlink_generic_file(
             vault_root,
             value,
             expected_identity=expected_identity,
+            expected_sha256=expected_sha256,
             identities=current,
         )
 
@@ -986,6 +1000,7 @@ def _unlink_generic_file_held(
     value: object,
     *,
     expected_identity: held_fs.StableIdentity | None,
+    expected_sha256: str | None,
     identities: IdentityCatalogue,
 ) -> None:
 
@@ -994,7 +1009,7 @@ def _unlink_generic_file_held(
     if not acquired.ok:
         raise ReservedPathLeafError("CAPABILITY_UNAVAILABLE")
     with acquired.require() as filesystem:
-        parent_result = filesystem.parent(parent_path)
+        parent_result = filesystem.parent(parent_path, access="flush")
         if not parent_result.ok:
             code = (
                 parent_result.error.code
@@ -1017,6 +1032,12 @@ def _unlink_generic_file_held(
                 _refuse_private_identity(file.identity, identities)
                 if expected_identity is not None and file.identity != expected_identity:
                     raise ReservedPathLeafError("IDENTITY_CHANGED")
+                if expected_sha256 is not None:
+                    observed_sha256 = filesystem.sha256(file)
+                    if not observed_sha256.ok:
+                        raise ReservedPathLeafError("IO_REFUSED")
+                    if observed_sha256.require() != expected_sha256:
+                        raise ReservedPathLeafError("CONTENT_CHANGED")
                 removed = filesystem.unlink(file)
                 if not removed.ok:
                     code = (
@@ -1025,6 +1046,14 @@ def _unlink_generic_file_held(
                         else "IO_REFUSED"
                     )
                     raise ReservedPathLeafError(code)
+            flushed = filesystem.flush_directory(parent)
+            if not flushed.ok:
+                code = (
+                    flushed.error.code
+                    if flushed.error is not None
+                    else "IO_REFUSED"
+                )
+                raise ReservedPathLeafError(code)
             missing = filesystem.file(parent, leaf)
             if missing.ok:
                 missing.require().close()

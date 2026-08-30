@@ -454,6 +454,7 @@ __all__ = [
     "ConsolidationEvent",
     "ConsolidationReceiptUnavailable",
     "append_intent",
+    "append_intent_with_status",
     "append_terminal",
     "build_evidence",
     "build_intent",
@@ -845,6 +846,22 @@ def append_intent(
 ) -> dict[str, object]:
     """Append or adopt one exact durable consolidation intent."""
 
+    record, _adopted = append_intent_with_status(
+        vault_root,
+        event,
+        timestamp=timestamp,
+    )
+    return record
+
+
+def append_intent_with_status(
+    vault_root: Path,
+    event: ConsolidationEvent,
+    *,
+    timestamp: str | None = None,
+) -> tuple[dict[str, object], bool]:
+    """Append/adopt an intent and report whether its durable record pre-existed."""
+
     from . import receipts
 
     try:
@@ -864,8 +881,15 @@ def append_intent(
             payload={"consolidation_event": dict(checked)},
             timestamp=timestamp,
             critical=True,
+            _report_adoption=True,
         )
-        return {key: value for key, value in record.items() if not key.startswith("_")}
+        adopted = record.get("_adopted")
+        if type(adopted) is not bool:
+            _fail()
+        return (
+            {key: value for key, value in record.items() if not key.startswith("_")},
+            adopted,
+        )
     except ConsolidationReceiptUnavailable:
         raise
     except (OSError, RuntimeError, TypeError, ValueError):
