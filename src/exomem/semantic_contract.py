@@ -750,25 +750,38 @@ def _path_parts(path: str) -> tuple[str, ...]:
     return tuple(part.casefold() for part in PurePosixPath(path.replace("\\", "/")).parts)
 
 
-def _path_excluded_from_semantic_minimum(path: str) -> bool:
+def _path_excluded_from_compiled_destination(path: str) -> bool:
     parts = _path_parts(path)
     if any(part in _SEMANTIC_UNIT_EXEMPT_PARTS for part in parts):
         return True
     name = parts[-1] if parts else ""
-    if name in {"hub.md", "index.md", "log.md"}:
+    return name in {"hub.md", "index.md", "log.md"}
+
+
+def _path_excluded_from_semantic_minimum(path: str) -> bool:
+    if _path_excluded_from_compiled_destination(path):
         return True
+    parts = _path_parts(path)
+    name = parts[-1] if parts else ""
     stem = PurePosixPath(name).stem
     return any(stem.endswith(suffix) for suffix in _SEMANTIC_UNIT_EXEMPT_SUFFIXES)
+
+
+def _structural_compiled_destination(path: str) -> str | None:
+    """Return a compiled route without applying minimum-unit-only exemptions."""
+    if _path_excluded_from_compiled_destination(path):
+        return None
+    parts = _path_parts(path)
+    if len(parts) < 3 or parts[:2] != ("knowledge base", "notes"):
+        return None
+    return _COMPILED_ROOT_TYPES.get(parts[2])
 
 
 def canonical_compiled_destination(path: str) -> str | None:
     """Return the compiled type selected by one canonical destination, if any."""
     if _path_excluded_from_semantic_minimum(path):
         return None
-    parts = _path_parts(path)
-    if len(parts) < 3 or parts[:2] != ("knowledge base", "notes"):
-        return None
-    return _COMPILED_ROOT_TYPES.get(parts[2])
+    return _structural_compiled_destination(path)
 
 
 def _frontmatter_tags(page: SemanticPageState) -> frozenset[str]:
@@ -799,8 +812,10 @@ def compiled_intent(page: SemanticPageState) -> bool:
 
 def compiled_structure_finding(page: SemanticPageState) -> ContractFinding | None:
     """Return a deterministic path/type mismatch before semantic applicability."""
-    destination_type = canonical_compiled_destination(page.path)
+    destination_type = _structural_compiled_destination(page.path)
     page_type = normalized_compiled_type(page.page_type)
+    if _path_excluded_from_semantic_minimum(page.path) and page_type not in COMPILED_TYPES:
+        return None
     if destination_type is not None and page_type != destination_type:
         return ContractFinding(
             code="COMPILED_TYPE_MISMATCH",

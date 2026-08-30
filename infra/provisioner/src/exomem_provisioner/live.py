@@ -442,6 +442,9 @@ class KubernetesProviderRegistry:
                 "exomem.io/resource-name": metadata.resource_name,
                 "exomem.io/pvc-name": metadata.resource_name + "-data",
                 "exomem.io/credentials-secret-name": "exomem-cell-credentials",
+                "exomem.io/authorization-session-secret-name": (
+                    "exomem-authorization-session"
+                ),
                 "exomem.io/init-request-configmap-name": metadata.resource_name + "-init-request",
                 "exomem.io/provision-mode": provision_mode,
             }

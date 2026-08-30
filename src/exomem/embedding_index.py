@@ -12,6 +12,7 @@ import logging
 import sqlite3
 import sys
 import threading
+from collections.abc import Set as AbstractSet
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -96,6 +97,38 @@ class _EmbCache(NamedTuple):
     recall_policy_identity: tuple[str, str]
     metadata: list[tuple[str, int]]
     matrix: np.ndarray
+
+
+class _MaskCache(NamedTuple):
+    """One memoized eligibility row mask for `search`'s allowed-paths filter.
+
+    `metadata` is held by STRONG reference and matched with `is`, NOT by the
+    write token `all_vectors()` keys on — deliberately the stronger of the two
+    invariants. Every producer of the matrix cache is copy-on-write
+    (`_load_all_rows`, `_splice_path_blocks` under `_patch_cache` /
+    `_catch_up_cache`, and `_purge_cache_paths` all build fresh containers), so
+    a different row set is ALWAYS a different list object; the converse does not
+    hold, because an equal `(epoch, generation, instance)` triple still falls
+    back to mtime on gen==0 legacy sidecars, where mtime both spuriously misses
+    and goes stale (see the generation-meta note). Reading the token separately
+    would also race: another thread may swap `self._cache` between
+    `all_vectors()` returning and the token being read, keying a mask against a
+    generation its rows never came from. Holding the reference additionally
+    stops the list being freed and its `id()` reused by an unrelated one, so a
+    mask can never outlive the matrix it was computed against.
+
+    `allowed_paths` is matched by CONTENT (a frozenset), never by identity: the
+    set belongs to the caller, which may mutate it in place between two queries
+    at the same scope, and a stale mask would return rows the caller excluded —
+    far worse than the slowness this cache exists to remove. `frozenset(x)`
+    returns `x` itself when it is already a frozenset, so an immutable caller
+    pays nothing for that safety.
+    """
+
+    metadata: list[tuple[str, int]]
+    allowed_paths: frozenset[str]
+    mask: np.ndarray
+    eligible: int
 
 
 def _splice_path_blocks(
@@ -213,6 +246,8 @@ class EmbeddingIndex:
         self.vault_root = vault_root
         self.path = index_paths.sidecar_path(vault_root)
         self._cache: _EmbCache | None = None
+        # One-slot memo for search()'s allowed-paths row mask (see _MaskCache).
+        self._mask_cache: _MaskCache | None = None
         # Guards in-memory cache mutation only (never held across a sqlite write).
         # Reentrant so rebuild_all()-style nesting can't self-deadlock.
         self._lock = threading.RLock()
@@ -693,6 +728,11 @@ class EmbeddingIndex:
         with self._lock:
             loaded = self._cache is not None
             self._cache = None
+            # The mask memo pins the metadata list by strong reference, so an
+            # unload that left it behind would keep those rows resident after
+            # the caller asked for the memory back. Correctness never depended
+            # on this — a reload builds a new list and simply misses.
+            self._mask_cache = None
             return loaded
 
     def cache_status(self) -> dict:
@@ -858,6 +898,16 @@ class EmbeddingIndex:
         default — exact, rank-identical to the scan below; binary+rescore when
         `EXOMEM_VEC_QUANT=binary`), otherwise the in-memory numpy scan. Every vec
         failure mode falls through to the scan — search never breaks on vec0.
+
+        Under an allowed-paths filter the scan SCORES FIRST AND MASKS SECOND:
+        one BLAS pass over the whole cached matrix, then `-inf` onto the
+        ineligible rows' scores. Slicing the matrix instead (`matrix[keep]`)
+        fancy-indexed a fresh copy of most of a ~200 MB matrix on every single
+        recall, which the matmul then had to read back — the memcpy issue #951
+        measured, and the reason a semantic recall cost ~10x a keyword one with
+        the GPU idle. Masking is behaviour-identical rather than approximate: an
+        ineligible row scores `-inf` and `k_eff` is clamped to the eligible
+        count, so `argpartition` provably cannot reach a masked row.
         """
         if allowed_paths is None:
             vec_hits = self._vec_search(query_vec, k)
@@ -866,19 +916,37 @@ class EmbeddingIndex:
         metadata, matrix = self.all_vectors()
         if not metadata:
             return []
+        mask: np.ndarray | None = None
+        # The ceiling on how many rows may be returned. Under a filter it is the
+        # ELIGIBLE count, never the row count: `argpartition` over the full score
+        # array will return `k` rows whatever the mask says, so an unclamped
+        # `k_eff` pads the answer with masked `-inf` rows as soon as fewer than
+        # `k` survive the filter — and returns a whole top-k when none do.
+        k_ceiling = len(metadata)
         if allowed_paths is not None:
-            keep = [index for index, (path, _chunk) in enumerate(metadata) if path in allowed_paths]
-            if not keep:
-                return []
-            metadata = [metadata[index] for index in keep]
-            matrix = matrix[keep]
-        # query_vec is (768,) normalized; matrix is (N, 768) normalized.
-        scores = matrix @ query_vec.astype(np.float32, copy=False)
-        k_eff = min(k, len(scores))
+            mask, k_ceiling = self._eligibility_mask(metadata, allowed_paths)
+        k_eff = min(k, k_ceiling)
         if k_eff <= 0:
             return []
+        # query_vec is (768,) normalized; matrix is (N, 768) normalized.
+        scores = matrix @ query_vec.astype(np.float32, copy=False)
+        if mask is not None:
+            scores = np.where(mask, scores, -np.inf)
         # argpartition is O(N), then sort the top-k slice.
         top_idx = np.argpartition(-scores, k_eff - 1)[:k_eff]
+        if mask is not None and not bool(mask[top_idx].all()):
+            # An ineligible row won a slot, which masking alone cannot prevent:
+            # `-(-inf)` is `+inf`, and numpy orders NaN ABOVE `+inf`, so when the
+            # query embeds to NaN (a zero-norm or broken vector) every eligible
+            # score is NaN and the masked rows partition first. Reachable only
+            # with non-finite scores, but eligibility is a governance boundary
+            # rather than a ranking preference, so it must not depend on
+            # arithmetic holding. Fall back to selecting among the eligible rows
+            # only — the pre-#951 computation exactly, on the rows it would have
+            # had — which restores both the row and its true score.
+            eligible_idx = np.flatnonzero(mask)
+            sub = scores[eligible_idx]
+            top_idx = eligible_idx[np.argpartition(-sub, k_eff - 1)[:k_eff]]
         top_idx = top_idx[np.argsort(-scores[top_idx])]
         top = [(metadata[i][0], metadata[i][1], float(scores[i])) for i in top_idx]
         # numpy-lite: hydrate only the winners' texts (PK point-lookups).
@@ -888,6 +956,51 @@ class EmbeddingIndex:
             log.warning("chunk-text fetch failed (%s); returning hits without text", e)
             texts = {}
         return [(fp, ci, texts.get((fp, ci), ""), score) for fp, ci, score in top]
+
+    def _eligibility_mask(
+        self, metadata: list[tuple[str, int]], allowed_paths: AbstractSet[str]
+    ) -> tuple[np.ndarray, int]:
+        """`(row_mask, eligible_count)` for `allowed_paths` over `metadata`'s rows.
+
+        Memoized in a single slot (see `_MaskCache` for why the key is the
+        metadata list's identity plus the allowed set's CONTENT). `allowed_paths`
+        is stable across a session at a given scope, so only the first query
+        after a matrix rebuild or a scope change pays the membership pass; the
+        rest pay one frozenset compare instead of a `len(metadata)`-iteration
+        Python loop that ran on every recall.
+
+        Lock-free on purpose, like `all_vectors()`'s fast path. The slot holds
+        one immutable NamedTuple, so a concurrent reader sees either the old
+        entry or the new one and never a torn pair, and it re-validates whatever
+        it read before trusting it. Two threads racing at different scopes both
+        compute a correct mask and one simply wins the slot; the only loss is a
+        recomputation. An `unload_cache()` that interleaves with the assignment
+        below can leave one memo pinned — the next unload or rebuild clears it,
+        and no answer is affected, which is not worth putting a lock on the hot
+        path for.
+        """
+        key = frozenset(allowed_paths)
+        cached = self._mask_cache
+        if (
+            cached is not None
+            and cached.metadata is metadata
+            and cached.allowed_paths == key
+        ):
+            return cached.mask, cached.eligible
+        # Build from `key`, NOT from `allowed_paths`. The caller's set is mutable
+        # and callers do mutate it, so reading it a second time here can cache a
+        # mask under a key that does not describe it: snapshot {a}, another thread
+        # adds b, the mask admits b, and the entry is filed under {a}. Restoring
+        # the set to {a} then serves that stale mask for the rest of the session.
+        # Membership on the frozenset costs the same and closes the window.
+        mask = np.fromiter(
+            (path in key for path, _chunk in metadata),
+            dtype=bool,
+            count=len(metadata),
+        )
+        eligible = int(np.count_nonzero(mask))
+        self._mask_cache = _MaskCache(metadata, key, mask, eligible)
+        return mask, eligible
 
     def search_semantic_units(
         self,
