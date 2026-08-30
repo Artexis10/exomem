@@ -6,7 +6,7 @@
 # the loader's choke point and this fixture proved the refusal. It now loads by
 # itself — exactly the transition sequence 1 went through — and the test over it
 # pins that release.
-scenario_id: red-sequence3-withheld-family
+scenario_id: once-red-sequence3-withheld-family
 family_id: f27
 kind: operational
 public_coverage: none

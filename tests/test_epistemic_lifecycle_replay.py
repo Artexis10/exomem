@@ -304,7 +304,7 @@ def test_the_once_withheld_red_fixture_loads_after_acknowledgment() -> None:
 
     from epistemic.schema import load_scenario
 
-    scenario = load_scenario(FIXTURES / "red-sequence3-withheld-family.yaml")
+    scenario = load_scenario(FIXTURES / "once-red-sequence3-withheld-family.yaml")
     assert scenario.family_id == "f27"
     # The fixture is deliberately minimal — one turn, not a conformant f27
     # phase — but it must not carry the one dangerous shape: a turn with no
