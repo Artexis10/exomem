@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import os
-import time
 from collections.abc import Callable
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
@@ -213,13 +212,16 @@ def collect_candidates(
     else:
         try:
             with _span(timings, "vector"):
-                idx = embeddings.get_embedding_index(vault_root)
-                query_vec = embeddings.embed_texts([query], is_query=True)[0]
-                chunk_hits = idx.search(
-                    query_vec,
-                    k=candidate_k * 3,
-                    allowed_paths=semantic_paths,
-                )
+                with _span(timings, "vector.index"):
+                    idx = embeddings.get_embedding_index(vault_root)
+                with _span(timings, "vector.embed"):
+                    query_vec = embeddings.embed_texts([query], is_query=True)[0]
+                with _span(timings, "vector.search"):
+                    chunk_hits = idx.search(
+                        query_vec,
+                        k=candidate_k * 3,
+                        allowed_paths=semantic_paths,
+                    )
                 best_per_file: dict[str, tuple[float, str]] = {}
                 for fp, _idx, ctext, score in chunk_hits:
                     existing = best_per_file.get(fp)
@@ -499,182 +501,161 @@ def collect_candidates(
                 "status": "non_applicable",
                 "reason": "request_disabled",
             }
-    graph_t0 = time.perf_counter()
     if graph:
-        primary_set: set[str] = set(vector_ranking) | set(bm25_ranking)
-        vector_set: set[str] = set(vector_ranking)
-        graph_seeds: list[str] = []
-        seen_seed: set[str] = set()
-        for r in (vector_ranking, bm25_ranking):
-            for p in r[:config.graph_seed_cap]:
-                if p in seen_seed:
-                    continue
-                seen_seed.add(p)
-                if p in vector_set:
-                    graph_seeds.append(p)
-                    continue
-                page = page_of(p)
-                if page is None:
-                    continue
-                if (
-                    find_results.make_excerpt(page, query_norm) is not None
-                    or find_results.stem_tokens_present(page, query_norm)
-                ):
-                    graph_seeds.append(p)
-        graph_t_seeds = time.perf_counter()
-        graph_index = epistemic_graph.EpistemicGraphIndex(vault_root)
-        if graph_index.available():
-            # Hybrid: seeds with a sidecar file node get typed expansion; seeds
-            # outside the indexed scope (e.g. an out-of-KB page under
-            # scope="vault" — rebuild_all only walks the KB tree) have no node
-            # at all, so typed expansion alone would silently drop them. Those
-            # seeds fall back to the legacy 1-hop wikilink expansion instead,
-            # preserving pre-change recall for out-of-KB seeds.
-            indexed = graph_index.indexed_paths(graph_seeds)
-            typed_seeds = [s for s in graph_seeds if s in indexed]
-            legacy_seeds = [s for s in graph_seeds if s not in indexed]
-            neighbors = graph_index.neighbors_for(typed_seeds) if typed_seeds else []
-            graph_t_sidecar = time.perf_counter()
+        with _span(timings, "graph"):
+            primary_set: set[str] = set(vector_ranking) | set(bm25_ranking)
+            vector_set: set[str] = set(vector_ranking)
+            graph_seeds: list[str] = []
+            seen_seed: set[str] = set()
+            with _span(timings, "graph.seeds"):
+                for r in (vector_ranking, bm25_ranking):
+                    for p in r[:config.graph_seed_cap]:
+                        if p in seen_seed:
+                            continue
+                        seen_seed.add(p)
+                        if p in vector_set:
+                            graph_seeds.append(p)
+                            continue
+                        page = page_of(p)
+                        if page is None:
+                            continue
+                        if (
+                            find_results.make_excerpt(page, query_norm) is not None
+                            or find_results.stem_tokens_present(page, query_norm)
+                        ):
+                            graph_seeds.append(p)
+            graph_index = epistemic_graph.EpistemicGraphIndex(vault_root)
+            if graph_index.available():
+                # Hybrid: seeds with a sidecar file node get typed expansion; seeds
+                # outside the indexed scope (e.g. an out-of-KB page under
+                # scope="vault" — rebuild_all only walks the KB tree) have no node
+                # at all, so typed expansion alone would silently drop them. Those
+                # seeds fall back to the legacy 1-hop wikilink expansion instead,
+                # preserving pre-change recall for out-of-KB seeds.
+                with _span(timings, "graph.sidecar"):
+                    indexed = graph_index.indexed_paths(graph_seeds)
+                    typed_seeds = [s for s in graph_seeds if s in indexed]
+                    legacy_seeds = [s for s in graph_seeds if s not in indexed]
+                    neighbors = graph_index.neighbors_for(typed_seeds) if typed_seeds else []
 
-            # Family precedence MUST be decided BEFORE target dedup: when a
-            # target is reached by both a typed relation and a plain
-            # links_to/unregistered edge, first-seen-wins would let arbitrary
-            # edge order misclassify the target's tier and provenance. Group
-            # every edge touching a target, then keep the highest-precedence
-            # (lowest tier) edge as the surfacing/provenance edge. in-degree is
-            # still tallied for EVERY edge, matching the existing invariant.
-            best_tier_for_target: dict[str, int] = {}
-            best_neighbor_for_target: dict[str, epistemic_graph.GraphNeighbor] = {}
-            first_pos_for_target: dict[str, int] = {}
-            for pos, neighbor in enumerate(neighbors):
-                target_rel = neighbor.other_rel
-                if target_rel not in recall_paths:
-                    continue
-                graph_in_degree_by_path[target_rel] = (
-                    graph_in_degree_by_path.get(target_rel, 0) + 1
-                )
-                if target_rel in primary_set:
-                    continue
-                if eligible_paths is not None and target_rel not in eligible_paths:
-                    continue
-                family = neighbor.family
-                tier = 0 if (neighbor.relation_type and family and family != "link") else 1
-                current_best = best_tier_for_target.get(target_rel)
-                if current_best is None or tier < current_best:
-                    best_tier_for_target[target_rel] = tier
-                    best_neighbor_for_target[target_rel] = neighbor
-                    first_pos_for_target[target_rel] = pos
-            typed_targets = sorted(
-                best_tier_for_target,
-                key=lambda t: (best_tier_for_target[t], first_pos_for_target[t]),
-            )
-            for target_rel in typed_targets:
-                neighbor = best_neighbor_for_target[target_rel]
-                graph_provenance_by_path[target_rel] = GraphProvenance(
-                    relation_type=neighbor.relation_type,
-                    direction=neighbor.direction,
-                    seed=neighbor.seed_rel,
-                )
-            seen_target = set(typed_targets)
-
-            legacy_targets: list[str] = []
-            if legacy_seeds:
-                resolver = get_query_resolver(
-                    vault_root, freshness=snapshot.projection_key("vault")
-                )
-                for seed_rel in legacy_seeds:
-                    page = page_of(seed_rel)
-                    if page is None:
-                        continue
-                    for target_rel in outbound_wikilink_paths(
-                        page,
-                        vault_root,
-                        resolver=resolver,
-                        allowed_paths=recall_paths,
-                    ):
+                # Family precedence MUST be decided BEFORE target dedup: when a
+                # target is reached by both a typed relation and a plain
+                # links_to/unregistered edge, first-seen-wins would let arbitrary
+                # edge order misclassify the target's tier and provenance. Group
+                # every edge touching a target, then keep the highest-precedence
+                # (lowest tier) edge as the surfacing/provenance edge. in-degree is
+                # still tallied for EVERY edge, matching the existing invariant.
+                with _span(timings, "graph.expand"):
+                    best_tier_for_target: dict[str, int] = {}
+                    best_neighbor_for_target: dict[str, epistemic_graph.GraphNeighbor] = {}
+                    first_pos_for_target: dict[str, int] = {}
+                    for pos, neighbor in enumerate(neighbors):
+                        target_rel = neighbor.other_rel
                         if target_rel not in recall_paths:
                             continue
                         graph_in_degree_by_path[target_rel] = (
                             graph_in_degree_by_path.get(target_rel, 0) + 1
                         )
-                        if target_rel in primary_set or target_rel in seen_target:
+                        if target_rel in primary_set:
                             continue
                         if eligible_paths is not None and target_rel not in eligible_paths:
                             continue
-                        seen_target.add(target_rel)
-                        legacy_targets.append(target_rel)
-
-            graph_ranking = typed_targets + legacy_targets
-            if capture_trace:
-                lane_statuses["graph"] = {
-                    "status": "participated" if graph_ranking else "available_nonmatching",
-                    "backend": "epistemic_graph",
-                    "metric": {"name": "rank", "direction": "lower", "rounding": "none"},
-                }
-            if graph_ranking:
-                rankings.append(graph_ranking)
-            if timings is not None:
-                graph_t_end = time.perf_counter()
-                timings.stages.setdefault("graph", {})["ms"] = round(
-                    (graph_t_end - graph_t0) * 1000.0, 3
-                )
-                for name, t0, t1 in (
-                    ("graph.seeds", graph_t0, graph_t_seeds),
-                    ("graph.sidecar", graph_t_seeds, graph_t_sidecar),
-                    ("graph.expand", graph_t_sidecar, graph_t_end),
-                ):
-                    timings.stages[name] = {"ms": round((t1 - t0) * 1000.0, 3)}
-        else:
-            # Fallback: the pre-existing 1-hop outbound-wikilink expansion,
-            # byte-identical to the pre-change ordering. Do not refactor.
-            resolver = (
-                get_query_resolver(
-                    vault_root, freshness=snapshot.projection_key("vault")
-                )
-                if graph_seeds else None
-            )
-            graph_t_resolver = time.perf_counter()
-            seen_target = set()
-            for seed_rel in graph_seeds:
-                page = page_of(seed_rel)
-                if page is None:
-                    continue
-                for target_rel in outbound_wikilink_paths(
-                    page,
-                    vault_root,
-                    resolver=resolver,
-                    allowed_paths=recall_paths,
-                ):
-                    if target_rel not in recall_paths:
-                        continue
-                    graph_in_degree_by_path[target_rel] = (
-                        graph_in_degree_by_path.get(target_rel, 0) + 1
+                        family = neighbor.family
+                        tier = 0 if (neighbor.relation_type and family and family != "link") else 1
+                        current_best = best_tier_for_target.get(target_rel)
+                        if current_best is None or tier < current_best:
+                            best_tier_for_target[target_rel] = tier
+                            best_neighbor_for_target[target_rel] = neighbor
+                            first_pos_for_target[target_rel] = pos
+                    typed_targets = sorted(
+                        best_tier_for_target,
+                        key=lambda t: (best_tier_for_target[t], first_pos_for_target[t]),
                     )
-                    if target_rel in primary_set or target_rel in seen_target:
-                        continue
-                    if eligible_paths is not None and target_rel not in eligible_paths:
-                        continue
-                    seen_target.add(target_rel)
-                    graph_ranking.append(target_rel)
-            if graph_ranking:
-                rankings.append(graph_ranking)
-            if capture_trace:
-                lane_statuses["graph"] = {
-                    "status": "participated" if graph_ranking else "available_nonmatching",
-                    "backend": "wikilink_fallback",
-                    "metric": {"name": "rank", "direction": "lower", "rounding": "none"},
-                }
-            if timings is not None:
-                graph_t_end = time.perf_counter()
-                timings.stages.setdefault("graph", {})["ms"] = round(
-                    (graph_t_end - graph_t0) * 1000.0, 3
-                )
-                for name, t0, t1 in (
-                    ("graph.seeds", graph_t0, graph_t_seeds),
-                    ("graph.resolver", graph_t_seeds, graph_t_resolver),
-                    ("graph.expand", graph_t_resolver, graph_t_end),
-                ):
-                    timings.stages[name] = {"ms": round((t1 - t0) * 1000.0, 3)}
+                    for target_rel in typed_targets:
+                        neighbor = best_neighbor_for_target[target_rel]
+                        graph_provenance_by_path[target_rel] = GraphProvenance(
+                            relation_type=neighbor.relation_type,
+                            direction=neighbor.direction,
+                            seed=neighbor.seed_rel,
+                        )
+                    seen_target = set(typed_targets)
+
+                    legacy_targets: list[str] = []
+                    if legacy_seeds:
+                        resolver = get_query_resolver(
+                            vault_root, freshness=snapshot.projection_key("vault")
+                        )
+                        for seed_rel in legacy_seeds:
+                            page = page_of(seed_rel)
+                            if page is None:
+                                continue
+                            for target_rel in outbound_wikilink_paths(
+                                page,
+                                vault_root,
+                                resolver=resolver,
+                                allowed_paths=recall_paths,
+                            ):
+                                if target_rel not in recall_paths:
+                                    continue
+                                graph_in_degree_by_path[target_rel] = (
+                                    graph_in_degree_by_path.get(target_rel, 0) + 1
+                                )
+                                if target_rel in primary_set or target_rel in seen_target:
+                                    continue
+                                if eligible_paths is not None and target_rel not in eligible_paths:
+                                    continue
+                                seen_target.add(target_rel)
+                                legacy_targets.append(target_rel)
+
+                    graph_ranking = typed_targets + legacy_targets
+                if capture_trace:
+                    lane_statuses["graph"] = {
+                        "status": "participated" if graph_ranking else "available_nonmatching",
+                        "backend": "epistemic_graph",
+                        "metric": {"name": "rank", "direction": "lower", "rounding": "none"},
+                    }
+                if graph_ranking:
+                    rankings.append(graph_ranking)
+            else:
+                # Fallback: the pre-existing 1-hop outbound-wikilink expansion,
+                # byte-identical to the pre-change ordering. Do not refactor.
+                with _span(timings, "graph.resolver"):
+                    resolver = (
+                        get_query_resolver(
+                            vault_root, freshness=snapshot.projection_key("vault")
+                        )
+                        if graph_seeds else None
+                    )
+                    seen_target = set()
+                    for seed_rel in graph_seeds:
+                        page = page_of(seed_rel)
+                        if page is None:
+                            continue
+                        for target_rel in outbound_wikilink_paths(
+                            page,
+                            vault_root,
+                            resolver=resolver,
+                            allowed_paths=recall_paths,
+                        ):
+                            if target_rel not in recall_paths:
+                                continue
+                            graph_in_degree_by_path[target_rel] = (
+                                graph_in_degree_by_path.get(target_rel, 0) + 1
+                            )
+                            if target_rel in primary_set or target_rel in seen_target:
+                                continue
+                            if eligible_paths is not None and target_rel not in eligible_paths:
+                                continue
+                            seen_target.add(target_rel)
+                            graph_ranking.append(target_rel)
+                if graph_ranking:
+                    rankings.append(graph_ranking)
+                if capture_trace:
+                    lane_statuses["graph"] = {
+                        "status": "participated" if graph_ranking else "available_nonmatching",
+                        "backend": "wikilink_fallback",
+                        "metric": {"name": "rank", "direction": "lower", "rounding": "none"},
+                    }
 
     if not rankings:
         return empty_bundle(
