@@ -2,6 +2,7 @@
 
 import hashlib
 import os
+import queue
 import threading
 import time
 from contextlib import contextmanager
@@ -1944,6 +1945,14 @@ def test_process_worker_drains_and_exits_after_idle(vault, monkeypatch: pytest.M
         assert media_jobs.status(vault)["worker_active"] is False
     finally:
         w.stop()
+
+
+def test_inline_join_timeout_refuses_an_undrained_queue() -> None:
+    pending: queue.Queue[object] = queue.Queue()
+    pending.put(object())
+
+    with pytest.raises(TimeoutError, match="media worker queue did not drain"):
+        media_worker._join_with_timeout(pending, timeout=0)
 
 
 def test_child_defers_transient_writer_failure_without_poisoning_job(
