@@ -56,6 +56,11 @@ import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
 
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _hosted_candidate_locks import read_lock  # noqa: E402 - script dir inserted above
+
 TEST_IDENTITY = "hosted-client-plugins-v1"
 
 OPERATIONS = (
@@ -161,10 +166,15 @@ def attest(secret: str, label: str, *parts: str) -> str:
     return hmac.new(secret.encode(), message, hashlib.sha256).hexdigest()
 
 
-def load_locks(repo: Path, platform: str) -> dict:
-    generated = repo / "plugins" / "hosted" / "generated"
-    package = json.loads((generated / f"{platform}.lock.json").read_text())
-    archive = json.loads((generated / f"{platform}.zip.lock.json").read_text())
+def load_locks(repo: Path, platform: str, profile: str) -> dict:
+    # Scoped to the candidate's profile. This read was fixed at the generated
+    # root, which holds only the default candidate, so a v2/v3/v4 candidate signed
+    # evidence carrying v1's artifact, archive, compatibility, contract, command
+    # surface, plugin version and profile. Nothing local rejects that: `observe`
+    # signs it happily and `import` refuses it afterwards, by which time the
+    # authority and both clean-client sessions are spent.
+    package = read_lock(repo, profile, f"{platform}.lock.json")
+    archive = read_lock(repo, profile, f"{platform}.zip.lock.json")
     return {"package": package, "archive": archive}
 
 
@@ -273,7 +283,17 @@ def observe(args: argparse.Namespace) -> int:
         substrate,
         f"select oauth_client_config_sha256 from exomem_staged_client_releases where id='{stage_id}'",
     )
-    locks = load_locks(args.repo, args.platform)
+    # From the bootstrap that produced this state directory, so the evidence cannot
+    # be signed against a different candidate's locks than the one whose cell was
+    # actually exercised.
+    profile = context.get("profile")
+    if not isinstance(profile, str) or not profile:
+        raise SystemExit(
+            "bootstrap-context.json carries no profile, so it predates candidate-scoped "
+            "locks and this run cannot tell which candidate's digests to sign. Add the "
+            "candidate's profile to that file before observing."
+        )
+    locks = load_locks(args.repo, args.platform, profile)
     package, archive = locks["package"], locks["archive"]
     now = datetime.now(UTC)
 

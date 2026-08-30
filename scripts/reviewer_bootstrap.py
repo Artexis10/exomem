@@ -30,14 +30,16 @@ Design notes, each of which is a bug this script exists to prevent:
 * Creating the authority is the irreversible step: it spends the invite whether
   it later succeeds, expires or is revoked. `prepare` therefore stops short of
   it, so the invite keeps its full 7-day life while a human fetches the token.
-* The locks are read from `--repo`, and they must be the ones the candidate was
-  cut from, NOT whatever this repo's HEAD generates. A change that touches the
-  schema contract moves `schema_contract_sha256` and `compatibility_sha256`
-  without moving the packaged artifact, and every server-side join on those
-  digests then fails -- `create-stage` with a bare 500, `attach-openai-locks`
-  with a silent `false`. `preflight` compares them and names the field that
-  moved; when it is red, point `--repo` at a worktree of the matching revision
-  rather than editing a lock file.
+* The locks are read from `--repo` at `--profile`, and they must be the ones the
+  candidate was cut from, NOT whatever this repo's HEAD generates. A change that
+  touches the schema contract moves `schema_contract_sha256` and
+  `compatibility_sha256` without moving the packaged artifact, and every
+  server-side join on those digests then fails -- `create-stage` with a bare 500,
+  `attach-openai-locks` with a silent `false`. `preflight` compares them and
+  names the field that moved; when it is red, point `--repo` at a worktree of the
+  matching revision rather than editing a lock file. `--profile` selects which
+  candidate's locks inside that worktree: only the default candidate's sit at the
+  generated root, so it is required rather than defaulted.
 * A candidate is created with `openai_package_lock` NULL, always, because the
   OpenAI artifact is not part of the checked Exomem release. `prepare` attaches
   it. Skipping that leaves `run` unable to create the OpenAI sibling stage, and
@@ -66,12 +68,32 @@ from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from exomem.hosted_plugins import seed_marketplace_review_fixture
+from exomem.hosted_plugins import CANDIDATE_PROFILES, seed_marketplace_review_fixture
 
-CANDIDATE_PROFILE = "hosted-alpha-agent-v1"
-#: `exomem_oauth_client_partition_available` in migration 0048. Operator clients
-#: keep the original bound; auto-registered CIMD clients get a separate 128.
-OPERATOR_CLIENT_BOUND = 32
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _hosted_candidate_locks import read_lock  # noqa: E402 - script dir inserted above
+
+#: Mirror of `exomem_oauth_client_partition_available`, raised to 96 by Substrate
+#: migration 0051. It is a copy of a bound this script cannot read, so it can only
+#: ever go stale: it sat at 32 while the deployed function said 96, and reported a
+#: full partition -- "<=0 of 32 operator slot(s) free" -- against 56 free slots.
+#: The count below is therefore advisory. The authority is the server, which
+#: answers `register_pinned` with a bare 400 when the partition is genuinely full.
+OPERATOR_CLIENT_BOUND = 96
+#: The staged release owns the whole review window: `run` takes the assignment's
+#: expiry from it, so everything after `prepare` -- provisioning, every platform's
+#: clean-client run, and `observe`/`sign`/`import` for each -- has to finish
+#: inside it. 55 minutes was hardcoded here while the runbook told the operator to
+#: size the window for the platforms actually being promoted, and warned in the
+#: same breath not to fit two platforms into thirty minutes. Provisioning alone
+#: has been observed at 8m20s. The control plane bounds a staged release at 7
+#: days, so the number below is this script's choice, not a limit.
+DEFAULT_STAGE_MINUTES = 55
+#: Below this there is no honest room for provisioning plus one clean-client run.
+MIN_STAGE_MINUTES = 20
+MAX_STAGE_MINUTES = 7 * 24 * 60
 LOOPBACK_REDIRECT = "http://localhost:47831/callback"
 CLAUDE_CIMD_CLIENT_ID = "https://claude.ai/oauth/mcp-oauth-client-metadata"
 CLAUDE_CIMD_REDIRECT = "https://claude.ai/api/mcp/auth_callback"
@@ -750,6 +772,7 @@ def prepare(
     email: str,
     locks: dict,
     existing_client_id: str | None = None,
+    stage_minutes: int = DEFAULT_STAGE_MINUTES,
 ) -> dict:
     """Create stage, pinned client and invite. Spends nothing irreversible."""
     # First, because `run` cannot create the OpenAI sibling stage without it and
@@ -767,7 +790,7 @@ def prepare(
         client_id=client_id,
         redirect_uris=[LOOPBACK_REDIRECT],
     )
-    stage_expires_at = stamp(timedelta(minutes=55))
+    stage_expires_at = stamp(timedelta(minutes=stage_minutes))
 
     status, stage = cp.call(
         "POST",
@@ -832,6 +855,10 @@ def prepare(
 
     context = {
         "candidateId": candidate_id,
+        # Carried so `promotion_evidence.py` reads its locks from the same profile
+        # this bootstrap pinned, instead of being told the profile a second time
+        # by hand across the context boundary between the two scripts.
+        "profile": locks["profile"],
         "stageId": stage_id,
         "stageExpiresAt": stage_expires_at,
         "oauthClientId": client["id"],
@@ -1052,7 +1079,11 @@ def run(
                 "action": "create-stage",
                 "candidateId": context["candidateId"],
                 "platform": platform,
-                "expiresAt": stamp(timedelta(minutes=55)),
+                # All stages in this review share one hard window. Recomputing
+                # from a CLI default here silently shortened a 150-minute
+                # bootstrap to 55 minutes unless the operator repeated the
+                # prepare-only flag on `run`.
+                "expiresAt": context["stageExpiresAt"],
                 "packageSha256": package,
                 "archiveSha256": archive,
                 "compatibilitySha256": locks["compatibility"],
@@ -1140,12 +1171,18 @@ def run(
         )
 
 
-def load_locks(repo: Path) -> dict:
-    generated = repo / "plugins" / "hosted" / "generated"
-    claude = json.loads((generated / "claude.lock.json").read_text())
-    claude_zip = json.loads((generated / "claude.zip.lock.json").read_text())
-    openai = json.loads((generated / "openai.lock.json").read_text())
-    openai_zip = json.loads((generated / "openai.zip.lock.json").read_text())
+def load_locks(repo: Path, profile: str) -> dict:
+    # Scoped to the candidate's profile. This read was fixed at the generated
+    # root, which holds only the default candidate, so every later candidate was
+    # bootstrapped against v1's 13-command locks no matter what --candidate-id
+    # said. The parity check below then compared v1's Claude lock to v1's OpenAI
+    # lock and reported drift between two files neither relevant to the promotion
+    # nor regenerated by it, which reads as a release defect rather than as this
+    # script looking in the wrong directory.
+    claude = read_lock(repo, profile, "claude.lock.json")
+    claude_zip = read_lock(repo, profile, "claude.zip.lock.json")
+    openai = read_lock(repo, profile, "openai.lock.json")
+    openai_zip = read_lock(repo, profile, "openai.zip.lock.json")
     fixture = json.loads(
         (repo / "plugins" / "hosted" / "marketplace-review-fixture-v2.json").read_text()
     )
@@ -1171,6 +1208,7 @@ def load_locks(repo: Path) -> dict:
         "contract": claude["schema_contract_sha256"],
         "command_surface": claude["command_surface_sha256"],
         "plugin_version": claude["plugin_version"],
+        "profile": profile,
         "fixture_version": fixture["fixture_version"],
         "fixture_digest": fixture["payload_sha256"],
         "fixture": fixture,
@@ -1187,6 +1225,26 @@ def main() -> int:
     parser.add_argument("--candidate-id", required=True)
     parser.add_argument("--state-dir", required=True, type=Path)
     parser.add_argument("--repo", default=".", type=Path)
+    parser.add_argument(
+        "--profile",
+        required=True,
+        choices=tuple(CANDIDATE_PROFILES),
+        help="candidate profile whose generated locks --repo should be read from. "
+        "Required, and deliberately not defaulted: a default is silently wrong for "
+        "every candidate that does not happen to match it, and the digests it "
+        "produces fail server-side rather than here.",
+    )
+    parser.add_argument(
+        "--stage-minutes",
+        type=int,
+        default=DEFAULT_STAGE_MINUTES,
+        metavar="N",
+        help="life of the staged release, which is the whole review window: "
+        f"provisioning plus a clean-client run per platform plus observe/sign/import "
+        f"for each must fit inside it (default {DEFAULT_STAGE_MINUTES}, "
+        f"{MIN_STAGE_MINUTES}-{MAX_STAGE_MINUTES}). Size it for the platforms being "
+        "promoted; two platforms do not fit in the default.",
+    )
     parser.add_argument("--email", help="reviewer alias, required for prepare")
     parser.add_argument(
         "--existing-client-id",
@@ -1217,8 +1275,15 @@ def main() -> int:
         print("EXOMEM_PUBLIC_BASE_URL and EXOMEM_ADMIN_TOKEN must be set", file=sys.stderr)
         return 2
 
+    if not MIN_STAGE_MINUTES <= args.stage_minutes <= MAX_STAGE_MINUTES:
+        print(
+            f"--stage-minutes must be between {MIN_STAGE_MINUTES} and {MAX_STAGE_MINUTES}",
+            file=sys.stderr,
+        )
+        return 2
+
     cp = ControlPlane(base_url, admin_token, args.state_dir)
-    locks = load_locks(args.repo)
+    locks = load_locks(args.repo, args.profile)
 
     if args.command == "preflight":
         print("preflight:")
@@ -1233,16 +1298,29 @@ def main() -> int:
             print("\nrefusing to prepare while preflight is red")
             return 1
         print("\nprepare:")
-        context = prepare(cp, args.candidate_id, args.email, locks, args.existing_client_id)
+        context = prepare(
+            cp,
+            args.candidate_id,
+            args.email,
+            locks,
+            args.existing_client_id,
+            args.stage_minutes,
+        )
         print(f"  stage   {context['stageId']}")
         print(f"  client  {context['oauthClientId']}")
         print(f"  invite  {context['inviteId']}")
         print(f"\n  Invite sent to {args.email}.")
+        # The staged release is already expiring, so say when rather than leaving
+        # the operator to add minutes to the time they ran this.
+        print(f"  The review window closes at {context['stageExpiresAt']}")
+        print(f"  ({args.stage_minutes} minutes from now). Everything after `run` --")
+        print("  provisioning, every clean-client run, observe/sign/import -- is inside it.")
         print("  Nothing irreversible has been spent: the invite keeps its full expiry")
         print("  until `run` creates the authority. Fetch the token from the email's")
         print("  text/plain part (the tracked HTML link drops the URL fragment), then:")
         print(f"\n    {sys.argv[0]} run --candidate-id {args.candidate_id} \\")
-        print(f"      --state-dir {args.state_dir} --token <token>")
+        print(f"      --state-dir {args.state_dir} --profile {args.profile} \\")
+        print(f"      --repo {args.repo} --token <token> --openai-connector <id>")
         return 0
 
     if not args.token:
@@ -1258,7 +1336,14 @@ def main() -> int:
         return 2
     context = json.loads((args.state_dir / "bootstrap-context.json").read_text())
     print("run:")
-    run(cp, context, args.token, locks, args.openai_connector, args.openai_redirect)
+    run(
+        cp,
+        context,
+        args.token,
+        locks,
+        args.openai_connector,
+        args.openai_redirect,
+    )
     return 0
 
 

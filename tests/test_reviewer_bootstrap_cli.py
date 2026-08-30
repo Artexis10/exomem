@@ -89,14 +89,34 @@ def test_every_option_main_reads_is_declared() -> None:
 @pytest.mark.parametrize(
     "argv",
     [
-        ["preflight", "--candidate-id", "c", "--state-dir", "/tmp/s"],
-        ["prepare", "--candidate-id", "c", "--state-dir", "/tmp/s", "--email", "a@b.c"],
+        [
+            "preflight",
+            "--candidate-id",
+            "c",
+            "--state-dir",
+            "/tmp/s",
+            "--profile",
+            "hosted-alpha-agent-v1",
+        ],
+        [
+            "prepare",
+            "--candidate-id",
+            "c",
+            "--state-dir",
+            "/tmp/s",
+            "--email",
+            "a@b.c",
+            "--profile",
+            "hosted-alpha-agent-v1",
+        ],
         [
             "run",
             "--candidate-id",
             "c",
             "--state-dir",
             "/tmp/s",
+            "--profile",
+            "hosted-alpha-agent-v1",
             "--token",
             "t",
             "--openai-connector",
@@ -207,6 +227,7 @@ def _locks() -> dict:
         "contract": OPENAI_PACKAGE_LOCK["schema_contract_sha256"],
         "command_surface": OPENAI_PACKAGE_LOCK["command_surface_sha256"],
         "plugin_version": "0.1.0",
+        "profile": OPENAI_PACKAGE_LOCK["profile"],
         "fixture_version": "v2",
         "fixture_digest": "ff" * 32,
         "fixture": {
@@ -337,9 +358,73 @@ def test_load_locks_rejects_cross_platform_contract_drift(
     fixture.write_text(json.dumps({"fixture_version": "v1", "payload_sha256": "ff" * 32}))
 
     with pytest.raises(SystemExit) as raised:
-        module.load_locks(tmp_path)
+        module.load_locks(tmp_path, "hosted-alpha-agent-v1")
 
     assert field in str(raised.value)
+
+
+def test_load_locks_reads_the_candidates_profile_not_the_generated_root(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A non-default candidate's locks live under `candidates/<profile>`.
+
+    Reading the generated root instead returns the default candidate's locks --
+    a different command surface, whose digests no server-side join accepts. The
+    failure is remote and late, so pin the directory here.
+    """
+    module = _load_module()
+    profile = "hosted-alpha-agent-v4"
+    generated = tmp_path / "plugins" / "hosted" / "generated"
+    candidate = generated / "candidates" / profile
+    candidate.mkdir(parents=True)
+    (tmp_path / "plugins" / "hosted" / "marketplace-review-fixture-v2.json").write_text(
+        json.dumps({"fixture_version": "v2", "payload_sha256": "ff" * 32})
+    )
+
+    def _write(root: pathlib.Path, declared: str, artifact: str) -> None:
+        package = {**OPENAI_PACKAGE_LOCK, "profile": declared, "artifact_sha256": artifact}
+        (root / "claude.lock.json").write_text(
+            json.dumps({**package, "platform": "claude"})
+        )
+        (root / "claude.zip.lock.json").write_text(
+            json.dumps({"platform": "claude", "archive_sha256": "0d" * 32})
+        )
+        (root / "openai.lock.json").write_text(json.dumps(package))
+        (root / "openai.zip.lock.json").write_text(json.dumps(OPENAI_ARCHIVE_LOCK))
+
+    # Both present, as they are in a real checkout, and distinguishable.
+    _write(generated, "hosted-alpha-agent-v1", "11" * 32)
+    _write(candidate, profile, "44" * 32)
+
+    locks = module.load_locks(tmp_path, profile)
+
+    assert locks["profile"] == profile
+    assert locks["openai_package"] == "44" * 32, "read the generated root, not the candidate"
+
+
+def test_load_locks_refuses_a_lock_that_declares_another_profile(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The directory name is not evidence; the lock's own `profile` is."""
+    module = _load_module()
+    profile = "hosted-alpha-agent-v4"
+    candidate = tmp_path / "plugins" / "hosted" / "generated" / "candidates" / profile
+    candidate.mkdir(parents=True)
+    (tmp_path / "plugins" / "hosted" / "marketplace-review-fixture-v2.json").write_text(
+        json.dumps({"fixture_version": "v2", "payload_sha256": "ff" * 32})
+    )
+    stale = {**OPENAI_PACKAGE_LOCK, "profile": "hosted-alpha-agent-v1"}
+    (candidate / "claude.lock.json").write_text(json.dumps({**stale, "platform": "claude"}))
+    (candidate / "claude.zip.lock.json").write_text(
+        json.dumps({"platform": "claude", "archive_sha256": "0d" * 32})
+    )
+    (candidate / "openai.lock.json").write_text(json.dumps(stale))
+    (candidate / "openai.zip.lock.json").write_text(json.dumps(OPENAI_ARCHIVE_LOCK))
+
+    with pytest.raises(SystemExit) as raised:
+        module.load_locks(tmp_path, profile)
+
+    assert "declares profile hosted-alpha-agent-v1" in str(raised.value)
 
 
 def test_prepare_attaches_the_openai_locks_before_anything_else(monkeypatch) -> None:
@@ -479,6 +564,60 @@ def test_prepare_keeps_fresh_client_generation_as_the_default(monkeypatch, tmp_p
     assert "existingClientRecordId" not in client_call["body"]
     assert context["clientId"] == f"exomem-reviewer-bootstrap-{generated}"
     assert all(call["label"] != "preflight-reuse-client" for call in cp.calls)
+
+
+def test_prepare_sizes_the_staged_release_from_stage_minutes(monkeypatch, tmp_path) -> None:
+    """The staged release is the whole review window, so its length is an input.
+
+    `run` takes the assignment's expiry from it, so provisioning, every platform's
+    clean-client run and each `observe`/`sign`/`import` have to fit inside it.
+    """
+    module = _load_module()
+    monkeypatch.setattr(module, "attach_openai_locks", lambda *_: None)
+    cp = _prepare_cp(tmp_path)
+
+    before = module.utc_now()
+    context = module.prepare(
+        cp, "cand-1", "reviewer@example.invalid", _locks(), None, 150
+    )
+    after = module.utc_now()
+
+    stage_call = next(call for call in cp.calls if call["label"] == "prepare-stage")
+    expiry = module.parse_stamp(stage_call["body"]["expiresAt"])
+    # `stamp` truncates to whole seconds, so the lower bound loses up to one.
+    assert before + module.timedelta(minutes=150, seconds=-1) <= expiry
+    assert expiry <= after + module.timedelta(minutes=150)
+    assert context["stageExpiresAt"] == stage_call["body"]["expiresAt"]
+
+
+@pytest.mark.parametrize("minutes", (0, 19, 7 * 24 * 60 + 1))
+def test_main_refuses_a_stage_window_outside_the_bounds(minutes: int, monkeypatch) -> None:
+    module = _load_module()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "reviewer_bootstrap.py",
+            "preflight",
+            "--candidate-id",
+            "c",
+            "--state-dir",
+            "/tmp/s",
+            "--profile",
+            "hosted-alpha-agent-v1",
+            "--stage-minutes",
+            str(minutes),
+        ],
+    )
+    monkeypatch.setenv("EXOMEM_PUBLIC_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("EXOMEM_ADMIN_TOKEN", "token")
+
+    def _no_control_plane(*_a, **_k):
+        raise AssertionError("bounds must be checked before any control-plane call")
+
+    monkeypatch.setattr(module, "ControlPlane", _no_control_plane)
+
+    assert module.main() == 2
 
 
 def test_prepare_reuses_only_the_explicit_exact_disabled_client(monkeypatch, tmp_path) -> None:
@@ -840,6 +979,8 @@ def test_run_seeds_exact_fixture_after_cell_ready_and_before_credentials(
 
     assert events.index("run-owner-status") < events.index("seed-fixture")
     assert events.index("seed-fixture") < events.index("run-sibling-stage-claude")
+    sibling = next(call for call in cp.calls if call["label"] == "run-sibling-stage-claude")
+    assert sibling["body"]["expiresAt"] == _run_context()["stageExpiresAt"]
     receipt = json.loads((tmp_path / "reviewer-fixture-seed.json").read_text())
     assert receipt == {
         "fixture_version": "v2",
