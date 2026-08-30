@@ -121,8 +121,29 @@ the task is ticked, not estimated.
   - The `heuristic_fails` flags are not decoration: each was checked against the
     real `_heuristic_polarity` (table in 5.1); every declared flag matches.
 
-- [ ] 1.5 Input-shape pin: the verifier accepts exactly a claim-text pair;
+- [x] 1.5 Input-shape pin: the verifier accepts exactly a claim-text pair;
   structural test that no prompt/template path exists behind the seam.
+  - **Evidence (mechanism-removal proof)** — the pin is an invariant that already
+    held, so it is proven by removing the mechanism rather than by an absent
+    symbol. Scratch mutant: `verifier_polarity` assembles a prompt
+    (`f"Does this contradict? A: {claim_a} B: {claim_b}"`) and sends it in
+    instruction position instead of the pair. Red:
+    ```
+    >           assert not (opcodes & assembly_opcodes), (function.__qualname__, opcodes)
+    E           AssertionError: ('verifier_polarity', {'BUILD_LIST', 'BUILD_STRING', 'BUILD_TUPLE', 'CALL', 'FORMAT_SIMPLE', 'LOAD_ATTR', ...})
+    FAILED tests/test_frozen_verifiers.py::test_admitted_verifier_labels_through_the_label_map
+    FAILED tests/test_frozen_verifiers.py::test_claim_texts_reach_the_model_verbatim_as_a_classification_pair
+    FAILED tests/test_frozen_verifiers.py::test_no_string_assembly_exists_behind_the_verifier_seam
+    3 failed, 32 passed in 0.15s
+    ```
+  - **Evidence (green, mutant reverted)** — same command: `35 passed in 0.13s`
+  - Three pins, not one: the signature accepts exactly `(claim_a: str, claim_b:
+    str)`; the captured model input is byte-for-byte
+    `[(a, b), (b, a)]` with nothing added; and structurally no string-assembly
+    opcode (`FORMAT_*`, `BUILD_STRING`, `CONVERT_VALUE`) or template name
+    (`format`, `join`, `Template`, `substitute`) exists on the seam's code
+    objects. A future "better" verifier cannot become a prompted generative
+    model behind this seam without one of the three going red.
 
 ## 2. Write path (design D3; command-surface delta)
 

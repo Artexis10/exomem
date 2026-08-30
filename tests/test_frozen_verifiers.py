@@ -419,3 +419,71 @@ def test_admitted_verifier_labels_through_the_label_map(tmp_path, monkeypatch) -
     assert result is not None
     assert result.label == "contradict"
     assert result.method == "nli"
+
+
+# ---------------- 1.5 input-shape pin (design D5) ----------------
+
+
+def test_verifier_takes_exactly_a_claim_text_pair() -> None:
+    import inspect
+
+    signature = inspect.signature(claims.verifier_polarity)
+    assert list(signature.parameters) == ["claim_a", "claim_b"]
+    for parameter in signature.parameters.values():
+        assert parameter.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+        assert parameter.annotation == "str"
+
+
+def test_claim_texts_reach_the_model_verbatim_as_a_classification_pair(
+    tmp_path, monkeypatch
+) -> None:
+    """No prefix, no instruction, no separator token — the two texts and nothing
+    else, in both orderings. Vault text can only ever be classified, never read
+    as an instruction."""
+    seen: list = []
+    _admit(tmp_path, monkeypatch, _oracle_predict(calls=seen))
+    claims.verifier_admission()
+    seen.clear()
+
+    claims.verifier_polarity("ALPHA claim text", "BETA claim text")
+
+    assert len(seen) == 1
+    assert seen[0] == [
+        ("ALPHA claim text", "BETA claim text"),
+        ("BETA claim text", "ALPHA claim text"),
+    ]
+    flattened = {text for pair in seen[0] for text in pair}
+    assert flattened == {"ALPHA claim text", "BETA claim text"}
+
+
+def test_no_string_assembly_exists_behind_the_verifier_seam() -> None:
+    """Structural: the verifier path builds no string at all.
+
+    An f-string, a `.format`, a `%` interpolation, or a join over claim text is
+    how a classification seam quietly becomes a prompted generative one. There
+    is no such opcode and no such name on this path, so the shape cannot drift
+    without this pin going red.
+    """
+    import dis
+
+    assembly_opcodes = {
+        "FORMAT_VALUE",
+        "FORMAT_SIMPLE",
+        "FORMAT_WITH_SPEC",
+        "BUILD_STRING",
+        "CONVERT_VALUE",
+    }
+    template_names = {"format", "format_map", "Template", "join", "substitute"}
+    for function in (claims.verifier_polarity, claims.LabelMap.apply):
+        opcodes = {instruction.opname for instruction in dis.get_instructions(function)}
+        assert not (opcodes & assembly_opcodes), (function.__qualname__, opcodes)
+        assert not (set(function.__code__.co_names) & template_names)
+
+
+def test_verifier_output_is_drawn_from_the_label_maps_closed_set(tmp_path, monkeypatch) -> None:
+    _admit(tmp_path, monkeypatch, _oracle_predict())
+    for pair in claims.VERIFICATION_FIXTURES["stance-v1"]:
+        result = claims.verifier_polarity(pair.claim_a, pair.claim_b)
+        assert result is not None
+        assert result.label in claims.POLARITY_LABELS
+        assert result.method == "nli"
