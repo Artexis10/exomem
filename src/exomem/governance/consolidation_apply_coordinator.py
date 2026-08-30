@@ -11,7 +11,9 @@ from __future__ import annotations
 import hashlib
 import math
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import NoReturn
 
@@ -22,16 +24,16 @@ from . import (
     consolidation_intake,
     consolidation_plan,
     consolidation_plan_store,
+    consolidation_policy,
     consolidation_preimage,
     consolidation_receipts,
     consolidation_seal,
 )
+from .principal import RequestPrincipal
 
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 _COMMITTED_EVENT = re.compile(r"[0-9a-f]{64}:committed\Z")
-_UUID4 = re.compile(
-    r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z"
-)
+_UUID4 = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z")
 _EFFECT_SCHEMA = "exomem.consolidation-apply-preparation-effect/v1"
 
 __all__ = [
@@ -76,6 +78,14 @@ def _uuid4(value: object) -> str:
     return value
 
 
+def _policy_verification_timestamp() -> str:
+    """Return a server-current millisecond timestamp for fresh session checks."""
+
+    current = datetime.now(UTC)
+    current = current.replace(microsecond=(current.microsecond // 1000) * 1000)
+    return current.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
 def _effect_digest(kind: str, state: str, facts: dict[str, object]) -> str:
     try:
         raw = consolidation_plan.canonical_closed_jcs(
@@ -89,12 +99,7 @@ def _effect_digest(kind: str, state: str, facts: dict[str, object]) -> str:
     except consolidation_plan.ConsolidationPlanUnavailable:
         _fail()
     domain = _EFFECT_SCHEMA.encode("ascii")
-    framed = (
-        len(domain).to_bytes(4, "big")
-        + domain
-        + len(raw).to_bytes(8, "big")
-        + raw
-    )
+    framed = len(domain).to_bytes(4, "big") + domain + len(raw).to_bytes(8, "big") + raw
     return hashlib.sha256(framed).hexdigest()
 
 
@@ -260,6 +265,7 @@ def prepare_apply_through_preimage(
     journal_digest: str,
     request_digest: str,
     plan_digest: str,
+    principal_contexts: Sequence[RequestPrincipal],
     sealed_at: str,
     drained_at: str,
     preimage_ready_at: str,
@@ -310,7 +316,8 @@ def prepare_apply_through_preimage(
         )
         if not sealed_time < drained_time < ready_time:
             _fail()
-        stored_plan = consolidation_plan_store.ConsolidationPlanStore(root).load(
+        plan_store = consolidation_plan_store.ConsolidationPlanStore(root)
+        stored_plan = plan_store.load(
             checked_run,
             plan_kind="cutover",
             plan_digest=checked_plan,
@@ -322,11 +329,25 @@ def prepare_apply_through_preimage(
         ):
             _fail()
         checked_basis = _digest(stored_plan.control_basis.digest)
-        checked_snapshot = _digest(
-            stored_plan.preimage["destination_snapshot_fingerprint"]
-        )
+        checked_snapshot = _digest(stored_plan.preimage["destination_snapshot_fingerprint"])
         checked_census = _digest(
             stored_plan.preimage["expected_destination_preimage_census_digest"]
+        )
+        plan_nonce = stored_plan.preimage["nonce"]
+        if not isinstance(plan_nonce, str):
+            _fail()
+        stored_policy_bundle = plan_store.load_policy_bundle(
+            checked_run,
+            plan_kind="cutover",
+            plan_digest=checked_plan,
+        )
+        consolidation_policy.revalidate_destination_policy(
+            root,
+            stored_policy_bundle,
+            principal_contexts=principal_contexts,
+            destination_vault_id=stored_policy_bundle.destination_vault_id,
+            expected_nonce=plan_nonce,
+            verified_at=_policy_verification_timestamp(),
         )
         parent_ordinal, parent_id, parent_digest = _committed_token_parent(
             root,
@@ -522,13 +543,8 @@ def prepare_apply_through_preimage(
         preimage_prior = _effect_digest("preimage", "prior", preimage_facts)
         preimage_prepared = _effect_digest("preimage", "prepared", preimage_facts)
         preimage_target = _effect_digest("preimage", "target", preimage_facts)
-        manifest_ref = (
-            "exomem-consolidation-preimage://sha256/"
-            f"{preimage_plan.manifest_digest}"
-        )
-        manifest_path = (
-            artifact_store.root / "preimages" / f"{preimage_plan.manifest_digest}.json"
-        )
+        manifest_ref = f"exomem-consolidation-preimage://sha256/{preimage_plan.manifest_digest}"
+        manifest_path = artifact_store.root / "preimages" / f"{preimage_plan.manifest_digest}.json"
 
         def manifest_is_absent() -> bool:
             try:
@@ -567,17 +583,20 @@ def prepare_apply_through_preimage(
                     return _observation("prepared", preimage_prepared)
                 if manifest_is_absent():
                     return _observation("prior", preimage_prior)
-            if _seal_matches(
-                state,
-                phase="preimage-ready",
-                revision=base_revision + 3,
-                vault_binding_digest=checked_vault,
-                run_id=checked_run,
-                operation_id=checked_operation,
-                journal_digest=checked_journal,
-                sealed_at=sealed_at,
-                recorded_at=preimage_ready_at,
-            ) and verified is not None:
+            if (
+                _seal_matches(
+                    state,
+                    phase="preimage-ready",
+                    revision=base_revision + 3,
+                    vault_binding_digest=checked_vault,
+                    run_id=checked_run,
+                    operation_id=checked_operation,
+                    journal_digest=checked_journal,
+                    sealed_at=sealed_at,
+                    recorded_at=preimage_ready_at,
+                )
+                and verified is not None
+            ):
                 return _observation("target", preimage_target)
             return _observation("mixed", state.state_digest)
 
@@ -663,6 +682,7 @@ def prepare_apply_through_preimage(
         consolidation_effect_coordinator.ConsolidationEffectUnavailable,
         consolidation_intake.ConsolidationIntakeUnavailable,
         consolidation_plan_store.ConsolidationPlanStoreUnavailable,
+        consolidation_policy.DestinationPolicyUnavailable,
         consolidation_preimage.ConsolidationPreimageUnavailable,
         consolidation_receipts.ConsolidationReceiptUnavailable,
         consolidation_seal.ConsolidationSealUnavailable,

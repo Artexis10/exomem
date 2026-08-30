@@ -343,7 +343,9 @@ destination-mismatched, session-mismatched, or source-copied principal identity.
 - every exact content action with expected-before and planned-after hashes, plus
   the deterministic journal-batch partition digest;
 - every exact canonical prospective policy document and its compiled policy,
-  bridge, and exact-release approval fingerprints;
+  bridge, and exact-release approval fingerprints, plus
+  `policy_bundle_digest` for the exact canonical destination-policy bundle from
+  which those values were reviewed;
 - the fresh destination owner/principal attestation-set digest;
 - the representative principal-by-purpose-by-item disclosure-matrix digest;
 - positive/negative verification-plan and nonterminal apply rollback-contingency
@@ -359,6 +361,25 @@ destination-mismatched, session-mismatched, or source-copied principal identity.
   no-loss consequence, and unresolved count; and
 - plan creation time, validity deadline, and fresh plan nonce.
 
+For a cutover plan, the owner-only immutable plan object SHALL contain
+`policy-bundle.json` beside `plan.json` and `control-basis.json`. Its bytes SHALL
+be canonical `exomem.consolidation-destination-policy/v1` and SHALL carry the
+exact destination binding, prospective compile target and authoring snapshot,
+document edits/set digest, source-authority review records/digest, destination
+principal attestations/set digest, principal requirements, and named principals.
+Its framed-JCS digest SHALL remain outside those bytes and SHALL equal the
+cutover plan's `policy_bundle_digest`; the bundle SHALL NOT contain
+`plan_digest`. Persist/load SHALL treat the three files as one immutable object
+and refuse missing, partial, non-canonical, changed, digest-mismatched, or legacy
+cutover plans without a bundle binding.
+
+Before governance mutation, apply and recovery SHALL load the exact stored
+bundle bytes, cross-bind them to the plan's policy documents, prospective policy
+fingerprint, principal-attestation-set digest, nonce, and destination, then
+rerun prospective compilation and fresh destination-principal/session
+validation. Caller-supplied bundle bytes, a digest-only claim, or reconstructed
+equivalent values SHALL NOT substitute for the stored reviewed bundle.
+
 All source-export claim, cutover, rollback, retirement, rendering, event, and fingerprint preimages
 SHALL use RFC 8785 JCS over a closed value subset: NFC-valid strings; duplicate
 keys, including post-NFC duplicates, refused; JCS escaping/property ordering;
@@ -370,6 +391,12 @@ u64be(JCS byte length) || JCS bytes`. `plan_digest` SHALL be SHA-256 over that
 framing with domain `exomem.consolidation-plan/v1` and SHALL not occur inside its
 own preimage. Cross-runtime fixed vectors SHALL pin NFC, escaping, order,
 integer boundaries, framing, and digest.
+
+#### Scenario: Stored policy bundle is missing or changed
+
+- **WHEN** apply loads a cutover plan whose `policy-bundle.json` is absent, non-canonical, changed, digest-mismatched, destination-mismatched, nonce-mismatched, or inconsistent with the plan's policy documents, prospective fingerprint, or principal attestation set
+- **THEN** apply refuses before any governance policy mutation
+- **AND** no caller-supplied bytes or digest-only assertion can repair or replace that reviewed authority
 
 `control_basis_digest` SHALL be framed-JCS SHA-256 under exact domain
 `exomem.consolidation-control-basis/v1` over a closed object containing run,
@@ -585,8 +612,10 @@ routing-opening -> complete`. Before publication it SHALL verify the immutable
 control basis and exact allowed successor chain, reserve the approval JTI and
 operation id, persist/revalidate the separate apply-predecessor terminal, acquire exclusive writer/lifecycle authority,
 persist and drain a destination-wide seal, and revalidate source artifacts,
-both snapshots, principal attestations, conflict completeness, and the entire
-plan preimage.
+both snapshots, the exact stored destination-policy bundle and its fresh
+principal attestations, conflict completeness, and the entire plan preimage.
+Missing, changed, or unbound policy-bundle bytes SHALL refuse before governance
+policy mutation.
 
 While sealed, every normal content read and mutation surface SHALL return the
 same content-free sealed outcome for every ordinary principal, including the
@@ -598,8 +627,9 @@ not be serializable, persisted as a reusable credential, or accepted from any
 request field.
 
 After proving a complete content-addressed destination preimage, apply SHALL
-activate the exact approved restrictive policy through the existing governance
-journal/marker/critical-receipt protocol. Only then SHALL it publish exact
+activate only the exact stored and revalidated restrictive policy bundle
+through the existing governance journal/marker/critical-receipt protocol. Only
+then SHALL it publish exact
 content actions in bounded deterministic `batch_atomic_write` batches. Each
 batch SHALL record domain-separated prior, prepared, and final fingerprints,
 receipt-first intent, and a durable run-journal transition. The first committed
