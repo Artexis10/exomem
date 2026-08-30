@@ -49,7 +49,9 @@ spec:
               (request.resource.resource != 'secrets' ||
                 (request.operation == 'DELETE'
                   ? oldObject.metadata.name == 'exomem-cell-credentials'
-                  : object.metadata.name == 'exomem-cell-credentials')))
+                  : object.metadata.name in [
+                      'exomem-cell-credentials', 'exomem-authorization-session'
+                    ])))
       message: The hosted provisioner may mutate only fixed resources in opaque exo-* tenant namespaces.
     - expression: >-
         request.resource.resource in [
@@ -78,7 +80,11 @@ spec:
             (request.resource.resource == 'services' &&
               variables.name == request.namespace) ||
             (request.resource.resource == 'secrets' &&
-              variables.name == 'exomem-cell-credentials') ||
+              (request.operation == 'DELETE'
+                ? variables.name == 'exomem-cell-credentials'
+                : variables.name in [
+                    'exomem-cell-credentials', 'exomem-authorization-session'
+                  ])) ||
             (request.resource.resource == 'leases' &&
               variables.name == request.namespace + '-maintenance') ||
             (request.resource.resource in ['statefulsets', 'statefulsets/scale'] &&
