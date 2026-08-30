@@ -511,6 +511,7 @@ async def test_live_plane_namespace_carries_the_fixed_helm_contract_annotations(
         "exomem.io/lifecycle-actions-enabled": "false",
         "exomem.io/browser-origin": "https://substratesystems.io",
         "exomem.io/transfer-hostname": "transfer.example.invalid",
+        "exomem.io/authorization-session-secret-name": "exomem-authorization-session",
     }
     annotations = core.namespace_body["metadata"]["annotations"]
     assert {key: annotations.get(key) for key in expected} == expected
