@@ -378,12 +378,23 @@ def op_bootstrap(
     except PackageNotFoundError:
         package_version = "0+unknown"
 
+    from . import envelope as envelope_module
     from . import mode as mode_module
     from . import prominence as prominence_module
     from . import tool_surface as tool_surface_module
 
     compute_policy = mode_module.resolved()
     engagement_policy = prominence_module.resolved()
+    # The delegation envelope rides INSIDE the engagement block rather than beside
+    # it: prominence sets its defaults, so a client reading one without the other
+    # would learn how eager Exomem is without learning what it is allowed to do on
+    # its own. Every string here is deliberately command-free, exactly like the
+    # epistemic commitments — `_filter_bootstrap_payload` deletes any value naming
+    # a command the active surface cannot call, and a ceiling that vanished on a
+    # reduced surface would be a ceiling nobody was told about.
+    engagement_policy["envelope"] = envelope_module.resolved(
+        level=engagement_policy["level"]
+    )
     active_descriptor = _active_bootstrap_descriptor()
     active_product_names = frozenset(active_descriptor.product_commands)
     requested_workflow = workflow.strip() if workflow and workflow.strip() else "general"
