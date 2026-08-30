@@ -21,8 +21,10 @@ def _proposal() -> dict[str, object]:
 
 def test_workflow_save_and_refresh_use_the_writer_lease_mutation_envelope(tmp_path: Path) -> None:
     from exomem import commands
+    from exomem.init import init_vault
     from exomem.writer_lease import invoke_command
 
+    init_vault(tmp_path)
     command = next(item for item in commands.COMMANDS if item.name == "schema_memory")
     saved = invoke_command(
         command,

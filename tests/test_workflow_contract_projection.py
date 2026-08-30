@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 
-def test_compact_full_and_selected_knowledge_pack_share_workflow_contract_identity(
+def test_compact_full_and_selected_knowledge_pack_share_workflow_contract_projection(
     tmp_path: Path,
 ) -> None:
     from exomem import commands, knowledge_packs, workflow_contracts
@@ -13,7 +13,15 @@ def test_compact_full_and_selected_knowledge_pack_share_workflow_contract_identi
     portable = workflow_contracts.portable_projection()
     identity = {key: portable[key] for key in ("family", "schema_version", "digest")}
 
-    assert compact["workflow_contracts"] == identity
+    assert compact["workflow_contracts"]["portable"] == identity
+    assert compact["workflow_contracts"]["invariants"] == portable["invariants"]
+    assert compact["workflow_contracts"]["builtin_fallback"] == portable["builtin_fallback"]
+    assert compact["workflow_contracts"]["route"] == {
+        "tool": "schema_memory",
+        "subject": "workflow-contracts",
+        "operation": "resolve",
+    }
+    assert compact["workflow_contracts"]["proactive_routing_available"] is True
     assert full["workflow_contracts"]["portable"] == portable
     assert compact["knowledge_packs"]["selected"]["workflow_contract"] == identity
     assert full["knowledge_packs"]["selected"]["workflow_contract"] == portable

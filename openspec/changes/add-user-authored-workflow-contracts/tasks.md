@@ -1,8 +1,8 @@
 ## 1. Workflow contract core
 
 - [ ] 1.1 Add red-first focused tests for the code-owned family registry, exact workflow v1 frontmatter schema/normalization/bounds, canonical project-key selectors, contract-wide single-owner tokens, companion sorting, stable/immutable identity, configured-KB paths, natural-case filenames and collisions, deterministic English presentation, authored-body preservation, presentation drift, safe paths, symlink refusal, and stale-write protection.
-- [ ] 1.2 Implement the reusable contract-family registry and the versioned `workflow` family parser, validator, canonical serializer, fingerprint, deterministic renderer, and bounded inventory model.
-- [ ] 1.3 Implement canonical workflow-contract storage under `_Schema/contracts/workflow/`, including guarded preview, save, refresh, direct-edit validation, lifecycle handling, and no-contract bootstrap compatibility.
+- [x] 1.2 Implement the reusable contract-family registry and the versioned `workflow` family parser, validator, canonical serializer, fingerprint, deterministic renderer, and bounded inventory model.
+- [x] 1.3 Implement canonical workflow-contract storage under `_Schema/contracts/workflow/`, including guarded preview, save, refresh, direct-edit validation, lifecycle handling, and no-contract bootstrap compatibility.
 - [ ] 1.4 Add red-first resolver tests covering explicit saved selection, reviewed ephemeral proposals, three-state project/domain/activity context, incomplete-context refusal, specificity, default and built-in standalone fallback, archived explicit selection, unreadable/unparseable inventory, duplicate IDs/keys, multiple defaults, scan limits, deterministic provenance, and equal-specificity ambiguity refusal.
 - [ ] 1.5 Implement the pure deterministic resolver and fixed-template explanation without model calls, tool-capability claims, contract merging, external state inference, or executable user instructions.
 - [ ] 1.6 Add adversarial contract tests for instruction-like data, oversized values, traversal and link attacks, malformed direct edits, unstable file ordering, bounded error disclosure, exact semantic/source fingerprints, scan exhaustion with no partial total, and byte-equivalent results when unreleased files are added.
@@ -19,7 +19,7 @@
 - [ ] 3.1 Add red-first bootstrap tests for immutable Planning/Records ownership, built-in standalone fallback, one released default/eight scoped summary caps, released-only totals, exact resolve route only when callable, `workflow_resolution_unavailable` on reduced profiles, empty-vault behaviour, and separation from governance and companion availability.
 - [x] 3.2 Project the workflow-contract protocol through full and compact bootstrap, portable export, and knowledge packs from the code-owned machine source; update the hand-authored generic scaffold and parity pins without generating it from a vault; remove product-specific OpenSpec behaviour from normative generic guidance.
 - [x] 3.3 Add a generic inactive OpenSpec companion example outside the active contract directory, with no personal vault labels or assumption that OpenSpec exists.
-- [ ] 3.4 Implement and test the durable migration marker before scaffold refresh: known pre-feature vaults require review, fresh vaults do not, valid markers are preserved, missing markers beside sentinels are conservative, and invalid/unsafe markers refuse without overwrite.
+- [x] 3.4 Implement and test the durable migration marker before scaffold refresh: known pre-feature vaults require review, fresh vaults do not, valid markers are preserved, missing markers beside sentinels are conservative, and invalid/unsafe markers refuse without overwrite.
 - [x] 3.5 Prove parity, compact-budget bounds, hand-authored scaffold genericity, portable-offline usefulness, and full/compact capability separation with focused tests.
 
 ## 4. Planning and Records feedback loop

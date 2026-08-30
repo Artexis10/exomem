@@ -51,6 +51,14 @@ owner for execution artifacts; without one, Planning works standalone. Companion
 references remain opaque, and governance, tool availability, and external
 permissions remain separate from the declaration.
 
+Before proactive Planning or Records capture, resolve the current workflow
+posture when the workflow route is available, using explicit known-absent scope
+values where applicable. Its capture posture is capped by the active prominence
+level. Inspect the relevant Planning collection before writing: update a matching
+item before creating another. Records are observations, not a transition engine:
+only an explicit user change of intent may make a guarded Planning transition;
+an outcome under a propose-after-outcome posture may only propose that change.
+
 ## Proactive engagement
 
 This skill is **context-aware, not just request-driven.** It engages on its own
@@ -125,19 +133,16 @@ is made**, or **an observed outcome or event is reported** — capture it:
   **failure** note. A one-off with nothing reusable stays unwritten.
 - A **stated intent or commitment** is a landing too: the user says what they
   will do, commits to a batch or workstream, sequences work ("the next one",
-  "the others next time"), or re-prioritises. Route it to Planning —
-  `plan_memory(action="add")` into the inbox state, or `triage`/`update` on an
-  item that already exists.
+  "the others next time"), or re-prioritises. Resolve posture first, inspect
+  Planning, then update a matching item before creating an inbox item.
 - An **observed outcome or event** is the mirror class: the conversation reports
   that something happened, was produced, measured, delivered, approved,
   published, or failed. Route it to Records — `record_memory(action="append")`
   into the one compatible collection.
-- **Pairing rule.** An observed outcome that lands on an open committed Planning
-  item is *one landing with two consequences*: append the record first (it is the
-  canonical observation), then transition the item (status, and lifecycle where
-  the collection's convention archives completed work). Do both together and
-  report them once, in the user's own words, citing the collection the way recall
-  cites a page. A **tentative** claim ("probably posted, not sure") is never
+- **Pairing rule.** Append an observed outcome to Records first; it is the
+  canonical observation. It never changes Planning automatically. An explicit
+  user intent may request a guarded transition; otherwise a
+  propose-after-outcome posture may only propose one. A **tentative** claim ("probably posted, not sure") is never
   written as an event — say so in a note field if the manifest offers one — and
   elapsed time is never an outcome.
 - Pause and ask only when type or scope is genuinely ambiguous (research vs.
@@ -656,8 +661,8 @@ reference for the canonical operation leaves that product commands route to.
 - topic maps to a project/domain/entity, or "what did I conclude about X" -> proactive **ask_memory** first, fold the hits into the answer
 - a decision is made or a problem just got solved -> stepping-stone: capture via **capture_source**/**remember**, then report the path
 - a method was run and the user says how it turned out -> stepping-stone: capture the method, the adjustment and the outcome, then report the path
-- the user states an intent or commits to work -> stepping-stone: **plan_memory** (`add` into the inbox, or `triage`/`update` an existing item)
-- the user reports that something happened, was produced, delivered, approved, published or failed -> stepping-stone: **record_memory** (`append` into the one compatible collection); when it lands on an open committed plan item, do the Planning transition in the same turn and report both once
+- the user states an intent or commits to work -> resolve workflow posture, inspect Planning, then update an existing matching item before creating an inbox item
+- the user reports that something happened, was produced, delivered, approved, published or failed -> resolve workflow posture and append a Record to one compatible collection; never transition Planning automatically
 
 When you say something oblique like "interesting, save it," default to
 **capture_source** and ask whether to compile only if there is a durable

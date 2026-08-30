@@ -19,7 +19,15 @@ from .entity_types import (
     load_entity_types,
 )
 from .kbdir import kb_dirname
-from .vault import render_wikilinks_for_vault, shipped_schema_target
+from .vault import (
+    PathGuard,
+    PathGuardError,
+    PlannedWrite,
+    batch_atomic_write,
+    read_guarded_text,
+    render_wikilinks_for_vault,
+    shipped_schema_target,
+)
 
 _SCAFFOLD = Path(__file__).parent / "_scaffold"
 
@@ -81,6 +89,7 @@ def refresh_shipped_schema(vault_root: Path) -> list[str]:
     including the per-vault YAML registries the user is expected to edit.
     """
     vault_root = Path(vault_root)
+    vault_root.mkdir(parents=True, exist_ok=True)
     kb = vault_root / kb_dirname()
     if not kb.is_dir():
         return []
@@ -88,6 +97,7 @@ def refresh_shipped_schema(vault_root: Path) -> list[str]:
 
     workflow_contracts.ensure_migration_marker(vault_root, review_required=True)
     refreshed: list[str] = []
+    writes: list[PlannedWrite] = []
     for src in shipped_schema_sources():
         # `_Schema/SKILL.md` -> `<vault>/.exomem/schema/SKILL.md`. The scaffold
         # keeps its `_Schema/` prefix because that is the shape the claude.ai
@@ -96,13 +106,31 @@ def refresh_shipped_schema(vault_root: Path) -> list[str]:
         relative = src.relative_to(_SCAFFOLD).as_posix().split("/", 1)[1]
         dest = shipped_schema_target(vault_root) / relative
         try:
-            if dest.is_file() and dest.read_bytes() == src.read_bytes():
+            current, guard = read_guarded_text(vault_root, dest)
+            if current == src.read_text(encoding="utf-8"):
                 continue
-        except OSError:
-            pass
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dest)
+        except FileNotFoundError:
+            try:
+                guard = PathGuard.capture(
+                    vault_root, dest.relative_to(vault_root).as_posix(), leaf_policy="absent"
+                )
+            except PathGuardError as error:
+                raise workflow_contracts.WorkflowContractError(
+                    "WORKFLOW_CONTRACT_MIGRATION_INDETERMINATE"
+                ) from error
+        except (OSError, UnicodeDecodeError, PathGuardError) as error:
+            raise workflow_contracts.WorkflowContractError(
+                "WORKFLOW_CONTRACT_MIGRATION_INDETERMINATE"
+            ) from error
+        writes.append(PlannedWrite(dest, src.read_text(encoding="utf-8"), guard=guard))
         refreshed.append(dest.relative_to(vault_root).as_posix())
+    if writes:
+        try:
+            batch_atomic_write(writes, vault_root=vault_root)
+        except PathGuardError as error:
+            raise workflow_contracts.WorkflowContractError(
+                "WORKFLOW_CONTRACT_MIGRATION_INDETERMINATE"
+            ) from error
     return refreshed
 
 
@@ -123,6 +151,7 @@ def init_vault(
     because the per-vault state key binds the final vault path.
     """
     vault_root = Path(vault_root)
+    vault_root.mkdir(parents=True, exist_ok=True)
     kb = vault_root / kb_dirname()
     fresh_vault = not kb.exists()
     if kb.exists() and not force:
@@ -134,7 +163,7 @@ def init_vault(
     created: list[str] = []
     from . import workflow_contracts
 
-    workflow_contracts.ensure_migration_marker(vault_root, review_required=not fresh_vault)
+    workflow_contracts.ensure_migration_marker(vault_root)
     # The product-owned markdown lands outside the note namespace; everything
     # else -- index.md, log.md, the typed tree, and the per-vault YAML registries
     # that also live under `_Schema/` -- is the user's and stays in the Knowledge

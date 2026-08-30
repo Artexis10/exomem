@@ -130,6 +130,7 @@ from .governance import projection_runtime as projection_runtime_module
 from .governance import tool as governance_tool_module
 from .kbdir import kb_dirname
 from .vault import (
+    PathGuardError,
     VaultPathError,
     resolve_under_vault,
 )
@@ -397,33 +398,50 @@ def op_bootstrap(
     workflow_portable_identity = {
         key: workflow_portable[key] for key in ("family", "schema_version", "digest")
     }
+    workflow_status = workflow_inventory.get("status")
+    workflow_findings = workflow_inventory.get("findings", [])
+    workflow_route = {
+        "tool": "schema_memory",
+        "subject": "workflow-contracts",
+        "operation": "resolve",
+    }
+    workflow_callable = "schema_memory" in active_product_names
+    workflow_projection_base = {
+        "invariants": workflow_portable["invariants"],
+        "builtin_fallback": workflow_portable["builtin_fallback"],
+        "resolution_available": workflow_callable,
+        "proactive_routing_available": bool(workflow_callable and workflow_status is None),
+        "default": workflow_defaults[:1],
+        "scoped": workflow_scoped[:8],
+        "total": workflow_inventory.get("total", 0),
+        "truncated": bool(workflow_inventory.get("truncated", False)),
+    }
     if profile == "compact":
-        workflow_contract_projection = workflow_portable_identity
-        selected_packs = {**selected_packs, "workflow_contract": workflow_portable_identity}
-    elif "schema_memory" in active_product_names:
         workflow_contract_projection = {
-            "invariants": workflow_portable["invariants"],
+            **workflow_projection_base,
+            "portable": workflow_portable_identity,
+            **({"route": workflow_route} if workflow_callable else {}),
+            **({"status": workflow_status} if workflow_status is not None else {}),
+            **({"findings": workflow_findings} if workflow_findings else {}),
+        }
+        selected_packs = {**selected_packs, "workflow_contract": workflow_portable_identity}
+    elif workflow_callable:
+        workflow_contract_projection = {
+            **workflow_projection_base,
             "portable": workflow_portable,
-            "resolution_available": True,
-            "route": {
-                "tool": "schema_memory",
-                "subject": "workflow-contracts",
-                "operation": "resolve",
-            },
-            "default": workflow_defaults[:1],
-            "scoped": workflow_scoped[:8],
-            "total": workflow_inventory.get("total", 0),
-            "truncated": bool(workflow_inventory.get("truncated", False)),
-            "findings": workflow_inventory.get("findings", []),
+            "route": workflow_route,
+            **({"status": workflow_status} if workflow_status is not None else {}),
+            "findings": workflow_findings,
         }
     else:
         workflow_contract_projection = {
-            "invariants": workflow_portable["invariants"],
+            **workflow_projection_base,
             "portable": workflow_portable,
-            "resolution_available": False,
-            "status": "workflow_resolution_unavailable"
-            if workflow_summaries
-            else "builtin_standalone",
+            "status": (
+                "builtin_standalone"
+                if not workflow_summaries and not workflow_findings and workflow_status is None
+                else "workflow_resolution_unavailable"
+            ),
         }
     entity_type_registry = entity_types_module.load_entity_types(vault_root)
     source_taxonomy_projection = _source_taxonomy_projection(vault_root, profile=profile)
@@ -1108,8 +1126,14 @@ def op_bootstrap(
         "product_commands": product_tool_catalog(
             active_product_names, callable_tools=active_descriptor.callable_commands
         ),
-        "tool_catalog": product_tool_catalog(
-            active_product_names, callable_tools=active_descriptor.callable_commands
+        **(
+            {
+                "tool_catalog": product_tool_catalog(
+                    active_product_names, callable_tools=active_descriptor.callable_commands
+                )
+            }
+            if profile != "compact"
+            else {}
         ),
         "common_tools": [
             "adopt_vault",
@@ -7235,7 +7259,7 @@ def _workflow_contract_schema_operation(
                 "fingerprint": contract.fingerprint,
             }
         if operation == "resolve":
-            if expected_hash is not None or why is not None:
+            if context is None or expected_hash is not None or why is not None:
                 return invalid
             return {
                 "subject": "workflow-contracts",
@@ -7256,7 +7280,14 @@ def _workflow_contract_schema_operation(
                 inspected = workflow_contracts_module.inspect_contract(vault_root, name)
                 if inspected["contract"]["contract_id"] != contract.contract_id:
                     return {"resolved": False, "code": "WORKFLOW_CONTRACT_INVALID"}
-                source = (Path(vault_root) / inspected["path"]).read_text(encoding="utf-8")
+                try:
+                    source, _guard = workflow_contracts_module._guarded_source(
+                        vault_root, Path(vault_root) / inspected["path"]
+                    )
+                except PathGuardError as error:
+                    raise workflow_contracts_module.WorkflowContractError(
+                        "WORKFLOW_CONTRACT_INVALID", "unsafe contract path"
+                    ) from error
                 content = workflow_contracts_module.canonical_content(
                     contract, workflow_contracts_module._body(source)
                 )
@@ -7285,6 +7316,7 @@ def _workflow_contract_schema_operation(
                 or not why
                 or context is not None
                 or (name is not None and expected_hash is None)
+                or (name is None and expected_hash is not None)
             ):
                 return invalid
             contract = workflow_contracts_module.parse_proposal(proposal)
