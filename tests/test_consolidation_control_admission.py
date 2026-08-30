@@ -989,3 +989,95 @@ def test_control_record_must_survive_until_seal_terminal(tmp_path: Path) -> None
         vault_binding_digest=VAULT_BINDING
     )
     assert durable.phase == "sealing"
+
+
+def test_receipt_first_seal_can_persist_intent_then_drain_as_two_exact_effects(
+    tmp_path: Path,
+) -> None:
+    admission = _open_admission(tmp_path)
+    ordinary, control = _convert_apply(admission)
+    authority = _apply_authority()
+    try:
+        sealing = admission.begin_seal(
+            control=control,
+            authority=authority,
+            run_id=RUN_ID,
+            operation_id=OPERATION_ID,
+            journal_digest=JOURNAL_DIGEST,
+            sealed_at=T1,
+            expected_revision=0,
+        )
+        assert sealing.state.phase == "sealing"
+        assert sealing.state.revision == 1
+        assert admission.begin_seal(
+            control=control,
+            authority=authority,
+            run_id=RUN_ID,
+            operation_id=OPERATION_ID,
+            journal_digest=JOURNAL_DIGEST,
+            sealed_at=T1,
+            expected_revision=0,
+        ) == sealing
+
+        with _assert_admission_error("CONSOLIDATION_SEALED"):
+            with admission.admit_read():
+                pass
+
+        sealed = admission.drain_and_seal(
+            control=control,
+            authority=authority,
+            run_id=RUN_ID,
+            operation_id=OPERATION_ID,
+            journal_digest=JOURNAL_DIGEST,
+            sealed_at=T1,
+            completed_at=T2,
+            expected_revision=1,
+            timeout=1.0,
+        )
+        assert sealed.state.phase == "sealed"
+        assert sealed.state.revision == 2
+        assert admission.drain_and_seal(
+            control=control,
+            authority=authority,
+            run_id=RUN_ID,
+            operation_id=OPERATION_ID,
+            journal_digest=JOURNAL_DIGEST,
+            sealed_at=T1,
+            completed_at=T2,
+            expected_revision=1,
+            timeout=1.0,
+        ) == sealed
+    finally:
+        ordinary.__exit__(None, None, None)
+
+
+def test_split_seal_rejects_changed_identity_without_advancing(
+    tmp_path: Path,
+) -> None:
+    admission = _open_admission(tmp_path)
+    ordinary, control = _convert_apply(admission)
+    try:
+        sealing = admission.begin_seal(
+            control=control,
+            authority=_apply_authority(),
+            run_id=RUN_ID,
+            operation_id=OPERATION_ID,
+            journal_digest=JOURNAL_DIGEST,
+            sealed_at=T1,
+            expected_revision=0,
+        )
+        with _assert_admission_error("CONSOLIDATION_SEAL_UNAVAILABLE"):
+            admission.drain_and_seal(
+                control=control,
+                authority=_apply_authority(),
+                run_id=RUN_ID,
+                operation_id=OPERATION_ID,
+                journal_digest=JOURNAL_DIGEST,
+                sealed_at=T1,
+                completed_at=T2,
+                expected_revision=0,
+                timeout=1.0,
+            )
+        assert admission.reload().state == sealing.state
+    finally:
+        ordinary.__exit__(None, None, None)
