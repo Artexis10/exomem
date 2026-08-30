@@ -341,13 +341,51 @@ the task is ticked, not estimated.
 
 ## 5. Acceptance (spec round-trip)
 
-- [ ] 5.1 Hookless quiet-loop test over a REAL registered family (e.g.
+- [x] 5.1 Hookless quiet-loop test over a REAL registered family (e.g.
   `scope_divergence_semantic`): quiet with reason lands through
   `triage_memory`, persists across a fresh engine, is listed with origin in the
   dispositions view, resets to `normal` — with every envelope class disposition
   unchanged throughout; plus a pin that the hookless custom-instructions block
   and compact bootstrap name the family-disposition surface and the vocabulary
   discovery path rather than a hardcoded family table.
+
+  Evidence. 5.1 is an acceptance round-trip over machinery landed by 3.x and
+  4.x, so it passed on its first run (`13 passed in 1.28s`) rather than going
+  red first. Red was therefore produced by REMOVING each half, which is the same
+  proof, and both mutants are recorded verbatim. Neither was committed.
+
+  Mutant A — revert the bootstrap teaching to its pre-4.2 wording, which never
+  names the registered vocabulary:
+
+  ```
+  >           assert "registered" in text, carrier
+  E           AssertionError: compact bootstrap
+  FAILED …::test_the_family_vocabulary_is_discoverable_rather_than_hardcoded
+  1 failed in 0.77s
+  ```
+
+  Mutant B — drop the envelope block from the dispositions view:
+
+  ```
+  >       envelope_before = commands.op_review_memory(vault, mode="dispositions")["envelope"]
+  E       KeyError: 'envelope'
+  FAILED …::test_a_hookless_session_can_quiet_a_real_family_and_the_envelope_stands
+  1 failed in 0.65s
+  ```
+
+  Green with both reverted: `pytest tests/test_delegation_envelope_surfaces.py -q`
+  -> `13 passed in 1.31s`.
+
+  The loop runs over the real registered family `scope_divergence_semantic`
+  (asserted to be in `review_state.registered_families()`, not assumed): quiet
+  with an `intentional:` reason lands through `triage_memory`, survives a fresh
+  store over the same bytes, is listed in the dispositions view with its origin
+  `manual`, and resets to `normal` — and the served envelope block is
+  byte-identical before, during and after. `test_the_envelope_is_unmoved_by_every_family_disposition`
+  runs the same quiet/reset cycle over registered families one at a time and
+  compares the whole envelope each way. The vocabulary pin also checks the
+  negative: neither carrier contains any name from
+  `registered_families()`, so neither ships a table that can go stale.
 - [ ] 5.2 `openspec validate --all --strict` green; lean scoped suites green;
   full-suite at the completion boundary with failures attributed against the
   origin/main baseline.

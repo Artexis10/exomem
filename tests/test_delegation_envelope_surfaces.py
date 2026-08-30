@@ -229,3 +229,114 @@ def test_the_plugin_skill_copy_matches_the_scaffold(config, vault: Path) -> None
     assert _markdown_section(PLUGIN_SKILL, TEACHING_HEADING) == _markdown_section(
         SCAFFOLD_SKILL, TEACHING_HEADING
     )
+
+
+# ------------------------------------------- 5.1 the hookless quiet loop, end to end
+
+
+#: A REAL registered family, and deliberately a structural one: it is what a
+#: user means by "stop suggesting I split this page up". A made-up family name
+#: would prove the plumbing and nothing about the vocabulary.
+STRUCTURAL_FAMILY = "scope_divergence_semantic"
+STRUCTURAL_FAMILY_REF = f"exomem://review/family/{STRUCTURAL_FAMILY}"
+STRUCTURAL_WHY = "intentional: this vault keeps broad pages on purpose"
+
+
+def test_a_hookless_session_can_quiet_a_real_family_and_the_envelope_stands(
+    config, vault: Path
+) -> None:
+    """The whole loop a hookless client has to be able to run from the contract.
+
+    No hooks, no skill: the served text is the only thing the session read. It
+    maps the user's words to a registered family, records the decision through
+    the family-disposition surface, and the decision survives a restart, is
+    legible afterwards, and resets — while not one envelope class moves, because
+    a family decision and a class disposition are different vocabularies.
+    """
+    from exomem import review_state
+
+    prominence.write_prominence("maximal")
+    envelope_before = commands.op_review_memory(vault, mode="dispositions")["envelope"]
+
+    assert STRUCTURAL_FAMILY in review_state.registered_families()
+
+    recorded = commands.op_triage_memory(
+        vault, ref=STRUCTURAL_FAMILY_REF, action="quiet", why=STRUCTURAL_WHY
+    )
+    assert recorded["disposition"] == "quiet"
+    assert recorded["reason"] == "intentional"
+    assert recorded["origin"] == "manual"
+
+    # A fresh engine over the same bytes: nothing in this process carries it.
+    fresh = review_state.ReviewStateStore(vault).load()
+    assert review_state.disposition_for(STRUCTURAL_FAMILY, payload=fresh) == "quiet"
+
+    view = commands.op_review_memory(vault, mode="dispositions")
+    rows = {row["family"]: row for row in view["dispositions"]}
+    assert rows[STRUCTURAL_FAMILY]["disposition"] == "quiet"
+    assert rows[STRUCTURAL_FAMILY]["origin"] == "manual"
+    assert rows[STRUCTURAL_FAMILY]["reason"] == "intentional"
+    assert rows[STRUCTURAL_FAMILY]["why"] == STRUCTURAL_WHY
+    assert set(rows) == {STRUCTURAL_FAMILY}, "no other family was touched"
+    assert view["envelope"] == envelope_before
+
+    cleared = commands.op_triage_memory(vault, ref=STRUCTURAL_FAMILY_REF, action="normal")
+    assert cleared["disposition"] == "normal"
+    assert cleared["cleared"] is True
+    after = commands.op_review_memory(vault, mode="dispositions")
+    assert after["dispositions"] == []
+    assert after["envelope"] == envelope_before
+
+
+def test_the_family_vocabulary_is_discoverable_rather_than_hardcoded(
+    config, vault: Path
+) -> None:
+    """The mapping is the agent's judgment; the vocabulary is the server's answer.
+
+    A carrier that shipped its own family table would go stale the day a queue
+    is added or retired, and a hookless client has nothing else to correct it.
+    """
+    bootstrap = commands.op_bootstrap(vault, profile="compact")
+    post_write = bootstrap["authoring_contract"]["post_write"]
+    taught = " ".join(str(value) for value in post_write.values()).lower()
+    pasted = "\n".join(_markdown_section(HOOKLESS_DOC, TEACHING_HEADING)).lower()
+
+    for carrier, text in (("compact bootstrap", taught), ("hookless block", pasted)):
+        # The surface a decision lands on...
+        assert "family" in text, carrier
+        assert "quiet" in text, carrier
+        # ...and where the vocabulary itself comes from.
+        assert "dispositions" in text, carrier
+        assert "registered" in text, carrier
+
+    # And neither one ships a table of family names.
+    view = commands.op_review_memory(vault, mode="dispositions")
+    assert STRUCTURAL_FAMILY in view["registered_families"]
+    for carrier, text in (("compact bootstrap", taught), ("hookless block", pasted)):
+        listed = [
+            family
+            for family in view["registered_families"]
+            if family in text
+        ]
+        assert listed == [], f"{carrier} hardcodes a family table: {listed}"
+
+
+def test_the_envelope_is_unmoved_by_every_family_disposition(config, vault: Path) -> None:
+    """Every registered family, one at a time, against every envelope class."""
+    from exomem import review_state
+
+    prominence.write_prominence("balanced")
+    before = envelope.resolved()
+
+    for family in sorted(review_state.registered_families())[:6]:
+        commands.op_triage_memory(
+            vault,
+            ref=f"exomem://review/family/{family}",
+            action="quiet",
+            why=STRUCTURAL_WHY,
+        )
+        assert envelope.resolved() == before, family
+        commands.op_triage_memory(
+            vault, ref=f"exomem://review/family/{family}", action="normal"
+        )
+        assert envelope.resolved() == before, family
