@@ -1723,6 +1723,27 @@ def block_for_write(
         return served(vault_root, today=today)
 
 
+def block_for_batch(
+    vault_root: Path, *, today: dt.date | None = None
+) -> dict[str, Any] | None:
+    """The block a completed multi-write batch may carry, or None.
+
+    The same serve as `block_for_write`, inside the same `due_state_advisory`
+    disclosure boundary and with the same produce-only posture — emission is
+    decided at the mutation terminal, after the batch scope has exited. It
+    differs in one way only: it applies no delta of its own, because a batch's
+    per-write deltas have already been applied (the operation leaves call
+    `_apply_batch_deltas`, and `reconcile` full-recomputes) by the time the
+    invocation reaches its terminal. Serving here therefore reports the
+    POST-batch projection; re-deltaing one arbitrary path of the batch would
+    report a number that belongs to no moment in particular.
+    """
+    from .governance import egress as egress_module
+
+    with egress_module.disclosure_boundary(Path(vault_root), "due_state_advisory"):
+        return served(vault_root, today=today)
+
+
 # --------------------------------------------------------------------------
 # emission governance
 # --------------------------------------------------------------------------
