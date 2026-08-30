@@ -249,6 +249,46 @@ def test_adoption_studio_apply_carries_one_block(vault: Path) -> None:
     assert response["due_state"] == due_state_module.served(vault)
 
 
+def test_adoption_studio_apply_proposal_carries_one_terminal_block(tmp_path: Path) -> None:
+    from test_adoption_proposals import (
+        _applied_run,
+        _imported_paths,
+        _legacy_vault,
+        _submit_compilation,
+    )
+
+    vault = _legacy_vault(tmp_path)
+    applied = _applied_run(vault)
+    proposal = _submit_compilation(
+        vault,
+        applied["run_id"],
+        applied["inventory_fingerprint"],
+        _imported_paths(applied),
+        title="Carrier proposal",
+    )
+    overdue_prediction(vault, "apply-proposal-carrier")
+    due_state_module.reconcile(vault)
+    due_state_module.reset_emission_state()
+    before = _ledger(vault)
+
+    response = writer_lease.invoke_command(
+        _command("adoption_studio"),
+        vault,
+        action="apply-proposal",
+        ref=proposal["ref"],
+        expected_fingerprint=proposal["fingerprint"],
+        why="Approved after reviewing the compiled synthesis.",
+    )
+
+    assert list(response).count("due_state") == 1
+    assert response["due_state"] == due_state_module.served(vault)
+    assert "_vault" not in response
+    assert "_vault" not in response["due_state"]
+    ledger = _ledger(vault)
+    assert ledger["writes"] - before["writes"] == 1
+    assert ledger["emissions"] - before["emissions"] == 1
+
+
 def test_maintain_fix_carries_one_block(vault: Path) -> None:
     _seed(vault)
     _repairable_overdue(vault, "carrier-fix")
@@ -279,21 +319,29 @@ def test_maintain_backfill_ids_carries_one_block(vault: Path) -> None:
 
 def test_preserve_artifacts_carries_one_block(vault: Path, monkeypatch) -> None:
     _seed(vault)
+    before = _ledger(vault)
 
     response = _preserve(vault, monkeypatch)
 
     assert "due_state" in response, response
     assert response["due_state"] == due_state_module.served(vault)
+    ledger = _ledger(vault)
+    assert ledger["writes"] == before["writes"]
+    assert ledger["emissions"] == before["emissions"] + 1
 
 
 def test_process_media_carries_one_block(vault: Path) -> None:
     _seed(vault)
     relative = _drop_media(vault)
+    before = _ledger(vault)
 
     response = _process_media(vault, relative)
 
     assert "due_state" in response, response
     assert response["due_state"] == due_state_module.served(vault)
+    ledger = _ledger(vault)
+    assert ledger["writes"] == before["writes"]
+    assert ledger["emissions"] == before["emissions"] + 1
 
 
 def test_structured_files_apply_carries_one_block(tmp_path: Path) -> None:
@@ -303,6 +351,7 @@ def test_structured_files_apply_carries_one_block(tmp_path: Path) -> None:
     overdue_prediction(tmp_path, "structured-carrier")
     due_state_module.reconcile(tmp_path)
     due_state_module.reset_emission_state()
+    before = _ledger(tmp_path)
     plan = commands.op_maintain_memory(
         tmp_path, mode="structured-files", collection=manifest_path
     )
@@ -318,6 +367,9 @@ def test_structured_files_apply_carries_one_block(tmp_path: Path) -> None:
     )
 
     assert "due_state" in response, response
+    ledger = _ledger(tmp_path)
+    assert ledger["writes"] == before["writes"]
+    assert ledger["emissions"] == before["emissions"] + 1
 
 
 def test_the_block_leaves_the_operation_outcome_keys_untouched(

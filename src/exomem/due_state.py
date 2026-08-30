@@ -1363,7 +1363,13 @@ def _record_emission(
 
 
 def emission_ledger(vault_root: Path) -> dict[str, Any]:
-    """The persisted `{writes, emissions, last_digest, due_total}` a projector reads."""
+    """The persisted `{writes, emissions, last_digest, due_total}` a projector reads.
+
+    `writes` counts governed page or structured projection deltas applied here,
+    not every filesystem mutation and not terminal deliveries. A qualifying
+    carrier that authors no projected category can therefore add one emission
+    while leaving `writes` unchanged.
+    """
     return _emission_section(load(vault_root) or _UNPERSISTED.get(str(vault_root)))
 
 

@@ -298,7 +298,7 @@ def test_a_multi_write_command_carries_one_block(vault: Path) -> None:
 
 
 def test_the_batch_scope_on_this_leaf_suppresses_nothing_today(vault: Path) -> None:
-    """Measured, because "the scope keeps it to one block" was never verified.
+    """Compare independent sessions, because the leaf's scope suppresses nothing.
 
     `op_adopt_vault` still reaches the PER-WRITE carrier ZERO times, and that
     half of the measurement is unchanged by
@@ -310,11 +310,9 @@ def test_the_batch_scope_on_this_leaf_suppresses_nothing_today(vault: Path) -> N
     it still changes nothing. What bounds the caller to one block is the response
     terminal (D9), which runs once per invocation whatever the scope did.
 
-    INVERTED where it had to be, and only there. The old expectation was that
-    neither run carried a block at all; the scoped run now carries one, because
-    the leaf became a carrier. The unscoped run carries none — not because the
-    scope was removed, but because it is the second invocation in the same
-    session over unchanged totals, which is the change-only rule doing its job.
+    Both independent-session runs now carry: reset the process-local governor
+    between them so change-only quieting cannot mask whether removing the scope
+    altered the terminal delivery.
 
     This is pinned rather than left implicit because the scope IS load-bearing
     at the per-write carrier
@@ -347,6 +345,7 @@ def test_the_batch_scope_on_this_leaf_suppresses_nothing_today(vault: Path) -> N
         scoped_calls = list(carried)
 
         carried.clear()
+        due_state_module.reset_emission_state()
         due_state_module.batch_scope = lambda *a, **k: contextlib.nullcontext()
         try:
             unscoped = _adopt_twelve(vault, directory="legacy2")
@@ -360,8 +359,7 @@ def test_the_batch_scope_on_this_leaf_suppresses_nothing_today(vault: Path) -> N
     assert scoped_calls == [], "the scoped leaf reached the write carrier"
     assert unscoped_calls == [], "the leaf reached the write carrier without the scope"
     assert "due_state" in scoped, scoped
-    # Quiet for the change-only rule, not for the scope that is no longer there.
-    assert "due_state" not in unscoped, unscoped
+    assert "due_state" in unscoped, unscoped
 
 
 def test_the_ledger_records_the_size_of_the_block_it_delivered(vault: Path) -> None:

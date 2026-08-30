@@ -40,11 +40,17 @@ Two different value propositions, stated so nobody expects the wrong one:
 | Leaf | Its writes move projected categories? | Delta path |
 |---|---|---|
 | `adopt_vault`, `adoption_studio` applies | Yes — compiled pages | already wired (`_apply_batch_deltas`) |
-| `maintain_memory` mutating modes | Sometimes — repairs touch compiled pages | settle in tasks 1.5: wire the batch-delta path or prove the reconcile rebuild covers it before carriage lands |
-| `preserve_artifacts`, `process_media` | No — binary Evidence blobs and transcript sidecars author no predictions, questions, experiments, or supersession pointers | none needed; carriage value is the session channel (first qualifying response and change-only deltas from elsewhere) |
+| `maintain_memory` `fix`, `reconcile`, `backfill-ids` | Sometimes — repairs touch compiled pages | settle in tasks 1.5: wire the batch-delta path or prove the reconcile rebuild covers it before carriage lands |
+| `maintain_memory(mode="structured-files", apply=true)`, `preserve_artifacts`, `process_media` | No — representation renames, binary Evidence blobs and transcript sidecars author no predictions, questions, experiments, or supersession pointers | none needed; carriage value is the session channel (first qualifying response and change-only deltas from elsewhere) |
 
 Either way the served block SHALL reflect the post-batch projection — a block
 computed from a stale projection is the bug tasks 1.5 exists to prevent.
+
+The emission ledger's `writes` denominator counts governed page or structured
+projection deltas applied to that projection, not every filesystem mutation or
+terminal delivery. These three no-delta carrier families can therefore produce
+`emissions +1` and `writes +0` on a first qualifying delivery; terminal delivery
+MUST NOT synthesize a write tick.
 
 ## D4. Surface reality
 

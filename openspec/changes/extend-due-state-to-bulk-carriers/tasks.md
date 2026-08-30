@@ -61,7 +61,7 @@ Measured at `7a5235e0` (branch point, no implementation applied) with a
 temporary probe that spied on `writer_lease.project_terminal`, driving each
 leaf through `writer_lease.invoke_command` at all three response details.
 
-**The finding that decides this task: all eight enumerated invocations already
+**The finding that decides this task: all nine enumerated invocations already
 reach the committed terminal today.** `mark_active_mutation_committed()` fires
 inside `vault.batch_atomic_write` on every one of them, so `invoke_leaf`
 already wraps each leaf in `committed_terminal(...)` and `project_terminal`
@@ -79,6 +79,7 @@ projected.
 | `maintain_memory` `structured-files apply=true` | yes | no — envelope only | yes, verbatim under `diagnostics` | yes, verbatim |
 | `preserve_artifacts` | yes | **yes** — `files` and `summary` survive via `_artifact_receipt_projection` | yes | yes, verbatim |
 | `process_media` `process` | yes | partial — `path` survives via `_path_projection`; the media `state` is shadowed | yes, verbatim under `diagnostics` | yes, verbatim |
+| `adoption_studio` `apply-proposal` | yes | no — envelope + `paths` only | yes, verbatim under `diagnostics` | yes, verbatim |
 
 Representative measurement, `adopt_vault` copy-as-sources ×12:
 
@@ -104,7 +105,7 @@ the caller under `diagnostics` at `full` and verbatim at `legacy`.
   detail=legacy   response keys: [..., 'index_refreshed', 'job_id', 'media_type', 'operation', 'path', 'sidecar_path', 'state']
 ```
 
-**Verdict: NO BLOCKER on any leaf; all eight wire.** The compact narrowing is
+**Verdict: NO BLOCKER on any leaf; all nine wire.** The compact narrowing is
 not a payload the terminal *drops* — it is the canonical projection this
 repository specifies, `openspec/specs/mutation-terminal-contract/spec.md`:
 
@@ -175,6 +176,13 @@ The seven that pass red are the 1.3/1.4 negative pins, which are vacuous
 before the carrier exists and only start defending once it does: they must
 still be green after the implementation, and that is what makes them worth
 keeping.
+
+The red-evidence test recorded above as
+`test_the_adopt_block_counts_the_batch_it_just_committed` shipped under its
+final name `test_the_adopt_block_reports_the_projection_after_the_batch`: its
+corrected measured meaning is the post-batch served projection, rather than a
+claim that the adopted Source pages changed the due totals. No historical rerun
+is claimed for that rename.
 
 ## 1.1–1.5 — green, and the mechanism-removal proof
 
@@ -378,7 +386,7 @@ flag-parity failure that are not this change's.
 |---|---|
 | `src/exomem/writer_lease.py` | `active_mutation_committed()` — the read side of the existing commit-boundary ContextVar |
 | `src/exomem/due_state.py` | `block_for_batch()` — the `block_for_write` family's serve-only sibling, same disclosure boundary |
-| `src/exomem/commands.py` | `_carrying_due_state()` and `_audit_fix_paths()`; the carrier applied at the eight enumerated invocations; batch deltas wired for `fix` and `backfill-ids` |
-| `tests/test_due_state_bulk_carriers.py` | new — 23 pins covering 1.1–1.5 |
+| `src/exomem/commands.py` | `_carrying_due_state()` and `_audit_fix_paths()`; the carrier applied at the nine enumerated invocations; batch deltas wired for `fix` and `backfill-ids` |
+| `tests/test_due_state_bulk_carriers.py` | new — 24 pins covering 1.1–1.5 |
 | `tests/test_due_state_emission_capture.py` | the two tripwires inverted, not deleted |
 | `benchmarks/epistemic/journeys/f23_dismissal.py` | prose only (AST-proven); zero-carrier inventory retired |
