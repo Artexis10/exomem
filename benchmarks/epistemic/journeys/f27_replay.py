@@ -31,10 +31,12 @@ expensive lie this harness could tell about itself.
 artifact is reproducible from its inputs; only :func:`main`, which is a command,
 may consult one.
 
-Sequence-3 status: the amendment that registers f27 is unacknowledged, so a run
-from this driver is evidence about the harness and the current runtime — the
-family's finding — and is not a comparative claim. The manifest says so in the
-artifact rather than leaving it to a reader's memory.
+Sequence-3 status: the manifest states the amendment receipt's own
+acknowledgment status, derived from the working receipts at write time — never
+hardcoded, because a remembered status lies the day the receipt changes.
+Acknowledged (2026-08-30), a run may back a comparative claim, with f27
+declared expected-partial on the current runtime; while a receipt is pending,
+a run is evidence about the harness only, and the artifact says so itself.
 """
 
 from __future__ import annotations
@@ -58,6 +60,7 @@ from typing import Protocol
 from membench.trackc.natural_prompt_driver import write_mcp_config
 from membench.trackc.witness_join import Transcript, parse_stream_json_transcript
 
+from ..amendments import withheld_family_ids
 from ..corpora.lifecycle_replay import CORPUS_ID, ReplayCorpus, replay_corpus, seed_replay_vault
 from ..projectors.exomem_vault import VaultProjector
 from ..snapshot import EpistemicStateSnapshot, ProjectorMeta
@@ -1178,14 +1181,39 @@ def manifest_payload(result: JourneyResult) -> dict:
         # working directory. Nothing is read from it and nothing is copied.
         "agent_transcript_home": str(Path("~/.claude/projects").expanduser()),
         "exomem_version": exomem_version,
-        "amendment_sequence": 3,
-        "amendment_acknowledged": False,
-        "claim_status": (
+        **amendment_status(),
+    }
+
+
+def amendment_status() -> dict:
+    """The receipt's own acknowledgment state, derived at artifact-write time.
+
+    Hardcoding this field misstated the ratification status once (caught in
+    review, 2026-08-30); the working receipts are the only source. The pending
+    arm is not dead code — sequence 2 is pending today, and the next amendment
+    will need the same words.
+    """
+
+    acknowledged = "f27" not in withheld_family_ids(REPO_ROOT)
+    if acknowledged:
+        claim_status = (
+            "Sequence 3 was acknowledged on 2026-08-30, so a run from this "
+            "driver may back a comparative claim. f27 is declared "
+            "expected-partial on the current runtime: a red positive is the "
+            "family's finding — the next slice's falsification target — not a "
+            "harness fault."
+        )
+    else:
+        claim_status = (
             "Development run. The sequence-3 amendment registering f27 is "
             "unacknowledged, so this is evidence about the harness and the "
             "current runtime, recorded as the family's finding, and is not a "
             "comparative claim, score, or ranking."
-        ),
+        )
+    return {
+        "amendment_sequence": 3,
+        "amendment_acknowledged": acknowledged,
+        "claim_status": claim_status,
     }
 
 

@@ -53,7 +53,8 @@ SEQUENCE_TWO_FAMILIES = ("f20", "f21", "f22", "f23", "f24", "f25", "f26")
 #: Families a *later* unacknowledged amendment introduced. The withhold gate is
 #: repo-wide, so a test that pinned its answer to sequence 2 alone would fail the
 #: day another amendment filed — which is drift in the test, not in the gate.
-LATER_WITHHELD_FAMILIES = ("f27",)
+#: Sequence 3 (f27) left this tuple when its acknowledgment landed on 2026-08-30.
+LATER_WITHHELD_FAMILIES: tuple[str, ...] = ()
 
 
 def _seed_journey_vault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
