@@ -1700,11 +1700,10 @@ class _LocalLockState:
     acquired_at: float | None = None
     long_holder_seconds: float = _DEFAULT_LONG_HOLDER_SECONDS
     long_warning_emitted: bool = False
-    # Contention attribution.  These are *measurement only* — nothing in the
+    # Contention attribution. These are *measurement only* — nothing in the
     # acquire path reads them, so no fairness or timeout behaviour depends on
-    # them.  They are deliberately maintained without taking any new lock:
-    # `int` increments and `deque.append` are cheap, and losing a count under
-    # extreme thread contention degrades a diagnostic rather than a decision.
+    # them. They share ``metadata_guard`` with the holder fields so a published
+    # view has a coherent snapshot and a bounded deque cannot mutate mid-view.
     # They are also strictly PROCESS-LOCAL: a second exomem process holding the
     # same OS boundary contributes nothing here, which is why the published
     # block carries `scope: "process_local"`.
@@ -1728,10 +1727,11 @@ _LOCAL_STATES_GUARD = threading.Lock()
 def _note_acquire_attempt(state: _LocalLockState) -> None:
     """Count one `hold()` entry, including re-entrant ones (they never contend).
 
-    No lock: this is a diagnostic counter, and taking one would add an
-    acquisition to the hot path the counter exists to measure.
+    The counter is published alongside the rest of the contention view, so it
+    is updated under the same narrow publication guard.
     """
-    state.acquire_attempts += 1
+    with state.metadata_guard:
+        state.acquire_attempts += 1
 
 
 def _note_busy_refusal(
@@ -1744,21 +1744,22 @@ def _note_busy_refusal(
     increments the counters; `last_holder` keeps the previous observation
     because it is the *last known* holder, not the currently-observed one.
     """
-    state.busy_refusals += 1
-    # Window arithmetic on the monotonic clock; display timestamp on the wall
-    # clock.  They are not interchangeable and must not be mixed.
-    state.busy_refusal_monotonic.append(time.monotonic())
-    if snapshot is not None and snapshot.get("state") == "held":
-        state.last_holder = {
-            # A refusal can observe another process's holder, whose pid this
-            # process never learns; the sidecar record is content-free labels.
-            "pid": None,
-            "request_id": _safe_label(snapshot.get("request_id"), fallback="untracked"),
-            "operation": _safe_label(snapshot.get("operation"), fallback="unknown"),
-            "holder_kind": _safe_label(snapshot.get("holder_kind"), fallback="unknown"),
-            "observed_at": time.time(),
-            "source": "refusal",
-        }
+    with state.metadata_guard:
+        state.busy_refusals += 1
+        # Window arithmetic on the monotonic clock; display timestamp on the wall
+        # clock.  They are not interchangeable and must not be mixed.
+        state.busy_refusal_monotonic.append(time.monotonic())
+        if snapshot is not None and snapshot.get("state") == "held":
+            state.last_holder = {
+                # A refusal can observe another process's holder, whose pid this
+                # process never learns; the sidecar record is content-free labels.
+                "pid": None,
+                "request_id": _safe_label(snapshot.get("request_id"), fallback="untracked"),
+                "operation": _safe_label(snapshot.get("operation"), fallback="unknown"),
+                "holder_kind": _safe_label(snapshot.get("holder_kind"), fallback="unknown"),
+                "observed_at": time.time(),
+                "source": "refusal",
+            }
 
 
 def _note_release(
@@ -1769,31 +1770,38 @@ def _note_release(
     holder_kind: str | None,
 ) -> None:
     """Record the hold this process just released as the last-known holder."""
-    state.last_holder = {
-        "pid": os.getpid(),
-        "request_id": _safe_label(request_id, fallback="untracked"),
-        "operation": _safe_label(operation, fallback="unknown"),
-        "holder_kind": _safe_label(holder_kind, fallback="unknown"),
-        "observed_at": time.time(),
-        "source": "release",
-    }
+    with state.metadata_guard:
+        state.last_holder = {
+            "pid": os.getpid(),
+            "request_id": _safe_label(request_id, fallback="untracked"),
+            "operation": _safe_label(operation, fallback="unknown"),
+            "holder_kind": _safe_label(holder_kind, fallback="unknown"),
+            "observed_at": time.time(),
+            "source": "release",
+        }
 
 
 def _contention_view(state: _LocalLockState) -> dict[str, object]:
     """Project the process-local contention counters into a content-free block."""
+    with state.metadata_guard:
+        recent_samples = tuple(state.busy_refusal_monotonic)
+        acquire_attempts = state.acquire_attempts
+        busy_refusals = state.busy_refusals
+        last_holder = (
+            dict(state.last_holder) if state.last_holder is not None else None
+        )
     horizon = time.monotonic() - _CONTENTION_RECENT_WINDOW_SECONDS
-    recent = sum(1 for at in tuple(state.busy_refusal_monotonic) if at >= horizon)
-    last_holder = state.last_holder
+    recent = sum(1 for at in recent_samples if at >= horizon)
     return {
-        "acquire_attempts": state.acquire_attempts,
-        "busy_refusals": state.busy_refusals,
+        "acquire_attempts": acquire_attempts,
+        "busy_refusals": busy_refusals,
         "busy_refusals_recent": recent,
         "recent_window_seconds": _CONTENTION_RECENT_WINDOW_SECONDS,
         # Cross-process caveat: these counts describe this process only.  A
         # concurrent writer in another process is invisible here, so a zero
         # refusal count is not evidence that the boundary is uncontended.
         "scope": "process_local",
-        "last_holder": dict(last_holder) if last_holder is not None else None,
+        "last_holder": last_holder,
     }
 
 

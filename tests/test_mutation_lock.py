@@ -8,6 +8,7 @@ import os
 import stat
 import threading
 import time
+from collections import deque
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -30,6 +31,52 @@ def _boundary(snapshot: dict) -> dict:
     boundary state keys, which the stats block must never disturb.
     """
     return {key: value for key, value in snapshot.items() if key != "contention"}
+
+
+def test_contention_view_snapshots_busy_refusals_while_recording_a_refusal() -> None:
+    """A full recent-refusal deque may be evicted while a view is built."""
+
+    entered_iteration = threading.Event()
+    resume_iteration = threading.Event()
+
+    class _PausingDeque(deque[float]):
+        def __iter__(self):
+            iterator = super().__iter__()
+            yield next(iterator)
+            entered_iteration.set()
+            assert resume_iteration.wait(timeout=1)
+            yield from iterator
+
+    state = mutation_lock_module._LocalLockState(
+        busy_refusal_monotonic=_PausingDeque(
+            [time.monotonic()] * mutation_lock_module._CONTENTION_RECENT_SAMPLES,
+            maxlen=mutation_lock_module._CONTENTION_RECENT_SAMPLES,
+        )
+    )
+    failures: list[BaseException] = []
+
+    def view() -> None:
+        try:
+            mutation_lock_module._contention_view(state)
+        except BaseException as error:
+            failures.append(error)
+
+    reader = threading.Thread(target=view)
+    reader.start()
+    assert entered_iteration.wait(timeout=1)
+
+    writer = threading.Thread(
+        target=mutation_lock_module._note_busy_refusal,
+        args=(state, None),
+    )
+    writer.start()
+    resume_iteration.set()
+    reader.join(timeout=1)
+    writer.join(timeout=1)
+
+    assert not reader.is_alive()
+    assert not writer.is_alive()
+    assert failures == []
 
 
 #: How long a holder keeps the mutation boundary, and how long a test will
