@@ -1,10 +1,11 @@
-# RED fixture: a sequence-3 family whose amendment receipt is still pending.
+# ONCE-RED fixture: a sequence-3 family whose amendment receipt was pending
+# until the founder acknowledgment landed on 2026-08-30.
 #
-# f27 IS in the §1 family table — registration is not the thing being refused.
-# What refuses it is the amendment receipt: sequence 3 has no founder
-# acknowledgment, so `epistemic.amendments` withholds the family it introduced
-# at the loader's choke point. This fixture goes green by itself the day the
-# acknowledgment lands, which is exactly the transition sequence 1 went through.
+# f27 IS in the §1 family table — registration was never the thing refused.
+# While the receipt was pending, `epistemic.amendments` withheld the family at
+# the loader's choke point and this fixture proved the refusal. It now loads by
+# itself — exactly the transition sequence 1 went through — and the test over it
+# pins that release.
 scenario_id: red-sequence3-withheld-family
 family_id: f27
 kind: operational

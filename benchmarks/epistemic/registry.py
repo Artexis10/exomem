@@ -175,10 +175,10 @@ AMENDMENT_INTRODUCED_FAMILIES: Mapping[str, int] = MappingProxyType(
         "f24": 2,
         "f25": 2,
         "f26": 2,
-        # Sequence 3 (lifecycle replay). Pending founder acknowledgment, so f27
-        # is registered and withheld at once — the development run the change
-        # records is evidence about the harness and the current runtime, never a
-        # comparative claim.
+        # Sequence 3 (lifecycle replay). Acknowledged 2026-08-30, releasing
+        # f27 the same way sequence 1's families were released — the development
+        # run recorded before acknowledgment remains evidence about the harness
+        # and that runtime, never a comparative claim.
         "f27": 3,
     }
 )
