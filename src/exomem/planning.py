@@ -1190,13 +1190,67 @@ def _valid_presentation_inspection(value: Any) -> bool:
 
 
 def _valid_inspection_audit(value: Any) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    status = value.get("status")
+    expected = {"status", "gaps"}
+    if status == "acknowledged_gap":
+        expected |= {"discontinuity", "discontinuities"}
+    if (
+        set(value) != expected
+        or status not in {"baseline", "ok", "gap", "acknowledged_gap", "history_incomplete"}
+        or not isinstance(value.get("gaps"), list)
+        or len(value["gaps"]) > 32
+        or not all(
+            type(gap) is str and len(gap.encode("utf-8")) <= 256 for gap in value["gaps"]
+        )
+    ):
+        return False
+    if status != "acknowledged_gap":
+        return True
+    discontinuity = value["discontinuity"]
+    discontinuities = value["discontinuities"]
+    return (
+        _valid_audit_discontinuity(discontinuity)
+        and isinstance(discontinuities, list)
+        and 1 <= len(discontinuities) <= 16
+        and all(_valid_audit_discontinuity(item) for item in discontinuities)
+        and discontinuities[0] == discontinuity
+    )
+
+
+def _valid_audit_discontinuity(value: Any) -> bool:
     return (
         isinstance(value, Mapping)
-        and set(value) == {"status", "gaps"}
-        and value["status"] in {"baseline", "ok", "gap", "history_incomplete"}
-        and isinstance(value["gaps"], list)
-        and len(value["gaps"]) <= 32
-        and all(type(gap) is str and len(gap.encode("utf-8")) <= 256 for gap in value["gaps"])
+        and set(value)
+        == {
+            "provenance_continuity",
+            "prior_head",
+            "acknowledged_gap_codes",
+            "rationale",
+            "checkpoint_transition",
+            "gap_fingerprint",
+            "checkpoint_snapshot_hash",
+        }
+        and value["provenance_continuity"] is False
+        and isinstance(value["prior_head"], str)
+        and (
+            value["prior_head"] == "baseline"
+            or re.fullmatch(r"[0-9a-f]{24}", value["prior_head"]) is not None
+        )
+        and isinstance(value["acknowledged_gap_codes"], list)
+        and value["acknowledged_gap_codes"]
+        == sorted(set(value["acknowledged_gap_codes"]))
+        and all(
+            type(code) is str and 0 < len(code.encode("utf-8")) <= 256
+            for code in value["acknowledged_gap_codes"]
+        )
+        and isinstance(value["rationale"], str)
+        and 0 < len(value["rationale"].encode("utf-8")) <= 512
+        and isinstance(value["checkpoint_transition"], str)
+        and re.fullmatch(r"[0-9a-f]{24}", value["checkpoint_transition"]) is not None
+        and _hash(value["gap_fingerprint"])
+        and _hash(value["checkpoint_snapshot_hash"])
     )
 
 
