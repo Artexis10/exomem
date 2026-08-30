@@ -236,3 +236,186 @@ def test_refused_verifier_never_lets_the_heuristic_wear_the_nli_name(monkeypatch
     assert claims.verifier_polarity("Caching improves latency", "Caching degrades latency") is None
     fallback = claims.classify_polarity("Caching improves latency", "Caching degrades latency")
     assert fallback.method == "heuristic"
+
+
+# ---------------- 1.3 knob fate ----------------
+
+
+def test_polarity_gate_is_default_off(monkeypatch) -> None:
+    monkeypatch.delenv("EXOMEM_CLAIM_POLARITY_NLI", raising=False)
+    assert claims._nli_enabled() is False
+    assert claims.verifier_admission().reason == "gate-off"
+
+
+def test_retired_model_knob_is_reported_on_the_diagnostic_surface(monkeypatch) -> None:
+    monkeypatch.delenv("EXOMEM_CLAIM_POLARITY_NLI", raising=False)
+    monkeypatch.setenv("EXOMEM_CLAIM_NLI_MODEL", "somebody/some-cross-encoder")
+
+    status = claims.verifier_status()
+    assert status["retired_model_env"] == "EXOMEM_CLAIM_NLI_MODEL"
+    assert status["ignored_model_env"] == "somebody/some-cross-encoder"
+    assert status["admitted"] is False
+    assert status["reason"] == "gate-off"
+    assert status["gate"] == "EXOMEM_CLAIM_POLARITY_NLI"
+
+
+def test_retired_model_knob_enables_nothing_on_its_own(tmp_path, monkeypatch) -> None:
+    """Setting the retired knob does not turn the verifier on, and does not
+    become the model even when weights under that name are resident."""
+    _plant_weights(tmp_path, monkeypatch)
+    monkeypatch.setenv("EXOMEM_CLAIM_NLI_MODEL", _FAKE_MODEL)
+    monkeypatch.setenv("EXOMEM_CLAIM_POLARITY_NLI", "1")
+    monkeypatch.setattr(claims, "VERIFIER_PINS", ())
+
+    status = claims.verifier_status()
+    assert status["admitted"] is False
+    assert status["reason"] == "no-pin"
+    assert status["pinned_models"] == []
+    assert status["model_name"] is None
+
+
+def test_status_names_the_registry_and_the_shipped_label_maps(tmp_path, monkeypatch) -> None:
+    digest = _plant_weights(tmp_path, monkeypatch)
+    monkeypatch.setattr(claims, "VERIFIER_PINS", _pin(digest))
+    monkeypatch.setenv("EXOMEM_CLAIM_POLARITY_NLI", "1")
+
+    status = claims.verifier_status()
+    assert status["pinned_models"] == [_FAKE_MODEL]
+    assert status["label_map_versions"] == ["v1"]
+
+
+# ---------------- 1.4 verification fixture set ----------------
+
+#: Logit blocks that label map v1 maps to each label, used to drive fake
+#: verifiers. Shape is exactly what a cross-encoder emits for the two
+#: orderings of one pair: (2, 3) over (contradiction, entailment, neutral).
+_LOGITS: dict[str, list[list[float]]] = {
+    "contradict": [[6.0, 0.0, 0.0], [6.0, 0.0, 0.0]],
+    "duplicate": [[0.0, 6.0, 0.0], [0.0, 6.0, 0.0]],
+    "unrelated": [[0.0, 0.0, 6.0], [0.0, 0.0, 6.0]],
+    "refine": [[0.0, 2.0, 0.6], [0.0, 0.0, 0.6]],
+}
+
+
+def _oracle_predict(*, wrong: str | None = None, raises_on: str | None = None, calls=None):
+    """A fake cross-encoder that answers the fixture set correctly.
+
+    `wrong` re-labels the fixture whose `claim_a` matches it; `raises_on` makes
+    the forward pass blow up on that one pair.
+    """
+    answers = {
+        (pair.claim_a, pair.claim_b): pair.expected
+        for pair in claims.VERIFICATION_FIXTURES["stance-v1"]
+    }
+
+    def predict(pairs):
+        if calls is not None:
+            calls.append(pairs)
+        claim_a, claim_b = pairs[0]
+        if raises_on is not None and claim_a == raises_on:
+            raise RuntimeError("forward pass exploded")
+        label = answers.get((claim_a, claim_b), "unrelated")
+        if wrong is not None and claim_a == wrong:
+            label = "duplicate" if label != "duplicate" else "contradict"
+        return _LOGITS[label]
+
+    return predict
+
+
+def _admit(tmp_path, monkeypatch, predict) -> str:
+    """Plant weights, pin their true digest, set the gate, inject `predict`."""
+    digest = _plant_weights(tmp_path, monkeypatch)
+    monkeypatch.setattr(claims, "VERIFIER_PINS", _pin(digest))
+    monkeypatch.setenv("EXOMEM_CLAIM_POLARITY_NLI", "1")
+    monkeypatch.setattr(claims, "_load_verifier_predictor", lambda name: predict)
+    return digest
+
+
+def test_fixture_set_covers_the_four_corpus_shapes() -> None:
+    fixtures = claims.VERIFICATION_FIXTURES["stance-v1"]
+    assert len(fixtures) >= 8
+    assert {pair.expected for pair in fixtures} == claims.POLARITY_LABELS
+    for pair in fixtures:
+        assert pair.claim_a and pair.claim_b and pair.note
+    # The heuristic's known failure cases are carried explicitly, not implied.
+    assert sum(1 for pair in fixtures if pair.heuristic_fails) >= 3
+
+
+def test_green_fixtures_admit_the_verifier(tmp_path, monkeypatch) -> None:
+    digest = _admit(tmp_path, monkeypatch, _oracle_predict())
+
+    admission = claims.verifier_admission()
+    assert admission.admitted is True
+    assert admission.reason == "admitted"
+    assert admission.model_digest == digest
+    assert admission.label_map_version == "v1"
+    assert admission.fixture_set == "stance-v1"
+
+
+def test_one_red_fixture_refuses_the_pair(tmp_path, monkeypatch) -> None:
+    first = claims.VERIFICATION_FIXTURES["stance-v1"][0]
+    _admit(tmp_path, monkeypatch, _oracle_predict(wrong=first.claim_a))
+
+    admission = claims.verifier_admission()
+    assert admission.admitted is False
+    assert admission.reason == "fixtures-failed"
+    assert first.claim_a in admission.detail
+    assert claims.verifier_polarity("Caching helps", "Caching hurts") is None
+
+
+def test_absent_extra_refuses_as_a_missing_dependency(tmp_path, monkeypatch) -> None:
+    digest = _plant_weights(tmp_path, monkeypatch)
+    monkeypatch.setattr(claims, "VERIFIER_PINS", _pin(digest))
+    monkeypatch.setenv("EXOMEM_CLAIM_POLARITY_NLI", "1")
+    monkeypatch.setattr(claims, "_load_verifier_predictor", lambda name: None)
+
+    admission = claims.verifier_admission()
+    assert admission.admitted is False
+    assert admission.reason == "dependency-missing"
+
+
+def test_unknown_fixture_set_in_a_pin_refuses(tmp_path, monkeypatch) -> None:
+    digest = _plant_weights(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        claims,
+        "VERIFIER_PINS",
+        (
+            claims.VerifierPin(
+                model_name=_FAKE_MODEL,
+                weights_sha256=digest,
+                label_map_version="v1",
+                fixture_set="no-such-set",
+            ),
+        ),
+    )
+    monkeypatch.setenv("EXOMEM_CLAIM_POLARITY_NLI", "1")
+    monkeypatch.setattr(claims, "_load_verifier_predictor", lambda name: _oracle_predict())
+
+    admission = claims.verifier_admission()
+    assert admission.admitted is False
+    assert admission.reason == "fixtures-failed"
+    assert "no-such-set" in admission.detail
+
+
+def test_fixture_verification_runs_once_per_admitted_pair(tmp_path, monkeypatch) -> None:
+    calls: list = []
+    _admit(tmp_path, monkeypatch, _oracle_predict(calls=calls))
+
+    assert claims.verifier_admission().admitted is True
+    after_first = len(calls)
+    assert after_first == len(claims.VERIFICATION_FIXTURES["stance-v1"])
+    for _ in range(3):
+        assert claims.verifier_admission().admitted is True
+    assert len(calls) == after_first
+
+
+def test_admitted_verifier_labels_through_the_label_map(tmp_path, monkeypatch) -> None:
+    _admit(tmp_path, monkeypatch, _oracle_predict())
+    fixture = next(
+        pair for pair in claims.VERIFICATION_FIXTURES["stance-v1"] if pair.expected == "contradict"
+    )
+
+    result = claims.verifier_polarity(fixture.claim_a, fixture.claim_b)
+    assert result is not None
+    assert result.label == "contradict"
+    assert result.method == "nli"

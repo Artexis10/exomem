@@ -72,13 +72,55 @@ the task is ticked, not estimated.
     contains no `environ`/`getenv`, and its constants hold no `EXOMEM_*` literal).
   - **`VERIFIER_PINS` ships EMPTY** — see the unticked follow-up under §5.
 
-- [ ] 1.3 Knob fate: `EXOMEM_CLAIM_POLARITY_NLI` default-off pin;
+- [x] 1.3 Knob fate: `EXOMEM_CLAIM_POLARITY_NLI` default-off pin;
   `EXOMEM_CLAIM_NLI_MODEL` retired — a set value selects nothing and is
   reported on the diagnostic surface. Red-first.
-- [ ] 1.4 Verification fixture set: golden pairs (contradiction, concordant,
+  - **Evidence (red, before implementation)** — same command:
+    ```
+    >       status = claims.verifier_status()
+    E       AttributeError: module 'exomem.claims' has no attribute 'verifier_status'
+    FAILED tests/test_frozen_verifiers.py::test_retired_model_knob_is_reported_on_the_diagnostic_surface
+    FAILED tests/test_frozen_verifiers.py::test_retired_model_knob_enables_nothing_on_its_own
+    FAILED tests/test_frozen_verifiers.py::test_status_names_the_registry_and_the_shipped_label_maps
+    3 failed, 21 passed in 0.13s
+    ```
+  - **Evidence (green, after implementation)** — same command: `24 passed in 0.11s`
+  - Shipped: `claims.verifier_status()` — the claims-side diagnostic payload
+    naming the gate (`EXOMEM_CLAIM_POLARITY_NLI`), the retired knob
+    (`EXOMEM_CLAIM_NLI_MODEL`) and any ignored value sitting in it, the pinned
+    model names, and the shipped label-map versions. Doctor renders it in 4.1.
+  - The retired knob is proven inert two ways: it does not turn the verifier on
+    (`reason="gate-off"` with only it set) and it does not become the model even
+    when weights under that exact name are resident (`reason="no-pin"`,
+    `model_name=None`, `pinned_models=[]`).
+
+- [x] 1.4 Verification fixture set: golden pairs (contradiction, concordant,
   restatement, unrelated, plus known heuristic failures); admission requires
   green at the pinned (digest, label-map) pair; CI job runs it with the extra
   installed.
+  - **Evidence (red, before implementation)** — same command:
+    ```
+    >           for pair in claims.VERIFICATION_FIXTURES["stance-v1"]
+    E       AttributeError: module 'exomem.claims' has no attribute 'VERIFICATION_FIXTURES'
+    FAILED tests/test_frozen_verifiers.py::test_fixture_set_covers_the_four_corpus_shapes
+    FAILED tests/test_frozen_verifiers.py::test_green_fixtures_admit_the_verifier
+    FAILED tests/test_frozen_verifiers.py::test_one_red_fixture_refuses_the_pair
+    FAILED tests/test_frozen_verifiers.py::test_absent_extra_refuses_as_a_missing_dependency
+    FAILED tests/test_frozen_verifiers.py::test_unknown_fixture_set_in_a_pin_refuses
+    FAILED tests/test_frozen_verifiers.py::test_fixture_verification_runs_once_per_admitted_pair
+    FAILED tests/test_frozen_verifiers.py::test_admitted_verifier_labels_through_the_label_map
+    7 failed, 24 passed in 0.16s
+    ```
+  - **Evidence (green, after implementation)** — same command: `31 passed in 0.12s`
+  - Shipped: `claims.FixturePair`, `claims.VERIFICATION_FIXTURES["stance-v1"]`
+    (9 golden pairs over the four f22 corpus shapes plus 4 known heuristic
+    failures), `_run_fixture_set`, `_verify_fixtures` (memoized by the exact
+    `(model, digest, label-map, fixture-set)` it verified). Admission now runs
+    the fixture set: `dependency-missing` when the extra cannot load,
+    `fixtures-failed` on one miss — partial evidence is none.
+  - The `heuristic_fails` flags are not decoration: each was checked against the
+    real `_heuristic_polarity` (table in 5.1); every declared flag matches.
+
 - [ ] 1.5 Input-shape pin: the verifier accepts exactly a claim-text pair;
   structural test that no prompt/template path exists behind the seam.
 

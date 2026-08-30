@@ -1443,19 +1443,153 @@ def resolve_weights_digest(model_name: str) -> str | None:
 def reset_verifier_cache() -> None:
     """Drop the process-cached digest and loaded model.
 
-    The digest is deliberately computed once per process, so a caller that has
-    changed what is on disk (a test planting a different snapshot; an operator
-    who has just replaced weights) needs an explicit way to say the process's
-    answer is stale.
+    The digest and the fixture verdict are deliberately computed once per
+    process, so a caller that has changed what is on disk (a test planting a
+    different snapshot; an operator who has just replaced weights) needs an
+    explicit way to say the process's answer is stale.
     """
     global _VERIFIER_MODEL, _VERIFIER_MODEL_NAME
 
     with _WEIGHTS_DIGEST_LOCK:
         _WEIGHTS_DIGEST_CACHE.clear()
+    with _FIXTURE_LOCK:
+        _FIXTURE_VERDICTS.clear()
     with _VERIFIER_LOCK:
         _VERIFIER_MODEL = None
         _VERIFIER_MODEL_NAME = None
 
+
+# ---------------------------------------------------------------------------
+# Verification fixture set (design D6) — the pair's admission evidence
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class FixturePair:
+    """One golden claim pair with the label an admitted verifier must produce.
+
+    `heuristic_fails` records whether the retired lexical stand-in gets this
+    pair wrong. It is documentation of WHY the tier exists, and the input to
+    the fixture-set precision table — not something admission consults.
+    """
+
+    claim_a: str
+    claim_b: str
+    expected: str
+    note: str
+    heuristic_fails: bool = False
+
+
+#: Golden pairs drawn from the f22 corpus shapes — genuine contradiction,
+#: concordant evidence, restatement, unrelated — plus the lexical heuristic's
+#: known failure cases. A (digest, label-map) pair is admitted only when it
+#: answers every one of these correctly.
+VERIFICATION_FIXTURES: dict[str, tuple[FixturePair, ...]] = {
+    "stance-v1": (
+        FixturePair(
+            "Raising the cache TTL reduces p99 latency.",
+            "Raising the cache TTL increases p99 latency.",
+            "contradict",
+            "genuine contradiction, shared vocabulary",
+        ),
+        FixturePair(
+            "The rollout regressed checkout throughput.",
+            "Checkout got faster after we shipped it.",
+            "contradict",
+            "genuine contradiction across differing surface forms",
+            heuristic_fails=True,
+        ),
+        FixturePair(
+            "Caching improves latency for repeat reads.",
+            "Caching improves latency on repeat reads.",
+            "duplicate",
+            "restatement, near-identical surface",
+        ),
+        FixturePair(
+            "Owned files are what retrieval quality depends on.",
+            "Retrieval quality depends on owning the files.",
+            "duplicate",
+            "restatement, reordered surface",
+            heuristic_fails=True,
+        ),
+        FixturePair(
+            "Batching similar work helps focus.",
+            "Batching similar work helps focus, most reliably in the morning.",
+            "refine",
+            "same stance, added detail",
+        ),
+        FixturePair(
+            "Enabling the cache improves throughput.",
+            "Disabling the cache degrades throughput.",
+            "refine",
+            "concordant evidence: antonym vocabulary, one stance",
+            heuristic_fails=True,
+        ),
+        FixturePair(
+            "Batching does not hurt focus.",
+            "Batching helps focus.",
+            "refine",
+            "concordant evidence: negation parity differs, one stance",
+            heuristic_fails=True,
+        ),
+        FixturePair(
+            "Tesseract is required for image OCR on Windows.",
+            "Pair dormancy reuses the stale-review activation calculation.",
+            "unrelated",
+            "disjoint topics",
+        ),
+        FixturePair(
+            "The upload route parses multipart bodies through Starlette.",
+            "Dormant notes in a close pair are the forgotten-conclusion case.",
+            "unrelated",
+            "disjoint topics, shared house vocabulary",
+        ),
+    ),
+}
+
+_FIXTURE_VERDICTS: dict[tuple[str, str, str, str], tuple[bool, str]] = {}
+_FIXTURE_LOCK = threading.Lock()
+
+
+def _run_fixture_set(pin: VerifierPin, label_map: LabelMap, predict) -> tuple[bool, str]:
+    """Run every fixture in `pin.fixture_set` through the label map.
+
+    Green means every pair produced exactly its expected label. One miss
+    refuses the whole pair: the fixture set is the evidence that this digest
+    and this label map belong together, and partial evidence is none.
+    """
+    pairs = VERIFICATION_FIXTURES.get(pin.fixture_set)
+    if not pairs:
+        return False, f"unknown fixture set {pin.fixture_set!r}"
+    for pair in pairs:
+        try:
+            logits = predict([(pair.claim_a, pair.claim_b), (pair.claim_b, pair.claim_a)])
+        except Exception as error:  # noqa: BLE001 — a forward pass that raises is a refusal
+            return False, f"fixture {pair.claim_a!r} raised: {error}"
+        result = label_map.apply(logits)
+        produced = result.label if result is not None else "no label"
+        if produced != pair.expected:
+            return False, (
+                f"fixture {pair.claim_a!r} expected {pair.expected!r}, got {produced!r}"
+            )
+    return True, f"{len(pairs)} fixtures green for {pin.fixture_set!r}"
+
+
+def _verify_fixtures(
+    pin: VerifierPin, digest: str, label_map: LabelMap, predict
+) -> tuple[bool, str]:
+    """Memoized `_run_fixture_set`, keyed by the exact pair it verified."""
+    key = (pin.model_name, digest, pin.label_map_version, pin.fixture_set)
+    cached = _FIXTURE_VERDICTS.get(key)
+    if cached is not None:
+        return cached
+    with _FIXTURE_LOCK:
+        cached = _FIXTURE_VERDICTS.get(key)
+        if cached is not None:
+            return cached
+        verdict = _run_fixture_set(pin, label_map, predict)
+        _FIXTURE_VERDICTS[key] = verdict
+    return verdict
 
 # ---------------------------------------------------------------------------
 # Admission, and the one channel a model-produced label may come from
@@ -1488,7 +1622,7 @@ def verifier_admission() -> VerifierAdmission:
             ignored_model_env=ignored,
         )
     try:
-        get_label_map(pin.label_map_version)
+        label_map = get_label_map(pin.label_map_version)
     except ValueError as error:
         return VerifierAdmission(
             False,
@@ -1524,10 +1658,37 @@ def verifier_admission() -> VerifierAdmission:
             fixture_set=pin.fixture_set,
             ignored_model_env=ignored,
         )
+    predict = _load_verifier_predictor(pin.model_name)
+    if predict is None:
+        return VerifierAdmission(
+            False,
+            "dependency-missing",
+            detail=(
+                f"the `nli` extra is not installed, or {pin.model_name!r} could not "
+                "be loaded from the offline model cache."
+            ),
+            model_name=pin.model_name,
+            model_digest=digest,
+            label_map_version=pin.label_map_version,
+            fixture_set=pin.fixture_set,
+            ignored_model_env=ignored,
+        )
+    green, fixture_detail = _verify_fixtures(pin, digest, label_map, predict)
+    if not green:
+        return VerifierAdmission(
+            False,
+            "fixtures-failed",
+            detail=fixture_detail,
+            model_name=pin.model_name,
+            model_digest=digest,
+            label_map_version=pin.label_map_version,
+            fixture_set=pin.fixture_set,
+            ignored_model_env=ignored,
+        )
     return VerifierAdmission(
         True,
         "admitted",
-        detail=detail,
+        detail=fixture_detail,
         model_name=pin.model_name,
         model_digest=digest,
         label_map_version=pin.label_map_version,
@@ -1535,6 +1696,23 @@ def verifier_admission() -> VerifierAdmission:
         ignored_model_env=ignored,
     )
 
+
+
+def verifier_status() -> dict:
+    """The verifier tier's status for the diagnostic surface (doctor, status).
+
+    Always answerable and never loads a model: it reports which knob is the
+    gate, which knob is RETIRED and whether a value is sitting in it being
+    ignored, what the repository registry actually pins, and which label maps
+    this build ships. An operator who set the retired knob learns from here
+    that it selected nothing.
+    """
+    payload = verifier_admission().as_dict()
+    payload["gate"] = "EXOMEM_CLAIM_POLARITY_NLI"
+    payload["retired_model_env"] = _NLI_MODEL_ENV
+    payload["pinned_models"] = [pin.model_name for pin in VERIFIER_PINS]
+    payload["label_map_versions"] = sorted(_LABEL_MAPS)
+    return payload
 
 def _load_verifier_predictor(model_name: str):
     """The cross-encoder's `predict`, or None when the `nli` extra is absent.
