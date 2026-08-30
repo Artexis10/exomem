@@ -72,6 +72,9 @@ _EVENT_PAYLOAD_FIELDS = {
     }),
     ("critical", "committed"): frozenset({"causation_id", "outcome"}),
     ("critical", "aborted"): frozenset({"causation_id", "outcome"}),
+    ("consolidation", "intent"): frozenset({"consolidation_event"}),
+    ("consolidation", "committed"): frozenset({"consolidation_event"}),
+    ("consolidation", "aborted"): frozenset({"consolidation_event"}),
 }
 _OUTCOME_FIELDS = frozenset({
     "ref", "content_hash", "size", "level", "decision", "redaction_count", "count",
@@ -773,7 +776,19 @@ def _validate_event(event_type: str, phase: str, payload: Mapping[str, Any]) -> 
         for field in ("principal", "audience", "purpose", "command"):
             if field in payload and not _identifier_value(payload[field]):
                 raise ReceiptError("credential identifier is invalid")
-    if phase == "intent":
+    if event_type == "consolidation":
+        if set(payload) != {"consolidation_event"}:
+            raise ReceiptError("consolidation receipt requires one nested event")
+        try:
+            from . import consolidation_receipts
+
+            consolidation_receipts.validate_nested(
+                payload["consolidation_event"],
+                outer_phase=phase,
+            )
+        except consolidation_receipts.ConsolidationReceiptUnavailable as exc:
+            raise ReceiptError("consolidation receipt event is invalid") from exc
+    if event_type == "critical" and phase == "intent":
         if not {"operation", "prior", "target"} <= set(payload):
             raise ReceiptError("critical intent requires operation, prior, and target")
         if not _identifier_value(payload["operation"]) or not _hex(payload["prior"]) or not _hex(payload["target"]):
@@ -788,7 +803,7 @@ def _validate_event(event_type: str, phase: str, payload: Mapping[str, Any]) -> 
             raise ReceiptError("critical parent causation id is invalid")
         if "intent_id" in payload and not _identifier_value(payload["intent_id"]):
             raise ReceiptError("critical child intent id is invalid")
-    if phase in {"committed", "aborted"}:
+    if event_type == "critical" and phase in {"committed", "aborted"}:
         if not _opaque_causation_id(payload.get("causation_id")):
             raise ReceiptError("critical terminal causation id is invalid")
         if "outcome" in payload and not _identifier_value(payload["outcome"]):
@@ -819,7 +834,7 @@ def _canonical_memory_ref(value: Any) -> bool:
 
 
 def _valid_event_id(event_type: str, phase: str, event_id: Any) -> bool:
-    if event_type != "critical":
+    if event_type not in {"critical", "consolidation"}:
         return _hex32(event_id)
     if phase == "intent":
         return _hex(event_id)
@@ -1258,8 +1273,10 @@ def append_event(
     _validate_event(event_type, phase, payload)
     if event_id is not None and not _valid_event_id(event_type, phase, event_id):
         raise ReceiptError("receipt event id is not opaque for its event phase")
-    if event_type == "critical" and event_id is None:
+    if event_type in {"critical", "consolidation"} and event_id is None:
         raise ReceiptError("critical receipts require a deterministic event id")
+    if event_type == "consolidation" and critical is not True:
+        raise ReceiptError("consolidation receipts must be durable")
     timestamp, _parsed = _timestamp(timestamp or _now())
     with _receipt_lock(vault_root):
         with _receipt_connection(vault_root, durable=critical) as conn:
@@ -1323,6 +1340,21 @@ def append_event(
                     conn.commit()
                     return tail
                 raise ReceiptError("receipt anchor is stale; reconcile before append")
+            if event_type == "consolidation":
+                try:
+                    from . import consolidation_receipts
+
+                    chain_records, chain_issues = _chain_state(instance_dir)
+                    if chain_issues:
+                        raise ReceiptError("receipt chain requires reconciliation")
+                    consolidation_receipts.validate_outer_append(
+                        chain_records,
+                        event_id=eid,
+                        outer_phase=phase,
+                        nested=payload["consolidation_event"],
+                    )
+                except consolidation_receipts.ConsolidationReceiptUnavailable as exc:
+                    raise ReceiptError("consolidation receipt causality is invalid") from exc
             if event_id is not None and critical:
                 existing = _matching_existing_event(instance_dir, eid, event_type, phase, payload)
                 if existing is not None:
@@ -1670,11 +1702,29 @@ def verify_chain(vault_root: Path) -> dict[str, Any]:
                     issues.append({"code": "sidecar_read_error", "path": str(instance_dir), "detail": str(exc)})
             if anchor is not None:
                 issues.extend(_anchor_issues(vault_root, instance_dir, records, anchor))
-            terminals = {str(item.get("causation_id")) for item in records if item.get("phase") in {"committed", "aborted"}}
+            terminals = {
+                str(
+                    item.get("consolidation_event", {}).get(
+                        "semantic_parent_event_id"
+                    )
+                    if item.get("event_type") == "consolidation"
+                    and isinstance(item.get("consolidation_event"), Mapping)
+                    else item.get("causation_id")
+                )
+                for item in records
+                if item.get("phase") in {"committed", "aborted"}
+            }
             terminal_phases: dict[str, set[str]] = {}
             for item in records:
                 if item.get("phase") in {"committed", "aborted"}:
-                    terminal_phases.setdefault(str(item.get("causation_id")), set()).add(str(item["phase"]))
+                    nested = item.get("consolidation_event")
+                    causation_id = (
+                        nested.get("semantic_parent_event_id")
+                        if item.get("event_type") == "consolidation"
+                        and isinstance(nested, Mapping)
+                        else item.get("causation_id")
+                    )
+                    terminal_phases.setdefault(str(causation_id), set()).add(str(item["phase"]))
             for causation_id, phases in terminal_phases.items():
                 if len(phases) > 1:
                     issues.append({"code": "competing_terminals", "path": str(instance_dir), "detail": causation_id})

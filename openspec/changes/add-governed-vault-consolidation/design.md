@@ -1104,7 +1104,8 @@ The nested common fields are `schema`, `kind`, `run_id`, `operation_id`,
 `phase`, `record_role`, `effect_ordinal`, the applicable
 batch/rebuild/probe/page ordinal, canonical `request_digest`, exact
 `prior_digest`/`target_digest`, `prepared_digest` exactly when the kind defines a
-distinct prepared state, `semantic_parent_event_id`,
+distinct prepared state, required closed digest-only `evidence` plus its
+`evidence_digest`, `semantic_parent_event_id`,
 `semantic_parent_payload_digest`, and `payload_digest`; only terminal roles add
 required `observed_digest`. `payload_digest` is SHA-256 over the common frame
 with ASCII domain
@@ -1112,6 +1113,17 @@ with ASCII domain
 closed JCS object excluding `payload_digest`. Intent forbids
 `observed_digest`; committed/aborted requires it. Nested `record_role` equals
 outer `phase`, and every consolidation record is durable.
+
+Every kind's `evidence` is an exact closed object with schema
+`exomem.consolidation-event-evidence/<kind>/v1`, matching kind, and only the
+named 64-hex digest fields applicable to disposition, checkpoint, JTI,
+render/coverage/impact, verification basis, forward snapshot, surviving-copy
+ledger, or permanent fence. It contains no proof body, path, ref, principal,
+credential, token, timestamp, count, enum, or caller extension. Its
+`evidence_digest` is SHA-256 over the common frame with that schema's ASCII
+domain and the exact evidence bytes. Intent construction, append, verification,
+and recovery fail closed unless the kind-specific object is exact and its
+digest matches; underlying proof bodies stay owner-protected.
 
 For an intent whose committed target would produce a successor context, the
 intent and its matching committed or aborted terminal additionally require

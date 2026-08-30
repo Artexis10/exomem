@@ -754,7 +754,12 @@ binds that reference and observed digest; no caller field selects K.
   and require its sole consolidation payload member to be one closed
   `exomem.consolidation-event/<kind>/v1` schema per effect, including disposition,
   forward-snapshot/surviving-copy-ledger, rendering/impact, and verification-basis
-  digests where applicable. Pin outer schema/event-type/phase/timestamp/instance/
+  digests where applicable through the required exact closed digest-only
+  `exomem.consolidation-event-evidence/<kind>/v1` object and its
+  `evidence_digest`; validate and hash the object at build, low-level append,
+  chain verification, and recovery boundaries rather than accepting a bare
+  caller digest.
+  Pin outer schema/event-type/phase/timestamp/instance/
   seq/physical-prev/durability/hash fields separately from the nested schema,
   require `successor_context_seed_digest` exactly on an intent whose target
   would create a context and its matching terminal, forbid it on every other
@@ -772,7 +777,8 @@ binds that reference and observed digest; no caller field selects K.
   `exomem.consolidation-event-id/<kind>/v1` over the exact closed intent identity:
   schema/kind/run/operation/phase/intent role, bounded effect and applicable
   batch/rebuild/probe/page ordinal, request/prior/optional-prepared/target digests,
-  plus non-caller-selected semantic-parent outer id/payload digest. Preserve the
+  required kind-specific evidence digest, plus non-caller-selected semantic-parent
+  outer id/payload digest. Preserve the
   outer terminal ids exactly as `<intent-id>:committed|aborted`; do not generate a
   second 64-hex terminal id. Make nested role branches closed: intent forbids
   observed digest; committed/aborted requires it and uses a distinct role payload
