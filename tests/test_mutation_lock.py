@@ -33,6 +33,15 @@ def _boundary(snapshot: dict) -> dict:
     return {key: value for key, value in snapshot.items() if key != "contention"}
 
 
+#: How long a holder keeps the mutation boundary, and how long a test will
+#: wait to observe a contender being refused. The gap between them is the
+#: whole discriminating power of the contention assertions: a contender that
+#: waited for the holder instead of honouring its own timeout blows straight
+#: through the observation window.
+_HOLD_SECONDS = 45.0
+_OBSERVE_SECONDS = 15.0
+
+
 def test_contention_view_snapshots_busy_refusals_while_recording_a_refusal() -> None:
     """A full recent-refusal deque may be evicted while a view is built."""
 
@@ -44,7 +53,7 @@ def test_contention_view_snapshots_busy_refusals_while_recording_a_refusal() -> 
             iterator = super().__iter__()
             yield next(iterator)
             entered_iteration.set()
-            assert resume_iteration.wait(timeout=1)
+            assert resume_iteration.wait(timeout=_OBSERVE_SECONDS)
             yield from iterator
 
     state = mutation_lock_module._LocalLockState(
@@ -63,7 +72,7 @@ def test_contention_view_snapshots_busy_refusals_while_recording_a_refusal() -> 
 
     reader = threading.Thread(target=view)
     reader.start()
-    assert entered_iteration.wait(timeout=1)
+    assert entered_iteration.wait(timeout=_OBSERVE_SECONDS)
 
     writer = threading.Thread(
         target=mutation_lock_module._note_busy_refusal,
@@ -71,21 +80,13 @@ def test_contention_view_snapshots_busy_refusals_while_recording_a_refusal() -> 
     )
     writer.start()
     resume_iteration.set()
-    reader.join(timeout=1)
-    writer.join(timeout=1)
+    reader.join(timeout=_OBSERVE_SECONDS)
+    writer.join(timeout=_OBSERVE_SECONDS)
 
     assert not reader.is_alive()
     assert not writer.is_alive()
     assert failures == []
 
-
-#: How long a holder keeps the mutation boundary, and how long a test will
-#: wait to observe a contender being refused. The gap between them is the
-#: whole discriminating power of the contention assertions: a contender that
-#: waited for the holder instead of honouring its own timeout blows straight
-#: through the observation window.
-_HOLD_SECONDS = 45.0
-_OBSERVE_SECONDS = 15.0
 
 #: A NEGATIVE observation -- how long the test waits to prove something has NOT
 #: happened yet -- is a different animal and stays short. Widening one does not
