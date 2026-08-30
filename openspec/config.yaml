@@ -10,11 +10,21 @@ context: |
   search, MarkItDown for office docs. Optional extras: embeddings, media, diarization,
   vision. NSSM-managed Windows service; GitHub OAuth proxy; cloudflared tunnel.
 
-  THE CORE CONSTRAINT — "pure substrate": the server MEASURES, the brain (Claude/Max)
-  REASONS. Deterministic transduction (ASR, OCR, embeddings, CLIP, frozen captioners,
-  voice-embedding speaker-ID) is "measurement" and is IN bounds. A server-side reasoning
-  LLM is NEVER added. No confidence/authority floats on notes. Epistemic surfaces
-  (conflict, staleness) MEASURE and SURFACE for review; they never auto-decay or rank.
+  THE CORE CONSTRAINT — the authority-and-effects matrix (ratified 2026-08-30,
+  restating the older transducer-vs-reasoner line as OUTPUT AUTHORITY): the server
+  MEASURES, the brain (Claude/Max) REASONS. What a server-side model may do is bounded
+  by what its output is allowed to touch, not by its architecture class:
+  retrieval scorers (embeddings, rerankers) may RANK; content transducers (ASR, OCR,
+  CLIP, frozen captioners, voice-embedding speaker-ID) may TRANSCRIBE across
+  modalities; frozen verifiers (e.g. an NLI stance classifier) may LABEL into
+  provenance-marked review queues only — pinned model digest, versioned label map,
+  off the synchronous write path, no vault text in instruction position — and their
+  output never enters canon, decisions, retrieval, ranking, or policy. The agent
+  alone judges conversation and authors proposals; governed leaves alone mutate.
+  Same-modal text-to-text generation server-side stays banned: a server-side
+  reasoning LLM is NEVER added. No confidence/authority floats on notes. Epistemic
+  surfaces (conflict, staleness) MEASURE and SURFACE for review; they never
+  auto-decay or rank.
 
   Surface consistency (engraph/Endstate-style): every core operation should be reachable
   consistently across the MCP tools, the CLI (`python -m exomem <cmd>`), and the personal
