@@ -25,11 +25,18 @@ PLAN_SCHEMA = "exomem.consolidation-plan/v1"
 CONTROL_BASIS_SCHEMA = "exomem.consolidation-control-basis/v1"
 PLAN_INPUT_SET_SCHEMA = "exomem.consolidation-plan-input-set/v1"
 PLAN_SUCCESSOR_AUTOMATON_SCHEMA = "exomem.consolidation-plan-successor-automaton/v1"
+JOURNAL_BATCH_PARTITION_SCHEMA = "exomem.consolidation-journal-batch-partition/v1"
+MAX_CONTENT_BATCH_ACTIONS = 128
 
 _PLAN_DOMAIN = PLAN_SCHEMA.encode("ascii")
 _CONTROL_BASIS_DOMAIN = CONTROL_BASIS_SCHEMA.encode("ascii")
 _PLAN_INPUT_SET_DOMAIN = PLAN_INPUT_SET_SCHEMA.encode("ascii")
 _AUTOMATON_DOMAIN = PLAN_SUCCESSOR_AUTOMATON_SCHEMA.encode("ascii")
+_JOURNAL_BATCH_PARTITION_DOMAIN = JOURNAL_BATCH_PARTITION_SCHEMA.encode("ascii")
+_BATCH_ACTION_SET_DOMAIN = b"exomem.consolidation-content-batch-actions/v1"
+_BATCH_PRIOR_DOMAIN = b"exomem.consolidation-content-batch-prior/v1"
+_BATCH_PREPARED_DOMAIN = b"exomem.consolidation-content-batch-prepared/v1"
+_BATCH_FINAL_DOMAIN = b"exomem.consolidation-content-batch-final/v1"
 _IMPACT_SUMMARY_DOMAIN = b"exomem.consolidation-impact-summary/v1"
 _RENDERING_DEFINITION_DOMAIN = b"exomem.consolidation-rendering-definition/v1"
 _RENDER_SECTION_DOMAIN = b"exomem.consolidation-render-section/v1"
@@ -186,6 +193,8 @@ _SECTION_FIELDS = frozenset(
 
 __all__ = [
     "CONTROL_BASIS_SCHEMA",
+    "JOURNAL_BATCH_PARTITION_SCHEMA",
+    "MAX_CONTENT_BATCH_ACTIONS",
     "PLAN_INPUT_SET_SCHEMA",
     "PLAN_SCHEMA",
     "PLAN_SUCCESSOR_AUTOMATON_SCHEMA",
@@ -197,10 +206,12 @@ __all__ = [
     "RENDER_PAGE_SIZE",
     "RENDER_SECTION_IDS",
     "canonical_closed_jcs",
+    "derive_journal_batch_partition",
     "derive_rendering_definition",
     "materialize_plan",
     "parse_canonical_plan",
     "parse_control_basis",
+    "parse_journal_batch_partition",
     "plan_successor_automaton",
     "render_plan_page",
 ]
@@ -446,6 +457,102 @@ def _validate_content_actions(value: object) -> tuple[Mapping[str, object], ...]
             _fail()
         normalized.append(item)
     return tuple(normalized)
+
+
+def derive_journal_batch_partition(value: object) -> CanonicalObject:
+    """Derive the only approved content-batch partition and state fingerprints."""
+
+    actions = _validate_content_actions(value)
+    grouped: list[list[Mapping[str, object]]] = []
+    expected_batch = 0
+    for action in actions:
+        batch_ordinal = _integer(action["batch_ordinal"], maximum=(1 << 31) - 1)
+        if batch_ordinal == expected_batch:
+            grouped.append([action])
+            expected_batch += 1
+        elif batch_ordinal == expected_batch - 1 and grouped:
+            grouped[-1].append(action)
+        else:
+            _fail()
+
+    batches: list[dict[str, object]] = []
+    for batch_ordinal, batch_actions in enumerate(grouped):
+        if len(batch_actions) > MAX_CONTENT_BATCH_ACTIONS:
+            _fail()
+        action_set = _canonical_object(
+            {
+                "schema": "exomem.consolidation-content-batch-actions/v1",
+                "batch_ordinal": batch_ordinal,
+                "actions": tuple(batch_actions),
+            },
+            _BATCH_ACTION_SET_DOMAIN,
+        )
+        prior_rows = tuple(
+            {
+                "ordinal": action["ordinal"],
+                "object_ref": action["object_ref"],
+                "destination_path": action["destination_path"],
+                "state": action["expected_before_state"],
+                "sha256": action["expected_before_sha256"],
+            }
+            for action in batch_actions
+        )
+        final_rows = tuple(
+            {
+                "ordinal": action["ordinal"],
+                "object_ref": action["object_ref"],
+                "destination_path": action["destination_path"],
+                "state": action["planned_after_state"],
+                "sha256": action["planned_after_sha256"],
+            }
+            for action in batch_actions
+        )
+        prior = _canonical_object(
+            {
+                "schema": "exomem.consolidation-content-batch-prior/v1",
+                "batch_ordinal": batch_ordinal,
+                "entries": prior_rows,
+            },
+            _BATCH_PRIOR_DOMAIN,
+        )
+        prepared = _canonical_object(
+            {
+                "schema": "exomem.consolidation-content-batch-prepared/v1",
+                "batch_ordinal": batch_ordinal,
+                "entries": final_rows,
+            },
+            _BATCH_PREPARED_DOMAIN,
+        )
+        final = _canonical_object(
+            {
+                "schema": "exomem.consolidation-content-batch-final/v1",
+                "batch_ordinal": batch_ordinal,
+                "entries": final_rows,
+            },
+            _BATCH_FINAL_DOMAIN,
+        )
+        batches.append(
+            {
+                "batch_ordinal": batch_ordinal,
+                "first_action_ordinal": batch_actions[0]["ordinal"],
+                "last_action_ordinal": batch_actions[-1]["ordinal"],
+                "action_count": len(batch_actions),
+                "publication_boundary": batch_ordinal == 0,
+                "action_set_digest": action_set.digest,
+                "prior_fingerprint": prior.digest,
+                "prepared_fingerprint": prepared.digest,
+                "final_fingerprint": final.digest,
+            }
+        )
+    return _canonical_object(
+        {
+            "schema": JOURNAL_BATCH_PARTITION_SCHEMA,
+            "action_count": len(actions),
+            "batch_count": len(batches),
+            "batches": tuple(batches),
+        },
+        _JOURNAL_BATCH_PARTITION_DOMAIN,
+    )
 
 
 def _validate_policy_documents(value: object) -> tuple[Mapping[str, object], ...]:
@@ -1043,6 +1150,73 @@ def parse_control_basis(raw: bytes) -> CanonicalObject:
     if control.canonical_bytes != raw:
         _fail()
     return control
+
+
+def parse_journal_batch_partition(raw: bytes) -> CanonicalObject:
+    """Parse one exact canonical batch partition and recompute its framed digest."""
+
+    parsed = _parse_canonical_mapping(raw, maximum=16 * 1024 * 1024)
+    if frozenset(parsed) != {"schema", "action_count", "batch_count", "batches"}:
+        _fail()
+    if parsed["schema"] != JOURNAL_BATCH_PARTITION_SCHEMA:
+        _fail()
+    action_count = _integer(parsed["action_count"], minimum=1)
+    batch_count = _integer(parsed["batch_count"], minimum=1)
+    batches = _sequence(parsed["batches"])
+    fields = frozenset(
+        {
+            "batch_ordinal",
+            "first_action_ordinal",
+            "last_action_ordinal",
+            "action_count",
+            "publication_boundary",
+            "action_set_digest",
+            "prior_fingerprint",
+            "prepared_fingerprint",
+            "final_fingerprint",
+        }
+    )
+    if len(batches) != batch_count:
+        _fail()
+    seen_actions = 0
+    for ordinal, raw_batch in enumerate(batches):
+        batch = _mapping(raw_batch, fields)
+        count = _integer(
+            batch["action_count"],
+            minimum=1,
+            maximum=MAX_CONTENT_BATCH_ACTIONS,
+        )
+        first = _integer(batch["first_action_ordinal"])
+        last = _integer(batch["last_action_ordinal"])
+        if (
+            _integer(batch["batch_ordinal"]) != ordinal
+            or batch["publication_boundary"] is not (ordinal == 0)
+            or first != seen_actions
+            or last != first + count - 1
+        ):
+            _fail()
+        for field in (
+            "action_set_digest",
+            "prior_fingerprint",
+            "prepared_fingerprint",
+            "final_fingerprint",
+        ):
+            _digest(batch[field])
+        if len(
+            {
+                batch["prior_fingerprint"],
+                batch["prepared_fingerprint"],
+                batch["final_fingerprint"],
+            }
+        ) != 3:
+            _fail()
+        seen_actions += count
+    if seen_actions != action_count:
+        _fail()
+    result = _canonical_object(parsed, _JOURNAL_BATCH_PARTITION_DOMAIN)
+    if result.canonical_bytes != raw:
+        _fail()
+    return result
 
 
 def parse_canonical_plan(

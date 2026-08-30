@@ -546,7 +546,7 @@ binds that reference and observed digest; no caller field selects K.
   predecessor/outer receipt references separately; prove no restore touches an
   older or concurrent run/evidence subtree and no unrelated physical-head append
   changes the canonical preimage.
-- [ ] 7.3 Add a red ordering test that instruments the existing governance
+- [x] 7.3 Add a red ordering test that instruments the existing governance
   transaction and `batch_atomic_write`: restrictive policy intent/prepare/activate/
   critical terminal must finish before the first content batch call. Assert the
   approved deterministic partition and each batch's prior/prepared/final/action
