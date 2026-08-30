@@ -459,10 +459,16 @@ def _validate_content_actions(value: object) -> tuple[Mapping[str, object], ...]
     return tuple(normalized)
 
 
+def validate_content_actions(value: object) -> tuple[Mapping[str, object], ...]:
+    """Return the exact validated action sequence used by plan fingerprints."""
+
+    return _validate_content_actions(value)
+
+
 def derive_journal_batch_partition(value: object) -> CanonicalObject:
     """Derive the only approved content-batch partition and state fingerprints."""
 
-    actions = _validate_content_actions(value)
+    actions = validate_content_actions(value)
     grouped: list[list[Mapping[str, object]]] = []
     expected_batch = 0
     for action in actions:

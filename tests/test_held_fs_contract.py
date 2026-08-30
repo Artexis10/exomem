@@ -151,6 +151,9 @@ def test_relative_leaf_operations_use_held_parents_only(tmp_path: Path) -> None:
                 assert filesystem.write(source_file, b"source").ok
                 assert source_file.identity.kind == "file"
                 assert source_file.identity.link_count == 1
+                assert filesystem.sha256(source_file).require() == hashlib.sha256(
+                    b"source"
+                ).hexdigest()
 
             with filesystem.file(source, "source.txt", access="mutate").require() as source_file:
                 assert filesystem.read(source_file).require() == b"source"

@@ -547,6 +547,17 @@ class ConsolidationBatchJournalStore:
             state, _raw = self._load_locked()
             return state
 
+    def batch_status(self, batch_value: consolidation_saga.ContentBatch) -> str:
+        batch = _content_batch(batch_value)
+        with _authority(self.vault_root, mutation=False):
+            current, _raw = self._load_locked()
+            if not 0 <= batch.ordinal < len(current.batches):
+                _fail()
+            entry = current.batches[batch.ordinal]
+            if not _entry_matches_batch(entry, batch):
+                _fail()
+            return entry.status
+
     def _transition(
         self,
         batch_value: consolidation_saga.ContentBatch,
