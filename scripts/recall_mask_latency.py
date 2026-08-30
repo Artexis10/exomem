@@ -13,6 +13,27 @@ running cell was measured to leave its catalog stale and grow its deferred queue
 
     uv run python scripts/recall_mask_latency.py
     uv run python scripts/recall_mask_latency.py --chunks 67000 --files 6074 --json
+
+RUN IT MORE THAN ONCE. A single run of this harness is not a measurement. Five
+runs at `--chunks 67000 --files 6074` on one machine, same commit:
+
+    eligible   speedup range   median
+        100%   5.69 - 11.46x    7.67x
+         85%   5.74 -  7.52x    6.53x
+         50%   4.09 -  4.40x    4.35x
+          5%   0.86 -  1.32x    1.06x   (break-even)
+
+The variance is not uniform noise, and its shape is the point: it tracks how
+much matrix the PRE-FIX lane copies. At 100% eligible that is the whole ~200 MB
+— the most memory-bandwidth-sensitive work here — and the row swings 2x with
+machine state, the pre-fix lane alone varying 230 ms to 60 ms across runs. At
+50% it copies half and the row holds to +/-4%. So the CONSERVATIVE rows are the
+trustworthy ones, and quoting a single 100%-eligible run as "11.5x" is quoting
+the machine, not the change.
+
+Agreement, by contrast, is stable and deterministic: 20 of 20 comparisons
+returned the same rows, with max |dscore| exactly 0.00e+00 everywhere except the
+5% lane's 1.12e-08 (OpenBLAS picking its sgemv kernel by row count).
 """
 
 from __future__ import annotations
