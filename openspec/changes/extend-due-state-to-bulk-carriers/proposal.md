@@ -64,8 +64,9 @@ carriage, not machinery.
   projection-delta path for the newly carrying leaves is settled per design
   D3; the f23 driver docstring updated.
 - Affected tests, named: `tests/test_due_state_emission_capture.py` — the two
-  tripwire pins (`test_a_multi_write_command_carries_one_block`-adjacent
-  zero-carrier assertions) are **inverted, not deleted** (tasks 2.1).
+  tripwire pins (`test_a_multi_write_command_carries_one_block` and
+  `test_the_batch_scope_on_this_leaf_suppresses_nothing_today`) are
+  **inverted, not deleted** (tasks 2.1).
 - Affected benchmarks: f23's recorded emission-assertion outcome flips
   `unsupported` → decided and is recorded in tasks; f26
   (`hookless_episode_carrier`, withheld with amendment sequence 2) has its

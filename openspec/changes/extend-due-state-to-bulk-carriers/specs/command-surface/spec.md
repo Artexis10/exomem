@@ -24,7 +24,7 @@ outside this requirement. A partially failed invocation that committed at
 least one governed write SHALL still carry under the change-only rule.
 Read-only and dry-run invocations of these leaves SHALL NOT carry the block.
 The leaves SHALL reuse the shared due-state projection helpers (the
-`due_state.block_for_write` family behind the terminal's
+`due_state.block_for_write` family behind the due-state helpers'
 `due_state_advisory` disclosure boundary) rather than re-deriving any of it,
 and tool input schemas SHALL NOT change.
 
