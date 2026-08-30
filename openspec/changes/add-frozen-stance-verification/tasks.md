@@ -485,3 +485,13 @@ code.
   runs the same fixtures against the REAL model. That job is only meaningful once
   6.1 lands, since with an empty registry there is nothing for it to verify.
   **To close:** add the job alongside 6.1, gated on the pin existing.
+- [ ] 6.3 **Decide the fate of `EXOMEM_CLAIM_POLARITY_MAX_PAIRS`.** Its only
+  caller was `corpus_aware._refine_contradictions`, which this slice removes, so
+  `claims._max_polarity_pairs()` is now production-dead. It is deliberately NOT
+  removed here: no spec delta or task in this change names it, its unit test is
+  outside the two suites task 2.2 authorises touching, and silently deleting a
+  knob someone may have set is a behaviour change this change did not propose.
+  Its docstring now says it is orphaned and names the real bound
+  (`EXOMEM_CONTRADICTION_TOP_N`, the surfaced set).
+  **To close:** retire the knob and its test in a small follow-up change, or
+  give it a caller if the audit lane ever wants a second cap.

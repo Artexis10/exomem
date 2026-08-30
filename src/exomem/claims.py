@@ -22,16 +22,22 @@ The design keeps these constraints:
 
 Everything here is OFF by default and gated behind `EXOMEM_CLAIM_LEVEL=1`. With
 the gate unset, `claim_level_enabled()` is False, no sidecar is created, no
-polarity is computed, and every wired surface (`corpus_aware.overlap_warning`,
-`audit.corpus_contradictions`) is byte-identical to its pre-feature behavior.
+polarity is computed, and `audit.corpus_contradictions` is byte-identical to its
+pre-feature behavior.
 
-STATUS (first increment — needs owner review before production):
-- Extraction, the `.claims.sqlite` sidecar, and the deterministic-heuristic
-  polarity backend are REAL and unit-tested.
-- The NLI cross-encoder backend (`EXOMEM_CLAIM_POLARITY_NLI=1`) is a wired-but-
-  UNVERIFIED seam: it will lazily load a local cross-encoder if one is present and
-  fall back to the heuristic on any failure. It has not been run against a real
-  model in this environment.
+POLARITY REACHES EXACTLY ONE SURFACE, UNDER ADMISSION CONTROL. The synchronous
+write path invokes no polarity classification at all: `corpus_aware` warnings
+carry no stance clause, on any gate. The only channel is the asynchronous audit
+contradiction sweep, and it enriches only through an ADMITTED frozen verifier —
+a pin in `VERIFIER_PINS` (a repository artifact, never runtime configuration)
+whose resolved weights match its sha256 digest, whose label map is a version
+this build ships, and whose verification fixture set is green at that exact
+pair, with `EXOMEM_CLAIM_POLARITY_NLI` set. Anything short of all of that
+refuses the verifier, and refusal degrades to ABSENCE: the entry carries no
+label. The deterministic lexical heuristic below is retired from queue
+enrichment — it had no admission control — and survives only as the comparison
+arm of the fixture-set precision table and as `classify_polarity`'s fallback for
+callers that are not writing an admitted, provenance-marked label.
 """
 
 from __future__ import annotations
@@ -82,11 +88,12 @@ def claim_level_enabled() -> bool:
 def _max_polarity_pairs() -> int:
     """Hard cap on polarity checks per call (`EXOMEM_CLAIM_POLARITY_MAX_PAIRS`).
 
-    Bounds the lane the way the reranker bounds its `(query, passage)` batch —
-    the proximity band can flag many pairs, and each polarity check is real work
-    (a heuristic pass now, an NLI forward pass under the optional backend). Pairs
-    beyond the cap flow through UNREFINED (polarity stays None) rather than being
-    dropped. Default 20; bad values log + fall back.
+    ORPHANED as of the frozen-verifier slice and kept only so the knob does not
+    change meaning under anyone who set it: its one caller was the write path's
+    `_refine_contradictions`, which is gone. The surviving polarity lane is the
+    audit sweep, and that lane is bounded by the surfaced set it runs over —
+    `EXOMEM_CONTRADICTION_TOP_N` — not by this. See follow-up 6.3 in the
+    `add-frozen-stance-verification` change. Default 20; bad values log + fall back.
     """
     raw = os.environ.get("EXOMEM_CLAIM_POLARITY_MAX_PAIRS")
     if raw is None:
@@ -1070,7 +1077,8 @@ class PolarityResult:
 
     `label` ∈ {contradict, refine, duplicate, unrelated}. `score` is a coarse
     [0,1] confidence in the label. `method` names the backend that produced it
-    (`heuristic` today, `nli` under the optional cross-encoder path).
+    (`heuristic` from the lexical fallback, `nli` from an admitted frozen
+    verifier — and ONLY an admitted one may ever carry the `nli` name).
     """
 
     label: str
@@ -1079,8 +1087,9 @@ class PolarityResult:
 
 
 # Deterministic-heuristic lexicon. Coarse by design — a lexical stand-in for a
-# real NLI model, chosen so v1 is REAL and testable without a model download. The
-# owner-review path is to flip on the NLI backend (see `_nli_polarity`).
+# real NLI model, chosen so v1 was REAL and testable without a model download.
+# RETIRED from queue enrichment (it has no admission control); it remains the
+# comparison arm of `VERIFICATION_FIXTURES` and `classify_polarity`'s fallback.
 _STOPWORDS = frozenset(
     """a an the this that these those of for to in on at by with from as is are be
     been being it its and or but if then so than into over under about we you they
