@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.67.0](https://github.com/Artexis10/exomem/compare/v0.66.0...v0.67.0) (2026-08-30)
+
+
+### Features
+
+* **audit:** add the entity recurrence sensor ([#961](https://github.com/Artexis10/exomem/issues/961)) ([d876c9e](https://github.com/Artexis10/exomem/commit/d876c9ebd8b8280fc0e6a6ec1cb89776304f7e34))
+* **benchmarks:** record the founder acknowledgment of amendment sequence 3 ([#962](https://github.com/Artexis10/exomem/issues/962)) ([bc45ece](https://github.com/Artexis10/exomem/commit/bc45ece22a6efaf69d7e6407769b7474ba3313a2))
+* **bootstrap:** trim compact and admit the destination-choice clause ([#959](https://github.com/Artexis10/exomem/issues/959)) ([8109094](https://github.com/Artexis10/exomem/commit/8109094d6a9ed7913d0a83d61978cab13557c122))
+
+
+### Bug Fixes
+
+* **hosted:** promote against the right profile and a sized review window ([#968](https://github.com/Artexis10/exomem/issues/968)) ([a81d505](https://github.com/Artexis10/exomem/commit/a81d505ef9300d6f11adbe6e8e1160162d04a7d4))
+* **records:** preserve audit through readable migrations ([#969](https://github.com/Artexis10/exomem/issues/969)) ([046520f](https://github.com/Artexis10/exomem/commit/046520f519884b77e12a56f5cdbaf872e68c7843))
+
 ## [0.66.0](https://github.com/Artexis10/exomem/compare/v0.65.0...v0.66.0) (2026-08-29)
 
 
