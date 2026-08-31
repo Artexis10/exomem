@@ -12,30 +12,32 @@ runs on a box with no cross-encoder weights and no `nli` extra installed.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
+import math
 
 import pytest
 
 from exomem import claims
 
-# ---------------- 1.1 label map v1 (versioned in-repo artifact) ----------------
+# ---------------- 1.1 label map v2 (versioned in-repo artifact) ----------------
 
 
-def test_label_map_v1_is_the_declared_current_version() -> None:
-    assert claims.LABEL_MAP_VERSION == "v1"
-    assert claims.get_label_map("v1").version == "v1"
+def test_label_map_v2_is_the_declared_current_version() -> None:
+    assert claims.LABEL_MAP_VERSION == "v2"
+    assert claims.get_label_map("v2").version == "v2"
 
 
 def test_label_map_declares_logit_column_semantics_and_order() -> None:
     """D4: the map declares the columns and their ORDER, so a model whose head
     orders entailment/contradiction differently is a different pair."""
-    v1 = claims.get_label_map("v1")
-    assert v1.columns == ("contradiction", "entailment", "neutral")
-    assert v1.labels == frozenset({"contradict", "refine", "duplicate", "unrelated"})
+    v2 = claims.get_label_map("v2")
+    assert v2.columns == ("entailment", "neutral", "contradiction")
+    assert v2.labels == frozenset({"contradict", "refine", "duplicate", "neutral"})
 
 
 def test_unknown_label_map_version_refuses() -> None:
     with pytest.raises(ValueError, match="unknown label map"):
-        claims.get_label_map("v2")
+        claims.get_label_map("v1")
 
 
 def test_unversioned_label_map_refuses() -> None:
@@ -47,38 +49,92 @@ def test_unversioned_label_map_refuses() -> None:
 @pytest.mark.parametrize(
     ("logits", "expected"),
     [
-        # (contradiction, entailment, neutral) logits per direction.
-        ([[4.0, 0.0, 0.0], [4.0, 0.0, 0.0]], "contradict"),
-        ([[0.0, 4.0, 0.0], [0.0, 4.0, 0.0]], "duplicate"),
-        ([[0.0, 0.0, 4.0], [0.0, 0.0, 4.0]], "unrelated"),
-        ([[0.0, 2.0, 0.6], [0.0, 0.0, 0.6]], "refine"),
+        # (entailment, neutral, contradiction) logits per direction.
+        ([[0.0, 0.0, 6.0], [0.0, 0.0, 6.0]], "contradict"),
+        ([[6.0, 0.0, 0.0], [6.0, 0.0, 0.0]], "duplicate"),
+        ([[0.0, 6.0, 0.0], [0.0, 6.0, 0.0]], "neutral"),
+        ([[0.0, 6.0, 0.0], [6.0, 0.0, 0.0]], "refine"),
+        # A one-direction contradiction is uncertainty, not a symmetric conflict.
+        ([[0.0, 0.0, 6.0], [0.0, 6.0, 0.0]], "neutral"),
     ],
 )
-def test_label_map_v1_applies_the_promoted_threshold_logic(logits, expected) -> None:
-    result = claims.get_label_map("v1").apply(logits)
+def test_label_map_v2_applies_the_bidirectional_nli_relation(logits, expected) -> None:
+    result = claims.get_label_map("v2").apply(logits)
     assert result is not None
     assert result.label == expected
     assert result.method == "nli"
     assert 0.0 <= result.score <= 1.0
 
 
-def test_label_map_v1_refuses_a_wrong_shaped_head() -> None:
+def _logits_for(*, entailment: float, neutral: float, contradiction: float) -> list[float]:
+    return [math.log(entailment), math.log(neutral), math.log(contradiction)]
+
+
+def test_label_map_v2_threshold_edges_are_inclusive_and_reviewed() -> None:
+    v2 = claims.get_label_map("v2")
+    contradiction_edge = _logits_for(
+        entailment=0.035, neutral=0.035, contradiction=0.93
+    )
+    duplicate_edge = _logits_for(
+        entailment=0.95, neutral=0.025, contradiction=0.025
+    )
+    neutral_edge = _logits_for(
+        entailment=0.025, neutral=0.946, contradiction=0.029
+    )
+
+    assert v2.apply([contradiction_edge, contradiction_edge]).label == "contradict"
+    assert v2.apply([duplicate_edge, duplicate_edge]).label == "duplicate"
+    assert v2.apply([neutral_edge, duplicate_edge]).label == "refine"
+
+
+def test_label_map_v2_does_not_relax_thresholds_by_a_decimal_tolerance() -> None:
+    v2 = claims.get_label_map("v2")
+    contradiction_below = _logits_for(
+        entailment=0.03500025,
+        neutral=0.03500025,
+        contradiction=0.9299995,
+    )
+    entailment_below = _logits_for(
+        entailment=0.9499995,
+        neutral=0.02500025,
+        contradiction=0.02500025,
+    )
+
+    assert v2.apply([contradiction_below, contradiction_below]).label == "neutral"
+    assert v2.apply([entailment_below, entailment_below]).label == "neutral"
+
+
+def test_label_map_v2_refuses_a_wrong_shaped_head() -> None:
     """A two-column head is a different (digest, label-map) pair, not a coercion."""
-    assert claims.get_label_map("v1").apply([[1.0, 0.0], [1.0, 0.0]]) is None
-    assert claims.get_label_map("v1").apply([1.0, 0.0, 0.0]) is None
+    assert claims.get_label_map("v2").apply([[1.0, 0.0], [1.0, 0.0]]) is None
+    assert claims.get_label_map("v2").apply([1.0, 0.0, 0.0]) is None
 
 
 @pytest.mark.parametrize("bad_logit", [float("nan"), float("inf"), float("-inf")])
-def test_label_map_v1_refuses_non_finite_logits(bad_logit: float) -> None:
+def test_label_map_v2_refuses_non_finite_logits(bad_logit: float) -> None:
     """A numerically invalid head is absence, never a confident label."""
     logits = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
     logits[0][0] = bad_logit
-    assert claims.get_label_map("v1").apply(logits) is None
+    assert claims.get_label_map("v2").apply(logits) is None
 
 
 # ---------------- 1.2 pin registry + admission (repository artifact) ----------------
 
 _FAKE_MODEL = "exomem-test/frozen-stance-fixture"
+_FAKE_REVISION = "rev0"
+_FAKE_ARTIFACTS = ("config.json", "model.safetensors")
+
+_REAL_MODEL = "MoritzLaurer/mDeBERTa-v3-base-xnli-multilingual-nli-2mil7"
+_REAL_REVISION = "b5113eb38ab63efdd7f280f8c144ea8b13f978ce"
+_REAL_ARTIFACTS = (
+    "config.json",
+    "model.safetensors",
+    "special_tokens_map.json",
+    "spm.model",
+    "tokenizer.json",
+    "tokenizer_config.json",
+)
+_REAL_DIGEST = "b1dbf445f78e823534f864406b773a5a6b46d04dd32b558588c29e3195349d22"
 
 
 @pytest.fixture(autouse=True)
@@ -88,26 +144,39 @@ def _reset_verifier_state():
     claims.reset_verifier_cache()
 
 
+def _manifest_digest(snapshot, files: tuple[str, ...] = _FAKE_ARTIFACTS) -> str:
+    """Independent statement of the reviewed name+bytes manifest digest."""
+    digest = hashlib.sha256()
+    for relative in files:
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update((snapshot / relative).read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
 def _plant_weights(tmp_path, monkeypatch, *, model_name: str = _FAKE_MODEL) -> str:
     """Plant a resident snapshot in a throwaway hub cache; return its true digest."""
     from exomem import model_cache
 
     hub = tmp_path / "hub"
-    snapshot = hub / model_cache.snapshot_dirname(model_name) / "snapshots" / "rev0"
+    snapshot = hub / model_cache.snapshot_dirname(model_name) / "snapshots" / _FAKE_REVISION
     snapshot.mkdir(parents=True)
     (snapshot / "config.json").write_text('{"architectures": ["X"]}', encoding="utf-8")
     (snapshot / "model.safetensors").write_bytes(b"not-real-weights-but-stable-bytes")
     monkeypatch.setenv("HF_HUB_CACHE", str(hub))
-    return claims._directory_digest(snapshot)
+    return _manifest_digest(snapshot)
 
 
-def _pin(digest: str, *, label_map_version: str = "v1") -> tuple:
+def _pin(digest: str, *, label_map_version: str = "v2") -> tuple:
     return (
         claims.VerifierPin(
             model_name=_FAKE_MODEL,
+            model_revision=_FAKE_REVISION,
+            artifact_files=_FAKE_ARTIFACTS,
             weights_sha256=digest,
             label_map_version=label_map_version,
-            fixture_set="stance-v1",
+            fixture_set="stance-v2-multilingual",
         ),
     )
 
@@ -133,8 +202,78 @@ def test_pin_registry_is_an_immutable_repository_artifact() -> None:
     assert isinstance(claims.VERIFIER_PINS, tuple)
     for pin in claims.VERIFIER_PINS:
         assert isinstance(pin, claims.VerifierPin)
-        assert pin.model_name and pin.weights_sha256
+        assert pin.model_name and pin.model_revision and pin.weights_sha256
+        assert pin.artifact_files
         assert pin.label_map_version and pin.fixture_set
+
+
+def test_production_registry_pins_the_reviewed_multilingual_checkpoint() -> None:
+    assert claims.VERIFIER_PINS == (
+        claims.VerifierPin(
+            model_name=_REAL_MODEL,
+            model_revision=_REAL_REVISION,
+            artifact_files=_REAL_ARTIFACTS,
+            weights_sha256=_REAL_DIGEST,
+            label_map_version="v2",
+            fixture_set="stance-v2-multilingual",
+        ),
+    )
+
+
+def test_pin_identity_requires_an_exact_revision_and_artifact_manifest() -> None:
+    pin = _pin("0" * 64)[0]
+
+    assert pin.model_revision == _FAKE_REVISION
+    assert pin.artifact_files == _FAKE_ARTIFACTS
+
+
+def test_extra_cache_files_and_revisions_do_not_change_the_pinned_digest(
+    tmp_path, monkeypatch
+) -> None:
+    from exomem import model_cache
+
+    digest = _plant_weights(tmp_path, monkeypatch)
+    root = tmp_path / "hub" / model_cache.snapshot_dirname(_FAKE_MODEL) / "snapshots"
+    (root / _FAKE_REVISION / "README.md").write_text("unlisted", encoding="utf-8")
+    second = root / "rev1"
+    second.mkdir()
+    (second / "model.safetensors").write_bytes(b"another revision")
+
+    assert claims._hash_resident_snapshot(_pin(digest)[0]) == (
+        digest,
+        str(root / _FAKE_REVISION),
+    )
+
+
+def test_a_missing_declared_artifact_refuses_before_model_construction(
+    tmp_path, monkeypatch
+) -> None:
+    from exomem import model_cache
+
+    digest = _plant_weights(tmp_path, monkeypatch)
+    snapshot = (
+        tmp_path
+        / "hub"
+        / model_cache.snapshot_dirname(_FAKE_MODEL)
+        / "snapshots"
+        / _FAKE_REVISION
+    )
+    (snapshot / "model.safetensors").unlink()
+    monkeypatch.setattr(claims, "VERIFIER_PINS", _pin(digest))
+    monkeypatch.setenv("EXOMEM_CLAIM_POLARITY_NLI", "1")
+    called = False
+
+    def should_not_load(pin):
+        nonlocal called
+        called = True
+        return None
+
+    monkeypatch.setattr(claims, "_load_verifier_predictor", should_not_load)
+
+    admission = claims.verifier_admission()
+    assert admission.reason == "weights-missing"
+    assert "model.safetensors" in admission.detail
+    assert called is False
 
 
 def test_no_runtime_configuration_reads_a_model_name_into_a_pin() -> None:
@@ -225,19 +364,21 @@ def test_weights_are_hashed_once_per_process_and_cached(tmp_path, monkeypatch) -
     monkeypatch.setenv("EXOMEM_CLAIM_POLARITY_NLI", "1")
 
     calls = {"n": 0}
-    real = claims._directory_digest
+    real = claims._artifact_manifest_digest
 
-    def counting(root):
+    def counting(root, artifact_files):
         calls["n"] += 1
-        return real(root)
+        return real(root, artifact_files)
 
-    monkeypatch.setattr(claims, "_directory_digest", counting)
+    monkeypatch.setattr(claims, "_artifact_manifest_digest", counting)
     for _ in range(4):
         claims.resolve_weights_digest(_FAKE_MODEL)
     assert calls["n"] == 1
 
 
-def test_a_second_resident_revision_is_ambiguous_and_refuses(tmp_path, monkeypatch) -> None:
+def test_a_second_resident_revision_does_not_change_admission_identity(
+    tmp_path, monkeypatch
+) -> None:
     from exomem import model_cache
 
     digest = _plant_weights(tmp_path, monkeypatch)
@@ -248,11 +389,11 @@ def test_a_second_resident_revision_is_ambiguous_and_refuses(tmp_path, monkeypat
     (second / "model.safetensors").write_bytes(b"a different revision entirely")
     monkeypatch.setattr(claims, "VERIFIER_PINS", _pin(digest))
     monkeypatch.setenv("EXOMEM_CLAIM_POLARITY_NLI", "1")
+    monkeypatch.setattr(claims, "_load_verifier_predictor", lambda pin: _oracle_predict())
 
     admission = claims.verifier_admission()
-    assert admission.admitted is False
-    assert admission.reason == "weights-missing"
-    assert "ambiguous" in admission.detail
+    assert admission.admitted is True
+    assert admission.model_revision == _FAKE_REVISION
 
 
 def test_refused_verifier_never_lets_the_heuristic_wear_the_nli_name(monkeypatch) -> None:
@@ -368,19 +509,29 @@ def test_status_names_the_registry_and_the_shipped_label_maps(tmp_path, monkeypa
 
     status = claims.verifier_status()
     assert status["pinned_models"] == [_FAKE_MODEL]
-    assert status["label_map_versions"] == ["v1"]
+    assert status["label_map_versions"] == ["v2"]
+    assert status["pins"] == [
+        {
+            "model_name": _FAKE_MODEL,
+            "model_revision": _FAKE_REVISION,
+            "artifact_files": list(_FAKE_ARTIFACTS),
+            "weights_sha256": digest,
+            "label_map_version": "v2",
+            "fixture_set": "stance-v2-multilingual",
+        }
+    ]
 
 
 # ---------------- 1.4 verification fixture set ----------------
 
-#: Logit blocks that label map v1 maps to each label, used to drive fake
+#: Logit blocks that label map v2 maps to each label, used to drive fake
 #: verifiers. Shape is exactly what a cross-encoder emits for the two
-#: orderings of one pair: (2, 3) over (contradiction, entailment, neutral).
+#: orderings of one pair: (2, 3) over (entailment, neutral, contradiction).
 _LOGITS: dict[str, list[list[float]]] = {
-    "contradict": [[6.0, 0.0, 0.0], [6.0, 0.0, 0.0]],
-    "duplicate": [[0.0, 6.0, 0.0], [0.0, 6.0, 0.0]],
-    "unrelated": [[0.0, 0.0, 6.0], [0.0, 0.0, 6.0]],
-    "refine": [[0.0, 2.0, 0.6], [0.0, 0.0, 0.6]],
+    "contradict": [[0.0, 0.0, 6.0], [0.0, 0.0, 6.0]],
+    "duplicate": [[6.0, 0.0, 0.0], [6.0, 0.0, 0.0]],
+    "neutral": [[0.0, 6.0, 0.0], [0.0, 6.0, 0.0]],
+    "refine": [[0.0, 6.0, 0.0], [6.0, 0.0, 0.0]],
 }
 
 
@@ -392,7 +543,7 @@ def _oracle_predict(*, wrong: str | None = None, raises_on: str | None = None, c
     """
     answers = {
         (pair.claim_a, pair.claim_b): pair.expected
-        for pair in claims.VERIFICATION_FIXTURES["stance-v1"]
+        for pair in claims.VERIFICATION_FIXTURES["stance-v2-multilingual"]
     }
 
     def predict(pairs):
@@ -401,7 +552,7 @@ def _oracle_predict(*, wrong: str | None = None, raises_on: str | None = None, c
         claim_a, claim_b = pairs[0]
         if raises_on is not None and claim_a == raises_on:
             raise RuntimeError("forward pass exploded")
-        label = answers.get((claim_a, claim_b), "unrelated")
+        label = answers.get((claim_a, claim_b), "neutral")
         if wrong is not None and claim_a == wrong:
             label = "duplicate" if label != "duplicate" else "contradict"
         return _LOGITS[label]
@@ -414,16 +565,23 @@ def _admit(tmp_path, monkeypatch, predict) -> str:
     digest = _plant_weights(tmp_path, monkeypatch)
     monkeypatch.setattr(claims, "VERIFIER_PINS", _pin(digest))
     monkeypatch.setenv("EXOMEM_CLAIM_POLARITY_NLI", "1")
-    monkeypatch.setattr(claims, "_load_verifier_predictor", lambda name: predict)
+    monkeypatch.setattr(claims, "_load_verifier_predictor", lambda pin: predict)
     return digest
 
 
 def test_fixture_set_covers_the_four_corpus_shapes() -> None:
-    fixtures = claims.VERIFICATION_FIXTURES["stance-v1"]
-    assert len(fixtures) >= 8
+    fixtures = claims.VERIFICATION_FIXTURES["stance-v2-multilingual"]
+    assert len(fixtures) >= 12
     assert {pair.expected for pair in fixtures} == claims.POLARITY_LABELS
     for pair in fixtures:
-        assert pair.claim_a and pair.claim_b and pair.note
+        assert pair.claim_a and pair.claim_b and pair.note and pair.language_shape
+    assert {pair.language_shape for pair in fixtures} >= {
+        "en/en",
+        "de/de",
+        "fr/fr",
+        "et/et",
+        "en/et",
+    }
     # The heuristic's known failure cases are carried explicitly, not implied.
     assert sum(1 for pair in fixtures if pair.heuristic_fails) >= 3
 
@@ -435,12 +593,14 @@ def test_green_fixtures_admit_the_verifier(tmp_path, monkeypatch) -> None:
     assert admission.admitted is True
     assert admission.reason == "admitted"
     assert admission.model_digest == digest
-    assert admission.label_map_version == "v1"
-    assert admission.fixture_set == "stance-v1"
+    assert admission.model_revision == _FAKE_REVISION
+    assert admission.artifact_files == _FAKE_ARTIFACTS
+    assert admission.label_map_version == "v2"
+    assert admission.fixture_set == "stance-v2-multilingual"
 
 
 def test_one_red_fixture_refuses_the_pair(tmp_path, monkeypatch) -> None:
-    first = claims.VERIFICATION_FIXTURES["stance-v1"][0]
+    first = claims.VERIFICATION_FIXTURES["stance-v2-multilingual"][0]
     _admit(tmp_path, monkeypatch, _oracle_predict(wrong=first.claim_a))
 
     admission = claims.verifier_admission()
@@ -453,7 +613,7 @@ def test_one_red_fixture_refuses_the_pair(tmp_path, monkeypatch) -> None:
 def test_a_label_map_change_without_a_version_bump_refuses(tmp_path, monkeypatch) -> None:
     """The spec's re-verification scenario, exercised on the real mechanism.
 
-    Move v1's thresholds without bumping the version. Admission re-runs the
+    Move v2's thresholds without bumping the version. Admission re-runs the
     fixture set against the CURRENT map, so the stale pair fails there — the
     only way a threshold change can ride in is by staying green on the very
     fixtures that justified the pin.
@@ -463,21 +623,21 @@ def test_a_label_map_change_without_a_version_bump_refuses(tmp_path, monkeypatch
 
     claims.reset_verifier_cache()
     drifted = dataclasses.replace(
-        claims.get_label_map("v1"), contradict_min=0.999, duplicate_min=0.999
+        claims.get_label_map("v2"), contradict_min=0.999, duplicate_min=0.999
     )
-    monkeypatch.setitem(claims._LABEL_MAPS, "v1", drifted)
+    monkeypatch.setitem(claims._LABEL_MAPS, "v2", drifted)
 
     admission = claims.verifier_admission()
     assert admission.admitted is False
     assert admission.reason == "fixtures-failed"
-    assert admission.label_map_version == "v1"
+    assert admission.label_map_version == "v2"
 
 
 def test_absent_extra_refuses_as_a_missing_dependency(tmp_path, monkeypatch) -> None:
     digest = _plant_weights(tmp_path, monkeypatch)
     monkeypatch.setattr(claims, "VERIFIER_PINS", _pin(digest))
     monkeypatch.setenv("EXOMEM_CLAIM_POLARITY_NLI", "1")
-    monkeypatch.setattr(claims, "_load_verifier_predictor", lambda name: None)
+    monkeypatch.setattr(claims, "_load_verifier_predictor", lambda pin: None)
 
     admission = claims.verifier_admission()
     assert admission.admitted is False
@@ -492,14 +652,16 @@ def test_unknown_fixture_set_in_a_pin_refuses(tmp_path, monkeypatch) -> None:
         (
             claims.VerifierPin(
                 model_name=_FAKE_MODEL,
+                model_revision=_FAKE_REVISION,
+                artifact_files=_FAKE_ARTIFACTS,
                 weights_sha256=digest,
-                label_map_version="v1",
+                label_map_version="v2",
                 fixture_set="no-such-set",
             ),
         ),
     )
     monkeypatch.setenv("EXOMEM_CLAIM_POLARITY_NLI", "1")
-    monkeypatch.setattr(claims, "_load_verifier_predictor", lambda name: _oracle_predict())
+    monkeypatch.setattr(claims, "_load_verifier_predictor", lambda pin: _oracle_predict())
 
     admission = claims.verifier_admission()
     assert admission.admitted is False
@@ -513,7 +675,7 @@ def test_fixture_verification_runs_once_per_admitted_pair(tmp_path, monkeypatch)
 
     assert claims.verifier_admission().admitted is True
     after_first = len(calls)
-    assert after_first == len(claims.VERIFICATION_FIXTURES["stance-v1"])
+    assert after_first == len(claims.VERIFICATION_FIXTURES["stance-v2-multilingual"])
     for _ in range(3):
         assert claims.verifier_admission().admitted is True
     assert len(calls) == after_first
@@ -522,7 +684,9 @@ def test_fixture_verification_runs_once_per_admitted_pair(tmp_path, monkeypatch)
 def test_admitted_verifier_labels_through_the_label_map(tmp_path, monkeypatch) -> None:
     _admit(tmp_path, monkeypatch, _oracle_predict())
     fixture = next(
-        pair for pair in claims.VERIFICATION_FIXTURES["stance-v1"] if pair.expected == "contradict"
+        pair
+        for pair in claims.VERIFICATION_FIXTURES["stance-v2-multilingual"]
+        if pair.expected == "contradict"
     )
 
     result = claims.verifier_polarity(fixture.claim_a, fixture.claim_b)
@@ -592,7 +756,7 @@ def test_no_string_assembly_exists_behind_the_verifier_seam() -> None:
 
 def test_verifier_output_is_drawn_from_the_label_maps_closed_set(tmp_path, monkeypatch) -> None:
     _admit(tmp_path, monkeypatch, _oracle_predict())
-    for pair in claims.VERIFICATION_FIXTURES["stance-v1"]:
+    for pair in claims.VERIFICATION_FIXTURES["stance-v2-multilingual"]:
         result = claims.verifier_polarity(pair.claim_a, pair.claim_b)
         assert result is not None
         assert result.label in claims.POLARITY_LABELS
@@ -611,7 +775,7 @@ _PAGE_B = "Knowledge Base/Notes/Insights/ttl-increases.md"
 def _contradiction_fixture() -> claims.FixturePair:
     return next(
         pair
-        for pair in claims.VERIFICATION_FIXTURES["stance-v1"]
+        for pair in claims.VERIFICATION_FIXTURES["stance-v2-multilingual"]
         if pair.expected == "contradict" and not pair.heuristic_fails
     )
 
@@ -703,7 +867,7 @@ def test_admitted_verifier_writes_the_label_with_digest_and_label_map(
     assert meta["polarity"] == "contradict"
     assert meta["polarity_method"] == "nli"
     assert meta["polarity_model_digest"] == digest
-    assert meta["polarity_label_map_version"] == "v1"
+    assert meta["polarity_label_map_version"] == "v2"
     assert meta["polarity_signal_version"] == meta["signal_version"]
     assert 0.0 <= meta["polarity_score"] <= 1.0
     assert "CONTRADICT" in findings[0].detail
@@ -801,7 +965,7 @@ def test_a_stale_label_is_dropped_not_served() -> None:
         "score": 0.9,
         "method": "nli",
         "model_digest": "d" * 64,
-        "label_map_version": "v1",
+        "label_map_version": "v2",
         "signal_version": "2222222222222222",
     }
     before = dict(finding.meta)
@@ -818,13 +982,30 @@ def test_a_current_label_is_attached() -> None:
         "score": 0.7,
         "method": "nli",
         "model_digest": "d" * 64,
-        "label_map_version": "v1",
+        "label_map_version": "v2",
         "signal_version": "1111111111111111",
     }
 
     assert audit_module._attach_polarity_label(finding, label) is True
     assert finding.meta["polarity"] == "refine"
     assert finding.meta["polarity_signal_version"] == "1111111111111111"
+
+
+def test_a_neutral_label_never_renders_or_implies_unrelatedness() -> None:
+    finding = _proximity_finding(signal_version="1111111111111111")
+    label = {
+        "label": "neutral",
+        "score": 0.8,
+        "method": "nli",
+        "model_digest": "d" * 64,
+        "label_map_version": "v2",
+        "signal_version": "1111111111111111",
+    }
+
+    assert audit_module._attach_polarity_label(finding, label) is True
+    assert finding.meta["polarity"] == "neutral"
+    assert "likely NEUTRAL" in finding.detail
+    assert "unrelated" not in finding.detail.lower()
 
 
 # ---- 3.4 asserted pairs ----
@@ -954,7 +1135,7 @@ def test_the_declared_heuristic_failures_are_real() -> None:
     The precision table in tasks.md 5.1 is derived from these flags, so without
     this pin the table could drift into fiction while staying green.
     """
-    for pair in claims.VERIFICATION_FIXTURES["stance-v1"]:
+    for pair in claims.VERIFICATION_FIXTURES["stance-v2-multilingual"]:
         verdict = claims._heuristic_polarity(pair.claim_a, pair.claim_b)
         assert (verdict.label != pair.expected) == pair.heuristic_fails, (
             pair.claim_a,
@@ -968,7 +1149,7 @@ def test_an_admitted_verifier_answers_every_fixture(tmp_path, monkeypatch) -> No
     """Admission's own bar, and the table's upper arm: every pair or nothing."""
     _admit(tmp_path, monkeypatch, _oracle_predict())
     assert claims.verifier_admission().admitted is True
-    for pair in claims.VERIFICATION_FIXTURES["stance-v1"]:
+    for pair in claims.VERIFICATION_FIXTURES["stance-v2-multilingual"]:
         result = claims.verifier_polarity(pair.claim_a, pair.claim_b)
         assert result is not None
         assert result.label == pair.expected

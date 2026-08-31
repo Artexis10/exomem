@@ -229,6 +229,7 @@ markers = [
     # and the HF model cache). Excluded from the lean matrix; run in the dedicated
     # `retrieval-eval` CI job via `pytest -m embeddings`.
     "embeddings: loads live vector models; run only in the retrieval-eval job",
+    "nli: loads the exact frozen stance-verifier model; run only in its dedicated job",
     "governance_timing_release: exact-capacity actual-wire governance timing characterization",
 ]
 

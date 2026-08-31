@@ -1271,6 +1271,8 @@ class FileWatcher:
     def stop(self) -> None:
         self._stop.set()
         self._wake.set()
+        self._seed_published.set()
+        self._seed_complete.set()
         if self._observer is not None:
             try:
                 self._observer.stop()
