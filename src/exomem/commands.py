@@ -121,6 +121,9 @@ from .command_surface import (
     type_tag as _type_tag,  # noqa: F401 - re-exported for server.py
 )
 from .entity_types import EntityTypeId
+from .governance import (
+    consolidation_verification_coverage as consolidation_verification_coverage_module,
+)
 from .governance import egress as egress_module
 from .governance import operations as governance_operations
 from .governance import policy as governance_policy_module
@@ -8810,6 +8813,10 @@ validate_product_registry()
 egress_module.assert_alias_projectors_registered(
     {command.name: command for command in PRODUCT_COMMANDS},
     {command.name: command for command in COMMANDS},
+)
+consolidation_verification_coverage_module.build_coverage_inventory(
+    {command.name: command for command in COMMANDS},
+    product_registry={command.name: command for command in PRODUCT_COMMANDS},
 )
 
 
