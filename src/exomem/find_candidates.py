@@ -159,6 +159,7 @@ def collect_candidates(
     lexical_repair: bool = True,
     eligible_paths: set[str] | None = None,
     capture_trace: bool = False,
+    query_vector_provider: Callable[[], Any] | None = None,
 ) -> CandidateBundle:
     """Collect vector/BM25/keyword/CLIP/graph/temporal lanes and fuse them."""
     from . import bm25, embeddings, epistemic_graph, fusion, lexstore, readiness, runtime_resources
@@ -215,7 +216,11 @@ def collect_candidates(
                 with _span(timings, "vector.index"):
                     idx = embeddings.get_embedding_index(vault_root)
                 with _span(timings, "vector.embed"):
-                    query_vec = embeddings.embed_texts([query], is_query=True)[0]
+                    query_vec = (
+                        query_vector_provider()
+                        if query_vector_provider is not None
+                        else embeddings.embed_texts([query], is_query=True)[0]
+                    )
                 with _span(timings, "vector.search"):
                     chunk_hits = idx.search(
                         query_vec,
