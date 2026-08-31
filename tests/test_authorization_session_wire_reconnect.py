@@ -14,7 +14,7 @@ import pytest
 from record_fixtures import copy_dataset_fixture
 from starlette.testclient import TestClient
 
-from exomem import commands, metrics, server, video_frames, writer_lease
+from exomem import commands, metrics, server, server_runtime, video_frames, writer_lease
 from exomem.governance import (
     authorization_custody,
     authorization_serving_membership,
@@ -331,6 +331,11 @@ def _configure_v4_authority(
 
 def _build_replica(vault: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(server, "load_dotenv", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        server_runtime.LocalRuntimeActivation,
+        "start",
+        lambda self: None,
+    )
     monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
     monkeypatch.setenv(
         "EXOMEM_WRITER_LEASE_STATE_DIR", str(vault.parent / "writer-lease-state")
@@ -791,6 +796,15 @@ def test_stateless_mcp_grant_is_bound_across_serving_content_route_families(
     replica_b = _build_replica(vault, monkeypatch)
     collection = COLLECTION_PATH
     routes = (
+        # Exercise the binary boundary before the negative credential probes in
+        # the text and Records routes. Those probes prove refusal behavior; they
+        # are not a precondition for the later positive route assertions.
+        (
+            "read_media",
+            "read_media",
+            {"path": VIDEO_PATH, "max_frames": 1},
+            '"duration_sec":42.0',
+        ),
         (
             "read_memory",
             "read_memory",
@@ -823,12 +837,6 @@ def test_stateless_mcp_grant_is_bound_across_serving_content_route_families(
                 "limit": 100,
             },
             DATASET_MARKER,
-        ),
-        (
-            "read_media",
-            "read_media",
-            {"path": VIDEO_PATH, "max_frames": 1},
-            '"duration_sec":42.0',
         ),
     )
 
