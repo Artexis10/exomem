@@ -90,6 +90,7 @@ __all__ = [
     "build_transport_verification_plan",
     "issue_exact_destination_binding",
     "issue_transport_probe_route",
+    "transport_verification_basis_fingerprint",
     "transport_probe_route_scope",
 ]
 
@@ -415,6 +416,15 @@ def issue_exact_destination_binding(
         checked_journal,
         _EXACT_DESTINATION_SEAL,
     )
+
+
+def transport_verification_basis_fingerprint(
+    basis: Mapping[str, object],
+) -> str:
+    """Digest the closed pre-stop facts before the stopped-cell binding exists."""
+
+    checked = _basis_from_input(basis)
+    return _framed_digest(_BASIS_DOMAIN, _basis_input_value(checked))
 
 
 def _checked_basis(
