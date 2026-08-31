@@ -16,6 +16,10 @@ Bootstrap SHALL expose `record` as a beginner-facing and product-front-door acti
 - **WHEN** a client asks where a future goal, priority, commitment, or candidate task belongs
 - **THEN** bootstrap identifies it as Planning intent and explains that Records can later supply observed progress evidence without mirroring the plan
 
+#### Scenario: Accepted software contract stays in the repository
+- **WHEN** future software intent is promoted into an OpenSpec change
+- **THEN** bootstrap tells the agent to keep only a thin `{kind, ref, label?}` Planning pointer and the item's single authored health field while phase, requirements, tasks, tests, code, and execution state remain in the repository
+
 #### Scenario: Companion execution artifacts stay with their declared owner
 - **WHEN** future intent is promoted into an artifact whose type a resolved workflow contract assigns to a companion tool
 - **THEN** bootstrap tells the agent to keep only an opaque Planning execution reference and connective context while the declared artifact contents and execution state remain with the companion

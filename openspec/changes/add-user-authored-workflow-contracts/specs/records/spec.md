@@ -16,6 +16,10 @@ A Record collection manifest MAY store one or more opaque Planning references pa
 - **WHEN** a join names a record field the schema does not declare, has more than four pairs, or has an empty plan-side name
 - **THEN** manifest validation refuses before acceptance and names the offending pair
 
+#### Scenario: External software execution truth remains external
+- **WHEN** a software initiative links to an accepted OpenSpec change, git state, tests, or deployment result
+- **THEN** Records may preserve the observed outcome and Planning may preserve intent, while repository/OpenSpec artifacts remain execution truth
+
 #### Scenario: Declared companion execution truth remains external
 - **WHEN** an initiative links to an artifact whose type the resolved workflow contract assigns to a companion
 - **THEN** Records may preserve an observed outcome and Planning may preserve intent, while the companion artifact remains opaque external execution truth

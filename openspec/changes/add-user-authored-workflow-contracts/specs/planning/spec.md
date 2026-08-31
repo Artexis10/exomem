@@ -40,6 +40,10 @@ A Planning item MAY carry at most 16 `execution` mappings. Each mapping SHALL co
 - **WHEN** a Planning initiative is accepted into an artifact whose type the resolved workflow contract assigns to a companion
 - **THEN** the item retains planning identity, hierarchy, horizon, top-level authored health, and the opaque companion pointer without copying artifact contents or remote phase
 
+#### Scenario: Promoted software work stays visible but thin
+- **WHEN** a Planning initiative is accepted into an OpenSpec change
+- **THEN** the item retains planning identity, hierarchy, horizon, top-level authored health, and the OpenSpec pointer without copying the change artifacts or remote phase
+
 #### Scenario: Existing OpenSpec pointer remains valid data
 - **WHEN** an existing item carries `kind: openspec`
 - **THEN** validation continues to accept the pointer, but its kind alone neither selects a workflow contract nor makes OpenSpec the product-wide execution authority
