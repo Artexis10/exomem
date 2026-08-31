@@ -386,6 +386,27 @@ the task is ticked, not estimated.
   compares the whole envelope each way. The vocabulary pin also checks the
   negative: neither carrier contains any name from
   `registered_families()`, so neither ships a table that can go stale.
-- [ ] 5.2 `openspec validate --all --strict` green; lean scoped suites green;
+- [x] 5.2 `openspec validate --all --strict` green; lean scoped suites green;
   full-suite at the completion boundary with failures attributed against the
   origin/main baseline.
+
+  Evidence (2026-08-31). `openspec validate --all --strict` validated 168
+  artifacts with zero failures. The affected envelope, attention, bootstrap,
+  review-state, advisory, plugin and scaffold scope passed with `281 passed, 4
+  skipped`; the skips require the optional embedding runtime. The repository
+  privacy inventory was also clean (`3455 files, 3523 text payloads`).
+
+  The completion-boundary comparison used exact `origin/main`
+  `e3e8ed48cd67437bbe9e03cea83797d82cd78406`, Python 3.14.6,
+  `EXOMEM_DISABLE_EMBEDDINGS=1`, `PYTHONPATH=<checkout>/src`, and separate
+  `/dev/shm` basetemps. Main completed 15,048 tests: 14,549 passed, 394 skipped,
+  88 failed and 17 errored in 1,758.877 seconds. This branch completed 15,131
+  tests: 14,634 passed, 394 skipped, 87 failed and 16 errored in 1,812.347
+  seconds.
+
+  JUnit identity comparison found 98 red tests common to both runs, seven
+  main-only reds, five branch-only errors, and no failure/error kind changes.
+  Every branch-only error was the suite's machine-global state-root interference
+  guard in unrelated epistemic replay/projector tests. Re-running those exact
+  five node ids on the otherwise quiescent branch passed (`5 passed in 6.09s`),
+  so the full comparison adds no attributable failure.
