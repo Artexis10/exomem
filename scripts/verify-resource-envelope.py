@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import secrets
 import shutil
 import subprocess
 import sys
@@ -135,6 +136,11 @@ def _isolated_sample_environment(sample_vault: Path, state_root: Path) -> dict[s
         "EXOMEM_WRITER_LEASE_PREFERRED": "0",
         "EXOMEM_WRITER_LEASE_STATE_DIR": str((state_root / "writer-lease").resolve()),
         "EXOMEM_WIDE_MUTATION_BOUNDARY": "0",
+        # Keep the active proof loopback-only without borrowing live OAuth
+        # credentials. A private REST key is the server's explicit local-HTTP
+        # mode; setting only a JWT signing key selects remote OAuth and then
+        # correctly refuses the otherwise incomplete GitHub configuration.
+        "EXOMEM_REST_API_KEY": secrets.token_urlsafe(32),
     }
     if pythonpath := os.environ.get("PYTHONPATH"):
         environment["PYTHONPATH"] = os.pathsep.join(

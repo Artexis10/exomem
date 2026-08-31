@@ -347,6 +347,12 @@ def test_media_child_defers_model_busy_without_publishing_a_failure(
         def recover_interrupted(self) -> None:
             events.append(("recover", None))
 
+        def recover_compute_runtime_failures(self) -> int:
+            return 0
+
+        def blocked_compute_presentations_needing_convergence(self, *, limit: int):
+            return []
+
         def set_worker(self, *_args) -> None:
             events.append(("worker", None))
 
@@ -670,6 +676,7 @@ def test_active_cgroup_environment_replaces_ambient_live_state(
     monkeypatch.setenv("EXOMEM_HOSTED_CELL", "1")
     monkeypatch.setenv("EXOMEM_WRITER_LEASE_URL", "https://live.example/lease")
     monkeypatch.setenv("EXOMEM_REST_API_KEY", "live-secret")
+    monkeypatch.setenv("EXOMEM_JWT_SIGNING_KEY", "live-jwt-secret")
     monkeypatch.setenv("EXOMEM_BASE_URL", "https://live.example")
     sample_state = tmp_path / "active-state"
 
@@ -679,8 +686,10 @@ def test_active_cgroup_environment_replaces_ambient_live_state(
     assert environment["EXOMEM_STATE_ROOT"] == str(sample_state.resolve())
     assert environment["EXOMEM_HOSTED_CELL"] == "0"
     assert environment["HOME"] == str((sample_state / "home").resolve())
+    assert len(environment["EXOMEM_REST_API_KEY"]) >= 32
+    assert environment["EXOMEM_REST_API_KEY"] != "live-secret"
     assert "EXOMEM_WRITER_LEASE_URL" not in environment
-    assert "EXOMEM_REST_API_KEY" not in environment
+    assert "EXOMEM_JWT_SIGNING_KEY" not in environment
     assert "EXOMEM_BASE_URL" not in environment
 
     supervisor = verifier._transient_supervisor_command(
@@ -695,7 +704,10 @@ def test_active_cgroup_environment_replaces_ambient_live_state(
         "-i",
         *[f"{name}={value}" for name, value in sorted(environment.items())],
     ]
-    assert not any("live.example" in value or "live-secret" in value for value in supervisor)
+    assert not any(
+        "live.example" in value or "live-secret" in value or "live-jwt-secret" in value
+        for value in supervisor
+    )
 
 
 def test_active_cleanup_times_out_then_kills_without_a_real_manager(
