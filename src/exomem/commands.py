@@ -35,7 +35,7 @@ from typing import Annotated, Any, Literal, NotRequired
 from fastmcp.tools import ToolResult
 from fastmcp.utilities.types import Image as FastMCPImage
 from mcp.types import TextContent
-from pydantic import Field, StrictInt, StringConstraints, WithJsonSchema
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, StringConstraints, WithJsonSchema
 from typing_extensions import TypedDict
 
 from . import add as add_module
@@ -158,10 +158,14 @@ _RerankCandidateLimit = Annotated[
         ),
     ),
 ]
-class _WorkflowContext(TypedDict, total=False):
-    project: str | None
-    domain: str | None
-    activity: str | None
+class _WorkflowContext(BaseModel):
+    """Exact public resolver context, preserving omitted versus null fields."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    project: str | None = None
+    domain: str | None = None
+    activity: str | None = None
 
 
 _WorkflowContextArgument = Annotated[
@@ -6974,6 +6978,8 @@ def op_schema_memory(
     operation = operation.strip().lower()
     subject = subject.strip().lower()
     if subject == "workflow-contracts":
+        if isinstance(context, _WorkflowContext):
+            context = context.model_dump(exclude_unset=True)
         return _workflow_contract_schema_operation(
             vault_root,
             operation=operation,

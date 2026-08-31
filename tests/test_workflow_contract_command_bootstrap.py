@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
+from starlette.testclient import TestClient
 
 
 def _proposal(**overrides: object) -> dict[str, object]:
@@ -235,3 +237,69 @@ def test_context_is_exact_at_runtime_and_in_the_published_schema() -> None:
             "activity": {"anyOf": [{"type": "string"}, {"type": "null"}]},
         },
     }
+
+
+def test_live_mcp_rejects_unknown_context_keys_without_dropping_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from conftest import initialize_vault_state_offline
+    from fastmcp.exceptions import ValidationError
+
+    from exomem import server as server_module
+    from exomem.init import init_vault
+
+    vault = tmp_path / "vault"
+    init_vault(vault)
+    initialize_vault_state_offline(vault, source="workflow context wire test")
+    monkeypatch.setattr(server_module, "load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    monkeypatch.setenv("EXOMEM_DISABLE_RELEVANCE_CHECK", "1")
+    monkeypatch.setenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", "1")
+    monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
+    monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "python")
+    monkeypatch.setenv("EXOMEM_DISABLE_FILE_WATCHER", "1")
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-lease"))
+    monkeypatch.setenv("EXOMEM_REST_API_KEY", "sekret")
+    mcp = server_module.build_server(require_auth=False)
+
+    invalid_request = {
+        "subject": "workflow-contracts",
+        "operation": "resolve",
+        "context": {"unexpected": "value"},
+    }
+    with pytest.raises(ValidationError, match="context.unexpected"):
+        asyncio.run(
+            mcp.call_tool(
+                "schema_memory",
+                invalid_request,
+                run_middleware=True,
+            )
+        )
+    valid = asyncio.run(
+        mcp.call_tool(
+            "schema_memory",
+            {
+                "subject": "workflow-contracts",
+                "operation": "resolve",
+                "context": {"domain": None, "activity": "implementation"},
+            },
+            run_middleware=True,
+        )
+    )
+
+    assert valid.structured_content["resolved"] is True
+    assert valid.structured_content["context"] == {
+        "project": ["unknown", None],
+        "domain": ["absent", None],
+        "activity": ["known", "implementation"],
+    }
+
+    direct = _schema(vault, "resolve", context=invalid_request["context"])
+    rest = TestClient(mcp.http_app()).post(
+        "/api/schema_memory",
+        json=invalid_request,
+        headers={"Authorization": "Bearer sekret"},
+    )
+    assert rest.status_code == 200, rest.text
+    assert rest.json() == {"success": True, "data": direct}
