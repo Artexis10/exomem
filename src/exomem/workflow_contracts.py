@@ -560,6 +560,37 @@ def inspect_contract(vault_root: Path, name: str) -> dict[str, Any]:
     }
 
 
+def validate_saved_contract(vault_root: Path, name: str) -> dict[str, Any]:
+    """Validate one released saved contract without routing through inspection."""
+    if migration_required(vault_root) is None:
+        return {
+            "valid": False,
+            "findings": [{"code": "WORKFLOW_CONTRACT_MIGRATION_INDETERMINATE"}],
+        }
+    contracts, findings, limited = _scan(vault_root)
+    if limited:
+        return {"valid": False, "findings": [{"code": "WORKFLOW_CONTRACT_SCAN_LIMIT"}]}
+    matching_findings = [item for item in findings if item.get("key") == name]
+    if matching_findings:
+        return {"valid": False, "findings": matching_findings[:32]}
+    matches = [item for item in contracts if item[0].key == name]
+    if len(matches) != 1:
+        code = "WORKFLOW_CONTRACT_DUPLICATE_IDENTITY" if len(matches) > 1 else "WORKFLOW_CONTRACT_NOT_FOUND"
+        return {"valid": False, "findings": [{"code": code}]}
+    if findings:
+        return {"valid": False, "findings": findings[:32]}
+    contract, path, source = matches[0]
+    return {
+        "valid": True,
+        "findings": [],
+        "proposal": contract.as_dict(),
+        "fingerprint": contract.fingerprint,
+        "path": path.relative_to(vault_root).as_posix(),
+        "content_hash": source_hash(source),
+        "presentation_drift": render_presentation(contract) not in _body(source),
+    }
+
+
 def inventory_contracts(vault_root: Path) -> dict[str, Any]:
     migration = migration_required(vault_root)
     contracts, findings, limited = _scan(vault_root)

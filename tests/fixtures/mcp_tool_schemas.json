@@ -5629,7 +5629,7 @@
       "additionalProperties": false,
       "properties": {
         "operation": {
-          "description": "infer, validate, diff, save-entity-types, or a workflow-contract operation.",
+          "description": "For `workflow-contracts`, exactly one of: inventory (no workflow fields); inspect (name); validate (exactly one of name or proposal); resolve (context plus at most one of name or proposal); preview (proposal, optional name); save (proposal and why, optional name plus expected_hash for updates); or refresh (name, expected_hash, and why). Other subjects retain their existing operations.",
           "type": "string"
         },
         "name": {
@@ -5642,7 +5642,7 @@
             }
           ],
           "default": null,
-          "description": "Lowercase contract slug; required only for `subject=\"contract\"`."
+          "description": "A saved workflow key for inspect/refresh, validate as an alternative to proposal, resolve (or `@standalone`), and optional preview/save update."
         },
         "subject": {
           "default": "contract",
@@ -5675,7 +5675,7 @@
         },
         "save": {
           "default": false,
-          "description": "Persist an inferred proposal. Default false.",
+          "description": "Legacy inference flag. Ignored when false for workflow contracts and refused when true; workflow writes use operation=`save`.",
           "type": "boolean"
         },
         "expected_hash": {
@@ -5688,7 +5688,7 @@
             }
           ],
           "default": null,
-          "description": "Required current hash when overwriting a saved contract."
+          "description": "Required for workflow save updates and refresh; rejected by every other workflow operation."
         },
         "strict": {
           "default": false,
@@ -5718,7 +5718,7 @@
             }
           ],
           "default": null,
-          "description": "Reviewed semantic-language, relation, traversal-profile, or workflow-contract proposal."
+          "description": "Required for workflow preview/save; validate and resolve accept it as the exact alternative to `name`."
         },
         "why": {
           "anyOf": [
@@ -5730,7 +5730,7 @@
             }
           ],
           "default": null,
-          "description": "Required audit reason for workflow and entity-type saves."
+          "description": "Required audit reason for workflow save/refresh and entity-type saves."
         },
         "include_model_suggestions": {
           "default": false,
@@ -5740,15 +5740,38 @@
         "context": {
           "anyOf": [
             {
-              "additionalProperties": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
+              "additionalProperties": false,
+              "properties": {
+                "project": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "domain": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "activity": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
               },
               "type": "object"
             },
@@ -5756,7 +5779,8 @@
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "description": "Exact optional workflow resolve mapping. Its only keys are project,\ndomain, and activity; omit a key for unknown or set it null for known absent."
         },
         "response_detail": {
           "default": "compact",

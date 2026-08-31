@@ -132,7 +132,7 @@ def test_bootstrap_is_bounded_sorted_and_omits_route_when_schema_is_unavailable(
     assert full["default"][0]["key"] == "default"
     assert [item["key"] for item in full["scoped"]] == [f"scope-{number:02d}" for number in range(8)]
     assert full["total"] == 11
-    assert full["truncated"] is False
+    assert full["truncated"] is True
 
     descriptor = ActiveSurfaceDescriptor(
         surface="test", profile="reduced", tier2_enabled=False, product_commands=("bootstrap",)
@@ -142,6 +142,34 @@ def test_bootstrap_is_bounded_sorted_and_omits_route_when_schema_is_unavailable(
     assert reduced["resolution_available"] is False
     assert "route" not in reduced
     assert reduced["status"] == "workflow_resolution_unavailable"
+
+
+def test_compact_reduced_bootstrap_reports_honest_fallback_or_unavailability(tmp_path: Path) -> None:
+    from exomem import commands, workflow_contracts
+    from exomem.capabilities import ActiveSurfaceDescriptor, active_surface
+    from exomem.governance import egress
+
+    descriptor = ActiveSurfaceDescriptor(
+        surface="test", profile="reduced", tier2_enabled=False, product_commands=("bootstrap",)
+    )
+    with active_surface(descriptor):
+        empty = commands.op_bootstrap(tmp_path, profile="compact")["workflow_contracts"]
+    assert empty["resolution_available"] is False
+    assert empty["proactive_routing_available"] is False
+    assert empty["status"] == "builtin_standalone"
+    assert "route" not in empty
+
+    workflow_contracts.contract_directory(tmp_path).mkdir(parents=True)
+    (workflow_contracts.contract_directory(tmp_path) / "bad.md").write_text(
+        "---\ntype: workflow-contract\nkey: bad\n---\n", encoding="utf-8"
+    )
+    egress.clear_decision_memo()
+    with active_surface(descriptor):
+        unavailable = commands.op_bootstrap(tmp_path, profile="compact")["workflow_contracts"]
+    assert unavailable["resolution_available"] is False
+    assert unavailable["proactive_routing_available"] is False
+    assert unavailable["status"] == "workflow_resolution_unavailable"
+    assert "route" not in unavailable
 
 
 def test_bootstrap_never_invents_a_total_after_an_incomplete_contract_scan(
@@ -157,5 +185,53 @@ def test_bootstrap_never_invents_a_total_after_an_incomplete_contract_scan(
 
     projection = commands.op_bootstrap(tmp_path, profile="compact")["workflow_contracts"]
 
-    assert projection["status"] == "WORKFLOW_CONTRACT_SCAN_LIMIT"
+    assert projection["status"] == "workflow_resolution_unavailable"
+    assert projection["findings"] == [{"code": "WORKFLOW_CONTRACT_SCAN_LIMIT", "detail": "scan bound exceeded"}]
     assert {"default", "scoped", "total", "truncated"}.isdisjoint(projection)
+    assert projection["proactive_routing_available"] is False
+
+
+def test_validate_uses_argument_presence_and_returns_repair_findings_for_saved_malformed_file(
+    tmp_path: Path,
+) -> None:
+    from exomem import workflow_contracts
+
+    mixed = _schema(
+        tmp_path, "validate", name="scope-00", proposal={}
+    )
+    assert mixed == {"resolved": False, "code": "WORKFLOW_CONTRACT_INVALID_ARGUMENTS"}
+
+    root = workflow_contracts.contract_directory(tmp_path)
+    root.mkdir(parents=True)
+    (root / "broken.md").write_text(
+        "---\ntype: workflow-contract\nkey: broken\n---\n", encoding="utf-8"
+    )
+    repaired = _schema(tmp_path, "validate", name="broken")
+    assert repaired["subject"] == "workflow-contracts"
+    assert repaired["valid"] is False
+    assert repaired["findings"]
+    assert "resolved" not in repaired
+
+
+def test_context_is_exact_at_runtime_and_in_the_published_schema() -> None:
+    import json
+
+    invalid = _schema(Path("/tmp"), "resolve", context={"unexpected": "value"})
+    assert invalid == {
+        "resolved": False,
+        "code": "WORKFLOW_CONTRACT_INVALID_ARGUMENTS",
+    }
+
+    schema = json.loads(
+        Path("tests/fixtures/mcp_tool_schemas.json").read_text(encoding="utf-8")
+    )["schema_memory"]["inputSchema"]["properties"]["context"]
+    context_schema = next(item for item in schema["anyOf"] if item.get("type") == "object")
+    assert context_schema == {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "project": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+            "domain": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+            "activity": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+        },
+    }

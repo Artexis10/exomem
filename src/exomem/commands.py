@@ -35,7 +35,7 @@ from typing import Annotated, Any, Literal, NotRequired
 from fastmcp.tools import ToolResult
 from fastmcp.utilities.types import Image as FastMCPImage
 from mcp.types import TextContent
-from pydantic import Field, StrictInt, StringConstraints
+from pydantic import Field, StrictInt, StringConstraints, WithJsonSchema
 from typing_extensions import TypedDict
 
 from . import add as add_module
@@ -156,6 +156,31 @@ _RerankCandidateLimit = Annotated[
             "Maximum fused candidates passed to the reranker; strict integer "
             "from the effective result limit through 300."
         ),
+    ),
+]
+class _WorkflowContext(TypedDict, total=False):
+    project: str | None
+    domain: str | None
+    activity: str | None
+
+
+_WorkflowContextArgument = Annotated[
+    _WorkflowContext | None,
+    WithJsonSchema(
+        {
+            "anyOf": [
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "project": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                        "domain": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                        "activity": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                    },
+                },
+                {"type": "null"},
+            ]
+        }
     ),
 ]
 # Keep commands.py as the public command-surface facade for server, CLI, docs,
@@ -398,19 +423,39 @@ def op_bootstrap(
         key: workflow_portable[key] for key in ("family", "schema_version", "digest")
     }
     workflow_complete = "total" in workflow_inventory
-    workflow_status = workflow_inventory.get("status") or workflow_inventory.get("code")
+    workflow_status = workflow_inventory.get("status")
+    workflow_failure_code = workflow_inventory.get("code")
     workflow_findings = workflow_inventory.get("findings", [])
+    workflow_unavailable = (
+        not workflow_complete
+        or workflow_status is not None
+        or workflow_failure_code is not None
+        or bool(workflow_findings)
+    )
     workflow_route = {
         "tool": "schema_memory",
         "subject": "workflow-contracts",
         "operation": "resolve",
     }
     workflow_callable = "schema_memory" in active_product_names
+    if workflow_callable:
+        if workflow_status is not None:
+            workflow_public_status = workflow_status
+        elif workflow_unavailable:
+            workflow_public_status = "workflow_resolution_unavailable"
+        else:
+            workflow_public_status = None
+    else:
+        workflow_public_status = (
+            "builtin_standalone"
+            if workflow_complete and not workflow_unavailable and not workflow_summaries
+            else "workflow_resolution_unavailable"
+        )
     workflow_projection_base = {
         "invariants": workflow_portable["invariants"],
         "builtin_fallback": workflow_portable["builtin_fallback"],
         "resolution_available": workflow_callable,
-        "proactive_routing_available": bool(workflow_callable and workflow_status is None),
+        "proactive_routing_available": bool(workflow_callable and not workflow_unavailable),
     }
     if workflow_complete:
         workflow_projection_base.update(
@@ -418,7 +463,11 @@ def op_bootstrap(
                 "default": workflow_defaults[:1],
                 "scoped": workflow_scoped[:8],
                 "total": workflow_inventory["total"],
-                "truncated": bool(workflow_inventory["truncated"]),
+                "truncated": bool(
+                    workflow_inventory["truncated"]
+                    or len(workflow_defaults) > 1
+                    or len(workflow_scoped) > 8
+                ),
             }
         )
     if profile == "compact":
@@ -426,7 +475,7 @@ def op_bootstrap(
             **workflow_projection_base,
             "portable": workflow_portable_identity,
             **({"route": workflow_route} if workflow_callable else {}),
-            **({"status": workflow_status} if workflow_status is not None else {}),
+            **({"status": workflow_public_status} if workflow_public_status is not None else {}),
             **({"findings": workflow_findings} if workflow_findings else {}),
         }
         selected_packs = {**selected_packs, "workflow_contract": workflow_portable_identity}
@@ -435,18 +484,14 @@ def op_bootstrap(
             **workflow_projection_base,
             "portable": workflow_portable,
             "route": workflow_route,
-            **({"status": workflow_status} if workflow_status is not None else {}),
+            **({"status": workflow_public_status} if workflow_public_status is not None else {}),
             "findings": workflow_findings,
         }
     else:
         workflow_contract_projection = {
             **workflow_projection_base,
             "portable": workflow_portable,
-            "status": (
-                "builtin_standalone"
-                if not workflow_summaries and not workflow_findings and workflow_status is None
-                else "workflow_resolution_unavailable"
-            ),
+            "status": workflow_public_status,
         }
     entity_type_registry = entity_types_module.load_entity_types(vault_root)
     source_taxonomy_projection = _source_taxonomy_projection(vault_root, profile=profile)
@@ -6887,7 +6932,7 @@ def op_schema_memory(
     proposal: dict | None = None,
     why: str | None = None,
     include_model_suggestions: bool = False,
-    context: Mapping[str, str | None] | None = None,
+    context: _WorkflowContextArgument = None,
 ) -> dict:
     """Infer, validate, diff, or save governed memory schemas and workflow contracts.
 
@@ -6897,20 +6942,31 @@ def op_schema_memory(
     current content hash.
 
     Args:
-        operation: infer, validate, diff, save-entity-types, or a workflow-contract operation.
-        name: Lowercase contract slug; required only for `subject="contract"`.
+        operation: For `workflow-contracts`, exactly one of: inventory (no workflow
+            fields); inspect (name); validate (exactly one of name or proposal);
+            resolve (context plus at most one of name or proposal); preview (proposal,
+            optional name); save (proposal and why, optional name plus expected_hash
+            for updates); or refresh (name, expected_hash, and why). Other subjects
+            retain their existing operations.
+        name: A saved workflow key for inspect/refresh, validate as an alternative to
+            proposal, resolve (or `@standalone`), and optional preview/save update.
         subject: `contract`, `categories`, `relations`, `traversal-profiles`, or
             `workflow-contracts`. Workflow contracts support inventory, inspect,
             validate, resolve, preview, save, and refresh with their exact argument matrix.
         project: Optional project scope for inference.
         page_type: Optional page-type scope for inference.
-        save: Persist an inferred proposal. Default false.
-        expected_hash: Required current hash when overwriting a saved contract.
+        save: Legacy inference flag. Ignored when false for workflow contracts and
+            refused when true; workflow writes use operation=`save`.
+        expected_hash: Required for workflow save updates and refresh; rejected by
+            every other workflow operation.
         strict: In validate mode, signal a failing CLI/CI outcome on findings.
         compare_to: In diff mode, compare to this saved contract instead of corpus reality.
-        proposal: Reviewed semantic-language, relation, traversal-profile, or workflow-contract proposal.
-        why: Required audit reason for workflow and entity-type saves.
+        proposal: Required for workflow preview/save; validate and resolve accept it
+            as the exact alternative to `name`.
+        why: Required audit reason for workflow save/refresh and entity-type saves.
         include_model_suggestions: Request response-only optional relation suggestions.
+        context: Exact optional workflow resolve mapping. Its only keys are project,
+            domain, and activity; omit a key for unknown or set it null for known absent.
 
     Returns:
         A structured profile/proposal, validation report, contract diff, or workflow result.
@@ -7245,17 +7301,21 @@ def _workflow_contract_schema_operation(
                 **workflow_contracts_module.inspect_contract(vault_root, name),
             }
         if operation == "validate":
+            has_name = name is not None
+            has_proposal = proposal is not None
             if (
                 expected_hash is not None
                 or why is not None
                 or context is not None
-                or bool(name) == bool(proposal)
+                or has_name == has_proposal
                 or (name is not None and not saved_name(name))
             ):
                 return invalid
-            if name:
-                inspected = workflow_contracts_module.inspect_contract(vault_root, name)
-                return {"subject": "workflow-contracts", "valid": True, "findings": [], **inspected}
+            if has_name:
+                return {
+                    "subject": "workflow-contracts",
+                    **workflow_contracts_module.validate_saved_contract(vault_root, name),
+                }
             try:
                 contract = family.parser(proposal or {})
             except workflow_contracts_module.WorkflowContractError as error:
