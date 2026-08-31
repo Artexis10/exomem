@@ -104,14 +104,6 @@ def test_agent_protocol_is_code_owned_and_shared_by_builtin_saved_ephemeral_and_
     assert ephemeral["agent_protocol"] == protocol
     assert bootstrap["agent_protocol"] == {
         "version": 1,
-        "active_prominence": "balanced",
-        "effective_capture": {
-            "explicit": True,
-            "proactive": {
-                "durable_intent": "durable-intent",
-                "observed_outcomes": "sufficiently-identified-outcome",
-            },
-        },
         "outcomes": {
             "planning_reference": protocol["outcomes"]["planning_reference"],
             "transition": protocol["outcomes"]["transition"],
@@ -247,16 +239,7 @@ def test_bootstrap_projects_the_active_prominence_capture_cap_without_transition
     assert effective["observed_outcomes"]["proactive_permitted"] is proactive_permitted
     assert "record then transition" not in json.dumps(payload).lower()
     capture = payload["engagement"]["contract"]["capture"].lower()
-    assert payload["workflow_contracts"]["agent_protocol"]["active_prominence"] == level
-    compact_effective = payload["workflow_contracts"]["agent_protocol"]["effective_capture"]
-    expected_proactive = {
-        "durable_intent": "durable-intent" if proactive_permitted else False,
-        "observed_outcomes": (
-            "sufficiently-identified-outcome" if proactive_permitted else False
-        ),
-    }
-    assert compact_effective["explicit"] is True
-    assert compact_effective["proactive"] == expected_proactive
+    assert "effective_capture" not in payload["workflow_contracts"]["agent_protocol"]
     if proactive_permitted:
         assert "transition only on explicit user intent" in capture
     else:
@@ -323,17 +306,8 @@ def test_public_resolve_and_compact_bootstrap_project_active_effective_capture(
 
     assert workflow_contracts.resolve_contracts(tmp_path, {"project": "delivery"}) == core_before
     compact = commands.op_bootstrap(tmp_path, profile="compact")["workflow_contracts"]
-    effective = prominence.effective_capture(compact["builtin_fallback"]["capture"], level)
     assert compact["agent_protocol"] == {
         "version": 1,
-        "active_prominence": level,
-        "effective_capture": {
-            "explicit": True,
-            "proactive": {
-                kind: (value["proactive_requires"][-1] if value["proactive_permitted"] else False)
-                for kind, value in effective.items()
-            },
-        },
         "outcomes": {
             "planning_reference": {
                 "unambiguous": "link-opaque",
@@ -348,3 +322,87 @@ def test_public_resolve_and_compact_bootstrap_project_active_effective_capture(
         },
     }
     assert "record then transition" not in json.dumps(compact).lower()
+
+
+@pytest.mark.parametrize("level", ("off", "light", "balanced", "maximal"))
+@pytest.mark.parametrize(
+    "inventory_case",
+    ("empty", "default", "scoped-and-default", "migration-required", "invalid"),
+)
+def test_bootstrap_keeps_capture_as_a_gate_until_workflow_resolution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    level: str,
+    inventory_case: str,
+) -> None:
+    from exomem import commands, workflow_contracts
+    from exomem.init import init_vault
+
+    monkeypatch.setenv("EXOMEM_PROMINENCE", level)
+    init_vault(tmp_path)
+    initialize_vault_state_offline(tmp_path, source="workflow bootstrap capture gate")
+    if inventory_case == "default":
+        workflow_contracts.save_contract(
+            tmp_path,
+            workflow_contracts.parse_proposal(
+                _proposal(
+                    key="default-capture",
+                    contract_id="a2df7e34-b1c0-4dd8-8a5b-3b3db9b9f79f",
+                    scope={"projects": [], "domains": [], "activities": []},
+                )
+            ),
+            why="reviewed default",
+        )
+    elif inventory_case == "scoped-and-default":
+        workflow_contracts.save_contract(
+            tmp_path,
+            workflow_contracts.parse_proposal(
+                _proposal(
+                    key="default-capture",
+                    contract_id="a2df7e34-b1c0-4dd8-8a5b-3b3db9b9f79f",
+                    scope={"projects": [], "domains": [], "activities": []},
+                )
+            ),
+            why="reviewed default",
+        )
+        workflow_contracts.save_contract(
+            tmp_path,
+            workflow_contracts.parse_proposal(
+                _proposal(
+                    key="scoped-capture",
+                    contract_id="b2df7e34-b1c0-4dd8-8a5b-3b3db9b9f79f",
+                    title="Scoped Capture",
+                )
+            ),
+            why="reviewed scoped policy",
+        )
+    elif inventory_case == "migration-required":
+        workflow_contracts.migration_marker_path(tmp_path).write_text(
+            "schema_version: 1\nreview_required: true\n", encoding="utf-8"
+        )
+    elif inventory_case == "invalid":
+        invalid = workflow_contracts.contract_directory(tmp_path) / "invalid.md"
+        invalid.parent.mkdir(parents=True, exist_ok=True)
+        invalid.write_text("not a workflow contract\n", encoding="utf-8")
+
+    workflow = commands.op_bootstrap(tmp_path, profile="compact")["workflow_contracts"]
+
+    assert workflow["invariants"] == workflow_contracts.portable_projection()["invariants"]
+    assert workflow["agent_protocol"] == {
+        "version": 1,
+        "outcomes": {
+            "planning_reference": {
+                "unambiguous": "link-opaque",
+                "absent": "record-without-plan",
+                "ambiguous": "no-link-surface-review",
+            },
+            "transition": {
+                "explicit-only": "explicit-user-transition-only",
+                "propose-after-outcome": "propose-review-only",
+                "automatic": "forbidden",
+            },
+        },
+    }
+    assert workflow.get("resolution_required", False) is (inventory_case != "empty")
+    assert "builtin_fallback_effective_capture" not in workflow
+    assert "effective_capture" not in workflow["agent_protocol"]

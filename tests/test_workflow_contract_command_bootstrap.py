@@ -159,7 +159,7 @@ def test_compact_reduced_bootstrap_reports_honest_fallback_or_unavailability(tmp
     with active_surface(descriptor):
         empty = commands.op_bootstrap(tmp_path, profile="compact")["workflow_contracts"]
     assert empty["resolution_available"] is False
-    assert empty["proactive_routing_available"] is False
+    assert "proactive_routing_available" not in empty
     assert empty["status"] == "builtin_standalone"
     assert "route" not in empty
 
@@ -171,7 +171,8 @@ def test_compact_reduced_bootstrap_reports_honest_fallback_or_unavailability(tmp
     with active_surface(descriptor):
         unavailable = commands.op_bootstrap(tmp_path, profile="compact")["workflow_contracts"]
     assert unavailable["resolution_available"] is False
-    assert unavailable["proactive_routing_available"] is False
+    assert "proactive_routing_available" not in unavailable
+    assert unavailable["resolution_required"] is True
     assert unavailable["status"] == "workflow_resolution_unavailable"
     assert "route" not in unavailable
 
@@ -192,7 +193,8 @@ def test_bootstrap_never_invents_a_total_after_an_incomplete_contract_scan(
     assert projection["status"] == "workflow_resolution_unavailable"
     assert projection["findings"] == [{"code": "WORKFLOW_CONTRACT_SCAN_LIMIT", "detail": "scan bound exceeded"}]
     assert {"default", "scoped", "total", "truncated"}.isdisjoint(projection)
-    assert projection["proactive_routing_available"] is False
+    assert "proactive_routing_available" not in projection
+    assert projection["resolution_required"] is True
 
 
 def test_validate_uses_argument_presence_and_returns_repair_findings_for_saved_malformed_file(
