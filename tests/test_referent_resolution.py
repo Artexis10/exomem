@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import time
 from pathlib import Path
 
 import pytest
@@ -64,6 +65,31 @@ def test_cue_fires_on_counted_plural_person_noun() -> None:
     assert cue.entity_type == "person"
     assert cue.expected_count == 2
     assert "coastal" in cue.descriptors
+    assert cue.qualifiers == ("coastal",)
+
+
+@pytest.mark.parametrize(
+    ("query", "qualifiers"),
+    [
+        ("You know my two Japanese friends — what did they say?", ("japanese",)),
+        ("my two verdant friends route timing", ("verdant",)),
+        ("which friend was Maribell", ()),
+        ("which crystal friend", ("crystal",)),
+    ],
+)
+def test_cue_qualifiers_are_the_pre_nominal_run(
+    query: str, qualifiers: tuple[str, ...]
+) -> None:
+    cue = _rr().detect_cue(query)
+    assert cue is not None
+    assert cue.qualifiers == qualifiers
+
+
+def test_cue_descriptors_and_qualifiers_are_deduplicated() -> None:
+    cue = _rr().detect_cue("my verdant verdant friend verdant route route")
+    assert cue is not None
+    assert cue.descriptors == ("verdant", "route")
+    assert cue.qualifiers == ("verdant",)
 
 
 def test_cue_count_outside_window_is_ignored() -> None:
@@ -206,15 +232,33 @@ def test_exact_name_resolves_alone() -> None:
 
 
 def test_fuzzy_name_needs_second_kind() -> None:
-    entity = _entity(title="Maribel", relationship="friend", tags=("coastal",))
+    entity = _entity(title="Maribel", relationship="friend")
     fuzzy_only = _resolve("which person was Maribell", entities=(entity,))
     assert fuzzy_only.resolved == ()
     assert {e.kind for e in fuzzy_only.candidates[0].evidence} == {"fuzzy_name"}
-    corroborated = _resolve("which coastal friend was Maribell", entities=(entity,))
+    corroborated = _resolve("which friend was Maribell", entities=(entity,))
     assert [item.path for item in corroborated.resolved] == [entity.path]
 
 
 def test_partial_name_token_is_fuzzy_name_evidence() -> None:
+    entity = _entity(title="Aster Vale", relationship="friend")
+    out = _resolve("which friend was Aster", entities=(entity,))
+    evidence = {item.kind: item.detail for item in out.resolved[0].evidence}
+    assert evidence["fuzzy_name"] == {
+        "query_token": "aster",
+        "name_token": "aster",
+        "distance": 0,
+    }
+    assert "attribute" in evidence
+
+
+def test_fuzzy_name_with_qualifier_attribute_resolves() -> None:
+    entity = _entity(title="Maribel", relationship="friend", tags=("coastal",))
+    out = _resolve("which coastal friend was Maribell", entities=(entity,))
+    assert [item.path for item in out.resolved] == [entity.path]
+
+
+def test_partial_name_token_with_qualifier_attribute_resolves() -> None:
     entity = _entity(title="Aster Vale", relationship="friend", tags=("coastal",))
     out = _resolve("which coastal friend was Aster", entities=(entity,))
     evidence = {item.kind: item.detail for item in out.resolved[0].evidence}
@@ -223,7 +267,22 @@ def test_partial_name_token_is_fuzzy_name_evidence() -> None:
         "name_token": "aster",
         "distance": 0,
     }
-    assert "attribute" in evidence
+    assert evidence["attribute"] == {"matched": ["coastal", "friend"]}
+
+
+def test_no_qualifier_attribute_fuzzy_name_and_retrieval_resolve() -> None:
+    entity = _entity(title="Maribel", relationship="friend")
+    out = _resolve(
+        "which friend was Maribell",
+        entities=(entity,),
+        hits=(_hit(entity.path, type="entity"),),
+    )
+    assert [item.path for item in out.resolved] == [entity.path]
+    assert {item.kind for item in out.resolved[0].evidence} == {
+        "attribute",
+        "fuzzy_name",
+        "retrieval",
+    }
 
 
 def test_graph_edge_from_non_entity_anchor_is_graph_evidence() -> None:
@@ -255,11 +314,11 @@ def test_counted_slot_requires_descriptor_evidence_when_cue_has_descriptors() ->
     anchor = "Knowledge Base/Notes/Research/trip-timing.md"
 
     out = _resolve(
-        "my two japanese friends",
+        "my two japanese friends route timing",
         entities=(evidenced, distractor),
         hits=(
             _hit(evidenced.path, type="entity"),
-            _hit(anchor, rank=2, descriptor_tokens=()),
+            _hit(anchor, rank=2, descriptor_tokens=("friends", "route", "timing")),
         ),
         edges=(
             rr.EdgeFact(anchor, distractor.path, "relates_to", "outbound", "epistemic"),
@@ -287,6 +346,30 @@ def test_descriptor_bearing_anchor_lets_graph_evidence_resolve() -> None:
     )
 
     assert [item.path for item in out.resolved] == [entity.path]
+
+
+def test_either_of_two_pre_nominal_qualifiers_satisfies_the_gate() -> None:
+    japanese = _entity(
+        "Knowledge Base/Entities/People/japanese.md",
+        title="Aster Vale",
+        relationship="friend",
+        tags=("japanese",),
+    )
+    hiking = _entity(
+        "Knowledge Base/Entities/People/hiking.md",
+        title="Beryl Moss",
+        relationship="friend",
+        tags=("hiking",),
+    )
+    out = _resolve(
+        "my two japanese hiking friends route timing details",
+        entities=(japanese, hiking),
+        hits=(
+            _hit(japanese.path, type="entity"),
+            _hit(hiking.path, type="entity", rank=2),
+        ),
+    )
+    assert [item.path for item in out.resolved] == sorted((japanese.path, hiking.path))
 
 
 def test_descriptorless_cue_keeps_existing_two_kind_resolution() -> None:
@@ -334,6 +417,33 @@ def test_exact_name_resolution_ignores_the_descriptor_gate() -> None:
 
     assert [item.path for item in out.resolved] == [entity.path]
     assert {item.kind for item in out.resolved[0].evidence} == {"exact_name"}
+
+
+def test_exact_name_keeps_pre_change_first_graph_edge() -> None:
+    rr = _rr()
+    entity = _entity(relationship="friend")
+    first = "Knowledge Base/Notes/Research/a-topic.md"
+    qualifier_bearing = "Knowledge Base/Notes/Research/z-crystal.md"
+    out = _resolve(
+        "which crystal friend was Aria Vale",
+        entities=(entity,),
+        hits=(
+            _hit(first, descriptor_tokens=("topic",)),
+            _hit(qualifier_bearing, rank=2, descriptor_tokens=("crystal",)),
+        ),
+        edges=(
+            rr.EdgeFact(first, entity.path, "relates_to", "outbound", "epistemic"),
+            rr.EdgeFact(
+                qualifier_bearing,
+                entity.path,
+                "relates_to",
+                "outbound",
+                "epistemic",
+            ),
+        ),
+    )
+    graph = next(item for item in out.resolved[0].evidence if item.kind == "graph")
+    assert graph.detail["seed"] == first
 
 
 def test_fuzzy_name_is_not_descriptor_bearing() -> None:
@@ -387,6 +497,33 @@ def test_anchor_beyond_cap_does_not_corroborate() -> None:
         anchor_cap=10,
     )
     assert out.resolved == ()
+
+
+def test_qualifier_anchor_scan_is_hoisted_for_large_graph_fanout() -> None:
+    rr = _rr()
+    anchor = "Knowledge Base/Notes/Research/large-topic.md"
+    entities = tuple(
+        _entity(
+            f"Knowledge Base/Entities/People/fanout-{index:03d}.md",
+            title=f"Fanout Person {index:03d}",
+            relationship="friend",
+        )
+        for index in range(500)
+    )
+    edges = tuple(
+        rr.EdgeFact(anchor, entity.path, "relates_to", "outbound", "epistemic")
+        for entity in entities
+    )
+    started = time.perf_counter()
+    out = _resolve(
+        "my two verdant friends route timing details",
+        entities=entities,
+        hits=(_hit(anchor, descriptor_tokens=tuple(f"topic{index}" for index in range(1000))),),
+        edges=edges,
+    )
+    elapsed_ms = (time.perf_counter() - started) * 1000
+    assert out.resolved == ()
+    assert elapsed_ms < 250
 
 
 def test_attribute_overlap_matches_stem_or_prefix() -> None:

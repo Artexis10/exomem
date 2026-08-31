@@ -66,6 +66,7 @@ def test_every_case_meets_expected_outcome_with_graph_on(tmp_path: Path) -> None
         "N",
         "O",
         "R",
+        "R2",
     ]
     assert all(case["graph_on"]["expected"] for case in report["_case_results"])
 
@@ -97,6 +98,11 @@ def test_negative_control_and_ambiguity_cases_abstain(tmp_path: Path) -> None:
     assert cases["R"]["graph_on"]["unresolved_count"] == 1
     assert "r-distractor" in {
         Path(path).stem for path in cases["R"]["graph_on"]["candidates"]
+    }
+    assert cases["R2"]["graph_on"]["status"] == "partial"
+    assert cases["R2"]["graph_on"]["unresolved_count"] == 1
+    assert "r-distractor" in {
+        Path(path).stem for path in cases["R2"]["graph_on"]["candidates"]
     }
 
 

@@ -1,13 +1,14 @@
 ## Why
 
-Counted referent cues can currently resolve descriptor-less entities from two unrelated evidence kinds, producing a false confident identity where the correct result is partial. The live "two Japanese friends" case demonstrates that the existing two-kind rule needs descriptor grounding without weakening exact-name or descriptorless resolution.
+Counted referent cues can currently resolve qualifier-less entities from two unrelated evidence kinds, producing a false confident identity where the correct result is partial. The live "two Japanese friends" case demonstrates that the existing two-kind rule needs grounding in the entity qualifiers immediately preceding the cue noun without weakening exact-name or unqualified resolution.
 
 ## What Changes
 
-- Require a non-exact candidate to have descriptor-bearing attribute or graph evidence whenever the cue contains descriptors, in addition to the existing two-independent-kinds rule.
-- Derive bounded descriptor knowledge for at most the top ten graph anchors from their existing parsed title and body content, then thread that categorical fact into the pure resolver.
-- Preserve exact-name behavior, descriptorless cues, hit ordering, the MCP surface, and write paths.
-- Add pure, envelope, and synthetic benchmark coverage for the live distractor shape and the legitimate descriptor-bearing graph-anchor shape.
+- Add `qualifiers`, the deduplicated contiguous run of non-stopword, non-count tokens immediately preceding the cue noun within its three-token window. The existing wide `descriptors` field remains attribute evidence input.
+- Require a non-exact candidate to have qualifier-bearing attribute or graph evidence whenever `qualifiers` is non-empty, in addition to the existing two-independent-kinds rule.
+- Derive bounded anchor token knowledge for at most the top ten graph anchors from their existing parsed title and body content, then thread that categorical fact into the pure resolver.
+- Preserve exact-name behavior, empty-qualifier cues, post-nominal fallback, hit ordering, the MCP surface, and write paths.
+- Add pure, envelope, fan-out, and synthetic benchmark coverage for multi-word topical distractors and legitimate qualifier-bearing evidence.
 
 ## Capabilities
 
@@ -17,7 +18,7 @@ None.
 
 ### Modified Capabilities
 
-- `referent-resolution`: Strengthen non-exact resolution so descriptor-bearing cues require descriptor-grounded evidence.
+- `referent-resolution`: Strengthen non-exact resolution so pre-nominal qualifier cues require qualifier-grounded evidence.
 
 ## Impact
 

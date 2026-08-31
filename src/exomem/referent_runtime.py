@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import replace
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,7 @@ from .referent_resolution import (
 
 _TRUE = frozenset({"1", "true", "yes", "on"})
 log = logging.getLogger(__name__)
+_REFERENT_ANCHOR_CAP = 10
 
 
 def cue_for_find(*, vault_root: Path, query: str, mode: str) -> ReferentCue | None:
@@ -52,6 +54,13 @@ def _hit_facts(hits: list[Any]) -> tuple[HitFact, ...]:
     )
 
 
+@lru_cache(maxsize=4096)
+def _descriptor_tokens_for_snapshot(
+    snapshot_hash: str, title: str, body: str
+) -> tuple[str, ...]:
+    return descriptor_tokens_for(title, body)
+
+
 def _with_anchor_descriptor_tokens(
     vault_root: Path,
     hits: tuple[HitFact, ...],
@@ -70,7 +79,11 @@ def _with_anchor_descriptor_tokens(
         facts.append(
             replace(
                 hit,
-                descriptor_tokens=descriptor_tokens_for(page.title, page.body),
+                descriptor_tokens=_descriptor_tokens_for_snapshot(
+                    page.snapshot_hash,
+                    page.title,
+                    page.body,
+                ),
             )
         )
     return tuple(facts)
@@ -82,6 +95,7 @@ def _edge_facts(
     anchors: list[str],
     entity_paths: frozenset[str],
     graph: bool,
+    anchor_cap: int,
 ) -> tuple[EdgeFact, ...]:
     if not graph or not anchors:
         return ()
@@ -89,7 +103,7 @@ def _edge_facts(
     if not index.available():
         return ()
     facts: set[EdgeFact] = set()
-    for neighbor in index.neighbors_for(anchors[:10]):
+    for neighbor in index.neighbors_for(anchors[: max(0, anchor_cap)]):
         if neighbor.other_rel in entity_paths:
             facts.add(
                 EdgeFact(
@@ -197,20 +211,27 @@ def resolve_for_find(
                 expected_recall_checkpoint=expected_registry_checkpoint,
             )
             return None
+        anchor_cap = _REFERENT_ANCHOR_CAP
         hit_facts = _hit_facts(hits)
-        if cue.descriptors:
-            hit_facts = _with_anchor_descriptor_tokens(vault_root, hit_facts)
+        if cue.qualifiers and graph:
+            hit_facts = _with_anchor_descriptor_tokens(
+                vault_root,
+                hit_facts,
+                anchor_cap=anchor_cap,
+            )
         edges = _edge_facts(
             vault_root,
-            anchors=[item.path for item in hit_facts[:10]],
+            anchors=[item.path for item in hit_facts],
             entity_paths=frozenset(registry),
             graph=graph,
+            anchor_cap=anchor_cap,
         )
         resolution = resolve_referents(
             cue=cue,
             hits=hit_facts,
             entities=tuple(registry.values()),
             edges=edges,
+            anchor_cap=anchor_cap,
         )
         block = resolution.as_dict()
         if not block["resolved"] and not block["candidates"] and cue.expected_count is None:

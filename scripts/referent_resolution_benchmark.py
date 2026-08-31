@@ -345,7 +345,10 @@ def _render_cases(root: Path) -> dict[str, str]:
         "Sera Venn",
         relationship="friend",
         tags=("verdant",),
-        body="A verdant friend who discussed when to go in the synthetic benchmark.",
+        body=(
+            "A verdant friend who compared route timing and when to go "
+            "in the synthetic benchmark."
+        ),
         relations=(r_evidenced_topic,),
     )
     r_distractor_topic = _note(
@@ -487,7 +490,7 @@ def _run_benchmark(manifest_path: Path, *, work_root: Path) -> dict[str, Any]:
 
     total = len(case_results)
     abstention_ids = {"F", "G", "I", "O"}
-    partial_ids = {"E", "H", "N", "R"}
+    partial_ids = {"E", "H", "N", "R", "R2"}
     stage_samples = [
         float(case["graph_on"]["referents_stage_ms"])
         for case in case_results

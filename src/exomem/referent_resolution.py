@@ -177,6 +177,7 @@ class ReferentCue:
     noun: str
     expected_count: int | None
     descriptors: tuple[str, ...]
+    qualifiers: tuple[str, ...]
     query: str
     cue_nouns: frozenset[str] = frozenset()
 
@@ -309,18 +310,27 @@ def detect_cue(
             break
 
     descriptors = tuple(
-        token
-        for token in tokens
-        if token not in _STOP_WORDS
-        and token not in _COUNT_TOKENS
-        and token not in cue_nouns
-        and len(token) >= 3
+        dict.fromkeys(
+            token
+            for token in tokens
+            if token not in _STOP_WORDS
+            and token not in _COUNT_TOKENS
+            and token not in cue_nouns
+            and len(token) >= 3
+        )
     )
+    preceding: list[str] = []
+    for token in reversed(tokens[max(0, cue_index - 3) : cue_index]):
+        if token in _STOP_WORDS or token in _COUNT_TOKENS:
+            break
+        preceding.append(token)
+    qualifiers = tuple(dict.fromkeys(reversed(preceding)))
     return ReferentCue(
         entity_type=entity_type,
         noun=noun,
         expected_count=expected_count,
         descriptors=descriptors,
+        qualifiers=qualifiers,
         query=query,
         cue_nouns=frozenset(cue_nouns),
     )
@@ -379,6 +389,22 @@ def descriptor_tokens_for(*values: object) -> tuple[str, ...]:
     return tuple(sorted({token for value in values for token in _tokens(value)}))
 
 
+def _tokens_match_qualifiers(
+    qualifiers: tuple[str, ...],
+    qualifier_stems: frozenset[str],
+    tokens: tuple[str, ...],
+) -> bool:
+    token_stems = {stem_word(token) for token in tokens}
+    if qualifier_stems & token_stems:
+        return True
+    return any(
+        len(shorter) >= 4 and longer.startswith(shorter)
+        for qualifier in qualifiers
+        for token in tokens
+        for shorter, longer in (tuple(sorted((qualifier, token), key=len)),)
+    )
+
+
 def _attribute_matches(cue: ReferentCue, entity: EntityRecord) -> tuple[str, ...]:
     attributes = tuple(
         token
@@ -412,6 +438,14 @@ def resolve_referents(
         if item.status.casefold() not in {"superseded", "archived", "dropped"}
     }
     hits_by_path = {item.path: item for item in hits}
+    qualifier_stems = frozenset(stem_word(qualifier) for qualifier in cue.qualifiers)
+    qualifier_seeds: set[str] = set()
+    if cue.qualifiers:
+        for path in active_anchors:
+            hit = hits_by_path.get(path)
+            tokens = hit.descriptor_tokens if hit is not None else ()
+            if _tokens_match_qualifiers(cue.qualifiers, qualifier_stems, tokens):
+                qualifier_seeds.add(path)
     edges_by_candidate: dict[str, list[EdgeFact]] = {}
     for edge in edges:
         if edge.seed_path in active_anchors:
@@ -426,6 +460,9 @@ def resolve_referents(
             continue
         evidence: list[Evidence] = []
         exact = _exact_name(cue, entity)
+        if entity.entity_type != cue.entity_type and exact is None:
+            reasons["type_mismatch"] += 1
+            continue
         if exact is not None:
             evidence.append(Evidence("exact_name", {"matched": exact}))
         else:
@@ -460,18 +497,10 @@ def resolve_referents(
                 item.direction,
             ),
         )
-        descriptor_graph_edges = [
-            edge
-            for edge in graph_edges
-            if any(
-                _matches_attribute(descriptor, token)
-                for descriptor in cue.descriptors
-                for token in hits_by_path[edge.seed_path].descriptor_tokens
-            )
-        ]
-        graph_descriptor_bearing = bool(descriptor_graph_edges)
+        qualifier_graph_edges = [edge for edge in graph_edges if edge.seed_path in qualifier_seeds]
+        graph_qualifier_bearing = bool(qualifier_graph_edges)
         if graph_edges:
-            edge = (descriptor_graph_edges or graph_edges)[0]
+            edge = ((qualifier_graph_edges if exact is None else ()) or graph_edges)[0]
             evidence.append(
                 Evidence(
                     "graph",
@@ -491,10 +520,7 @@ def resolve_referents(
             evidence.append(Evidence("attribute", {"matched": list(matched_attributes)}))
 
         evidence.sort(key=lambda item: item.kind)
-        exact_present = any(item.kind == "exact_name" for item in evidence)
-        if entity.entity_type != cue.entity_type and not exact_present:
-            reasons["type_mismatch"] += 1
-            continue
+        exact_present = exact is not None
         match = ReferentMatch(
             path=entity.path,
             title=entity.title,
@@ -503,13 +529,17 @@ def resolve_referents(
             ref=entity.ref,
         )
         non_exact_kinds = {item.kind for item in evidence if item.kind != "exact_name"}
-        attribute_descriptor_bearing = any(
-            descriptor in matched_attributes for descriptor in cue.descriptors
+        attribute_qualifier_bearing = any(
+            qualifier in matched_attributes for qualifier in cue.qualifiers
         )
-        descriptor_gate_passes = (
-            not cue.descriptors or attribute_descriptor_bearing or graph_descriptor_bearing
-        )
-        if exact_present or (len(non_exact_kinds) >= 2 and descriptor_gate_passes):
+        if not cue.qualifiers:
+            should_resolve = exact_present or len(non_exact_kinds) >= 2
+        else:
+            should_resolve = exact_present or (
+                len(non_exact_kinds) >= 2
+                and (attribute_qualifier_bearing or graph_qualifier_bearing)
+            )
+        if should_resolve:
             resolved.append(match)
         elif evidence:
             candidates.append(match)
