@@ -219,13 +219,15 @@ the task is ticked, not estimated.
   and `::test_a_previous_schema_store_keeps_its_decisions`. Both green
   (`18 passed in 5.00s`); neither assertion was weakened.
 
-  Known boundary, stated rather than discovered later: family attribution is
-  written where the caller can NAME the family — the review-item path
-  (`apply_for_item`), which covers every registered attention family. Triage of
-  a write-advisory ref (`near-duplicate`, `contradiction-band`, `overlap`) does
-  not carry its kind through the ref, so those records stay unattributed and
-  their families never arm an offer. Attributing them needs the kind on the
-  advisory identity, which is a change to that surface rather than to this one.
+  Initial boundary, closed before acceptance after independent review: the
+  stable write-advisory ref deliberately remains unchanged and does not encode
+  its kind. Instead, each surfaced ledger row records the registered kind, and
+  write-advisory triage resolves the family from the exact
+  `review_id:fingerprint` row. Decisions for `near-duplicate`,
+  `contradiction-band`, and `overlap` are therefore attributed and can earn the
+  same one-time actionable quiet offer as attention families, without a tool
+  schema or stable-ref change. The round-trip and offer-failure regressions are
+  in `tests/test_delegation_envelope_gap_closure.py`.
 
   Regression scope run after the migration:
   `pytest tests/test_attention.py tests/test_review_state.py
