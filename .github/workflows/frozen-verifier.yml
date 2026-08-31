@@ -34,7 +34,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
-      HF_HOME: ${{ runner.temp }}/huggingface
+      HF_HOME: /tmp/exomem-frozen-verifier-hf
       EXOMEM_DISABLE_EMBEDDINGS: "1"
       OMP_NUM_THREADS: "2"
       TOKENIZERS_PARALLELISM: "false"

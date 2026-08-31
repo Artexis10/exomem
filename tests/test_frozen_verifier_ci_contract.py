@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import yaml
+
 from exomem import claims
 
 
@@ -38,3 +40,10 @@ def test_real_verifier_workflow_is_scoped_to_identity_and_behavior_changes() -> 
         assert path in text
     assert "schedule:" in text
     assert "workflow_dispatch:" in text
+
+
+def test_real_verifier_job_env_uses_only_job_available_contexts() -> None:
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    job_env = workflow["jobs"]["exact-multilingual-pin"]["env"]
+
+    assert not any("${{ runner." in value for value in job_env.values())
