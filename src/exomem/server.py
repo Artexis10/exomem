@@ -492,6 +492,7 @@ def build_server(*, require_auth: bool) -> FastMCP:
             expose_tier2=expose_tier2,
             private_authenticator=security_authority,
             transfer_security_authority=security_authority,
+            consolidation_binding=runtime.hosted_binding,
         )
     else:
         runtime_activation = LocalRuntimeActivation(runtime.vault_root)

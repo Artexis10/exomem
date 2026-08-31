@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
+from pathlib import Path
 
 import pytest
 from starlette.testclient import TestClient
@@ -43,6 +45,36 @@ def test_download_streams_file_with_minted_token(vault, monkeypatch: pytest.Monk
 def test_download_master_token_works(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     c = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="sek")
     assert _get(c, "Knowledge Base/index.md", "sek").status_code == 200
+
+
+def test_download_enters_consolidation_transfer_admission(
+    vault,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance import consolidation_runtime
+
+    events: list[str] = []
+
+    @contextmanager
+    def admission(_vault_root: Path):
+        events.append("transfer-enter")
+        try:
+            yield
+        finally:
+            events.append("transfer-exit")
+
+    monkeypatch.setattr(
+        consolidation_runtime,
+        "admit_transfer",
+        admission,
+        raising=False,
+    )
+    client = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="sek")
+
+    response = _get(client, "Knowledge Base/index.md", "sek")
+
+    assert response.status_code == 200
+    assert events == ["transfer-enter", "transfer-exit"]
 
 
 def test_upload_scoped_token_rejected_on_download(vault, monkeypatch: pytest.MonkeyPatch) -> None:

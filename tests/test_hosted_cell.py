@@ -540,6 +540,47 @@ def test_hosted_initialize_starts_only_explicitly_granted_workers(
     assert calls.count("restart:watcher") == 1
 
 
+def test_hosted_initialize_starts_no_workers_while_consolidation_sealed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance import consolidation_runtime
+
+    values, _config = _provisioned(tmp_path, grants="embeddings,media,file-watcher")
+    values["EXOMEM_HOSTED_WORKER_LIMIT"] = "2"
+    for key, value in values.items():
+        monkeypatch.setenv(key, value)
+    calls: list[str] = []
+    monkeypatch.setattr(
+        consolidation_runtime,
+        "readiness",
+        lambda _vault: {"admitted": False},
+    )
+    monkeypatch.setattr(
+        server_runtime,
+        "_start_compute_runtime",
+        lambda _vault: calls.append("compute"),
+    )
+    monkeypatch.setattr(
+        server_runtime,
+        "_start_media_worker",
+        lambda _vault: calls.append("media"),
+    )
+    monkeypatch.setattr(
+        server_runtime,
+        "_start_file_watcher",
+        lambda _vault: calls.append("watcher"),
+    )
+
+    runtime = server_runtime.initialize_runtime(load_dotenv_func=lambda **_kwargs: None)
+
+    assert calls == []
+    assert runtime.hosted_lifecycle is not None
+    assert runtime.hosted_lifecycle.readiness().ready is False
+    assert runtime.media_worker is None
+    assert runtime.file_watcher is None
+
+
 def test_zero_worker_limit_keeps_granted_background_features_disabled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

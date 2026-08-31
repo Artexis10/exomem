@@ -201,6 +201,98 @@ def test_ready_retrieval_catalog_admits_runtime_readiness() -> None:
     assert snapshot["reasons"] == []
 
 
+def test_consolidation_seal_withholds_runtime_readiness_without_phase_disclosure() -> None:
+    snapshot = build_runtime_readiness(
+        coordination={
+            "enabled": False,
+            "role": "writer",
+            "coordinator_healthy": True,
+            "replica_id": None,
+        },
+        release="test",
+        mcp_tool_surface_sha256="f" * 64,
+        consolidation={"admitted": False},
+    )
+
+    assert snapshot["status"] == "not_ready"
+    assert snapshot["takeover_eligible"] is False
+    assert snapshot["reasons"] == ["vault_admission_unavailable"]
+    assert snapshot["consolidation"] == {"admitted": False}
+
+
+def test_runtime_loads_durable_consolidation_before_other_readiness_probes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import runtime_readiness as readiness_module
+    from exomem.governance import consolidation_runtime
+
+    observed: list[str] = []
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(tmp_path))
+    monkeypatch.setattr(
+        consolidation_runtime,
+        "readiness",
+        lambda _vault: observed.append("consolidation") or {"admitted": False},
+    )
+    monkeypatch.setattr(
+        readiness_module,
+        "_bounded_coordination_status",
+        lambda *_args, **_kwargs: observed.append("coordination")
+        or {
+            "enabled": False,
+            "role": "standalone",
+            "replica_id": None,
+            "coordinator_healthy": True,
+        },
+    )
+    monkeypatch.setattr(
+        readiness_module,
+        "_measure_observability",
+        lambda: {},
+    )
+
+    snapshot = readiness_module.runtime_readiness(mcp_tool_surface_sha256="f" * 64)
+
+    assert observed[:2] == ["consolidation", "coordination"]
+    assert snapshot["status"] == "not_ready"
+    assert snapshot["consolidation"] == {"admitted": False}
+
+
+def test_relative_configured_vault_still_loads_consolidation_readiness(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import runtime_readiness as readiness_module
+    from exomem.governance import consolidation_runtime
+
+    vault = tmp_path / "relative-vault"
+    observed: list[Path] = []
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", "relative-vault")
+    monkeypatch.setattr(
+        consolidation_runtime,
+        "readiness",
+        lambda supplied: observed.append(supplied) or {"admitted": False},
+    )
+    monkeypatch.setattr(
+        readiness_module,
+        "_bounded_coordination_status",
+        lambda *_args, **_kwargs: {
+            "enabled": False,
+            "role": "standalone",
+            "replica_id": None,
+            "coordinator_healthy": True,
+        },
+    )
+    monkeypatch.setattr(readiness_module, "_measure_observability", lambda: {})
+
+    snapshot = readiness_module.runtime_readiness(mcp_tool_surface_sha256="f" * 64)
+
+    assert observed == [vault]
+    assert snapshot["status"] == "not_ready"
+    assert snapshot["consolidation"] == {"admitted": False}
+
+
 def test_retrieval_repair_progress_is_bounded_and_privacy_safe() -> None:
     snapshot = build_runtime_readiness(
         coordination={

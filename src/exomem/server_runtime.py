@@ -56,6 +56,7 @@ class ServerRuntime:
     hosted_config: HostedCellConfig | None = None
     hosted_lifecycle: HostedCellLifecycle | None = None
     hosted_security_authority: Any | None = None
+    hosted_binding: HostedBindingV2 | None = None
     hosted_lifetime_lock: AbstractContextManager[None] | None = None
 
 
@@ -110,6 +111,10 @@ class LocalRuntimeActivation:
 
     def start(self) -> None:
         """Launch local workers once; safe from health and timer races."""
+        from .governance import consolidation_runtime
+
+        if not consolidation_runtime.readiness(self.vault_root)["admitted"]:
+            return
         with self._lock:
             if self._started:
                 return
@@ -272,7 +277,7 @@ def _initialize_hosted_runtime() -> ServerRuntime:
     lifetime_lock.__enter__()
     try:
         _cleanup_hosted_transfer_temp(config)
-        return _initialize_locked_hosted_runtime(config, lifetime_lock)
+        return _initialize_locked_hosted_runtime(config, lifetime_lock, binding=binding)
     except BaseException:
         lifetime_lock.__exit__(*sys.exc_info())
         raise
@@ -300,6 +305,8 @@ def _hosted_authorization_session_readiness_provider(
 def _initialize_locked_hosted_runtime(
     config: HostedCellConfig,
     lifetime_lock: AbstractContextManager[None],
+    *,
+    binding: HostedBindingV2 | None,
 ) -> ServerRuntime:
     """Finish hosted startup while retaining exclusive target-root ownership."""
 
@@ -314,6 +321,14 @@ def _initialize_locked_hosted_runtime(
     security_authority = _initialize_hosted_security(config)
     vault_root = config.vault_root
 
+    from .governance import consolidation_runtime
+
+    if binding is None:
+        consolidation = consolidation_runtime.readiness(vault_root)
+    else:
+        with consolidation_runtime.bind_hosted_admission(binding):
+            consolidation = consolidation_runtime.readiness(vault_root)
+
     source_schema = schema.load_source_schema(vault_root)
     project_keys_hint = project_keys.keys_hint(vault_root)
     projection_runtime.preactivate_projection_runtime(vault_root)
@@ -326,7 +341,7 @@ def _initialize_locked_hosted_runtime(
     mutation_ready, mutation_reason = probe_hosted_mutation_authority(vault_root)
 
     startup = lifecycle.complete_startup(
-        vault_ready=True,
+        vault_ready=consolidation["admitted"],
         mutation_authority_ready=mutation_ready,
         service_auth_ready=(
             security_authority is not None or config.service_credential is not None
@@ -343,7 +358,7 @@ def _initialize_locked_hosted_runtime(
 
     media_worker = None
     file_watcher = None
-    if mutation_ready and startup.phase == "active":
+    if mutation_ready and startup.phase == "active" and lifecycle.readiness().ready:
         # Retrieval catalog warm-up is core service work, not an optional
         # hosted worker.  A zero optional-worker budget must still converge
         # truthful retrieval admission for lean cells.
@@ -358,6 +373,14 @@ def _initialize_locked_hosted_runtime(
                     feature,
                     ready=False,
                     reason_code="HOSTED_MUTATION_AUTHORITY_UNAVAILABLE",
+                )
+    elif not consolidation["admitted"]:
+        for feature in ("embeddings", "file-watcher", "media"):
+            if config.has_feature(feature):
+                lifecycle.set_worker_status(
+                    feature,
+                    ready=False,
+                    reason_code="HOSTED_VAULT_UNAVAILABLE",
                 )
     elif config.resource_limits.worker_count == 0:
         for feature in ("embeddings", "file-watcher", "media"):
@@ -431,6 +454,7 @@ def _initialize_locked_hosted_runtime(
         hosted_config=config,
         hosted_lifecycle=lifecycle,
         hosted_security_authority=security_authority,
+        hosted_binding=binding,
         hosted_lifetime_lock=lifetime_lock,
     )
 

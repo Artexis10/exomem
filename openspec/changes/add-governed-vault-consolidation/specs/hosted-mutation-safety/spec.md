@@ -1,5 +1,31 @@
 ## ADDED Requirements
 
+### Requirement: Consolidation enrollment is explicit and offline
+
+An exactly absent consolidation-seal subtree SHALL denote a legacy vault that
+is not enrolled, not an inferred `open` state. Enrollment SHALL be an explicit
+owner-only pre-start operation over an already authenticated cell identity. It
+SHALL exclude every server and direct-CLI runtime for that vault, create the
+immutable revision-0 `open` snapshot and active pointer, and reload their exact
+identity binding before the runtime may advertise readiness. Hosted SHALL use
+its cell lifetime exclusion; local SHALL use process-safe vault presence slots
+that allow concurrent readers but block new registrations during enrollment.
+Ordinary dispatch, readiness, and admission SHALL NOT initialize a seal or
+adopt identity. Any seal-path presence other than a complete authenticated
+store SHALL fail closed.
+
+#### Scenario: Enrollment is requested while a runtime is live
+
+- **WHEN** a Hosted cell, local server, or direct CLI invocation holds runtime presence for the destination
+- **THEN** enrollment refuses before identity or seal publication
+- **AND** ordinary traffic continues under the unchanged legacy or enrolled state
+
+#### Scenario: Enrollment crashes after the initial snapshot
+
+- **WHEN** revision 0 is durable but its active pointer is absent after restart
+- **THEN** ordinary admission and readiness fail closed
+- **AND** only an exact explicit enrollment retry may complete that pointer without adopting a different identity or timestamp
+
 ### Requirement: A durable consolidation seal composes with the shared vault boundary
 
 The destination-wide consolidation seal SHALL be keyed by canonical vault

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
+import stat
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
@@ -209,6 +211,43 @@ class ConsolidationSealStore:
     def _snapshot_path(self, revision: int) -> Path:
         return self.base / "snapshots" / f"{revision}.json"
 
+    @staticmethod
+    def _linked(path: Path) -> bool:
+        is_junction = getattr(os.path, "isjunction", lambda _path: False)
+        return os.path.islink(path) or bool(is_junction(path))
+
+    def _validate_layout_locked(self, state: ConsolidationSealState) -> None:
+        try:
+            if self._linked(self.base) or not stat.S_ISDIR(
+                os.stat(self.base, follow_symlinks=False).st_mode
+            ):
+                _fail("SEAL_STORE_CORRUPT")
+            top = {entry.name: entry for entry in os.scandir(self.base)}
+            if set(top) != {"active.json", "snapshots"}:
+                _fail("SEAL_STORE_CORRUPT")
+            if top["active.json"].is_symlink() or not top["active.json"].is_file(
+                follow_symlinks=False
+            ):
+                _fail("SEAL_STORE_CORRUPT")
+            snapshots_path = self.base / "snapshots"
+            if self._linked(snapshots_path) or not top["snapshots"].is_dir(
+                follow_symlinks=False
+            ):
+                _fail("SEAL_STORE_CORRUPT")
+            snapshots = {
+                entry.name: entry for entry in os.scandir(snapshots_path)
+            }
+            expected = {f"{revision}.json" for revision in range(state.revision + 1)}
+            if set(snapshots) != expected or any(
+                entry.is_symlink() or not entry.is_file(follow_symlinks=False)
+                for entry in snapshots.values()
+            ):
+                _fail("SEAL_STORE_CORRUPT")
+        except ConsolidationSealUnavailable:
+            raise
+        except (OSError, ValueError):
+            _fail("SEAL_STORE_CORRUPT")
+
     def _read_optional(self, path: Path, *, limit: int) -> bytes | None:
         try:
             return reserved_paths._read_owner_bytes(  # noqa: SLF001
@@ -388,6 +427,26 @@ class ConsolidationSealStore:
             if error.code == "SEAL_INPUT_INVALID":
                 _fail("SEAL_STORE_CORRUPT")
             raise
+
+    def load_optional(self) -> ConsolidationSealState | None:
+        """Load a complete store, returning ``None`` only for exact absence."""
+
+        # Legacy-unenrolled vaults must not enter writer coordination merely to
+        # prove that no seal path exists. Explicit enrollment owns the separate
+        # offline/runtime-presence exclusion that makes this fast path stable.
+        if not os.path.lexists(self.base):
+            return None
+        with _authority(self.vault_root, mutation=False):
+            if not os.path.lexists(self.base):
+                return None
+            try:
+                state, _active = self._load_locked()
+            except ConsolidationSealUnavailable as error:
+                if error.code == "SEAL_NOT_INITIALIZED":
+                    _fail("SEAL_STORE_CORRUPT")
+                raise
+            self._validate_layout_locked(state)
+            return state
 
     @staticmethod
     def _require_vault(state: ConsolidationSealState, expected: str) -> None:

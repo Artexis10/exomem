@@ -2231,6 +2231,127 @@ def test_hosted_upload_holds_injected_mutation_guard_only_around_commit(
     assert (config.vault_root / path).read_bytes() == b"private evidence"
 
 
+def test_hosted_upload_and_download_enter_consolidation_admission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance import consolidation_runtime
+
+    events: list[str] = []
+
+    @contextmanager
+    def admission(_vault_root: Path, kind: str) -> Iterator[None]:
+        events.append(f"{kind}-enter")
+        try:
+            yield
+        finally:
+            events.append(f"{kind}-exit")
+
+    monkeypatch.setattr(
+        consolidation_runtime,
+        "admit_transfer",
+        lambda root: admission(root, "transfer"),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        consolidation_runtime,
+        "admit_mutation",
+        lambda root: admission(root, "mutation"),
+        raising=False,
+    )
+    client, config, _lifecycle, _invoker = _cell(
+        tmp_path,
+        cell_id="cell-transfer-admission",
+        credential="transfer-admission-service-credential-0001",
+    )
+    upload_grant = gateway.mint_transfer_grant(
+        config,
+        tenant_scope="tenant-001",
+        principal_scope=DEFAULT_PRINCIPAL,
+        operation="upload",
+        jti="upload-admission",
+        max_bytes=128,
+    )
+    uploaded = client.post(
+        "/private/exomem/v1/upload",
+        headers={
+            **_headers(config, idempotency_key="upload-admission-001"),
+            gateway.TRANSFER_GRANT_HEADER: upload_grant,
+        },
+        files={"file": ("proof.bin", b"private evidence", "application/octet-stream")},
+        data={"scope": "Case", "category": "Evidence"},
+    )
+    assert uploaded.status_code == 201, uploaded.text
+    path = uploaded.json()["data"]["path"]
+    assert events == [
+        "transfer-enter",
+        "mutation-enter",
+        "mutation-exit",
+        "transfer-exit",
+    ]
+
+    events.clear()
+    download_grant = gateway.mint_transfer_grant(
+        config,
+        tenant_scope="tenant-001",
+        principal_scope=DEFAULT_PRINCIPAL,
+        operation="download",
+        jti="download-admission",
+        max_bytes=128,
+    )
+    downloaded = client.post(
+        "/private/exomem/v1/download",
+        headers={
+            **_headers(config),
+            gateway.TRANSFER_GRANT_HEADER: download_grant,
+        },
+        json={"path": path},
+    )
+
+    assert downloaded.status_code == 200, downloaded.text
+    assert downloaded.content == b"private evidence"
+    assert events == ["transfer-enter", "transfer-exit"]
+
+
+def test_hosted_download_maps_consolidation_seal_to_public_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance import consolidation_runtime
+
+    @contextmanager
+    def sealed(_vault_root: Path) -> Iterator[None]:
+        raise cli_ops.OpError("VAULT_UNAVAILABLE", "vault is unavailable")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(consolidation_runtime, "admit_transfer", sealed)
+    client, config, _lifecycle, _invoker = _cell(
+        tmp_path,
+        cell_id="cell-sealed-download",
+        credential="sealed-download-service-credential-0001",
+    )
+    grant = gateway.mint_transfer_grant(
+        config,
+        tenant_scope="tenant-001",
+        principal_scope=DEFAULT_PRINCIPAL,
+        operation="download",
+        jti="download-sealed",
+        max_bytes=128,
+    )
+
+    response = client.post(
+        "/private/exomem/v1/download",
+        headers={
+            **_headers(config),
+            gateway.TRANSFER_GRANT_HEADER: grant,
+        },
+        json={"path": "Knowledge Base/Notes/private.md"},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "VAULT_UNAVAILABLE"
+
+
 def test_hosted_transfer_scope_expiry_cross_cell_and_download_isolation(tmp_path: Path) -> None:
     alpha, alpha_config, _alpha_lifecycle, _alpha_invoker = _cell(
         tmp_path,

@@ -85,6 +85,33 @@ def test_initialize_runtime_does_not_start_workers_before_transport(
     assert events == [f"projection:{vault}"]
 
 
+def test_local_runtime_activation_does_not_start_while_consolidation_sealed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance import consolidation_runtime
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    calls: list[str] = []
+    monkeypatch.setattr(
+        consolidation_runtime,
+        "readiness",
+        lambda _vault: {"admitted": False},
+    )
+    activation = server_runtime.LocalRuntimeActivation(vault)
+    monkeypatch.setattr(
+        activation,
+        "_activate",
+        lambda: calls.append("activate"),
+    )
+
+    activation.start()
+
+    assert calls == []
+    assert activation._thread is None  # noqa: SLF001
+
+
 def test_local_runtime_activation_waits_for_liveness_and_starts_once(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

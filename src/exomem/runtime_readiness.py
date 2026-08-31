@@ -352,6 +352,7 @@ def build_runtime_readiness(
     observability: Mapping[str, Any] | None = None,
     traffic: Mapping[str, Any] | None = None,
     retrieval: Mapping[str, Any] | None = None,
+    consolidation: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the public readiness payload from already-measured coordination state."""
     enabled = bool(coordination.get("enabled"))
@@ -372,6 +373,13 @@ def build_runtime_readiness(
             reasons.append("coordination_role_unknown")
         if replica_id is None:
             reasons.append("replica_identity_missing")
+
+    consolidation_payload: dict[str, bool] | None = None
+    if consolidation is not None:
+        consolidation_admitted = bool(consolidation.get("admitted"))
+        consolidation_payload = {"admitted": consolidation_admitted}
+        if not consolidation_admitted:
+            reasons.append("vault_admission_unavailable")
 
     retrieval_payload: dict[str, object] | None = None
     retrieval_admitted = True
@@ -430,6 +438,8 @@ def build_runtime_readiness(
     }
     if retrieval_payload is not None:
         payload["retrieval"] = retrieval_payload
+    if consolidation_payload is not None:
+        payload["consolidation"] = consolidation_payload
     if traffic is not None:
         payload["traffic"] = dict(traffic)
     return payload
@@ -546,23 +556,34 @@ def runtime_readiness(
 ) -> dict[str, Any]:
     """Measure this process's eligibility without exposing vault or credential state."""
     from . import readiness
+    from .governance import consolidation_runtime
     from .session_validation_cache import session_store_readiness
     from .writer_lease import coordination_status
 
     coordination: Mapping[str, Any]
-    configured_vault: Path | None = None
+    configured_raw = os.environ.get("EXOMEM_VAULT_PATH", "").strip()
+    configured_path = Path(configured_raw).expanduser() if configured_raw else None
+    configured_vault = (
+        configured_path
+        if configured_path is not None and configured_path.is_absolute()
+        else None
+    )
+    consolidation_vault = (
+        configured_path.resolve(strict=False)
+        if configured_path is not None
+        else None
+    )
+    consolidation = (
+        consolidation_runtime.readiness(consolidation_vault)
+        if consolidation_vault is not None
+        else None
+    )
     try:
-        configured_raw = os.environ.get("EXOMEM_VAULT_PATH", "").strip()
         # Only an absolute path names a boundary this process can probe. A
         # relative one resolves against whatever the service's cwd happens to
         # be, so it would measure some other boundary and publish that as this
         # vault's state; that is a blind "free", which is the failure being
         # fixed here. Fall through to the process-local `unknown` instead.
-        configured_vault = (
-            Path(configured_raw)
-            if configured_raw and Path(configured_raw).is_absolute()
-            else None
-        )
         measured = _bounded_coordination_status(
             configured_vault,
             coordination_status,
@@ -613,4 +634,5 @@ def runtime_readiness(
             else get_silent_traffic_monitor().snapshot()
         ),
         retrieval=retrieval,
+        consolidation=consolidation,
     )

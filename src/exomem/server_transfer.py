@@ -239,22 +239,7 @@ def register_transfer_routes(
                 return True
         return False
 
-    @mcp_app.custom_route("/upload", methods=["POST"])
-    async def _upload(request: Request) -> JSONResponse:
-        if not config.enabled:
-            return JSONResponse(
-                {
-                    "code": "UPLOAD_DISABLED",
-                    "reason": "uploads are off: set EXOMEM_UPLOAD_TOKEN (or configure "
-                    "Cloudflare Access via EXOMEM_CF_ACCESS_TEAM_DOMAIN + EXOMEM_CF_ACCESS_AUD)",
-                },
-                status_code=503,
-            )
-        if not _authorized(request):
-            return JSONResponse(
-                {"code": "UNAUTHORIZED", "reason": "missing or invalid upload credential"},
-                status_code=401,
-            )
+    async def _upload_admitted(request: Request) -> JSONResponse:
         from .cli_ops import OpError, error_dict, http_status_for
         from .writer_lease import get_manager
 
@@ -355,6 +340,35 @@ def register_transfer_routes(
             )
         return JSONResponse(result.as_dict(), status_code=201)
 
+    @mcp_app.custom_route("/upload", methods=["POST"])
+    async def _upload(request: Request) -> JSONResponse:
+        if not config.enabled:
+            return JSONResponse(
+                {
+                    "code": "UPLOAD_DISABLED",
+                    "reason": "uploads are off: set EXOMEM_UPLOAD_TOKEN (or configure "
+                    "Cloudflare Access via EXOMEM_CF_ACCESS_TEAM_DOMAIN + EXOMEM_CF_ACCESS_AUD)",
+                },
+                status_code=503,
+            )
+        if not _authorized(request):
+            return JSONResponse(
+                {"code": "UNAUTHORIZED", "reason": "missing or invalid upload credential"},
+                status_code=401,
+            )
+        from .cli_ops import OpError, error_dict, http_status_for
+        from .governance import consolidation_runtime
+
+        try:
+            with consolidation_runtime.admit_upload(vault_root):
+                return await _upload_admitted(request)
+        except OpError as exc:
+            error = error_dict(exc)
+            return JSONResponse(
+                {"code": error["code"], "reason": error["message"]},
+                status_code=http_status_for(error["code"]),
+            )
+
     @mcp_app.custom_route("/upload", methods=["GET"])
     async def _upload_form(request: Request) -> HTMLResponse:
         q = request.query_params
@@ -403,42 +417,56 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
                 {"code": "UNAUTHORIZED", "reason": "missing or invalid download credential"},
                 status_code=401,
             )
-        path = request.query_params.get("path", "")
-        if not path.strip():
-            return JSONResponse(
-                {"code": "INVALID_PATH", "reason": "query param `path` (vault-relative) is required"},
-                status_code=400,
-            )
+        from .cli_ops import OpError, error_dict, http_status_for
+        from .governance import consolidation_runtime
+
         try:
-            abs_path, rel = resolve_under_vault(
-                vault_root, path, must_exist=True, must_be_file=True
+            with consolidation_runtime.admit_transfer(vault_root):
+                path = request.query_params.get("path", "")
+                if not path.strip():
+                    return JSONResponse(
+                        {
+                            "code": "INVALID_PATH",
+                            "reason": "query param `path` (vault-relative) is required",
+                        },
+                        status_code=400,
+                    )
+                try:
+                    abs_path, rel = resolve_under_vault(
+                        vault_root, path, must_exist=True, must_be_file=True
+                    )
+                    # A download hands over complete bytes, so only full disclosure
+                    # authorizes it. Refusal remains byte-identical to absence.
+                    if not egress.release_allows_download(
+                        vault_root,
+                        rel,
+                        principal=download_principal(request, config),
+                    ):
+                        raise VaultPathError("NOT_FOUND", f"path does not exist: {rel}")
+                    try:
+                        snapshot = reserved_paths.read_generic_bytes(vault_root, rel)
+                    except reserved_paths.ReservedPathLeafError:
+                        raise VaultPathError(
+                            "NOT_FOUND", f"path does not exist: {rel}"
+                        ) from None
+                except VaultPathError as exc:
+                    status = 404 if exc.code == "NOT_FOUND" else 400
+                    return JSONResponse(
+                        {"code": exc.code, "reason": exc.reason}, status_code=status
+                    )
+                filename = quote(abs_path.name, safe="")
+                return Response(
+                    snapshot.data,
+                    media_type="application/octet-stream",
+                    headers={
+                        "content-disposition": f"attachment; filename*=utf-8''{filename}"
+                    },
+                )
+        except OpError as exc:
+            error = error_dict(exc)
+            return JSONResponse(
+                {"code": error["code"], "reason": error["message"]},
+                status_code=http_status_for(error["code"]),
             )
-            # Release gate on the download TARGET after path resolution but before
-            # the response snapshot is opened or its bytes are read (design D1: the
-            # transfer routes bypass `invoke_command`, so they carry the gate
-            # explicitly). A download hands over the item's COMPLETE bytes, so only
-            # full disclosure authorizes one — otherwise any ceiling could be
-            # escaped by asking for the artifact instead of the text.
-            #
-            # Raised as the route's own NOT_FOUND rather than a new code, so a
-            # withheld artifact is byte-identical to one that never existed:
-            # a distinct "forbidden" reply would itself be an existence oracle.
-            if not egress.release_allows_download(
-                vault_root, rel, principal=download_principal(request, config)
-            ):
-                raise VaultPathError("NOT_FOUND", f"path does not exist: {rel}")
-            try:
-                snapshot = reserved_paths.read_generic_bytes(vault_root, rel)
-            except reserved_paths.ReservedPathLeafError:
-                raise VaultPathError("NOT_FOUND", f"path does not exist: {rel}") from None
-        except VaultPathError as exc:
-            status = 404 if exc.code == "NOT_FOUND" else 400
-            return JSONResponse({"code": exc.code, "reason": exc.reason}, status_code=status)
-        filename = quote(abs_path.name, safe="")
-        return Response(
-            snapshot.data,
-            media_type="application/octet-stream",
-            headers={"content-disposition": f"attachment; filename*=utf-8''{filename}"},
-        )
 
     return config

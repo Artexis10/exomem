@@ -135,6 +135,7 @@ _SERVICE_UNAVAILABLE_CODES = frozenset(
         "WRITER_COORDINATOR_UNAVAILABLE",
         "WRITER_COORDINATOR_CONTRACT_ABSENT",
         "MUTATION_LOCK_UNAVAILABLE",
+        "VAULT_UNAVAILABLE",
         # Retrieval-index-reliability (restore-indexed-category-recall): a safe
         # exact category/kind plan whose maintained semantic catalog cannot yet
         # prove completeness — retryable with bounded `retry_after_ms`, never a
