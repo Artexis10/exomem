@@ -24,11 +24,11 @@
 
 ## 4. Planning and Records feedback loop
 
-- [ ] 4.1 Add red-first contract-projection scenarios for proactive versus explicit durable-intent capture, prominence caps, update-before-create behaviour, tentative conversation, standalone versus companion ownership, and explicit known-absent context.
-- [ ] 4.2 Add red-first scenarios for observed-outcome capture into one compatible Records collection, opaque companion references, Records-to-Planning links, explicit user transitions, proposed transitions, and the prohibition on automatic completion.
+- [x] 4.1 Add red-first contract-projection scenarios for proactive versus explicit durable-intent capture, prominence caps, update-before-create behaviour, tentative conversation, standalone versus companion ownership, and explicit known-absent context.
+- [x] 4.2 Add red-first scenarios for observed-outcome capture into one compatible Records collection, opaque companion references, Records-to-Planning links, explicit user transitions, proposed transitions, and the prohibition on automatic completion.
 - [x] 4.3 Replace privileged OpenSpec/repository wording across canonical runtime descriptions, validators, bootstrap, scaffold, and knowledge packs; broaden Planning `execution.kind` to the exact open key syntax while preserving every existing enum value as valid opaque data.
-- [ ] 4.4 Implement the bounded agent-facing Planning/Records protocol and resolver decision fields needed by those scenarios without adding a server-side conversational classifier or calling a companion system.
-- [ ] 4.5 Keep plan-progress and `unreflected_outcomes` as the deterministic review surfaces and add regression coverage that contracts do not bypass their governance or transition rules.
+- [x] 4.4 Implement the bounded agent-facing Planning/Records protocol and resolver decision fields needed by those scenarios without adding a server-side conversational classifier or calling a companion system.
+- [x] 4.5 Keep plan-progress and `unreflected_outcomes` as the deterministic review surfaces and add regression coverage that contracts do not bypass their governance or transition rules.
 
 ## 5. Documentation and migration
 

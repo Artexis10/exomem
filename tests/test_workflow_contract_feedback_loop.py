@@ -1,0 +1,143 @@
+"""Workflow contracts project a bounded Planning/Records agent protocol.
+
+The service resolves authored policy.  It does not classify conversations,
+choose a collection, or transition a plan; those remain guarded agent actions.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from conftest import initialize_vault_state_offline
+
+
+def _proposal(**overrides: object) -> dict[str, object]:
+    proposal: dict[str, object] = {
+        "type": "workflow-contract",
+        "contract_id": "d2df7e34-b1c0-4dd8-8a5b-3b3db9b9f79f",
+        "schema_version": 1,
+        "key": "delivery-feedback",
+        "title": "Delivery Feedback",
+        "lifecycle": "active",
+        "scope": {"projects": ["delivery"], "domains": [], "activities": []},
+        "planning": {"mode": "companion"},
+        "companions": [
+            {
+                "key": "external-tracker",
+                "name": "External Tracker",
+                "owns": ["software.acceptance-tasks", "software.requirements"],
+            }
+        ],
+        "capture": {"durable_intent": "proactive", "observed_outcomes": "explicit"},
+        "planning_transition": "propose-after-outcome",
+    }
+    proposal.update(overrides)
+    return proposal
+
+
+def test_agent_protocol_is_code_owned_and_shared_by_builtin_saved_ephemeral_and_bootstrap(
+    tmp_path: Path,
+) -> None:
+    from exomem import commands, workflow_contracts
+    from exomem.init import init_vault
+
+    init_vault(tmp_path)
+    initialize_vault_state_offline(tmp_path, source="workflow feedback protocol")
+    contract = workflow_contracts.parse_proposal(_proposal())
+    workflow_contracts.save_contract(tmp_path, contract, why="reviewed workflow policy")
+
+    portable = workflow_contracts.portable_projection()
+    protocol = portable["agent_protocol"]
+    builtin = workflow_contracts.resolve_contracts(tmp_path, {}, name="@standalone")
+    saved = workflow_contracts.resolve_contracts(tmp_path, {"project": "delivery"})
+    ephemeral = workflow_contracts.resolve_contracts(
+        tmp_path, {}, proposal=_proposal(key="session-feedback")
+    )
+    bootstrap = commands.op_bootstrap(tmp_path, profile="compact")["workflow_contracts"]
+
+    assert protocol == {
+        "version": 1,
+        "intent": {
+            "explicit": "route",
+            "proactive": {
+                "requires": ["active-prominence", "durable-intent"],
+                "excludes": ["tentative"],
+            },
+            "planning": ["inspect", "update-one-unambiguous", "create-if-none", "ask-if-ambiguous"],
+            "context": {"missing": "unknown", "null": "known-absent"},
+            "standalone": "complete-durable-hierarchy",
+            "companion": "opaque-execution-references-only",
+        },
+        "outcomes": {
+            "explicit": "route",
+            "proactive": {
+                "requires": ["active-prominence", "identified-outcome"],
+            },
+            "records": ["inspect", "append-one-compatible", "propose-if-none", "ask-if-ambiguous"],
+            "references": "opaque-bounded",
+            "transition": {
+                "explicit-only": "explicit-user-transition-only",
+                "propose-after-outcome": "propose-review-only",
+                "automatic": "forbidden",
+            },
+        },
+        "review": {
+            "surfaces": ["plan-progress", "unreflected-outcomes"],
+            "mode": "deterministic-read-only",
+            "completion-inference": "forbidden",
+        },
+        "service": {
+            "conversation-classification": "agent-supplied-facts-only",
+            "companion-calls": "forbidden",
+            "external-state-inference": "forbidden",
+        },
+    }
+    assert builtin["agent_protocol"] == protocol
+    assert saved["agent_protocol"] == protocol
+    assert ephemeral["agent_protocol"] == protocol
+    assert bootstrap["agent_protocol"] == protocol
+
+    assert saved["decision"]["capture"] == {
+        "durable_intent": "proactive",
+        "observed_outcomes": "explicit",
+    }
+    assert saved["decision"]["planning_transition"] == "propose-after-outcome"
+    assert saved["decision"]["planning"]["mode"] == "companion"
+    assert saved["decision"]["companions"][0]["owns"] == [
+        "software.acceptance-tasks",
+        "software.requirements",
+    ]
+    assert ephemeral["source"] == "ephemeral"
+
+    saved["agent_protocol"]["intent"]["planning"].append("mutate-call-result")
+    assert workflow_contracts.portable_projection()["agent_protocol"] == protocol
+    assert (
+        workflow_contracts.resolve_contracts(tmp_path, {}, name="@standalone")["agent_protocol"]
+        == protocol
+    )
+
+
+def test_workflow_resolution_and_review_surfaces_are_read_only(tmp_path: Path) -> None:
+    from lifecycle_fixtures import queue_item, report_event, seed_vault
+
+    from exomem import audit, commands, workflow_contracts
+
+    seed_vault(tmp_path)
+    queue_item(tmp_path, "Deliverable")
+    report_event(tmp_path, "Deliverable")
+    before = {
+        path.relative_to(tmp_path).as_posix(): path.read_bytes()
+        for path in sorted(tmp_path.rglob("*"))
+        if path.is_file()
+    }
+
+    workflow_contracts.resolve_contracts(tmp_path, {}, name="@standalone")
+    commands.op_review_memory(tmp_path, mode="plan-progress")
+    audit.audit(tmp_path, categories=["unreflected_outcomes"])
+
+    after = {
+        path.relative_to(tmp_path).as_posix(): path.read_bytes()
+        for path in sorted(tmp_path.rglob("*"))
+        if path.is_file()
+    }
+    assert after == before

@@ -86,6 +86,67 @@ _RENDERER_TEMPLATE = MappingProxyType({
     "records": "Records holds observed outcomes; it never completes Planning automatically.",
     "max_bytes": 4096,
 })
+_AGENT_PROTOCOL_TEMPLATE = MappingProxyType(
+    {
+        "version": 1,
+        "intent": MappingProxyType(
+            {
+                "explicit": "route",
+                "proactive": MappingProxyType(
+                    {
+                        "requires": ("active-prominence", "durable-intent"),
+                        "excludes": ("tentative",),
+                    }
+                ),
+                "planning": (
+                    "inspect",
+                    "update-one-unambiguous",
+                    "create-if-none",
+                    "ask-if-ambiguous",
+                ),
+                "context": MappingProxyType({"missing": "unknown", "null": "known-absent"}),
+                "standalone": "complete-durable-hierarchy",
+                "companion": "opaque-execution-references-only",
+            }
+        ),
+        "outcomes": MappingProxyType(
+            {
+                "explicit": "route",
+                "proactive": MappingProxyType(
+                    {"requires": ("active-prominence", "identified-outcome")}
+                ),
+                "records": (
+                    "inspect",
+                    "append-one-compatible",
+                    "propose-if-none",
+                    "ask-if-ambiguous",
+                ),
+                "references": "opaque-bounded",
+                "transition": MappingProxyType(
+                    {
+                        "explicit-only": "explicit-user-transition-only",
+                        "propose-after-outcome": "propose-review-only",
+                        "automatic": "forbidden",
+                    }
+                ),
+            }
+        ),
+        "review": MappingProxyType(
+            {
+                "surfaces": ("plan-progress", "unreflected-outcomes"),
+                "mode": "deterministic-read-only",
+                "completion-inference": "forbidden",
+            }
+        ),
+        "service": MappingProxyType(
+            {
+                "conversation-classification": "agent-supplied-facts-only",
+                "companion-calls": "forbidden",
+                "external-state-inference": "forbidden",
+            }
+        ),
+    }
+)
 
 
 class WorkflowContractError(ValueError):
@@ -162,6 +223,7 @@ def portable_projection() -> dict[str, Any]:
         "context_semantics": {"missing": "unknown", "null": "known-absent"},
         "precedence": ("explicit", "scoped", "default", "builtin"),
         "argument_semantics": "exact-v1",
+        "agent_protocol": _agent_protocol_projection(),
         "renderer_template": _renderer_template_projection(),
     }
     return {
@@ -177,6 +239,39 @@ def _renderer_template_projection() -> dict[str, Any]:
     template["scope_labels"] = dict(_RENDERER_TEMPLATE["scope_labels"])
     template["line_layout"] = list(_RENDERER_TEMPLATE["line_layout"])
     return template
+
+
+def _agent_protocol_projection() -> dict[str, Any]:
+    """Return a detached JSON-shaped copy of the bounded agent protocol."""
+    return {
+        "version": _AGENT_PROTOCOL_TEMPLATE["version"],
+        "intent": {
+            "explicit": _AGENT_PROTOCOL_TEMPLATE["intent"]["explicit"],
+            "proactive": {
+                "requires": list(_AGENT_PROTOCOL_TEMPLATE["intent"]["proactive"]["requires"]),
+                "excludes": list(_AGENT_PROTOCOL_TEMPLATE["intent"]["proactive"]["excludes"]),
+            },
+            "planning": list(_AGENT_PROTOCOL_TEMPLATE["intent"]["planning"]),
+            "context": dict(_AGENT_PROTOCOL_TEMPLATE["intent"]["context"]),
+            "standalone": _AGENT_PROTOCOL_TEMPLATE["intent"]["standalone"],
+            "companion": _AGENT_PROTOCOL_TEMPLATE["intent"]["companion"],
+        },
+        "outcomes": {
+            "explicit": _AGENT_PROTOCOL_TEMPLATE["outcomes"]["explicit"],
+            "proactive": {
+                "requires": list(_AGENT_PROTOCOL_TEMPLATE["outcomes"]["proactive"]["requires"])
+            },
+            "records": list(_AGENT_PROTOCOL_TEMPLATE["outcomes"]["records"]),
+            "references": _AGENT_PROTOCOL_TEMPLATE["outcomes"]["references"],
+            "transition": dict(_AGENT_PROTOCOL_TEMPLATE["outcomes"]["transition"]),
+        },
+        "review": {
+            "surfaces": list(_AGENT_PROTOCOL_TEMPLATE["review"]["surfaces"]),
+            "mode": _AGENT_PROTOCOL_TEMPLATE["review"]["mode"],
+            "completion-inference": _AGENT_PROTOCOL_TEMPLATE["review"]["completion-inference"],
+        },
+        "service": dict(_AGENT_PROTOCOL_TEMPLATE["service"]),
+    }
 
 
 def contract_directory(vault_root: Path) -> Path:
@@ -1074,6 +1169,7 @@ def _builtin(
         "context": context,
         "decision": {"planning": {"mode": "standalone"}, "companions": []},
         "capabilities": {"declared_companion_keys": [], "available": []},
+        "agent_protocol": _agent_protocol_projection(),
         "explanation": "Planning owns intended future state and Records holds observed outcomes.",
         "warnings": [],
     }
@@ -1108,6 +1204,7 @@ def _resolved(
             "declared_companion_keys": [item["key"] for item in contract.data["companions"]],
             "available": [],
         },
+        "agent_protocol": _agent_protocol_projection(),
         "explanation": render_presentation(contract),
         "warnings": [],
     }

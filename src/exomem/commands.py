@@ -448,6 +448,7 @@ def op_bootstrap(
     workflow_projection_base = {
         "invariants": workflow_portable["invariants"],
         "builtin_fallback": workflow_portable["builtin_fallback"],
+        "agent_protocol": workflow_portable["agent_protocol"],
         "resolution_available": workflow_callable,
         "proactive_routing_available": bool(workflow_callable and not workflow_unavailable),
     }
