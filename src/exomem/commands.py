@@ -446,10 +446,37 @@ def op_bootstrap(
             else "workflow_resolution_unavailable"
         )
     workflow_projection_base = {
-        "invariants": workflow_portable["invariants"],
         "builtin_fallback": workflow_portable["builtin_fallback"],
         "resolution_available": workflow_callable,
         "proactive_routing_available": bool(workflow_callable and not workflow_unavailable),
+    }
+    workflow_effective_capture = prominence_module.effective_capture(
+        workflow_portable["builtin_fallback"]["capture"], engagement_policy["level"]
+    )
+    workflow_compact_effective_capture = {
+        "explicit": True,
+        "proactive": {
+            kind: (
+                value["proactive_requires"][-1] if value["proactive_permitted"] else False
+            )
+            for kind, value in workflow_effective_capture.items()
+        },
+    }
+    workflow_compact_protocol = {
+        "version": workflow_portable["agent_protocol"]["version"],
+        "active_prominence": engagement_policy["level"],
+        "effective_capture": workflow_compact_effective_capture,
+        "outcomes": {
+            "planning_reference": workflow_portable["agent_protocol"]["outcomes"][
+                "planning_reference"
+            ],
+            "transition": workflow_portable["agent_protocol"]["outcomes"]["transition"],
+        },
+    }
+    workflow_active_protocol = {
+        **workflow_portable["agent_protocol"],
+        "active_prominence": engagement_policy["level"],
+        "effective_capture": workflow_effective_capture,
     }
     if workflow_complete:
         workflow_projection_base.update(
@@ -468,6 +495,7 @@ def op_bootstrap(
         workflow_contract_projection = {
             **workflow_projection_base,
             "portable": workflow_portable_identity,
+            "agent_protocol": workflow_compact_protocol,
             **({"route": workflow_route} if workflow_callable else {}),
             **({"status": workflow_public_status} if workflow_public_status is not None else {}),
             **({"findings": workflow_findings} if workflow_findings else {}),
@@ -476,8 +504,9 @@ def op_bootstrap(
     elif workflow_callable:
         workflow_contract_projection = {
             **workflow_projection_base,
+            "invariants": workflow_portable["invariants"],
             "portable": workflow_portable,
-            "agent_protocol": workflow_portable["agent_protocol"],
+            "agent_protocol": workflow_active_protocol,
             "route": workflow_route,
             **({"status": workflow_public_status} if workflow_public_status is not None else {}),
             "findings": workflow_findings,
@@ -485,8 +514,9 @@ def op_bootstrap(
     else:
         workflow_contract_projection = {
             **workflow_projection_base,
+            "invariants": workflow_portable["invariants"],
             "portable": workflow_portable,
-            "agent_protocol": workflow_portable["agent_protocol"],
+            "agent_protocol": workflow_active_protocol,
             "status": workflow_public_status,
         }
     entity_type_registry = entity_types_module.load_entity_types(vault_root)
@@ -7335,12 +7365,21 @@ def _workflow_contract_schema_operation(
                 or (name is not None and name != "@standalone" and not saved_name(name))
             ):
                 return invalid
-            return {
+            result = {
                 "subject": "workflow-contracts",
                 **family.resolver(
                     vault_root, context, name=name, proposal=proposal
                 ),
             }
+            if result.get("resolved"):
+                from . import prominence as prominence_module
+
+                active_prominence = prominence_module.resolve()
+                result["active_prominence"] = active_prominence
+                result["effective_capture"] = prominence_module.effective_capture(
+                    result["decision"]["capture"], active_prominence
+                )
+            return result
         if operation == "preview":
             if (
                 proposal is None

@@ -360,7 +360,7 @@ def test_light_does_not_widen_with_the_lifecycle_classes() -> None:
 
 @pytest.mark.parametrize("level", prominence.CANON)
 def test_effective_capture_pins_explicit_and_proactive_gates(level: str) -> None:
-    effective = prominence.effective_capture(level)
+    effective = prominence.capture_gate(level)
     proactive = level in {"balanced", "maximal"}
 
     assert set(effective) == {"durable_intent", "observed_outcomes"}
@@ -384,6 +384,26 @@ def test_effective_capture_projection_is_complete_and_detached() -> None:
     projection = prominence.capture_policy_projection()
     assert list(projection) == list(prominence.CANON)
     projection["balanced"]["durable_intent"]["proactive_requires"].append("mutated")
-    assert prominence.capture_policy_projection()["balanced"] == prominence.effective_capture(
+    assert prominence.capture_policy_projection()["balanced"] == prominence.capture_gate(
         "balanced"
     )
+
+
+@pytest.mark.parametrize("level", prominence.CANON)
+@pytest.mark.parametrize("authored", ("explicit", "proactive"))
+def test_effective_capture_applies_authored_posture_under_the_active_level(
+    level: str, authored: str
+) -> None:
+    effective = prominence.effective_capture(
+        {"durable_intent": authored, "observed_outcomes": authored}, level
+    )
+    proactive = authored == "proactive" and level in {"balanced", "maximal"}
+
+    for value in effective.values():
+        assert value["authored"] == authored
+        assert value["explicit_user_request_permitted"] is True
+        assert value["proactive_permitted"] is proactive
+        if proactive:
+            assert value["proactive_requires"]
+        else:
+            assert value["proactive_requires"] == []

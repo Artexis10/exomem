@@ -40,7 +40,7 @@ def _proposal(**overrides: object) -> dict[str, object]:
 def test_agent_protocol_is_code_owned_and_shared_by_builtin_saved_ephemeral_and_bootstrap(
     tmp_path: Path,
 ) -> None:
-    from exomem import commands, prominence, workflow_contracts
+    from exomem import commands, workflow_contracts
     from exomem.init import init_vault
 
     init_vault(tmp_path)
@@ -98,12 +98,25 @@ def test_agent_protocol_is_code_owned_and_shared_by_builtin_saved_ephemeral_and_
             "companion-calls": "forbidden",
             "external-state-inference": "forbidden",
         },
-        "effective_capture_by_prominence": prominence.capture_policy_projection(),
     }
     assert builtin["agent_protocol"] == protocol
     assert saved["agent_protocol"] == protocol
     assert ephemeral["agent_protocol"] == protocol
-    assert "agent_protocol" not in bootstrap
+    assert bootstrap["agent_protocol"] == {
+        "version": 1,
+        "active_prominence": "balanced",
+        "effective_capture": {
+            "explicit": True,
+            "proactive": {
+                "durable_intent": "durable-intent",
+                "observed_outcomes": "sufficiently-identified-outcome",
+            },
+        },
+        "outcomes": {
+            "planning_reference": protocol["outcomes"]["planning_reference"],
+            "transition": protocol["outcomes"]["transition"],
+        },
+    }
     assert bootstrap["portable"] == {
         key: portable[key] for key in ("family", "schema_version", "digest")
     }
@@ -203,13 +216,13 @@ def test_every_resolution_projects_the_same_prominence_cap_for_authored_capture_
             tmp_path, {}, proposal=_proposal(key="session-effective-capture", capture=capture)
         ),
     )
-    expected = prominence.capture_policy_projection()
     for result in results:
-        assert result["agent_protocol"]["effective_capture_by_prominence"] == expected
+        assert "effective_capture_by_prominence" not in result["agent_protocol"]
     assert results[1]["decision"]["capture"] == capture
     assert results[2]["decision"]["capture"] == capture
-    assert expected[level]["durable_intent"]["proactive_permitted"] is (
-        level in {"balanced", "maximal"}
+    effective = prominence.effective_capture(capture, level)
+    assert effective["durable_intent"]["proactive_permitted"] is (
+        capture["durable_intent"] == "proactive" and level in {"balanced", "maximal"}
     )
 
 
@@ -223,22 +236,115 @@ def test_bootstrap_projects_the_active_prominence_capture_cap_without_transition
     level: str,
     proactive_permitted: bool,
 ) -> None:
-    from exomem import commands, prominence, workflow_contracts
+    from exomem import commands, prominence
 
     monkeypatch.setenv("EXOMEM_PROMINENCE", level)
     payload = commands.op_bootstrap(tmp_path, profile="compact")
     effective = payload["engagement"]["contract"]["effective_capture"]
-    table = workflow_contracts.portable_projection()["agent_protocol"][
-        "effective_capture_by_prominence"
-    ]
 
-    assert effective == prominence.effective_capture(level)
-    assert table == prominence.capture_policy_projection()
+    assert effective == prominence.capture_gate(level)
     assert effective["durable_intent"]["proactive_permitted"] is proactive_permitted
     assert effective["observed_outcomes"]["proactive_permitted"] is proactive_permitted
     assert "record then transition" not in json.dumps(payload).lower()
     capture = payload["engagement"]["contract"]["capture"].lower()
+    assert payload["workflow_contracts"]["agent_protocol"]["active_prominence"] == level
+    compact_effective = payload["workflow_contracts"]["agent_protocol"]["effective_capture"]
+    expected_proactive = {
+        "durable_intent": "durable-intent" if proactive_permitted else False,
+        "observed_outcomes": (
+            "sufficiently-identified-outcome" if proactive_permitted else False
+        ),
+    }
+    assert compact_effective["explicit"] is True
+    assert compact_effective["proactive"] == expected_proactive
     if proactive_permitted:
         assert "transition only on explicit user intent" in capture
     else:
         assert "ask" in capture
+
+
+@pytest.mark.parametrize("level", ("off", "light", "balanced", "maximal"))
+@pytest.mark.parametrize(
+    "capture",
+    (
+        {"durable_intent": "explicit", "observed_outcomes": "explicit"},
+        {"durable_intent": "proactive", "observed_outcomes": "proactive"},
+    ),
+)
+def test_public_resolve_and_compact_bootstrap_project_active_effective_capture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    level: str,
+    capture: dict[str, str],
+) -> None:
+    from exomem import commands, prominence, workflow_contracts
+    from exomem.init import init_vault
+
+    init_vault(tmp_path)
+    initialize_vault_state_offline(tmp_path, source="workflow public effective capture")
+    contract = workflow_contracts.parse_proposal(_proposal(capture=capture))
+    workflow_contracts.save_contract(tmp_path, contract, why="reviewed workflow policy")
+    core_before = workflow_contracts.resolve_contracts(tmp_path, {"project": "delivery"})
+    monkeypatch.setenv("EXOMEM_PROMINENCE", level)
+
+    results = (
+        commands.op_schema_memory(
+            tmp_path,
+            subject="workflow-contracts",
+            operation="resolve",
+            name="@standalone",
+            context={},
+        ),
+        commands.op_schema_memory(
+            tmp_path,
+            subject="workflow-contracts",
+            operation="resolve",
+            context={"project": "delivery"},
+        ),
+        commands.op_schema_memory(
+            tmp_path,
+            subject="workflow-contracts",
+            operation="resolve",
+            context={},
+            proposal=_proposal(key="session-public-effective", capture=capture),
+        ),
+    )
+    for result in results:
+        assert result["active_prominence"] == level
+        assert result["effective_capture"] == prominence.effective_capture(
+            result["decision"]["capture"], level
+        )
+        for kind, value in result["effective_capture"].items():
+            assert value["explicit_user_request_permitted"] is True
+            assert value["proactive_permitted"] is (
+                result["decision"]["capture"][kind] == "proactive"
+                and level in {"balanced", "maximal"}
+            )
+
+    assert workflow_contracts.resolve_contracts(tmp_path, {"project": "delivery"}) == core_before
+    compact = commands.op_bootstrap(tmp_path, profile="compact")["workflow_contracts"]
+    effective = prominence.effective_capture(compact["builtin_fallback"]["capture"], level)
+    assert compact["agent_protocol"] == {
+        "version": 1,
+        "active_prominence": level,
+        "effective_capture": {
+            "explicit": True,
+            "proactive": {
+                kind: (value["proactive_requires"][-1] if value["proactive_permitted"] else False)
+                for kind, value in effective.items()
+            },
+        },
+        "outcomes": {
+            "planning_reference": {
+                "unambiguous": "link-opaque",
+                "absent": "record-without-plan",
+                "ambiguous": "no-link-surface-review",
+            },
+            "transition": {
+                "explicit-only": "explicit-user-transition-only",
+                "propose-after-outcome": "propose-review-only",
+                "automatic": "forbidden",
+            },
+        },
+    }
+    assert "record then transition" not in json.dumps(compact).lower()

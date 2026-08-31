@@ -181,7 +181,7 @@ class ProminenceContract:
             "capture": self.capture,
             "narration": self.narration,
             "summary": self.summary,
-            "effective_capture": effective_capture(self.level),
+            "effective_capture": capture_gate(self.level),
         }
 
 
@@ -374,7 +374,7 @@ def contract(level: str | None = None, surface: str | None = None) -> Prominence
     return CONTRACTS[resolved_level]
 
 
-def effective_capture(level: str | None = None, surface: str | None = None) -> dict:
+def capture_gate(level: str | None = None, surface: str | None = None) -> dict:
     """Return one level's detached capture gate for workflow-contract consumers."""
     resolved_level = normalize(level) or resolve(surface)
     return {
@@ -387,9 +387,40 @@ def effective_capture(level: str | None = None, surface: str | None = None) -> d
     }
 
 
+def effective_capture(authored_capture: dict[str, str], prominence_level: str) -> dict:
+    """Evaluate an authored workflow posture under one active prominence level.
+
+    This is deliberately pure: workflow resolution selects authored policy, while
+    public adapters supply the active prominence level that caps it.
+    """
+    if set(authored_capture) != {"durable_intent", "observed_outcomes"} or any(
+        value not in {"explicit", "proactive"} for value in authored_capture.values()
+    ):
+        raise ValueError("authored capture must name explicit or proactive for both capture kinds")
+    if prominence_level not in CANON:
+        raise ValueError(f"unknown canonical prominence: {prominence_level!r}")
+
+    gate = _CAPTURE_EFFECTIVE_TEMPLATE[prominence_level]
+    return {
+        kind: {
+            "authored": authored_capture[kind],
+            "explicit_user_request_permitted": True,
+            "proactive_permitted": (
+                authored_capture[kind] == "proactive" and gate[kind]["proactive_permitted"]
+            ),
+            "proactive_requires": (
+                list(gate[kind]["proactive_requires"])
+                if authored_capture[kind] == "proactive" and gate[kind]["proactive_permitted"]
+                else []
+            ),
+        }
+        for kind in ("durable_intent", "observed_outcomes")
+    }
+
+
 def capture_policy_projection() -> dict:
     """Return the complete, detached level-to-effective-capture table."""
-    return {level: effective_capture(level) for level in CANON}
+    return {level: capture_gate(level) for level in CANON}
 
 
 def hook_env(level: str | None = None, surface: str | None = None) -> dict[str, str]:

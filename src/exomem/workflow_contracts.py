@@ -148,6 +148,17 @@ _AGENT_PROTOCOL_TEMPLATE = MappingProxyType(
     }
 )
 
+_BUILTIN_DECISION = MappingProxyType(
+    {
+        "planning": MappingProxyType({"mode": "standalone"}),
+        "companions": (),
+        "capture": MappingProxyType(
+            {"durable_intent": "proactive", "observed_outcomes": "proactive"}
+        ),
+        "planning_transition": "propose-after-outcome",
+    }
+)
+
 
 class WorkflowContractError(ValueError):
     """A stable workflow-contract refusal."""
@@ -219,7 +230,7 @@ def portable_projection() -> dict[str, Any]:
         "schema_version": SCHEMA_VERSION,
         "operations": ("inventory", "inspect", "validate", "resolve", "preview", "save", "refresh"),
         "invariants": invariants,
-        "builtin_fallback": {"planning": {"mode": "standalone"}, "companions": []},
+        "builtin_fallback": _builtin_decision_projection(),
         "context_semantics": {"missing": "unknown", "null": "known-absent"},
         "precedence": ("explicit", "scoped", "default", "builtin"),
         "argument_semantics": "exact-v1",
@@ -243,8 +254,6 @@ def _renderer_template_projection() -> dict[str, Any]:
 
 def _agent_protocol_projection() -> dict[str, Any]:
     """Return a detached JSON-shaped copy of the bounded agent protocol."""
-    from . import prominence
-
     return {
         "version": _AGENT_PROTOCOL_TEMPLATE["version"],
         "intent": {
@@ -278,7 +287,16 @@ def _agent_protocol_projection() -> dict[str, Any]:
             "completion-inference": _AGENT_PROTOCOL_TEMPLATE["review"]["completion-inference"],
         },
         "service": dict(_AGENT_PROTOCOL_TEMPLATE["service"]),
-        "effective_capture_by_prominence": prominence.capture_policy_projection(),
+    }
+
+
+def _builtin_decision_projection() -> dict[str, Any]:
+    """Return the code-owned standalone posture without sharing mutable state."""
+    return {
+        "planning": dict(_BUILTIN_DECISION["planning"]),
+        "companions": list(_BUILTIN_DECISION["companions"]),
+        "capture": dict(_BUILTIN_DECISION["capture"]),
+        "planning_transition": _BUILTIN_DECISION["planning_transition"],
     }
 
 
@@ -1175,7 +1193,7 @@ def _builtin(
         "source": source,
         "schema_version": SCHEMA_VERSION,
         "context": context,
-        "decision": {"planning": {"mode": "standalone"}, "companions": []},
+        "decision": _builtin_decision_projection(),
         "capabilities": {"declared_companion_keys": [], "available": []},
         "agent_protocol": _agent_protocol_projection(),
         "explanation": "Planning owns intended future state and Records holds observed outcomes.",

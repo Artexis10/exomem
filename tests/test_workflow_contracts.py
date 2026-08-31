@@ -1226,7 +1226,10 @@ def test_workflow_projection_stays_identical_across_bootstrap_and_knowledge_pack
     portable = portable_projection()
     for profile in ("compact", "full"):
         projected = op_bootstrap(tmp_path, profile=profile)["workflow_contracts"]
-        assert projected["invariants"] == portable["invariants"]
+        if profile == "compact":
+            assert "invariants" not in projected
+        else:
+            assert projected["invariants"] == portable["invariants"]
         assert projected["builtin_fallback"] == portable["builtin_fallback"]
         assert projected["route"]["operation"] == "resolve"
         assert projected["proactive_routing_available"] is True
