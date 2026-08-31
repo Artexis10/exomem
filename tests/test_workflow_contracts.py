@@ -1053,6 +1053,54 @@ def test_explicit_selection_recovers_a_same_key_nested_duplicate_and_keeps_other
     assert unrelated["key"] == "other-delivery"
 
 
+def test_explicit_selection_refuses_an_invalid_sibling_with_duplicate_identical_top_level_key(
+    tmp_path: Path,
+) -> None:
+    from exomem import workflow_contracts
+
+    _write_contract(tmp_path, _proposal(), "valid.md")
+    invalid = workflow_contracts.contract_directory(tmp_path) / "invalid.md"
+    source = workflow_contracts.canonical_content(
+        workflow_contracts.parse_proposal(_proposal())
+    )
+    invalid.write_text(
+        source.replace(
+            "key: software-delivery\n",
+            "key: software-delivery\nkey: software-delivery\n",
+        ),
+        encoding="utf-8",
+    )
+
+    result = workflow_contracts.resolve_contracts(tmp_path, {}, name="software-delivery")
+
+    assert result["resolved"] is False
+    assert result["code"] == "WORKFLOW_CONTRACT_INVALID"
+
+
+def test_conflicting_duplicate_top_level_keys_remain_unattributed(tmp_path: Path) -> None:
+    from exomem import workflow_contracts
+
+    _write_contract(tmp_path, _proposal(), "valid.md")
+    invalid = workflow_contracts.contract_directory(tmp_path) / "invalid.md"
+    source = workflow_contracts.canonical_content(
+        workflow_contracts.parse_proposal(_proposal())
+    )
+    invalid.write_text(
+        source.replace(
+            "key: software-delivery\n",
+            "key: software-delivery\nkey: conflicting-delivery\n",
+        ),
+        encoding="utf-8",
+    )
+
+    inventory = workflow_contracts.inventory_contracts(tmp_path)
+    result = workflow_contracts.resolve_contracts(tmp_path, {}, name="software-delivery")
+
+    assert "key" not in inventory["findings"][0]
+    assert result["resolved"] is True
+    assert result["key"] == "software-delivery"
+
+
 @pytest.mark.parametrize(
     "malformed",
     (

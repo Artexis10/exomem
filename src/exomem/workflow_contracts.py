@@ -1102,7 +1102,7 @@ def _recovered_top_level_key(source: str) -> str | None:
         and isinstance(value_node, yaml.ScalarNode)
         and value_node.tag == "tag:yaml.org,2002:str"
     ]
-    return keys[0] if len(keys) == 1 else None
+    return keys[0] if keys and len(set(keys)) == 1 else None
 
 
 def _body(source: str) -> str:
