@@ -185,8 +185,9 @@ def test_sentinel_boundary_keeps_literal_preserved_notes_in_extraction() -> None
     content = (
         FRONTMATTER
         + "# Evidence: report.pdf\n\nPreserved under `Evidence/Case/`.\n\n"
-        + "## Extracted text\n\n# Document\n\n## Preserved notes\n\n"
-        + "This is a literal document heading, not sidecar structure.\n\n"
+        + "## Extracted text\n\n# Document\n\n"
+        + "<!-- exomem:sidecar-preserved-notes -->\n## Preserved notes\n\n"
+        + "This is literal extracted content, not sidecar structure.\n\n"
         + "<!-- exomem:sidecar-preserved-notes -->\n"
         + "## Preserved notes\n\nAuthored note.\n"
     )
@@ -241,6 +242,7 @@ def test_empty_extraction_keeps_repeated_preserved_block_without_candidate() -> 
     damage = sidecar_repair.analyze(content, Path("requirements.xlsx.md"))
     assert damage is not None
     assert damage.recovered_chars == 0
+    assert damage.source_reextraction_required is True
     assert sidecar_repair.repair_is_safe(content, repaired)
 
 

@@ -1149,9 +1149,16 @@ def _preservable_notes(body: str) -> str | None:
     """
     preserve = _preserve_module()
     kept: list[str] = []
-    for segment in body.split(_PRESERVED_HEADING):
+    owned_boundary = f"{preserve.SIDECAR_PRESERVED_NOTES_SENTINEL}\n{_PRESERVED_HEADING}"
+    segments = (
+        body.rsplit(owned_boundary, 1)
+        if owned_boundary in body
+        else body.split(_PRESERVED_HEADING)
+    )
+    for segment in segments:
         prose = _strip_empty_extracted_sections(segment)
-        prose = prose.replace(preserve.SIDECAR_PRESERVED_NOTES_SENTINEL, "")
+        if owned_boundary not in body:
+            prose = prose.replace(preserve.SIDECAR_PRESERVED_NOTES_SENTINEL, "")
         prose = _SIDECAR_BOILERPLATE_RE.sub("", prose).strip()
         if prose and prose not in kept:
             kept.append(prose)

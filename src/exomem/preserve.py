@@ -935,7 +935,7 @@ def _has_ambiguous_legacy_preserved_notes(content: str) -> bool:
         return False
     start = extraction + len(_EXTRACTED_HEADING)
     if any(
-        content.find(f"\n{sentinel}\n", start) != -1
+        content.rfind(f"\n{sentinel}\n", start) != -1
         for sentinel in (SIDECAR_PRESERVED_NOTES_SENTINEL, SIDECAR_ARTIFACT_SENTINEL)
     ) or _LEGACY_ARTIFACT_BLOCK_RE.search(content, start) is not None:
         return False
@@ -1193,10 +1193,10 @@ def _set_extracted_text(content: str, text: str) -> str:
         return content.rstrip("\n") + "\n\n" + block
     start = idx + len(_EXTRACTED_HEADING)
     boundaries = (
-        content.find(f"\n{SIDECAR_PRESERVED_NOTES_SENTINEL}\n", start),
-        content.find(f"\n{SIDECAR_ARTIFACT_SENTINEL}\n", start),
+        content.rfind(f"\n{SIDECAR_PRESERVED_NOTES_SENTINEL}\n", start),
+        content.rfind(f"\n{SIDECAR_ARTIFACT_SENTINEL}\n", start),
     )
-    after = min((boundary for boundary in boundaries if boundary != -1), default=-1)
+    after = max((boundary for boundary in boundaries if boundary != -1), default=-1)
     legacy_preserved = False
     if after == -1:
         legacy_artifact = _LEGACY_ARTIFACT_BLOCK_RE.search(content, start)

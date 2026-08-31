@@ -643,7 +643,22 @@ def _check_duplicated_sidecars(vault_root: Path) -> list[AuditFinding]:
         if damage is None:
             continue
         rel = sidecar.relative_to(vault_root).as_posix()
-        detail = f"{damage.depth} nested copies; {damage.duplicate_chars:,} duplicate chars"
+        if damage.source_reextraction_required:
+            detail = (
+                f"{damage.depth} nested copies; source re-extraction required "
+                "(no surviving extracted text)"
+            )
+            severity = "error"
+            proposed_fix = (
+                "retry media processing to produce a source-derived extraction; "
+                "automatic sidecar repair cannot determine a safe unit"
+            )
+        else:
+            detail = f"{damage.depth} nested copies; {damage.duplicate_chars:,} duplicate chars"
+            severity = "error" if damage.recovery_only else "warn"
+            proposed_fix = (
+                "maintain_memory(mode='fix') keeps the longest extraction and drops the nesting"
+            )
         if damage.recovery_only:
             detail += "; extraction survives ONLY in a nested copy"
         elif damage.distinct_extractions > 1:
@@ -651,12 +666,10 @@ def _check_duplicated_sidecars(vault_root: Path) -> list[AuditFinding]:
         findings.append(
             AuditFinding(
                 category="duplicated_sidecar",
-                severity="error" if damage.recovery_only else "warn",
+                severity=severity,
                 path=rel,
                 detail=detail,
-                proposed_fix=(
-                    "maintain_memory(mode='fix') keeps the longest extraction and drops the nesting"
-                ),
+                proposed_fix=proposed_fix,
             )
         )
     return findings

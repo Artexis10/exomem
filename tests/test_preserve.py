@@ -262,6 +262,35 @@ def test_update_sidecar_extraction_keeps_sentinel_owned_boundary_after_collision
     assert body.count(owned) == 1
 
 
+def test_update_sidecar_extraction_uses_final_owned_preserved_notes_boundary(
+    vault: Path,
+) -> None:
+    result = preserve_module.preserve_bytes(
+        vault, scope="Test", category="docs", filename="final-boundary.docx", data=b"BINARY"
+    )
+    sidecar = vault / result.sidecar_path
+    sidecar.write_text(
+        _read(sidecar)
+        + f"{_PRESERVED_NOTES_SENTINEL}\n## Preserved notes\n\nAuthored note.\n",
+        encoding="utf-8",
+    )
+    extraction = (
+        "# Document\n\n"
+        f"{_ARTIFACT_SENTINEL}\n## Artifact\n\n"
+        "Literal artifact content.\n\n"
+        f"{_PRESERVED_NOTES_SENTINEL}\n## Preserved notes\n\n"
+        "Literal extracted content."
+    )
+
+    preserve_module.update_sidecar_extraction(vault, sidecar, text=extraction, engine="markitdown")
+    preserve_module.update_sidecar_extraction(vault, sidecar, text=extraction, engine="markitdown")
+
+    updated = _read(sidecar)
+    assert updated.count(extraction) == 1
+    assert updated.count(_ARTIFACT_SENTINEL) == 1
+    assert updated.count(_PRESERVED_NOTES_SENTINEL) == 2
+    assert updated.count("Authored note.") == 1
+
 def test_update_sidecar_extraction_keeps_complete_legacy_artifact_block() -> None:
     artifact = (
         "## Artifact\n\n- Original filename: `report.docx`\n"

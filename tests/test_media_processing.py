@@ -1882,6 +1882,41 @@ def test_changed_bytes_are_still_a_conflict(vault: Path) -> None:
     assert "Transcript of the ORIGINAL bytes." in body
 
 
+def test_conflict_rerender_keeps_literal_owned_boundary_in_extraction(vault: Path) -> None:
+    media_processing = _media_processing()
+    binary = _drop_media(vault, "literal-boundary.m4a")
+    sidecar = _completed(vault, binary, "[0:00] Original transcript.")
+    frontmatter, _body = _frontmatter_and_body(sidecar)
+    prefix = sidecar.read_text(encoding="utf-8").split("\n---\n", 1)[0] + "\n---\n"
+    literal = (
+        "# Document\n\n"
+        "<!-- exomem:sidecar-preserved-notes -->\n## Preserved notes\n\n"
+        "Literal extracted content."
+    )
+    sidecar.write_text(
+        prefix
+        + "# Evidence: literal-boundary.m4a\n\n"
+        + "Preserved under `Evidence/Audio/`.\n\n## Extracted text\n\n"
+        + literal
+        + "\n\n<!-- exomem:sidecar-preserved-notes -->\n"
+        + "## Preserved notes\n\nAuthored note.\n",
+        encoding="utf-8",
+    )
+    assert frontmatter["processing_state"] == "completed"
+
+    bodies: list[str] = []
+    for payload in (b"first conflicting bytes", b"second conflicting bytes"):
+        binary.write_bytes(payload)
+        media_processing.reconcile_media(vault, binary)
+        bodies.append(_frontmatter_and_body(sidecar)[1])
+
+    assert bodies[0] == bodies[1]
+    for body in bodies:
+        assert body.count(literal) == 1
+        assert body.count("<!-- exomem:sidecar-preserved-notes -->") == 2
+        assert body.count("Authored note.") == 1
+
+
 def test_repeated_conflicting_re_renders_do_not_nest(vault: Path) -> None:
     """The unbounded-growth regression, directly.
 

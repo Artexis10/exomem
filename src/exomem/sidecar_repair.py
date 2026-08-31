@@ -60,7 +60,7 @@ def _segments(body: str) -> list[tuple[str, str]]:
     out: list[tuple[str, str]] = []
     owned_boundary = f"{PRESERVED_NOTES_SENTINEL}\n{PRESERVED_HEADING}"
     boundaries = (
-        body.split(owned_boundary)
+        body.rsplit(owned_boundary, 1)
         if owned_boundary in body
         else body.split(PRESERVED_HEADING)
     )
@@ -108,6 +108,11 @@ class SidecarDamage:
         Truncating at the first `## Preserved notes` would destroy these.
         """
         return self.top_level_chars == 0 and self.recovered_chars > 0
+
+    @property
+    def source_reextraction_required(self) -> bool:
+        """Whether no surviving extraction can safely anchor a repair."""
+        return self.top_level_chars == 0 and self.recovered_chars == 0
 
 
 def analyze(content: str, path: Path) -> SidecarDamage | None:
