@@ -248,12 +248,17 @@ def _render_identified_write_advisory(
 ) -> str:
     suffix = f" [review: {identity.ref}; fingerprint: {identity.fingerprint}]"
     prose = _render_write_advisory(kind, candidate)
+    offer_clause = ""
     if quiet_offer:
-        prose += " Quiet this kind with a reason if it is no longer useful."
+        offer_clause = (
+            " [quiet offer: ref="
+            f"{quiet_offer['ref']}; action=quiet; reason required]"
+        )
     budget = _WRITE_ADVISORY_WARNING_CHARS - len(suffix)
-    if len(prose) > budget:
-        prose = prose[: max(0, budget - 1)].rstrip() + "…"
-    return prose + suffix
+    prose_budget = budget - len(offer_clause)
+    if len(prose) > prose_budget:
+        prose = prose[: max(0, prose_budget - 1)].rstrip() + "…"
+    return prose + offer_clause + suffix
 
 
 def emit_write_advisories(

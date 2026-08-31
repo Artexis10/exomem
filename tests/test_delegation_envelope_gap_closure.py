@@ -152,6 +152,13 @@ def test_the_first_eligible_write_advisory_carries_one_quiet_offer(vault) -> Non
 
     assert identity.ref in warning
     assert "quiet" in warning.lower()
+    assert (
+        "[quiet offer: ref=exomem://review/family/near-duplicate; action=quiet; "
+        "reason required]" in warning
+    )
+    assert warning.endswith(
+        f"[review: {identity.ref}; fingerprint: {identity.fingerprint}]"
+    )
     assert len(warning) <= 300
     assert review_state.quiet_offered_at(store.load(), "near-duplicate")
     again = corpus_aware.emit_write_advisories(
