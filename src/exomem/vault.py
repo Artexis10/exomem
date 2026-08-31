@@ -4519,13 +4519,31 @@ def _batch_atomic_write_locked(
         if any(part.startswith(_BATCH_RESIDUE_PREFIX) for part in absolute_parts):
             raise _batch_residue_error("BATCH_RESIDUE_UNSAFE")
         if isinstance(write.content, PreparedBinaryContent):
-            if not write.create_only or write.expected_hash != MISSING_CONTENT_HASH:
+            if write.expected_hash is None or (
+                write.create_only != (write.expected_hash == MISSING_CONTENT_HASH)
+            ):
                 raise PathGuardError(
                     "PATH_GUARD_INVALID",
-                    "binary batch content requires an exact missing destination",
+                    "binary batch content requires an exact destination state",
                 )
-            if os.path.lexists(write.path):
-                raise CreateOnlyConflict(_safe_write_target(write.path, vault_root))
+            if write.create_only:
+                if os.path.lexists(write.path):
+                    raise CreateOnlyConflict(_safe_write_target(write.path, vault_root))
+            else:
+                try:
+                    with write.path.open("rb") as current_stream:
+                        current_digest = hashlib.file_digest(
+                            current_stream,
+                            "sha256",
+                        ).hexdigest()
+                except FileNotFoundError:
+                    current_digest = None
+                if current_digest != write.expected_hash:
+                    raise ContentHashMismatchError(
+                        write.path,
+                        write.expected_hash,
+                        current_digest,
+                    )
             continue
         if write.expected_hash is not None:
             try:
@@ -4662,10 +4680,12 @@ def _batch_atomic_write_locked(
                     f"stage-{index}.tmp", write.content.encode("utf-8")
                 )
             elif isinstance(write.content, PreparedBinaryContent):
-                if not write.create_only or write.expected_hash != MISSING_CONTENT_HASH:
+                if write.expected_hash is None or (
+                    write.create_only != (write.expected_hash == MISSING_CONTENT_HASH)
+                ):
                     raise PathGuardError(
                         "PATH_GUARD_INVALID",
-                        "binary batch content requires an exact missing destination",
+                        "binary batch content requires an exact destination state",
                     )
                 artifact = workspace.create_stream_artifact(
                     f"stage-{index}.tmp",

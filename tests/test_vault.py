@@ -206,6 +206,58 @@ def test_batch_binary_create_only_refuses_existing_non_utf8_leaf(
     assert target.read_bytes() == b"\xffexisting"
 
 
+def test_batch_binary_overwrite_requires_and_replaces_exact_prior_bytes(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "Evidence" / "artifact.bin"
+    target.parent.mkdir(parents=True)
+    before = b"\xffexisting"
+    after = b"\x00replacement\xfe"
+    target.write_bytes(before)
+
+    vault.batch_atomic_write(
+        [
+            vault.PlannedWrite(
+                target,
+                vault.PreparedBinaryContent(
+                    io.BytesIO(after),
+                    len(after),
+                    hashlib.sha256(after).hexdigest(),
+                ),
+                expected_hash=hashlib.sha256(before).hexdigest(),
+            )
+        ],
+        vault_root=tmp_path,
+    )
+
+    assert target.read_bytes() == after
+
+
+def test_batch_binary_overwrite_refuses_changed_prior_bytes(tmp_path: Path) -> None:
+    target = tmp_path / "Evidence" / "artifact.bin"
+    target.parent.mkdir(parents=True)
+    reviewed = b"reviewed"
+    target.write_bytes(b"changed")
+
+    with pytest.raises(vault.ContentHashMismatchError):
+        vault.batch_atomic_write(
+            [
+                vault.PlannedWrite(
+                    target,
+                    vault.PreparedBinaryContent(
+                        io.BytesIO(b"replacement"),
+                        len(b"replacement"),
+                        hashlib.sha256(b"replacement").hexdigest(),
+                    ),
+                    expected_hash=hashlib.sha256(reviewed).hexdigest(),
+                )
+            ],
+            vault_root=tmp_path,
+        )
+
+    assert target.read_bytes() == b"changed"
+
+
 def test_batch_write_rejects_changed_binary_stream_before_publication(
     tmp_path: Path,
 ) -> None:
