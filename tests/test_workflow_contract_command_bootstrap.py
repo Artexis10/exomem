@@ -244,6 +244,7 @@ def test_live_workflow_context_refusals_and_schema_match_across_surfaces(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     from conftest import initialize_vault_state_offline
+    from fastmcp.exceptions import ValidationError
 
     from exomem import server as server_module
     from exomem.__main__ import main
@@ -269,6 +270,22 @@ def test_live_workflow_context_refusals_and_schema_match_across_surfaces(
         "operation": "resolve",
         "context": {"unexpected": "value"},
     }
+
+    def cli_result(context: object) -> dict:
+        assert main(
+            [
+                "schema_memory",
+                "--subject",
+                "workflow-contracts",
+                "--operation",
+                "resolve",
+                "--context",
+                json.dumps(context),
+                "--json",
+            ]
+        ) == 0
+        return json.loads(capsys.readouterr().out)
+
     invalid = asyncio.run(
         mcp.call_tool(
             "schema_memory",
@@ -304,7 +321,38 @@ def test_live_workflow_context_refusals_and_schema_match_across_surfaces(
     )
     assert rest.status_code == 200, rest.text
     assert rest.json() == {"success": True, "data": direct}
+    assert cli_result(invalid_request["context"]) == {"success": True, "data": direct}
 
+    for malformed in (1, [], {}):
+        request = {**invalid_request, "context": {"project": malformed}}
+        expected = _schema(vault, "resolve", context=request["context"])
+        assert expected == {"resolved": False, "code": "WORKFLOW_CONTRACT_INVALID"}
+        assert asyncio.run(
+            mcp.call_tool("schema_memory", request, run_middleware=True)
+        ).structured_content == expected
+        malformed_rest = TestClient(mcp.http_app()).post(
+            "/api/schema_memory",
+            json=request,
+            headers={"Authorization": "Bearer sekret"},
+        )
+        assert malformed_rest.status_code == 200, malformed_rest.text
+        assert malformed_rest.json() == {"success": True, "data": expected}
+        assert cli_result(request["context"]) == {"success": True, "data": expected}
+
+    non_mapping = {**invalid_request, "context": []}
+    assert _schema(vault, "resolve", context=[]) == {
+        "resolved": False,
+        "code": "WORKFLOW_CONTRACT_INVALID_ARGUMENTS",
+    }
+    with pytest.raises(ValidationError, match="context"):
+        asyncio.run(mcp.call_tool("schema_memory", non_mapping, run_middleware=True))
+    non_mapping_rest = TestClient(mcp.http_app()).post(
+        "/api/schema_memory",
+        json=non_mapping,
+        headers={"Authorization": "Bearer sekret"},
+    )
+    assert non_mapping_rest.status_code == 400
+    assert non_mapping_rest.json()["error"]["code"] == "BAD_JSON"
     assert main(
         [
             "schema_memory",
@@ -313,11 +361,11 @@ def test_live_workflow_context_refusals_and_schema_match_across_surfaces(
             "--operation",
             "resolve",
             "--context",
-            json.dumps(invalid_request["context"]),
+            "[]",
             "--json",
         ]
-    ) == 0
-    assert json.loads(capsys.readouterr().out) == {"success": True, "data": direct}
+    ) == 1
+    assert json.loads(capsys.readouterr().out)["error"]["code"] == "BAD_JSON"
 
     mcp_schema = next(
         tool.to_mcp_tool().model_dump(mode="json")["inputSchema"]["properties"]["context"]

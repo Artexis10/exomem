@@ -159,7 +159,7 @@ _RerankCandidateLimit = Annotated[
     ),
 ]
 _WorkflowContextArgument = Annotated[
-    dict[str, str | None] | None,
+    dict[str, Any] | None,
     WithJsonSchema(
         {
             "anyOf": [
