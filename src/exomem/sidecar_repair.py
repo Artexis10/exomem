@@ -74,6 +74,62 @@ def _is_repeated_extraction_residual(residual: str, extraction: str) -> bool:
     return re.fullmatch(rf"{copy}(?:\s+{copy})*", residual) is not None
 
 
+def _repeated_residual_block(residual: str, *, minimum_copies: int = 3) -> str | None:
+    """Recover one block only when the entire residual proves exact repetition."""
+    first_line_end = residual.find("\n")
+    if first_line_end == -1:
+        first_space = next((i for i, char in enumerate(residual) if char.isspace()), len(residual))
+        anchor = residual[:first_space]
+    else:
+        anchor = residual[: first_line_end + 1]
+    if not anchor.strip():
+        return None
+    position = residual.find(anchor, len(anchor))
+    attempts = 0
+    while position != -1 and attempts < 64:
+        attempts += 1
+        block = residual[:position].rstrip()
+        if block and _is_exact_block_run(residual, block, minimum_copies):
+            return block
+        position = residual.find(anchor, position + 1)
+    return None
+
+
+def _is_exact_block_run(residual: str, block: str, minimum_copies: int) -> bool:
+    """True when all of residual is whole block copies separated by whitespace."""
+    position = 0
+    copies = 0
+    while residual.startswith(block, position):
+        copies += 1
+        position += len(block)
+        if position == len(residual):
+            return copies >= minimum_copies
+        separator_start = position
+        while position < len(residual) and residual[position].isspace():
+            position += 1
+        if position == separator_start:
+            return False
+        if position == len(residual):
+            return copies >= minimum_copies
+    return False
+
+
+def _selected_extraction(segments: list[tuple[str, str]]) -> str:
+    """Return the longest extraction or an exactly provable recovered block."""
+    blocks = [extraction.strip() for _prose, extraction in segments if extraction.strip()]
+    if blocks:
+        return max(blocks, key=len)
+    top = segments[0][1].strip() if segments else ""
+    if top:
+        return ""
+    residuals = [
+        _BOILERPLATE_RE.sub("", prose).strip()
+        for prose, _extraction in segments[1:]
+        if _BOILERPLATE_RE.sub("", prose).strip()
+    ]
+    return (_repeated_residual_block(residuals[0]) or "") if len(residuals) == 1 else ""
+
+
 @dataclass(frozen=True)
 class SidecarDamage:
     """What one over-rendered sidecar contains."""
@@ -115,7 +171,7 @@ def analyze(content: str, path: Path) -> SidecarDamage | None:
     # Deliberately the FIRST segment's block, empty or not — an empty one is what
     # makes a sidecar recovery-only.
     top = segments[0][1].strip() if segments else ""
-    best = max(blocks, key=len) if blocks else ""
+    best = _selected_extraction(segments)
     return SidecarDamage(
         path=path,
         depth=body.count(PRESERVED_HEADING),
@@ -138,8 +194,7 @@ def repair(content: str) -> str:
         return content
 
     segments = _segments(body)
-    blocks = [extraction.strip() for _prose, extraction in segments if extraction.strip()]
-    best = max(blocks, key=len) if blocks else ""
+    best = _selected_extraction(segments)
 
     head_text = "\n\n".join(
         line.strip() for line in _BOILERPLATE_RE.findall(segments[0][0]) if line.strip()
@@ -200,8 +255,9 @@ def _extraction_blocks(body: str) -> list[str]:
 
 def _longest_extraction(content: str) -> int:
     content = _logical_text(content)
-    blocks = _extraction_blocks(content)
-    return len(max(blocks, key=len)) if blocks else 0
+    _frontmatter, body, raw = parse_frontmatter(content)
+    body = body if raw is not None else content
+    return len(_selected_extraction(_segments(body)))
 
 
 def _split_frontmatter(content: str) -> tuple[str, str]:

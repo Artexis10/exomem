@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from exomem import sidecar_repair
 
 FRONTMATTER = """---
@@ -37,6 +39,14 @@ def _sidecar_with_preserved_residual(extraction: str, residual: str) -> str:
         + "\n"
         + f"{HEAD}\n## Extracted text\n\n{extraction}\n\n"
         + f"## Preserved notes\n\n{residual}\n"
+    )
+
+
+def _empty_extraction_with_preserved_residual(residual: str) -> str:
+    return (
+        FRONTMATTER
+        + "\n"
+        + f"{HEAD}\n## Extracted text\n\n## Preserved notes\n\n{residual}\n"
     )
 
 
@@ -157,6 +167,35 @@ def test_repeated_extraction_residual_with_prose_is_preserved() -> None:
     assert sidecar_repair.PRESERVED_HEADING in repaired
     assert repaired.count(extraction) == 2
     assert prose in repaired
+
+
+def test_empty_extraction_recovers_repeated_preserved_block() -> None:
+    block = "# Polly MVP Requirements\n\n## Overview\n\nA requirement.\n\n## Scope\n\nAnother requirement."
+    content = _empty_extraction_with_preserved_residual("\n\n".join([block] * 100))
+
+    repaired = sidecar_repair.repair(content)
+    damage = sidecar_repair.analyze(content, Path("requirements.xlsx.md"))
+
+    assert repaired.count(block) == 1
+    assert sidecar_repair.PRESERVED_HEADING not in repaired
+    assert damage is not None and damage.recovery_only
+    assert damage.recovered_chars == len(block)
+    assert sidecar_repair.repair_is_safe(content, repaired)
+    assert sidecar_repair.repair(repaired) == repaired
+
+
+@pytest.mark.parametrize("copies", [2, 3])
+def test_empty_extraction_keeps_residual_without_exact_three_copy_proof(copies: int) -> None:
+    block = "# Repeated document\n\n## Body\n\nExact content."
+    residual = "\n\n".join([block] * copies)
+    if copies == 3:
+        residual += "\n\nA genuine differing byte."
+    content = _empty_extraction_with_preserved_residual(residual)
+
+    repaired = sidecar_repair.repair(content)
+
+    assert sidecar_repair.PRESERVED_HEADING in repaired
+    assert residual in repaired
 
 
 def test_hand_written_prose_is_kept_once() -> None:
