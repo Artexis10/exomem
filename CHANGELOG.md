@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.68.1](https://github.com/Artexis10/exomem/compare/v0.68.0...v0.68.1) (2026-08-31)
+
+
+### Bug Fixes
+
+* **media:** bound host compute and repair Blackwell runtime ([#1022](https://github.com/Artexis10/exomem/issues/1022)) ([91b62c9](https://github.com/Artexis10/exomem/commit/91b62c97f745195aa67dc99713864c82bbd01815))
+
+
+### Performance
+
+* **recall:** reuse query vectors and batch frame collapse ([#1028](https://github.com/Artexis10/exomem/issues/1028)) ([7c01a56](https://github.com/Artexis10/exomem/commit/7c01a567348662cca1800f34b69db01408338e60))
+
 ## [0.68.0](https://github.com/Artexis10/exomem/compare/v0.67.1...v0.68.0) (2026-08-31)
 
 
