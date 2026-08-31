@@ -20,6 +20,7 @@ from . import (
     consolidation_rebuild,
     consolidation_rebuild_journal,
     consolidation_receipts,
+    consolidation_runtime,
     consolidation_seal,
     consolidation_verification,
     consolidation_verification_journal,
@@ -336,6 +337,7 @@ def _validate_existing_probe_effect(
 def _execute_probes(
     *,
     vault_root: Path,
+    admission: consolidation_admission.ConsolidationAdmission,
     store: consolidation_verification_journal.ConsolidationVerificationJournalStore,
     manifest: consolidation_verification_manifest.VerificationManifest,
     vault_binding_digest: str,
@@ -427,11 +429,12 @@ def _execute_probes(
                 authority=authority,
                 contract=expected_contract,
             )
-            terminal = consolidation_verification._run_probe(  # noqa: SLF001
-                _canonical_surface_probe_runner,
-                expected_probe,
-                context,
-            )
+            with consolidation_runtime.bind_verification_admission(admission, authority):
+                terminal = consolidation_verification._run_probe(  # noqa: SLF001
+                    _canonical_surface_probe_runner,
+                    expected_probe,
+                    context,
+                )
             if _snapshot_census(vault_root) != current.canonical_census_digest:
                 _fail()
             store.record_probe_result(expected_probe, terminal.result_digest)
@@ -759,6 +762,7 @@ def verify_rebuilt_destination(
         )
         probe_effects = _execute_probes(
             vault_root=root,
+            admission=admission,
             store=journal_store,
             manifest=manifest,
             vault_binding_digest=checked_vault,

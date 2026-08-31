@@ -110,6 +110,52 @@ def test_upload_happy_path_lands_in_evidence(vault, monkeypatch: pytest.MonkeyPa
     assert written.read_bytes() == b"\x89PNGrealbytes"
 
 
+def test_upload_enters_consolidation_transfer_and_mutation_admission(
+    vault,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance import consolidation_runtime
+
+    events: list[str] = []
+
+    @contextmanager
+    def admission(_vault_root: Path, kind: str):
+        events.append(f"{kind}-enter")
+        try:
+            yield
+        finally:
+            events.append(f"{kind}-exit")
+
+    monkeypatch.setattr(
+        consolidation_runtime,
+        "admit_transfer",
+        lambda root: admission(root, "transfer"),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        consolidation_runtime,
+        "admit_mutation",
+        lambda root: admission(root, "mutation"),
+        raising=False,
+    )
+    client = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="sekret")
+
+    response = client.post(
+        "/upload",
+        files={"file": ("proof.bin", b"proof", "application/octet-stream")},
+        data={"scope": "Case", "category": "Evidence"},
+        headers={"Authorization": "Bearer sekret"},
+    )
+
+    assert response.status_code == 201, response.text
+    assert events == [
+        "transfer-enter",
+        "mutation-enter",
+        "mutation-exit",
+        "transfer-exit",
+    ]
+
+
 def test_upload_supported_media_routes_through_canonical_reconciliation(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:

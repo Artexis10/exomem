@@ -959,6 +959,21 @@ operation, but no second operation or plan kind can reuse it.
 
 ### 9. Seal every ordinary content surface, including the owner's
 
+An exactly absent seal subtree denotes a legacy vault that has not enrolled in
+the consolidation lifecycle; it is not an implicit `open` member. Enrollment is
+an explicit offline/pre-start owner operation after authenticated cell identity
+already exists. It creates the immutable revision-0 `open` snapshot and active
+pointer under exclusive runtime-lifetime authority, then reloads the exact
+identity-bound state before serving begins. Ordinary dispatch, readiness, and
+admission never create or adopt identity or seal state. Hosted enrollment uses
+the cell lifetime lock. Local enrollment requires a process-safe vault presence
+registry that blocks new server/direct-CLI registrations and proves all live
+slots have drained without serializing concurrent reads; until that registry is
+available, local enrollment remains unavailable. Any seal-path presence other
+than a complete authenticated store—including a crash between revision-0
+snapshot and active-pointer publication—fails closed and is recovered only by
+the explicit enrollment operation.
+
 Apply first acquires the destination writer authority and transitions to a
 durable destination-wide seal. The seal drains admitted reads, writes,
 transfers, and background writers, then rejects all new ordinary content reads

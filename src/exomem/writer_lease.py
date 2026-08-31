@@ -4207,6 +4207,55 @@ def _fixed_projected_command_completion(
     return wrapped
 
 
+def _consolidation_command_admission(
+    function: Callable[..., Any],
+) -> Callable[..., Any]:
+    @wraps(function)
+    def wrapped(
+        command: Any,
+        *injected: Any,
+        idempotency_key: str | None = None,
+        public_idempotency_key: str | None | object = _PUBLIC_IDEMPOTENCY_KEY_UNSET,
+        idempotency_principal_scope: str | None = None,
+        implicit_idempotency_scope: str | None = None,
+        mutation_request_id: str | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        def invoke() -> Any:
+            return function(
+                command,
+                *injected,
+                idempotency_key=idempotency_key,
+                public_idempotency_key=public_idempotency_key,
+                idempotency_principal_scope=idempotency_principal_scope,
+                implicit_idempotency_scope=implicit_idempotency_scope,
+                mutation_request_id=mutation_request_id,
+                **kwargs,
+            )
+
+        if (
+            not injected
+            or not isinstance(injected[0], (str, os.PathLike))
+        ):
+            return invoke()
+        from .commands import invocation_is_read_only
+        from .governance import consolidation_runtime
+        from .governance.egress import SelectorCoverageError
+
+        try:
+            read_only = invocation_is_read_only(command, kwargs)
+        except SelectorCoverageError:
+            read_only = False
+        with consolidation_runtime.admit_command(
+            Path(injected[0]),
+            read_only=read_only,
+        ):
+            return invoke()
+
+    return wrapped
+
+
+@_consolidation_command_admission
 @_fixed_projected_command_completion
 def invoke_command(
     command: Any,

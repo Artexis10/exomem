@@ -487,12 +487,20 @@ binds that reference and observed digest; no caller field selects K.
   consolidation-sealed(vault,run,operation,phase,journal)`: deletion dominates,
   only the exact consolidation journal can unseal its own kind, and generic
   resume/consolidation recovery never reopens deletion. Other canonical vault
-  identities remain independently available.
+  identities remain independently available. Prove exact seal-subtree absence is
+  the only legacy-unenrolled fast path; empty, partial, linked, stray, malformed,
+  or mismatched stores fail closed. Prove first enrollment is explicit and
+  offline: Hosted excludes its lifetime holder, local excludes server/direct-CLI
+  presence without serializing concurrent readers, and no ordinary request,
+  readiness probe, or admission path creates/adopts identity or revision 0.
 - [ ] 6.5 Implement one durable seal/admission state integrated with the shared
   lifecycle and process-safe writer boundary. Place the outer sealed response before
   retrieval, raw serialization, enumeration, mutation dispatch, and error assembly;
   retain existing release decisions/projectors/scrubber underneath it and keep
-  deletion-seal semantics irreversible.
+  deletion-seal semantics irreversible. Add explicit owner-only pre-start
+  enrollment over an existing authenticated identity, Hosted lifetime exclusion,
+  and a vault-keyed local runtime-presence registry; do not lazily initialize or
+  adopt through product dispatch.
 - [ ] 6.6 Add red Hosted owner-control admission tests in
   `tests/test_consolidation_control_admission.py` proving apply and its
   identical tagged-request/operation-id resume,

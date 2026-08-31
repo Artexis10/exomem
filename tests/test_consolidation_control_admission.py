@@ -7,7 +7,9 @@ import sys
 import threading
 import time
 from contextlib import ExitStack
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -874,6 +876,296 @@ def test_lost_seal_terminal_ack_replays_the_exact_durable_terminal(
     replayed = _seal_with_recovered_control(restarted)
 
     assert replayed == sealed
+
+
+def test_shared_command_dispatcher_enters_the_outer_consolidation_admission(
+    tmp_path: Path,
+) -> None:
+    from exomem import commands, writer_lease
+    from exomem.governance import consolidation_runtime
+
+    admission = _open_admission(tmp_path)
+    calls: list[int] = []
+    command = next(command for command in commands.COMMANDS if command.name == "get")
+
+    def leaf(_vault_root: Path, **_kwargs: object) -> object:
+        calls.append(admission.snapshot().active_reads)
+        raise RuntimeError("leaf reached")
+
+    with consolidation_runtime.bind_admission(admission):
+        with pytest.raises(RuntimeError, match="^leaf reached$"):
+            writer_lease.invoke_command(
+                replace(command, leaf=leaf),
+                tmp_path,
+                path="Knowledge Base/Notes/example.md",
+            )
+
+    assert calls == [1]
+    assert admission.snapshot().active_total == 0
+
+
+def test_shared_command_dispatcher_refuses_before_leaf_and_error_assembly(
+    tmp_path: Path,
+) -> None:
+    from exomem import commands, writer_lease
+    from exomem.cli_ops import OpError
+    from exomem.governance import consolidation_runtime
+
+    admission = _open_admission(tmp_path)
+    _seal_with_new_control(admission)
+    calls: list[str] = []
+    command = next(command for command in commands.COMMANDS if command.name == "get")
+
+    def leaf(_vault_root: Path, **_kwargs: object) -> object:
+        calls.append("leaf")
+        return {"path": "private"}
+
+    with consolidation_runtime.bind_admission(admission):
+        with pytest.raises(OpError) as error:
+            writer_lease.invoke_command(
+                replace(command, leaf=leaf),
+                tmp_path,
+                path="Knowledge Base/Notes/example.md",
+            )
+
+    assert calls == []
+    assert error.value.code == "VAULT_UNAVAILABLE"
+    assert str(error.value) == "VAULT_UNAVAILABLE: vault is unavailable"
+
+
+def test_runtime_transfer_upload_and_background_paths_share_the_outer_admission(
+    tmp_path: Path,
+) -> None:
+    from exomem.governance import consolidation_runtime
+
+    admission = _open_admission(tmp_path)
+    with consolidation_runtime.bind_admission(admission):
+        with consolidation_runtime.admit_transfer(tmp_path):
+            snapshot = admission.snapshot()
+            assert snapshot.active_transfers == 1
+            assert snapshot.active_mutations == 0
+        with consolidation_runtime.admit_upload(tmp_path):
+            snapshot = admission.snapshot()
+            assert snapshot.active_transfers == 1
+            assert snapshot.active_mutations == 1
+        with consolidation_runtime.admit_background(tmp_path):
+            snapshot = admission.snapshot()
+            assert snapshot.active_background == 1
+
+    assert admission.snapshot().active_total == 0
+
+
+def test_exactly_absent_seal_preserves_legacy_dispatch_without_identity_adoption(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import commands, writer_lease
+    from exomem.governance import consolidation_identity, consolidation_seal
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        consolidation_identity,
+        "load_local_identity",
+        lambda *_args, **_kwargs: pytest.fail("legacy dispatch loaded an identity"),
+    )
+    monkeypatch.setattr(
+        consolidation_identity,
+        "adopt_local_identity",
+        lambda *_args, **_kwargs: pytest.fail("legacy dispatch adopted an identity"),
+    )
+    monkeypatch.setattr(
+        consolidation_seal.ConsolidationSealStore,
+        "initialize_open",
+        lambda *_args, **_kwargs: pytest.fail("legacy dispatch initialized a seal"),
+    )
+    command = next(command for command in commands.COMMANDS if command.name == "get")
+
+    result = writer_lease.invoke_command(
+        replace(command, leaf=lambda *_args, **_kwargs: calls.append("leaf") or "ok"),
+        tmp_path,
+        path="Knowledge Base/Notes/example.md",
+    )
+
+    assert result == "ok"
+    assert calls == ["leaf"]
+
+
+def test_fresh_dispatcher_reconstructs_the_durable_seal_before_the_leaf(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import commands, writer_lease
+    from exomem.cli_ops import OpError
+    from exomem.governance import consolidation_identity
+
+    admission = _open_admission(tmp_path)
+    _seal_with_new_control(admission)
+    monkeypatch.setattr(
+        consolidation_identity,
+        "load_local_identity",
+        lambda *_args, **_kwargs: SimpleNamespace(record_digest=VAULT_BINDING),
+    )
+    calls: list[str] = []
+    command = next(command for command in commands.COMMANDS if command.name == "get")
+
+    with pytest.raises(OpError) as error:
+        writer_lease.invoke_command(
+            replace(
+                command,
+                leaf=lambda *_args, **_kwargs: calls.append("leaf"),
+            ),
+            tmp_path,
+            path="Knowledge Base/Notes/example.md",
+        )
+
+    assert calls == []
+    assert error.value.code == "VAULT_UNAVAILABLE"
+
+
+@pytest.mark.parametrize("identity_digest", [None, OTHER_VAULT_BINDING])
+def test_enrolled_runtime_refuses_missing_or_mismatched_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    identity_digest: str | None,
+) -> None:
+    from exomem import commands, writer_lease
+    from exomem.cli_ops import OpError
+    from exomem.governance import consolidation_identity
+
+    _open_admission(tmp_path)
+    if identity_digest is None:
+        monkeypatch.setattr(
+            consolidation_identity,
+            "load_local_identity",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                consolidation_identity.ConsolidationIdentityUnavailable()
+            ),
+        )
+    else:
+        monkeypatch.setattr(
+            consolidation_identity,
+            "load_local_identity",
+            lambda *_args, **_kwargs: SimpleNamespace(record_digest=identity_digest),
+        )
+    command = next(command for command in commands.COMMANDS if command.name == "get")
+
+    with pytest.raises(OpError) as error:
+        writer_lease.invoke_command(
+            command,
+            tmp_path,
+            path="Knowledge Base/Notes/example.md",
+        )
+
+    assert error.value.code == "VAULT_UNAVAILABLE"
+
+
+def test_malformed_runtime_seal_has_the_same_content_free_refusal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import commands, writer_lease
+    from exomem.cli_ops import OpError
+    from exomem.governance import consolidation_identity, consolidation_seal
+
+    _open_admission(tmp_path)
+    active = consolidation_seal.ConsolidationSealStore(tmp_path).base / "active.json"
+    active.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        consolidation_identity,
+        "load_local_identity",
+        lambda *_args, **_kwargs: SimpleNamespace(record_digest=VAULT_BINDING),
+    )
+    command = next(command for command in commands.COMMANDS if command.name == "get")
+
+    with pytest.raises(OpError) as error:
+        writer_lease.invoke_command(
+            command,
+            tmp_path,
+            path="Knowledge Base/Notes/example.md",
+        )
+
+    assert error.value.code == "VAULT_UNAVAILABLE"
+    assert str(error.value) == "VAULT_UNAVAILABLE: vault is unavailable"
+
+
+def test_partial_runtime_seal_store_has_the_same_content_free_refusal(
+    tmp_path: Path,
+) -> None:
+    from exomem import commands, writer_lease
+    from exomem.cli_ops import OpError
+    from exomem.governance import consolidation_seal
+
+    consolidation_seal.ConsolidationSealStore(tmp_path).base.mkdir(parents=True)
+    command = next(command for command in commands.COMMANDS if command.name == "get")
+
+    with pytest.raises(OpError) as error:
+        writer_lease.invoke_command(
+            command,
+            tmp_path,
+            path="Knowledge Base/Notes/example.md",
+        )
+
+    assert error.value.code == "VAULT_UNAVAILABLE"
+    assert str(error.value) == "VAULT_UNAVAILABLE: vault is unavailable"
+
+
+def test_stray_runtime_seal_state_has_the_same_content_free_refusal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import commands, writer_lease
+    from exomem.cli_ops import OpError
+    from exomem.governance import consolidation_identity, consolidation_seal
+
+    _open_admission(tmp_path)
+    (consolidation_seal.ConsolidationSealStore(tmp_path).base / "stray.json").write_text(
+        "{}", encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        consolidation_identity,
+        "load_local_identity",
+        lambda *_args, **_kwargs: SimpleNamespace(record_digest=VAULT_BINDING),
+    )
+    command = next(command for command in commands.COMMANDS if command.name == "get")
+
+    with pytest.raises(OpError) as error:
+        writer_lease.invoke_command(
+            command,
+            tmp_path,
+            path="Knowledge Base/Notes/example.md",
+        )
+
+    assert error.value.code == "VAULT_UNAVAILABLE"
+    assert str(error.value) == "VAULT_UNAVAILABLE: vault is unavailable"
+
+
+def test_hosted_binding_resolves_the_same_shared_dispatcher_admission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import commands, writer_lease
+    from exomem.cli_ops import OpError
+    from exomem.governance import consolidation_runtime
+
+    admission = _open_admission(tmp_path)
+    _seal_with_new_control(admission)
+    binding = SimpleNamespace(vault_root=tmp_path)
+    monkeypatch.setattr(
+        consolidation_runtime,
+        "load_hosted_admission",
+        lambda supplied: admission if supplied is binding else None,
+    )
+    command = next(command for command in commands.COMMANDS if command.name == "get")
+
+    with consolidation_runtime.bind_hosted_admission(binding):
+        with pytest.raises(OpError) as error:
+            writer_lease.invoke_command(
+                command,
+                tmp_path,
+                path="Knowledge Base/Notes/example.md",
+            )
+
+    assert error.value.code == "VAULT_UNAVAILABLE"
 
 
 @pytest.mark.parametrize(

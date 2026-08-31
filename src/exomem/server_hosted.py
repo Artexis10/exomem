@@ -14,7 +14,7 @@ import stat
 import threading
 import time
 from collections.abc import AsyncIterator, Callable, Mapping
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, ExitStack, nullcontext
 from pathlib import Path
 from typing import Any, BinaryIO
 from urllib.parse import quote
@@ -43,6 +43,7 @@ from .governance import (
     authorization_request,
     authorization_session_lifecycle,
     authorization_transport,
+    consolidation_runtime,
 )
 from .hosted_runtime import (
     HostedCellConfig,
@@ -818,7 +819,7 @@ def _open_bounded_vault_file(
 async def _stream_bounded_file(
     stream: BinaryIO,
     size: int,
-    admission: AbstractContextManager[None],
+    admission: AbstractContextManager[Any],
 ) -> AsyncIterator[bytes]:
     remaining = size
     try:
@@ -862,6 +863,7 @@ def register_hosted_routes(
     private_authenticator: Any | None = None,
     transfer_security_authority: hosted_transfer.TransferSecurityAuthority | None = None,
     runtime_temp_authority: hosted_runtime_temp.HostedRuntimeTempAuthority | None = None,
+    consolidation_binding: Any | None = None,
 ) -> None:
     """Register private v1 plus the two exact public transfer-v2 capabilities."""
 
@@ -906,6 +908,22 @@ def register_hosted_routes(
         invoke = invoke_command
     guard_factory = mutation_guard_factory or _default_mutation_guard
     preserve_stream = preserve_stream_func or _default_preserve_stream
+
+    def _new_transfer_admission(*, upload: bool) -> AbstractContextManager[Any]:
+        with ExitStack() as stack:
+            with (
+                consolidation_runtime.bind_hosted_admission(consolidation_binding)
+                if consolidation_binding is not None
+                else nullcontext()
+            ):
+                stack.enter_context(
+                    consolidation_runtime.admit_upload(config.vault_root)
+                    if upload
+                    else consolidation_runtime.admit_transfer(config.vault_root)
+                )
+            stack.enter_context(lifecycle.admit_public_transfer())
+            return stack.pop_all()
+
     upload_idempotency = IdempotencyStore(config.state_root / "idempotency-hosted.sqlite")
     private_v1_upload_slot = threading.Lock()
     try:
@@ -1202,6 +1220,9 @@ def register_hosted_routes(
                 with (
                     capabilities.active_surface(descriptor),
                     principal_module.request_scope(bound_principal),
+                    consolidation_runtime.bind_hosted_admission(consolidation_binding)
+                    if consolidation_binding is not None
+                    else nullcontext(),
                 ):
                     selector_error: SelectorCoverageError | None = None
                     try:
@@ -1720,7 +1741,7 @@ def register_hosted_routes(
     async def _upload(request: Request) -> HostedJSONResponse:
         started = time.perf_counter()
         context: gateway.TrustedGatewayContext | None = None
-        transfer_admission: AbstractContextManager[None] | None = None
+        transfer_admission: AbstractContextManager[Any] | None = None
         runtime_temp_reservation: AbstractContextManager[Path] | None = None
         runtime_temp_reserved = False
         upload_slot_held = False
@@ -1731,9 +1752,7 @@ def register_hosted_routes(
                     "HOSTED_TRANSFER_V1_DISABLED",
                     "private transfer compatibility is disabled",
                 )
-            admitted_transfer = lifecycle.admit_public_transfer()
-            admitted_transfer.__enter__()
-            transfer_admission = admitted_transfer
+            transfer_admission = _new_transfer_admission(upload=True)
             if not private_v1_upload_slot.acquire(blocking=False):
                 raise gateway.HostedGatewayError(
                     "HOSTED_TRANSFER_UNAVAILABLE", "another private upload is active"
@@ -1866,7 +1885,7 @@ def register_hosted_routes(
     async def _download(request: Request) -> Response:
         started = time.perf_counter()
         context: gateway.TrustedGatewayContext | None = None
-        transfer_admission: AbstractContextManager[None] | None = None
+        transfer_admission: AbstractContextManager[Any] | None = None
         try:
             context = _trusted_context(request, config, private_authenticator)
             if not config.private_v1_transfer_enabled():
@@ -1881,9 +1900,7 @@ def register_hosted_routes(
                 expected_tenant_scope=None,
                 expected_principal_scope=context.principal_scope,
             )
-            admitted_transfer = lifecycle.admit_public_transfer()
-            admitted_transfer.__enter__()
-            transfer_admission = admitted_transfer
+            transfer_admission = _new_transfer_admission(upload=False)
             if request.query_params:
                 raise gateway.HostedGatewayError(
                     "HOSTED_SELECTOR_REJECTED", "download does not accept URL selectors"
@@ -1935,11 +1952,11 @@ def register_hosted_routes(
                 request_id=context.request_id if context else None,
                 started=started,
             )
-        except Exception:  # noqa: BLE001 - private boundary redacts path/open details
+        except Exception as exc:  # noqa: BLE001 - private boundary redacts path/open details
             if transfer_admission is not None:
                 transfer_admission.__exit__(None, None, None)
             return _error_response(
-                "INTERNAL",
+                getattr(exc, "code", "INTERNAL"),
                 config=config,
                 operation="download",
                 request_id=context.request_id if context else None,
