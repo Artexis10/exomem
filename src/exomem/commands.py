@@ -476,9 +476,7 @@ def op_bootstrap(
         )
     if profile == "compact":
         workflow_contract_projection = {
-            "invariants": workflow_portable["invariants"],
-            "builtin_fallback": workflow_portable["builtin_fallback"],
-            "resolution_available": workflow_callable,
+            **workflow_projection_base,
             "portable": workflow_portable_identity,
             "agent_protocol": workflow_compact_protocol,
             **({"resolution_required": True} if workflow_resolution_required else {}),
@@ -880,7 +878,7 @@ def op_bootstrap(
                 "bootstrap",
                 "adopt_vault or browse_memory when first seeing an existing vault",
                 "ask_memory for cheap product recall",
-                "read_memory or ask_memory(deep=true) when more context is needed",
+                "read_memory or reasoning_lookup for more context",
                 (
                     "show the note title by default in normal user-facing prose and do not "
                     "expose the raw canonical ref by default; add the current vault-relative "
@@ -1138,7 +1136,6 @@ def op_bootstrap(
         },
         "performance_profiles": {
             "diagnostics": {
-                "ask_memory_args": {"include_timings": True, "rerank": True},
                 "interpretation": (
                     "timings measure retrieval stages; unset rerank is mode-aware "
                     "and CPU steady-state modes keep auto-rerank off; compute_policy "

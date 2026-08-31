@@ -132,11 +132,15 @@ def test_bootstrap_is_bounded_sorted_and_omits_route_when_schema_is_unavailable(
     )
 
     full = commands.op_bootstrap(tmp_path, profile="full")["workflow_contracts"]
+    compact = commands.op_bootstrap(tmp_path, profile="compact")["workflow_contracts"]
     assert len(full["default"]) == 1
     assert full["default"][0]["key"] == "default"
     assert [item["key"] for item in full["scoped"]] == [f"scope-{number:02d}" for number in range(8)]
     assert full["total"] == 11
     assert full["truncated"] is True
+    for field in ("default", "scoped", "total", "truncated"):
+        assert compact[field] == full[field]
+    assert compact["proactive_routing_available"] is True
 
     descriptor = ActiveSurfaceDescriptor(
         surface="test", profile="reduced", tier2_enabled=False, product_commands=("bootstrap",)
@@ -159,7 +163,7 @@ def test_compact_reduced_bootstrap_reports_honest_fallback_or_unavailability(tmp
     with active_surface(descriptor):
         empty = commands.op_bootstrap(tmp_path, profile="compact")["workflow_contracts"]
     assert empty["resolution_available"] is False
-    assert "proactive_routing_available" not in empty
+    assert empty["proactive_routing_available"] is False
     assert empty["status"] == "builtin_standalone"
     assert "route" not in empty
 
@@ -171,7 +175,7 @@ def test_compact_reduced_bootstrap_reports_honest_fallback_or_unavailability(tmp
     with active_surface(descriptor):
         unavailable = commands.op_bootstrap(tmp_path, profile="compact")["workflow_contracts"]
     assert unavailable["resolution_available"] is False
-    assert "proactive_routing_available" not in unavailable
+    assert unavailable["proactive_routing_available"] is False
     assert unavailable["resolution_required"] is True
     assert unavailable["status"] == "workflow_resolution_unavailable"
     assert "route" not in unavailable
@@ -193,7 +197,7 @@ def test_bootstrap_never_invents_a_total_after_an_incomplete_contract_scan(
     assert projection["status"] == "workflow_resolution_unavailable"
     assert projection["findings"] == [{"code": "WORKFLOW_CONTRACT_SCAN_LIMIT", "detail": "scan bound exceeded"}]
     assert {"default", "scoped", "total", "truncated"}.isdisjoint(projection)
-    assert "proactive_routing_available" not in projection
+    assert projection["proactive_routing_available"] is False
     assert projection["resolution_required"] is True
 
 

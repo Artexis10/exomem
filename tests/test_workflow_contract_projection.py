@@ -22,7 +22,7 @@ def test_compact_full_and_selected_knowledge_pack_share_workflow_contract_projec
         "subject": "workflow-contracts",
         "operation": "resolve",
     }
-    assert "proactive_routing_available" not in compact["workflow_contracts"]
+    assert compact["workflow_contracts"]["proactive_routing_available"] is True
     assert full["workflow_contracts"]["portable"] == portable
     assert "workflow_contract" not in compact["knowledge_packs"]["selected"]
     assert full["knowledge_packs"]["selected"]["workflow_contract"] == portable

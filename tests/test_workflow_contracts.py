@@ -1230,7 +1230,7 @@ def test_workflow_projection_stays_identical_across_bootstrap_and_knowledge_pack
         if profile == "compact":
             assert projected["builtin_fallback"] == portable["builtin_fallback"]
             assert projected["resolution_available"] is True
-            assert "proactive_routing_available" not in projected
+            assert projected["proactive_routing_available"] is True
         else:
             assert projected["builtin_fallback"] == portable["builtin_fallback"]
             assert projected["resolution_available"] is True
