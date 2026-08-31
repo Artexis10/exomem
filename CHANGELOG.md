@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.68.0](https://github.com/Artexis10/exomem/compare/v0.67.1...v0.68.0) (2026-08-31)
+
+
+### ⚠ BREAKING CHANGES
+
+* **claims:** freeze stance verification off the write path ([#1009](https://github.com/Artexis10/exomem/issues/1009))
+
+### Features
+
+* add user-authored workflow contracts ([#1007](https://github.com/Artexis10/exomem/issues/1007)) ([42ad1dd](https://github.com/Artexis10/exomem/commit/42ad1ddb21020601ed154486ee965892212d5f4c))
+* **claims:** admit multilingual frozen stance verifier ([#1016](https://github.com/Artexis10/exomem/issues/1016)) ([b47d77c](https://github.com/Artexis10/exomem/commit/b47d77c9926457032db085213c4a191fba2c3733))
+* **claims:** freeze stance verification off the write path ([#1009](https://github.com/Artexis10/exomem/issues/1009)) ([64c71b0](https://github.com/Artexis10/exomem/commit/64c71b06de1c0e03f216dee72698e5e52b7b146a))
+* **due-state:** carry the advisory block on the operation leaves ([#999](https://github.com/Artexis10/exomem/issues/999)) ([e3e8ed4](https://github.com/Artexis10/exomem/commit/e3e8ed48cd67437bbe9e03cea83797d82cd78406))
+* **envelope:** add the delegation envelope ([#1005](https://github.com/Artexis10/exomem/issues/1005)) ([23a02e5](https://github.com/Artexis10/exomem/commit/23a02e5074f7184093d2784de23c4e29e2761da7))
+
+
+### Bug Fixes
+
+* **hosted:** authorize provisioner authorization session secret ([#992](https://github.com/Artexis10/exomem/issues/992)) ([37bb814](https://github.com/Artexis10/exomem/commit/37bb8148f7388d0be6987fad4c73c451d024229e))
+* **hosted:** preserve private storage custody ([#1011](https://github.com/Artexis10/exomem/issues/1011)) ([e958a46](https://github.com/Artexis10/exomem/commit/e958a4639cd1c1849d922079a48cbc455c03ff71))
+* **recall:** gate counted referent slots on pre-nominal qualifiers ([#1014](https://github.com/Artexis10/exomem/issues/1014)) ([d57ddf4](https://github.com/Artexis10/exomem/commit/d57ddf4d5ca7fc2932080b6cd56e3eb09269df7b))
+* **runtime:** stop activation work before shutdown ([#1019](https://github.com/Artexis10/exomem/issues/1019)) ([72d427a](https://github.com/Artexis10/exomem/commit/72d427a760401a205ebad9b366a5e045ca8a47e4))
+* **tests:** stabilize authorization media route coverage ([#1017](https://github.com/Artexis10/exomem/issues/1017)) ([5ec7031](https://github.com/Artexis10/exomem/commit/5ec7031e523526301dd646f87ac49d72cab854fa))
+
 ## [0.67.1](https://github.com/Artexis10/exomem/compare/v0.67.0...v0.67.1) (2026-08-30)
 
 
