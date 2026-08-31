@@ -23,12 +23,12 @@ SCHEMA_VERSION = 3
 #: whose writers upgrade together (see the `add-nag-governance-and-metrics-capture`
 #: design, D7).
 #:
-#: v3 adds three things the envelope's adaptation needs and v2 had nowhere to
-#: put: `family` on a decision record; a family SLATE that exists even while the
-#: family's disposition is `normal`, so a quiet offer can be recorded durably;
-#: and an adaptation-reset epoch that excludes pre-reset dismissals from a new
-#: offer. A v2 file migrates forward silently; a v2 RUNTIME refuses a v3 file,
-#: which is the point of the bump.
+#: v3 adds the storage the envelope's adaptation needs and v2 had nowhere to
+#: put: `family` on decision records and exact first-surfaced ledger rows; a
+#: family SLATE that exists even while the disposition is `normal`, so a quiet
+#: offer can be recorded durably; and an adaptation-reset epoch that excludes
+#: pre-reset dismissals from a new offer. A v2 file migrates forward silently;
+#: a v2 RUNTIME refuses a v3 file, which is the point of the bump.
 _READABLE_SCHEMA_VERSIONS = frozenset({1, 2, 3})
 STATE_FILENAME = ".review-state.json"
 #: Raised from 4 MiB with the sectioned schema, and MEASURED rather than picked.
