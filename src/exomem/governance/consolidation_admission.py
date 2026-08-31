@@ -19,7 +19,12 @@ from typing import NoReturn, cast
 from .. import held_fs, reserved_paths, writer_lease
 from ..cli_ops import OpError
 from ..mutation_lock import VaultMutationCoordinator
-from . import consolidation_authority, consolidation_plan, consolidation_seal
+from . import (
+    consolidation_authority,
+    consolidation_plan,
+    consolidation_seal,
+    consolidation_transport_verification,
+)
 
 _DESCRIPTOR_ID = "consolidation-tree"
 _OWNER = "consolidation.run"
@@ -513,6 +518,26 @@ class ConsolidationAdmission:
 
         return self.snapshot()
 
+    @staticmethod
+    def _ordinary_admitted(
+        state: consolidation_seal.ConsolidationSealState,
+        *,
+        kind: str,
+    ) -> bool:
+        if state.kind == "open":
+            return True
+        return (
+            kind == "read"
+            and state.kind == "consolidation-sealed"
+            and consolidation_transport_verification._active_route_matches(  # noqa: SLF001
+                vault_binding_digest=state.vault_binding_digest,
+                run_id=state.run_id,
+                operation_id=state.operation_id,
+                journal_digest=state.journal_digest,
+                phase=state.phase,
+            )
+        )
+
     @contextmanager
     def _admit(self, kind: str) -> Iterator[ConsolidationMutationAdmission | None]:
         if kind not in _PARTICIPANT_KINDS:
@@ -541,7 +566,7 @@ class ConsolidationAdmission:
                         holder_kind="reserved-state",
                         publish_holder_metadata=False,
                     ):
-                        if self._load_state().kind != "open":
+                        if not self._ordinary_admitted(self._load_state(), kind=kind):
                             _fail("CONSOLIDATION_SEALED")
                         if any(current.kind == "control" for current in self._load_participants()):
                             _fail("CONSOLIDATION_CONTROL_PENDING")
@@ -549,7 +574,7 @@ class ConsolidationAdmission:
                         published = True
                     # Another configured coordination root cannot share this
                     # gate. Rechecking the seal closes that publication race.
-                    if self._load_state().kind != "open":
+                    if not self._ordinary_admitted(self._load_state(), kind=kind):
                         self._remove_participant(participant_id)
                         published = False
                         _fail("CONSOLIDATION_SEALED")
