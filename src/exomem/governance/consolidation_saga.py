@@ -36,6 +36,8 @@ POLICY_ACTIVATION_TERMINAL_SCHEMA = (
 
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 _COMMITTED_EVENT = re.compile(r"([0-9a-f]{64}):committed\Z")
+_POLICY_GATE_PHASES = frozenset({"policy-active", "publishing", "rebuilding"})
+_DEFAULT_POLICY_GATE_PHASES = frozenset({"policy-active", "publishing"})
 _BATCH_FIELDS = frozenset(
     {
         "batch_ordinal",
@@ -196,9 +198,16 @@ def _verify_policy_terminal_receipt(
     vault_binding_digest: str,
     terminal: object,
     expected_policy_fingerprint: str,
+    allowed_seal_phases: frozenset[str] = _DEFAULT_POLICY_GATE_PHASES,
 ) -> PolicyActivationTerminal:
     """Bind the content gate to the exact durable policy receipt chain."""
 
+    if (
+        not isinstance(allowed_seal_phases, frozenset)
+        or not allowed_seal_phases
+        or not allowed_seal_phases <= _POLICY_GATE_PHASES
+    ):
+        _fail()
     checked = _policy_terminal(
         terminal,
         expected_policy_fingerprint=expected_policy_fingerprint,
@@ -280,7 +289,7 @@ def _verify_policy_terminal_receipt(
         _fail()
     if (
         seal.kind != "consolidation-sealed"
-        or seal.phase not in {"policy-active", "publishing"}
+        or seal.phase not in allowed_seal_phases
         or seal.run_id != active_intent["run_id"]
         or seal.operation_id != active_intent["operation_id"]
         or active_snapshot.active.policy_fingerprint

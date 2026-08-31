@@ -538,7 +538,19 @@ class ConsolidationBatchJournalStore:
             current = _parse_state(existing)
             if current.run_id != self.run_id:
                 _fail()
-            if current == target:
+            if (
+                current.schema == target.schema
+                and current.operation_id == target.operation_id
+                and current.request_digest == target.request_digest
+                and current.partition_digest == target.partition_digest
+                and current.binding_digest == target.binding_digest
+                and current.publication_boundary_ordinal
+                == target.publication_boundary_ordinal
+                and tuple(
+                    replace(entry, status="prior") for entry in current.batches
+                )
+                == target.batches
+            ):
                 return current
             _fail()
 
