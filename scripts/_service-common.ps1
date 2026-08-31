@@ -1068,9 +1068,9 @@ function Test-ExomemProcessTreeMembership {
 
     if ($RootPid -le 0 -or $CandidatePid -le 0 -or $MaxDepth -le 0) { return $false }
     $currentPid = $CandidatePid
+    $childCreatedAt = $null
     $seen = @{}
     foreach ($depth in 1..$MaxDepth) {
-        if ($currentPid -eq $RootPid) { return $true }
         if ($currentPid -le 0 -or $seen.ContainsKey($currentPid)) { return $false }
         $seen[$currentPid] = $true
         try {
@@ -1081,6 +1081,15 @@ function Test-ExomemProcessTreeMembership {
             return $false
         }
         if (-not $process) { return $false }
+        try {
+            $createdAt = [datetime]$process.CreationDate
+        } catch {
+            return $false
+        }
+        if (-not $createdAt) { return $false }
+        if ($childCreatedAt -and $createdAt -gt $childCreatedAt) { return $false }
+        if ($currentPid -eq $RootPid) { return $true }
+        $childCreatedAt = $createdAt
         $currentPid = [int]$process.ParentProcessId
     }
     return $false
@@ -1098,7 +1107,20 @@ function Assert-ExomemListenerOwnedByWorker {
         $listeners = @(Get-ExomemConfiguredListenerPids -ServiceName $ServiceName)
         if ($listeners.Count -eq 1) {
             $listenerPid = [int]$listeners[0]
-            if (Test-ExomemProcessTreeMembership -RootPid $WorkerPid -CandidatePid $listenerPid) {
+            $currentWorkerPid = Get-ExomemServiceWorkerPid -ServiceName $ServiceName
+            $belongsToTree = $listenerPid -eq $WorkerPid -or (
+                Test-ExomemProcessTreeMembership -RootPid $WorkerPid -CandidatePid $listenerPid
+            )
+            if ($currentWorkerPid -eq $WorkerPid -and $belongsToTree) {
+                $confirmedWorkerPid = Get-ExomemServiceWorkerPid -ServiceName $ServiceName
+                $confirmedListeners = @(Get-ExomemConfiguredListenerPids -ServiceName $ServiceName)
+                if (
+                    $confirmedWorkerPid -ne $WorkerPid -or
+                    $confirmedListeners.Count -ne 1 -or
+                    [int]$confirmedListeners[0] -ne $listenerPid
+                ) {
+                    throw "The configured listener or service worker changed during process-tree ownership proof."
+                }
                 Write-Host "Configured listener belongs to the selected worker process tree: $WorkerPid -> $listenerPid"
                 return
             }
