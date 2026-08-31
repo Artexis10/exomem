@@ -27,7 +27,7 @@
 - [x] 4.4 Introduce a typed compute-runtime extraction failure and a ledger-first crash-consistent blocked protocol; verify fault after ledger marking converges the sidecar without ASR, the source artifact is unchanged, explicit retry reuses the job, and status never recommends artifact repair.
 - [x] 4.5 Add bounded startup reconciliation for retained legacy accelerator failures and a worker-lifetime circuit breaker for subsequent queued ASR jobs; verify old failed rows/sidecars converge to blocked and one runtime failure prevents repeated model construction.
 - [x] 4.6 Update the explicit media GPU verifier to use product routing and perform actual tiny-model compute in its preconfigured child before success; verify CPU-only reporting stays soft and mocked CUDA enumeration without model execution cannot pass.
-- [ ] 4.7 Mark machine-owned sidecar boundaries explicitly; block ambiguous unmarked nonempty legacy notes before metadata or queue mutation; collapse repeated residue only against a surviving or freshly source-derived extraction candidate, never by inferring a blank-top period; verify two copies, differing prose, document-heading collisions, frontmatter, safety, idempotence, and repeated updates.
+- [x] 4.7 Mark machine-owned sidecar boundaries explicitly; block ambiguous unmarked nonempty legacy notes before metadata or queue mutation; collapse repeated residue only against a surviving or freshly source-derived extraction candidate, never by inferring a blank-top period; verify two copies, differing prose, document-heading collisions, frontmatter, safety, idempotence, and repeated updates.
 
 ## 5. Verify Active Host Cooperation
 
@@ -35,7 +35,7 @@
 - [x] 5.2 Run the focused CPU-envelope, media-worker, extraction, status/doctor, installer, and verification-script suites plus Ruff; record exact scoped commands and results in the lane result.
 - [x] 5.3 Have an author-independent reviewer inspect and reproduce the CPU-envelope diff, return findings to the implementation lane, and verify every accepted finding is fixed before accelerator work is accepted.
 - [x] 5.4 Have a fresh author-independent reviewer inspect and reproduce the accelerator/runtime/failure-state diff, return findings to the implementation lane, and verify every accepted finding is fixed.
-- [ ] 5.5 Have an author-independent reviewer reproduce the exact-duplicate sidecar regression and verify the repair cannot discard non-whitespace authored residue before accepting it.
+- [x] 5.5 Have an author-independent reviewer reproduce the exact-duplicate sidecar regression and verify the repair cannot discard non-whitespace authored residue before accepting it.
 
 ## 6. Completion and Release Evidence
 
