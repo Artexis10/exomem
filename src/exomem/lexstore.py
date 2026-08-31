@@ -1356,6 +1356,28 @@ def search_substring_result(
     )
 
 
+def emitted_parent_hints_result(
+    vault_root: Path,
+    paths: set[str],
+    *,
+    scope: str = "kb",
+    freshness: tuple | None = None,
+    recall_checkpoint: Any | None = None,
+) -> CatalogQueryResult[dict[str, str | None]]:
+    """Current emitted-parent metadata for every requested scoped page.
+
+    The caller may treat explicit ``None`` as an ordinary page only when this
+    complete result proves the requested candidate set has no missing rows.
+    """
+    if not _catalog_usable():
+        return CatalogQueryResult(None, CatalogReadiness("unsupported", False, backend()))
+    if not paths:
+        return CatalogQueryResult({}, CatalogReadiness("available", True, backend()))
+    return get_store(vault_root).emitted_parent_hints_result(
+        paths, scope, freshness, recall_checkpoint
+    )
+
+
 def search_semantic_units(
     vault_root: Path,
     query: str,
@@ -4599,6 +4621,7 @@ class LexicalStore:
         *,
         allow_delta: bool = True,
         schedule_repair: bool = True,
+        recall_checkpoint: Any | None = None,
     ) -> CatalogReadiness:
         """Decide, without ever rebuilding/healing/walking, whether the exact
         category/kind projection can be served for `scope` at `freshness`.
@@ -4615,7 +4638,11 @@ class LexicalStore:
         from . import freshness as freshness_module
 
         backend_name = backend()
-        target_checkpoint = freshness_module.recall_checkpoint(self.vault_root, scope)
+        target_checkpoint = (
+            recall_checkpoint
+            if recall_checkpoint is not None
+            else freshness_module.recall_checkpoint(self.vault_root, scope)
+        )
         target_state = _checkpoint_state(target_checkpoint)
         if backend_name == "python":
             return CatalogReadiness("unsupported", False, backend_name)
@@ -4688,6 +4715,7 @@ class LexicalStore:
                             freshness,
                             allow_delta=False,
                             schedule_repair=schedule_repair,
+                            recall_checkpoint=target_checkpoint,
                         )
             if schedule_repair:
                 _schedule_runtime_catalog_repair(self.vault_root)
@@ -4746,6 +4774,8 @@ class LexicalStore:
         freshness: tuple | None,
         query_fn: Callable[[sqlite3.Connection], _CatalogValue],
         failure_message: str,
+        *,
+        recall_checkpoint: Any | None = None,
     ) -> CatalogQueryResult[_CatalogValue]:
         """Validate readiness AND run `query_fn(conn)` bound to ONE connection and
         read transaction, so a concurrent publication cannot swap the catalog file
@@ -4762,7 +4792,13 @@ class LexicalStore:
         """
         from . import freshness as freshness_module
 
-        readiness = self.catalog_readiness(scope, freshness)
+        readiness = (
+            self.catalog_readiness(scope, freshness)
+            if recall_checkpoint is None
+            else self.catalog_readiness(
+                scope, freshness, recall_checkpoint=recall_checkpoint
+            )
+        )
         if not readiness.complete:
             return CatalogQueryResult(None, readiness)
         try:
@@ -4772,7 +4808,11 @@ class LexicalStore:
                 # returned; the whole validate-then-query runs inside it.
                 conn.execute("BEGIN")
                 stored = self._meta_checkpoint(conn, scope)
-                target = freshness_module.recall_checkpoint(self.vault_root, scope)
+                target = (
+                    recall_checkpoint
+                    if recall_checkpoint is not None
+                    else freshness_module.recall_checkpoint(self.vault_root, scope)
+                )
                 if (
                     _checkpoint_state(stored) != _checkpoint_state(target)
                     or not self._schema_is_current(conn)
@@ -5120,6 +5160,52 @@ class LexicalStore:
             params,
         ).fetchall()
         return sorted(str(row[0]) for row in rows)
+
+    def emitted_parent_hints_result(
+        self,
+        paths: set[str],
+        scope: str,
+        freshness: tuple | None,
+        recall_checkpoint: Any | None = None,
+    ) -> CatalogQueryResult[dict[str, str | None]]:
+        """Read emitted-parent hints from one ready catalog snapshot.
+
+        A complete result must name every requested path. A missing row is not
+        evidence of an ordinary page: it means the snapshot cannot safely
+        collapse the candidates without the legacy Markdown hydration path.
+        """
+        requested = set(paths)
+        result = self._serve_from_ready_catalog_result(
+            scope,
+            freshness,
+            lambda conn: self._emitted_parent_hints_query(conn, requested, scope),
+            "lexical emitted-parent hint query failed (%s); candidate collapse hydrates",
+            recall_checkpoint=recall_checkpoint,
+        )
+        if not result.readiness.complete or result.value is None:
+            return result
+        if requested <= result.value.keys():
+            return result
+        _schedule_runtime_catalog_repair(self.vault_root)
+        return CatalogQueryResult(
+            None, CatalogReadiness("stale", False, result.readiness.backend)
+        )
+
+    def _emitted_parent_hints_query(
+        self,
+        conn: sqlite3.Connection,
+        paths: set[str],
+        scope: str,
+    ) -> dict[str, str | None]:
+        """One JSON-backed scoped query, independent of SQLite bind limits."""
+        col = "in_vault" if scope == "vault" else "in_kb"
+        rows = conn.execute(
+            "SELECT p.path, p.emitted_parent_path FROM pages p "
+            "JOIN json_each(?) requested ON requested.value = p.path "
+            f"WHERE p.{col} = 1",
+            (json.dumps(sorted(paths), ensure_ascii=False),),
+        ).fetchall()
+        return {str(path): parent for path, parent in rows}
 
     def search_substring(
         self,

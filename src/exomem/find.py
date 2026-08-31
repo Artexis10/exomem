@@ -16,7 +16,7 @@ import os
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from collections.abc import Set as AbstractSet
 from datetime import date
 from pathlib import Path
@@ -1166,6 +1166,17 @@ def find(
                 _trim_find_cache(cache_size)
         return unit_hits
     mixed = effective_result_level == "mixed"
+    query_vector: Any = None
+    query_vector_ready = False
+
+    def _query_vector() -> Any:
+        nonlocal query_vector, query_vector_ready
+        if not query_vector_ready:
+            from . import embeddings
+
+            query_vector = embeddings.embed_texts([query], is_query=True)[0]
+            query_vector_ready = True
+        return query_vector
 
     # ---- Hot cache lookup (freshness-keyed; see _freshness_key above) ----
     # prefer_used bypasses the cache entirely — simplest correct interaction;
@@ -1337,6 +1348,7 @@ def find(
                 degraded_out=degraded,
                 failed_out=failed,
                 retrieval_trace=retrieval_trace,
+                query_vector_provider=_query_vector,
             )
         if retrieval_trace is not None:
             retrieval_trace.snapshot_result_plan("unit")
@@ -1423,6 +1435,7 @@ def find(
                 eligible_paths=eligible_paths,
                 recall_scope="kb" if scope == "kb-only" else "vault",
                 retrieval_trace=retrieval_trace,
+                query_vector_provider=_query_vector if mixed else None,
             )
 
     if retrieval_trace is not None and (mode == "keyword" or not query_norm):
@@ -1891,6 +1904,7 @@ def _vector_unit_candidates(
     degraded_out: list[str] | None,
     failed_out: list[str] | None,
     timings: FindTimings | None,
+    query_vector_provider: Callable[[], Any] | None = None,
 ) -> tuple[list[Any], dict[str, Any], str]:
     """Return bounded vector candidates without opening every Markdown parent."""
     model_name = "BAAI/bge-base-en-v1.5"
@@ -1912,7 +1926,11 @@ def _vector_unit_candidates(
 
         index = embeddings.get_embedding_index(vault_root)
         with _span(timings, "vector.unit.embed"):
-            query_vector = embeddings.embed_texts([query], is_query=True)[0]
+            query_vector = (
+                query_vector_provider()
+                if query_vector_provider is not None
+                else embeddings.embed_texts([query], is_query=True)[0]
+            )
         hits = index.search_semantic_units(
             query_vector,
             k=candidate_limit,
@@ -1964,6 +1982,7 @@ def _find_semantic_units(
     failed_out: list[str] | None,
     retrieval_trace: Any | None = None,
     timings: FindTimings | None = None,
+    query_vector_provider: Callable[[], Any] | None = None,
 ) -> list[SemanticUnitHit]:
     """Rank current, exactly eligible units through lexical and vector lanes."""
     from . import lexstore
@@ -2180,6 +2199,7 @@ def _find_semantic_units(
             degraded_out=degraded_out,
             failed_out=failed_out,
             timings=timings,
+            query_vector_provider=query_vector_provider,
         )
         if (
             vector_allowed_refs is not None
@@ -3096,6 +3116,7 @@ def _find_semantic(
     eligible_paths: set[str] | None = None,
     recall_scope: str | None = None,
     retrieval_trace: Any | None = None,
+    query_vector_provider: Callable[[], Any] | None = None,
 ) -> list[Hit]:
     """Hybrid (BM25+vector) or vector-only mode.
 
@@ -3169,6 +3190,7 @@ def _find_semantic(
             lexical_repair=lexical_repair,
             eligible_paths=eligible_paths,
             capture_trace=retrieval_trace is not None,
+            query_vector_provider=query_vector_provider,
         )
     except lexstore.CatalogUnavailable as error:
         _raise_catalog_outcome(error.readiness)
