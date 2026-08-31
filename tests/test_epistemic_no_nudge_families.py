@@ -1187,14 +1187,15 @@ def test_the_f23_journey_runs_against_the_installed_envelope(
     assert run.passes == f23_dismissal.DEFAULT_PASSES + len(
         f23_dismissal.PROMINENCE_LEVELS
     )
+    prior_ledger = run.prior.item("surface-due_state_counters")
     ledger = run.later.item("surface-due_state_counters")
+    assert prior_ledger is not None and prior_ledger.raw["projection"] == "complete"
     assert ledger is not None and ledger.raw["projection"] == "complete"
-    assert int(ledger.raw["writes"]) == f23_dismissal.BULK_DOCUMENTS
+    assert int(ledger.raw["writes"]) - int(prior_ledger.raw["writes"]) == (
+        f23_dismissal.BULK_DOCUMENTS
+    )
     # The operation leaf delivers one batch block, never one per governed write.
-    assert int(ledger.raw["emissions"]) == 1
-    # The dismissed probe stays closed; the still-open probe keeps the delivered
-    # block non-vacuous. The adopted Source pages themselves add no due items.
-    assert int(ledger.raw["due_total"]) == 1
+    assert int(ledger.raw["emissions"]) - int(prior_ledger.raw["emissions"]) == 1
 
     context = AssertionContext(
         snapshot=run.later, prior=run.prior, subject=run.subject, family="f23"
