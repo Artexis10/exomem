@@ -671,6 +671,7 @@ def _check_resource_posture(profile: Profile) -> DoctorCheck:
     if runtime.get("variant"):
         runtime_label += f"({runtime['variant']})"
     gpu = posture["gpu"]
+    asr = posture["asr"]
     mode_name = posture["mode"]
     if gpu.get("usable") is False:
         status: Status = "pass" if profile == "lean" else "warn"
@@ -679,7 +680,7 @@ def _check_resource_posture(profile: Profile) -> DoctorCheck:
             "resource.posture",
             status,
             f"Runtime is {runtime_label}; resource mode is {mode_name}; CPU is the "
-            f"supported baseline. {reason}.",
+            f"supported baseline. ASR policy is {asr['effective_policy']}. {reason}.",
             "Use `exomem mode quiet` before foreground GPU work, or `exomem mode "
             "performance` only when enough free VRAM is available.",
             details=posture,
@@ -689,15 +690,15 @@ def _check_resource_posture(profile: Profile) -> DoctorCheck:
             "resource.posture",
             "pass",
             f"Runtime is {runtime_label}; resource mode is {mode_name}; GPU headroom "
-            "probe is capable, but GPU use remains explicit policy opt-in.",
+            f"probe is capable; ASR policy is {asr['effective_policy']}.",
             details=posture,
         )
     return _check(
         "resource.posture",
         "pass",
         f"Runtime is {runtime_label}; resource mode is {mode_name}; CPU is the "
-        "supported baseline and GPU headroom is unknown without an available "
-        "non-torch probe.",
+        f"supported baseline; ASR policy is {asr['effective_policy']}; GPU headroom is "
+        "unknown without an available non-torch probe.",
         details=posture,
     )
 
@@ -1579,12 +1580,17 @@ def _check_media_runtime(vault_root: Path | None) -> DoctorCheck | None:
     blocked = int(counts.get("blocked", 0))
     failed = int(counts.get("failed", 0))
     if blocked or failed:
+        compute_blocked = int(status.get("compute_runtime_count", 0)) > 0
+        remediation = (
+            "Repair the CUDA/cuBLAS/cuDNN runtime or explicitly select bounded CPU, then retry."
+            if compute_blocked
+            else "Install the missing media engine or fix the failed input, then restart the service to retry blocked work."
+        )
         return _check(
             "media.runtime",
             "warn",
             f"Media work needs attention: {blocked} blocked, {failed} failed.",
-            "Install the missing media engine or fix the failed input, then restart the "
-            "service to retry blocked work.",
+            remediation,
             details=status,
         )
     queued = int(counts.get("pending", 0)) + int(counts.get("running", 0))

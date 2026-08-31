@@ -8,7 +8,14 @@ from pathlib import Path
 
 import pytest
 
-from exomem import extract, speaker_attribution, state_paths, voice_embed, voice_profiles
+from exomem import (
+    asr_runtime,
+    extract,
+    speaker_attribution,
+    state_paths,
+    voice_embed,
+    voice_profiles,
+)
 
 
 @pytest.mark.parametrize(
@@ -164,6 +171,57 @@ def test_extract_text_default_does_not_request_timestamps(
 def test_extract_text_unknown_type_raises() -> None:
     with pytest.raises(extract.ExtractionUnavailable):
         extract.extract_text("x.zip")
+
+
+def test_whisper_uses_asr_runtime_selection(monkeypatch: pytest.MonkeyPatch) -> None:
+    made: list[dict] = []
+
+    class _Model:
+        pass
+
+    monkeypatch.setitem(sys.modules, "faster_whisper", type("FW", (), {"WhisperModel": lambda *a, **k: made.append(k) or _Model})())
+    monkeypatch.setattr(
+        asr_runtime,
+        "select_asr_runtime",
+        lambda: asr_runtime.ASRSelection("cuda", "float16", asr_runtime.ASRProbe(True, frozenset({"float16"}), frozenset({"int8"}), (12, 0))),
+    )
+    monkeypatch.setattr(extract, "_WHISPER", None)
+
+    extract._get_whisper()
+
+    assert made == [{"device": "cuda", "compute_type": "float16", "cpu_threads": 1, "num_workers": 1}]
+
+
+def test_constructor_cuda_failure_is_typed(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _BrokenModel:
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError("cuBLAS failed with status CUBLAS_STATUS_NOT_SUPPORTED")
+
+    monkeypatch.setitem(sys.modules, "faster_whisper", type("FW", (), {"WhisperModel": _BrokenModel})())
+    monkeypatch.setattr(
+        asr_runtime,
+        "select_asr_runtime",
+        lambda: asr_runtime.ASRSelection("cuda", "float16", asr_runtime.ASRProbe(True, frozenset({"float16"}), frozenset({"int8"}), (12, 0))),
+    )
+    monkeypatch.setattr(extract, "_WHISPER", None)
+
+    with pytest.raises(asr_runtime.ASRComputeRuntimeError):
+        extract._get_whisper()
+
+
+def test_lazy_segment_cuda_failure_is_typed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    class _Model:
+        def transcribe(self, _path):
+            def segments():
+                raise RuntimeError("CUDA driver version is insufficient")
+                yield None
+            return segments(), None
+
+    monkeypatch.setattr(extract, "_get_whisper", lambda: _Model())
+    segments, _ = extract.FasterWhisperBackend().transcribe(tmp_path / "x.m4a")
+
+    with pytest.raises(asr_runtime.ASRComputeRuntimeError):
+        list(segments)
 
 
 def test_extract_textfile_reads_utf8(tmp_path) -> None:

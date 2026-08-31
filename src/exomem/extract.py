@@ -48,7 +48,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
-from . import accel, runtime_resources
+from . import accel, asr_runtime, runtime_resources
 from .media_types import (
     DOC_EXTS as _DOC_EXTS,
 )
@@ -249,22 +249,31 @@ def _get_whisper():
         with _WHISPER_LOCK:
             if _WHISPER is not None:
                 return _WHISPER
+            selection = asr_runtime.select_asr_runtime()
             _ensure_cuda_dll_path()
             try:
                 from faster_whisper import WhisperModel
             except ImportError as e:
                 raise ExtractionUnavailable(f"faster-whisper not installed: {e}") from e
-            device = _device()
-            # int8_float16 on GPU keeps large-v3 light without accuracy loss; int8 on CPU.
-            compute_type = "int8_float16" if device == "cuda" else "int8"
-            log.info("loading faster-whisper %s on %s (%s)", WHISPER_MODEL, device, compute_type)
-            _WHISPER = WhisperModel(
+            log.info(
+                "loading faster-whisper %s on %s (%s)",
                 WHISPER_MODEL,
-                device=device,
-                compute_type=compute_type,
-                cpu_threads=runtime_resources.resolve_policy().cpu_threads,
-                num_workers=1,
+                selection.device,
+                selection.compute_type,
             )
+            try:
+                _WHISPER = WhisperModel(
+                    WHISPER_MODEL,
+                    device=selection.device,
+                    compute_type=selection.compute_type,
+                    cpu_threads=runtime_resources.resolve_policy().cpu_threads,
+                    num_workers=1,
+                )
+            except Exception as exc:
+                typed = asr_runtime.as_compute_runtime_error(exc)
+                if typed is not None:
+                    raise typed from exc
+                raise
         return _WHISPER
 
 
@@ -281,7 +290,7 @@ def asr_prewarm_enabled() -> bool:
     return False
 
 
-def prewarm() -> None:
+def prewarm() -> asr_runtime.ASRComputeRuntimeError | None:
     """Eagerly load the ASR model so the first real transcription isn't a cold-start.
 
     `WHISPER_MODEL` (default large-v3, ~3 GB) loads lazily on first use; with a single
@@ -292,16 +301,21 @@ def prewarm() -> None:
     just stays lazy and transcribes nothing until configured.
     """
     if not extraction_enabled():
-        return
+        return None
     if not asr_prewarm_enabled():
         log.info("ASR prewarm skipped by policy; model will lazy-load on first media job")
-        return
+        return None
     try:
         get_transcriber().prewarm()
+        return None
+    except asr_runtime.ASRComputeRuntimeError as e:
+        log.warning("ASR prewarm hit a compute runtime failure; worker will circuit-break: %s", e)
+        return e
     except ExtractionUnavailable as e:
         log.info("ASR prewarm skipped (engine unavailable): %s", e)
     except Exception:  # noqa: BLE001 — prewarm must never crash startup
         log.warning("ASR prewarm failed; will retry lazily on first job", exc_info=True)
+    return None
 
 
 # ---------------- ASR backend seam ----------------
@@ -353,9 +367,15 @@ class FasterWhisperBackend:
         # containers too), so a video file can be passed directly — no ffmpeg step.
         def guarded_segments():
             with runtime_resources.model_execution():
-                model = _get_whisper()
-                segments, _info = model.transcribe(str(path))
-                yield from segments
+                try:
+                    model = _get_whisper()
+                    segments, _info = model.transcribe(str(path))
+                    yield from segments
+                except Exception as exc:
+                    typed = asr_runtime.as_compute_runtime_error(exc)
+                    if typed is not None:
+                        raise typed from exc
+                    raise
 
         return guarded_segments(), f"faster-whisper:{WHISPER_MODEL}"
 
