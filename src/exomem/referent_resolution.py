@@ -205,6 +205,7 @@ class HitFact:
     bm25_rank: int | None = None
     vector_rank: int | None = None
     keyword_rank: int | None = None
+    descriptor_tokens: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -373,6 +374,11 @@ def _matches_attribute(descriptor: str, attribute: str) -> bool:
     return len(shorter) >= 4 and longer.startswith(shorter)
 
 
+def descriptor_tokens_for(*values: object) -> tuple[str, ...]:
+    """Return deterministic tokens for descriptor matching in the pure layer."""
+    return tuple(sorted({token for value in values for token in _tokens(value)}))
+
+
 def _attribute_matches(cue: ReferentCue, entity: EntityRecord) -> tuple[str, ...]:
     attributes = tuple(
         token
@@ -454,8 +460,18 @@ def resolve_referents(
                 item.direction,
             ),
         )
+        descriptor_graph_edges = [
+            edge
+            for edge in graph_edges
+            if any(
+                _matches_attribute(descriptor, token)
+                for descriptor in cue.descriptors
+                for token in hits_by_path[edge.seed_path].descriptor_tokens
+            )
+        ]
+        graph_descriptor_bearing = bool(descriptor_graph_edges)
         if graph_edges:
-            edge = graph_edges[0]
+            edge = (descriptor_graph_edges or graph_edges)[0]
             evidence.append(
                 Evidence(
                     "graph",
@@ -487,7 +503,13 @@ def resolve_referents(
             ref=entity.ref,
         )
         non_exact_kinds = {item.kind for item in evidence if item.kind != "exact_name"}
-        if exact_present or len(non_exact_kinds) >= 2:
+        attribute_descriptor_bearing = any(
+            descriptor in matched_attributes for descriptor in cue.descriptors
+        )
+        descriptor_gate_passes = (
+            not cue.descriptors or attribute_descriptor_bearing or graph_descriptor_bearing
+        )
+        if exact_present or (len(non_exact_kinds) >= 2 and descriptor_gate_passes):
             resolved.append(match)
         elif evidence:
             candidates.append(match)

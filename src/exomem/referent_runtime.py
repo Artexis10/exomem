@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import logging
 import os
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from . import epistemic_graph, freshness, memory_refs, readiness
+from . import epistemic_graph, find_corpus, freshness, memory_refs, readiness
 from .entity_registry import load_entity_registry, schedule_entity_registry_warm
 from .entity_types import load_entity_types
 from .find import FreshnessSnapshot
@@ -16,6 +17,7 @@ from .referent_resolution import (
     EdgeFact,
     HitFact,
     ReferentCue,
+    descriptor_tokens_for,
     detect_cue,
     resolve_referents,
 )
@@ -48,6 +50,30 @@ def _hit_facts(hits: list[Any]) -> tuple[HitFact, ...]:
         for index, hit in enumerate(hits, 1)
         if getattr(hit, "path", None)
     )
+
+
+def _with_anchor_descriptor_tokens(
+    vault_root: Path,
+    hits: tuple[HitFact, ...],
+    *,
+    anchor_cap: int = 10,
+) -> tuple[HitFact, ...]:
+    facts: list[HitFact] = []
+    for index, hit in enumerate(hits):
+        if index >= max(0, anchor_cap):
+            facts.append(hit)
+            continue
+        page = find_corpus.CACHE.get(vault_root / hit.path, vault_root)
+        if page is None:
+            facts.append(hit)
+            continue
+        facts.append(
+            replace(
+                hit,
+                descriptor_tokens=descriptor_tokens_for(page.title, page.body),
+            )
+        )
+    return tuple(facts)
 
 
 def _edge_facts(
@@ -172,6 +198,8 @@ def resolve_for_find(
             )
             return None
         hit_facts = _hit_facts(hits)
+        if cue.descriptors:
+            hit_facts = _with_anchor_descriptor_tokens(vault_root, hit_facts)
         edges = _edge_facts(
             vault_root,
             anchors=[item.path for item in hit_facts[:10]],

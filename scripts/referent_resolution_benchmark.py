@@ -333,6 +333,33 @@ def _render_cases(root: Path) -> dict[str, str]:
         "The quay library we reviewed was discussed only by synthetic people.",
         relations=(paths["o-person-one"], paths["o-person-two"]),
     )
+
+    r_evidenced_topic = _note(
+        root,
+        "r-verdant",
+        "The verdant friend group compared synthetic travel plans.",
+    )
+    paths["r-evidenced"] = _entity(
+        root,
+        "r-evidenced",
+        "Sera Venn",
+        relationship="friend",
+        tags=("verdant",),
+        body="A verdant friend who discussed when to go in the synthetic benchmark.",
+        relations=(r_evidenced_topic,),
+    )
+    r_distractor_topic = _note(
+        root,
+        "r-route-timing",
+        "Two friends compared when to go and which neutral routes to use.",
+    )
+    paths["r-distractor"] = _entity(
+        root,
+        "r-distractor",
+        "Taro Pell",
+        relationship="friend",
+        relations=(r_distractor_topic,),
+    )
     return paths
 
 
@@ -411,10 +438,15 @@ def _arm(vault: Path, case: dict[str, Any], *, graph: bool) -> dict[str, Any]:
     expected_status = str(case["status"])
     expected_unresolved = case.get("unresolved_count")
     actual_unresolved = block.get("unresolved_count")
+    expected_candidate_paths = case.get("_expected_candidate_paths")
     expected = (
         resolved_paths == expected_paths
         and block.get("status") == expected_status
         and (expected_unresolved is None or actual_unresolved == expected_unresolved)
+        and (
+            expected_candidate_paths is None
+            or set(expected_candidate_paths).issubset(candidate_paths)
+        )
     )
     stage = ((result.get("timings") or {}).get("stages") or {}).get("referents", {})
     return {
@@ -438,6 +470,10 @@ def _run_benchmark(manifest_path: Path, *, work_root: Path) -> dict[str, Any]:
     for raw_case in manifest["cases"]:
         case = dict(raw_case)
         case["_expected_paths"] = [rendered.id_to_path[key] for key in case["resolved"]]
+        if "candidates" in case:
+            case["_expected_candidate_paths"] = [
+                rendered.id_to_path[key] for key in case["candidates"]
+            ]
         graph_on = _arm(rendered.root, case, graph=True)
         graph_off = _arm(rendered.root, case, graph=False)
         case_results.append(
@@ -451,7 +487,7 @@ def _run_benchmark(manifest_path: Path, *, work_root: Path) -> dict[str, Any]:
 
     total = len(case_results)
     abstention_ids = {"F", "G", "I", "O"}
-    partial_ids = {"E", "H", "N"}
+    partial_ids = {"E", "H", "N", "R"}
     stage_samples = [
         float(case["graph_on"]["referents_stage_ms"])
         for case in case_results
