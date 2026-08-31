@@ -181,6 +181,20 @@ def test_clean_sentinel_preserved_notes_are_not_repaired() -> None:
     assert sidecar_repair.analyze(content, Path("sentinel.pdf.md")) is None
 
 
+def test_sentinel_boundary_keeps_literal_preserved_notes_in_extraction() -> None:
+    content = (
+        FRONTMATTER
+        + "# Evidence: report.pdf\n\nPreserved under `Evidence/Case/`.\n\n"
+        + "## Extracted text\n\n# Document\n\n## Preserved notes\n\n"
+        + "This is a literal document heading, not sidecar structure.\n\n"
+        + "<!-- exomem:sidecar-preserved-notes -->\n"
+        + "## Preserved notes\n\nAuthored note.\n"
+    )
+
+    assert sidecar_repair.repair(content) == content
+    assert sidecar_repair.analyze(content, Path("collision.pdf.md")) is None
+
+
 def test_empty_extraction_keeps_sentinel_marked_repeated_residual_without_candidate() -> None:
     block = "# Repeated document\n\n## Body\n\nExact content."
     content = _empty_extraction_with_preserved_residual("\n\n".join([block] * 3)).replace(

@@ -605,6 +605,12 @@ class MediaWorker:
                     job.sidecar_path.name,
                 )
                 return False
+            if preserve._has_ambiguous_legacy_preserved_notes(current_content):
+                raise preserve.PreserveError(
+                    code="AMBIGUOUS_SIDECAR_BOUNDARY",
+                    missing=[],
+                    reason="unmarked nonempty preserved notes have no machine-owned boundary",
+                )
             receipts = deferred_index.add_full_receipts(
                 self._vault_root,
                 [job.sidecar_path.relative_to(self._vault_root).as_posix()],

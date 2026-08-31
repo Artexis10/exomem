@@ -2353,6 +2353,8 @@ def test_child_blocks_ambiguous_sidecar_boundary_without_writing_it(
         + "# Existing document heading\n\n## Preserved notes\n\nAuthored note.\n",
         encoding="utf-8",
     )
+    deferred_index.clear_full_receipts(vault, deferred_index.snapshot_full(vault))
+    assert deferred_index.full_status(vault)["count"] == 0
     before = sidecar.read_bytes()
     monkeypatch.setattr(
         extract,
@@ -2380,6 +2382,7 @@ def test_child_blocks_ambiguous_sidecar_boundary_without_writing_it(
     assert status["error"].startswith("AMBIGUOUS_SIDECAR_BOUNDARY:")
     assert status["next_action"] == "review the sidecar's preserved-notes boundary, then retry"
     assert sidecar.read_bytes() == before
+    assert deferred_index.full_status(vault)["count"] == 0
 
 
 def test_child_keeps_other_preserve_errors_as_failed_extraction(

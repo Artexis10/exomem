@@ -57,9 +57,14 @@ def _segments(body: str) -> list[tuple[str, str]]:
     emits document headings, so a "stop at the next H2" reader sees an empty block
     and would silently drop the whole table on repair.
     """
-    body = body.replace(f"{PRESERVED_NOTES_SENTINEL}\n", "")
     out: list[tuple[str, str]] = []
-    for segment in body.split(PRESERVED_HEADING):
+    owned_boundary = f"{PRESERVED_NOTES_SENTINEL}\n{PRESERVED_HEADING}"
+    boundaries = (
+        body.split(owned_boundary)
+        if owned_boundary in body
+        else body.split(PRESERVED_HEADING)
+    )
+    for segment in boundaries:
         index = segment.find(EXTRACTED_HEADING)
         if index == -1:
             out.append((segment, ""))
