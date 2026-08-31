@@ -1227,6 +1227,8 @@ class LabelMap:
             return None
         if arr.shape[0] != 2:
             return None
+        if not np.isfinite(arr).all():
+            return None
         shifted = arr - arr.max(axis=1, keepdims=True)
         exp = np.exp(shifted)
         probs = exp / exp.sum(axis=1, keepdims=True)
@@ -1272,6 +1274,8 @@ def get_label_map(version: str | None) -> LabelMap:
         return _LABEL_MAPS[version]
     except KeyError:
         raise ValueError(f"unknown label map version: {version!r}") from None
+
+
 def _nli_enabled() -> bool:
     """The frozen verifier's opt-in gate (`EXOMEM_CLAIM_POLARITY_NLI`).
 
@@ -1279,7 +1283,8 @@ def _nli_enabled() -> bool:
     the verifier is refused for the process and the queue carries no label at
     all — it does not hand the lane to another backend.
     """
-    return bool(os.environ.get("EXOMEM_CLAIM_POLARITY_NLI"))
+    value = os.environ.get("EXOMEM_CLAIM_POLARITY_NLI")
+    return bool(value) and value.strip().lower() not in {"", "0", "false", "no", "off"}
 
 
 # ---------------------------------------------------------------------------
@@ -1710,11 +1715,12 @@ def verifier_admission() -> VerifierAdmission:
 def verifier_status() -> dict:
     """The verifier tier's status for the diagnostic surface (doctor, status).
 
-    Always answerable and never loads a model: it reports which knob is the
-    gate, which knob is RETIRED and whether a value is sitting in it being
-    ignored, what the repository registry actually pins, and which label maps
-    this build ships. An operator who set the retired knob learns from here
-    that it selected nothing.
+    Always answerable and never fetches a model: an admitted verifier is loaded
+    only from the exact resident snapshot whose digest was checked. The payload
+    reports which knob is the gate, which knob is RETIRED and whether a value is
+    sitting in it being ignored, what the repository registry actually pins,
+    and which label maps this build ships. An operator who set the retired knob
+    learns from here that it selected nothing.
     """
     payload = verifier_admission().as_dict()
     payload["gate"] = "EXOMEM_CLAIM_POLARITY_NLI"
@@ -1723,8 +1729,14 @@ def verifier_status() -> dict:
     payload["label_map_versions"] = sorted(_LABEL_MAPS)
     return payload
 
+
 def _load_verifier_predictor(model_name: str):
     """The cross-encoder's `predict`, or None when the `nli` extra is absent.
+
+    The constructor receives the exact snapshot directory whose bytes were
+    hashed for admission, with local-only loading forced. A local load failure
+    refuses the verifier; this path never retries a repository name through the
+    hub and therefore cannot execute bytes other than the admitted snapshot.
 
     Two claim texts enter as a classification PAIR and logits come out. There is
     no prompt assembly, no instruction template, and no generation anywhere on
@@ -1741,12 +1753,16 @@ def _load_verifier_predictor(model_name: str):
         try:
             from sentence_transformers import CrossEncoder
 
-            from . import accel, model_cache
+            from . import accel
 
+            digest, snapshot_detail = _resolve_weights(model_name)
+            if digest is None:
+                return None
             device = accel.select_device()
-            model = model_cache.load_offline_first(
-                model_name,
-                lambda **kw: CrossEncoder(model_name, device=device, **kw),
+            model = CrossEncoder(
+                str(Path(snapshot_detail)),
+                device=device,
+                local_files_only=True,
             )
         except Exception as error:  # noqa: BLE001 — absent extra is a refusal, not a crash
             log.warning("frozen verifier unavailable (%s); no label is produced", error)

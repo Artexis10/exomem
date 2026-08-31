@@ -8,8 +8,11 @@ verified against, and the fixture set that verified it. The registry is a
 **repository artifact** — reviewed in diff, versioned with the code; no
 runtime configuration, environment knob, or vault content can add or alter a
 pin (`EXOMEM_CLAIM_NLI_MODEL`, the free-form override, is retired). At load,
-the resolved weights are hashed once per process and the digest cached;
-a mismatch, a missing model, a missing dependency, an unverified
+one unambiguous resident snapshot is hashed once per process and the digest
+cached. The verifier loads that exact snapshot path with local-only loading;
+a constructor failure refuses and never retries the repository model name or
+hub access. This makes the loaded bytes the bytes the pin admitted. A
+mismatch, a missing model, a missing dependency, an unverified
 (name, label-map) pair, or the opt-in gate (`EXOMEM_CLAIM_POLARITY_NLI`,
 default off) being unset refuses the verifier. Refusal degrades to
 **absence** — the entry simply carries no label — never to the lexical
@@ -66,8 +69,9 @@ whose head orders entailment/contradiction differently is a different
 (digest, label-map) pair and needs its own verified version. Changing a
 threshold, the label set, the column order, or the direction convention bumps
 the version and requires re-verification against the fixture set before the
-pair is admitted again. The map is data reviewed in diff, not arithmetic
-buried in code.
+pair is admitted again. Any NaN or infinite logit refuses the output rather
+than flowing through softmax into a confident label. The map is data reviewed
+in diff, not arithmetic buried in code.
 
 ## D5. No vault text in instruction position, by construction
 
@@ -80,9 +84,12 @@ cannot quietly become a prompted generative model behind the same seam.
 
 Golden claim pairs with expected labels — drawn from the f22 corpus shapes
 (genuine contradiction, concordant evidence, restatement, unrelated) plus the
-heuristic's known failure cases — checked at admission time and in CI with the
-extra installed. The slice's precision claim is made against these fixtures
-only; comparative bench claims stay withheld with sequence 2.
+heuristic's known failure cases — are checked at admission time. Ordinary CI
+exercises the fixture wiring with injected deterministic predictors. A CI lane
+that installs the extra and verifies a real model is deferred until a real pin
+exists; with the shipped empty registry there is no model identity for such a
+lane to verify. The slice's precision claim is made against these fixtures only;
+comparative bench claims stay withheld with sequence 2.
 
 ## D7. Out of scope
 

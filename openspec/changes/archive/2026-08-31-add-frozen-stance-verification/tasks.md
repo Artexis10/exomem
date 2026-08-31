@@ -25,6 +25,10 @@ the task is ticked, not estimated.
     9 failed in 0.09s
     ```
   - **Evidence (green, after implementation)** — same command: `9 passed in 0.08s`
+  - **Post-review numeric refusal pin** — NaN, positive infinity and negative
+    infinity each produced a non-None label before the fix (3 red cases); after
+    rejecting non-finite arrays before softmax, all 3 refuse. They are included
+    in the combined repair run: `13 passed, 50 deselected in 0.11s`.
   - Shipped: `claims.LabelMap` / `claims.get_label_map` / `claims._LABEL_MAPS`
     (`src/exomem/claims.py`). v1 declares `columns=("contradiction","entailment",
     "neutral")` and the bidirectional aggregation convention; a head whose width
@@ -57,6 +61,12 @@ the task is ticked, not estimated.
     20 errors in 0.15s
     ```
   - **Evidence (green, after implementation)** — same command: `20 passed in 0.12s`
+  - **Post-review exact-load pin** — the admitted path previously called the
+    constructor first by repository model name with `local_files_only=True`,
+    then retried that name without the flag after a local failure. The red test
+    captured both calls. It now captures one call only: the exact hashed
+    snapshot path with `local_files_only=True`; doctor uses the same path. Green
+    in the combined repair run: `13 passed, 50 deselected in 0.11s`.
   - No regression on the pre-existing suites: `tests/test_claims.py
     tests/test_write_advisory_suppression.py` → `56 passed, 1 skipped in 4.21s`
     (the skip is `sentence_transformers` absent, as on the baseline).
@@ -85,6 +95,11 @@ the task is ticked, not estimated.
     3 failed, 21 passed in 0.13s
     ```
   - **Evidence (green, after implementation)** — same command: `24 passed in 0.11s`
+  - **Post-review falsey parsing pin** — `0`, `false`, `no`, and `off` (including
+    case and whitespace variants) previously admitted because every non-empty
+    string was truthy: 8 red cases. Conventional falsey parsing makes all 9
+    tested false values gate-off. Green in the combined repair run:
+    `13 passed, 50 deselected in 0.11s`.
   - Shipped: `claims.verifier_status()` — the claims-side diagnostic payload
     naming the gate (`EXOMEM_CLAIM_POLARITY_NLI`), the retired knob
     (`EXOMEM_CLAIM_NLI_MODEL`) and any ignored value sitting in it, the pinned
@@ -96,8 +111,9 @@ the task is ticked, not estimated.
 
 - [x] 1.4 Verification fixture set: golden pairs (contradiction, concordant,
   restatement, unrelated, plus known heuristic failures); admission requires
-  green at the pinned (digest, label-map) pair; CI job runs it with the extra
-  installed.
+  green at the pinned (digest, label-map) pair. Ordinary CI exercises the
+  fixture machinery with injected deterministic predictors; real-model CI is
+  explicitly deferred to 6.2 until a real pin exists.
   - **Evidence (red, before implementation)** — same command:
     ```
     >           for pair in claims.VERIFICATION_FIXTURES["stance-v1"]
@@ -376,7 +392,9 @@ the task is ticked, not estimated.
     retired `EXOMEM_CLAIM_NLI_MODEL` knob, which the message and remediation both
     name. It stays inside doctor's never-fetches guarantee: admission resolves
     the digest from the local cache and refuses before any load when nothing is
-    resident, so the only reachable load is offline-first over resident weights.
+    resident; an admitted path constructs the cross-encoder from the exact
+    hashed snapshot path with `local_files_only=True`, and a local failure
+    refuses without a model-name or hub retry.
   - **Uninstalled degrades byte-identically** — this whole suite runs with
     `sentence_transformers` genuinely absent (the test asserts that, so it cannot
     pass vacuously): `verifier_polarity` returns None and a proximity finding's
@@ -451,8 +469,26 @@ the task is ticked, not estimated.
     ```
     Reverted: `48 passed in 0.15s`.
 
-- [ ] 5.2 `openspec validate --all --strict` green; scoped suites green; full
+- [x] 5.2 `openspec validate --all --strict` green; scoped suites green; full
   suite at the completion boundary attributed against the origin/main baseline.
+  - Strict OpenSpec validation before archive: `168 passed, 0 failed`.
+  - Strict OpenSpec validation after archive: `168 passed, 0 failed`; archive
+    discipline: `57 active changes; none task-complete`.
+  - Affected integration surface (frozen verifier, doctor, claims, write
+    advisory suppression, corpus/audit contradiction queues, epistemic review
+    queues, corpus-aware writes, and no-nudge families):
+    `336 passed, 6 skipped in 144.00s`; every skip is the intentionally absent
+    `sentence_transformers` optional dependency.
+  - Exact baseline: detached `origin/main` at `23a02e50`, Python 3.14.6,
+    `EXOMEM_DISABLE_EMBEDDINGS=1`, locked environment and isolated `/dev/shm`
+    base temp: 15,126 cases — 14,634 passed, 394 skipped, 87 failed, 11 errors.
+  - Branch, identical command and separate base temp: 15,197 cases — 14,704
+    passed, 394 skipped, 88 failed, 11 errors.
+  - JUnit identity diff: 98 common red nodes, 0 main-only, 1 branch-only, and 0
+    failure/error kind changes. The sole branch-only node was unrelated
+    `tests/test_govern_memory_tool.py::test_undo_direction_can_be_widening`;
+    isolated rerun: `1 passed in 1.96s`. Therefore the completion run adds no
+    attributable regression.
 
 ## 6. Follow-ups — explicitly NOT delivered in this slice
 

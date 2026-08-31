@@ -68,6 +68,14 @@ def test_label_map_v1_refuses_a_wrong_shaped_head() -> None:
     assert claims.get_label_map("v1").apply([1.0, 0.0, 0.0]) is None
 
 
+@pytest.mark.parametrize("bad_logit", [float("nan"), float("inf"), float("-inf")])
+def test_label_map_v1_refuses_non_finite_logits(bad_logit: float) -> None:
+    """A numerically invalid head is absence, never a confident label."""
+    logits = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+    logits[0][0] = bad_logit
+    assert claims.get_label_map("v1").apply(logits) is None
+
+
 # ---------------- 1.2 pin registry + admission (repository artifact) ----------------
 
 _FAKE_MODEL = "exomem-test/frozen-stance-fixture"
@@ -257,11 +265,71 @@ def test_refused_verifier_never_lets_the_heuristic_wear_the_nli_name(monkeypatch
     assert fallback.method == "heuristic"
 
 
+def test_doctor_loads_only_the_exact_hashed_snapshot_without_hub_fallback(
+    tmp_path, monkeypatch
+) -> None:
+    """The bytes admitted by digest are the bytes loaded by the verifier.
+
+    A local constructor failure must refuse. It must never retry the repository
+    model name without ``local_files_only`` and fetch different bytes.
+    """
+    import sys
+    import types
+
+    from exomem import accel, doctor, model_cache
+
+    digest = _plant_weights(tmp_path, monkeypatch)
+    snapshot = (
+        tmp_path
+        / "hub"
+        / model_cache.snapshot_dirname(_FAKE_MODEL)
+        / "snapshots"
+        / "rev0"
+    )
+    calls: list[tuple[str, dict]] = []
+
+    class FakeCrossEncoder:
+        def __init__(self, model_name: str, **kwargs) -> None:
+            calls.append((model_name, kwargs))
+            if model_name == _FAKE_MODEL and kwargs.get("local_files_only"):
+                raise RuntimeError("the named-model offline load failed")
+
+        def predict(self, pairs):
+            return _oracle_predict()(pairs)
+
+    fake_module = types.ModuleType("sentence_transformers")
+    fake_module.CrossEncoder = FakeCrossEncoder
+    monkeypatch.setitem(sys.modules, "sentence_transformers", fake_module)
+    monkeypatch.setattr(accel, "select_device", lambda: "cpu")
+    monkeypatch.setattr(claims, "VERIFIER_PINS", _pin(digest))
+    monkeypatch.setenv("EXOMEM_CLAIM_POLARITY_NLI", "1")
+
+    check = doctor._check_frozen_verifier()
+
+    assert check.details["admitted"] is True
+    assert calls == [
+        (
+            str(snapshot),
+            {"device": "cpu", "local_files_only": True},
+        )
+    ]
+
+
 # ---------------- 1.3 knob fate ----------------
 
 
 def test_polarity_gate_is_default_off(monkeypatch) -> None:
     monkeypatch.delenv("EXOMEM_CLAIM_POLARITY_NLI", raising=False)
+    assert claims._nli_enabled() is False
+    assert claims.verifier_admission().reason == "gate-off"
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["", "0", "false", "FALSE", "no", "No", "off", "OFF", "  false  "],
+)
+def test_polarity_gate_parses_conventional_falsey_values(value: str, monkeypatch) -> None:
+    monkeypatch.setenv("EXOMEM_CLAIM_POLARITY_NLI", value)
     assert claims._nli_enabled() is False
     assert claims.verifier_admission().reason == "gate-off"
 
