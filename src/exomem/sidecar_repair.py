@@ -158,7 +158,10 @@ def repair(content: str) -> str:
     if notes:
         parts.append(f"{PRESERVED_HEADING}\n\n" + "\n\n".join(notes))
     rebuilt = "\n\n".join(parts) + "\n"
-    return f"{frontmatter_text}\n{rebuilt}" if frontmatter_text else rebuilt
+    if frontmatter_text:
+        separator = "" if frontmatter_text.endswith(("\n", "\r")) else "\n"
+        return f"{frontmatter_text}{separator}{rebuilt}"
+    return rebuilt
 
 
 def repair_is_safe(original: str, repaired: str) -> bool:
@@ -209,4 +212,8 @@ def _split_frontmatter(content: str) -> tuple[str, str]:
     if end == -1:
         return "", content
     boundary = end + len("\n---")
-    return content[:boundary], content[boundary:].lstrip("\n")
+    if content.startswith("\r\n", boundary):
+        boundary += 2
+    elif content.startswith("\n", boundary):
+        boundary += 1
+    return content[:boundary], content[boundary:]
