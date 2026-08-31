@@ -41,8 +41,11 @@ def _owner_contract() -> dict[str, object]:
         "principal_kind": "owner",
         "principal_id": "owner",
         "purpose": "owner-verification",
-        "command_name": "get",
-        "arguments": {"path": "Knowledge Base/Notes/destination.md"},
+        "command_name": "read_memory",
+        "arguments": {
+            "path": "Knowledge Base/Notes/destination.md",
+            "include_raw": True,
+        },
         "expected_result_digest": _digest("owner-note-full:wire"),
     }
 
@@ -56,23 +59,55 @@ def _delegated_contract() -> dict[str, object]:
         "principal_id": "external",
         "principal_attestation_fingerprint": ATTESTATION_FINGERPRINT,
         "purpose": "support",
-        "command_name": "find",
+        "command_name": "ask_memory",
         "arguments": {
             "query": "approved compiled abstraction",
             "mode": "keyword",
             "graph": False,
+            "rerank": False,
             "limit": 10,
         },
         "expected_result_digest": _digest("delegated-approved-projection:wire"),
     }
 
 
+def _graph_contract() -> dict[str, object]:
+    return {
+        **_delegated_contract(),
+        "probe_id": "delegated-approved-graph",
+        "command_name": "connect_memory",
+        "arguments": {
+            "operation": "graph-context",
+            "path": "Knowledge Base/Notes/destination.md",
+            "include_model_suggestions": False,
+            "depth": 1,
+        },
+        "expected_result_digest": _digest("delegated-approved-graph:wire"),
+    }
+
+
+def _owner_keyword_contract() -> dict[str, object]:
+    contract = {
+        **_delegated_contract(),
+        "probe_id": "owner-keyword",
+        "principal_kind": "owner",
+        "principal_id": "owner",
+        "purpose": "owner-verification",
+        "expected_result_digest": _digest("owner-keyword:wire"),
+    }
+    contract.pop("principal_attestation_fingerprint")
+    return contract
+
+
 def _negative_contract() -> dict[str, object]:
     return {
         **_delegated_contract(),
         "probe_id": "delegated-private-body-absent",
-        "command_name": "get",
-        "arguments": {"path": "Knowledge Base/Notes/private.md"},
+        "command_name": "read_memory",
+        "arguments": {
+            "path": "Knowledge Base/Notes/private.md",
+            "include_raw": True,
+        },
         "expected_result_digest": _digest("delegated-private-body-absent:wire"),
     }
 
@@ -81,7 +116,7 @@ def _manifest():
     from exomem.governance import consolidation_verification_manifest
 
     return consolidation_verification_manifest.build_verification_manifest(
-        positive_contracts=(_owner_contract(), _delegated_contract()),
+        positive_contracts=(_owner_contract(), _delegated_contract(), _graph_contract()),
         negative_contracts=(_negative_contract(),),
     )
 
@@ -149,7 +184,7 @@ def test_manifest_is_canonical_round_trippable_and_builds_the_exact_probe_plan()
     )
     assert consolidation_verification_manifest.contract_arguments(
         manifest.positive_contracts[0]
-    ) == {"path": "Knowledge Base/Notes/destination.md"}
+    ) == {"include_raw": True, "path": "Knowledge Base/Notes/destination.md"}
 
 
 @pytest.mark.parametrize(
@@ -338,7 +373,12 @@ def test_manifest_store_accepts_the_complete_owner_and_delegated_purpose_matrix(
         "expected_result_digest": _digest("delegated-audit-denied:wire"),
     }
     manifest = consolidation_verification_manifest.build_verification_manifest(
-        positive_contracts=(_owner_contract(), _delegated_contract(), audit_positive),
+        positive_contracts=(
+            _owner_contract(),
+            _delegated_contract(),
+            _graph_contract(),
+            audit_positive,
+        ),
         negative_contracts=(_negative_contract(), audit_negative),
     )
     _install_stored_plan(
@@ -362,11 +402,24 @@ def test_manifest_store_accepts_an_owner_only_destination_policy(
     owner_negative = {
         **_owner_contract(),
         "probe_id": "owner-private-absent",
-        "arguments": {"path": "Knowledge Base/Notes/private.md"},
+        "arguments": {
+            "path": "Knowledge Base/Notes/private.md",
+            "include_raw": True,
+        },
         "expected_result_digest": _digest("owner-private-absent:wire"),
     }
+    owner_keyword = _owner_keyword_contract()
+    owner_graph = {
+        **_graph_contract(),
+        "probe_id": "owner-graph",
+        "principal_kind": "owner",
+        "principal_id": "owner",
+        "purpose": "owner-verification",
+        "expected_result_digest": _digest("owner-graph:wire"),
+    }
+    owner_graph.pop("principal_attestation_fingerprint")
     manifest = consolidation_verification_manifest.build_verification_manifest(
-        positive_contracts=(_owner_contract(),),
+        positive_contracts=(_owner_contract(), owner_keyword, owner_graph),
         negative_contracts=(owner_negative,),
     )
     _install_stored_plan(monkeypatch, manifest, principal_requirements=())
@@ -375,3 +428,217 @@ def test_manifest_store_accepts_an_owner_only_destination_policy(
         tmp_path / "vault"
     )
     assert store.persist(RUN_ID, PLAN_DIGEST, manifest) == manifest
+
+
+@pytest.mark.parametrize(
+    ("missing_row", "positive_contracts", "negative_contracts"),
+    [
+        (
+            "keyword",
+            (_owner_contract(), _graph_contract()),
+            (_negative_contract(),),
+        ),
+        (
+            "graph",
+            (_owner_contract(), _delegated_contract()),
+            (_negative_contract(),),
+        ),
+        (
+            "raw-read",
+            (_owner_keyword_contract(), _delegated_contract(), _graph_contract()),
+            (_negative_contract(),),
+        ),
+        (
+            "security",
+            (_owner_contract(), _delegated_contract(), _graph_contract()),
+            (
+                {
+                    **_negative_contract(),
+                    "probe_id": "optional-vector-negative",
+                    "command_name": "ask_memory",
+                    "arguments": {
+                        "query": "private body",
+                        "mode": "vector",
+                        "graph": False,
+                        "limit": 10,
+                    },
+                    "expected_result_digest": _digest("optional-vector-negative:wire"),
+                },
+            ),
+        ),
+    ],
+)
+def test_manifest_store_rejects_missing_mandatory_non_model_verification_row(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    missing_row: str,
+    positive_contracts: tuple[dict[str, object], ...],
+    negative_contracts: tuple[dict[str, object], ...],
+) -> None:
+    from exomem.governance import consolidation_verification_manifest
+
+    manifest = consolidation_verification_manifest.build_verification_manifest(
+        positive_contracts=positive_contracts,
+        negative_contracts=negative_contracts,
+    )
+    _install_stored_plan(monkeypatch, manifest)
+
+    with pytest.raises(
+        consolidation_verification_manifest.ConsolidationVerificationManifestUnavailable,
+        match="^CONSOLIDATION_VERIFICATION_MANIFEST_UNAVAILABLE$",
+    ):
+        consolidation_verification_manifest.ConsolidationVerificationManifestStore(
+            tmp_path / f"vault-{missing_row}"
+        ).persist(RUN_ID, PLAN_DIGEST, manifest)
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {
+            "query": "approved compiled abstraction",
+            "mode": "vector",
+            "graph": False,
+            "rerank": False,
+            "limit": 10,
+        },
+        {
+            "query": "approved compiled abstraction",
+            "mode": "hybrid",
+            "graph": False,
+            "rerank": False,
+            "limit": 10,
+        },
+        {
+            "query": "approved compiled abstraction",
+            "mode": "keyword",
+            "graph": False,
+            "rerank": True,
+            "limit": 10,
+        },
+        {
+            "query": "approved compiled abstraction",
+            "mode": "keyword",
+            "graph": False,
+            "limit": 10,
+        },
+        {
+            "query": "approved compiled abstraction",
+            "mode": "keyword",
+            "graph": False,
+            "rerank": False,
+            "deep": True,
+            "limit": 10,
+        },
+        {
+            "query": "approved compiled abstraction",
+            "mode": "keyword",
+            "graph": False,
+            "rerank": False,
+            "deep": "true",
+            "limit": 10,
+        },
+        {
+            "query": "approved compiled abstraction",
+            "mode": "keyword",
+            "graph": False,
+            "rerank": False,
+            "graph_enrich": "1",
+            "limit": 10,
+        },
+        {
+            "query": "   ",
+            "mode": "keyword",
+            "graph": False,
+            "rerank": False,
+            "limit": 10,
+        },
+    ],
+)
+def test_non_mandatory_recall_profile_cannot_satisfy_the_keyword_row(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: dict[str, object],
+) -> None:
+    from exomem.governance import consolidation_verification_manifest
+
+    optional_recall = {
+        **_delegated_contract(),
+        "probe_id": "optional-model-recall",
+        "arguments": arguments,
+        "expected_result_digest": _digest("optional-model-recall:wire"),
+    }
+    manifest = consolidation_verification_manifest.build_verification_manifest(
+        positive_contracts=(_owner_contract(), _graph_contract(), optional_recall),
+        negative_contracts=(_negative_contract(),),
+    )
+    _install_stored_plan(monkeypatch, manifest)
+
+    with pytest.raises(
+        consolidation_verification_manifest.ConsolidationVerificationManifestUnavailable,
+        match="^CONSOLIDATION_VERIFICATION_MANIFEST_UNAVAILABLE$",
+    ):
+        consolidation_verification_manifest.ConsolidationVerificationManifestStore(
+            tmp_path / "vault-optional-model"
+        ).persist(RUN_ID, PLAN_DIGEST, manifest)
+
+
+@pytest.mark.parametrize("missing_row", ["graph", "raw-read"])
+def test_truthy_string_flag_cannot_satisfy_a_mandatory_non_model_row(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    missing_row: str,
+) -> None:
+    from exomem.governance import consolidation_verification_manifest
+
+    raw = _owner_contract()
+    graph = _graph_contract()
+    if missing_row == "graph":
+        graph["arguments"] = {
+            **graph["arguments"],
+            "include_model_suggestions": "true",
+        }
+    else:
+        raw["arguments"] = {
+            **raw["arguments"],
+            "frontmatter_only": "true",
+        }
+    manifest = consolidation_verification_manifest.build_verification_manifest(
+        positive_contracts=(raw, _delegated_contract(), graph),
+        negative_contracts=(_negative_contract(),),
+    )
+    _install_stored_plan(monkeypatch, manifest)
+
+    with pytest.raises(
+        consolidation_verification_manifest.ConsolidationVerificationManifestUnavailable,
+        match="^CONSOLIDATION_VERIFICATION_MANIFEST_UNAVAILABLE$",
+    ):
+        consolidation_verification_manifest.ConsolidationVerificationManifestStore(
+            tmp_path / f"vault-truthy-{missing_row}"
+        ).persist(RUN_ID, PLAN_DIGEST, manifest)
+
+
+def test_non_rest_contracts_cannot_satisfy_the_in_process_mandatory_rows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance import consolidation_verification_manifest
+
+    positive = tuple(
+        {**contract, "surface": "mcp"}
+        for contract in (_owner_contract(), _delegated_contract(), _graph_contract())
+    )
+    negative = ({**_negative_contract(), "surface": "mcp"},)
+    manifest = consolidation_verification_manifest.build_verification_manifest(
+        positive_contracts=positive,
+        negative_contracts=negative,
+    )
+    _install_stored_plan(monkeypatch, manifest)
+
+    with pytest.raises(
+        consolidation_verification_manifest.ConsolidationVerificationManifestUnavailable,
+        match="^CONSOLIDATION_VERIFICATION_MANIFEST_UNAVAILABLE$",
+    ):
+        consolidation_verification_manifest.ConsolidationVerificationManifestStore(
+            tmp_path / "vault-mcp-only"
+        ).persist(RUN_ID, PLAN_DIGEST, manifest)
