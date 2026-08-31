@@ -791,6 +791,15 @@ def test_stateless_mcp_grant_is_bound_across_serving_content_route_families(
     replica_b = _build_replica(vault, monkeypatch)
     collection = COLLECTION_PATH
     routes = (
+        # Exercise the binary boundary before the negative credential probes in
+        # the text and Records routes. Those probes prove refusal behavior; they
+        # are not a precondition for the later positive route assertions.
+        (
+            "read_media",
+            "read_media",
+            {"path": VIDEO_PATH, "max_frames": 1},
+            '"duration_sec":42.0',
+        ),
         (
             "read_memory",
             "read_memory",
@@ -823,12 +832,6 @@ def test_stateless_mcp_grant_is_bound_across_serving_content_route_families(
                 "limit": 100,
             },
             DATASET_MARKER,
-        ),
-        (
-            "read_media",
-            "read_media",
-            {"path": VIDEO_PATH, "max_frames": 1},
-            '"duration_sec":42.0',
         ),
     )
 
