@@ -41,6 +41,7 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 
 from . import mode
 
@@ -79,6 +80,89 @@ _SURFACE_ENV = "EXOMEM_SURFACE"
 _HOSTED_CELL_ENV = "EXOMEM_HOSTED_CELL"
 _CONFIG_KEY = "prominence"
 
+_CAPTURE_EFFECTIVE_TEMPLATE = MappingProxyType(
+    {
+        "off": MappingProxyType(
+            {
+                "durable_intent": MappingProxyType(
+                    {
+                        "authored_explicit": "explicit-user-request",
+                        "proactive_permitted": False,
+                        "proactive_requires": (),
+                    }
+                ),
+                "observed_outcomes": MappingProxyType(
+                    {
+                        "authored_explicit": "explicit-user-request",
+                        "proactive_permitted": False,
+                        "proactive_requires": (),
+                    }
+                ),
+            }
+        ),
+        "light": MappingProxyType(
+            {
+                "durable_intent": MappingProxyType(
+                    {
+                        "authored_explicit": "explicit-user-request",
+                        "proactive_permitted": False,
+                        "proactive_requires": (),
+                    }
+                ),
+                "observed_outcomes": MappingProxyType(
+                    {
+                        "authored_explicit": "explicit-user-request",
+                        "proactive_permitted": False,
+                        "proactive_requires": (),
+                    }
+                ),
+            }
+        ),
+        "balanced": MappingProxyType(
+            {
+                "durable_intent": MappingProxyType(
+                    {
+                        "authored_explicit": "explicit-user-request",
+                        "proactive_permitted": True,
+                        "proactive_requires": ("authored-proactive", "durable-intent"),
+                    }
+                ),
+                "observed_outcomes": MappingProxyType(
+                    {
+                        "authored_explicit": "explicit-user-request",
+                        "proactive_permitted": True,
+                        "proactive_requires": (
+                            "authored-proactive",
+                            "sufficiently-identified-outcome",
+                        ),
+                    }
+                ),
+            }
+        ),
+        "maximal": MappingProxyType(
+            {
+                "durable_intent": MappingProxyType(
+                    {
+                        "authored_explicit": "explicit-user-request",
+                        "proactive_permitted": True,
+                        "proactive_requires": ("authored-proactive", "durable-intent"),
+                    }
+                ),
+                "observed_outcomes": MappingProxyType(
+                    {
+                        "authored_explicit": "explicit-user-request",
+                        "proactive_permitted": True,
+                        "proactive_requires": (
+                            "authored-proactive",
+                            "sufficiently-identified-outcome",
+                        ),
+                    }
+                ),
+            }
+        ),
+    }
+)
+
 
 @dataclass(frozen=True)
 class ProminenceContract:
@@ -97,6 +181,7 @@ class ProminenceContract:
             "capture": self.capture,
             "narration": self.narration,
             "summary": self.summary,
+            "effective_capture": effective_capture(self.level),
         }
 
 
@@ -137,9 +222,9 @@ CONTRACTS: dict[str, ProminenceContract] = {
             "conclusion lands, a recurring entity accumulates reusable facts, or a "
             "method was carried out and the user reports how it went. Not "
             "mid-thought exploration, tangents, or unresolved questions. "
-            "Route stated intent to Planning, observed outcome to Records; an "
-            "outcome on an open committed item is one landing, two consequences: "
-            "record then transition, once."
+            "Route stated intent to Planning and observed outcome to Records. "
+            "Transition only on explicit user intent; otherwise leave Planning "
+            "unchanged or, under the resolved posture, propose a bounded review."
         ),
         narration=(
             "Stay quiet. Mention memory only when a search returned something you "
@@ -161,9 +246,9 @@ CONTRACTS: dict[str, ProminenceContract] = {
             "a fact about a recurring entity, a method you actually ran and how it "
             "turned out. When torn between capturing and letting it pass, capture. "
             "Prefer a real page over a mental note, and do not wait to be asked. "
-            "Route stated intent to Planning, observed outcome to Records; an "
-            "outcome on an open committed item is one landing, two consequences: "
-            "record then transition, once."
+            "Route stated intent to Planning and observed outcome to Records. "
+            "Transition only on explicit user intent; otherwise leave Planning "
+            "unchanged or, under the resolved posture, propose a bounded review."
         ),
         narration=(
             "Say what you did. Name what you recalled and cite it; state one line "
@@ -287,6 +372,24 @@ def contract(level: str | None = None, surface: str | None = None) -> Prominence
     """The behavioural contract for a level (defaults to the active one)."""
     resolved_level = normalize(level) or resolve(surface)
     return CONTRACTS[resolved_level]
+
+
+def effective_capture(level: str | None = None, surface: str | None = None) -> dict:
+    """Return one level's detached capture gate for workflow-contract consumers."""
+    resolved_level = normalize(level) or resolve(surface)
+    return {
+        kind: {
+            "authored_explicit": rule["authored_explicit"],
+            "proactive_permitted": rule["proactive_permitted"],
+            "proactive_requires": list(rule["proactive_requires"]),
+        }
+        for kind, rule in _CAPTURE_EFFECTIVE_TEMPLATE[resolved_level].items()
+    }
+
+
+def capture_policy_projection() -> dict:
+    """Return the complete, detached level-to-effective-capture table."""
+    return {level: effective_capture(level) for level in CANON}
 
 
 def hook_env(level: str | None = None, surface: str | None = None) -> dict[str, str]:

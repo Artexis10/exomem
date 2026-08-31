@@ -6,8 +6,10 @@ choose a collection, or transition a plan; those remain guarded agent actions.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
+import pytest
 from conftest import initialize_vault_state_offline
 
 
@@ -38,7 +40,7 @@ def _proposal(**overrides: object) -> dict[str, object]:
 def test_agent_protocol_is_code_owned_and_shared_by_builtin_saved_ephemeral_and_bootstrap(
     tmp_path: Path,
 ) -> None:
-    from exomem import commands, workflow_contracts
+    from exomem import commands, prominence, workflow_contracts
     from exomem.init import init_vault
 
     init_vault(tmp_path)
@@ -75,6 +77,11 @@ def test_agent_protocol_is_code_owned_and_shared_by_builtin_saved_ephemeral_and_
             },
             "records": ["inspect", "append-one-compatible", "propose-if-none", "ask-if-ambiguous"],
             "references": "opaque-bounded",
+            "planning_reference": {
+                "unambiguous": "link-opaque",
+                "absent": "record-without-plan",
+                "ambiguous": "no-link-surface-review",
+            },
             "transition": {
                 "explicit-only": "explicit-user-transition-only",
                 "propose-after-outcome": "propose-review-only",
@@ -91,11 +98,15 @@ def test_agent_protocol_is_code_owned_and_shared_by_builtin_saved_ephemeral_and_
             "companion-calls": "forbidden",
             "external-state-inference": "forbidden",
         },
+        "effective_capture_by_prominence": prominence.capture_policy_projection(),
     }
     assert builtin["agent_protocol"] == protocol
     assert saved["agent_protocol"] == protocol
     assert ephemeral["agent_protocol"] == protocol
-    assert bootstrap["agent_protocol"] == protocol
+    assert "agent_protocol" not in bootstrap
+    assert bootstrap["portable"] == {
+        key: portable[key] for key in ("family", "schema_version", "digest")
+    }
 
     assert saved["decision"]["capture"] == {
         "durable_intent": "proactive",
@@ -141,3 +152,93 @@ def test_workflow_resolution_and_review_surfaces_are_read_only(tmp_path: Path) -
         if path.is_file()
     }
     assert after == before
+
+
+@pytest.mark.parametrize(
+    ("planning_match", "expected"),
+    (
+        ("unambiguous", "link-opaque"),
+        ("absent", "record-without-plan"),
+        ("ambiguous", "no-link-surface-review"),
+    ),
+)
+def test_outcome_protocol_handles_present_absent_and_ambiguous_planning_without_guessing(
+    planning_match: str, expected: str
+) -> None:
+    from exomem import workflow_contracts
+
+    references = workflow_contracts.portable_projection()["agent_protocol"]["outcomes"][
+        "planning_reference"
+    ]
+    assert references[planning_match] == expected
+
+
+@pytest.mark.parametrize("level", ("off", "light", "balanced", "maximal"))
+@pytest.mark.parametrize(
+    "capture",
+    (
+        {"durable_intent": "explicit", "observed_outcomes": "explicit"},
+        {"durable_intent": "proactive", "observed_outcomes": "proactive"},
+    ),
+)
+def test_every_resolution_projects_the_same_prominence_cap_for_authored_capture_postures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    level: str,
+    capture: dict[str, str],
+) -> None:
+    from exomem import prominence, workflow_contracts
+    from exomem.init import init_vault
+
+    monkeypatch.setenv("EXOMEM_PROMINENCE", level)
+    init_vault(tmp_path)
+    initialize_vault_state_offline(tmp_path, source="workflow effective capture")
+    contract = workflow_contracts.parse_proposal(_proposal(capture=capture))
+    workflow_contracts.save_contract(tmp_path, contract, why="reviewed workflow policy")
+
+    results = (
+        workflow_contracts.resolve_contracts(tmp_path, {}, name="@standalone"),
+        workflow_contracts.resolve_contracts(tmp_path, {"project": "delivery"}),
+        workflow_contracts.resolve_contracts(
+            tmp_path, {}, proposal=_proposal(key="session-effective-capture", capture=capture)
+        ),
+    )
+    expected = prominence.capture_policy_projection()
+    for result in results:
+        assert result["agent_protocol"]["effective_capture_by_prominence"] == expected
+    assert results[1]["decision"]["capture"] == capture
+    assert results[2]["decision"]["capture"] == capture
+    assert expected[level]["durable_intent"]["proactive_permitted"] is (
+        level in {"balanced", "maximal"}
+    )
+
+
+@pytest.mark.parametrize(
+    ("level", "proactive_permitted"),
+    (("off", False), ("light", False), ("balanced", True), ("maximal", True)),
+)
+def test_bootstrap_projects_the_active_prominence_capture_cap_without_transition_conflict(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    level: str,
+    proactive_permitted: bool,
+) -> None:
+    from exomem import commands, prominence, workflow_contracts
+
+    monkeypatch.setenv("EXOMEM_PROMINENCE", level)
+    payload = commands.op_bootstrap(tmp_path, profile="compact")
+    effective = payload["engagement"]["contract"]["effective_capture"]
+    table = workflow_contracts.portable_projection()["agent_protocol"][
+        "effective_capture_by_prominence"
+    ]
+
+    assert effective == prominence.effective_capture(level)
+    assert table == prominence.capture_policy_projection()
+    assert effective["durable_intent"]["proactive_permitted"] is proactive_permitted
+    assert effective["observed_outcomes"]["proactive_permitted"] is proactive_permitted
+    assert "record then transition" not in json.dumps(payload).lower()
+    capture = payload["engagement"]["contract"]["capture"].lower()
+    if proactive_permitted:
+        assert "transition only on explicit user intent" in capture
+    else:
+        assert "ask" in capture

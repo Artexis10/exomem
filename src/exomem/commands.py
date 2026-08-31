@@ -448,7 +448,6 @@ def op_bootstrap(
     workflow_projection_base = {
         "invariants": workflow_portable["invariants"],
         "builtin_fallback": workflow_portable["builtin_fallback"],
-        "agent_protocol": workflow_portable["agent_protocol"],
         "resolution_available": workflow_callable,
         "proactive_routing_available": bool(workflow_callable and not workflow_unavailable),
     }
@@ -478,6 +477,7 @@ def op_bootstrap(
         workflow_contract_projection = {
             **workflow_projection_base,
             "portable": workflow_portable,
+            "agent_protocol": workflow_portable["agent_protocol"],
             "route": workflow_route,
             **({"status": workflow_public_status} if workflow_public_status is not None else {}),
             "findings": workflow_findings,
@@ -486,6 +486,7 @@ def op_bootstrap(
         workflow_contract_projection = {
             **workflow_projection_base,
             "portable": workflow_portable,
+            "agent_protocol": workflow_portable["agent_protocol"],
             "status": workflow_public_status,
         }
     entity_type_registry = entity_types_module.load_entity_types(vault_root)

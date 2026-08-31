@@ -243,6 +243,8 @@ def _renderer_template_projection() -> dict[str, Any]:
 
 def _agent_protocol_projection() -> dict[str, Any]:
     """Return a detached JSON-shaped copy of the bounded agent protocol."""
+    from . import prominence
+
     return {
         "version": _AGENT_PROTOCOL_TEMPLATE["version"],
         "intent": {
@@ -263,6 +265,11 @@ def _agent_protocol_projection() -> dict[str, Any]:
             },
             "records": list(_AGENT_PROTOCOL_TEMPLATE["outcomes"]["records"]),
             "references": _AGENT_PROTOCOL_TEMPLATE["outcomes"]["references"],
+            "planning_reference": {
+                "unambiguous": "link-opaque",
+                "absent": "record-without-plan",
+                "ambiguous": "no-link-surface-review",
+            },
             "transition": dict(_AGENT_PROTOCOL_TEMPLATE["outcomes"]["transition"]),
         },
         "review": {
@@ -271,6 +278,7 @@ def _agent_protocol_projection() -> dict[str, Any]:
             "completion-inference": _AGENT_PROTOCOL_TEMPLATE["review"]["completion-inference"],
         },
         "service": dict(_AGENT_PROTOCOL_TEMPLATE["service"]),
+        "effective_capture_by_prominence": prominence.capture_policy_projection(),
     }
 
 
