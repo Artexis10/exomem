@@ -800,6 +800,7 @@ def _render_sidecar(
     # invalid source. Describing the artifact is also the only thing this page
     # can honestly say about bytes it does not inline.
     if not description and not text and binary_sha256:
+        lines.append(SIDECAR_ARTIFACT_SENTINEL)
         lines.append("## Artifact")
         lines.append("")
         lines.append(f"- Original filename: `{artifact_name}`")
@@ -919,6 +920,12 @@ def ensure_artifact_page(
 
 
 _EXTRACTED_HEADING = "## Extracted text"
+SIDECAR_ARTIFACT_SENTINEL = "<!-- exomem:sidecar-artifact -->"
+SIDECAR_PRESERVED_NOTES_SENTINEL = "<!-- exomem:sidecar-preserved-notes -->"
+_LEGACY_ARTIFACT_BLOCK_RE = re.compile(
+    r"(?m)^## Artifact\n\n- Original filename: `[^`\n]+`\n"
+    r"- SHA-256: `[0-9a-f]{64}`(?:\n- Bytes: \d+)?\n?\Z"
+)
 
 
 def update_sidecar_extraction(
@@ -1149,13 +1156,29 @@ def _set_extracted_text(content: str, text: str) -> str:
         return content.rstrip("\n") + "\n\n" + block
     start = idx + len(_EXTRACTED_HEADING)
     boundaries = (
-        content.find("\n## Preserved notes\n", start),
-        content.find("\n## Artifact\n", start),
+        content.find(f"\n{SIDECAR_PRESERVED_NOTES_SENTINEL}\n", start),
+        content.find(f"\n{SIDECAR_ARTIFACT_SENTINEL}\n", start),
     )
     after = min((boundary for boundary in boundaries if boundary != -1), default=-1)
+    legacy_preserved = False
+    if after == -1:
+        legacy_artifact = _LEGACY_ARTIFACT_BLOCK_RE.search(content, start)
+        if legacy_artifact is not None:
+            after = legacy_artifact.start() - 1
+        else:
+            legacy_preserved = content.find("\n## Preserved notes\n", start)
+            if legacy_preserved != -1:
+                if not content[start:legacy_preserved].strip():
+                    after = legacy_preserved
+                else:
+                    # A nonempty, unmarked notes title has no ownership proof.
+                    return content
     if after == -1:
         return content[:idx] + block
-    return content[:idx] + block + "\n" + content[after + 1 :]
+    boundary = content[after + 1 :]
+    if legacy_preserved:
+        boundary = f"{SIDECAR_PRESERVED_NOTES_SENTINEL}\n{boundary}"
+    return content[:idx] + block + "\n" + boundary
 
 
 def _prepend_log_entry(

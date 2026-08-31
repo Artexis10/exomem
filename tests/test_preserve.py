@@ -14,6 +14,8 @@ from exomem import vault as vault_module
 from exomem.governance import companions
 
 TODAY = dt.date(2026, 5, 25)
+_ARTIFACT_SENTINEL = "<!-- exomem:sidecar-artifact -->"
+_PRESERVED_NOTES_SENTINEL = "<!-- exomem:sidecar-preserved-notes -->"
 
 
 def _read(p: Path) -> str:
@@ -55,6 +57,7 @@ def test_preserve_text_artifact_writes_file(vault: Path) -> None:
     # invalid source, and a page that says nothing about the artifact is worse
     # than useless next to it.
     assert "## Artifact" in page
+    assert _ARTIFACT_SENTINEL in page
     # The artifact's own bytes are pointed at, never copied into the page.
     assert "cease and desist" not in page
     descriptor = vault_module.parse_frontmatter(page, strict=True)[0][
@@ -122,7 +125,7 @@ def test_update_sidecar_extraction_replaces_internal_headings_before_preserved_n
     sidecar.write_text(
         _read(sidecar)
         + "# Old H1\n\n## Old H2\n\nOld extraction.\n\n"
-        + "## Preserved notes\n\nKeep this authored note.\n",
+        + f"{_PRESERVED_NOTES_SENTINEL}\n## Preserved notes\n\nKeep this authored note.\n",
         encoding="utf-8",
     )
     first = "# First H1\n\n## First H2\n\nFirst extraction."
@@ -170,7 +173,10 @@ def test_update_sidecar_extraction_keeps_renderer_artifact_after_internal_headin
         vault, scope="Test", category="docs", filename="report.docx", data=b"BINARY"
     )
     sidecar = vault / result.sidecar_path
-    artifact = "## Artifact\n\n- Original filename: `report.docx`\n- SHA-256: `abc123`\n"
+    artifact = (
+        "## Artifact\n\n- Original filename: `report.docx`\n"
+        f"- SHA-256: `{'a' * 64}`\n"
+    )
     sidecar.write_text(
         _read(sidecar) + "# Old H1\n\n## Old H2\n\nOld extraction.\n\n" + artifact,
         encoding="utf-8",
@@ -185,6 +191,91 @@ def test_update_sidecar_extraction_keeps_renderer_artifact_after_internal_headin
     assert body.count(extraction) == 1
     assert "Old extraction." not in body
     assert body.count(artifact) == 1
+
+
+@pytest.mark.parametrize(
+    ("heading", "updates_extraction"),
+    [("## Artifact", True), ("## Preserved notes", False)],
+)
+def test_update_sidecar_extraction_does_not_treat_document_titles_as_boundaries(
+    vault: Path, heading: str, updates_extraction: bool
+) -> None:
+    result = preserve_module.preserve_bytes(
+        vault, scope="Test", category="docs", filename="collision.docx", data=b"BINARY"
+    )
+    sidecar = vault / result.sidecar_path
+    sidecar.write_text(
+        _read(sidecar) + f"# Old H1\n\n{heading}\n\nLiteral document section.\n",
+        encoding="utf-8",
+    )
+    first = "# First H1\n\n## First H2\n\nFirst extraction."
+    second = "# Second H1\n\n## Second H2\n\nSecond extraction."
+
+    preserve_module.update_sidecar_extraction(vault, sidecar, text=first, engine="markitdown")
+    preserve_module.update_sidecar_extraction(vault, sidecar, text=second, engine="markitdown")
+
+    body = _read(sidecar)
+    if updates_extraction:
+        assert body.count(second) == 1
+        assert "First extraction." not in body
+        assert "Literal document section." not in body
+    else:
+        assert second not in body
+        assert body.count("Literal document section.") == 1
+
+
+@pytest.mark.parametrize(
+    ("sentinel", "heading", "owned"),
+    [
+        (_ARTIFACT_SENTINEL, "## Artifact", "- SHA-256: `abc123`"),
+        (_PRESERVED_NOTES_SENTINEL, "## Preserved notes", "Keep this authored note."),
+    ],
+)
+def test_update_sidecar_extraction_keeps_sentinel_owned_boundary_after_collision(
+    vault: Path, sentinel: str, heading: str, owned: str
+) -> None:
+    result = preserve_module.preserve_bytes(
+        vault, scope="Test", category="docs", filename="owned.docx", data=b"BINARY"
+    )
+    sidecar = vault / result.sidecar_path
+    sidecar.write_text(
+        _read(sidecar)
+        + "# Old H1\n\n## Artifact\n\nLiteral document section.\n\n"
+        + f"{sentinel}\n{heading}\n\n{owned}\n",
+        encoding="utf-8",
+    )
+    extraction = "# New H1\n\n## New H2\n\nNew extraction."
+
+    preserve_module.update_sidecar_extraction(vault, sidecar, text=extraction, engine="markitdown")
+    preserve_module.update_sidecar_extraction(vault, sidecar, text=extraction, engine="markitdown")
+
+    body = _read(sidecar)
+    assert body.count(extraction) == 1
+    assert "Literal document section." not in body
+    assert body.count(sentinel) == 1
+    assert body.count(owned) == 1
+
+
+def test_update_sidecar_extraction_keeps_complete_legacy_artifact_block() -> None:
+    artifact = (
+        "## Artifact\n\n- Original filename: `report.docx`\n"
+        f"- SHA-256: `{'0' * 64}`\n- Bytes: 6\n"
+    )
+    content = f"## Extracted text\n\nOld extraction.\n\n{artifact}"
+
+    updated = preserve_module._set_extracted_text(content, "New extraction.")
+
+    assert "Old extraction." not in updated
+    assert updated.endswith(artifact)
+
+
+def test_update_sidecar_extraction_upgrades_empty_legacy_preserved_notes() -> None:
+    content = "## Extracted text\n\n\n## Preserved notes\n\nKeep this authored note.\n"
+
+    updated = preserve_module._set_extracted_text(content, "New extraction.")
+
+    assert _PRESERVED_NOTES_SENTINEL in updated
+    assert updated.endswith("## Preserved notes\n\nKeep this authored note.\n")
 
 
 def test_preserve_binary_artifact_decodes_base64(vault: Path) -> None:

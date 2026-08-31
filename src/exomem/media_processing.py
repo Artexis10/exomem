@@ -1124,7 +1124,12 @@ def _render_pending_sidecar(
     for field, value in _pending_fields(provenance):
         rendered = preserve._set_frontmatter_field(rendered, field, str(value))
     if preserved_notes:
-        rendered = rendered.rstrip("\n") + "\n\n## Preserved notes\n\n" + preserved_notes
+        rendered = (
+            rendered.rstrip("\n")
+            + f"\n\n{preserve.SIDECAR_PRESERVED_NOTES_SENTINEL}\n"
+            + "## Preserved notes\n\n"
+            + preserved_notes
+        )
     return rendered
 
 
@@ -1142,9 +1147,11 @@ def _preservable_notes(body: str) -> str | None:
     record. Only regenerated scaffolding is dropped: the title/locator lines and
     an empty ``## Extracted text`` anchor.
     """
+    preserve = _preserve_module()
     kept: list[str] = []
     for segment in body.split(_PRESERVED_HEADING):
         prose = _strip_empty_extracted_sections(segment)
+        prose = prose.replace(preserve.SIDECAR_PRESERVED_NOTES_SENTINEL, "")
         prose = _SIDECAR_BOILERPLATE_RE.sub("", prose).strip()
         if prose and prose not in kept:
             kept.append(prose)

@@ -163,7 +163,7 @@ def test_prose_only_sidecar_is_repaired_without_losing_notes(vault: Path) -> Non
     assert frontmatter["type"] == "source"
     assert frontmatter["media_type"] == "audio"
     assert frontmatter["extracted_by"] == "pending"
-    assert f"## Preserved notes\n\n{original}" in body
+    assert f"<!-- exomem:sidecar-preserved-notes -->\n## Preserved notes\n\n{original}" in body
     assert media_jobs.status(vault)["counts"]["pending"] == 1
 
 
