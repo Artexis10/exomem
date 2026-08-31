@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import time
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -19,7 +20,12 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Literal, NoReturn, Protocol
 
 from .. import held_fs, reserved_paths, vault
-from . import consolidation_plan, consolidation_receipts
+from . import (
+    consolidation_plan,
+    consolidation_receipts,
+    consolidation_seal,
+    policy_publication,
+)
 
 if TYPE_CHECKING:
     from . import consolidation_effect_coordinator
@@ -158,6 +164,131 @@ def _policy_terminal(
         active_fingerprint=_digest(value.active_fingerprint),
         terminal_event_id=value.terminal_event_id,
     )
+
+
+def _consolidation_receipt_event(
+    records: list[dict[str, object]],
+    *,
+    event_id: str,
+    phase: Literal["intent", "committed"],
+) -> Mapping[str, object]:
+    matching = [
+        record
+        for record in records
+        if record.get("event_type") == "consolidation"
+        and record.get("phase") == phase
+        and record.get("event_id") == event_id
+    ]
+    if len(matching) != 1:
+        _fail()
+    try:
+        return consolidation_receipts.validate_nested(
+            matching[0].get("consolidation_event"),
+            outer_phase=phase,
+        )
+    except consolidation_receipts.ConsolidationReceiptUnavailable:
+        _fail()
+
+
+def _verify_policy_terminal_receipt(
+    *,
+    vault_root: Path,
+    vault_binding_digest: str,
+    terminal: object,
+    expected_policy_fingerprint: str,
+) -> PolicyActivationTerminal:
+    """Bind the content gate to the exact durable policy receipt chain."""
+
+    checked = _policy_terminal(
+        terminal,
+        expected_policy_fingerprint=expected_policy_fingerprint,
+    )
+    try:
+        records = consolidation_receipts._active_records(  # noqa: SLF001
+            Path(vault_root)
+        )
+    except consolidation_receipts.ConsolidationReceiptUnavailable:
+        _fail()
+    active_intent = _consolidation_receipt_event(
+        records,
+        event_id=checked.intent_event_id,
+        phase="intent",
+    )
+    active_terminal = _consolidation_receipt_event(
+        records,
+        event_id=checked.terminal_event_id,
+        phase="committed",
+    )
+    prepare_terminal = _consolidation_receipt_event(
+        records,
+        event_id=str(active_intent["semantic_parent_event_id"]),
+        phase="committed",
+    )
+    active_evidence = active_intent["evidence"]
+    terminal_evidence = active_terminal["evidence"]
+    if (
+        not isinstance(active_evidence, Mapping)
+        or not isinstance(terminal_evidence, Mapping)
+        or active_intent["kind"] != "policy-active"
+        or active_intent["target_digest"] != checked.active_fingerprint
+        or active_evidence.get("policy_active_digest")
+        != checked.active_fingerprint
+        or active_evidence.get("policy_fingerprint")
+        != checked.policy_fingerprint
+        or active_terminal["kind"] != "policy-active"
+        or active_terminal["target_digest"] != checked.active_fingerprint
+        or active_terminal["observed_digest"] != checked.active_fingerprint
+        or terminal_evidence != active_evidence
+        or active_terminal["semantic_parent_event_id"]
+        != checked.intent_event_id
+        or active_terminal["semantic_parent_payload_digest"]
+        != active_intent["payload_digest"]
+        or prepare_terminal["kind"] != "policy-prepare"
+        or prepare_terminal["target_digest"] != checked.prepared_fingerprint
+        or prepare_terminal["observed_digest"]
+        != checked.prepared_fingerprint
+        or prepare_terminal["payload_digest"]
+        != active_intent["semantic_parent_payload_digest"]
+        or prepare_terminal["run_id"] != active_intent["run_id"]
+        or prepare_terminal["operation_id"] != active_intent["operation_id"]
+        or prepare_terminal["request_digest"] != active_intent["request_digest"]
+        or int(prepare_terminal["effect_ordinal"]) + 1
+        != int(active_intent["effect_ordinal"])
+    ):
+        _fail()
+    try:
+        seal = consolidation_seal.ConsolidationSealStore(vault_root).load(
+            vault_binding_digest=_digest(vault_binding_digest),
+        )
+        current_now = int(time.time())
+        if current_now < 0:
+            _fail()
+        _custody, active_snapshot = (
+            policy_publication.load_active_authority_snapshot(
+                vault_root,
+                now=current_now,
+            )
+        )
+    except (
+        consolidation_seal.ConsolidationSealUnavailable,
+        policy_publication.GovernanceError,
+        OSError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+    ):
+        _fail()
+    if (
+        seal.kind != "consolidation-sealed"
+        or seal.phase not in {"policy-active", "publishing"}
+        or seal.run_id != active_intent["run_id"]
+        or seal.operation_id != active_intent["operation_id"]
+        or active_snapshot.active.policy_fingerprint
+        != checked.policy_fingerprint
+        or active_snapshot.policy.fingerprint != checked.policy_fingerprint
+    ):
+        _fail()
+    return checked
 
 
 def _content_batches(
@@ -375,6 +506,7 @@ def publish_policy_first(
     content_actions: object,
     approved_partition_digest: str,
     expected_policy_fingerprint: str,
+    vault_binding_digest: str,
     activate_policy: Callable[[], PolicyActivationTerminal],
     journal: BatchJournal,
     vault_root: Path,
@@ -386,8 +518,10 @@ def publish_policy_first(
     batches = _content_batches(partition)
     if partition.digest != _digest(approved_partition_digest):
         _fail()
-    terminal = _policy_terminal(
-        activate_policy(),
+    terminal = _verify_policy_terminal_receipt(
+        vault_root=Path(vault_root),
+        vault_binding_digest=vault_binding_digest,
+        terminal=activate_policy(),
         expected_policy_fingerprint=expected_policy_fingerprint,
     )
     committed: list[int] = []

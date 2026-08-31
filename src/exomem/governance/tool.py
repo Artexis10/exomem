@@ -49,6 +49,7 @@ from . import (
     decisions,
     graph_producer,
     membership,
+    policy_publication,
     projection_store,
     projections,
     receipts,
@@ -135,6 +136,18 @@ class _ValidatedV4PolicyProposal:
     decoded: _DecodedV4PolicyProposal
     custody: authorization_custody.AuthorizationCustody
 
+
+def _prepared_v4_policy_publication(
+    decoded: _DecodedV4PolicyProposal,
+) -> policy_publication.PreparedPolicyPublication:
+    return policy_publication.prepare_policy_publication(
+        expected=decoded.expected,
+        policy=decoded.policy,
+        catalog=decoded.catalog,
+        namespace=decoded.namespace,
+        dependent_grants=decoded.dependent_grants,
+    )
+
 __all__ = [
     "GovernanceCrash",
     "GovernanceError",
@@ -178,50 +191,7 @@ def _v4_active_authority_snapshot(
     authorization_custody.AuthorizationCustody,
     schema_v4.ActivePolicySnapshot,
 ]:
-    connection: sqlite3.Connection | None = None
-    try:
-        custody = authorization_custody.load_authorization_custody(
-            vault_root,
-            now=now,
-        )
-        control = custody.control
-        if (
-            not control.governance_enrolled
-            or control.activation_store_id is None
-            or control.activation_epoch is None
-            or control.activation_state_digest is None
-        ):
-            raise schema_v4.SchemaV4Error("external activation authority is incomplete")
-        connection = store.open_authorization_session_connection(vault_root)
-        connection.execute("BEGIN")
-        snapshot = schema_v4.load_active_policy(
-            connection,
-            expected_logical_vault_id=control.logical_vault_id,
-            expected_activation_store_id=control.activation_store_id,
-            expected_activation_epoch=control.activation_epoch,
-            expected_activation_state_digest=control.activation_state_digest,
-        )
-        connection.commit()
-        return custody, snapshot
-    except (
-        authorization_custody.AuthorizationCustodyUnavailable,
-        schema_v4.SchemaV4Error,
-        store.UnsupportedGovernanceSchema,
-        FileNotFoundError,
-        OSError,
-        sqlite3.Error,
-        RuntimeError,
-        ValueError,
-    ):
-        if connection is not None and connection.in_transaction:
-            connection.rollback()
-        raise GovernanceError(
-            "GOVERNANCE_BLOCKED",
-            "the active governance tuple cannot be verified",
-        ) from None
-    finally:
-        if connection is not None:
-            connection.close()
+    return policy_publication.load_active_authority_snapshot(vault_root, now=now)
 
 
 def _v4_active_policy_snapshot(
@@ -354,28 +324,7 @@ def _policy_publication_identities(
 def _full_search_fields(
     item: projection_store.ProjectionItemVariants,
 ) -> Mapping[str, str]:
-    candidates: list[Mapping[str, str]] = []
-    for variant in item.variants:
-        if variant.decision_level != policy_module.DISCLOSURE_MAX:
-            continue
-        try:
-            value = json.loads(variant.value_jcs)
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            continue
-        if value.get("release_strip") == []:
-            candidates.append(variant.search_fields)
-    if not candidates:
-        raise GovernanceError(
-            "GOVERNANCE_PROJECTION_REBUILD_REQUIRED",
-            "the active catalog lacks an unstripped full projection",
-        )
-    canonical = {_canonical_json(dict(candidate)) for candidate in candidates}
-    if len(canonical) != 1:
-        raise GovernanceError(
-            "GOVERNANCE_PROJECTION_REBUILD_REQUIRED",
-            "the active catalog has ambiguous full projections",
-        )
-    return dict(candidates[0])
+    return policy_publication._full_search_fields(item)  # noqa: SLF001
 
 
 def _stage_target_projection_namespace(
@@ -385,179 +334,17 @@ def _stage_target_projection_namespace(
     target_policy: policy_module.Policy,
     ready_at: int,
 ) -> _StagedTargetProjection:
-    try:
-        active_evidence = projection_store.namespace_evidence_from_snapshot(
-            active_snapshot
-        )
-        active_manifest, active_items = projection_store.load_projection_catalog(
-            vault_root,
-            key=active_evidence.manifest.namespace_key,
-            expected_rows_digest=active_evidence.manifest.rows_digest,
-        )
-        projection_store.bind_active_projection_namespace(
-            active_snapshot,
-            manifest=active_manifest,
-            items=active_items,
-        )
-        if active_evidence.required_measurement_roots:
-            raise GovernanceError(
-                "GOVERNANCE_PROJECTION_REBUILD_REQUIRED",
-                "the active model/graph lanes require a prepared measurement rebuild",
-            )
-        target_memberships: list[tuple[str, ...]] = []
-        for item in active_items:
-            snapshot = reserved_paths.read_generic_bytes(
-                vault_root,
-                item.item_identity,
-            )
-            if not __import__("hmac").compare_digest(
-                hashlib.sha256(snapshot.data).hexdigest(),
-                item.content_hash,
-            ):
-                raise GovernanceError(
-                    "GOVERNANCE_PROJECTION_REBUILD_REQUIRED",
-                    "the live corpus no longer matches the active catalog",
-                )
-            if Path(item.item_identity).suffix.casefold() == ".md":
-                page = find_corpus.parse_page(
-                    vault_root / item.item_identity,
-                    snapshot.mtime,
-                    vault_root,
-                    content=snapshot.data,
-                    resolved_relative=item.item_identity,
-                )
-                if page is None:
-                    raise GovernanceError(
-                        "GOVERNANCE_PROJECTION_REBUILD_REQUIRED",
-                        "the active Markdown catalog item cannot be classified",
-                    )
-                scope_ids = membership.evaluate(page, target_policy)
-            else:
-                scope_ids = membership.evaluate_path_only(
-                    vault_root,
-                    item.item_identity,
-                    target_policy,
-                ).require_classified()
-            target_memberships.append(tuple(sorted(scope_ids)))
-
-        membership_changed = any(
-            target_scope_ids != item.scope_ids
-            for item, target_scope_ids in zip(
-                active_items,
-                target_memberships,
-                strict=True,
-            )
-        )
-        target_catalog_generation = active_snapshot.active.catalog_generation + int(
-            membership_changed
-        )
-        key = projections.ProjectionNamespaceKey(
-            policy_fingerprint=target_policy.fingerprint,
-            projector_schema_version=active_snapshot.active.projector_schema_version,
-            catalog_generation=target_catalog_generation,
-        )
-        target_items = tuple(
-            projection_store.ProjectionItemVariants(
-                item_identity=item.item_identity,
-                content_hash=item.content_hash,
-                scope_ids=target_scope_ids,
-                variants=projections.enumerate_projection_variants(
-                    item_identity=item.item_identity,
-                    content_hash=item.content_hash,
-                    scope_ids=target_scope_ids,
-                    policy=target_policy,
-                    projector_schema_version=key.projector_schema_version,
-                    full_search_fields=_full_search_fields(item),
-                ),
-            )
-            for item, target_scope_ids in zip(
-                active_items,
-                target_memberships,
-                strict=True,
-            )
-        )
-        target_catalog_descriptor = projection_store.catalog_descriptor_bytes(
-            key,
-            target_items,
-        )
-        if not membership_changed and not __import__("hmac").compare_digest(
-            target_catalog_descriptor,
-            active_snapshot.catalog_descriptor,
-        ):
-            raise GovernanceError(
-                "GOVERNANCE_PROJECTION_REBUILD_REQUIRED",
-                "the prepared projection catalog does not match the reviewed catalog",
-            )
-        target_catalog = (
-            schema_v4.CatalogGenerationSeed(
-                catalog_generation=target_catalog_generation,
-                descriptor=target_catalog_descriptor,
-                artifact_count=len(target_items),
-                created_at=ready_at,
-            )
-            if membership_changed
-            else None
-        )
-        target_manifest = projection_store.stage_variant_store(
-            vault_root,
-            key=key,
-            items=target_items,
-        )
-        evidence = projection_store.projection_namespace_evidence_bytes(target_manifest)
-        connection = store.open_authorization_session_connection(vault_root)
-        try:
-            existing_namespace = connection.execute(
-                "SELECT namespace_id, evidence, ready_at "
-                "FROM governance_projection_namespaces "
-                "WHERE policy_fingerprint=? AND projector_schema_version=? "
-                "AND catalog_generation=?",
-                (
-                    key.policy_fingerprint,
-                    key.projector_schema_version,
-                    key.catalog_generation,
-                ),
-            ).fetchone()
-        finally:
-            connection.close()
-        if existing_namespace is not None:
-            if (
-                existing_namespace[0] != key.namespace_id
-                or bytes(existing_namespace[1]) != evidence
-            ):
-                raise GovernanceError(
-                    "GOVERNANCE_PROJECTION_REBUILD_REQUIRED",
-                    "the reusable projection namespace does not verify",
-                )
-            ready_at = int(existing_namespace[2])
-    except GovernanceError:
-        raise
-    except (
-        membership.MembershipUnresolved,
-        projection_store.ProjectionStoreError,
-        projections.ProjectionError,
-        reserved_paths.ReservedPathLeafError,
-        FileNotFoundError,
-        OSError,
-        sqlite3.Error,
-        TypeError,
-        ValueError,
-    ):
-        raise GovernanceError(
-            "GOVERNANCE_PROJECTION_REBUILD_REQUIRED",
-            "the target authorization-projection namespace is unavailable",
-        ) from None
+    staged = policy_publication.stage_target_projection_namespace(
+        vault_root,
+        active_snapshot=active_snapshot,
+        target_policy=target_policy,
+        ready_at=ready_at,
+    )
     return _StagedTargetProjection(
-        catalog=target_catalog,
-        namespace={
-            "namespace_id": key.namespace_id,
-            "projector_schema_version": key.projector_schema_version,
-            "catalog_generation": key.catalog_generation,
-            "projection_rows_digest": target_manifest.rows_digest,
-            "evidence": base64.b64encode(evidence).decode("ascii"),
-            "ready_at": ready_at,
-        },
-        predecessor_items=active_items,
-        items=target_items,
+        catalog=staged.catalog,
+        namespace=dict(staged.namespace),
+        predecessor_items=staged.predecessor_items,
+        items=staged.items,
     )
 
 
@@ -569,99 +356,13 @@ def _v4_dependent_grant_transitions(
     predecessor_items: tuple[projection_store.ProjectionItemVariants, ...],
     target_items: tuple[projection_store.ProjectionItemVariants, ...],
 ) -> tuple[schema_v4.DependentGrantTransition, ...]:
-    connection = store.open_authorization_session_connection(vault_root)
-    try:
-        rows = connection.execute(
-            "SELECT grant_id, paths, fingerprints, scope_ids, membership_manifest, "
-            "policy_fingerprint, prepared_event_id FROM governance_session_grants "
-            "WHERE status='active' ORDER BY grant_id"
-        ).fetchall()
-    except sqlite3.Error:
-        raise GovernanceError(
-            "GOVERNANCE_BLOCKED",
-            "dependent grant authority cannot be reviewed exactly",
-        ) from None
-    finally:
-        connection.close()
-    predecessor_by_path = {item.item_identity: item for item in predecessor_items}
-    target_by_path = {item.item_identity: item for item in target_items}
-    transitions: list[schema_v4.DependentGrantTransition] = []
-    for row in rows:
-        try:
-            grant_id = str(row[0])
-            paths = json.loads(str(row[1]))
-            fingerprints = json.loads(str(row[2]))
-            scope_ids = json.loads(str(row[3]))
-            expected_manifest = str(row[4])
-            stored_policy_fingerprint = str(row[5])
-            reviewed_membership = authorization_session_authority._load_membership(
-                expected_manifest
-            )
-            if (
-                not grant_id
-                or not isinstance(paths, list)
-                or not all(isinstance(path, str) and path for path in paths)
-                or not isinstance(fingerprints, list)
-                or not all(isinstance(value, str) for value in fingerprints)
-                or len(paths) != len(fingerprints)
-                or not isinstance(scope_ids, list)
-                or not scope_ids
-                or not all(isinstance(scope_id, str) and scope_id for scope_id in scope_ids)
-                or scope_ids != sorted(set(scope_ids))
-                or tuple(paths) != tuple(item.path for item in reviewed_membership)
-                or tuple(fingerprints)
-                != tuple(item.fingerprint for item in reviewed_membership)
-                or any(
-                    path not in predecessor_by_path
-                    for path in paths
-                )
-                or not set(scope_ids).issubset(
-                    {
-                        scope_id
-                        for item in reviewed_membership
-                        for scope_id in item.scope_ids
-                    }
-                )
-                or stored_policy_fingerprint != current_policy.fingerprint
-                or row[6] is not None
-            ):
-                raise ValueError
-            target_membership = [
-                {
-                    "path": path,
-                    "fingerprint": target_by_path[path].content_hash,
-                    "scope_ids": list(target_by_path[path].scope_ids),
-                }
-                for path in paths
-                if path in target_by_path
-            ]
-            target_manifest = _canonical_json(target_membership)
-        except (
-            GovernanceError,
-            authorization_session_lifecycle.AuthorizationSessionUnavailable,
-            json.JSONDecodeError,
-            TypeError,
-            ValueError,
-        ):
-            raise GovernanceError(
-                "GOVERNANCE_BLOCKED",
-                "dependent grant authority cannot be reviewed exactly",
-            ) from None
-        transitions.append(
-            schema_v4.DependentGrantTransition(
-                grant_id=grant_id,
-                expected_policy_fingerprint=stored_policy_fingerprint,
-                expected_membership_manifest=expected_manifest,
-                target_status=(
-                    "expired"
-                    if target_manifest != expected_manifest
-                    else "review"
-                ),
-                target_policy_fingerprint=target_policy.fingerprint,
-                target_membership_manifest=target_manifest,
-            )
-        )
-    return tuple(transitions)
+    return policy_publication.dependent_grant_transitions(
+        vault_root,
+        current_policy=current_policy,
+        target_policy=target_policy,
+        predecessor_items=predecessor_items,
+        target_items=target_items,
+    )
 
 
 def _direction_with_dependent_grants(
@@ -4049,99 +3750,6 @@ def _validate_v4_proposal_binding(
     return _ValidatedV4PolicyProposal(decoded, custody)
 
 
-def _control_matches_active(
-    control: authorization_custody.AuthorizationControlRecord,
-    active: schema_v4.VerifiedActiveGovernanceState,
-) -> bool:
-    return (
-        control.governance_enrolled
-        and control.logical_vault_id == active.logical_vault_id
-        and control.activation_store_id == active.activation_store_id
-        and control.activation_epoch == active.activation_epoch
-        and control.activation_state_digest == active.activation_state_digest
-    )
-
-
-def _committed_v4_policy_target(
-    connection: sqlite3.Connection,
-    decoded: _DecodedV4PolicyProposal,
-) -> schema_v4.VerifiedActiveGovernanceState | None:
-    target_catalog_generation = (
-        decoded.expected.catalog_generation
-        if decoded.catalog is None
-        else decoded.catalog.catalog_generation
-    )
-    row = connection.execute(
-        "SELECT publication_kind, predecessor_activation_state_digest, "
-        "target_activation_state_digest, policy_generation_id, policy_fingerprint, "
-        "projector_schema_version, catalog_generation, activation_epoch, status "
-        "FROM governance_tuple_publications WHERE event_id=?",
-        (decoded.policy.receipt_event_id,),
-    ).fetchone()
-    if row is None:
-        return None
-    target = schema_v4.load_active_tuple_pointer(connection)
-    if (
-        tuple(row)
-        != (
-            "policy",
-            decoded.expected.activation_state_digest,
-            target.activation_state_digest,
-            decoded.policy.generation_id,
-            decoded.policy.policy_fingerprint,
-            decoded.policy.projector_schema_version,
-            target_catalog_generation,
-            decoded.expected.activation_epoch + 1,
-            "committed",
-        )
-        or target.logical_vault_id != decoded.expected.logical_vault_id
-        or target.activation_store_id != decoded.expected.activation_store_id
-        or target.activation_epoch != decoded.expected.activation_epoch + 1
-        or target.policy_generation_id != decoded.policy.generation_id
-        or target.policy_fingerprint != decoded.policy.policy_fingerprint
-        or target.projector_schema_version != decoded.policy.projector_schema_version
-        or target.catalog_generation != target_catalog_generation
-        or target.projection_namespace_id != decoded.namespace.namespace_id
-    ):
-        raise GovernanceError(
-            "GOVERNANCE_BLOCKED",
-            "committed policy publication does not match the reviewed proposal",
-        )
-    active_count = connection.execute(
-        "SELECT COUNT(*) FROM governance_session_grants WHERE status='active'"
-    ).fetchone()
-    if decoded.dependent_grants is not None:
-        committed_grants = connection.execute(
-            "SELECT grant_id, status, policy_fingerprint, membership_manifest, "
-            "prepared_event_id FROM governance_session_grants "
-            "WHERE grant_id IN ("
-            + ",".join("?" for _ in decoded.dependent_grants)
-            + ") ORDER BY grant_id",
-            tuple(transition.grant_id for transition in decoded.dependent_grants),
-        ).fetchall() if decoded.dependent_grants else []
-        expected_grants = [
-            (
-                transition.grant_id,
-                transition.target_status,
-                transition.target_policy_fingerprint,
-                transition.target_membership_manifest,
-                None,
-            )
-            for transition in decoded.dependent_grants
-        ]
-        if committed_grants != expected_grants or active_count != (0,):
-            raise GovernanceError(
-                "GOVERNANCE_BLOCKED",
-                "committed dependent grants do not match the reviewed proposal",
-            )
-    elif active_count != (0,):
-        raise GovernanceError(
-            "GOVERNANCE_BLOCKED",
-            "legacy policy publication did not bind the active dependent grants",
-        )
-    return target
-
-
 def _verify_recorded_v4_policy_terminal(
     vault_root: Path,
     decoded: _DecodedV4PolicyProposal,
@@ -4249,64 +3857,12 @@ def _recover_v4_policy_publication(
     decoded: _DecodedV4PolicyProposal,
     now: int,
 ) -> schema_v4.VerifiedActiveGovernanceState | None:
-    try:
-        target = _committed_v4_policy_target(connection, decoded)
-        if target is None:
-            return None
-        custody = authorization_custody.load_authorization_custody(
-            vault_root,
-            now=now,
-        )
-        if _control_matches_active(custody.control, target):
-            verified = schema_v4.load_active_state(
-                connection,
-                expected_logical_vault_id=target.logical_vault_id,
-                expected_activation_store_id=target.activation_store_id,
-                expected_activation_epoch=target.activation_epoch,
-                expected_activation_state_digest=target.activation_state_digest,
-            )
-            if verified != target:
-                raise schema_v4.SchemaV4Error(
-                    "active tuple changed during policy recovery"
-                )
-            return target
-        if not _control_matches_active(custody.control, decoded.expected):
-            raise GovernanceError(
-                "GOVERNANCE_BLOCKED",
-                "external activation authority names neither reviewed policy state",
-            )
-        recovered = schema_v4.recover_registry_acknowledgement(
-            connection,
-            expected=decoded.expected,
-            acknowledge_registry=lambda active: (
-                authorization_custody.acknowledge_activation_tuple(
-                    vault_root,
-                    expected_control=custody.control,
-                    target=active,
-                    now=now,
-                )
-            ),
-        )
-        if recovered.active != target:
-            raise schema_v4.SchemaV4Error(
-                "registry recovery selected an unexpected policy tuple"
-            )
-        return target
-    except GovernanceError:
-        raise
-    except (
-        authorization_custody.AuthorizationCustodyUnavailable,
-        schema_v4.SchemaV4Error,
-        FileNotFoundError,
-        OSError,
-        sqlite3.Error,
-        RuntimeError,
-        ValueError,
-    ):
-        raise GovernanceError(
-            "GOVERNANCE_BLOCKED",
-            "the committed policy tuple needs exact registry recovery",
-        ) from None
+    return policy_publication.recover(
+        vault_root,
+        connection=connection,
+        prepared=_prepared_v4_policy_publication(decoded),
+        now=now,
+    )
 
 
 def _spend_v4_policy_proposal(
@@ -4470,61 +4026,25 @@ def _v4_policy_publication_receipt_terminal(
     vault_root: Path,
     decoded: _DecodedV4PolicyProposal,
 ) -> str | None:
+    return policy_publication.receipt_terminal(
+        vault_root,
+        _v4_policy_publication_receipt(decoded),
+    )
+
+
+def _v4_policy_publication_receipt(
+    decoded: _DecodedV4PolicyProposal,
+) -> policy_publication.CriticalReceipt:
     prior, prepared, target, affected = _v4_policy_publication_receipt_digests(
         decoded
     )
-    try:
-        records = receipts.event_records(vault_root)
-    except receipts.ReceiptError:
-        raise GovernanceError(
-            "GOVERNANCE_BLOCKED",
-            "policy publication receipt evidence cannot be verified",
-        ) from None
-    intents = [
-        record
-        for record in records
-        if record.get("event_id") == decoded.policy.receipt_event_id
-        and record.get("phase") == "intent"
-    ]
-    terminals = [
-        record
-        for record in records
-        if record.get("causation_id") == decoded.policy.receipt_event_id
-        and record.get("phase") in {"committed", "aborted"}
-    ]
-    if not intents and not terminals:
-        return None
-    if len(intents) != 1 or any(
-        intents[0].get(field) != expected
-        for field, expected in {
-            "event_type": "critical",
-            "operation": _V4_POLICY_PUBLICATION_RECEIPT_OPERATION,
-            "prior": prior,
-            "prepared": prepared,
-            "target": target,
-            "affected_ids": affected,
-        }.items()
-    ):
-        raise GovernanceError(
-            "GOVERNANCE_BLOCKED",
-            "policy publication receipt intent is contradictory",
-        )
-    if not terminals:
-        return "pending"
-    if len(terminals) != 1:
-        raise GovernanceError(
-            "GOVERNANCE_BLOCKED",
-            "policy publication receipt terminal is contradictory",
-        )
-    phase = terminals[0].get("phase")
-    outcome = terminals[0].get("outcome")
-    if phase == "committed" and outcome == "committed":
-        return "committed"
-    if phase == "aborted" and isinstance(outcome, str) and outcome:
-        return "aborted"
-    raise GovernanceError(
-        "GOVERNANCE_BLOCKED",
-        "policy publication receipt terminal is contradictory",
+    return policy_publication.CriticalReceipt(
+        event_id=decoded.policy.receipt_event_id,
+        operation=_V4_POLICY_PUBLICATION_RECEIPT_OPERATION,
+        prior=prior,
+        prepared=prepared,
+        target=target,
+        affected_ids=tuple(affected),
     )
 
 
@@ -4532,86 +4052,21 @@ def _begin_v4_policy_publication_receipt(
     vault_root: Path,
     decoded: _DecodedV4PolicyProposal,
 ) -> None:
-    terminal = _v4_policy_publication_receipt_terminal(vault_root, decoded)
-    if terminal == "committed":
-        return
-    if terminal == "aborted":
-        raise GovernanceError(
-            "STALE_GOVERNANCE_POLICY",
-            "the reviewed policy publication was already refused",
-        )
-    if terminal == "pending":
-        return
-    prior, prepared, target, affected = _v4_policy_publication_receipt_digests(
-        decoded
-    )
-    try:
-        receipts.begin_event(
-            vault_root,
-            operation=_V4_POLICY_PUBLICATION_RECEIPT_OPERATION,
-            prior=prior,
-            prepared=prepared,
-            target=target,
-            affected_ids=affected,
-            event_id=decoded.policy.receipt_event_id,
-        )
-    except receipts.ReceiptError:
-        raise GovernanceError(
-            "GOVERNANCE_BLOCKED",
-            "policy publication receipt intent could not be recorded",
-        ) from None
+    policy_publication.begin_receipt(vault_root, _v4_policy_publication_receipt(decoded))
 
 
 def _commit_v4_policy_publication_receipt(
     vault_root: Path,
     decoded: _DecodedV4PolicyProposal,
 ) -> None:
-    terminal = _v4_policy_publication_receipt_terminal(vault_root, decoded)
-    if terminal == "committed":
-        return
-    if terminal == "aborted":
-        raise GovernanceError(
-            "GOVERNANCE_BLOCKED",
-            "committed policy publication has an aborted receipt",
-        )
-    if terminal is None:
-        _begin_v4_policy_publication_receipt(vault_root, decoded)
-    try:
-        receipts.commit_event(
-            vault_root,
-            decoded.policy.receipt_event_id,
-            outcome="committed",
-        )
-    except receipts.ReceiptError:
-        raise GovernanceError(
-            "GOVERNANCE_BLOCKED",
-            "policy publication receipt terminal could not be recorded",
-        ) from None
+    policy_publication.commit_receipt(vault_root, _v4_policy_publication_receipt(decoded))
 
 
 def _abort_v4_policy_publication_receipt(
     vault_root: Path,
     decoded: _DecodedV4PolicyProposal,
 ) -> None:
-    terminal = _v4_policy_publication_receipt_terminal(vault_root, decoded)
-    if terminal in {None, "aborted"}:
-        return
-    if terminal == "committed":
-        raise GovernanceError(
-            "GOVERNANCE_BLOCKED",
-            "committed policy publication cannot be expired as stale",
-        )
-    try:
-        receipts.abort_event(
-            vault_root,
-            decoded.policy.receipt_event_id,
-            outcome="stale_predecessor",
-        )
-    except receipts.ReceiptError:
-        raise GovernanceError(
-            "GOVERNANCE_BLOCKED",
-            "stale policy publication receipt could not be closed",
-        ) from None
+    policy_publication.abort_receipt(vault_root, _v4_policy_publication_receipt(decoded))
 
 
 def _v4_workspace_mirror_barrier(_phase: str, _path: str | None = None) -> None:
@@ -4632,58 +4087,29 @@ def _v4_workspace_mirror_terminal(
     vault_root: Path,
     decoded: _DecodedV4PolicyProposal,
 ) -> str | None:
+    return policy_publication.workspace_mirror_terminal(
+        vault_root,
+        _v4_workspace_mirror(decoded),
+    )
+
+
+def _v4_workspace_mirror(
+    decoded: _DecodedV4PolicyProposal,
+) -> policy_publication.WorkspaceMirror:
     event_id = _v4_workspace_mirror_event_id(decoded)
     prior, prepared, target, affected = _v4_workspace_mirror_receipt_digests(decoded)
-    try:
-        event_records = receipts.event_records(vault_root)
-        intents = [
-            record
-            for record in event_records
-            if record.get("event_id") == event_id and record.get("phase") == "intent"
-        ]
-        terminals = [
-            record
-            for record in event_records
-            if record.get("causation_id") == event_id
-            and record.get("phase") in {"committed", "aborted"}
-        ]
-    except receipts.ReceiptError:
-        raise GovernanceError(
-            "GOVERNANCE_BLOCKED",
-            "policy workspace mirror evidence cannot be verified",
-        ) from None
-    if not intents and not terminals:
-        return None
-    if len(intents) != 1 or any(
-        intents[0].get(field) != expected
-        for field, expected in {
-            "event_type": "critical",
-            "operation": _V4_POLICY_MIRROR_OPERATION,
-            "prior": prior,
-            "prepared": prepared,
-            "target": target,
-            "affected_ids": affected,
-            "parent_causation_id": decoded.policy.receipt_event_id,
-        }.items()
-    ):
-        raise GovernanceError(
-            "GOVERNANCE_BLOCKED",
-            "policy workspace mirror intent evidence is contradictory",
-        )
-    if not terminals:
-        return None
-    if len(terminals) != 1 or terminals[0].get("phase") != "committed":
-        raise GovernanceError(
-            "GOVERNANCE_BLOCKED",
-            "policy workspace mirror evidence is contradictory",
-        )
-    outcome = terminals[0].get("outcome")
-    if outcome not in _V4_POLICY_MIRROR_OUTCOMES:
-        raise GovernanceError(
-            "GOVERNANCE_BLOCKED",
-            "policy workspace mirror evidence has an unknown outcome",
-        )
-    return str(outcome)
+    return policy_publication.WorkspaceMirror(
+        receipt=policy_publication.CriticalReceipt(
+            event_id=event_id,
+            operation=_V4_POLICY_MIRROR_OPERATION,
+            prior=prior,
+            prepared=prepared,
+            target=target,
+            affected_ids=tuple(affected),
+            parent_causation_id=decoded.policy.receipt_event_id,
+        ),
+        outcomes=_V4_POLICY_MIRROR_OUTCOMES,
+    )
 
 
 def _v4_workspace_mirror_receipt_digests(
@@ -4788,49 +4214,27 @@ def _mirror_v4_policy_workspace(
     *,
     crash_at: object,
 ) -> str:
-    event_id = _v4_workspace_mirror_event_id(decoded)
-    existing = _v4_workspace_mirror_terminal(vault_root, decoded)
-    if existing is not None:
-        return existing
-    prior, prepared, target, affected = _v4_workspace_mirror_receipt_digests(decoded)
-    try:
-        receipts.begin_event(
+    def after_intent() -> None:
+        _v4_workspace_mirror_barrier("after_intent")
+        if crash_at == "v4_after_mirror_intent":
+            raise GovernanceCrash("v4_after_mirror_intent")
+
+    def apply() -> str:
+        outcome = _apply_v4_workspace_mirror(
             vault_root,
-            operation=_V4_POLICY_MIRROR_OPERATION,
-            prior=prior,
-            prepared=prepared,
-            target=target,
-            affected_ids=affected,
-            event_id=event_id,
-            parent_causation_id=decoded.policy.receipt_event_id,
+            decoded,
+            crash_at=crash_at,
         )
-    except receipts.ReceiptError:
-        raise GovernanceError(
-            "GOVERNANCE_BLOCKED",
-            "policy workspace mirror intent could not be recorded",
-        ) from None
-    _v4_workspace_mirror_barrier("after_intent")
-    if crash_at == "v4_after_mirror_intent":
-        raise GovernanceCrash("v4_after_mirror_intent")
-    outcome = _apply_v4_workspace_mirror(
+        if crash_at == "v4_after_mirror_effect":
+            raise GovernanceCrash("v4_after_mirror_effect")
+        return outcome
+
+    outcome = policy_publication.run_workspace_mirror(
         vault_root,
-        decoded,
-        crash_at=crash_at,
+        _v4_workspace_mirror(decoded),
+        apply,
+        after_intent=after_intent,
     )
-    if crash_at == "v4_after_mirror_effect":
-        raise GovernanceCrash("v4_after_mirror_effect")
-    if outcome == "pending":
-        raise GovernanceError(
-            "GOVERNANCE_BLOCKED",
-            "the committed policy tuple is active but its workspace mirror needs retry",
-        )
-    try:
-        receipts.commit_event(vault_root, event_id, outcome=outcome)
-    except receipts.ReceiptError:
-        raise GovernanceError(
-            "GOVERNANCE_BLOCKED",
-            "policy workspace mirror outcome could not be recorded",
-        ) from None
     if crash_at == "v4_after_mirror_terminal":
         raise GovernanceCrash("v4_after_mirror_terminal")
     return outcome
@@ -4961,62 +4365,25 @@ def _commit(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
         )
         if kwargs.get("crash_at") == "v4_after_policy_receipt_intent":
             raise GovernanceCrash("v4_after_policy_receipt_intent")
-        connection = store.open_authorization_session_connection(vault_root)
-        try:
-            try:
-                schema_v4.publish_policy_generation(
-                    connection,
-                    expected=validated.decoded.expected,
-                    policy=validated.decoded.policy,
-                    catalog=validated.decoded.catalog,
-                    namespace=validated.decoded.namespace,
-                    # A pre-v4 proposal did not bind grants. Passing an exact
-                    # empty tuple makes the transaction prove there are none;
-                    # it must never silently preserve unreviewed active rows.
-                    dependent_grants=validated.decoded.dependent_grants or (),
-                    activated_at=int(now),
-                    acknowledge_registry=lambda active: (
-                        authorization_custody.acknowledge_activation_tuple(
-                            vault_root,
-                            expected_control=validated.custody.control,
-                            target=active,
-                            now=int(now),
-                        )
-                    ),
-                )
-            except schema_v4.ActiveTupleStale:
-                recovered = _recover_v4_policy_publication(
-                    vault_root,
-                    connection=connection,
-                    decoded=validated.decoded,
-                    now=int(now),
-                )
-                if recovered is None:
-                    _abort_v4_policy_publication_receipt(
-                        vault_root,
-                        validated.decoded,
-                    )
-                    _expire_v4_policy_proposal(
-                        vault_root,
-                        proposal_id=proposal_id,
-                        expired_at=int(now),
-                    )
-                    raise GovernanceError(
-                        "STALE_GOVERNANCE_POLICY",
-                        "the reviewed active policy tuple changed",
-                    ) from None
-            except authorization_custody.AuthorizationCustodyUnavailable:
-                raise GovernanceError(
-                    "GOVERNANCE_BLOCKED",
-                    "the committed policy tuple needs exact registry recovery",
-                ) from None
-            except (schema_v4.SchemaV4Error, OSError, sqlite3.Error):
-                raise GovernanceError(
-                    "GOVERNANCE_BLOCKED",
-                    "the reviewed policy tuple could not be published exactly",
-                ) from None
-        finally:
-            connection.close()
+        publication = policy_publication.activate_or_recover(
+            vault_root,
+            _prepared_v4_policy_publication(validated.decoded),
+            now=int(now),
+        )
+        if publication.state == "stale":
+            _abort_v4_policy_publication_receipt(
+                vault_root,
+                validated.decoded,
+            )
+            _expire_v4_policy_proposal(
+                vault_root,
+                proposal_id=proposal_id,
+                expired_at=int(now),
+            )
+            raise GovernanceError(
+                "STALE_GOVERNANCE_POLICY",
+                "the reviewed active policy tuple changed",
+            )
         if kwargs.get("crash_at") == "v4_after_registry_ack":
             raise GovernanceCrash("v4_after_registry_ack")
         _commit_v4_policy_publication_receipt(vault_root, validated.decoded)

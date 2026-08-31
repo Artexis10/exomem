@@ -18,6 +18,7 @@ RUN_ID = "00000000-0000-4000-8000-0000000000a1"
 OPERATION_ID = "00000000-0000-4000-8000-0000000000a2"
 REQUEST_DIGEST = hashlib.sha256(b"batch-crash-matrix").hexdigest()
 POLICY_FINGERPRINT = hashlib.sha256(b"batch-crash-policy").hexdigest()
+VAULT_BINDING = hashlib.sha256(b"batch-crash-vault-binding").hexdigest()
 
 
 class SimulatedProcessCrash(BaseException):
@@ -33,6 +34,27 @@ def _private_writer_state(
         writer_lease.LeaseConfig(state_dir=tmp_path / "writer-state")
     )
     monkeypatch.setattr(writer_lease, "active_manager", lambda: manager)
+
+    def accept_synthetic_terminal(
+        *,
+        vault_root: Path,
+        terminal: consolidation_saga.PolicyActivationTerminal,
+        expected_policy_fingerprint: str,
+        vault_binding_digest: str,
+    ) -> consolidation_saga.PolicyActivationTerminal:
+        del vault_root
+        del vault_binding_digest
+        return consolidation_saga._policy_terminal(  # noqa: SLF001
+            terminal,
+            expected_policy_fingerprint=expected_policy_fingerprint,
+        )
+
+    monkeypatch.setattr(
+        consolidation_saga,
+        "_verify_policy_terminal_receipt",
+        accept_synthetic_terminal,
+        raising=False,
+    )
 
 
 def _action(ordinal: int, *, batch_ordinal: int = 0) -> dict[str, object]:
@@ -185,6 +207,7 @@ def test_restart_repairs_only_the_missing_effect_or_terminal(
             content_actions=actions,
             approved_partition_digest=partition.digest,
             expected_policy_fingerprint=POLICY_FINGERPRINT,
+            vault_binding_digest=VAULT_BINDING,
             activate_policy=_terminal,
             journal=FaultingJournal(store, seam),
             vault_root=root,
@@ -203,6 +226,7 @@ def test_restart_repairs_only_the_missing_effect_or_terminal(
         content_actions=actions,
         approved_partition_digest=partition.digest,
         expected_policy_fingerprint=POLICY_FINGERPRINT,
+        vault_binding_digest=VAULT_BINDING,
         activate_policy=_terminal,
         journal=_store(root),
         vault_root=root,
@@ -238,6 +262,7 @@ def test_crash_after_one_of_two_destination_renames_stays_mixed_and_cannot_advan
             content_actions=actions,
             approved_partition_digest=partition.digest,
             expected_policy_fingerprint=POLICY_FINGERPRINT,
+            vault_binding_digest=VAULT_BINDING,
             activate_policy=_terminal,
             journal=store,
             vault_root=root,
@@ -258,6 +283,7 @@ def test_crash_after_one_of_two_destination_renames_stays_mixed_and_cannot_advan
             content_actions=actions,
             approved_partition_digest=partition.digest,
             expected_policy_fingerprint=POLICY_FINGERPRINT,
+            vault_binding_digest=VAULT_BINDING,
             activate_policy=_terminal,
             journal=_store(root),
             vault_root=root,
@@ -288,6 +314,7 @@ def test_crash_after_last_destination_rename_repairs_only_the_final_terminal(
             content_actions=actions,
             approved_partition_digest=partition.digest,
             expected_policy_fingerprint=POLICY_FINGERPRINT,
+            vault_binding_digest=VAULT_BINDING,
             activate_policy=_terminal,
             journal=store,
             vault_root=root,
@@ -307,6 +334,7 @@ def test_crash_after_last_destination_rename_repairs_only_the_final_terminal(
         content_actions=actions,
         approved_partition_digest=partition.digest,
         expected_policy_fingerprint=POLICY_FINGERPRINT,
+        vault_binding_digest=VAULT_BINDING,
         activate_policy=_terminal,
         journal=_store(root),
         vault_root=root,

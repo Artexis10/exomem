@@ -103,7 +103,13 @@ _ORDINAL_FIELD = {
     "render-ack": "page_ordinal",
 }
 _PREPARED_KINDS = frozenset(
-    {"preimage", "content-batch", "rollback-restore-batch"}
+    {
+        "preimage",
+        "policy-prepare",
+        "policy-active",
+        "content-batch",
+        "rollback-restore-batch",
+    }
 )
 _CONDITIONAL_SUCCESSOR_KINDS = frozenset({"reconcile", "repair-terminal"})
 _REQUIRED_SUCCESSOR_KINDS = frozenset(
@@ -294,7 +300,11 @@ _EVIDENCE_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType(
             {"policy_bundle_digest", "policy_prepared_digest"}
         ),
         "policy-active": frozenset(
-            {"policy_active_digest", "policy_bundle_digest"}
+            {
+                "policy_active_digest",
+                "policy_bundle_digest",
+                "policy_fingerprint",
+            }
         ),
         "content-batch": frozenset(
             {"batch_manifest_digest", "classification_digest"}

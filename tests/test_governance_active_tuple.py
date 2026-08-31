@@ -3358,6 +3358,221 @@ def test_govern_memory_v4_commit_adopts_its_exact_concurrent_cas_winner(
         ).fetchone() == (1,)
 
 
+def test_govern_memory_v4_commit_routes_exact_state_through_publication_adapter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance import policy_publication
+    from exomem.governance import tool as governance_tool
+    from exomem.governance.tool import op_govern_memory
+
+    now = int(time.time())
+    monkeypatch.setenv(
+        "EXOMEM_WRITER_LEASE_STATE_DIR",
+        str(tmp_path / "publication-writer-state"),
+    )
+    writer_lease.reset_managers_for_tests()
+    vault = tmp_path / "vault"
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_empty_projection_catalog(vault, now=now)
+    _configure_custody(
+        monkeypatch,
+        tmp_path / "custody",
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        proposed = op_govern_memory(
+            vault,
+            operation="propose",
+            principal=owner_principal(),
+            intent="Lower the external ceiling",
+            documents={
+                relative: content.decode("utf-8")
+                for relative, content in _documents(ceiling=1)
+            },
+            target_ceiling=1,
+            now=now + 1,
+        )
+
+    observed: list[policy_publication.PreparedPolicyPublication] = []
+    activate_or_recover = policy_publication.activate_or_recover
+
+    def record(
+        vault_root: Path,
+        prepared: policy_publication.PreparedPolicyPublication,
+        *,
+        now: int,
+    ) -> policy_publication.PolicyPublicationClassification:
+        observed.append(prepared)
+        return activate_or_recover(vault_root, prepared, now=now)
+
+    monkeypatch.setattr(
+        governance_tool.policy_publication,
+        "activate_or_recover",
+        record,
+    )
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        committed = op_govern_memory(
+            vault,
+            operation="commit",
+            principal=owner_principal(),
+            proposal_id=proposed["proposal_id"],
+            now=now + 2,
+        )
+
+    assert committed["status"] == "committed"
+    assert len(observed) == 1
+    prepared = observed[0]
+    assert prepared.identity.receipt_event_id == committed["event_id"]
+    assert prepared.expected.activation_state_digest == migration.activation_state_digest
+    assert prepared.policy.policy_fingerprint == _compiled(_documents(ceiling=1)).fingerprint
+
+
+def test_policy_publication_classifies_a_third_sqlite_tuple_as_mixed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance import policy_publication
+
+    now = int(time.time())
+    monkeypatch.setenv(
+        "EXOMEM_WRITER_LEASE_STATE_DIR",
+        str(tmp_path / "publication-writer-state"),
+    )
+    writer_lease.reset_managers_for_tests()
+    vault = tmp_path / "vault"
+    _write_workspace(vault, _documents(ceiling=2))
+    migration = _migrate_with_empty_projection_catalog(vault, now=now)
+    custody_root = tmp_path / "custody"
+    _configure_custody(
+        monkeypatch,
+        custody_root,
+        activation_epoch=1,
+        activation_state_digest=migration.activation_state_digest,
+        now=now,
+    )
+
+    def prepare(
+        *,
+        ceiling: int,
+        generation_id: str,
+        event_suffix: str,
+    ) -> policy_publication.PreparedPolicyPublication:
+        edits = {
+            "rules/external.yaml": dict(_documents(ceiling=ceiling))[
+                "rules/external.yaml"
+            ].decode("utf-8")
+        }
+        prospective = policy.compile_prospective(vault, edits)
+        assert prospective is not None
+        return policy_publication.prepare_destination_policy_publication(
+            vault,
+            prospective=prospective,
+            document_edits=edits,
+            generation_id=generation_id,
+            authoring_event_id=hashlib.sha256(
+                f"authoring-{event_suffix}".encode()
+            ).hexdigest(),
+            receipt_event_id=hashlib.sha256(
+                f"receipt-{event_suffix}".encode()
+            ).hexdigest(),
+            ready_at=now + 1,
+            now=now,
+        )
+
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        reviewed = prepare(
+            ceiling=1,
+            generation_id=LOSING_GENERATION_ID,
+            event_suffix="reviewed",
+        )
+        third = prepare(
+            ceiling=0,
+            generation_id=SECOND_GENERATION_ID,
+            event_suffix="third",
+        )
+        published = policy_publication.activate_or_recover(
+            vault,
+            third,
+            now=now + 2,
+        )
+        assert published.state == "activated"
+
+        # Recreate the split-brain shape: external custody still names the
+        # reviewed predecessor while SQLite was won by an unrelated publication.
+        _configure_custody(
+            monkeypatch,
+            custody_root,
+            activation_epoch=1,
+            activation_state_digest=migration.activation_state_digest,
+            now=now + 3,
+        )
+        classification = policy_publication.classify_authority(
+            vault,
+            reviewed,
+            now=now + 3,
+        )
+
+    assert classification.state == "mixed"
+    assert classification.active is not None
+    assert classification.active.policy_generation_id == SECOND_GENERATION_ID
+
+
+def test_policy_publication_critical_receipt_replays_its_exact_terminal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance import policy_publication
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer"))
+    event_id = receipts.critical_event_id(
+        {"policy-publication-receipt": "exact-terminal"}
+    )
+    receipt = policy_publication.CriticalReceipt(
+        event_id=event_id,
+        operation="governance_policy_publication",
+        prior="1" * 64,
+        prepared="2" * 64,
+        target="3" * 64,
+        affected_ids=("4" * 64,),
+    )
+
+    assert policy_publication.receipt_terminal(vault, receipt) is None
+    policy_publication.begin_receipt(vault, receipt)
+    assert policy_publication.receipt_terminal(vault, receipt) == "pending"
+    policy_publication.commit_receipt(vault, receipt)
+    assert policy_publication.receipt_terminal(vault, receipt) == "committed"
+
+
+def test_policy_publication_workspace_mirror_records_exact_outcome(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance import policy_publication
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer"))
+    mirror = policy_publication.WorkspaceMirror(
+        receipt=policy_publication.CriticalReceipt(
+            event_id=receipts.critical_event_id({"workspace-mirror": "complete"}),
+            operation="governance_policy_workspace_mirror",
+            prior="1" * 64,
+            prepared="2" * 64,
+            target="3" * 64,
+            affected_ids=("4" * 64,),
+        ),
+        outcomes=frozenset({"complete", "diverged"}),
+    )
+
+    assert policy_publication.run_workspace_mirror(vault, mirror, lambda: "complete") == "complete"
+    assert policy_publication.workspace_mirror_terminal(vault, mirror) == "complete"
+
+
 def test_govern_memory_v4_commit_refuses_reviewed_tuple_mismatch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
