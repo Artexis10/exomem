@@ -359,7 +359,7 @@ basetemp:
 
 | Scope | Result |
 |---|---|
-| the new carrier suite | `23 passed` |
+| the new carrier suite | `24 passed` |
 | due-state ×5, mutation terminal, tool-surface contract, MCP schema fidelity | `211 passed` |
 | the five leaves' own suites — adopt ×2, adoption studio ×3, structured files, client artifacts, media ×2, writer lease, REST registry | `522 passed` |
 | adjacent surfaces — CLI core ops, governance egress, command-surface retry, hosted agent surface, epistemic loop primitives, media deletion/worker, attachment ingestion | `651 passed, 2 errors` |
@@ -375,10 +375,22 @@ carries five findings (B009 ×2, BLE001 ×3) at lines 222, 226, 2101, 2138 and
 2171 — all pre-existing, confirmed identical against `origin/main`'s copy of
 the file, and none in the eleven lines this change added at ~4130.
 
-**Not run here:** the full corpus. It belongs at the delivery boundary and must
-be attributed against an `origin/main` baseline, because this repository has a
-standing ~30 pre-existing `setup_wizard`/`demo`/`doctor` failures and one CLI
-flag-parity failure that are not this change's.
+The full corpus was run at the delivery boundary on the final integrated tree,
+against a fresh `origin/main` baseline at `741d2ca0`:
+
+| Tree | Result |
+|---|---|
+| `origin/main` | `14526 passed, 394 skipped, 87 failed, 11 errors` |
+| this change | `14550 passed, 394 skipped, 87 failed, 11 errors` |
+
+The JUnit failure/error identity comparison found 97 common red tests and no
+kind mismatches. One identity swapped in each direction: the branch-only
+`test_undo_direction_can_be_widening` passed immediately when rerun solo
+(`1 passed in 1.86s`) and had passed in the preceding full branch run; neither
+its test nor governance implementation is in this diff. The baseline-only
+`test_a_direct_mutation_guard_also_returns_while_its_rebuild_runs` is another
+concurrency-sensitive test outside this diff. The completion run therefore
+adds 24 passing tests and no attributable failure.
 
 ## Files changed
 
@@ -389,4 +401,5 @@ flag-parity failure that are not this change's.
 | `src/exomem/commands.py` | `_carrying_due_state()` and `_audit_fix_paths()`; the carrier applied at the nine enumerated invocations; batch deltas wired for `fix` and `backfill-ids` |
 | `tests/test_due_state_bulk_carriers.py` | new — 24 pins covering 1.1–1.5 |
 | `tests/test_due_state_emission_capture.py` | the two tripwires inverted, not deleted |
+| `tests/test_epistemic_no_nudge_families.py` | the installed-envelope f23 journey now pins the batch's `+12` write / `+1` emission deltas and decided verdict |
 | `benchmarks/epistemic/journeys/f23_dismissal.py` | prose only (AST-proven); zero-carrier inventory retired |
