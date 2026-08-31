@@ -21,6 +21,8 @@
     {"id": "L", "query": "the rendering library we picked for the atlas project", "status": "resolved", "resolved": ["l-one"]},
     {"id": "M", "query": "that decision about the harbour tariff", "status": "resolved", "resolved": ["m-one"]},
     {"id": "N", "query": "the two concepts behind the tide model", "status": "partial", "resolved": ["n-one"], "expected_count": 2, "unresolved_count": 1},
-    {"id": "O", "query": "the quay library we reviewed", "status": "unresolved", "resolved": []}
+    {"id": "O", "query": "the quay library we reviewed", "status": "unresolved", "resolved": []},
+    {"id": "R", "query": "my two verdant friends when to go", "status": "partial", "resolved": ["r-evidenced"], "candidates": ["r-distractor"], "expected_count": 2, "unresolved_count": 1},
+    {"id": "R2", "query": "my two verdant friends route timing", "status": "partial", "resolved": ["r-evidenced"], "candidates": ["r-distractor"], "expected_count": 2, "unresolved_count": 1}
   ]
 }

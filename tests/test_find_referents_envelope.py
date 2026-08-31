@@ -12,6 +12,7 @@ from exomem import embeddings as embeddings_module
 from exomem import find as find_module
 
 TOPIC = "Knowledge Base/Notes/Research/coastal-season.md"
+DISTRACTOR_TOPIC = "Knowledge Base/Notes/Research/trip-timing.md"
 ENTITY = "Knowledge Base/Entities/People/aria-vale.md"
 NOISE = "Knowledge Base/Entities/People/beryl-moss.md"
 
@@ -45,6 +46,20 @@ Two coastal friends discussed autumn travel and harbour weather.
     )
     _write(
         vault,
+        DISTRACTOR_TOPIC,
+        """---
+type: research-note
+title: Trip timing advice
+status: active
+updated: 2026-08-01
+---
+# Trip timing advice
+
+Two friends discussed when to go and how to compare routes.
+""",
+    )
+    _write(
+        vault,
         ENTITY,
         f"""---
 type: entity
@@ -57,7 +72,7 @@ updated: 2026-08-02
 ---
 # Aria Vale
 
-A trusted contact.
+A coastal friend who discussed when to go.
 
 ## Relations
 - relates_to [[{TOPIC[:-3]}]]
@@ -66,16 +81,20 @@ A trusted contact.
     _write(
         vault,
         NOISE,
-        """---
+        f"""---
 type: entity
 title: Beryl Moss
 entity_type: person
 status: active
+relationship: friend
 updated: 2026-08-03
 ---
 # Beryl Moss
 
 Two coastal friends are mentioned here only as retrieval wording.
+
+## Relations
+- relates_to [[{DISTRACTOR_TOPIC[:-3]}]]
 """,
     )
     monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
@@ -343,6 +362,8 @@ def test_managed_referent_stage_omits_block_when_vault_proof_advances(
         lambda _root=None: {"state": "ready", "admitted": True},
     )
     monkeypatch.setattr(readiness, "runtime_managed", lambda: True)
+    cue = runtime.detect_cue("my two coastal friends")
+    assert cue is not None
 
     result = runtime.resolve_for_find(
         Path("unused-vault"),
@@ -352,7 +373,7 @@ def test_managed_referent_stage_omits_block_when_vault_proof_advances(
         graph=False,
         release=object(),
         purpose=None,
-        cue=object(),
+        cue=cue,
         expected_recall_checkpoints=proof,
     )
 
@@ -434,6 +455,16 @@ def test_product_case_two_counted_friends_one_captured(referent_vault: Path) -> 
     assert [item["path"] for item in block["resolved"]] == [ENTITY]
     assert block["unresolved_count"] == 1
     assert NOISE in [item["path"] for item in block["candidates"]]
+
+
+def test_envelope_threads_anchor_descriptor_knowledge(referent_vault: Path) -> None:
+    block = _block(_call(referent_vault, "my two coastal friends when to go"))
+    distractor = next(item for item in block["candidates"] if item["path"] == NOISE)
+    graph = next(item for item in distractor["evidence"] if item["kind"] == "graph")
+
+    assert graph["seed"] == DISTRACTOR_TOPIC
+    assert block["status"] == "partial"
+    assert block["unresolved_count"] == 1
 
 
 def test_referents_resolve_a_vault_defined_entity_type_end_to_end(
