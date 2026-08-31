@@ -58,6 +58,7 @@ _FOLDERS = (
 #: traversal-profiles.yaml) or their own content, and is never overwritten.
 _SHIPPED_SCHEMA_GLOBS = (
     "_Schema/SKILL.md",
+    "_Schema/examples/**/*.md",
     "_Schema/references/*.md",
     "_Schema/workflow-skills/*/SKILL.md",
     # The registry of those skills. Product-owned for the same reason they are,
