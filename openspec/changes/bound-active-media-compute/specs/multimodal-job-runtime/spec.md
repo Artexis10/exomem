@@ -63,3 +63,31 @@ An accelerator, native-runtime, or compute-initialization failure SHALL durably 
 - **WHEN** the operator repairs the accelerator runtime or explicitly selects bounded CPU and retries
 - **THEN** the existing durable job becomes eligible without replacing the source artifact
 - **AND** a successful extraction moves both job and sidecar to their existing completed contract
+
+### Requirement: Machine-generated extraction duplication is repairable without deleting authored notes
+Media extraction SHALL use explicit machine-owned boundary markers and treat headings inside extracted Markdown as payload. An unmarked nonempty legacy preserved-notes boundary SHALL block extraction commit before sidecar metadata or deferred-index state changes. The governed legacy repair SHALL collapse preserved-note residue only when a surviving extraction supplies the byte-exact candidate. When no extraction survives, repair SHALL retain the residual until a fresh source extraction supplies the candidate. Source-derived cleanup SHALL require at least three exact candidate copies separated only by whitespace. Two copies and any differing non-whitespace residue SHALL remain preserved. Repair SHALL retain frontmatter verbatim, remain idempotent, and refuse an output that shortens the selected extraction.
+
+#### Scenario: Extracted document contains Markdown headings
+- **WHEN** a document extraction containing H1 or H2 headings is written again above an explicitly marked machine-owned notes section
+- **THEN** the full extraction is replaced once through that explicit boundary
+- **AND** neither the document headings nor the preserved notes are duplicated
+
+#### Scenario: Legacy sidecar has a surviving extraction candidate
+- **WHEN** preserved-note residue contains hundreds of exact copies of a surviving selected extraction with only whitespace between them
+- **THEN** repair leaves one selected extraction and removes the duplicate residue
+- **AND** a second repair produces no change
+
+#### Scenario: Blank-top residual waits for source authority
+- **WHEN** a legacy sidecar has an empty extraction and repeated preserved-note bytes whose authored unit cannot be inferred
+- **THEN** audit reports that source re-extraction is required and makes no repair write
+- **AND** a fresh extraction collapses the residual only when it is at least three exact copies of that fresh result separated solely by whitespace
+
+#### Scenario: Preserved residue includes authored prose
+- **WHEN** only two candidate copies exist or even one non-whitespace fragment differs from the selected extraction
+- **THEN** repair retains that residual content
+- **AND** exact-copy detection does not heuristically delete it
+
+#### Scenario: Legacy notes boundary is ambiguous
+- **WHEN** a nonempty unmarked legacy `## Preserved notes` heading could be document payload or sidecar structure
+- **THEN** extraction commit leaves the sidecar and deferred-index queue unchanged
+- **AND** the durable media job is blocked with an action to review the sidecar boundary before retry
