@@ -1383,6 +1383,79 @@ def test_bm25_vault_scope_reaches_outside_kb(tmp_path):
     assert vault_hits and vault_hits[0][0] == "Projects/out.md"
 
 
+def test_emitted_parent_hints_return_every_scoped_path(tmp_path):
+    parent = _write_page(tmp_path, "Knowledge Base/media/demo.mp4.md", "transcript")
+    child = _write_page(
+        tmp_path,
+        "Knowledge Base/media/demo.mp4.frames/scene-000-005.000.jpg.md",
+        "frame OCR",
+    )
+    child.write_text(
+        "---\n"
+        "type: source\n"
+        "parent_media: Knowledge Base/media/demo.mp4\n"
+        "evidence_file: Knowledge Base/media/demo.mp4.frames/scene-000-005.000.jpg\n"
+        "---\n# frame\n\nframe OCR\n",
+        encoding="utf-8",
+    )
+    _write_page(tmp_path, "Projects/ordinary.md", "outside scope")
+
+    # Establish the sidecar through its normal maintenance seam, then query the
+    # readiness-bound normal-table catalog directly.
+    assert lexstore.search_bm25(tmp_path, "transcript", k=3, scope="kb")
+    result = lexstore.emitted_parent_hints_result(
+        tmp_path,
+        {
+            parent.relative_to(tmp_path).as_posix(),
+            child.relative_to(tmp_path).as_posix(),
+        },
+        scope="kb",
+    )
+
+    assert result.readiness.complete
+    assert result.value == {
+        "Knowledge Base/media/demo.mp4.md": None,
+        "Knowledge Base/media/demo.mp4.frames/scene-000-005.000.jpg.md": "Knowledge Base/media/demo.mp4.md",
+    }
+
+
+def test_emitted_parent_hints_use_json_for_large_path_sets(tmp_path):
+    paths = {
+        f"Knowledge Base/large/page-{number:04d}.md"
+        for number in range(1_100)
+    }
+    for rel in paths:
+        _write_page(tmp_path, rel, "ordinary page")
+
+    assert lexstore.search_bm25(tmp_path, "ordinary", k=3, scope="kb")
+    result = lexstore.emitted_parent_hints_result(tmp_path, paths, scope="kb")
+
+    assert result.readiness.complete
+    assert result.value == {path: None for path in paths}
+
+
+def test_emitted_parent_hints_missing_row_is_incomplete(tmp_path):
+    known = _write_page(tmp_path, "Knowledge Base/known.md", "known page")
+    out_of_scope = _write_page(tmp_path, "Projects/out-of-scope.md", "outside page")
+    assert lexstore.search_bm25(tmp_path, "known", k=3, scope="kb")
+
+    result = lexstore.emitted_parent_hints_result(
+        tmp_path,
+        {known.relative_to(tmp_path).as_posix(), "Knowledge Base/missing.md"},
+        scope="kb",
+    )
+
+    assert not result.readiness.complete
+    assert result.readiness.status == "stale"
+    assert result.value is None
+
+    scoped_out = lexstore.emitted_parent_hints_result(
+        tmp_path, {out_of_scope.relative_to(tmp_path).as_posix()}, scope="kb"
+    )
+    assert not scoped_out.readiness.complete
+    assert scoped_out.value is None
+
+
 # ---------------------------------------------------------------- substring primitive
 
 

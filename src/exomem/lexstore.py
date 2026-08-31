@@ -1356,6 +1356,25 @@ def search_substring_result(
     )
 
 
+def emitted_parent_hints_result(
+    vault_root: Path,
+    paths: set[str],
+    *,
+    scope: str = "kb",
+    freshness: tuple | None = None,
+) -> CatalogQueryResult[dict[str, str | None]]:
+    """Current emitted-parent metadata for every requested scoped page.
+
+    The caller may treat explicit ``None`` as an ordinary page only when this
+    complete result proves the requested candidate set has no missing rows.
+    """
+    if not _catalog_usable():
+        return CatalogQueryResult(None, CatalogReadiness("unsupported", False, backend()))
+    if not paths:
+        return CatalogQueryResult({}, CatalogReadiness("available", True, backend()))
+    return get_store(vault_root).emitted_parent_hints_result(paths, scope, freshness)
+
+
 def search_semantic_units(
     vault_root: Path,
     query: str,
@@ -5120,6 +5139,50 @@ class LexicalStore:
             params,
         ).fetchall()
         return sorted(str(row[0]) for row in rows)
+
+    def emitted_parent_hints_result(
+        self,
+        paths: set[str],
+        scope: str,
+        freshness: tuple | None,
+    ) -> CatalogQueryResult[dict[str, str | None]]:
+        """Read emitted-parent hints from one ready catalog snapshot.
+
+        A complete result must name every requested path. A missing row is not
+        evidence of an ordinary page: it means the snapshot cannot safely
+        collapse the candidates without the legacy Markdown hydration path.
+        """
+        requested = set(paths)
+        result = self._serve_from_ready_catalog_result(
+            scope,
+            freshness,
+            lambda conn: self._emitted_parent_hints_query(conn, requested, scope),
+            "lexical emitted-parent hint query failed (%s); candidate collapse hydrates",
+        )
+        if not result.readiness.complete or result.value is None:
+            return result
+        if requested <= result.value.keys():
+            return result
+        _schedule_runtime_catalog_repair(self.vault_root)
+        return CatalogQueryResult(
+            None, CatalogReadiness("stale", False, result.readiness.backend)
+        )
+
+    def _emitted_parent_hints_query(
+        self,
+        conn: sqlite3.Connection,
+        paths: set[str],
+        scope: str,
+    ) -> dict[str, str | None]:
+        """One JSON-backed scoped query, independent of SQLite bind limits."""
+        col = "in_vault" if scope == "vault" else "in_kb"
+        rows = conn.execute(
+            "SELECT p.path, p.emitted_parent_path FROM pages p "
+            "JOIN json_each(?) requested ON requested.value = p.path "
+            f"WHERE p.{col} = 1",
+            (json.dumps(sorted(paths), ensure_ascii=False),),
+        ).fetchall()
+        return {str(path): parent for path, parent in rows}
 
     def search_substring(
         self,

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from pathlib import Path
@@ -90,6 +90,7 @@ def collapse_frame_children(
     page_of: PageOf,
     attribution: dict[str, tuple[str, float | None]],
     *aux_maps: dict,
+    parent_hints: Mapping[str, str | None] | None = None,
     recall_paths: AbstractSet[str] | None = None,
 ) -> list[str]:
     """Remap scene-frame sidecar candidates onto their parent video sidecar."""
@@ -109,7 +110,16 @@ def collapse_frame_children(
     for rel in ranking:
         if not admitted(rel):
             continue
-        page = page_of(rel)
+        # A ready catalog's explicit NULL proves this is an ordinary page, so
+        # avoid its otherwise pointless Markdown hydration. A non-NULL hint is
+        # only a hydration selector: the parsed child remains authoritative if
+        # it was deleted, became malformed, or changed parent_media after the
+        # catalog snapshot.
+        page = (
+            None
+            if parent_hints is not None and parent_hints.get(rel) is None and rel in parent_hints
+            else page_of(rel)
+        )
         parent = page.parent_media if page is not None else None
         if parent:
             parent_sidecar = parent + ".md"
@@ -274,17 +284,6 @@ def collect_candidates(
                 failed_out.append("vector")
             if timings is not None:
                 timings.error("vector", e)
-    vector_ranking = collapse_frame_children(
-        vector_ranking,
-        vault_root,
-        page_of,
-        frame_attribution,
-        chunk_text_by_path,
-        vector_score_by_path,
-        recall_paths=recall_paths,
-    )
-    vector_ranking = _eligible(vector_ranking)
-
     clip_ranking: list[str] = []
     clip_score_by_path: dict[str, float] = {}
     clip_frame_ts_by_path: dict[str, float | None] = {}
@@ -370,17 +369,6 @@ def collect_candidates(
             "reason": "clip_disabled",
             "model": embeddings.CLIP_MODEL_NAME,
         }
-    clip_ranking = collapse_frame_children(
-        clip_ranking,
-        vault_root,
-        page_of,
-        frame_attribution,
-        clip_score_by_path,
-        clip_frame_ts_by_path,
-        recall_paths=recall_paths,
-    )
-    clip_ranking = _eligible(clip_ranking)
-
     bm25_ranking: list[str] = []
     bm25_score_by_path: dict[str, float] = {}
     keyword_ranking: list[str] = []
@@ -457,16 +445,6 @@ def collect_candidates(
             log.warning("BM25 search failed: %s; using vector-only", e)
             if timings is not None:
                 timings.error("bm25", e)
-        bm25_ranking = collapse_frame_children(
-            bm25_ranking,
-            vault_root,
-            page_of,
-            frame_attribution,
-            bm25_score_by_path,
-            recall_paths=recall_paths,
-        )
-        bm25_ranking = _eligible(bm25_ranking)
-
         with _span(timings, "keyword"):
             # Over-fetch by the same factor the BM25 lane uses, and for the same
             # reason: `collapse_frame_children` and `_eligible` below can drop
@@ -481,23 +459,71 @@ def collect_candidates(
                 repair=lexical_repair,
                 k=candidate_k * 3,
             )
-        keyword_ranking = collapse_frame_children(
-            keyword_ranking,
+    raw_rankings = (vector_ranking, clip_ranking, bm25_ranking, keyword_ranking)
+    admitted_raw_paths = set().union(*raw_rankings) & recall_paths
+    parent_hints: Mapping[str, str | None] | None = None
+    if admitted_raw_paths:
+        hint_result = lexstore.emitted_parent_hints_result(
             vault_root,
-            page_of,
-            frame_attribution,
-            recall_paths=recall_paths,
+            admitted_raw_paths,
+            scope=scope,
+            freshness=snapshot.for_scope(scope),
         )
-        keyword_ranking = _eligible(keyword_ranking)
-        if capture_trace:
-            lane_statuses["keyword"] = {
-                "status": "participated" if keyword_ranking else "available_nonmatching",
-                "backend": "case_insensitive_substring",
-                "metric": {"name": "rank", "direction": "lower", "rounding": "none"},
-            }
-        rankings = [
-            r for r in (vector_ranking, bm25_ranking, keyword_ranking, clip_ranking) if r
-        ]
+        if hint_result.readiness.complete:
+            parent_hints = hint_result.value
+
+    vector_ranking = collapse_frame_children(
+        vector_ranking,
+        vault_root,
+        page_of,
+        frame_attribution,
+        chunk_text_by_path,
+        vector_score_by_path,
+        parent_hints=parent_hints,
+        recall_paths=recall_paths,
+    )
+    vector_ranking = _eligible(vector_ranking)
+    clip_ranking = collapse_frame_children(
+        clip_ranking,
+        vault_root,
+        page_of,
+        frame_attribution,
+        clip_score_by_path,
+        clip_frame_ts_by_path,
+        parent_hints=parent_hints,
+        recall_paths=recall_paths,
+    )
+    clip_ranking = _eligible(clip_ranking)
+    bm25_ranking = collapse_frame_children(
+        bm25_ranking,
+        vault_root,
+        page_of,
+        frame_attribution,
+        bm25_score_by_path,
+        parent_hints=parent_hints,
+        recall_paths=recall_paths,
+    )
+    bm25_ranking = _eligible(bm25_ranking)
+    keyword_ranking = collapse_frame_children(
+        keyword_ranking,
+        vault_root,
+        page_of,
+        frame_attribution,
+        parent_hints=parent_hints,
+        recall_paths=recall_paths,
+    )
+    keyword_ranking = _eligible(keyword_ranking)
+    if capture_trace and mode != "vector":
+        lane_statuses["keyword"] = {
+            "status": "participated" if keyword_ranking else "available_nonmatching",
+            "backend": "case_insensitive_substring",
+            "metric": {"name": "rank", "direction": "lower", "rounding": "none"},
+        }
+    rankings = [
+        r
+        for r in (vector_ranking, bm25_ranking, keyword_ranking, clip_ranking)
+        if r
+    ]
 
     graph_ranking: list[str] = []
     graph_in_degree_by_path: dict[str, int] = {}
