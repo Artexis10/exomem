@@ -7,10 +7,13 @@ import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import NoReturn
+from typing import TYPE_CHECKING, NoReturn
 
 from .. import reserved_paths
 from . import consolidation_plan, consolidation_policy, consolidation_run_state, policy
+
+if TYPE_CHECKING:
+    from .consolidation_verification_manifest import VerificationManifest
 
 _DESCRIPTOR_ID = "consolidation-tree"
 _OWNER = "consolidation.run"
@@ -21,6 +24,7 @@ _MAX_SAFE_INTEGER = (1 << 53) - 1
 _MAX_PLAN_BYTES = 16 * 1024 * 1024
 _MAX_CONTROL_BYTES = 64 * 1024
 _MAX_POLICY_BUNDLE_BYTES = 16 * 1024 * 1024
+_MAX_VERIFICATION_MANIFEST_BYTES = 16 * 1024 * 1024
 
 
 class ConsolidationPlanStoreUnavailable(RuntimeError):
@@ -159,6 +163,7 @@ class ConsolidationPlanStore:
         plan: consolidation_plan.CanonicalConsolidationPlan,
         *,
         policy_bundle: consolidation_policy.DestinationPolicyPlan | None = None,
+        verification_manifest: VerificationManifest | None = None,
         expected_run_revision: int,
     ) -> consolidation_plan.CanonicalConsolidationPlan:
         """Create or adopt one byte-identical immutable plan."""
@@ -183,12 +188,21 @@ class ConsolidationPlanStore:
         directory = self._plan_dir(run_id, kind, digest)
         control_path = directory / "control-basis.json"
         policy_bundle_path = directory / "policy-bundle.json"
+        verification_manifest_path = directory / "verification-manifest.json"
         plan_path = directory / "plan.json"
 
         policy_bundle_raw: bytes | None = None
+        verification_manifest_raw: bytes | None = None
         if kind == "cutover":
+            from . import consolidation_verification_manifest as verification_manifest_module
+
             if not isinstance(policy_bundle, consolidation_policy.DestinationPolicyPlan):
                 _fail("PLAN_POLICY_BUNDLE_REQUIRED")
+            if not isinstance(
+                verification_manifest,
+                verification_manifest_module.VerificationManifest,
+            ):
+                _fail("PLAN_VERIFICATION_MANIFEST_REQUIRED")
             try:
                 policy_bundle_raw = consolidation_policy.canonical_destination_policy_bundle(
                     policy_bundle
@@ -198,9 +212,24 @@ class ConsolidationPlanStore:
                     != policy_bundle
                 ):
                     _fail("PLAN_STORE_INPUT_INVALID")
-            except consolidation_policy.DestinationPolicyUnavailable:
+                verification_manifest_module._bind_to_stored_plan(  # noqa: SLF001
+                    run_id=run_id,
+                    plan_digest=digest,
+                    plan=plan,
+                    bundle=policy_bundle,
+                    manifest=verification_manifest,
+                )
+                verification_manifest_raw = (
+                    verification_manifest_module.canonical_verification_manifest(
+                        verification_manifest
+                    )
+                )
+            except (
+                consolidation_policy.DestinationPolicyUnavailable,
+                verification_manifest_module.ConsolidationVerificationManifestUnavailable,
+            ):
                 _fail("PLAN_STORE_INPUT_INVALID")
-        elif policy_bundle is not None:
+        elif policy_bundle is not None or verification_manifest is not None:
             _fail("PLAN_STORE_INPUT_INVALID")
 
         with _authority(self.vault_root, mutation=True):
@@ -218,14 +247,27 @@ class ConsolidationPlanStore:
                 policy_bundle_path,
                 limit=_MAX_POLICY_BUNDLE_BYTES,
             )
+            existing_verification_manifest = self._read_optional(
+                verification_manifest_path,
+                limit=_MAX_VERIFICATION_MANIFEST_BYTES,
+            )
             existing_plan = self._read_optional(plan_path, limit=_MAX_PLAN_BYTES)
             if existing_control is None and (
-                existing_policy_bundle is not None or existing_plan is not None
+                existing_policy_bundle is not None
+                or existing_verification_manifest is not None
+                or existing_plan is not None
             ):
                 _fail("PLAN_STORE_CORRUPT")
             if (
-                kind == "cutover" and existing_plan is not None and existing_policy_bundle is None
-            ) or (kind != "cutover" and existing_policy_bundle is not None):
+                kind == "cutover"
+                and existing_plan is not None
+                and (existing_policy_bundle is None or existing_verification_manifest is None)
+            ) or (
+                kind != "cutover"
+                and (
+                    existing_policy_bundle is not None or existing_verification_manifest is not None
+                )
+            ):
                 _fail("PLAN_STORE_CORRUPT")
             if (
                 (
@@ -236,6 +278,10 @@ class ConsolidationPlanStore:
                     existing_policy_bundle is not None
                     and existing_policy_bundle != policy_bundle_raw
                 )
+                or (
+                    existing_verification_manifest is not None
+                    and existing_verification_manifest != verification_manifest_raw
+                )
                 or (existing_plan is not None and existing_plan != plan.canonical_bytes)
             ):
                 _fail("PLAN_STORE_CONFLICT")
@@ -243,6 +289,11 @@ class ConsolidationPlanStore:
                 self._publish_missing(control_path, plan.control_basis.canonical_bytes)
             if existing_policy_bundle is None and policy_bundle_raw is not None:
                 self._publish_missing(policy_bundle_path, policy_bundle_raw)
+            if existing_verification_manifest is None and verification_manifest_raw is not None:
+                self._publish_missing(
+                    verification_manifest_path,
+                    verification_manifest_raw,
+                )
             if existing_plan is None:
                 self._publish_missing(plan_path, plan.canonical_bytes)
         return plan
@@ -271,15 +322,26 @@ class ConsolidationPlanStore:
                 directory / "policy-bundle.json",
                 limit=_MAX_POLICY_BUNDLE_BYTES,
             )
+            verification_manifest_raw = self._read_optional(
+                directory / "verification-manifest.json",
+                limit=_MAX_VERIFICATION_MANIFEST_BYTES,
+            )
             plan_raw = self._read_optional(
                 directory / "plan.json",
                 limit=_MAX_PLAN_BYTES,
             )
-            if control_raw is None and policy_bundle_raw is None and plan_raw is None:
+            if (
+                control_raw is None
+                and policy_bundle_raw is None
+                and verification_manifest_raw is None
+                and plan_raw is None
+            ):
                 _fail("PLAN_NOT_FOUND")
             if control_raw is None or plan_raw is None:
                 _fail("PLAN_STORE_CORRUPT")
-            if (kind == "cutover") != (policy_bundle_raw is not None):
+            if (kind == "cutover") != (policy_bundle_raw is not None) or (
+                (kind == "cutover") != (verification_manifest_raw is not None)
+            ):
                 _fail("PLAN_STORE_CORRUPT")
             try:
                 control = consolidation_plan.parse_control_basis(control_raw)
@@ -306,6 +368,23 @@ class ConsolidationPlanStore:
             self._bind_run(record, plan)
             if bundle is not None:
                 self._bind_policy_bundle(record, plan, bundle)
+                from . import consolidation_verification_manifest as verification_manifest_module
+
+                if verification_manifest_raw is None:
+                    _fail("PLAN_STORE_CORRUPT")
+                try:
+                    manifest = verification_manifest_module.parse_verification_manifest(
+                        verification_manifest_raw
+                    )
+                    verification_manifest_module._bind_to_stored_plan(  # noqa: SLF001
+                        run_id=run_id,
+                        plan_digest=digest,
+                        plan=plan,
+                        bundle=bundle,
+                        manifest=manifest,
+                    )
+                except (verification_manifest_module.ConsolidationVerificationManifestUnavailable,):
+                    _fail("PLAN_STORE_CORRUPT")
         return plan, bundle
 
     def load(

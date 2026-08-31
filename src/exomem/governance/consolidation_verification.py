@@ -81,9 +81,17 @@ class VerificationPlan:
 @dataclass(frozen=True, slots=True)
 class VerificationProbeContext:
     vault_root: Path
+    vault_binding_digest: str
+    run_id: str
+    operation_id: str
+    journal_digest: str
+    plan_digest: str
     canonical_census_digest: str
     verification_basis_digest: str
+    verified_at: str
+    principals: tuple[object, ...]
     authority: object
+    contract: object
 
 
 @dataclass(frozen=True, slots=True)
