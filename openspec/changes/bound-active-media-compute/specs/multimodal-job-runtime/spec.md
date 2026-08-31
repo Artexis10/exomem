@@ -19,12 +19,27 @@ Normal and performance modes SHALL permit a disposable media worker to use a sup
 - **AND** torch's result does not admit the job
 
 ### Requirement: ASR computation type follows runtime capability
-Accelerated ASR SHALL select a computation type supported by the installed runtime and device rather than force a quantization mode known to be unsupported on a device generation. An explicit operator computation-type override SHALL remain available and SHALL be disclosed.
+Accelerated ASR SHALL use CUDA `float16` by default and CPU `int8` by default. A concrete operator computation-type override SHALL remain available and SHALL be disclosed, but `auto`, unknown values, and values not reported supported on the selected device SHALL be refused. On compute capability 12.x, every INT8-family override SHALL be refused despite CTranslate2 4.8 reporting it as supported. Runtime capability reporting is preflight only and SHALL NOT replace real model-execution proof.
 
-#### Scenario: Accelerator does not support INT8 execution
-- **WHEN** the accelerator runtime excludes INT8 from its supported computation types
-- **THEN** automatic ASR selects a supported floating-point computation type
-- **AND** transcription does not attempt the unsupported INT8 operation
+#### Scenario: Runtime misreports Blackwell INT8 support
+- **WHEN** the accelerator runtime reports both `float16` and an INT8 type on an `sm_120` device
+- **THEN** Exomem selects the conservative CUDA `float16` default rather than CTranslate2 4.8's `auto` INT8 path
+- **AND** a real ASR model operation succeeds before readiness claims the path works
+
+#### Scenario: Automatic device decline respects a computation override
+- **WHEN** automatic CUDA admission declines and the operator supplied a concrete computation type
+- **THEN** Exomem uses bounded CPU only when that exact type is reported supported on CPU
+- **AND** otherwise refuses instead of discarding the override or starting an unsafe fallback
+
+#### Scenario: Explicit CUDA never falls back silently
+- **WHEN** the operator explicitly requests CUDA and CUDA admission or the selected computation type fails
+- **THEN** Exomem returns a typed compute-runtime refusal
+- **AND** it does not retry or continue on CPU
+
+#### Scenario: Automatic computation policy cannot be re-enabled
+- **WHEN** the operator sets `EXOMEM_ASR_COMPUTE_TYPE=auto`
+- **THEN** Exomem refuses the value and names the concrete supported choices
+- **AND** CTranslate2 4.8's incident-causing automatic INT8 selection is never entered
 
 ### Requirement: Compute infrastructure failure is not an artifact failure
 An accelerator, native-runtime, or compute-initialization failure SHALL durably block the media job before publishing its canonical failure sidecar, then converge either partial state after a crash without re-entering compute. The source artifact SHALL remain unchanged, and status SHALL NOT advise repairing or replacing it. Exomem SHALL NOT silently retry the same failed accelerator job on an unbounded CPU path. Retained legacy failed rows and sidecars with known CUDA/cuBLAS/cuDNN signatures SHALL receive corrected status immediately and SHALL converge to the blocked contract during bounded worker recovery.

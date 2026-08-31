@@ -1,6 +1,6 @@
 ## Why
 
-Legitimate media and indexing work can consume nearly every host CPU through independent native thread pools, making a self-hosted desktop and even WSL control traffic unusable. The disposable-worker contract bounds residency and process count but does not bound active compute, while the CUDA ASR path forces an INT8 mode that current CTranslate2 disables on Blackwell and reports accelerator failures as corrupt input.
+Legitimate media and indexing work can consume nearly every host CPU through independent native thread pools, making a self-hosted desktop and even WSL control traffic unusable. The disposable-worker contract bounds residency and process count but does not bound active compute, while the CUDA ASR path forces an INT8 mode that fails on Blackwell, is still incorrectly selected by CTranslate2 4.8's automatic policy, and reports accelerator failures as corrupt input.
 
 ## What Changes
 
