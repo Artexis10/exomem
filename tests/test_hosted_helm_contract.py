@@ -641,6 +641,54 @@ def test_platform_renders_real_provisioner_composition() -> None:
     assert rule["services"] == [{"name": "exomem-provisioner", "port": 8080}]
 
 
+def test_platform_limits_provisioner_authorization_secret_access_to_required_lifecycle() -> None:
+    documents = _render(PLATFORM, PLATFORM / "values.validation.yaml", namespace="exomem-platform")
+
+    provisioner_role = _find(documents, "ClusterRole", "exomem-cell-provisioner")
+    secret_rules = {
+        tuple(rule.get("resourceNames", [])): set(rule["verbs"])
+        for rule in provisioner_role["rules"]
+        if rule.get("apiGroups") == [""] and rule.get("resources") == ["secrets"]
+    }
+    assert secret_rules[()] == {"create"}
+    assert secret_rules[("exomem-cell-credentials",)] == {
+        "delete",
+        "get",
+        "patch",
+        "update",
+    }
+    assert secret_rules.get(("exomem-authorization-session",)) == {
+        "get",
+        "patch",
+        "update",
+    }
+
+    provisioner_scope = _find(
+        documents,
+        "ValidatingAdmissionPolicy",
+        "exomem-provisioner-scope",
+    )
+    validations = {
+        validation["message"]: " ".join(validation["expression"].split())
+        for validation in provisioner_scope["spec"]["validations"]
+    }
+    namespace_scope = validations[
+        "The hosted provisioner may mutate only fixed resources in opaque exo-* tenant namespaces."
+    ]
+    assert "oldObject.metadata.name == 'exomem-cell-credentials'" in namespace_scope
+    assert (
+        "object.metadata.namein['exomem-cell-credentials','exomem-authorization-session']"
+    ) in namespace_scope.replace(" ", "")
+
+    fixed_names = validations[
+        "The hosted provisioner may mutate only exact fixed names derived from the tenant namespace."
+    ]
+    assert (
+        "request.operation=='DELETE'?variables.name=='exomem-cell-credentials':"
+        "variables.namein['exomem-cell-credentials','exomem-authorization-session']"
+    ) in fixed_names.replace(" ", "")
+
+
 def test_platform_uses_the_selected_v3_rollback_runtime_everywhere(tmp_path: Path) -> None:
     values = yaml.safe_load((PLATFORM / "values.validation.yaml").read_text(encoding="utf-8"))
     lock = _v3_lock(json.loads(values["provisioner"]["deploymentLockJson"]))
