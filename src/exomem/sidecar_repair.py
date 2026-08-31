@@ -66,6 +66,14 @@ def _segments(body: str) -> list[tuple[str, str]]:
     return out
 
 
+def _is_repeated_extraction_residual(residual: str, extraction: str) -> bool:
+    """Whether a preserved residual is only whole copies of the extraction."""
+    if not extraction:
+        return False
+    copy = re.escape(extraction)
+    return re.fullmatch(rf"{copy}(?:\s+{copy})*", residual) is not None
+
+
 @dataclass(frozen=True)
 class SidecarDamage:
     """What one over-rendered sidecar contains."""
@@ -138,8 +146,10 @@ def repair(content: str) -> str:
     )
 
     notes: list[str] = []
-    for prose, _extraction in segments:
+    for index, (prose, _extraction) in enumerate(segments):
         residual = _BOILERPLATE_RE.sub("", prose).strip()
+        if index and _is_repeated_extraction_residual(residual, best):
+            continue
         if residual and residual not in notes:
             notes.append(residual)
 

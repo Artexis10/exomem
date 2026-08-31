@@ -31,6 +31,15 @@ def _sidecar(*levels: str) -> str:
     return FRONTMATTER + "\n" + body
 
 
+def _sidecar_with_preserved_residual(extraction: str, residual: str) -> str:
+    return (
+        FRONTMATTER
+        + "\n"
+        + f"{HEAD}\n## Extracted text\n\n{extraction}\n\n"
+        + f"## Preserved notes\n\n{residual}\n"
+    )
+
+
 def test_clean_sidecar_is_untouched() -> None:
     content = _sidecar("The only extraction.")
     assert sidecar_repair.analyze(content, Path("report.pdf.md")) is None
@@ -112,6 +121,30 @@ def test_extraction_containing_h2_headings_survives() -> None:
     repaired = sidecar_repair.repair(content)
     assert table in repaired
     assert sidecar_repair.repair_is_safe(content, repaired)
+
+
+def test_repeated_extraction_residual_collapses_without_preserved_notes() -> None:
+    extraction = "# Report\n\n## Findings\n\nA result.\n\n### Detail\n\nMore detail."
+    content = _sidecar_with_preserved_residual(extraction, "\n\n\n".join([extraction] * 720))
+
+    repaired = sidecar_repair.repair(content)
+
+    assert repaired.count(extraction) == 1
+    assert sidecar_repair.PRESERVED_HEADING not in repaired
+    assert sidecar_repair.repair_is_safe(content, repaired)
+    assert sidecar_repair.repair(repaired) == repaired
+
+
+def test_repeated_extraction_residual_with_prose_is_preserved() -> None:
+    extraction = "# Report\n\n## Findings\n\nA result."
+    prose = "The author confirmed this finding after the call."
+    content = _sidecar_with_preserved_residual(extraction, f"{extraction}\n\n{prose}")
+
+    repaired = sidecar_repair.repair(content)
+
+    assert sidecar_repair.PRESERVED_HEADING in repaired
+    assert repaired.count(extraction) == 2
+    assert prose in repaired
 
 
 def test_hand_written_prose_is_kept_once() -> None:
