@@ -36,7 +36,9 @@ POLICY_ACTIVATION_TERMINAL_SCHEMA = (
 
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 _COMMITTED_EVENT = re.compile(r"([0-9a-f]{64}):committed\Z")
-_POLICY_GATE_PHASES = frozenset({"policy-active", "publishing", "rebuilding"})
+_POLICY_GATE_PHASES = frozenset(
+    {"policy-active", "publishing", "rebuilding", "verifying"}
+)
 _DEFAULT_POLICY_GATE_PHASES = frozenset({"policy-active", "publishing"})
 _BATCH_FIELDS = frozenset(
     {

@@ -215,6 +215,124 @@ def _content_batch_event(
     return batch, event, journal
 
 
+def _rebuild_event(vault: Path, *, effect_ordinal: int = 18):
+    from exomem.governance import consolidation_effect_coordinator
+
+    parent = _append_policy_active_parent(vault)
+    content = consolidation_receipts.build_intent(
+        kind="content-batch",
+        run_id=RUN_ID,
+        operation_id=OPERATION_ID,
+        phase="publishing",
+        effect_ordinal=effect_ordinal - 1,
+        batch_ordinal=0,
+        request_digest=REQUEST_DIGEST,
+        prior_digest=hashlib.sha256(b"batch-prior").hexdigest(),
+        prepared_digest=hashlib.sha256(b"batch-prepared").hexdigest(),
+        target_digest=hashlib.sha256(b"batch-target").hexdigest(),
+        evidence=consolidation_receipts.build_evidence(
+            kind="content-batch",
+            digests={
+                "batch_manifest_digest": hashlib.sha256(b"batch-manifest").hexdigest(),
+                "classification_digest": hashlib.sha256(b"classification").hexdigest(),
+            },
+        ),
+        semantic_parent_event_id=str(parent["event_id"]),
+        semantic_parent_payload_digest=str(parent["consolidation_event"]["payload_digest"]),
+    )
+    content_intent = consolidation_receipts.append_intent(vault, content, timestamp=T0)
+    content_terminal = consolidation_receipts.append_terminal(
+        vault,
+        intent_event_id=str(content_intent["event_id"]),
+        role="committed",
+        observed_digest=str(content.payload["target_digest"]),
+        timestamp=T0,
+    )
+    event = consolidation_receipts.build_intent(
+        kind="rebuild-kind",
+        run_id=RUN_ID,
+        operation_id=OPERATION_ID,
+        phase="rebuilding",
+        effect_ordinal=effect_ordinal,
+        rebuild_ordinal=0,
+        request_digest=REQUEST_DIGEST,
+        prior_digest=PRIOR_DIGEST,
+        target_digest=TARGET_DIGEST,
+        evidence=consolidation_receipts.build_evidence(
+            kind="rebuild-kind",
+            digests={"rebuild_basis_digest": hashlib.sha256(b"rebuild-basis").hexdigest()},
+        ),
+        semantic_parent_event_id=str(content_terminal["event_id"]),
+        semantic_parent_payload_digest=str(
+            content_terminal["consolidation_event"]["payload_digest"]
+        ),
+    )
+    journal = consolidation_effect_coordinator.ConsolidationEffectJournalStore(
+        vault,
+        run_id=RUN_ID,
+        effect_ordinal=effect_ordinal,
+    )
+    return event, journal
+
+
+def test_rebuild_effect_commits_a_learned_result_and_replays_without_rerun(
+    vault: Path,
+) -> None:
+    from exomem.governance import consolidation_effect_coordinator
+
+    event, journal = _rebuild_event(vault)
+    artifact_fingerprint = hashlib.sha256(b"rebuilt-artifact").hexdigest()
+    recorded: str | None = None
+    rebuilds = 0
+
+    def classify() -> consolidation_effect_coordinator.EffectObservation:
+        return consolidation_effect_coordinator.EffectObservation(
+            state="prior" if recorded is None else "target",
+            digest=PRIOR_DIGEST if recorded is None else recorded,
+        )
+
+    def rebuild() -> None:
+        nonlocal rebuilds, recorded
+        rebuilds += 1
+        recorded = artifact_fingerprint
+
+    result = consolidation_effect_coordinator._execute_effect(  # noqa: SLF001
+        vault_root=vault,
+        event=event,
+        journal=journal,
+        classify=classify,
+        apply_effect=rebuild,
+        timestamp=T0,
+    )
+
+    assert result.role == "committed"
+    assert result.observed_digest == artifact_fingerprint
+    assert result.observed_digest != event.payload["target_digest"]
+    assert rebuilds == 1
+    terminal_records = [
+        record
+        for record in consolidation_receipts._active_records(vault)  # noqa: SLF001
+        if record.get("event_id") == result.terminal.event_id
+    ]
+    assert len(terminal_records) == 1
+    assert (
+        terminal_records[0]["consolidation_event"]["evidence"]["rebuild_result_digest"]
+        == artifact_fingerprint
+    )
+
+    replayed = consolidation_effect_coordinator._execute_effect(  # noqa: SLF001
+        vault_root=vault,
+        event=event,
+        journal=journal,
+        classify=classify,
+        apply_effect=lambda: pytest.fail("final rebuild must not rerun"),
+        timestamp=T0,
+    )
+
+    assert replayed == result
+    assert rebuilds == 1
+
+
 def test_effect_uses_exact_receipt_first_order_and_persists_references(
     vault: Path,
     monkeypatch: pytest.MonkeyPatch,

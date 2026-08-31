@@ -75,7 +75,7 @@ _EVIDENCE_FIELDS = {
         "source_consume_event_digest",
         "source_receipt_head_digest",
     ),
-    "rebuild-kind": ("rebuild_basis_digest", "rebuild_result_digest"),
+    "rebuild-kind": ("rebuild_basis_digest",),
     "in-process-probe": (
         "probe_digest",
         "probe_result_digest",
@@ -586,6 +586,166 @@ def test_kind_specific_evidence_is_closed_and_hashed_by_the_builder() -> None:
         consolidation_receipts.build_evidence(
             kind="content-batch",
             digests={"batch_manifest_digest": "a" * 64},
+        )
+
+
+def test_rebuild_receipt_learns_the_actual_result_only_after_commit() -> None:
+    from exomem.governance import consolidation_receipts
+
+    basis = hashlib.sha256(b"rebuild-basis").hexdigest()
+    intent = consolidation_receipts.build_intent(
+        kind="rebuild-kind",
+        run_id=RUN_ID,
+        operation_id=OPERATION_ID,
+        phase="rebuilding",
+        effect_ordinal=8,
+        rebuild_ordinal=0,
+        request_digest=REQUEST_DIGEST,
+        prior_digest=PRIOR_DIGEST,
+        target_digest=TARGET_DIGEST,
+        evidence=consolidation_receipts.build_evidence(
+            kind="rebuild-kind",
+            digests={"rebuild_basis_digest": basis},
+        ),
+        semantic_parent_event_id=PARENT_EVENT_ID,
+        semantic_parent_payload_digest=PARENT_PAYLOAD_DIGEST,
+    )
+
+    assert intent.payload["evidence"] == {
+        "schema": "exomem.consolidation-event-evidence/rebuild-kind/v1",
+        "kind": "rebuild-kind",
+        "rebuild_basis_digest": basis,
+    }
+    terminal = consolidation_receipts.build_terminal(
+        intent,
+        role="committed",
+        observed_digest=OBSERVED_DIGEST,
+    )
+    assert terminal.payload["target_digest"] == TARGET_DIGEST
+    assert terminal.payload["observed_digest"] == OBSERVED_DIGEST
+    assert terminal.payload["evidence"] == {
+        "schema": "exomem.consolidation-event-evidence/rebuild-kind/v1",
+        "kind": "rebuild-kind",
+        "rebuild_basis_digest": basis,
+        "rebuild_result_digest": OBSERVED_DIGEST,
+    }
+    assert (
+        consolidation_receipts.validate_nested(
+            terminal.payload,
+            outer_phase="committed",
+        )["payload_digest"]
+        == terminal.payload_digest
+    )
+    aborted = consolidation_receipts.build_terminal(
+        intent,
+        role="aborted",
+        observed_digest=PRIOR_DIGEST,
+    )
+    assert "rebuild_result_digest" not in aborted.payload["evidence"]
+    assert (
+        consolidation_receipts.validate_nested(
+            aborted.payload,
+            outer_phase="aborted",
+        )["payload_digest"]
+        == aborted.payload_digest
+    )
+
+
+@pytest.mark.parametrize(
+    ("kind", "basis_field"),
+    (
+        ("abort-rebuild-kind", "abort_basis_digest"),
+        ("rollback-rebuild-kind", "rebuild_basis_digest"),
+    ),
+)
+def test_every_rebuild_branch_learns_its_result_only_at_commit(
+    kind: str,
+    basis_field: str,
+) -> None:
+    from exomem.governance import consolidation_receipts
+
+    basis = hashlib.sha256(f"{kind}:basis".encode()).hexdigest()
+    evidence = consolidation_receipts.build_evidence(
+        kind=kind,
+        digests={basis_field: basis},
+    )
+    assert "rebuild_result_digest" not in evidence
+    intent = consolidation_receipts.build_intent(
+        kind=kind,
+        run_id=RUN_ID,
+        operation_id=OPERATION_ID,
+        phase="rebuilding",
+        effect_ordinal=8,
+        rebuild_ordinal=0,
+        request_digest=REQUEST_DIGEST,
+        prior_digest=PRIOR_DIGEST,
+        target_digest=TARGET_DIGEST,
+        evidence=evidence,
+        semantic_parent_event_id=PARENT_EVENT_ID,
+        semantic_parent_payload_digest=PARENT_PAYLOAD_DIGEST,
+    )
+
+    terminal = consolidation_receipts.build_terminal(
+        intent,
+        role="committed",
+        observed_digest=OBSERVED_DIGEST,
+    )
+
+    assert terminal.payload["evidence"][basis_field] == basis
+    assert (
+        terminal.payload["evidence"]["rebuild_result_digest"]
+        == OBSERVED_DIGEST
+    )
+
+
+def test_rebuild_intent_refuses_a_fabricated_future_result() -> None:
+    from exomem.governance import consolidation_receipts
+
+    with pytest.raises(
+        consolidation_receipts.ConsolidationReceiptUnavailable,
+        match="^CONSOLIDATION_RECEIPT_UNAVAILABLE$",
+    ):
+        consolidation_receipts.build_evidence(
+            kind="rebuild-kind",
+            digests={
+                "rebuild_basis_digest": "a" * 64,
+                "rebuild_result_digest": "b" * 64,
+            },
+        )
+
+
+def test_rebuild_terminal_refuses_a_result_different_from_observation() -> None:
+    from exomem.governance import consolidation_receipts
+
+    event = consolidation_receipts.build_intent(
+        kind="rebuild-kind",
+        run_id=RUN_ID,
+        operation_id=OPERATION_ID,
+        phase="rebuilding",
+        effect_ordinal=8,
+        rebuild_ordinal=0,
+        request_digest=REQUEST_DIGEST,
+        prior_digest=PRIOR_DIGEST,
+        target_digest=TARGET_DIGEST,
+        evidence=_evidence("rebuild-kind"),
+        semantic_parent_event_id=PARENT_EVENT_ID,
+        semantic_parent_payload_digest=PARENT_PAYLOAD_DIGEST,
+    )
+    terminal = consolidation_receipts.build_terminal(
+        event,
+        role="committed",
+        observed_digest=OBSERVED_DIGEST,
+    )
+    changed = copy.deepcopy(dict(terminal.payload))
+    changed["evidence"]["rebuild_result_digest"] = "f" * 64
+
+    with pytest.raises(
+        consolidation_receipts.ConsolidationReceiptUnavailable,
+        match="^CONSOLIDATION_RECEIPT_UNAVAILABLE$",
+    ):
+        consolidation_receipts.validate_nested(
+            changed,
+            outer_phase="committed",
         )
 
 
