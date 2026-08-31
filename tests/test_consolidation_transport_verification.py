@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import dataclasses
 import hashlib
 import pickle
 import threading
@@ -77,14 +78,14 @@ def _sealed_at_transport_verifying(vault: Path) -> None:
         )
 
 
-def _probe_authority():
+def _probe_authority(*, journal_digest: str = JOURNAL_DIGEST):
     from exomem.governance import consolidation_authority
 
     return consolidation_authority.issue_authority(
         vault_binding_digest=VAULT_BINDING,
         run_id=RUN_ID,
         operation_id=OPERATION_ID,
-        journal_digest=JOURNAL_DIGEST,
+        journal_digest=journal_digest,
         phase="transport-verifying",
         action="probe",
     )
@@ -292,7 +293,6 @@ def test_exact_supervised_route_bypasses_only_read_admission_and_never_request_a
     )
     route = consolidation_transport_verification.issue_transport_probe_route(
         _probe_authority(),
-        journal_digest=JOURNAL_DIGEST,
         plan=plan,
         probe=probe,
     )
@@ -348,7 +348,6 @@ def test_transport_route_is_process_local_unforgeable_and_not_inherited_by_threa
     probe = plan.probes[0]
     route = consolidation_transport_verification.issue_transport_probe_route(
         _probe_authority(),
-        journal_digest=JOURNAL_DIGEST,
         plan=plan,
         probe=probe,
     )
@@ -395,7 +394,6 @@ def test_transport_route_is_revoked_in_async_child_when_parent_scope_exits(
     probe = plan.probes[0]
     route = consolidation_transport_verification.issue_transport_probe_route(
         _probe_authority(),
-        journal_digest=JOURNAL_DIGEST,
         plan=plan,
         probe=probe,
     )
@@ -445,14 +443,12 @@ def test_nonmember_probe_cannot_issue_or_enter_a_transport_route() -> None:
     ):
         consolidation_transport_verification.issue_transport_probe_route(
             _probe_authority(),
-            journal_digest=JOURNAL_DIGEST,
             plan=plan,
             probe=forged_probe,
         )
 
     route = consolidation_transport_verification.issue_transport_probe_route(
         _probe_authority(),
-        journal_digest=JOURNAL_DIGEST,
         plan=plan,
         probe=plan.probes[0],
     )
@@ -465,6 +461,69 @@ def test_nonmember_probe_cannot_issue_or_enter_a_transport_route() -> None:
             probe=forged_probe,
         ):
             pass
+
+
+def test_self_consistent_but_never_admitted_plan_cannot_issue_a_route() -> None:
+    from exomem.governance import consolidation_transport_verification as transport
+
+    plan = _transport_plan()
+    original = plan.probes[0]
+    preliminary = dataclasses.replace(
+        original,
+        contract_digest="c" * 64,
+        probe_digest="0" * 64,
+    )
+    forged_probe = dataclasses.replace(
+        preliminary,
+        probe_digest=transport._framed_digest(  # noqa: SLF001 - adversarial fixture
+            transport._PROBE_DOMAIN,  # noqa: SLF001 - adversarial fixture
+            transport._probe_value(preliminary),  # noqa: SLF001 - adversarial fixture
+        ),
+    )
+    forged_probes = (forged_probe, *plan.probes[1:])
+    value = {
+        "schema": plan.schema,
+        "basis": {
+            **transport._basis_value(plan.basis),  # noqa: SLF001 - adversarial fixture
+            "basis_digest": plan.basis.digest,
+        },
+        "probes": tuple(
+            {
+                **transport._probe_value(candidate),  # noqa: SLF001 - adversarial fixture
+                "probe_digest": candidate.probe_digest,
+            }
+            for candidate in forged_probes
+        ),
+    }
+    forged_plan = dataclasses.replace(
+        plan,
+        probes=forged_probes,
+        digest=transport._framed_digest(  # noqa: SLF001 - adversarial fixture
+            transport._PLAN_DOMAIN,  # noqa: SLF001 - adversarial fixture
+            value,
+        ),
+    )
+    with pytest.raises(transport.ConsolidationTransportVerificationUnavailable):
+        transport.issue_transport_probe_route(
+            _probe_authority(),
+            plan=forged_plan,
+            probe=forged_probe,
+        )
+
+
+def test_exact_destination_binding_journal_cannot_be_rebound_at_route_issuance() -> None:
+    from exomem.governance import consolidation_transport_verification
+
+    plan = _transport_plan()
+    other_journal = "d" * 64
+    with pytest.raises(
+        consolidation_transport_verification.ConsolidationTransportVerificationUnavailable
+    ):
+        consolidation_transport_verification.issue_transport_probe_route(
+            _probe_authority(journal_digest=other_journal),
+            plan=plan,
+            probe=plan.probes[0],
+        )
 
 
 def test_wrong_transport_authority_or_binding_never_opens_probe_route() -> None:
@@ -486,7 +545,6 @@ def test_wrong_transport_authority_or_binding_never_opens_probe_route() -> None:
     ):
         consolidation_transport_verification.issue_transport_probe_route(
             wrong_phase,
-            journal_digest=JOURNAL_DIGEST,
             plan=(plan := _transport_plan()),
             probe=plan.probes[0],
         )
@@ -494,8 +552,7 @@ def test_wrong_transport_authority_or_binding_never_opens_probe_route() -> None:
         consolidation_transport_verification.ConsolidationTransportVerificationUnavailable
     ):
         consolidation_transport_verification.issue_transport_probe_route(
-            _probe_authority(),
-            journal_digest="f" * 64,
+            _probe_authority(journal_digest="f" * 64),
             plan=plan,
             probe=plan.probes[0],
         )

@@ -7,7 +7,7 @@ import re
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal, NoReturn, SupportsIndex, cast
 
 from . import consolidation_authority, consolidation_plan
@@ -40,6 +40,7 @@ _MAX_PROBES = 1024
 _MAX_SAFE_INTEGER = (1 << 53) - 1
 _ROUTE_SEAL = object()
 _EXACT_DESTINATION_SEAL = object()
+_PLAN_SEAL = object()
 _ACTIVE_ROUTE: ContextVar[TransportProbeRoute | None] = ContextVar(
     "exomem_consolidation_transport_probe_route",
     default=None,
@@ -151,6 +152,7 @@ class TransportVerificationBasis:
     vault_binding_digest: str
     run_id: str
     operation_id: str
+    journal_digest: str
     plan_digest: str
     verification_manifest_digest: str
     canonical_census_digest: str
@@ -182,12 +184,29 @@ class TransportProbe:
     probe_digest: str
 
 
+class _PlanAdmission:
+    __slots__ = ("__plan_digest", "__seal")
+    __plan_digest: str
+    __seal: object
+
+    def __init__(self, plan_digest: str, seal: object) -> None:
+        self.__plan_digest = plan_digest
+        self.__seal = seal
+
+    def _matches(self, plan_digest: str) -> bool:
+        return self.__seal is _PLAN_SEAL and self.__plan_digest == plan_digest
+
+    def __reduce__(self) -> NoReturn:
+        raise TypeError("transport verification plan admission is process-local")
+
+
 @dataclass(frozen=True, slots=True)
 class TransportVerificationPlan:
     schema: str
     basis: TransportVerificationBasis
     probes: tuple[TransportProbe, ...]
     digest: str
+    _admission: object = field(repr=False, compare=False)
 
 
 def _basis_value(basis: TransportVerificationBasis) -> dict[str, object]:
@@ -196,6 +215,7 @@ def _basis_value(basis: TransportVerificationBasis) -> dict[str, object]:
         "vault_binding_digest": basis.vault_binding_digest,
         "run_id": basis.run_id,
         "operation_id": basis.operation_id,
+        "journal_digest": basis.journal_digest,
         "plan_digest": basis.plan_digest,
         "verification_manifest_digest": basis.verification_manifest_digest,
         "canonical_census_digest": basis.canonical_census_digest,
@@ -227,7 +247,12 @@ def _basis_input_value(basis: TransportVerificationBasis) -> dict[str, object]:
     return {
         key: value
         for key, value in _basis_value(basis).items()
-        if key not in {"destination_kind", "exact_destination_binding_digest"}
+        if key
+        not in {
+            "destination_kind",
+            "exact_destination_binding_digest",
+            "journal_digest",
+        }
     }
 
 
@@ -240,6 +265,7 @@ def _basis_from_input(value: object) -> TransportVerificationBasis:
         vault_binding_digest=_digest(row["vault_binding_digest"]),
         run_id=_uuid4(row["run_id"]),
         operation_id=_uuid4(row["operation_id"]),
+        journal_digest="0" * 64,
         plan_digest=_digest(row["plan_digest"]),
         verification_manifest_digest=_digest(row["verification_manifest_digest"]),
         canonical_census_digest=_digest(row["canonical_census_digest"]),
@@ -271,15 +297,22 @@ def _basis_from_input(value: object) -> TransportVerificationBasis:
 class ExactDestinationBinding:
     """Opaque control proof that basis facts came from the exact stopped cell."""
 
-    __slots__ = ("__basis_fingerprint", "__binding_digest", "__seal")
+    __slots__ = (
+        "__basis_fingerprint",
+        "__binding_digest",
+        "__journal_digest",
+        "__seal",
+    )
     __basis_fingerprint: str
     __binding_digest: str
+    __journal_digest: str
     __seal: object
 
     def __init__(
         self,
         basis_fingerprint: str,
         binding_digest: str,
+        journal_digest: str,
         seal: object,
     ) -> None:
         object.__setattr__(
@@ -291,6 +324,11 @@ class ExactDestinationBinding:
             self,
             "_ExactDestinationBinding__binding_digest",
             binding_digest,
+        )
+        object.__setattr__(
+            self,
+            "_ExactDestinationBinding__journal_digest",
+            journal_digest,
         )
         object.__setattr__(self, "_ExactDestinationBinding__seal", seal)
 
@@ -321,6 +359,11 @@ class ExactDestinationBinding:
         if self.__seal is not _EXACT_DESTINATION_SEAL:
             _fail()
         return self.__binding_digest
+
+    def _journal_digest(self) -> str:
+        if self.__seal is not _EXACT_DESTINATION_SEAL:
+            _fail()
+        return self.__journal_digest
 
 
 def issue_exact_destination_binding(
@@ -360,6 +403,7 @@ def issue_exact_destination_binding(
     return ExactDestinationBinding(
         basis_fingerprint,
         binding_digest,
+        checked_journal,
         _EXACT_DESTINATION_SEAL,
     )
 
@@ -376,14 +420,21 @@ def _checked_basis(
     ):
         _fail()
     exact_digest = exact_destination_binding._binding_digest()
+    journal_digest = exact_destination_binding._journal_digest()
     basis = TransportVerificationBasis(
         **{
             **{
                 field: getattr(basis, field)
                 for field in TransportVerificationBasis.__slots__
-                if field not in {"digest", "exact_destination_binding_digest"}
+                if field
+                not in {
+                    "digest",
+                    "exact_destination_binding_digest",
+                    "journal_digest",
+                }
             },
             "exact_destination_binding_digest": exact_digest,
+            "journal_digest": journal_digest,
             "digest": "0" * 64,
         }
     )
@@ -478,11 +529,13 @@ def build_transport_verification_plan(
             for probe in probes
         ),
     }
+    plan_digest = _framed_digest(_PLAN_DOMAIN, value)
     return TransportVerificationPlan(
         schema=TRANSPORT_VERIFICATION_PLAN_SCHEMA,
         basis=checked_basis,
         probes=probes,
-        digest=_framed_digest(_PLAN_DOMAIN, value),
+        digest=plan_digest,
+        _admission=_PlanAdmission(plan_digest, _PLAN_SEAL),
     )
 
 
@@ -491,6 +544,10 @@ def _checked_plan_member(
     probe: object,
 ) -> tuple[TransportVerificationPlan, TransportProbe]:
     if type(plan) is not TransportVerificationPlan or type(probe) is not TransportProbe:
+        _fail()
+    if type(plan._admission) is not _PlanAdmission or not plan._admission._matches(
+        plan.digest
+    ):
         _fail()
     basis = plan.basis
     if (
@@ -507,6 +564,7 @@ def _checked_plan_member(
         _fail()
     for digest in (
         basis.vault_binding_digest,
+        basis.journal_digest,
         basis.plan_digest,
         basis.verification_manifest_digest,
         basis.canonical_census_digest,
@@ -681,7 +739,6 @@ class TransportProbeRoute:
 def issue_transport_probe_route(
     authority: object,
     *,
-    journal_digest: str,
     plan: object,
     probe: object,
 ) -> TransportProbeRoute:
@@ -691,7 +748,7 @@ def issue_transport_probe_route(
     checked_vault = checked_plan.basis.vault_binding_digest
     checked_run = checked_plan.basis.run_id
     checked_operation = checked_plan.basis.operation_id
-    checked_journal = _digest(journal_digest)
+    checked_journal = checked_plan.basis.journal_digest
     try:
         consolidation_authority.require_authority(
             authority,
