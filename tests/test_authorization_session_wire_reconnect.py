@@ -14,7 +14,7 @@ import pytest
 from record_fixtures import copy_dataset_fixture
 from starlette.testclient import TestClient
 
-from exomem import commands, metrics, server, video_frames, writer_lease
+from exomem import commands, metrics, server, server_runtime, video_frames, writer_lease
 from exomem.governance import (
     authorization_custody,
     authorization_serving_membership,
@@ -331,6 +331,11 @@ def _configure_v4_authority(
 
 def _build_replica(vault: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(server, "load_dotenv", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        server_runtime.LocalRuntimeActivation,
+        "start",
+        lambda self: None,
+    )
     monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
     monkeypatch.setenv(
         "EXOMEM_WRITER_LEASE_STATE_DIR", str(vault.parent / "writer-lease-state")
