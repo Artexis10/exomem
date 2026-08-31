@@ -27,6 +27,7 @@ from .kbdir import kb_dirname
 SCHEMA_VERSION = 1
 MIN_REQUIRED_SAMPLE = 5
 DEFAULT_RELATION_PROMOTION_THRESHOLD = 3
+RELATION_RAW_VARIANT_LIMIT = 5
 # Fixed generic description for reviewed-corpus category candidates. Inference
 # never infers semantics, so every proposed definition shares this public-safe
 # text; a human reviewer refines it before saving.
@@ -370,6 +371,8 @@ def infer_relation_registry(
     *,
     project: str | None = None,
     page_type: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
     include_model_suggestions: bool = False,
     recurrence_threshold: int = DEFAULT_RELATION_PROMOTION_THRESHOLD,
 ) -> dict[str, Any]:
@@ -380,6 +383,15 @@ def infer_relation_registry(
     pages, observations = _scan_relation_observations(
         vault_root, project=project, page_type=page_type, registry=registry
     )
+    start = _origin_date_bound(date_from, "date_from")
+    end = _origin_date_bound(date_to, "date_to")
+    if start and end and start > end:
+        raise ValueError("INVALID_DATE_SCOPE: date_from must not be after date_to")
+    included_paths, denominators = _date_scoped_relation_pages(pages, start, end)
+    if start or end:
+        observations = [
+            item for item in observations if item["source_path"] in included_paths
+        ]
     grouped: dict[str, dict[str, Any]] = {}
     for item in observations:
         key = str(item["raw_relation"])
@@ -403,13 +415,73 @@ def infer_relation_registry(
             entry["examples"].append(example)
     counts = Counter(item["registry_status"] for item in observations)
     proposal = relation_registry_proposal(registry)
-    for item in grouped.values():
+    promotion_groups: dict[str, dict[str, Any]] = {}
+    for item in sorted(grouped.values(), key=lambda entry: entry["raw_relation"]):
+        alias = relation_registry.normalize_relation(item["raw_relation"])
+        entry = promotion_groups.setdefault(
+            alias,
+            {
+                "raw_relation": alias,
+                "registry_status": item["registry_status"],
+                "count": 0,
+                "examples": [],
+                "raw_variants": [],
+            },
+        )
+        entry["count"] += item["count"]
+        for example in item["examples"]:
+            if example not in entry["examples"] and len(entry["examples"]) < 5:
+                entry["examples"].append(example)
+        entry["raw_variants"].append(
+            {
+                "raw_relation": item["raw_relation"],
+                "count": item["count"],
+                "examples": list(item["examples"]),
+            }
+        )
+    promotion_candidates: list[dict[str, Any]] = []
+    eligible_candidates = [
+        item
+        for item in sorted(
+            promotion_groups.values(), key=lambda entry: entry["raw_relation"]
+        )
+        if item["registry_status"] == "unregistered"
+        and item["count"] >= recurrence_threshold
+    ]
+    reserved_identities = (
+        set(registry.keys)
+        | set(registry.aliases)
+        | {
+            relation_registry.normalize_relation(item["raw_relation"])
+            for item in eligible_candidates
+        }
+    )
+    for item in eligible_candidates:
         raw = item["raw_relation"]
-        if (
-            item["registry_status"] == "unregistered"
-            and item["count"] >= recurrence_threshold
-        ):
-            proposal["extensions"].setdefault(raw, {"parent": None, "description": None})
+        alias = relation_registry.normalize_relation(raw)
+        base = relation_registry.extension_key_for_label(alias)
+        canonical = base
+        suffix = 2
+        while canonical in reserved_identities:
+            canonical = f"{base}_{suffix}"
+            suffix += 1
+        reserved_identities.add(canonical)
+        promotion_candidates.append(
+            {
+                "canonical": canonical,
+                "aliases": [alias],
+                "parent": None,
+                "description": None,
+                "direction": None,
+                "count": item["count"],
+                "examples": list(item["examples"]),
+                "raw_variants": item["raw_variants"][:RELATION_RAW_VARIANT_LIMIT],
+                "raw_variants_total": len(item["raw_variants"]),
+                "raw_variants_truncated": (
+                    len(item["raw_variants"]) > RELATION_RAW_VARIANT_LIMIT
+                ),
+            }
+        )
     warnings: list[dict[str, str]] = []
     suggestions: list[dict[str, Any]] = []
     if include_model_suggestions:
@@ -426,6 +498,7 @@ def infer_relation_registry(
         "subject": "relations",
         "sample_size": len(pages),
         "observation_count": len(observations),
+        "date_denominators": denominators,
         "counts": {
             key: counts.get(key, 0)
             for key in (
@@ -460,6 +533,7 @@ def infer_relation_registry(
             grouped.values(), key=lambda item: (-item["count"], item["raw_relation"])
         ),
         "proposal": proposal,
+        "promotion_candidates": promotion_candidates,
         "content_hash": registry.extension_hash,
         "warnings": warnings,
         "model_suggestions": suggestions,
@@ -467,6 +541,59 @@ def infer_relation_registry(
         if include_model_suggestions
         else None,
     }
+
+
+def _origin_date_bound(value: str | None, name: str) -> dt.date | None:
+    if value is None:
+        return None
+    try:
+        return dt.date.fromisoformat(str(value))
+    except ValueError as exc:
+        raise ValueError(f"INVALID_DATE_SCOPE: {name} must be an ISO date") from exc
+
+
+def _date_scoped_relation_pages(
+    pages: list[Any], start: dt.date | None, end: dt.date | None
+) -> tuple[set[str], dict[str, int]]:
+    included: set[str] = set()
+    denominators = {
+        "sampled": len(pages),
+        "included": 0,
+        "undated": 0,
+        "excluded": 0,
+    }
+    for page in pages:
+        date = _frontmatter_origin_date(page.frontmatter.get("created"))
+        if date is None:
+            date = _frontmatter_origin_date(page.frontmatter.get("captured"))
+        if date is None:
+            denominators["undated"] += 1
+            if start is None and end is None:
+                included.add(page.rel_path)
+            continue
+        if (start and date < start) or (end and date > end):
+            denominators["excluded"] += 1
+            continue
+        denominators["included"] += 1
+        included.add(page.rel_path)
+    return included, denominators
+
+
+def _frontmatter_origin_date(value: Any) -> dt.date | None:
+    if isinstance(value, dt.datetime):
+        return value.date()
+    if isinstance(value, dt.date):
+        return value
+    if value is None:
+        return None
+    text = str(value).strip()
+    try:
+        return dt.date.fromisoformat(text)
+    except ValueError:
+        try:
+            return dt.datetime.fromisoformat(text.replace("Z", "+00:00")).date()
+        except ValueError:
+            return None
 
 
 def relation_observations(
@@ -527,7 +654,7 @@ def _scan_relation_observations(
                     )
                 )
         for relation in document.note_relations:
-            raw = relation.kind
+            raw = _authored_note_relation_label(relation.raw, relation.kind)
             resolution = registry.resolve(
                 raw,
                 project=page_project,
@@ -1045,13 +1172,18 @@ def _observation(
     path: str, anchor: str, raw: str, resolution: relation_registry.RelationResolution
 ) -> dict[str, Any]:
     return {
-        "raw_relation": relation_registry.normalize_relation(raw),
+        "raw_relation": raw,
         "canonical": resolution.canonical,
         "parent": resolution.parent,
         "registry_status": resolution.status,
         "source_path": path,
         "source_anchor": anchor,
     }
+
+
+def _authored_note_relation_label(raw: str, fallback: str) -> str:
+    match = re.match(r"^\s*[-*+]\s+([a-z][a-z0-9_.-]{1,80})", raw, re.IGNORECASE)
+    return match.group(1) if match else fallback
 
 
 def save_contract(

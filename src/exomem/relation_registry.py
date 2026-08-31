@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import re
 from collections.abc import Iterable
+from copy import deepcopy
 from dataclasses import dataclass, field
 from functools import lru_cache
 from importlib.resources import files
@@ -30,6 +31,20 @@ _ORIGINS = {
     "wikilink",
 }
 _KIND_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+_DEFINITION_FIELDS = {
+    "description",
+    "parent",
+    "family",
+    "direction",
+    "inverse",
+    "origins",
+    "aliases",
+    "source_kinds",
+    "target_kinds",
+    "scope",
+    "status",
+    "replaced_by",
+}
 
 
 @dataclass(frozen=True)
@@ -86,6 +101,7 @@ class RelationResolution:
     status: str
     definition: RelationDefinition | None
     replacement: str | None = None
+    terminal_replacement: str | None = None
     findings: tuple[dict[str, str], ...] = ()
 
 
@@ -97,6 +113,8 @@ class RelationRegistry:
     extensions: dict[str, RelationDefinition] = field(default_factory=dict)
     aliases: dict[str, str] = field(default_factory=dict)
     findings: tuple[dict[str, str], ...] = ()
+    terminal_replacements: dict[str, str] = field(default_factory=dict)
+    predecessor_closure: dict[str, frozenset[str]] = field(default_factory=dict)
 
     @property
     def keys(self) -> frozenset[str]:
@@ -108,6 +126,12 @@ class RelationRegistry:
 
     def definition(self, key: str) -> RelationDefinition | None:
         return self.core.get(key) or self.extensions.get(key)
+
+    def terminal_replacement(self, key: str) -> str | None:
+        return self.terminal_replacements.get(key)
+
+    def predecessors(self, key: str) -> frozenset[str]:
+        return self.predecessor_closure.get(key, frozenset())
 
     def resolve(
         self,
@@ -156,6 +180,7 @@ class RelationRegistry:
             status=status,
             definition=definition,
             replacement=definition.replaced_by,
+            terminal_replacement=self.terminal_replacement(canonical),
             findings=tuple(findings),
         )
 
@@ -227,6 +252,276 @@ def validate_proposal(proposal: dict[str, Any]) -> list[dict[str, str]]:
     return list(load_registry(proposal=proposal).findings)
 
 
+def require_current_hash(current_hash: str, expected_hash: str) -> None:
+    """Raise the stable optimistic-concurrency error for an outdated proposal."""
+    if current_hash != expected_hash:
+        raise ValueError("STALE_RELATION_REGISTRY: expected_hash does not match current hash")
+
+
+def propose_extension(
+    registry: RelationRegistry,
+    *,
+    requested_label: str,
+    parent: str | None = None,
+    description: str | None = None,
+    direction: str | None = None,
+    namespace: str = "vault",
+    aliases: Iterable[str] = (),
+    inverse: str | None = None,
+    origins: Iterable[str] | None = None,
+    source_kinds: Iterable[str] | None = None,
+    target_kinds: Iterable[str] | None = None,
+    projects: Iterable[str] | None = None,
+    page_types: Iterable[str] | None = None,
+) -> dict[str, Any]:
+    """Build a read-only, reviewed extension delta without inferring meaning."""
+    label = normalize_relation(requested_label)
+    normalized_namespace = normalize_relation(namespace)
+    key = extension_key_for_label(label, normalized_namespace)
+    findings: list[dict[str, str]] = []
+    missing = [
+        field_name
+        for field_name, value in (
+            ("parent", parent),
+            ("description", description),
+            ("direction", direction),
+        )
+        if value is None or (isinstance(value, str) and not value.strip())
+    ]
+    if missing:
+        findings.append(
+            _finding(
+                "incomplete_proposal",
+                "proposal",
+                f"required semantic fields are missing: {', '.join(missing)}",
+            )
+        )
+    clean_aliases = list(
+        dict.fromkeys([label, *(normalize_relation(alias) for alias in aliases)])
+    )
+    if key in registry.keys or key in registry.aliases:
+        findings.append(
+            _finding(
+                "collision",
+                "proposal.requested_label",
+                f"canonical key {key!r} collides",
+            )
+        )
+    value: dict[str, Any] = {
+        "parent": parent,
+        "description": description,
+        "direction": direction,
+        "aliases": clean_aliases,
+    }
+    for field_name, supplied in (
+        ("inverse", inverse),
+        ("origins", origins),
+        ("source_kinds", source_kinds),
+        ("target_kinds", target_kinds),
+    ):
+        if supplied is not None:
+            value[field_name] = supplied if field_name == "inverse" else list(supplied)
+    scope: dict[str, list[str]] = {}
+    if projects is not None:
+        scope["projects"] = list(projects)
+    if page_types is not None:
+        scope["page_types"] = list(page_types)
+    if scope:
+        value["scope"] = scope
+
+    candidate = {
+        "schema_version": EXTENSION_SCHEMA_VERSION,
+        "extensions": {
+            **{
+                existing_key: _definition_document(existing)
+                for existing_key, existing in registry.extensions.items()
+            },
+            key: value,
+        },
+    }
+    if not missing:
+        findings.extend(
+            finding
+            for finding in load_registry(proposal=candidate).findings
+            if finding.get("relation") == key
+        )
+    findings = list(
+        {
+            tuple(sorted(finding.items())): finding
+            for finding in findings
+        }.values()
+    )
+    return {
+        "expected_hash": registry.extension_hash,
+        "delta": {"upsert": {key: value}},
+        "findings": findings,
+    }
+
+
+def _definition_document(definition: RelationDefinition) -> dict[str, Any]:
+    value: dict[str, Any] = {
+        "parent": definition.parent,
+        "description": definition.description,
+        "family": definition.family,
+        "direction": definition.direction,
+        "origins": sorted(definition.origins),
+        "aliases": list(definition.aliases),
+        "source_kinds": sorted(definition.source_kinds),
+        "target_kinds": sorted(definition.target_kinds),
+        "status": definition.status,
+    }
+    if definition.inverse is not None:
+        value["inverse"] = definition.inverse
+    if definition.replaced_by is not None:
+        value["replaced_by"] = definition.replaced_by
+    scope: dict[str, list[str]] = {}
+    if definition.projects:
+        scope["projects"] = sorted(definition.projects)
+    if definition.page_types:
+        scope["page_types"] = sorted(definition.page_types)
+    if scope:
+        value["scope"] = scope
+    return value
+
+
+def merge_extension_delta(current: dict[str, Any], delta: dict[str, Any]) -> dict[str, Any]:
+    """Merge a registry delta purely, preserving existing relation meaning."""
+    if not isinstance(delta, dict) or set(delta) - {"upsert", "deprecate"}:
+        raise ValueError("INVALID_RELATION_DELTA: only upsert and deprecate are allowed")
+    result = deepcopy(current)
+    extensions = result.setdefault("extensions", {})
+    if result.get("schema_version") != EXTENSION_SCHEMA_VERSION or not isinstance(extensions, dict):
+        raise ValueError("INVALID_RELATION_REGISTRY: current registry is invalid")
+    upserts = delta.get("upsert", {})
+    if not isinstance(upserts, dict):
+        raise ValueError("INVALID_RELATION_DELTA: upsert must be an object")
+    for key, patch in upserts.items():
+        if not isinstance(patch, dict):
+            raise ValueError("INVALID_RELATION_DELTA: extension patch must be an object")
+        if set(patch) - _DEFINITION_FIELDS:
+            raise ValueError("INVALID_RELATION_DELTA: extension patch has unknown fields")
+        old = extensions.get(key)
+        if old is None:
+            extensions[key] = deepcopy(patch)
+            continue
+        if not isinstance(old, dict):
+            raise ValueError("INVALID_RELATION_REGISTRY: existing extension is invalid")
+        _merge_existing_extension(old, patch)
+    deprecations = delta.get("deprecate", {})
+    if not isinstance(deprecations, dict):
+        raise ValueError("INVALID_RELATION_DELTA: deprecate must be an object")
+    for key, replacement in deprecations.items():
+        old = extensions.get(key)
+        if not isinstance(old, dict):
+            raise ValueError(f"UNKNOWN_RELATION: {key}")
+        _merge_existing_extension(old, {"status": "deprecated", "replaced_by": replacement})
+    registry = load_registry(proposal=result)
+    if registry.findings:
+        raise ValueError(f"INVALID_RELATION_REGISTRY: {list(registry.findings)!r}")
+    return result
+
+
+def _merge_existing_extension(old: dict[str, Any], patch: dict[str, Any]) -> None:
+    immutable = {
+        "parent",
+        "family",
+        "description",
+        "direction",
+        "inverse",
+        "origins",
+        "source_kinds",
+        "target_kinds",
+        "scope",
+    }
+    for field_name in immutable:
+        if field_name in patch and patch[field_name] != old.get(field_name):
+            raise ValueError("IMMUTABLE_RELATION_MEANING: create a new canonical key instead")
+    if "aliases" in patch:
+        old_aliases = list(old.get("aliases") or [])
+        if not isinstance(patch["aliases"], list) or any(
+            not isinstance(item, str) for item in patch["aliases"]
+        ):
+            raise ValueError("INVALID_RELATION_DELTA: aliases must be a list of strings")
+        requested = [normalize_relation(item) for item in patch["aliases"]]
+        if (not requested and old_aliases) or (
+            set(requested) & set(old_aliases) and not set(old_aliases) <= set(requested)
+        ):
+            raise ValueError("IMMUTABLE_RELATION_ALIASES: aliases may only be added")
+        old["aliases"] = list(dict.fromkeys([*old_aliases, *requested]))
+    if old.get("status") == "deprecated":
+        if patch.get("status", "deprecated") != "deprecated":
+            raise ValueError("IMMUTABLE_REPLACEMENT: deprecated status is immutable")
+        if "replaced_by" in patch and patch["replaced_by"] != old.get("replaced_by"):
+            raise ValueError("IMMUTABLE_REPLACEMENT: immediate replacement is immutable")
+    else:
+        if "status" in patch:
+            old["status"] = patch["status"]
+        if "replaced_by" in patch:
+            old["replaced_by"] = patch["replaced_by"]
+
+
+def _semantic_continuity_findings(
+    before: RelationRegistry, after: RelationRegistry
+) -> list[dict[str, str]]:
+    findings: list[dict[str, str]] = []
+    fields = (
+        "parent",
+        "family",
+        "description",
+        "direction",
+        "inverse",
+        "origins",
+        "source_kinds",
+        "target_kinds",
+        "projects",
+        "page_types",
+    )
+    for key, old in before.extensions.items():
+        new = after.extensions.get(key)
+        if new is None:
+            findings.append(
+                _finding(
+                    "immutable_definition",
+                    f"extensions.{key}",
+                    "registered definitions cannot be hard-deleted; deprecate instead",
+                    relation=key,
+                )
+            )
+            continue
+        if any(getattr(old, field_name) != getattr(new, field_name) for field_name in fields):
+            findings.append(_finding("immutable_meaning", f"extensions.{key}", "meaning fields are immutable", relation=key))
+        if not set(old.aliases) <= set(new.aliases):
+            findings.append(_finding("immutable_aliases", f"extensions.{key}.aliases", "aliases may only be added", relation=key))
+        if old.status == "deprecated" and (
+            new.status != "deprecated" or new.replaced_by != old.replaced_by
+        ):
+            findings.append(_finding("immutable_replacement", f"extensions.{key}.replaced_by", "deprecated status and immediate replacement are immutable", relation=key))
+    return findings
+
+
+def extension_key_for_label(label: str, namespace: str = "vault") -> str:
+    """Return a valid two-segment canonical key for a clean authoring label."""
+    return f"{namespace}.{_extension_label(normalize_relation(label))}"
+
+
+def available_extension_key(
+    registry: RelationRegistry, label: str, namespace: str = "vault"
+) -> str:
+    """Return the first deterministic namespaced key not occupied in this registry."""
+    base = extension_key_for_label(label, namespace)
+    occupied = registry.keys | frozenset(registry.aliases)
+    if base not in occupied:
+        return base
+    suffix = 2
+    while f"{base}_{suffix}" in occupied:
+        suffix += 1
+    return f"{base}_{suffix}"
+
+
+def _extension_label(label: str) -> str:
+    return label.replace(".", "_")
+
+
 def save_registry(
     vault_root: Path,
     proposal: dict[str, Any],
@@ -250,6 +545,10 @@ def save_registry(
             raise ValueError("REGISTRY_EXISTS: provide current expected_hash")
         if expected_hash != current_hash:
             raise ValueError("STALE_RELATION_REGISTRY: expected_hash does not match current hash")
+        current_registry = load_registry(vault_root)
+        continuity = _semantic_continuity_findings(current_registry, registry)
+        if continuity:
+            raise ValueError(f"IMMUTABLE_RELATION_MEANING: {continuity!r}")
     rendered = yaml.safe_dump(proposal, sort_keys=False, allow_unicode=True)
     vault.batch_atomic_write(
         [vault.PlannedWrite(path=path, content=rendered)], vault_root=vault_root
@@ -290,20 +589,6 @@ def _parse_extension_data(data: Any, digest: str, core: RelationRegistry) -> Rel
     extensions: dict[str, RelationDefinition] = {}
     aliases: dict[str, str] = {}
     occupied = set(core.core)
-    allowed_fields = {
-        "description",
-        "parent",
-        "family",
-        "direction",
-        "inverse",
-        "origins",
-        "aliases",
-        "source_kinds",
-        "target_kinds",
-        "scope",
-        "status",
-        "replaced_by",
-    }
     for raw_key, value in raw_extensions.items():
         key = str(raw_key)
         span = f"extensions.{key}"
@@ -336,7 +621,7 @@ def _parse_extension_data(data: Any, digest: str, core: RelationRegistry) -> Rel
                 )
             )
             continue
-        for unknown in sorted(set(value) - allowed_fields):
+        for unknown in sorted(set(value) - _DEFINITION_FIELDS):
             findings.append(
                 _finding(
                     "unknown_field",
@@ -520,17 +805,6 @@ def _parse_extension_data(data: Any, digest: str, core: RelationRegistry) -> Rel
                     relation=key,
                 )
             )
-        if definition.replaced_by:
-            replacement = extensions.get(definition.replaced_by)
-            if replacement and replacement.status == "deprecated":
-                findings.append(
-                    _finding(
-                        "invalid_replacement",
-                        f"extensions.{key}.replaced_by",
-                        "replacement must be active",
-                        relation=key,
-                    )
-                )
         if definition.status == "deprecated" and not definition.replaced_by:
             findings.append(
                 _finding(
@@ -574,6 +848,10 @@ def _parse_extension_data(data: Any, digest: str, core: RelationRegistry) -> Rel
                     )
     findings.extend(_cycle_findings(extensions, "replaced_by", allow_pair=False))
     findings.extend(_cycle_findings(extensions, "inverse", allow_pair=True))
+    terminals, predecessors, replacement_findings = _replacement_closure(
+        core.core, extensions
+    )
+    findings.extend(replacement_findings)
     return RelationRegistry(
         core.core_version,
         digest,
@@ -581,6 +859,8 @@ def _parse_extension_data(data: Any, digest: str, core: RelationRegistry) -> Rel
         extensions,
         aliases,
         tuple(sorted(findings, key=lambda x: (x["path"], x["code"], x["detail"]))),
+        terminals,
+        predecessors,
     )
 
 
@@ -663,3 +943,59 @@ def _cycle_findings(
             )
         )
     return findings
+
+
+def _replacement_closure(
+    core: dict[str, RelationDefinition], extensions: dict[str, RelationDefinition]
+) -> tuple[dict[str, str], dict[str, frozenset[str]], list[dict[str, str]]]:
+    """Validate terminal survivors and materialize directed predecessor closure."""
+    terminals: dict[str, str] = {}
+    predecessors: dict[str, set[str]] = {}
+    findings: list[dict[str, str]] = []
+    for key, definition in extensions.items():
+        if not definition.replaced_by:
+            continue
+        seen = {key}
+        chain = [key]
+        current = definition.replaced_by
+        terminal_key: str | None = None
+        while current in extensions:
+            if current in seen:
+                break
+            seen.add(current)
+            chain.append(current)
+            replacement = extensions[current].replaced_by
+            if extensions[current].status == "active" and not replacement:
+                terminal_key = current
+                break
+            if not replacement:
+                findings.append(
+                    _finding(
+                        "invalid_replacement",
+                        f"extensions.{key}.replaced_by",
+                        "replacement chain must end in an active survivor",
+                        relation=key,
+                    )
+                )
+                break
+            current = replacement
+        if current in core:
+            terminal_key = current
+        if terminal_key is None:
+            continue
+        terminal = core.get(terminal_key) or extensions.get(terminal_key)
+        if terminal is None or terminal.status != "active":
+            findings.append(
+                _finding(
+                    "invalid_replacement",
+                    f"extensions.{key}.replaced_by",
+                    "replacement chain must end in an active survivor",
+                    relation=key,
+                )
+            )
+            continue
+        terminals[key] = terminal_key
+        predecessors.setdefault(terminal_key, set()).update(
+            item for item in chain if item != terminal_key
+        )
+    return terminals, {key: frozenset(value) for key, value in predecessors.items()}, findings

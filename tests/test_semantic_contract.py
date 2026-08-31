@@ -743,6 +743,48 @@ def test_build_corpus_reads_and_parses_each_page_once_and_reuses_pure_census(
     assert len(corpus.activation_census.candidates) == 2
 
 
+def test_build_corpus_context_preserves_immutable_replacement_closure(
+    tmp_path: Path,
+) -> None:
+    registry = relation_registry.load_registry(
+        proposal={
+            "schema_version": 1,
+            "extensions": {
+                "vault.old": {
+                    "parent": "relates_to",
+                    "description": "Old relation",
+                    "status": "deprecated",
+                    "replaced_by": "vault.middle",
+                },
+                "vault.middle": {
+                    "parent": "relates_to",
+                    "description": "Middle relation",
+                    "status": "deprecated",
+                    "replaced_by": "vault.current",
+                },
+                "vault.current": {
+                    "parent": "relates_to",
+                    "description": "Current relation",
+                },
+            },
+        }
+    )
+    page = tmp_path / "Knowledge Base/Notes/Insights/page.md"
+    page.parent.mkdir(parents=True)
+    page.write_text(_source(body="## Relations\n- vault.old [[Target]]\n"), encoding="utf-8")
+
+    corpus = semantic_contract.build_corpus_context(tmp_path, registry=registry)
+
+    assert corpus.registry.terminal_replacement("vault.old") == "vault.current"
+    assert corpus.registry.predecessors("vault.current") == frozenset(
+        {"vault.old", "vault.middle"}
+    )
+    with pytest.raises(TypeError):
+        corpus.registry.terminal_replacements["vault.old"] = "relates_to"
+    with pytest.raises(TypeError):
+        corpus.registry.predecessor_closure["vault.current"] = frozenset()
+
+
 def test_candidate_insertion_reresolves_forward_and_ambiguous_facts_without_io(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -913,14 +913,23 @@ def _copy_registry(
     registry: relation_registry.RelationRegistry,
 ) -> relation_registry.RelationRegistry:
     return relation_registry.RelationRegistry(
-        registry.core_version,
-        registry.extension_hash,
-        MappingProxyType({key: _copy_definition(value) for key, value in registry.core.items()}),
-        MappingProxyType(
+        core_version=registry.core_version,
+        extension_hash=registry.extension_hash,
+        core=MappingProxyType(
+            {key: _copy_definition(value) for key, value in registry.core.items()}
+        ),
+        extensions=MappingProxyType(
             {key: _copy_definition(value) for key, value in registry.extensions.items()}
         ),
-        MappingProxyType(dict(registry.aliases)),
-        tuple(MappingProxyType(dict(finding)) for finding in registry.findings),
+        aliases=MappingProxyType(dict(registry.aliases)),
+        findings=tuple(MappingProxyType(dict(finding)) for finding in registry.findings),
+        terminal_replacements=MappingProxyType(dict(registry.terminal_replacements)),
+        predecessor_closure=MappingProxyType(
+            {
+                key: frozenset(predecessors)
+                for key, predecessors in registry.predecessor_closure.items()
+            }
+        ),
     )
 
 
