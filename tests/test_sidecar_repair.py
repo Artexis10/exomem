@@ -169,8 +169,45 @@ def test_repeated_extraction_residual_with_prose_is_preserved() -> None:
     assert prose in repaired
 
 
+def test_clean_sentinel_preserved_notes_are_not_repaired() -> None:
+    content = (
+        FRONTMATTER
+        + "# Evidence: report.pdf\n\nPreserved under `Evidence/Case/`.\n\n"
+        + "## Extracted text\n\nExtraction body.\n\n"
+        + "<!-- exomem:sidecar-preserved-notes -->\n## Preserved notes\n\nAuthored note.\n"
+    )
+
+    assert sidecar_repair.repair(content) == content
+    assert sidecar_repair.analyze(content, Path("sentinel.pdf.md")) is None
+
+
+def test_empty_extraction_recovers_sentinel_marked_repeated_residual() -> None:
+    block = "# Repeated document\n\n## Body\n\nExact content."
+    content = _empty_extraction_with_preserved_residual("\n\n".join([block] * 3)).replace(
+        "## Preserved notes",
+        "<!-- exomem:sidecar-preserved-notes -->\n## Preserved notes",
+    )
+
+    repaired = sidecar_repair.repair(content)
+
+    assert repaired.count(block) == 1
+    assert sidecar_repair.PRESERVED_HEADING not in repaired
+
+
+def test_empty_extraction_refuses_ambiguous_periodic_residual() -> None:
+    half = "# Repeated half\n\n## Body\n\nExact content."
+    unit = f"{half}\n\n{half}"
+    residual = "\n\n".join([unit] * 3)
+    content = _empty_extraction_with_preserved_residual(residual)
+
+    repaired = sidecar_repair.repair(content)
+
+    assert sidecar_repair.PRESERVED_HEADING in repaired
+    assert residual in repaired
+
+
 def test_empty_extraction_recovers_repeated_preserved_block() -> None:
-    block = "# Polly MVP Requirements\n\n## Overview\n\nA requirement.\n\n## Scope\n\nAnother requirement."
+    block = "# Product MVP Requirements\n\n## Overview\n\nA requirement.\n\n## Scope\n\nAnother requirement."
     content = _empty_extraction_with_preserved_residual("\n\n".join([block] * 100))
 
     repaired = sidecar_repair.repair(content)

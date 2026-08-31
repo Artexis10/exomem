@@ -928,6 +928,21 @@ _LEGACY_ARTIFACT_BLOCK_RE = re.compile(
 )
 
 
+def _has_ambiguous_legacy_preserved_notes(content: str) -> bool:
+    """Whether a nonempty legacy notes block lacks an ownership boundary."""
+    extraction = content.find(_EXTRACTED_HEADING)
+    if extraction == -1:
+        return False
+    start = extraction + len(_EXTRACTED_HEADING)
+    if any(
+        content.find(f"\n{sentinel}\n", start) != -1
+        for sentinel in (SIDECAR_PRESERVED_NOTES_SENTINEL, SIDECAR_ARTIFACT_SENTINEL)
+    ) or _LEGACY_ARTIFACT_BLOCK_RE.search(content, start) is not None:
+        return False
+    notes = content.find("\n## Preserved notes\n", start)
+    return notes != -1 and bool(content[start:notes].strip())
+
+
 def update_sidecar_extraction(
     vault_root: Path, sidecar_path: Path, *, text: str, engine: str,
     speakers: list[dict] | None = None,
@@ -951,6 +966,12 @@ def update_sidecar_extraction(
     existing call site is unaffected.
     """
     before = sidecar_path.read_text(encoding="utf-8")
+    if _has_ambiguous_legacy_preserved_notes(before):
+        raise PreserveError(
+            code="AMBIGUOUS_SIDECAR_BOUNDARY",
+            missing=[],
+            reason="unmarked nonempty preserved notes have no machine-owned boundary",
+        )
     content = _set_frontmatter_field(before, "extracted_by", engine)
     content = _set_frontmatter_field(content, "processing_state", "completed")
     content = _set_frontmatter_field(content, "processing_error", "null")

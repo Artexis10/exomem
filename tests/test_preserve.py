@@ -278,6 +278,29 @@ def test_update_sidecar_extraction_upgrades_empty_legacy_preserved_notes() -> No
     assert updated.endswith("## Preserved notes\n\nKeep this authored note.\n")
 
 
+def test_update_sidecar_extraction_declines_ambiguous_legacy_notes_before_metadata_write(
+    vault: Path,
+) -> None:
+    result = preserve_module.preserve_bytes(
+        vault, scope="Test", category="docs", filename="ambiguous.docx", data=b"BINARY"
+    )
+    sidecar = vault / result.sidecar_path
+    sidecar.write_text(
+        _read(sidecar)
+        + "# Existing document heading\n\n## Preserved notes\n\nAuthored note.\n",
+        encoding="utf-8",
+    )
+    before = sidecar.read_bytes()
+
+    with pytest.raises(preserve_module.PreserveError) as raised:
+        preserve_module.update_sidecar_extraction(
+            vault, sidecar, text="New extraction.", engine="markitdown"
+        )
+
+    assert raised.value.code == "AMBIGUOUS_SIDECAR_BOUNDARY"
+    assert sidecar.read_bytes() == before
+
+
 def test_preserve_binary_artifact_decodes_base64(vault: Path) -> None:
     payload = b"\x89PNG\r\n\x1a\nfakepng"
     result = preserve_module.preserve(

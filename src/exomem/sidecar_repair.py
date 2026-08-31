@@ -35,6 +35,7 @@ from .vault import parse_frontmatter, walk_vault_md
 
 PRESERVED_HEADING = "## Preserved notes"
 EXTRACTED_HEADING = "## Extracted text"
+PRESERVED_NOTES_SENTINEL = "<!-- exomem:sidecar-preserved-notes -->"
 
 # Title + locator lines that `_render_sidecar` re-emits on every render.
 _BOILERPLATE_RE = re.compile(
@@ -56,6 +57,7 @@ def _segments(body: str) -> list[tuple[str, str]]:
     emits document headings, so a "stop at the next H2" reader sees an empty block
     and would silently drop the whole table on repair.
     """
+    body = body.replace(f"{PRESERVED_NOTES_SENTINEL}\n", "")
     out: list[tuple[str, str]] = []
     for segment in body.split(PRESERVED_HEADING):
         index = segment.find(EXTRACTED_HEADING)
@@ -89,29 +91,34 @@ def _repeated_residual_block(residual: str, *, minimum_copies: int = 3) -> str |
     while position != -1 and attempts < 64:
         attempts += 1
         block = residual[:position].rstrip()
-        if block and _is_exact_block_run(residual, block, minimum_copies):
+        copies = _exact_block_run_count(residual, block)
+        # Six primitive copies cannot prove whether this was six documents or
+        # three documents whose bodies happen to have two identical halves.
+        if copies == minimum_copies * 2:
+            return None
+        if copies >= minimum_copies:
             return block
         position = residual.find(anchor, position + 1)
     return None
 
 
-def _is_exact_block_run(residual: str, block: str, minimum_copies: int) -> bool:
-    """True when all of residual is whole block copies separated by whitespace."""
+def _exact_block_run_count(residual: str, block: str) -> int:
+    """Return whole-block copies when all of `residual` is an exact run."""
     position = 0
     copies = 0
     while residual.startswith(block, position):
         copies += 1
         position += len(block)
         if position == len(residual):
-            return copies >= minimum_copies
+            return copies
         separator_start = position
         while position < len(residual) and residual[position].isspace():
             position += 1
         if position == separator_start:
-            return False
+            return 0
         if position == len(residual):
-            return copies >= minimum_copies
-    return False
+            return copies
+    return 0
 
 
 def _selected_extraction(segments: list[tuple[str, str]]) -> str:
@@ -193,6 +200,7 @@ def repair(content: str) -> str:
     if PRESERVED_HEADING not in body:
         return content
 
+    has_preserved_sentinel = f"{PRESERVED_NOTES_SENTINEL}\n{PRESERVED_HEADING}" in body
     segments = _segments(body)
     best = _selected_extraction(segments)
 
@@ -211,7 +219,12 @@ def repair(content: str) -> str:
     parts = [head_text] if head_text else []
     parts.append(f"{EXTRACTED_HEADING}\n\n{best}".rstrip("\n"))
     if notes:
-        parts.append(f"{PRESERVED_HEADING}\n\n" + "\n\n".join(notes))
+        heading = (
+            f"{PRESERVED_NOTES_SENTINEL}\n{PRESERVED_HEADING}"
+            if has_preserved_sentinel
+            else PRESERVED_HEADING
+        )
+        parts.append(f"{heading}\n\n" + "\n\n".join(notes))
     rebuilt = "\n\n".join(parts) + "\n"
     if frontmatter_text:
         separator = "" if frontmatter_text.endswith(("\n", "\r")) else "\n"
