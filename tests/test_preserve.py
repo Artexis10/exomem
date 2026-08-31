@@ -139,6 +139,54 @@ def test_update_sidecar_extraction_replaces_internal_headings_before_preserved_n
     assert body.count("Keep this authored note.") == 1
 
 
+def test_update_sidecar_extraction_replaces_internal_headings_through_eof(
+    vault: Path,
+) -> None:
+    result = preserve_module.preserve_bytes(
+        vault, scope="Test", category="docs", filename="report.docx", data=b"BINARY"
+    )
+    sidecar = vault / result.sidecar_path
+    sidecar.write_text(
+        _read(sidecar) + "# Old H1\n\n## Old H2\n\nOld extraction.\n",
+        encoding="utf-8",
+    )
+    first = "# First H1\n\n## First H2\n\nFirst extraction."
+    second = "# Second H1\n\n## Second H2\n\nSecond extraction."
+
+    preserve_module.update_sidecar_extraction(vault, sidecar, text=first, engine="markitdown")
+    preserve_module.update_sidecar_extraction(vault, sidecar, text=second, engine="markitdown")
+
+    body = _read(sidecar)
+    assert body.count("## Extracted text") == 1
+    assert body.count(second) == 1
+    assert "First extraction." not in body
+    assert "Old extraction." not in body
+
+
+def test_update_sidecar_extraction_keeps_renderer_artifact_after_internal_headings(
+    vault: Path,
+) -> None:
+    result = preserve_module.preserve_bytes(
+        vault, scope="Test", category="docs", filename="report.docx", data=b"BINARY"
+    )
+    sidecar = vault / result.sidecar_path
+    artifact = "## Artifact\n\n- Original filename: `report.docx`\n- SHA-256: `abc123`\n"
+    sidecar.write_text(
+        _read(sidecar) + "# Old H1\n\n## Old H2\n\nOld extraction.\n\n" + artifact,
+        encoding="utf-8",
+    )
+    extraction = "# New H1\n\n## New H2\n\nNew extraction."
+
+    preserve_module.update_sidecar_extraction(vault, sidecar, text=extraction, engine="markitdown")
+    preserve_module.update_sidecar_extraction(vault, sidecar, text=extraction, engine="markitdown")
+
+    body = _read(sidecar)
+    assert body.count("## Extracted text") == 1
+    assert body.count(extraction) == 1
+    assert "Old extraction." not in body
+    assert body.count(artifact) == 1
+
+
 def test_preserve_binary_artifact_decodes_base64(vault: Path) -> None:
     payload = b"\x89PNG\r\n\x1a\nfakepng"
     result = preserve_module.preserve(

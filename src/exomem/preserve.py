@@ -1142,14 +1142,17 @@ def _set_frontmatter_field(content: str, field: str, value: str) -> str:
 
 
 def _set_extracted_text(content: str, text: str) -> str:
-    """Replace the extracted body through preserved notes, or the legacy next heading."""
+    """Replace extracted text through a sidecar-owned boundary, or EOF."""
     block = f"{_EXTRACTED_HEADING}\n\n{text}\n"
     idx = content.find(_EXTRACTED_HEADING)
     if idx == -1:
         return content.rstrip("\n") + "\n\n" + block
-    after = content.find("\n## Preserved notes\n", idx + len(_EXTRACTED_HEADING))
-    if after == -1:
-        after = content.find("\n## ", idx + len(_EXTRACTED_HEADING))
+    start = idx + len(_EXTRACTED_HEADING)
+    boundaries = (
+        content.find("\n## Preserved notes\n", start),
+        content.find("\n## Artifact\n", start),
+    )
+    after = min((boundary for boundary in boundaries if boundary != -1), default=-1)
     if after == -1:
         return content[:idx] + block
     return content[:idx] + block + "\n" + content[after + 1 :]
