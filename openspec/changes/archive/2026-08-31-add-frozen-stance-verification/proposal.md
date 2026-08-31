@@ -30,7 +30,8 @@ soft-failing, measurement-labelled, propose-only; today those properties hold
 by configuration accident. This slice (S9 of the no-nudge programme, report
 §17) is the re-laning: it makes them hold by construction, consolidates the
 two paths into one admitted channel, and makes the verifier tier real with its
-first occupant.
+first complete admission boundary. Activation remains refused until a real
+model snapshot is hashed and pinned in a separate reviewed change.
 
 ## What Changes
 
@@ -64,9 +65,10 @@ first occupant.
   retired — model identity comes only from the in-repo pin registry, and a
   set-but-ignored value is reported.
 - **`nli` optional extra.** The cross-encoder dependency ships as a default-off
-  extra; weights are pinned by digest through the existing offline model
-  cache; the label map (the current threshold logic, promoted to a versioned
-  in-repo artifact) is label map v1.
+  extra; the label map (the current threshold logic, promoted to a versioned
+  in-repo artifact) is label map v1. This slice ships an empty pin registry:
+  model weights must be resident, hashed, and added by reviewed repository pin
+  before the tier can admit, and runtime loading never fetches them.
 - **Local-only in v1.** Hosted activation (an int8 classifier fits the cell
   envelope) is a separate decision and out of scope here.
 

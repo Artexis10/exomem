@@ -1361,6 +1361,77 @@ def _check_write_path_env_flags(vault_root: Path | None) -> DoctorCheck:
     )
 
 
+
+def _check_frozen_verifier() -> DoctorCheck:
+    """The frozen stance verifier's tier: admitted, absent, or refused-with-reason.
+
+    Never `fail`. The tier is optional and default-off by design, so its absence
+    is the NORMAL state and reporting that as a failure would only train an
+    operator to ignore doctor. It warns exactly where a stated intent is not
+    being met: the gate is on but the verifier is refused, or a value is sitting
+    in the retired `EXOMEM_CLAIM_NLI_MODEL` knob selecting nothing.
+
+    Stays inside doctor's "never fetches anything" guarantee: admission resolves
+    the weights digest from the local model cache first and refuses before any
+    load when nothing is resident, so the only load it can reach is an
+    offline-first one over weights already on disk.
+    """
+    from . import claims
+
+    status = claims.verifier_status()
+    ignored = status.get("ignored_model_env")
+    ignored_note = (
+        f" {status['retired_model_env']}={ignored!r} is RETIRED and selected nothing."
+        if ignored
+        else ""
+    )
+    ignored_fix = (
+        f"Unset {status['retired_model_env']}: model identity comes only from the "
+        "in-repo pin registry, so the value is inert."
+        if ignored
+        else None
+    )
+    if status["admitted"]:
+        return _check(
+            "verifier.frozen_stance",
+            "pass",
+            (
+                f"Frozen stance verifier admitted: {status['model_name']} "
+                f"(digest {str(status['model_digest'])[:12]}…, label map "
+                f"{status['label_map_version']}, fixtures {status['fixture_set']})."
+                f"{ignored_note}"
+            ),
+            ignored_fix,
+            details=status,
+        )
+    if status["reason"] == "gate-off":
+        return _check(
+            "verifier.frozen_stance",
+            "warn" if ignored else "pass",
+            (
+                "Frozen stance verifier is off (EXOMEM_CLAIM_POLARITY_NLI unset); "
+                f"review-queue entries carry no model polarity label.{ignored_note}"
+            ),
+            ignored_fix,
+            details=status,
+        )
+    return _check(
+        "verifier.frozen_stance",
+        "warn",
+        (
+            f"Frozen stance verifier refused ({status['reason']}): {status['detail']} "
+            f"Review-queue entries carry no model polarity label.{ignored_note}"
+        ),
+        ignored_fix
+        or (
+            "Either unset EXOMEM_CLAIM_POLARITY_NLI, or install `uv sync --extra nli` "
+            "and make the resident weights match a pin in the repository registry. "
+            "A pin is only ever added in a reviewed diff."
+        ),
+        details=status,
+    )
+
+
 def _check_sqlite_vec() -> DoctorCheck:
     """vec0 backend availability: package import + a live loadability probe.
 
@@ -3058,6 +3129,7 @@ def doctor(
         _check_state_placement(vault_root),
         _check_rebuild_temp_orphans(vault_root),
         _check_write_path_env_flags(vault_root),
+        _check_frozen_verifier(),
         check_graph_recovery_age(vault_root),
     ]
     runtime_processes = _check_runtime_processes()

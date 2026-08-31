@@ -678,6 +678,11 @@ media = [
 media-mlx = [
     { name = "mlx-whisper", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'" },
 ]
+nli = [
+    { name = "sentence-transformers" },
+    { name = "torch", version = "2.12.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' and sys_platform != 'win32'" },
+    { name = "torch", version = "2.12.0+cu132", source = { registry = "https://download.pytorch.org/whl/cu132" }, marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
 tui = [
     { name = "textual" },
 ]
@@ -719,6 +724,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "rank-bm25", specifier = ">=0.2.2" },
     { name = "sentence-transformers", marker = "extra == 'embeddings'", specifier = ">=2.7" },
+    { name = "sentence-transformers", marker = "extra == 'nli'", specifier = ">=3.0" },
     { name = "snowballstemmer", specifier = ">=2.2" },
     { name = "speechbrain", marker = "extra == 'diarization'", specifier = ">=1.0" },
     { name = "sqlite-vec", marker = "extra == 'embeddings'", specifier = ">=0.1.6" },
@@ -726,11 +732,13 @@ requires-dist = [
     { name = "textual", marker = "extra == 'tui'", specifier = ">=5.0" },
     { name = "tokenizers", marker = "extra == 'embeddings-onnx'", specifier = ">=0.20" },
     { name = "torch", marker = "(sys_platform == 'linux' and extra == 'embeddings') or (sys_platform == 'win32' and extra == 'embeddings')", specifier = ">=2.12", index = "https://download.pytorch.org/whl/cu132" },
+    { name = "torch", marker = "(sys_platform == 'linux' and extra == 'nli') or (sys_platform == 'win32' and extra == 'nli')", specifier = ">=2.12", index = "https://download.pytorch.org/whl/cu132" },
     { name = "torch", marker = "sys_platform != 'linux' and sys_platform != 'win32' and extra == 'embeddings'", specifier = ">=2.12" },
+    { name = "torch", marker = "sys_platform != 'linux' and sys_platform != 'win32' and extra == 'nli'", specifier = ">=2.12" },
     { name = "transformers", marker = "extra == 'vision'", specifier = ">=4.40" },
     { name = "watchdog", specifier = ">=4.0" },
 ]
-provides-extras = ["embeddings", "embeddings-onnx", "media", "media-mlx", "diarization", "vision", "tui"]
+provides-extras = ["embeddings", "embeddings-onnx", "nli", "media", "media-mlx", "diarization", "vision", "tui"]
 
 [package.metadata.requires-dev]
 dev = [
