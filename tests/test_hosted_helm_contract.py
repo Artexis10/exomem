@@ -2080,6 +2080,12 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
     assert "exomem.io/lifecycle-actions-enabled" in admission_text
     assert "EXOMEM_AUTH_SESSION_REPLICA_ID" in admission_text
     assert "exomem.io/authorization-session-secret-name" in admission_text
+    assert "/run/exomem/authorization-session/private/keyring.json" in admission_text
+    assert "/run/exomem/authorization-session/private/control.json" in admission_text
+    assert "/run/exomem/authorization-session/private/serving-membership.json" in admission_text
+    assert "!has(object.spec.securityContext.fsGroup)" in admission_text
+    assert "!has(object.spec.securityContext.fsGroupChangePolicy)" in admission_text
+    assert "volume.secret.defaultMode == 288" not in admission_text
     assert "exact approved serving command and environment" in admission_text
     assert "exact approved serving ports, probes, and interactive surface" in admission_text
     for forbidden_surface in (
@@ -2509,8 +2515,8 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
         pod = workload["spec"]["template"]["spec"]
         assert pod["restartPolicy"] == "Always"
         assert "runtimeClassName" not in pod
-        assert pod["securityContext"]["fsGroup"] == 10001
-        assert pod["securityContext"]["fsGroupChangePolicy"] == "OnRootMismatch"
+        assert "fsGroup" not in pod["securityContext"]
+        assert "fsGroupChangePolicy" not in pod["securityContext"]
         assert len(pod.get("initContainers", [])) == 1
         custody_init = pod["initContainers"][0]
         assert custody_init["name"] == "authorization-session-custody"
@@ -2539,13 +2545,13 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
         assert env["EXOMEM_HOSTED_RECORDS_READER_VERSION"] == "2"
         assert env["EXOMEM_HOSTED_LIFECYCLE_ACTIONS_ENABLED"] == "false"
         assert env["EXOMEM_AUTH_SESSION_KEYRING_FILE"] == (
-            "/run/exomem/authorization-session/keyring.json"
+            "/run/exomem/authorization-session/private/keyring.json"
         )
         assert env["EXOMEM_AUTH_SESSION_CONTROL_FILE"] == (
-            "/run/exomem/authorization-session/control.json"
+            "/run/exomem/authorization-session/private/control.json"
         )
         assert env["EXOMEM_AUTH_SESSION_MEMBERSHIP_FILE"] == (
-            "/run/exomem/authorization-session/serving-membership.json"
+            "/run/exomem/authorization-session/private/serving-membership.json"
         )
         replica = next(
             item
@@ -2641,6 +2647,12 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
         credentials = next(volume for volume in pod["volumes"] if volume["name"] == "credentials")
         assert credentials["secret"]["defaultMode"] == 0o444
         assert credentials["secret"]["secretName"] == "exomem-cell-credentials"
+        authorization_source = next(
+            volume
+            for volume in pod["volumes"]
+            if volume["name"] == "authorization-session-source"
+        )
+        assert authorization_source["secret"]["defaultMode"] == 0o444
         assert "EXOMEM_HOSTED_SERVICE_CREDENTIAL" not in env
         assert not any("secretKeyRef" in item.get("valueFrom", {}) for item in container["env"])
 

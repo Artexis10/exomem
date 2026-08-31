@@ -186,21 +186,22 @@ def test_intent_boundary_routes_the_two_lifecycle_classes(vault: Path) -> None:
     assert "record_memory" in boundary["observed_outcome"]
 
     pairing = boundary["pairing_rule"].lower()
-    assert "one landing" in pairing
-    assert "two consequences" in pairing
-    # Order is load-bearing: the observation is canonical, the transition follows.
+    # The observation is canonical; it is never an automatic transition trigger.
     assert pairing.index("record") < pairing.index("transition")
-    assert "once" in pairing
+    assert "user may" in pairing
+    assert "propose" in pairing
+    assert "automatically" not in pairing
     assert "tentative" in pairing
     assert "elapsed time" in pairing
 
 
-def test_capture_examples_carry_one_paired_landing(vault: Path) -> None:
-    """The two consequences have to appear together in an example, not only a rule."""
+def test_capture_examples_require_explicit_intent_for_a_planning_transition(vault: Path) -> None:
+    """Records capture may propose a transition but cannot perform one by itself."""
     examples = commands.op_bootstrap(vault)["records"]["capture_examples"].lower()
 
     assert "plan" in examples
-    assert "once" in examples
+    assert "never closes planning automatically" in examples
+    assert "explicit user intent" in examples
 
 
 def test_plan_is_a_simple_front_door_action(vault: Path) -> None:

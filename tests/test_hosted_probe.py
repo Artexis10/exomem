@@ -98,6 +98,13 @@ def _readiness(
         "security_revision": security_revision,
         "service_authenticated": True,
         "mutation_authority": True,
+        "authorization_session": {
+            "ready": True,
+            "code": "AUTHORIZATION_MEMBERSHIP_READY",
+            "servingMembershipEpoch": 1,
+            "servingReplicaCount": 1,
+            "drainingReplicaCount": 0,
+        },
         "admission_phase": "active",
         "read_admission": True,
         "write_admission": True,
@@ -288,6 +295,21 @@ def test_probe_rejects_redirect_without_following_or_recording(tmp_path: Path) -
         (_readiness(), "application/json; charset=utf-8", 200, "HOSTED_PROBE_MEDIA_INVALID"),
         (b'{"success":true,"success":true,"data":{}}', "application/json", 200, "HOSTED_PROBE_SCHEMA_INVALID"),
         ({**_readiness(), "extra": True}, "application/json", 200, "HOSTED_PROBE_SCHEMA_INVALID"),
+        (
+            _readiness(
+                authorization_session={
+                    "ready": True,
+                    "code": "AUTHORIZATION_MEMBERSHIP_READY",
+                    "servingMembershipEpoch": 1,
+                    "servingReplicaCount": 1,
+                    "drainingReplicaCount": 0,
+                    "unexpected": True,
+                }
+            ),
+            "application/json",
+            200,
+            "HOSTED_PROBE_SCHEMA_INVALID",
+        ),
         (_readiness(), "application/json", 401, "HOSTED_PROBE_AUTH_FAILED"),
     ],
 )
@@ -325,6 +347,24 @@ def test_probe_enforces_bounded_exact_response_contract(
         {"security_revision": 1},
         {"service_authenticated": False},
         {"mutation_authority": False},
+        {
+            "authorization_session": {
+                "ready": False,
+                "code": "AUTHORIZATION_MEMBERSHIP_UNAVAILABLE",
+                "servingMembershipEpoch": None,
+                "servingReplicaCount": 0,
+                "drainingReplicaCount": 0,
+            }
+        },
+        {
+            "authorization_session": {
+                "ready": True,
+                "code": "AUTHORIZATION_MEMBERSHIP_READY",
+                "servingMembershipEpoch": 2,
+                "servingReplicaCount": 0,
+                "drainingReplicaCount": 1,
+            }
+        },
         {"admission_phase": "quiesced"},
         {"read_admission": False},
         {"write_admission": False},

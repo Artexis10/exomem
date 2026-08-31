@@ -40,10 +40,16 @@ _STRUCTURED_TOOL_LISTS = {
     "primary",
     "primary_tools",
 }
-# Maps whose KEYS are vocabulary rather than tool names. `contract` is the prominence
-# engagement contract, keyed by behavioural axis (recall/capture/narration) — `capture`
-# there names a behaviour, not the `capture` action, and advertises nothing callable.
-_ACTION_VOCABULARY_MAPS = {"front_door_actions", "simple_actions", "contract"}
+# Maps whose KEYS are vocabulary rather than tool names. The engagement contract,
+# workflow fallback, and agent protocol use keys such as `capture` and `review` for
+# behaviour; they do not advertise the same-named actions as callable.
+_ACTION_VOCABULARY_MAPS = {
+    "agent_protocol",
+    "builtin_fallback",
+    "contract",
+    "front_door_actions",
+    "simple_actions",
+}
 
 
 def _call_mcp(mcp, profile: str) -> dict:
@@ -134,6 +140,8 @@ def test_conformance_extractor_distinguishes_tool_keys_from_action_vocabulary() 
         },
         "front_door_actions": {"review": {"intent": "action label"}},
         "knowledge_packs": {"available": [{"actions": ["ask", "review"]}]},
+        "builtin_fallback": {"capture": "propose"},
+        "agent_protocol": {"review": {"mode": "read-only"}},
     }
 
     refs = _extract_advertised_tool_refs(
@@ -144,7 +152,7 @@ def test_conformance_extractor_distinguishes_tool_keys_from_action_vocabulary() 
 
     assert "read_media" in refs
     assert "ask_memory" in refs
-    assert {"ask", "review"}.isdisjoint(refs)
+    assert {"ask", "capture", "review"}.isdisjoint(refs)
 
 
 def _assert_conforms(

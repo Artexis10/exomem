@@ -253,15 +253,16 @@ def test_bootstrap_routes_observed_state_to_records_without_activating_state(
             "failed; route: record_memory"
         ),
         "pairing_rule": (
-            "an outcome on an open committed Planning item is one landing, "
-            "two consequences: record then transition, once. A tentative "
-            "claim is not an event, elapsed time not an outcome"
+            "an outcome on an open Planning item is recorded once. A user may "
+            "then request a guarded Planning transition; otherwise review may "
+            "propose one. A tentative claim is not an event, and elapsed time "
+            "is not an outcome"
         ),
     }
     assert "ordinary editable files" in contract["manual_first"]
     assert "schema" in contract["template_rule"]
     assert "does not create" in contract["activation_rule"]
-    assert "OpenSpec" in contract["software_rule"]
+    assert "workflow contract" in contract["software_rule"]
 
 
 def test_bootstrap_does_not_advertise_records_when_surface_omits_command(

@@ -2895,7 +2895,6 @@ _METADATA_ONLY_COMMANDS: frozenset[str] = frozenset(
         "coordination_status",
         "bootstrap",
         "connect_memory",
-        "schema_memory",
         # Governance inspection returns policy ids/counts only; authoring
         # returns receipt-backed mutation metadata, never vault content.
         "govern_memory",
@@ -2972,6 +2971,7 @@ _COMMAND_PROJECTOR_KIND: dict[str, str] = {
     "provenance_report": "structure",
     "query_data": "structure",
     "adopt": "structure",
+    "schema_memory": "structure",
     # The action dispatcher routes all content through the typed Records
     # inspection/query/mutation projectors before it returns.
     "record_memory": "structure",
@@ -3003,6 +3003,7 @@ _COMMAND_OUTCOME_ADAPTER: dict[str, str] = {
     },
     "record_memory": "structure",
     "plan_memory": "structure",
+    "schema_memory": "structure",
 }
 
 # Every content selector declares both evidence collection and tombstone
@@ -3080,6 +3081,13 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "infer": "save-conditional",
         "validate": "structure",
         "diff": "structure",
+        "inventory": "structure",
+        "inspect": "structure",
+        "resolve": "structure",
+        "preview": "structure",
+        "save": "mutation",
+        "refresh": "mutation",
+        "save-entity-types": "mutation",
     },
     ("record_memory", "action"): {
         "describe": "structure",

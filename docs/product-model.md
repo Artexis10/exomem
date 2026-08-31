@@ -44,10 +44,11 @@ make a user choose.
 
 Planning and Records have distinct semantic profiles but share the structured
 collection substrate. Exomem Planning owns durable intent and prioritisation.
-For software, OpenSpec and the repository own accepted change contracts and
-execution truth; git, specifications, tests, and code remain authoritative.
-Planning may point to Records as observed evidence, but neither layer mirrors the
-other or infers progress, completion, medical conclusions, or personal judgment.
+Planning is standalone by default and may coordinate with a user-authored
+workflow contract that declares companion ownership. Companion references remain
+opaque and do not establish tool availability or external truth. Planning may
+point to Records as observed evidence, but neither layer mirrors the other or
+infers progress, completion, medical conclusions, or personal judgment.
 
 See [Records](records.md) for the manual-first collection contract.
 

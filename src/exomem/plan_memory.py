@@ -193,8 +193,8 @@ def plan_memory(
     `inspect`, `validate`, and `query` are read-only. `create`, `add`, `update`,
     `triage`, `revise`, and `rebaseline` are guarded mutations. Planning stores
     goals, outcomes, initiatives, work items, horizons, priorities, and explicit
-    commitments; observed events belong in `record_memory`, while accepted
-    software change contracts and execution truth remain in the repository.
+    commitments; observed events belong in `record_memory`, while a resolved
+    workflow contract may keep companion-owned execution artifacts external.
 
     A plan's UUID is durable identity, not its reader-facing filename. New
     collections can declare human filenames and managed presentation blocks;

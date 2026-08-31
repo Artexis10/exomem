@@ -161,6 +161,7 @@ def test_resolved_payload_shape(config):
         "capture",
         "narration",
         "summary",
+        "effective_capture",
     }
 
 
@@ -316,7 +317,7 @@ def test_the_deployed_copy_matches_the_packaged_hook() -> None:
 
 
 @pytest.mark.parametrize("level", ["balanced", "maximal"])
-def test_the_capture_axis_names_both_lifecycle_classes_and_the_pairing_rule(
+def test_the_capture_axis_names_both_lifecycle_classes_and_the_transition_boundary(
     level: str,
 ) -> None:
     """Stated intent and observed outcomes are capture classes, not magic words.
@@ -333,13 +334,12 @@ def test_the_capture_axis_names_both_lifecycle_classes_and_the_pairing_rule(
     assert "planning" in capture
     assert "observed outcome" in capture
     assert "records" in capture
-    # The pairing rule: one landing, two consequences, reported once. Pinned on
-    # the exact tail rather than on "once" alone, which any prose could satisfy.
-    assert "one landing" in capture
-    assert "two consequences" in capture
-    assert "record then transition, once" in capture
-    # Order is load-bearing: the observation is canonical, the transition follows.
-    assert capture.index("record then transition") > capture.index("one landing")
+    # An outcome is a Record. A transition needs a distinct explicit user decision;
+    # the only non-mutating alternative is the resolved posture's bounded review.
+    assert "transition only on explicit user intent" in capture
+    assert "leave planning unchanged" in capture
+    assert "propose a bounded review" in capture
+    assert "record then transition" not in capture
     # The two named non-outcomes -- a tentative claim, and elapsed time -- are
     # stated ONCE, in the bootstrap `intent_boundary` that every client tier
     # reads, rather than in every carrier: see
@@ -356,3 +356,54 @@ def test_light_does_not_widen_with_the_lifecycle_classes() -> None:
     assert "stated intent" not in capture
     assert "observed outcome" not in capture
     assert "only when the user asks" in capture
+
+
+@pytest.mark.parametrize("level", prominence.CANON)
+def test_effective_capture_pins_explicit_and_proactive_gates(level: str) -> None:
+    effective = prominence.capture_gate(level)
+    proactive = level in {"balanced", "maximal"}
+
+    assert set(effective) == {"durable_intent", "observed_outcomes"}
+    assert effective["durable_intent"] == {
+        "authored_explicit": "explicit-user-request",
+        "proactive_permitted": proactive,
+        "proactive_requires": (
+            ["authored-proactive", "durable-intent"] if proactive else []
+        ),
+    }
+    assert effective["observed_outcomes"] == {
+        "authored_explicit": "explicit-user-request",
+        "proactive_permitted": proactive,
+        "proactive_requires": (
+            ["authored-proactive", "sufficiently-identified-outcome"] if proactive else []
+        ),
+    }
+
+
+def test_effective_capture_projection_is_complete_and_detached() -> None:
+    projection = prominence.capture_policy_projection()
+    assert list(projection) == list(prominence.CANON)
+    projection["balanced"]["durable_intent"]["proactive_requires"].append("mutated")
+    assert prominence.capture_policy_projection()["balanced"] == prominence.capture_gate(
+        "balanced"
+    )
+
+
+@pytest.mark.parametrize("level", prominence.CANON)
+@pytest.mark.parametrize("authored", ("explicit", "proactive"))
+def test_effective_capture_applies_authored_posture_under_the_active_level(
+    level: str, authored: str
+) -> None:
+    effective = prominence.effective_capture(
+        {"durable_intent": authored, "observed_outcomes": authored}, level
+    )
+    proactive = authored == "proactive" and level in {"balanced", "maximal"}
+
+    for value in effective.values():
+        assert value["authored"] == authored
+        assert value["explicit_user_request_permitted"] is True
+        assert value["proactive_permitted"] is proactive
+        if proactive:
+            assert value["proactive_requires"]
+        else:
+            assert value["proactive_requires"] == []

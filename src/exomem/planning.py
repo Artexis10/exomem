@@ -22,6 +22,7 @@ _PRIORITIES = frozenset({"critical", "high", "medium", "low", "none"})
 _COMMITMENTS = frozenset({"uncommitted", "considering", "committed"})
 _HORIZONS = frozenset({"inbox", "week", "month", "quarter", "year", "multi-year"})
 _HEALTH = frozenset({"unknown", "on-track", "at-risk", "off-track"})
+_EXECUTION_KIND = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$")
 _AREA_FORBIDDEN = frozenset({"status", "priority", "commitment", "horizon", "area", "parent"})
 _OPTIONAL = frozenset(
     {
@@ -1700,11 +1701,14 @@ def _validate_execution(value: Any) -> None:
             {"kind", "ref", "label"},
         ):
             _invalid("execution descriptor is invalid")
-        _enum(
-            descriptor.get("kind"),
-            {"openspec", "repository", "issue", "pull-request", "release", "deployment", "other"},
-            "execution kind",
-        )
+        kind = descriptor.get("kind")
+        if (
+            not isinstance(kind, str)
+            or len(kind.encode("ascii", "ignore")) != len(kind)
+            or len(kind) > 64
+            or not _EXECUTION_KIND.fullmatch(kind)
+        ):
+            _invalid("execution kind is invalid")
         _bounded_string(descriptor.get("ref"), "execution ref", 2048)
         if "label" in descriptor:
             _bounded_string(descriptor["label"], "execution label", 256)

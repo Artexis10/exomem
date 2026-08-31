@@ -22,16 +22,22 @@ The design keeps these constraints:
 
 Everything here is OFF by default and gated behind `EXOMEM_CLAIM_LEVEL=1`. With
 the gate unset, `claim_level_enabled()` is False, no sidecar is created, no
-polarity is computed, and every wired surface (`corpus_aware.overlap_warning`,
-`audit.corpus_contradictions`) is byte-identical to its pre-feature behavior.
+polarity is computed, and `audit.corpus_contradictions` is byte-identical to its
+pre-feature behavior.
 
-STATUS (first increment — needs owner review before production):
-- Extraction, the `.claims.sqlite` sidecar, and the deterministic-heuristic
-  polarity backend are REAL and unit-tested.
-- The NLI cross-encoder backend (`EXOMEM_CLAIM_POLARITY_NLI=1`) is a wired-but-
-  UNVERIFIED seam: it will lazily load a local cross-encoder if one is present and
-  fall back to the heuristic on any failure. It has not been run against a real
-  model in this environment.
+POLARITY REACHES EXACTLY ONE SURFACE, UNDER ADMISSION CONTROL. The synchronous
+write path invokes no polarity classification at all: `corpus_aware` warnings
+carry no stance clause, on any gate. The only channel is the asynchronous audit
+contradiction sweep, and it enriches only through an ADMITTED frozen verifier —
+a pin in `VERIFIER_PINS` (a repository artifact, never runtime configuration)
+whose resolved weights match its sha256 digest, whose label map is a version
+this build ships, and whose verification fixture set is green at that exact
+pair, with `EXOMEM_CLAIM_POLARITY_NLI` set. Anything short of all of that
+refuses the verifier, and refusal degrades to ABSENCE: the entry carries no
+label. The deterministic lexical heuristic below is retired from queue
+enrichment — it had no admission control — and survives only as the comparison
+arm of the fixture-set precision table and as `classify_polarity`'s fallback for
+callers that are not writing an admitted, provenance-marked label.
 """
 
 from __future__ import annotations
@@ -82,11 +88,12 @@ def claim_level_enabled() -> bool:
 def _max_polarity_pairs() -> int:
     """Hard cap on polarity checks per call (`EXOMEM_CLAIM_POLARITY_MAX_PAIRS`).
 
-    Bounds the lane the way the reranker bounds its `(query, passage)` batch —
-    the proximity band can flag many pairs, and each polarity check is real work
-    (a heuristic pass now, an NLI forward pass under the optional backend). Pairs
-    beyond the cap flow through UNREFINED (polarity stays None) rather than being
-    dropped. Default 20; bad values log + fall back.
+    ORPHANED as of the frozen-verifier slice and kept only so the knob does not
+    change meaning under anyone who set it: its one caller was the write path's
+    `_refine_contradictions`, which is gone. The surviving polarity lane is the
+    audit sweep, and that lane is bounded by the surfaced set it runs over —
+    `EXOMEM_CONTRADICTION_TOP_N` — not by this. See follow-up 6.3 in the
+    `add-frozen-stance-verification` change. Default 20; bad values log + fall back.
     """
     raw = os.environ.get("EXOMEM_CLAIM_POLARITY_MAX_PAIRS")
     if raw is None:
@@ -1070,7 +1077,8 @@ class PolarityResult:
 
     `label` ∈ {contradict, refine, duplicate, unrelated}. `score` is a coarse
     [0,1] confidence in the label. `method` names the backend that produced it
-    (`heuristic` today, `nli` under the optional cross-encoder path).
+    (`heuristic` from the lexical fallback, `nli` from an admitted frozen
+    verifier — and ONLY an admitted one may ever carry the `nli` name).
     """
 
     label: str
@@ -1079,8 +1087,9 @@ class PolarityResult:
 
 
 # Deterministic-heuristic lexicon. Coarse by design — a lexical stand-in for a
-# real NLI model, chosen so v1 is REAL and testable without a model download. The
-# owner-review path is to flip on the NLI backend (see `_nli_polarity`).
+# real NLI model, chosen so v1 was REAL and testable without a model download.
+# RETIRED from queue enrichment (it has no admission control); it remains the
+# comparison arm of `VERIFICATION_FIXTURES` and `classify_polarity`'s fallback.
 _STOPWORDS = frozenset(
     """a an the this that these those of for to in on at by with from as is are be
     been being it its and or but if then so than into over under about we you they
@@ -1168,104 +1177,634 @@ def _heuristic_polarity(
     return PolarityResult("unrelated", round(1.0 - overlap, 4), "heuristic")
 
 
-def _nli_enabled() -> bool:
-    """Opt-in NLI cross-encoder backend (`EXOMEM_CLAIM_POLARITY_NLI`).
+# ---------------------------------------------------------------------------
+# Label map v1 — the frozen verifier's logit → label contract (design D4)
+# ---------------------------------------------------------------------------
 
-    UNVERIFIED in this increment — see module docstring. Default OFF; when unset
-    the heuristic is the only backend.
+#: The closed label set a verifier may emit. Shared by the heuristic and the
+#: frozen verifier so a label can never be minted outside this vocabulary.
+POLARITY_LABELS = frozenset({"contradict", "refine", "duplicate", "unrelated"})
+
+#: The label-map version this build ships. A pin names the version it was
+#: verified against; changing a threshold, the label set, the column order, or
+#: the direction convention bumps this and demands fixture re-verification
+#: before the (digest, label-map) pair is admitted again.
+LABEL_MAP_VERSION = "v1"
+
+
+@dataclass(frozen=True)
+class LabelMap:
+    """A versioned, in-repo mapping from cross-encoder logits to the closed set.
+
+    Data reviewed in diff, not arithmetic buried in code. `columns` declares the
+    logit column SEMANTICS AND THEIR ORDER: a model whose head orders
+    entailment/contradiction differently is a different (digest, label-map)
+    pair and needs its own verified version, so a head whose width does not
+    match this declaration is refused rather than coerced.
+
+    `direction` names the aggregation convention over the two orderings of the
+    pair: contradiction takes the max (either direction contradicting is a
+    contradiction), entailment the min (both directions must entail for a
+    restatement), neutral the mean.
     """
-    return bool(os.environ.get("EXOMEM_CLAIM_POLARITY_NLI"))
+
+    version: str
+    columns: tuple[str, ...]
+    direction: str
+    contradict_min: float
+    duplicate_min: float
+    unrelated_min: float
+    labels: frozenset[str] = POLARITY_LABELS
+
+    def apply(self, logits: Any) -> PolarityResult | None:
+        """One verdict from a (2, len(columns)) logit block, or None if refused.
+
+        None means "this head is not the one this map was verified against" —
+        the caller degrades to absence, never to another backend's label.
+        """
+        arr = np.asarray(logits, dtype=np.float32)
+        if arr.ndim != 2 or arr.shape[1] != len(self.columns):
+            return None
+        if arr.shape[0] != 2:
+            return None
+        if not np.isfinite(arr).all():
+            return None
+        shifted = arr - arr.max(axis=1, keepdims=True)
+        exp = np.exp(shifted)
+        probs = exp / exp.sum(axis=1, keepdims=True)
+        contra = float(probs[:, 0].max())
+        entail = float(probs[:, 1].min())
+        neutral = float(probs[:, 2].mean())
+        if contra >= self.contradict_min and contra >= entail:
+            return PolarityResult("contradict", round(contra, 4), "nli")
+        if entail >= self.duplicate_min:
+            return PolarityResult("duplicate", round(entail, 4), "nli")
+        if neutral >= self.unrelated_min:
+            return PolarityResult("unrelated", round(neutral, 4), "nli")
+        return PolarityResult(
+            "refine", round(max(0.0, min(1.0, max(entail, 1 - contra - neutral))), 4), "nli"
+        )
 
 
-# The local NLI model name is intentionally an env knob so no specific weight is
-# pinned/downloaded by v1. A small entailment cross-encoder (label order
-# contradiction/entailment/neutral) is the intended shape.
+#: Every label map this build can load. A pin may only name a key present here.
+_LABEL_MAPS: dict[str, LabelMap] = {
+    "v1": LabelMap(
+        version="v1",
+        columns=("contradiction", "entailment", "neutral"),
+        direction="bidirectional:contradiction=max,entailment=min,neutral=mean",
+        contradict_min=0.5,
+        duplicate_min=0.6,
+        unrelated_min=0.5,
+    ),
+}
+
+
+def get_label_map(version: str | None) -> LabelMap:
+    """The label map a pin names, or refuse.
+
+    An unversioned or unknown map is never loaded: the version is half of the
+    admitted pair, so guessing one would let a threshold change ride in behind
+    a digest that was verified against different arithmetic.
+    """
+    if not version:
+        raise ValueError(
+            "label map version is required; an unversioned label map is never loaded"
+        )
+    try:
+        return _LABEL_MAPS[version]
+    except KeyError:
+        raise ValueError(f"unknown label map version: {version!r}") from None
+
+
+def _nli_enabled() -> bool:
+    """The frozen verifier's opt-in gate (`EXOMEM_CLAIM_POLARITY_NLI`).
+
+    Default OFF. This is an ADMISSION CONDITION, not a backend selector: unset,
+    the verifier is refused for the process and the queue carries no label at
+    all — it does not hand the lane to another backend.
+    """
+    value = os.environ.get("EXOMEM_CLAIM_POLARITY_NLI")
+    return bool(value) and value.strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+# ---------------------------------------------------------------------------
+# The pin registry (design D1) — a REPOSITORY artifact, reviewed in diff
+# ---------------------------------------------------------------------------
+
+#: RETIRED knob. Model identity comes only from `VERIFIER_PINS`; a value set
+#: here selects nothing. It is still READ — once, to report it as ignored on
+#: the diagnostic surface — so an operator who set it learns it is inert rather
+#: than assuming it took effect.
 _NLI_MODEL_ENV = "EXOMEM_CLAIM_NLI_MODEL"
-_NLI_MODEL = None
-_NLI_LOCK = threading.Lock()
-_NLI_IMPORT_FAILED = False
 
 
-def _get_nli_model():
-    """Lazy singleton for the optional NLI cross-encoder (mirrors
-    `embeddings.get_reranker`). Returns None if unconfigured/unavailable so the
-    caller falls back to the heuristic."""
-    global _NLI_MODEL, _NLI_IMPORT_FAILED
-    if _NLI_IMPORT_FAILED:
-        return None
-    if _NLI_MODEL is not None:
-        return _NLI_MODEL
-    name = os.environ.get(_NLI_MODEL_ENV)
-    if not name:
-        return None
-    with _NLI_LOCK:
-        if _NLI_MODEL is not None:
-            return _NLI_MODEL
+@dataclass(frozen=True)
+class VerifierPin:
+    """One admitted `(model, weights, label map, fixture set)` tuple.
+
+    All four move together. A pin is only ever added or changed in a reviewed
+    diff: no environment value, runtime configuration, or vault content may add,
+    select, or alter one, which is what makes "an unpinned model never labels"
+    a property of the code rather than of a deployment's configuration.
+    """
+
+    model_name: str
+    weights_sha256: str
+    label_map_version: str
+    fixture_set: str
+
+
+#: Every verifier this build may run. EMPTY in this build: no cross-encoder
+#: weights have been resolved and hashed in a reviewed environment yet, and a
+#: digest is never guessed. An empty registry refuses every verifier, which is
+#: the correct behaviour — absence, not a heuristic wearing the model's name.
+VERIFIER_PINS: tuple[VerifierPin, ...] = ()
+
+
+def _active_pin() -> VerifierPin | None:
+    """The pin this build runs, or None.
+
+    Reads the repository artifact and nothing else. Deliberately free of any
+    environment or vault read: this function is the whole surface through which
+    a model identity can be selected, so keeping it configuration-blind is the
+    mechanism behind "runtime configuration cannot supply a model".
+    """
+    return VERIFIER_PINS[0] if VERIFIER_PINS else None
+
+
+#: Closed set of refusal causes, so a degradation record names one of a known
+#: vocabulary instead of free prose.
+VERIFIER_REFUSAL_REASONS = frozenset(
+    {
+        "gate-off",
+        "no-pin",
+        "label-map-unknown",
+        "weights-missing",
+        "digest-mismatch",
+        "dependency-missing",
+        "fixtures-failed",
+    }
+)
+
+
+@dataclass(frozen=True)
+class VerifierAdmission:
+    """The verifier tier's status: admitted, or refused with a named cause.
+
+    This IS the degradation record. Every refusal path returns one, so the
+    diagnostic surface can always say which of the admission conditions was
+    not met rather than reporting a silent absence.
+    """
+
+    admitted: bool
+    reason: str
+    detail: str = ""
+    model_name: str | None = None
+    model_digest: str | None = None
+    label_map_version: str | None = None
+    fixture_set: str | None = None
+    ignored_model_env: str | None = None
+
+    def as_dict(self) -> dict:
+        return {
+            "admitted": self.admitted,
+            "reason": self.reason,
+            "detail": self.detail,
+            "model_name": self.model_name,
+            "model_digest": self.model_digest,
+            "label_map_version": self.label_map_version,
+            "fixture_set": self.fixture_set,
+            "ignored_model_env": self.ignored_model_env,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Resolve-and-hash: the pinned digest, computed once per process
+# ---------------------------------------------------------------------------
+
+_WEIGHTS_DIGEST_CACHE: dict[str, tuple[str | None, str]] = {}
+_WEIGHTS_DIGEST_LOCK = threading.Lock()
+
+_VERIFIER_MODEL: Any = None
+_VERIFIER_MODEL_NAME: str | None = None
+_VERIFIER_LOCK = threading.Lock()
+
+
+def _directory_digest(root: Path) -> str:
+    """sha256 over a snapshot directory's content, path-order stable.
+
+    Names are hashed alongside bytes so a rename is a different digest, and the
+    walk is sorted so the answer does not depend on filesystem iteration order.
+    """
+    digest = hashlib.sha256()
+    for path in sorted(p for p in root.rglob("*") if p.is_file()):
+        digest.update(path.relative_to(root).as_posix().encode("utf-8"))
+        digest.update(b"\0")
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(chunk)
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _hash_resident_snapshot(model_name: str) -> tuple[str | None, str]:
+    """`(digest, detail)` for the model's resident weights through the offline cache.
+
+    Exactly one resident revision is required. Zero means the weights are not
+    there; more than one means the loader's choice is not determined by this
+    directory, and a digest that does not name what will actually be loaded
+    would be a pin in name only.
+    """
+    from . import model_cache
+
+    root = model_cache.hub_dir() / model_cache.snapshot_dirname(model_name) / "snapshots"
+    try:
+        revisions = sorted(p for p in root.iterdir() if p.is_dir())
+    except OSError:
+        return None, f"no resident snapshot for {model_name!r} under {root}"
+    if not revisions:
+        return None, f"no resident snapshot for {model_name!r} under {root}"
+    if len(revisions) > 1:
+        return None, (
+            f"resident snapshot for {model_name!r} is ambiguous: {len(revisions)} "
+            f"revisions under {root}"
+        )
+    try:
+        return _directory_digest(revisions[0]), str(revisions[0])
+    except OSError as error:
+        return None, f"weights for {model_name!r} are unreadable: {error}"
+
+
+def _resolve_weights(model_name: str) -> tuple[str | None, str]:
+    """Memoized `_hash_resident_snapshot` — hashed once per process."""
+    cached = _WEIGHTS_DIGEST_CACHE.get(model_name)
+    if cached is not None:
+        return cached
+    with _WEIGHTS_DIGEST_LOCK:
+        cached = _WEIGHTS_DIGEST_CACHE.get(model_name)
+        if cached is not None:
+            return cached
+        resolved = _hash_resident_snapshot(model_name)
+        _WEIGHTS_DIGEST_CACHE[model_name] = resolved
+    return resolved
+
+
+def resolve_weights_digest(model_name: str) -> str | None:
+    """The resident weights digest for `model_name`, or None if unresolvable."""
+    return _resolve_weights(model_name)[0]
+
+
+def reset_verifier_cache() -> None:
+    """Drop the process-cached digest and loaded model.
+
+    The digest and the fixture verdict are deliberately computed once per
+    process, so a caller that has changed what is on disk (a test planting a
+    different snapshot; an operator who has just replaced weights) needs an
+    explicit way to say the process's answer is stale.
+    """
+    global _VERIFIER_MODEL, _VERIFIER_MODEL_NAME
+
+    with _WEIGHTS_DIGEST_LOCK:
+        _WEIGHTS_DIGEST_CACHE.clear()
+    with _FIXTURE_LOCK:
+        _FIXTURE_VERDICTS.clear()
+    with _VERIFIER_LOCK:
+        _VERIFIER_MODEL = None
+        _VERIFIER_MODEL_NAME = None
+
+
+# ---------------------------------------------------------------------------
+# Verification fixture set (design D6) — the pair's admission evidence
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class FixturePair:
+    """One golden claim pair with the label an admitted verifier must produce.
+
+    `heuristic_fails` records whether the retired lexical stand-in gets this
+    pair wrong. It is documentation of WHY the tier exists, and the input to
+    the fixture-set precision table — not something admission consults.
+    """
+
+    claim_a: str
+    claim_b: str
+    expected: str
+    note: str
+    heuristic_fails: bool = False
+
+
+#: Golden pairs drawn from the f22 corpus shapes — genuine contradiction,
+#: concordant evidence, restatement, unrelated — plus the lexical heuristic's
+#: known failure cases. A (digest, label-map) pair is admitted only when it
+#: answers every one of these correctly.
+VERIFICATION_FIXTURES: dict[str, tuple[FixturePair, ...]] = {
+    "stance-v1": (
+        FixturePair(
+            "Raising the cache TTL reduces p99 latency.",
+            "Raising the cache TTL increases p99 latency.",
+            "contradict",
+            "genuine contradiction, shared vocabulary",
+        ),
+        FixturePair(
+            "The rollout regressed checkout throughput.",
+            "Checkout got faster after we shipped it.",
+            "contradict",
+            "genuine contradiction across differing surface forms",
+            heuristic_fails=True,
+        ),
+        FixturePair(
+            "Caching improves latency for repeat reads.",
+            "Caching improves latency on repeat reads.",
+            "duplicate",
+            "restatement, near-identical surface",
+        ),
+        FixturePair(
+            "Owned files are what retrieval quality depends on.",
+            "Retrieval quality depends on owning the files.",
+            "duplicate",
+            "restatement, reordered surface",
+            heuristic_fails=True,
+        ),
+        FixturePair(
+            "Batching similar work helps focus.",
+            "Batching similar work helps focus, most reliably in the morning.",
+            "refine",
+            "same stance, added detail",
+        ),
+        FixturePair(
+            "Enabling the cache improves throughput.",
+            "Disabling the cache degrades throughput.",
+            "refine",
+            "concordant evidence: antonym vocabulary, one stance",
+            heuristic_fails=True,
+        ),
+        FixturePair(
+            "Batching does not hurt focus.",
+            "Batching helps focus.",
+            "refine",
+            "concordant evidence: negation parity differs, one stance",
+            heuristic_fails=True,
+        ),
+        FixturePair(
+            "Tesseract is required for image OCR on Windows.",
+            "Pair dormancy reuses the stale-review activation calculation.",
+            "unrelated",
+            "disjoint topics",
+        ),
+        FixturePair(
+            "The upload route parses multipart bodies through Starlette.",
+            "Dormant notes in a close pair are the forgotten-conclusion case.",
+            "unrelated",
+            "disjoint topics, shared house vocabulary",
+        ),
+    ),
+}
+
+_FIXTURE_VERDICTS: dict[tuple[str, str, str, str], tuple[bool, str]] = {}
+_FIXTURE_LOCK = threading.Lock()
+
+
+def _run_fixture_set(pin: VerifierPin, label_map: LabelMap, predict) -> tuple[bool, str]:
+    """Run every fixture in `pin.fixture_set` through the label map.
+
+    Green means every pair produced exactly its expected label. One miss
+    refuses the whole pair: the fixture set is the evidence that this digest
+    and this label map belong together, and partial evidence is none.
+    """
+    pairs = VERIFICATION_FIXTURES.get(pin.fixture_set)
+    if not pairs:
+        return False, f"unknown fixture set {pin.fixture_set!r}"
+    for pair in pairs:
+        try:
+            logits = predict([(pair.claim_a, pair.claim_b), (pair.claim_b, pair.claim_a)])
+        except Exception as error:  # noqa: BLE001 — a forward pass that raises is a refusal
+            return False, f"fixture {pair.claim_a!r} raised: {error}"
+        result = label_map.apply(logits)
+        produced = result.label if result is not None else "no label"
+        if produced != pair.expected:
+            return False, (
+                f"fixture {pair.claim_a!r} expected {pair.expected!r}, got {produced!r}"
+            )
+    return True, f"{len(pairs)} fixtures green for {pin.fixture_set!r}"
+
+
+def _verify_fixtures(
+    pin: VerifierPin, digest: str, label_map: LabelMap, predict
+) -> tuple[bool, str]:
+    """Memoized `_run_fixture_set`, keyed by the exact pair it verified."""
+    key = (pin.model_name, digest, pin.label_map_version, pin.fixture_set)
+    cached = _FIXTURE_VERDICTS.get(key)
+    if cached is not None:
+        return cached
+    with _FIXTURE_LOCK:
+        cached = _FIXTURE_VERDICTS.get(key)
+        if cached is not None:
+            return cached
+        verdict = _run_fixture_set(pin, label_map, predict)
+        _FIXTURE_VERDICTS[key] = verdict
+    return verdict
+
+# ---------------------------------------------------------------------------
+# Admission, and the one channel a model-produced label may come from
+# ---------------------------------------------------------------------------
+
+
+def verifier_admission() -> VerifierAdmission:
+    """Whether the frozen verifier may run, or the named cause it may not.
+
+    The conditions, in order: the opt-in gate is set; a pin exists in the
+    repository registry; the pin's label map is one this build ships; the
+    pinned weights resolve; and their digest matches the pin. Any failure
+    refuses — and refusal degrades to ABSENCE, never to another backend's
+    label under this one's method name.
+    """
+    ignored = os.environ.get(_NLI_MODEL_ENV) or None
+    if not _nli_enabled():
+        return VerifierAdmission(
+            False,
+            "gate-off",
+            detail="EXOMEM_CLAIM_POLARITY_NLI is not set (default off).",
+            ignored_model_env=ignored,
+        )
+    pin = _active_pin()
+    if pin is None:
+        return VerifierAdmission(
+            False,
+            "no-pin",
+            detail="the repository pin registry is empty; no verifier is admitted.",
+            ignored_model_env=ignored,
+        )
+    try:
+        label_map = get_label_map(pin.label_map_version)
+    except ValueError as error:
+        return VerifierAdmission(
+            False,
+            "label-map-unknown",
+            detail=str(error),
+            model_name=pin.model_name,
+            label_map_version=pin.label_map_version,
+            fixture_set=pin.fixture_set,
+            ignored_model_env=ignored,
+        )
+    digest, detail = _resolve_weights(pin.model_name)
+    if digest is None:
+        return VerifierAdmission(
+            False,
+            "weights-missing",
+            detail=detail,
+            model_name=pin.model_name,
+            label_map_version=pin.label_map_version,
+            fixture_set=pin.fixture_set,
+            ignored_model_env=ignored,
+        )
+    if digest != pin.weights_sha256:
+        return VerifierAdmission(
+            False,
+            "digest-mismatch",
+            detail=(
+                f"resolved weights digest {digest} does not match the pinned "
+                f"{pin.weights_sha256} for {pin.model_name!r}."
+            ),
+            model_name=pin.model_name,
+            model_digest=digest,
+            label_map_version=pin.label_map_version,
+            fixture_set=pin.fixture_set,
+            ignored_model_env=ignored,
+        )
+    predict = _load_verifier_predictor(pin.model_name)
+    if predict is None:
+        return VerifierAdmission(
+            False,
+            "dependency-missing",
+            detail=(
+                f"the `nli` extra is not installed, or {pin.model_name!r} could not "
+                "be loaded from the offline model cache."
+            ),
+            model_name=pin.model_name,
+            model_digest=digest,
+            label_map_version=pin.label_map_version,
+            fixture_set=pin.fixture_set,
+            ignored_model_env=ignored,
+        )
+    green, fixture_detail = _verify_fixtures(pin, digest, label_map, predict)
+    if not green:
+        return VerifierAdmission(
+            False,
+            "fixtures-failed",
+            detail=fixture_detail,
+            model_name=pin.model_name,
+            model_digest=digest,
+            label_map_version=pin.label_map_version,
+            fixture_set=pin.fixture_set,
+            ignored_model_env=ignored,
+        )
+    return VerifierAdmission(
+        True,
+        "admitted",
+        detail=fixture_detail,
+        model_name=pin.model_name,
+        model_digest=digest,
+        label_map_version=pin.label_map_version,
+        fixture_set=pin.fixture_set,
+        ignored_model_env=ignored,
+    )
+
+
+
+def verifier_status() -> dict:
+    """The verifier tier's status for the diagnostic surface (doctor, status).
+
+    Always answerable and never fetches a model: an admitted verifier is loaded
+    only from the exact resident snapshot whose digest was checked. The payload
+    reports which knob is the gate, which knob is RETIRED and whether a value is
+    sitting in it being ignored, what the repository registry actually pins,
+    and which label maps this build ships. An operator who set the retired knob
+    learns from here that it selected nothing.
+    """
+    payload = verifier_admission().as_dict()
+    payload["gate"] = "EXOMEM_CLAIM_POLARITY_NLI"
+    payload["retired_model_env"] = _NLI_MODEL_ENV
+    payload["pinned_models"] = [pin.model_name for pin in VERIFIER_PINS]
+    payload["label_map_versions"] = sorted(_LABEL_MAPS)
+    return payload
+
+
+def _load_verifier_predictor(model_name: str):
+    """The cross-encoder's `predict`, or None when the `nli` extra is absent.
+
+    The constructor receives the exact snapshot directory whose bytes were
+    hashed for admission, with local-only loading forced. A local load failure
+    refuses the verifier; this path never retries a repository name through the
+    hub and therefore cannot execute bytes other than the admitted snapshot.
+
+    Two claim texts enter as a classification PAIR and logits come out. There is
+    no prompt assembly, no instruction template, and no generation anywhere on
+    this path (design D5) — which is why vault text can never reach instruction
+    position through this seam.
+    """
+    global _VERIFIER_MODEL, _VERIFIER_MODEL_NAME
+
+    if _VERIFIER_MODEL is not None and _VERIFIER_MODEL_NAME == model_name:
+        return _VERIFIER_MODEL.predict
+    with _VERIFIER_LOCK:
+        if _VERIFIER_MODEL is not None and _VERIFIER_MODEL_NAME == model_name:
+            return _VERIFIER_MODEL.predict
         try:
             from sentence_transformers import CrossEncoder
 
-            from . import accel, model_cache
+            from . import accel
 
+            digest, snapshot_detail = _resolve_weights(model_name)
+            if digest is None:
+                return None
             device = accel.select_device()
-            _NLI_MODEL = model_cache.load_offline_first(
-                name,
-                lambda **kw: CrossEncoder(name, device=device, **kw),
+            model = CrossEncoder(
+                str(Path(snapshot_detail)),
+                device=device,
+                local_files_only=True,
             )
-        except Exception as e:  # noqa: BLE001 — optional path; degrade to heuristic
-            log.warning("NLI polarity model unavailable (%s); using heuristic", e)
-            _NLI_IMPORT_FAILED = True
+        except Exception as error:  # noqa: BLE001 — absent extra is a refusal, not a crash
+            log.warning("frozen verifier unavailable (%s); no label is produced", error)
             return None
-    return _NLI_MODEL
+        _VERIFIER_MODEL = model
+        _VERIFIER_MODEL_NAME = model_name
+    return _VERIFIER_MODEL.predict
 
 
-def _nli_polarity(claim_a: str, claim_b: str) -> PolarityResult | None:
-    """Optional NLI backend. Returns None (→ heuristic fallback) when the model is
-    unconfigured or a forward pass fails. WIRED BUT UNVERIFIED (see module docstring).
+def verifier_polarity(claim_a: str, claim_b: str) -> PolarityResult | None:
+    """The ONLY channel a model-produced polarity label may come from.
 
-    Expected mapping once a model is attached: symmetric contradiction probability
-    → `contradict`; high mutual entailment → `duplicate`; one-directional
-    entailment → `refine`; neutral → `unrelated`.
+    Returns None whenever the verifier is not admitted — absence, never a
+    differently-produced label wearing the verifier's method name. A forward
+    pass that raises propagates to the caller, which records that one entry as
+    degraded and carries on (the pass is never aborted by one bad pair).
     """
-    model = _get_nli_model()
-    if model is None:
+    admission = verifier_admission()
+    if not admission.admitted:
+        log.debug(
+            "frozen verifier refused (%s): %s", admission.reason, admission.detail
+        )
         return None
-    try:
-        import numpy as _np
-
-        # Score both directions; a real entailment cross-encoder emits 3 logits
-        # (contradiction, entailment, neutral). Kept defensive so a differently-
-        # shaped model can't crash the write path.
-        logits = model.predict([(claim_a, claim_b), (claim_b, claim_a)])
-        arr = _np.asarray(logits, dtype=_np.float32)
-        if arr.ndim != 2 or arr.shape[1] < 3:
-            return None
-        probs = _np.exp(arr) / _np.exp(arr).sum(axis=1, keepdims=True)
-        contra = float(probs[:, 0].max())
-        entail = float(probs[:, 1].min())  # both directions must entail for a dup
-        neutral = float(probs[:, 2].mean())
-        if contra >= 0.5 and contra >= entail:
-            return PolarityResult("contradict", round(contra, 4), "nli")
-        if entail >= 0.6:
-            return PolarityResult("duplicate", round(entail, 4), "nli")
-        if neutral >= 0.5:
-            return PolarityResult("unrelated", round(neutral, 4), "nli")
-        return PolarityResult("refine", round(max(entail, 1 - contra - neutral), 4), "nli")
-    except Exception as e:  # noqa: BLE001 — never break a write on the optional path
-        log.debug("NLI polarity failed (%s); falling back to heuristic", e)
+    label_map = get_label_map(admission.label_map_version)
+    predict = _load_verifier_predictor(str(admission.model_name))
+    if predict is None:
         return None
+    return label_map.apply(predict([(claim_a, claim_b), (claim_b, claim_a)]))
 
 
 def classify_polarity(
     claim_a: str, claim_b: str, *, cosine: float | None = None
 ) -> PolarityResult:
-    """Polarity of two claims, behind ONE stable interface.
+    """Polarity of two claims behind ONE stable interface.
 
-    Dispatches to the optional NLI backend when enabled+available, else the
-    deterministic heuristic. This is the seam a better model slots into without
-    touching any caller (corpus_aware / audit).
+    The admitted frozen verifier when it is admitted, else the deterministic
+    lexical heuristic. NOT the review-queue channel: the queue calls
+    `verifier_polarity` directly, precisely so a heuristic verdict can never
+    reach queue metadata (design D3). This seam remains for callers that want a
+    best-effort verdict and are not writing an admitted, provenance-marked label.
     """
-    if _nli_enabled():
-        r = _nli_polarity(claim_a, claim_b)
-        if r is not None:
-            return r
+    verdict = verifier_polarity(claim_a, claim_b)
+    if verdict is not None:
+        return verdict
     return _heuristic_polarity(claim_a, claim_b, cosine=cosine)

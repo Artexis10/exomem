@@ -1,8 +1,16 @@
-## ADDED Requirements
+# frozen-verifiers Specification
+
+## Purpose
+
+Define the local-only admission boundary for optional stance verifiers so
+model labels are pinned, fixture-verified, provenance-marked queue enrichment
+that stays off synchronous writes and degrades to silence when unavailable.
+
+## Requirements
 
 ### Requirement: A frozen verifier runs only under a pinned identity
 
-A model-backed verifier SHALL run only when its opt-in gate is set
+A model-backed verifier SHALL run only when its opt-in gate has a truthy value
 (`EXOMEM_CLAIM_POLARITY_NLI`, default off), its resolved weights match a
 pinned sha256 digest, its label map carries the version the pin names, and
 that (digest, label-map version) pair has a green verification fixture set.
@@ -10,7 +18,11 @@ The pin registry SHALL be a repository artifact: no runtime configuration,
 environment value, or vault content may add, select, or alter a pin. The gate
 being unset, a digest mismatch, missing weights, a missing dependency, or an
 unverified pair SHALL refuse the verifier for the process. The verifier's
-input SHALL be a fixed classification shape over the texts it compares —
+constructor SHALL receive only the exact resident snapshot whose bytes matched
+the pin, with local-only loading forced; a local load failure SHALL refuse and
+SHALL NOT retry a repository model name or access the hub. Non-finite model
+logits SHALL refuse that output. The verifier's input SHALL be a fixed
+classification shape over the texts it compares —
 never an assembled prompt, never vault text in instruction position — and its
 output SHALL be drawn from the label map's closed set.
 
@@ -33,6 +45,24 @@ output SHALL be drawn from the label map's closed set.
   registry
 - **THEN** no verifier runs under that name, and the ignored value is reported
   on the diagnostic surface
+
+#### Scenario: The admitted bytes are the loaded bytes
+
+- **WHEN** the exact snapshot whose digest matched the pin cannot be loaded
+  locally
+- **THEN** the verifier refuses without retrying the repository model name or
+  making a hub request
+
+#### Scenario: Conventional false values keep the opt-in gate off
+
+- **WHEN** the gate is unset, empty, `0`, `false`, `no`, or `off`, ignoring case
+  and surrounding whitespace
+- **THEN** the verifier remains refused as gate-off
+
+#### Scenario: Invalid numeric output never becomes a label
+
+- **WHEN** either direction's logits contain NaN or infinity
+- **THEN** the label map refuses the output and no polarity label is attached
 
 ### Requirement: Verifier output is provenance-marked queue enrichment only
 

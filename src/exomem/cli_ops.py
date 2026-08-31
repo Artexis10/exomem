@@ -483,6 +483,15 @@ def _coerce_dict(value: Any, name: str) -> dict:
     return out
 
 
+def _coerce_nullable_dict(value: Any, name: str) -> dict | None:
+    out = _coerce_json(value, name)
+    if out is None:
+        return None
+    if not isinstance(out, dict):
+        raise OpError("BAD_JSON", f"`{name}` must be a JSON object or null")
+    return out
+
+
 def _coerce_client_artifact_files(value: Any, name: str, *, cli: bool) -> list[dict[str, str]]:
     """Validate file handles at non-MCP boundaries without reflecting signed URLs."""
     from .commands import _ClientArtifactFiles
@@ -573,6 +582,8 @@ def coerce(
             kwargs[name] = _coerce_list(value, name)
         elif p.type == "dict":
             kwargs[name] = _coerce_dict(value, name)
+        elif p.type == "nullable_dict":
+            kwargs[name] = _coerce_nullable_dict(value, name)
         elif p.type == "json":
             kwargs[name] = _coerce_json(value, name, cli=cli)
         elif p.type == "client_artifact_files":
