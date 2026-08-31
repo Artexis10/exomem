@@ -159,6 +159,27 @@ _ACTIVE_LEASE_MANAGER: ContextVar[Any | None] = ContextVar(
 _ACTIVE_DIRECT_MUTATION_GUARDS: ContextVar[tuple[tuple[str, Path], ...]] = ContextVar(
     "exomem_active_direct_mutation_guards", default=()
 )
+_ACTIVE_VERIFICATION_COMPONENT_FAILURES: ContextVar[list[str] | None] = ContextVar(
+    "exomem_active_verification_component_failures", default=None
+)
+
+
+@contextmanager
+def _verification_component_failure_scope() -> Iterator[list[str]]:
+    """Collect governed-boundary failures for one in-process verification probe."""
+
+    failures: list[str] = []
+    token = _ACTIVE_VERIFICATION_COMPONENT_FAILURES.set(failures)
+    try:
+        yield failures
+    finally:
+        _ACTIVE_VERIFICATION_COMPONENT_FAILURES.reset(token)
+
+
+def _mark_verification_component_failure(component: str) -> None:
+    failures = _ACTIVE_VERIFICATION_COMPONENT_FAILURES.get()
+    if failures is not None:
+        failures.append(component)
 
 
 def _direct_mutation_boundary(
@@ -919,11 +940,7 @@ class SchemaFenceState:
             or schema_version not in {3, 4}
         ):
             raise ValueError("schema fence version is invalid")
-        if (
-            isinstance(generation, bool)
-            or not isinstance(generation, int)
-            or generation < 1
-        ):
+        if isinstance(generation, bool) or not isinstance(generation, int) or generation < 1:
             raise ValueError("schema fence generation is invalid")
         return cls(enrolled, schema_version, generation)
 
@@ -1160,9 +1177,7 @@ class LeaseCoordinatorClient:
             # HTTPError subclasses URLError, so it has to be caught first for
             # the status to be visible at all.
             if exc.code in _CONTRACT_ABSENT_STATUSES:
-                raise _contract_absent_error(
-                    self.config.url, contract_route, exc.code
-                ) from None
+                raise _contract_absent_error(self.config.url, contract_route, exc.code) from None
             raise _coordinator_unavailable_error(exc) from None
         except (
             urllib.error.URLError,
@@ -1183,9 +1198,7 @@ def configured_schema_fence_operator_client(
     config = LeaseConfig.from_env(values)
     if not config.enabled:
         return None
-    operator_token = values.get(
-        "EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN", ""
-    ).strip()
+    operator_token = values.get("EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN", "").strip()
     if not operator_token:
         raise OpError(
             "SCHEMA_FENCE_OPERATOR_UNAVAILABLE",
@@ -2894,11 +2907,7 @@ class LeaseManager:
             try:
                 authorization_custody.require_standalone_mutation_admission(
                     Path(vault_root),
-                    now=(
-                        int(time.time())
-                        if attachment_now is None
-                        else attachment_now
-                    ),
+                    now=(int(time.time()) if attachment_now is None else attachment_now),
                 )
             except authorization_custody.AuthorizationCustodyUnavailable:
                 raise OpError(
@@ -3419,11 +3428,11 @@ class LeaseManager:
                             with_graph_outcome(
                                 terminal,
                                 {
-                            "graph_sync": "failed",
-                            "graph_sync_code": "GRAPH_SYNC_VAULT_AUTHORITY_MISSING",
-                            "graph_sync_remediation": (
-                                "Configure the vault mount and run reconcile to recover the derived graph."
-                            ),
+                                    "graph_sync": "failed",
+                                    "graph_sync_code": "GRAPH_SYNC_VAULT_AUTHORITY_MISSING",
+                                    "graph_sync_remediation": (
+                                        "Configure the vault mount and run reconcile to recover the derived graph."
+                                    ),
                                 },
                             )
                         )
@@ -3442,9 +3451,9 @@ class LeaseManager:
                             with_graph_outcome(
                                 terminal,
                                 {
-                            "graph_sync": "failed",
-                            "graph_sync_code": "GRAPH_SYNC_CHECKPOINT_MISSING",
-                            "graph_sync_remediation": "Run reconcile to recover the derived graph.",
+                                    "graph_sync": "failed",
+                                    "graph_sync_code": "GRAPH_SYNC_CHECKPOINT_MISSING",
+                                    "graph_sync_remediation": "Run reconcile to recover the derived graph.",
                                 },
                             )
                         )
@@ -3478,11 +3487,11 @@ class LeaseManager:
                         with_graph_outcome(
                             terminal,
                             {
-                        "graph_sync": "failed",
-                        "graph_sync_code": "GRAPH_SYNC_VAULT_AUTHORITY_MISSING",
-                        "graph_sync_remediation": (
-                            "Configure the vault mount and run reconcile to recover the derived graph."
-                        ),
+                                "graph_sync": "failed",
+                                "graph_sync_code": "GRAPH_SYNC_VAULT_AUTHORITY_MISSING",
+                                "graph_sync_remediation": (
+                                    "Configure the vault mount and run reconcile to recover the derived graph."
+                                ),
                             },
                         )
                     )
@@ -3506,16 +3515,16 @@ class LeaseManager:
                     if required is not None:
                         return retain_failure(
                             with_graph_outcome(
-                            terminal, graph_sync.committed_graph_failure(required)
+                                terminal, graph_sync.committed_graph_failure(required)
                             )
                         )
                     return retain_failure(
                         with_graph_outcome(
                             terminal,
                             {
-                        "graph_sync": "failed",
-                        "graph_sync_code": "GRAPH_SYNC_CHECKPOINT_MISSING",
-                        "graph_sync_remediation": "Run reconcile to recover the derived graph.",
+                                "graph_sync": "failed",
+                                "graph_sync_code": "GRAPH_SYNC_CHECKPOINT_MISSING",
+                                "graph_sync_remediation": "Run reconcile to recover the derived graph.",
                             },
                         )
                     )
@@ -3551,9 +3560,9 @@ class LeaseManager:
                     with_graph_outcome(
                         terminal,
                         {
-                    "graph_sync": "failed",
-                    "graph_sync_code": "GRAPH_SYNC_RESUME_FAILED",
-                    "graph_sync_remediation": "Run reconcile to recover the derived graph.",
+                            "graph_sync": "failed",
+                            "graph_sync_code": "GRAPH_SYNC_RESUME_FAILED",
+                            "graph_sync_remediation": "Run reconcile to recover the derived graph.",
                         },
                     )
                 )
@@ -3832,8 +3841,8 @@ class LeaseManager:
                 if (
                     graph_status["state"] == "current"
                     and not epistemic_graph.EpistemicGraphIndex(
-                    vault_root,
-                    mutation_coordinator=self._mutation_coordinator_for(vault_root),
+                        vault_root,
+                        mutation_coordinator=self._mutation_coordinator_for(vault_root),
                     ).available()
                 ):
                     graph_status = {
@@ -4304,12 +4313,13 @@ def invoke_command(
 
     if not injected or not is_vault_root(injected[0]):
         return _invoke()
-    # An error is a payload. `_invoke()` is evaluated as an ARGUMENT to
-    # `postfilter`, so a raising command never reached the filter and its
-    # message crossed this boundary untouched — `AMBIGUOUS_REFERENCE` embedded
-    # the colliding vault paths and made that a path oracle. Both the
-    # read-only and the mutation return are inside one try, so a future path
-    # through this function cannot open a fresh bypass either.
+
+    # An error is a payload. Both the leaf and terminal filter stay inside one
+    # guarded path so a raising command cannot bypass `postfilter_error` --
+    # `AMBIGUOUS_REFERENCE` once embedded colliding vault paths and made that a
+    # path oracle. They are evaluated as separate steps only so consolidation
+    # verification can distinguish a legitimate public leaf error from failure
+    # of the projector, scrubber, or receipt boundary itself.
     #
     # `kwargs` goes to the filter so it can tell a reference the CALLER sent
     # from one the vault volunteered. Only the latter may be redacted; see
@@ -4317,26 +4327,65 @@ def invoke_command(
     #
     # `BaseException`, not `Exception`: a "terminal" filter that a Cancelled or
     # a SystemExit walks straight past is not terminal.
+    def filtered_result(value: Any) -> Any:
+        try:
+            return postfilter(command.name, value, injected[0])
+        except BaseException:
+            _mark_verification_component_failure("egress-postfilter")
+            raise
+
+    def filtered_error(error: BaseException) -> None:
+        try:
+            postfilter_error(command.name, error, injected[0], request_kwargs=kwargs)
+        except BaseException:
+            _mark_verification_component_failure("egress-error-filter")
+            raise
+
+    def emit_receipt(collector: Any) -> None:
+        try:
+            emit_boundary_receipt(collector)
+        except BaseException:
+            _mark_verification_component_failure("egress-receipt")
+            raise
+
     if not read_only:
         try:
-            return postfilter(command.name, _invoke(), injected[0])
+            value = _invoke()
         except BaseException as error:
-            postfilter_error(command.name, error, injected[0], request_kwargs=kwargs)
+            filtered_error(error)
+            raise
+        try:
+            return filtered_result(value)
+        except BaseException as error:
+            filtered_error(error)
             raise
     # The try lives INSIDE the boundary so `collector` is still bound when the
     # filter runs: `disclosure_boundary`'s `finally` resets the contextvar on
     # the way out, so an except-block outside it records credential blocks into
     # a collector that is already gone, and emits no receipt for a governed read
     # that touched withheld items before failing.
-    with disclosure_boundary(injected[0], command.name) as collector:
-        try:
-            result = postfilter(command.name, _invoke(), injected[0])
-        except BaseException as error:
-            postfilter_error(command.name, error, injected[0], request_kwargs=kwargs)
-            emit_boundary_receipt(collector)
-            raise
-        emit_boundary_receipt(collector)
-        return result
+    leaf_error: BaseException | None = None
+    try:
+        with disclosure_boundary(injected[0], command.name) as collector:
+            try:
+                value = _invoke()
+            except BaseException as error:
+                leaf_error = error
+                filtered_error(error)
+                emit_receipt(collector)
+                raise
+            try:
+                result = filtered_result(value)
+            except BaseException as error:
+                filtered_error(error)
+                emit_receipt(collector)
+                raise
+            emit_receipt(collector)
+            return result
+    except BaseException as error:
+        if error is not leaf_error and not _ACTIVE_VERIFICATION_COMPONENT_FAILURES.get():
+            _mark_verification_component_failure("egress-disclosure-boundary")
+        raise
 
 
 def coordination_status(

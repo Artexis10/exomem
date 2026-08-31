@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import re
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn
@@ -23,6 +23,11 @@ from . import (
     consolidation_seal,
     consolidation_verification,
     consolidation_verification_journal,
+    consolidation_verification_manifest,
+    consolidation_verification_registry,
+)
+from . import (
+    principal as governance_principal,
 )
 
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
@@ -112,12 +117,12 @@ def _crash_point(_point: str) -> None:
 
 
 def _canonical_surface_probe_runner(
-    _probe: consolidation_verification.VerificationProbe,
-    _context: consolidation_verification.VerificationProbeContext,
+    probe: consolidation_verification.VerificationProbe,
+    context: consolidation_verification.VerificationProbeContext,
 ) -> consolidation_verification.VerificationProbeTerminal:
-    """Closed adapter seam; unavailable until the canonical registry is installed."""
+    """Run one exact contract through the fixed canonical surface registry."""
 
-    _fail()
+    return consolidation_verification_registry.run_probe(probe, context)
 
 
 def _require_seal(
@@ -332,12 +337,27 @@ def _execute_probes(
     *,
     vault_root: Path,
     store: consolidation_verification_journal.ConsolidationVerificationJournalStore,
+    manifest: consolidation_verification_manifest.VerificationManifest,
+    vault_binding_digest: str,
+    journal_digest: str,
+    verified_at: str,
+    principals: tuple[governance_principal.RequestPrincipal, ...],
     authority: object,
     timestamp: str,
 ) -> tuple[consolidation_effect_coordinator.EffectExecutionResult, ...]:
     effects: list[consolidation_effect_coordinator.EffectExecutionResult] = []
     initial = store.load()
+    if tuple(entry.probe for entry in initial.probes) != manifest.verification_plan.probes:
+        _fail()
     for probe in (entry.probe for entry in initial.probes):
+        contract = manifest.contracts[probe.ordinal]
+        if (
+            contract.probe_id != probe.probe_id
+            or contract.contract_digest != probe.contract_digest
+            or contract.expected_result_digest != probe.expected_result_digest
+            or contract.executor_id != probe.executor_id
+        ):
+            _fail()
         state = store.load()
         if probe.ordinal == 0:
             parent_event_id = state.last_rebuild_terminal_event_id
@@ -390,13 +410,22 @@ def _execute_probes(
         def apply(
             *,
             expected_probe: consolidation_verification.VerificationProbe = probe,
+            expected_contract: consolidation_verification_manifest.VerificationContract = contract,
         ) -> None:
             current = store.load()
             context = consolidation_verification.VerificationProbeContext(
                 vault_root=vault_root,
+                vault_binding_digest=vault_binding_digest,
+                run_id=current.run_id,
+                operation_id=current.operation_id,
+                journal_digest=journal_digest,
+                plan_digest=current.plan_digest,
                 canonical_census_digest=current.canonical_census_digest,
                 verification_basis_digest=current.binding_digest,
+                verified_at=verified_at,
+                principals=principals,
                 authority=authority,
+                contract=expected_contract,
             )
             terminal = consolidation_verification._run_probe(  # noqa: SLF001
                 _canonical_surface_probe_runner,
@@ -599,8 +628,8 @@ def verify_rebuilt_destination(
     journal_digest: str,
     request_digest: str,
     plan_digest: str,
-    verification_plan: consolidation_verification.VerificationPlan,
     verified_at: str,
+    attested_principals: Sequence[governance_principal.RequestPrincipal] = (),
 ) -> ConsolidationVerificationCoordinatorResult:
     """Run exact in-process probes and advance only a proven result to verified."""
 
@@ -612,7 +641,23 @@ def verify_rebuilt_destination(
     checked_request = _digest(request_digest)
     checked_plan_digest = _digest(plan_digest)
     checked_time = _timestamp(verified_at)
-    checked_plan = consolidation_verification._checked_plan(verification_plan)  # noqa: SLF001
+    if isinstance(attested_principals, (str, bytes)) or not isinstance(
+        attested_principals, Sequence
+    ):
+        _fail()
+    principals = tuple(attested_principals)
+    if len(principals) > 1024 or any(
+        type(item) is not governance_principal.RequestPrincipal
+        or not item.resolved
+        or item.audience_id == governance_principal.OWNER_AUDIENCE
+        for item in principals
+    ):
+        _fail()
+    principal_keys = tuple(
+        (item.audience_id, item.surface, item.authorization_session_id) for item in principals
+    )
+    if len(set(principal_keys)) != len(principal_keys):
+        _fail()
     if (
         not isinstance(admission, consolidation_admission.ConsolidationAdmission)
         or admission.vault_root != root
@@ -634,6 +679,12 @@ def verify_rebuilt_destination(
         ):
             _fail()
         positive_digest, negative_digest = _plan_verification(preimage.get("verification_plan"))
+        manifest = consolidation_verification_manifest.ConsolidationVerificationManifestStore(
+            root
+        ).load(checked_run, checked_plan_digest)
+        checked_plan = consolidation_verification._checked_plan(  # noqa: SLF001
+            manifest.verification_plan
+        )
         if (
             positive_digest != checked_plan.positive_probe_digest
             or negative_digest != checked_plan.negative_probe_digest
@@ -709,6 +760,11 @@ def verify_rebuilt_destination(
         probe_effects = _execute_probes(
             vault_root=root,
             store=journal_store,
+            manifest=manifest,
+            vault_binding_digest=checked_vault,
+            journal_digest=checked_journal,
+            verified_at=checked_time,
+            principals=principals,
             authority=authority,
             timestamp=checked_time,
         )
@@ -759,6 +815,8 @@ def verify_rebuilt_destination(
         consolidation_seal.ConsolidationSealUnavailable,
         consolidation_verification.ConsolidationVerificationUnavailable,
         consolidation_verification_journal.ConsolidationVerificationJournalUnavailable,
+        consolidation_verification_manifest.ConsolidationVerificationManifestUnavailable,
+        consolidation_verification_registry.ConsolidationVerificationRegistryUnavailable,
         OSError,
         RuntimeError,
         TypeError,

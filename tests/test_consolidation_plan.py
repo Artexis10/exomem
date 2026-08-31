@@ -150,10 +150,53 @@ def _plan(
     basis_run_revision: int = 7,
     policy_bundle: consolidation_policy.DestinationPolicyPlan | None = None,
     plan_kind: str = "cutover",
+    verification_manifest: object | None = None,
 ) -> consolidation_plan.CanonicalConsolidationPlan:
+    plan_input = _plan_input(policy_bundle, plan_kind=plan_kind)
+    if verification_manifest is not None:
+        verification_plan = verification_manifest.verification_plan
+        plan_input["verification_plan"] = {
+            "schema": "exomem.consolidation-verification-plan/v1",
+            "positive_probe_digest": verification_plan.positive_probe_digest,
+            "negative_probe_digest": verification_plan.negative_probe_digest,
+        }
+        plan_input["rendering_definition"] = consolidation_plan.derive_rendering_definition(
+            plan_input
+        )
     return consolidation_plan.materialize_plan(
-        _plan_input(policy_bundle, plan_kind=plan_kind),
+        plan_input,
         materialization=_materialization(basis_run_revision=basis_run_revision),
+    )
+
+
+def _verification_manifest():
+    from exomem.governance import consolidation_verification_manifest
+
+    common = {
+        "executor_id": "canonical-governance-surface-v1",
+        "surface": "rest",
+        "principal_kind": "owner",
+        "principal_id": "owner",
+        "purpose": "consolidation-verification",
+        "command_name": "read_memory",
+    }
+    return consolidation_verification_manifest.build_verification_manifest(
+        positive_contracts=(
+            {
+                **common,
+                "probe_id": "owner-destination-present",
+                "arguments": {"path": "Knowledge Base/Notes/destination.md"},
+                "expected_result_digest": _digest("destination-present-wire"),
+            },
+        ),
+        negative_contracts=(
+            {
+                **common,
+                "probe_id": "owner-private-absent",
+                "arguments": {"path": "Knowledge Base/Notes/private.md"},
+                "expected_result_digest": _digest("private-absent-wire"),
+            },
+        ),
     )
 
 
@@ -640,30 +683,41 @@ def test_owner_only_plan_store_reloads_exact_bytes_and_replays_idempotently(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from exomem.governance import consolidation_plan_store
+    from exomem.governance import (
+        consolidation_plan_store,
+        consolidation_verification_manifest,
+    )
 
     vault = tmp_path / "vault"
     _create_run(vault, monkeypatch)
     policy_bundle = _policy_bundle(vault)
-    plan = _plan(basis_run_revision=1, policy_bundle=policy_bundle)
+    manifest = _verification_manifest()
+    plan = _plan(
+        basis_run_revision=1,
+        policy_bundle=policy_bundle,
+        verification_manifest=manifest,
+    )
     store = consolidation_plan_store.ConsolidationPlanStore(vault)
 
     with pytest.raises(consolidation_plan_store.ConsolidationPlanStoreUnavailable):
         store.persist(
             plan,
             policy_bundle=_policy_bundle(vault, name="Changed review"),
+            verification_manifest=manifest,
             expected_run_revision=1,
         )
 
     first = store.persist(
         plan,
         policy_bundle=policy_bundle,
+        verification_manifest=manifest,
         expected_run_revision=1,
     )
     assert (
         store.persist(
             plan,
             policy_bundle=policy_bundle,
+            verification_manifest=manifest,
             expected_run_revision=1,
         )
         == first
@@ -687,6 +741,7 @@ def test_owner_only_plan_store_reloads_exact_bytes_and_replays_idempotently(
         "control-basis.json",
         "plan.json",
         "policy-bundle.json",
+        "verification-manifest.json",
     ]
     if os.name != "nt":
         assert plan_dir.stat().st_mode & 0o777 == 0o700
@@ -697,6 +752,12 @@ def test_owner_only_plan_store_reloads_exact_bytes_and_replays_idempotently(
     assert (
         restarted.load_policy_bundle(RUN_ID, plan_kind="cutover", plan_digest=plan.digest)
         == policy_bundle
+    )
+    assert (
+        consolidation_verification_manifest.ConsolidationVerificationManifestStore(vault).load(
+            RUN_ID, plan.digest
+        )
+        == manifest
     )
 
 
@@ -709,20 +770,36 @@ def test_plan_store_refuses_wrong_run_revision_or_partial_state(
     vault = tmp_path / "vault"
     _create_run(vault, monkeypatch)
     policy_bundle = _policy_bundle(vault)
-    plan = _plan(basis_run_revision=1, policy_bundle=policy_bundle)
+    manifest = _verification_manifest()
+    plan = _plan(
+        basis_run_revision=1,
+        policy_bundle=policy_bundle,
+        verification_manifest=manifest,
+    )
     store = consolidation_plan_store.ConsolidationPlanStore(vault)
 
     with pytest.raises(consolidation_plan_store.ConsolidationPlanStoreUnavailable):
         store.persist(
             plan,
             policy_bundle=policy_bundle,
+            verification_manifest=manifest,
             expected_run_revision=2,
         )
     with pytest.raises(consolidation_plan_store.ConsolidationPlanStoreUnavailable):
         store.persist(plan, expected_run_revision=1)
+    with pytest.raises(
+        consolidation_plan_store.ConsolidationPlanStoreUnavailable,
+        match="^PLAN_VERIFICATION_MANIFEST_REQUIRED$",
+    ):
+        store.persist(
+            plan,
+            policy_bundle=policy_bundle,
+            expected_run_revision=1,
+        )
     store.persist(
         plan,
         policy_bundle=policy_bundle,
+        verification_manifest=manifest,
         expected_run_revision=1,
     )
     control_path = (
@@ -750,7 +827,12 @@ def test_plan_store_recovers_control_first_crash_without_changing_plan(
     vault = tmp_path / "vault"
     _create_run(vault, monkeypatch)
     policy_bundle = _policy_bundle(vault)
-    plan = _plan(basis_run_revision=1, policy_bundle=policy_bundle)
+    manifest = _verification_manifest()
+    plan = _plan(
+        basis_run_revision=1,
+        policy_bundle=policy_bundle,
+        verification_manifest=manifest,
+    )
     store = consolidation_plan_store.ConsolidationPlanStore(vault)
     original_publish = store._publish_missing
 
@@ -764,6 +846,7 @@ def test_plan_store_recovers_control_first_crash_without_changing_plan(
         store.persist(
             plan,
             policy_bundle=policy_bundle,
+            verification_manifest=manifest,
             expected_run_revision=1,
         )
 
@@ -772,6 +855,7 @@ def test_plan_store_recovers_control_first_crash_without_changing_plan(
         store.persist(
             plan,
             policy_bundle=policy_bundle,
+            verification_manifest=manifest,
             expected_run_revision=1,
         )
         == plan
@@ -790,11 +874,17 @@ def test_plan_store_refuses_missing_or_changed_policy_bundle(
     vault = tmp_path / "vault"
     _create_run(vault, monkeypatch)
     policy_bundle = _policy_bundle(vault)
-    plan = _plan(basis_run_revision=1, policy_bundle=policy_bundle)
+    manifest = _verification_manifest()
+    plan = _plan(
+        basis_run_revision=1,
+        policy_bundle=policy_bundle,
+        verification_manifest=manifest,
+    )
     store = consolidation_plan_store.ConsolidationPlanStore(vault)
     store.persist(
         plan,
         policy_bundle=policy_bundle,
+        verification_manifest=manifest,
         expected_run_revision=1,
     )
     path = (
@@ -817,6 +907,40 @@ def test_plan_store_refuses_missing_or_changed_policy_bundle(
         store.load(RUN_ID, plan_kind="cutover", plan_digest=plan.digest)
 
 
+@pytest.mark.parametrize("replacement", [None, b"{}"])
+def test_plan_store_refuses_missing_or_changed_verification_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replacement: bytes | None,
+) -> None:
+    from exomem.governance import consolidation_plan_store
+
+    vault = tmp_path / "vault"
+    _create_run(vault, monkeypatch)
+    policy_bundle = _policy_bundle(vault)
+    manifest = _verification_manifest()
+    plan = _plan(
+        basis_run_revision=1,
+        policy_bundle=policy_bundle,
+        verification_manifest=manifest,
+    )
+    store = consolidation_plan_store.ConsolidationPlanStore(vault)
+    store.persist(
+        plan,
+        policy_bundle=policy_bundle,
+        verification_manifest=manifest,
+        expected_run_revision=1,
+    )
+    path = store._plan_dir(RUN_ID, "cutover", plan.digest) / "verification-manifest.json"  # noqa: SLF001
+    if replacement is None:
+        path.unlink()
+    else:
+        path.write_bytes(replacement)
+
+    with pytest.raises(consolidation_plan_store.ConsolidationPlanStoreUnavailable):
+        store.load(RUN_ID, plan_kind="cutover", plan_digest=plan.digest)
+
+
 def test_plan_store_binds_only_executable_policy_documents(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -829,13 +953,19 @@ def test_plan_store_binds_only_executable_policy_documents(
     governance.mkdir(parents=True)
     (governance / "README.md").write_text("Authoring guidance only.\n", encoding="utf-8")
     policy_bundle = _policy_bundle(vault)
-    plan = _plan(basis_run_revision=1, policy_bundle=policy_bundle)
+    manifest = _verification_manifest()
+    plan = _plan(
+        basis_run_revision=1,
+        policy_bundle=policy_bundle,
+        verification_manifest=manifest,
+    )
     store = consolidation_plan_store.ConsolidationPlanStore(vault)
 
     assert (
         store.persist(
             plan,
             policy_bundle=policy_bundle,
+            verification_manifest=manifest,
             expected_run_revision=1,
         )
         == plan
@@ -1136,10 +1266,16 @@ def _stored_review(
     vault = tmp_path / "vault"
     _create_run(vault, monkeypatch)
     policy_bundle = _policy_bundle(vault)
-    plan = _plan(basis_run_revision=1, policy_bundle=policy_bundle)
+    manifest = _verification_manifest()
+    plan = _plan(
+        basis_run_revision=1,
+        policy_bundle=policy_bundle,
+        verification_manifest=manifest,
+    )
     consolidation_plan_store.ConsolidationPlanStore(vault).persist(
         plan,
         policy_bundle=policy_bundle,
+        verification_manifest=manifest,
         expected_run_revision=1,
     )
     review = consolidation_review.begin_review(

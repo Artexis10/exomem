@@ -67,16 +67,34 @@ def _probe(probe_id: str) -> dict[str, str]:
 
 
 def _verification_plan():
-    from exomem.governance import consolidation_verification
+    return _verification_manifest().verification_plan
 
-    return consolidation_verification.build_verification_plan(
-        positive_probes=(
-            _probe("owner-note-full"),
-            _probe("delegated-approved-projection"),
+
+def _contract(probe_id: str) -> dict[str, object]:
+    return {
+        "probe_id": probe_id,
+        "executor_id": "canonical-governance-surface-v1",
+        "surface": "rest",
+        "principal_kind": "owner",
+        "principal_id": "owner",
+        "purpose": "consolidation-verification",
+        "command_name": "get",
+        "arguments": {"path": f"Knowledge Base/Notes/{probe_id}.md"},
+        "expected_result_digest": _digest(f"{probe_id}:pass"),
+    }
+
+
+def _verification_manifest():
+    from exomem.governance import consolidation_verification_manifest
+
+    return consolidation_verification_manifest.build_verification_manifest(
+        positive_contracts=(
+            _contract("owner-note-full"),
+            _contract("delegated-approved-projection"),
         ),
-        negative_probes=(
-            _probe("delegated-private-body-absent-pair"),
-            _probe("wrong-purpose-wire-equivalence"),
+        negative_contracts=(
+            _contract("delegated-private-body-absent-pair"),
+            _contract("wrong-purpose-wire-equivalence"),
         ),
     )
 
@@ -84,6 +102,8 @@ def _verification_plan():
 def _rebuilt_run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    manifest=None,
 ):
     from exomem.governance import (
         consolidation_rebuild_coordinator,
@@ -104,7 +124,8 @@ def _rebuilt_run(
     rebuilt = consolidation_rebuild_coordinator.rebuild_published_destination(**arguments)
     assert rebuilt.seal_state.phase == "verifying"
 
-    plan = _verification_plan()
+    manifest = manifest or _verification_manifest()
+    plan = manifest.verification_plan
     stored = SimpleNamespace(
         digest=PLAN_DIGEST,
         preimage={
@@ -121,6 +142,11 @@ def _rebuilt_run(
         consolidation_verification_coordinator.consolidation_plan_store.ConsolidationPlanStore,
         "load",
         lambda _store, _run_id, *, plan_kind, plan_digest: stored,
+    )
+    monkeypatch.setattr(
+        consolidation_verification_coordinator.consolidation_verification_manifest.ConsolidationVerificationManifestStore,
+        "load",
+        lambda _store, _run_id, _plan_digest: manifest,
     )
     monkeypatch.setattr(
         consolidation_verification_coordinator,
@@ -140,11 +166,69 @@ def _rebuilt_run(
             "plan_digest",
         )
     }
-    verify_arguments.update(
-        verification_plan=plan,
-        verified_at=VERIFIED_AT,
-    )
+    verify_arguments.update(verified_at=VERIFIED_AT)
     return vault, verify_arguments, plan
+
+
+def _real_registry_manifest():
+    from exomem import cli_ops
+    from exomem.governance import (
+        consolidation_verification_manifest,
+        consolidation_verification_registry,
+    )
+
+    present_data = {
+        "path": "Knowledge Base/Notes/destination.md",
+        "frontmatter": {},
+        "has_frontmatter": False,
+    }
+    present_wire = consolidation_verification_registry.render_rest_verification_wire(
+        success=True,
+        data=present_data,
+    )
+    missing_error = cli_ops.error_dict(
+        ValueError("NOT_FOUND: file does not exist: Knowledge Base/Notes/absent.md")
+    )
+    missing_wire = consolidation_verification_registry.render_rest_verification_wire(
+        success=False,
+        error=missing_error,
+    )
+
+    def contract(probe_id: str, path: str, expected: str) -> dict[str, object]:
+        return {
+            "probe_id": probe_id,
+            "executor_id": "canonical-governance-surface-v1",
+            "surface": "rest",
+            "principal_kind": "owner",
+            "principal_id": "owner",
+            "purpose": "consolidation-verification",
+            "command_name": "read_memory",
+            "arguments": {"path": path, "frontmatter_only": True},
+            "expected_result_digest": expected,
+        }
+
+    return consolidation_verification_manifest.build_verification_manifest(
+        positive_contracts=(
+            contract(
+                "owner-present",
+                "Knowledge Base/Notes/destination.md",
+                consolidation_verification_registry.verification_wire_result_digest(
+                    "rest",
+                    present_wire,
+                ),
+            ),
+        ),
+        negative_contracts=(
+            contract(
+                "owner-absent",
+                "Knowledge Base/Notes/absent.md",
+                consolidation_verification_registry.verification_wire_result_digest(
+                    "rest",
+                    missing_wire,
+                ),
+            ),
+        ),
+    )
 
 
 def _install_passing_runner(
@@ -197,16 +281,16 @@ def test_probe_and_matrix_digests_are_fixed_framed_jcs_vectors() -> None:
     plan = _verification_plan()
 
     assert plan.positive_probe_digest == (
-        "3270b6c5047a088e38bdbf5e7ebbc4b4c483869a8aa669ea501b4b785bc307df"
+        "9c72df10e936be2d2727487907b97a7644fadfb53171477f2126744a98788612"
     )
     assert plan.negative_probe_digest == (
-        "cc9a67cc0748b61a11a6c9073e040dbb817727fbce00cbdf4860d957d8a21efc"
+        "d25ca94e49a9355f3e32809424f66a4f999ad683532426bc966c8dc8f1e3a689"
     )
     assert tuple(probe.probe_digest for probe in plan.probes) == (
-        "425c0416e0a1efd536e97c0395d6d7b4105b57fcb62d8db2aa4f399eac8ea269",
-        "14bf94b53db7a43ca1f4b35616068ab50bca5a4d7392c77faa19f00b9e990697",
-        "cb7f779b936cba0d1daefdbcc556d04a5bff777b8bc81a834ea766400fc290c8",
-        "5968f29ee48f0e48bf8ec49bf30499a309854ff71b000dc0a98dd5ccef3036a7",
+        "6cbf2cab57b9f55d2e84305a232fc52a087b6830388ddc366ffcc5c950be950a",
+        "7f210b108f73c767a81e42c10f8a8d859ac5448779aaf142774a5b33fbcad9b0",
+        "0cb339d0f20473ca576511bca06b500c8edb58fcd841bf9b07a8e05079cbfe70",
+        "010273dcec2db69ba2de795f2d25842c7a56c13644cc8beb20b07010879939ca",
     )
 
 
@@ -308,6 +392,27 @@ def test_uninstalled_canonical_probe_registry_fails_closed(
         == "verifying"
     )
     assert not any(record["phase"] == "committed" for record in _verification_records(vault))
+
+
+def test_installed_registry_verifies_real_present_and_absent_rest_responses(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance import consolidation_verification_coordinator
+
+    manifest = _real_registry_manifest()
+    _vault, arguments, plan = _rebuilt_run(
+        tmp_path,
+        monkeypatch,
+        manifest=manifest,
+    )
+
+    result = consolidation_verification_coordinator.verify_rebuilt_destination(
+        **arguments,
+    )
+
+    assert result.seal_state.phase == "verified"
+    assert result.completed_probe_ids == tuple(probe.probe_id for probe in plan.probes)
 
 
 def test_tampered_verification_journal_fails_closed(
@@ -548,15 +653,17 @@ def test_changed_probe_matrix_is_rejected_before_any_probe_runs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from exomem.governance import (
-        consolidation_verification,
-        consolidation_verification_coordinator,
-    )
+    from exomem.governance import consolidation_verification_coordinator
 
     _vault, arguments, _plan = _rebuilt_run(tmp_path, monkeypatch)
-    arguments["verification_plan"] = consolidation_verification.build_verification_plan(
-        positive_probes=(_probe("changed-owner-probe"),),
-        negative_probes=(_probe("wrong-purpose-wire-equivalence"),),
+    changed_manifest = consolidation_verification_coordinator.consolidation_verification_manifest.build_verification_manifest(
+        positive_contracts=(_contract("changed-owner-probe"),),
+        negative_contracts=(_contract("wrong-purpose-wire-equivalence"),),
+    )
+    monkeypatch.setattr(
+        consolidation_verification_coordinator.consolidation_verification_manifest.ConsolidationVerificationManifestStore,
+        "load",
+        lambda _store, _run_id, _plan_digest: changed_manifest,
     )
     calls: list[str] = []
     _install_passing_runner(monkeypatch, calls)
