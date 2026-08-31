@@ -1,12 +1,4 @@
-# frozen-verifiers Specification
-
-## Purpose
-
-Define the local-only admission boundary for optional stance verifiers so
-model labels are pinned, fixture-verified, provenance-marked queue enrichment
-that stays off synchronous writes and degrades to silence when unavailable.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: A frozen verifier runs only under a pinned identity
 
@@ -47,8 +39,8 @@ label map's closed set.
 
 - **WHEN** an environment value names a model absent from the repository pin
   registry
-- **THEN** no verifier runs under that name, and the ignored value is reported
-  on the diagnostic surface
+- **THEN** no verifier runs under that name, and the ignored value is reported on
+  the diagnostic surface
 
 #### Scenario: The admitted bytes are the loaded bytes
 
@@ -80,41 +72,7 @@ label map's closed set.
 - **WHEN** either direction's logits contain NaN or infinity
 - **THEN** the label map refuses the output and no polarity label is attached
 
-### Requirement: Verifier output is provenance-marked queue enrichment only
-
-A frozen verifier's labels SHALL attach only to review-queue entries, carrying
-the method, model digest, and label-map version that produced them. Verifier
-output SHALL NOT enter note canon, decisions, retrieval, ranking, policy, or
-any synchronous write path, and SHALL NOT create, mutate, accept, or supersede
-any page, relation, or proposal.
-
-#### Scenario: The label stays on the review surface
-
-- **WHEN** a verifier labels a queue entry
-- **THEN** no page, relation, ranking position, or write response changes, and
-  the entry's label names its producing digest and label-map version
-
-### Requirement: Verifier absence degrades to byte-identical silence
-
-With the verifier's extra uninstalled, its opt-in gate off (the default), or
-its pin unsatisfied, every product surface SHALL behave byte-identically to a
-build that has no verifier tier at all, apart from an explicit degradation
-record on the diagnostic surface. A per-entry failure during an enrichment
-pass SHALL leave that entry unenriched and recorded, and SHALL NOT abort the
-pass.
-
-#### Scenario: Uninstalled means invisible
-
-- **WHEN** the extra is not installed and a full audit and write cycle runs
-- **THEN** queue entries, write responses, and rankings are byte-identical to
-  a no-verifier build's, and only the diagnostic surface names the absent
-  verifier
-
-#### Scenario: One bad entry does not take down the pass
-
-- **WHEN** the model raises on one claim pair mid-pass
-- **THEN** that entry is unenriched and recorded as degraded, and every other
-  entry's enrichment completes
+## ADDED Requirements
 
 ### Requirement: The admitted NLI map states only relations its head measures
 

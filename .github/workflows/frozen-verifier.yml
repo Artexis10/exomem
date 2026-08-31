@@ -1,0 +1,85 @@
+name: frozen stance verifier
+
+on:
+  push:
+    paths:
+      - src/exomem/claims.py
+      - tests/test_frozen_verifier_real.py
+      - tests/test_frozen_verifiers.py
+      - pyproject.toml
+      - uv.lock
+      - .github/workflows/frozen-verifier.yml
+  pull_request:
+    paths:
+      - src/exomem/claims.py
+      - tests/test_frozen_verifier_real.py
+      - tests/test_frozen_verifiers.py
+      - pyproject.toml
+      - uv.lock
+      - .github/workflows/frozen-verifier.yml
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: frozen-verifier-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  exact-multilingual-pin:
+    name: exact multilingual pin
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      HF_HOME: ${{ runner.temp }}/huggingface
+      EXOMEM_DISABLE_EMBEDDINGS: "1"
+      OMP_NUM_THREADS: "2"
+      TOKENIZERS_PARALLELISM: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Verify lockfile
+        run: uv lock --check
+      - name: Cache exact model revision
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.HF_HOME }}/hub
+          key: >-
+            frozen-stance-linux-b5113eb38ab63efdd7f280f8c144ea8b13f978ce
+      - name: Download and verify the declared artifact manifest
+        run: |
+          uv run --frozen --extra nli python - <<'PY'
+          from pathlib import Path
+
+          from huggingface_hub import snapshot_download
+
+          from exomem import claims
+
+          pin = claims.VERIFIER_PINS[0]
+          downloaded = Path(
+              snapshot_download(
+                  repo_id=pin.model_name,
+                  revision=pin.model_revision,
+                  allow_patterns=list(pin.artifact_files),
+              )
+          )
+          digest, resident = claims._hash_resident_snapshot(pin)
+          assert downloaded == Path(resident), (downloaded, resident)
+          assert digest == pin.weights_sha256, (digest, pin.weights_sha256)
+          print(f"verified {pin.model_name}@{pin.model_revision}: {digest}")
+          PY
+      - name: Exercise production admission against the exact local bytes
+        env:
+          EXOMEM_CLAIM_POLARITY_NLI: "1"
+          EXOMEM_RUN_REAL_NLI: "1"
+          HF_HUB_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
+        run: >-
+          uv run --frozen --extra nli python -m pytest
+          tests/test_frozen_verifier_real.py -q -vv

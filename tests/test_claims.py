@@ -191,15 +191,6 @@ def test_claim_level_gate_on(monkeypatch) -> None:
     assert claims.claim_level_enabled() is True
 
 
-def test_max_polarity_pairs_default_and_override(monkeypatch) -> None:
-    monkeypatch.delenv("EXOMEM_CLAIM_POLARITY_MAX_PAIRS", raising=False)
-    assert claims._max_polarity_pairs() == 20
-    monkeypatch.setenv("EXOMEM_CLAIM_POLARITY_MAX_PAIRS", "5")
-    assert claims._max_polarity_pairs() == 5
-    monkeypatch.setenv("EXOMEM_CLAIM_POLARITY_MAX_PAIRS", "junk")
-    assert claims._max_polarity_pairs() == 20
-
-
 # ---------------- sidecar (FAKE vectors — torch-free) ----------------
 
 
