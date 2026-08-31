@@ -2330,6 +2330,29 @@ def execute_hosted_init_v2(request: dict[str, Any]) -> tuple[str, dict[str, Any]
             request_digest=canonical_request_digest(request),
             allow_privileged_migration=os.geteuid() == 0,
         )
+        from .hosted_restore import acquire_hosted_lifetime_lock
+
+        try:
+            with acquire_hosted_lifetime_lock(binding.state_root, binding=binding):
+                _prepare_hosted_enrollment_custody()
+                _enroll_initialized_hosted_cell(binding, now=int(time.time()))
+                if os.geteuid() == 0:
+                    limits = HostedMigrationLimits()
+                    for root in (binding.vault_root, binding.state_root):
+                        _converge_tree_ownership(
+                            _preflight_migration_tree(root, limits),
+                            binding,
+                        )
+        except OperatorFailure as exc:
+            raise HostedConfigError(
+                "HOSTED_SECURITY_UNAVAILABLE",
+                "hosted governance enrollment exclusion is unavailable",
+            ) from exc
+        except RuntimeError as exc:
+            raise HostedConfigError(
+                "HOSTED_SECURITY_UNAVAILABLE",
+                "hosted governance enrollment is unavailable",
+            ) from exc
     except HostedConfigError as exc:
         code = "HOSTED_ROOT_UNSAFE_ENTRY" if exc.code == "HOSTED_ROOT_SYMLINK" else exc.code
         code = code if code in {
@@ -2351,3 +2374,40 @@ def execute_hosted_init_v2(request: dict[str, Any]) -> tuple[str, dict[str, Any]
             code, command="init", request_id=request.get("request_id")
         ) from exc
     return "HOSTED_CELL_INITIALIZED", result.as_operator_data()
+
+
+def _prepare_hosted_enrollment_custody() -> None:
+    """Copy one fixed projected control-plane generation into private memory."""
+
+    from .governance.authorization_hosted_mount import (
+        HOSTED_CUSTODY_ROOT,
+        SOURCE_ROOT,
+        copy_projected_custody,
+    )
+
+    copy_projected_custody(SOURCE_ROOT, HOSTED_CUSTODY_ROOT)
+
+
+def _enroll_initialized_hosted_cell(binding: HostedBindingV2, *, now: int) -> None:
+    """Adopt and enroll one initialized cell while its lifetime lock is held."""
+
+    from .governance import (
+        authorization_custody,
+        consolidation_enrollment,
+        consolidation_identity,
+    )
+
+    custody = authorization_custody.load_authorization_custody(
+        binding.vault_root,
+        now=now,
+    )
+    consolidation_identity.adopt_hosted_identity(
+        binding,
+        custody=custody,
+        now=now,
+    )
+    consolidation_enrollment.enroll_hosted_locked(
+        binding,
+        custody=custody,
+        now=now,
+    )

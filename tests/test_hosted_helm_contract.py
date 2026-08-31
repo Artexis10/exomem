@@ -2433,7 +2433,35 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
             "--request-file",
             "/run/exomem/operator-requests/init.json",
         ]
-        assert container["env"] == [{"name": "EXOMEM_LOG_DIR", "value": "/dev"}]
+        assert container["env"] == [
+            {"name": "EXOMEM_LOG_DIR", "value": "/dev"},
+            {
+                "name": "EXOMEM_AUTH_SESSION_KEYRING_FILE",
+                "value": "/run/exomem/authorization-session/keyring.json",
+            },
+            {
+                "name": "EXOMEM_AUTH_SESSION_CONTROL_FILE",
+                "value": "/run/exomem/authorization-session/control.json",
+            },
+            {
+                "name": "EXOMEM_AUTH_SESSION_MEMBERSHIP_FILE",
+                "value": "/run/exomem/authorization-session/serving-membership.json",
+            },
+        ]
+        assert {volume["name"] for volume in pod["volumes"]} == {
+            "authorization-session-custody",
+            "authorization-session-source",
+            "data",
+            "credentials",
+            "init-request",
+        }
+        assert {mount["mountPath"] for mount in container["volumeMounts"]} == {
+            "/var/lib/exomem",
+            "/run/exomem/credentials",
+            "/run/exomem/operator-requests/init.json",
+            "/run/exomem/authorization-session-source",
+            "/run/exomem/authorization-session",
+        }
     else:
         assert workload["spec"]["template"]["metadata"]["annotations"] == {
             "exomem.io/authorization-session-revision": "a" * 64

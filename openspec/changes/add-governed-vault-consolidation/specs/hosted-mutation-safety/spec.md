@@ -14,6 +14,11 @@ Ordinary dispatch, readiness, and admission SHALL NOT initialize a seal or
 adopt identity. Any seal-path presence other than a complete authenticated
 store SHALL fail closed.
 
+The local owner operation SHALL be exposed only as the CLI operator command
+`exomem governance-enroll`; it SHALL NOT enter MCP, REST, or Hosted agent command
+registries. Hosted provisioning SHALL invoke the trusted enrollment seam while
+holding the existing Hosted cell lifetime lock.
+
 #### Scenario: Enrollment is requested while a runtime is live
 
 - **WHEN** a Hosted cell, local server, or direct CLI invocation holds runtime presence for the destination

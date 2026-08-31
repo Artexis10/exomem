@@ -29,6 +29,14 @@ _LEAN_FALLBACK_VARS = (
 )
 
 
+def retain_runtime_presence(vault_root: Path) -> bool:
+    """Retain a TUI vault on the app thread for the process lifetime."""
+
+    from ..governance import consolidation_enrollment
+
+    return consolidation_enrollment.ensure_cli_runtime_presence(vault_root)
+
+
 class BackendError(Exception):
     """A structured service failure: stable code, message, remediation."""
 

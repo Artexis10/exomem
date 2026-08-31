@@ -41,6 +41,12 @@ spec:
           env:
             - name: EXOMEM_LOG_DIR
               value: /dev
+            - name: EXOMEM_AUTH_SESSION_KEYRING_FILE
+              value: /run/exomem/authorization-session/keyring.json
+            - name: EXOMEM_AUTH_SESSION_CONTROL_FILE
+              value: /run/exomem/authorization-session/control.json
+            - name: EXOMEM_AUTH_SESSION_MEMBERSHIP_FILE
+              value: /run/exomem/authorization-session/serving-membership.json
           resources:
             requests:
               cpu: 100m
@@ -66,6 +72,11 @@ spec:
               mountPath: /run/exomem/operator-requests/init.json
               subPath: init.json
               readOnly: true
+            - name: authorization-session-source
+              mountPath: /run/exomem/authorization-session-source
+              readOnly: true
+            - name: authorization-session-custody
+              mountPath: /run/exomem/authorization-session
       volumes:
         - name: data
           persistentVolumeClaim:
@@ -78,4 +89,12 @@ spec:
           configMap:
             name: {{ .Values.resourceName }}-init-request
             defaultMode: 0444
+        - name: authorization-session-source
+          secret:
+            secretName: {{ .Values.authorizationSessionSecretName }}
+            defaultMode: 0440
+        - name: authorization-session-custody
+          emptyDir:
+            medium: Memory
+            sizeLimit: 256Ki
 {{- end }}

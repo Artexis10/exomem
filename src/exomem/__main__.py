@@ -111,6 +111,28 @@ _CLI_ONLY_SUBCOMMANDS: frozenset[str] = frozenset(
         "trace",
         "logs",
         "lease",
+        "governance-enroll",
+        "governance-schema",
+    }
+)
+
+_DIRECT_VAULT_SUBCOMMANDS: frozenset[str] = frozenset(
+    {
+        "setup",
+        "init",
+        "reclaim-schema",
+        "package-skills",
+        "personalize",
+        "demo",
+        "tui",
+        "doctor",
+        "status",
+        "warm",
+        "backfill-media",
+        "index",
+        "enroll-speaker",
+        "list-speakers",
+        "remove-speaker",
         "governance-schema",
     }
 )
@@ -127,6 +149,46 @@ def _is_cli_only_invocation(raw: list[str]) -> bool:
     return raw[0] in _simple_cli_action_names()
 
 
+def _retain_direct_cli_runtime(raw: list[str]) -> None:
+    """Register an explicitly selected local vault before one-shot dispatch.
+
+    Legacy one-shot commands do not pass through ``product_invoke``, while the
+    TUI runs product calls in worker threads.  Retaining their selected vault
+    here gives the whole CLI process one presence interval, including final
+    graph drain. Registry-driven product commands retain their exact resolved
+    root inside ``product_invoke``. Enrollment alone is excluded so it cannot
+    register itself as a live runtime.
+    """
+
+    if (
+        not _is_cli_only_invocation(raw)
+        or not raw
+        or raw[0] not in _DIRECT_VAULT_SUBCOMMANDS
+    ):
+        return
+    selected: str | None = None
+    for index, token in enumerate(raw[1:], start=1):
+        if token.startswith("--vault="):
+            selected = token.partition("=")[2]
+            break
+        if (
+            token == "--vault"
+            and index + 1 < len(raw)
+            and not raw[index + 1].startswith("-")
+        ):
+            selected = raw[index + 1]
+            break
+    selected = selected or os.environ.get("EXOMEM_VAULT_PATH")
+    if not selected and raw[0] in {"init", "reclaim-schema"}:
+        selected = "."
+    if selected:
+        from .governance import consolidation_enrollment
+
+        consolidation_enrollment.ensure_cli_runtime_presence(
+            Path(selected).expanduser()
+        )
+
+
 def main(argv: list[str] | None = None) -> int:
     # Wrapped so *every* exit drains, including the early returns above
     # `_run_cli`. A graph rebuild no longer blocks the write that caused it, and
@@ -135,17 +197,20 @@ def main(argv: list[str] | None = None) -> int:
     # it, so a CLI write would report `pending` and nothing would ever make it
     # true. The boundary is process lifetime, not the write path -- and a
     # boundary that only some exits honour is not one.
-    try:
-        return _run_cli(argv)
-    finally:
-        from . import graph_sync
+    from .governance import consolidation_enrollment
 
-        if not graph_sync.drain_active_rebuilds():
-            print(
-                "exomem: a graph rebuild did not finish before exit; the change is "
-                "committed and `exomem reconcile` will bring the graph up to date",
-                file=sys.stderr,
-            )
+    with consolidation_enrollment.cli_runtime_scope():
+        try:
+            return _run_cli(argv)
+        finally:
+            from . import graph_sync
+
+            if not graph_sync.drain_active_rebuilds():
+                print(
+                    "exomem: a graph rebuild did not finish before exit; the change is "
+                    "committed and `exomem reconcile` will bring the graph up to date",
+                    file=sys.stderr,
+                )
 
 
 def _run_cli(argv: list[str] | None = None) -> int:
@@ -161,6 +226,7 @@ def _run_cli(argv: list[str] | None = None) -> int:
         # `find` was the original friendly retrieval command.  Keep existing
         # scripts useful while the current product language calls it `ask`.
         raw[0] = "ask"
+    _retain_direct_cli_runtime(raw)
     if _is_cli_only_invocation(raw):
         from .logging_config import configure_logging, resolve_log_dir
 
@@ -238,6 +304,8 @@ def _dispatch_main(raw: list[str]) -> int:
         return _logs_main(raw[1:])
     if raw and raw[0] == "lease":
         return _lease_main(raw[1:])
+    if raw and raw[0] == "governance-enroll":
+        return _governance_enroll_main(raw[1:])
     if raw and raw[0] == "governance-schema":
         return _governance_schema_main(raw[1:])
     # Registry-driven product operations (reads + writes): `exomem ask_memory "..."`,
@@ -1540,6 +1608,61 @@ def _governance_schema_status(vault: Path, *, now: int) -> dict[str, object]:
         "serving_membership_epoch": control.serving_membership_epoch,
         "replicas": replicas,
     }
+
+
+def _governance_enroll_main(argv: list[str]) -> int:
+    """Explicitly enroll one stopped local vault in consolidation governance."""
+
+    import time
+
+    from .governance import consolidation_enrollment, principal
+    from .vault import resolve_vault
+
+    parser = argparse.ArgumentParser(
+        prog="exomem governance-enroll",
+        description=(
+            "Enroll an already identified local vault while its server and direct "
+            "CLI runtimes are stopped."
+        ),
+    )
+    parser.add_argument("--vault", help="explicit vault root; defaults to EXOMEM_VAULT_PATH")
+    parser.add_argument("--json", action="store_true", help="emit stable JSON")
+    args = parser.parse_args(argv)
+    root = Path(args.vault).expanduser().resolve() if args.vault else resolve_vault()
+    try:
+        state = consolidation_enrollment.enroll_local(
+            root,
+            principal=principal.owner_principal(surface="cli"),
+            now=int(time.time()),
+        )
+    except consolidation_enrollment.ConsolidationEnrollmentUnavailable as error:
+        result = {
+            "ok": False,
+            "error": {
+                "code": error.code,
+                "message": "governance enrollment is unavailable",
+            },
+        }
+        if args.json:
+            print(json.dumps(result))
+        else:
+            print(
+                f"Error [{error.code}]: governance enrollment is unavailable",
+                file=sys.stderr,
+            )
+        return 1
+
+    result = {
+        "ok": True,
+        "status": "enrolled",
+        "kind": state.kind,
+        "revision": state.revision,
+    }
+    if args.json:
+        print(json.dumps(result))
+    else:
+        print(f"Governance enrolled: {state.kind} revision {state.revision}")
+    return 0
 
 
 def _governance_schema_main(argv: list[str]) -> int:

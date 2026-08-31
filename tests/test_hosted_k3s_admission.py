@@ -11,6 +11,7 @@ import time
 import tomllib
 import uuid
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,109 @@ RUN_LIVE = os.environ.get("RUN_K3S_ADMISSION_TEST") == "1"
 RUN_RUNTIME = os.environ.get("RUN_K3S_RUNTIME_TEST") == "1"
 RUNTIME_REPOSITORY = Path(os.environ.get("EXOMEM_RUNTIME_REPO", ROOT))
 K3S_IMAGE = json.loads(RUNTIME_GATE.read_text(encoding="utf-8"))["k3sImage"]
+
+
+def _authorization_session_secret(
+    *,
+    namespace: str,
+    release: str,
+    annotations: dict[str, str],
+) -> dict[str, Any]:
+    """Build one deterministic runtime-valid Hosted custody Secret."""
+
+    from exomem.governance import authorization_custody
+    from exomem.governance import authorization_serving_membership as membership
+
+    now = int(time.time())
+    key = authorization_custody.AuthorizationVerifierKey(
+        key_id="hosted-runtime-gate-key-v1",
+        key=hashlib.sha256(b"hosted-runtime-gate-authorization").digest(),
+        not_before=now - 60,
+        not_after=now + 86_400,
+    )
+    keyring = authorization_custody.AuthorizationKeyring(
+        version=1,
+        keyring_id="hosted-runtime-gate-keyring-v1",
+        cell_id="alpha-test-original",
+        logical_vault_id="vault-alpha-original",
+        active_key_id=key.key_id,
+        accepted_keys=(key,),
+    )
+    control = authorization_custody.AuthorizationControlRecord(
+        version=1,
+        keyring_id=keyring.keyring_id,
+        cell_id=keyring.cell_id,
+        logical_vault_id=keyring.logical_vault_id,
+        registry_attachment_id="hosted-runtime-gate-attachment-v1",
+        attachment_epoch=1,
+        governance_enrolled=False,
+        activation_store_id=None,
+        activation_epoch=None,
+        activation_state_digest=None,
+        serving_membership_epoch=1,
+        serving_membership_digest="0" * 64,
+        issued_at=now - 60,
+        expires_at=now + 3_600,
+        signing_key_id=key.key_id,
+    )
+    attestation = membership.ReplicaReadinessAttestation(
+        version=1,
+        epoch=1,
+        replica_id="cell-alpha-0",
+        state="SERVING",
+        software_version=release,
+        schema_version=4,
+        cell_id=keyring.cell_id,
+        active_key_id=key.key_id,
+        accepted_key_ids=(key.key_id,),
+        control_digest=authorization_custody.control_attestation_digest(control),
+        keyring_digest=authorization_custody.keyring_attestation_digest(keyring),
+        attested_at=now - 1,
+        expires_at=now + 299,
+        issuance_stopped=False,
+        no_in_flight=False,
+        signing_key_id=key.key_id,
+    )
+    epoch = membership.ServingMembershipEpoch(
+        version=1,
+        epoch=1,
+        cell_id=keyring.cell_id,
+        logical_vault_id=keyring.logical_vault_id,
+        previous_epoch_digest=None,
+        issued_at=now - 1,
+        expires_at=now + 299,
+        replicas=(attestation,),
+        signing_key_id=key.key_id,
+    )
+    membership_raw = membership.encode_serving_membership(
+        epoch,
+        verifier_keys={key.key_id: key.key},
+    )
+    control = replace(
+        control,
+        serving_membership_digest=hashlib.sha256(membership_raw).hexdigest(),
+    )
+    files = {
+        "keyring.json": authorization_custody._keyring_bytes(keyring).decode("utf-8"),  # noqa: SLF001
+        "control.json": authorization_custody._signed_control_bytes(  # noqa: SLF001
+            control,
+            signing_key=key.key,
+        ).decode("utf-8"),
+        "serving-membership.json": membership_raw.decode("utf-8"),
+    }
+    return {
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {
+            "name": "exomem-authorization-session",
+            "namespace": namespace,
+            "labels": {"exomem.io/resource-name": "cell-alpha"},
+            "annotations": annotations | {"exomem.io/recovery-envelope": "q" * 64},
+        },
+        "type": "Opaque",
+        "immutable": False,
+        "stringData": files,
+    }
 
 
 def _run(
@@ -2465,6 +2569,23 @@ def test_exact_k3s_runs_the_reviewed_hosted_runtime_release(k3s: str, tmp_path: 
                 + "\n"
             },
         }
+        identity_annotations = {
+            key: namespace_document["metadata"]["annotations"][key]
+            for key in (
+                "exomem.io/tenant-id",
+                "exomem.io/cell-id",
+                "exomem.io/operation-id",
+                "exomem.io/tenant-digest",
+                "exomem.io/subject-digest",
+                "exomem.io/operation-digest",
+                "exomem.io/fence",
+            )
+        }
+        authorization_secret = _authorization_session_secret(
+            namespace=namespace,
+            release=gate["release"],
+            annotations=identity_annotations,
+        )
         claim = next(item for item in initialize if item.get("kind") == "PersistentVolumeClaim")
         claim["spec"]["volumeName"] = "exomem-runtime-gate-pv"
         init_job = next(item for item in initialize if item.get("kind") == "Job")
@@ -2478,7 +2599,7 @@ def test_exact_k3s_runs_the_reviewed_hosted_runtime_release(k3s: str, tmp_path: 
                 "Job",
             }
         ]
-        namespaced_prerequisites.append(secret)
+        namespaced_prerequisites.extend((secret, authorization_secret))
         _kubectl(
             k3s,
             ["apply", "--namespace", namespace, "--filename=-"],

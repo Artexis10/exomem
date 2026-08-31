@@ -37,6 +37,8 @@ def test_initialize_runtime_loads_dotenv_from_service_working_directory(
 
     assert calls == [(tmp_path / ".env", True)]
     assert runtime.vault_root == vault
+    assert runtime.local_runtime_presence is not None
+    runtime.local_runtime_presence.__exit__(None, None, None)
 
 
 def test_initialize_runtime_does_not_start_workers_before_transport(
@@ -80,9 +82,11 @@ def test_initialize_runtime_does_not_start_workers_before_transport(
         lambda root: events.append(f"graph:{root}"),
     )
 
-    server_runtime.initialize_runtime(load_dotenv_func=lambda **_kwargs: None)
+    runtime = server_runtime.initialize_runtime(load_dotenv_func=lambda **_kwargs: None)
 
     assert events == [f"projection:{vault}"]
+    assert runtime.local_runtime_presence is not None
+    runtime.local_runtime_presence.__exit__(None, None, None)
 
 
 def test_local_runtime_activation_does_not_start_while_consolidation_sealed(

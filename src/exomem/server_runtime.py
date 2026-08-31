@@ -58,6 +58,7 @@ class ServerRuntime:
     hosted_security_authority: Any | None = None
     hosted_binding: HostedBindingV2 | None = None
     hosted_lifetime_lock: AbstractContextManager[None] | None = None
+    local_runtime_presence: AbstractContextManager[None] | None = None
 
 
 def initialize_runtime(*, load_dotenv_func: Callable[..., object]) -> ServerRuntime:
@@ -77,25 +78,40 @@ def initialize_runtime(*, load_dotenv_func: Callable[..., object]) -> ServerRunt
     env_compat.promote_legacy()
 
     vault_root = resolve_vault()
-    source_schema = schema.load_source_schema(vault_root)
-    log.info("vault=%s source_types=%s", vault_root, source_schema.source_types)
+    from .governance import consolidation_enrollment
 
-    project_keys_hint = project_keys.keys_hint(vault_root)
-    projection_runtime.preactivate_projection_runtime(vault_root)
-    _start_metrics_persistence()
-    base_url = os.environ.get("EXOMEM_BASE_URL", "").strip().rstrip("/")
-    return ServerRuntime(
-        vault_root=vault_root,
-        source_schema=source_schema,
-        project_keys_hint=project_keys_hint,
-        base_url=base_url,
-    )
+    runtime_presence = consolidation_enrollment.local_runtime_presence(vault_root)
+    runtime_presence.__enter__()
+    try:
+        source_schema = schema.load_source_schema(vault_root)
+        log.info("vault=%s source_types=%s", vault_root, source_schema.source_types)
+
+        project_keys_hint = project_keys.keys_hint(vault_root)
+        projection_runtime.preactivate_projection_runtime(vault_root)
+        _start_metrics_persistence()
+        base_url = os.environ.get("EXOMEM_BASE_URL", "").strip().rstrip("/")
+        return ServerRuntime(
+            vault_root=vault_root,
+            source_schema=source_schema,
+            project_keys_hint=project_keys_hint,
+            base_url=base_url,
+            local_runtime_presence=runtime_presence,
+        )
+    except BaseException:
+        runtime_presence.__exit__(*sys.exc_info())
+        raise
 
 
 class LocalRuntimeActivation:
     """Start local background workers after transport liveness is observable."""
 
-    def __init__(self, vault_root: Path, *, fallback_seconds: float = 5.0) -> None:
+    def __init__(
+        self,
+        vault_root: Path,
+        *,
+        fallback_seconds: float = 5.0,
+        runtime_presence: AbstractContextManager[None] | None = None,
+    ) -> None:
         from . import readiness, warmup
 
         if warmup.warmup_enabled():
@@ -108,6 +124,7 @@ class LocalRuntimeActivation:
         self._thread: threading.Thread | None = None
         self.media_worker: Any | None = None
         self.file_watcher: Any | None = None
+        self._runtime_presence = runtime_presence
 
     def start(self) -> None:
         """Launch local workers once; safe from health and timer races."""
@@ -251,6 +268,11 @@ class LocalRuntimeActivation:
                 yield {}
             finally:
                 timer.cancel()
+                # Presence is process-lifetime state, not ASGI-lifespan state.
+                # Worker shutdown is best-effort and several daemon threads can
+                # outlive this callback; retaining the slot until process exit
+                # keeps offline enrollment conservative. The OS releases the
+                # underlying lock on clean exit or crash.
 
         return _lifespan
 

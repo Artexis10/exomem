@@ -12,7 +12,12 @@ from pathlib import Path
 import pytest
 
 from exomem import hosted_portability, hosted_runtime, writer_lease
-from exomem.governance import authorization_custody, consolidation_identity, principal
+from exomem.governance import (
+    authorization_custody,
+    consolidation_enrollment,
+    consolidation_identity,
+    principal,
+)
 
 
 def test_consolidation_identity_store_is_an_explicit_private_subsystem() -> None:
@@ -186,6 +191,28 @@ def test_local_owner_adoption_generates_and_authenticates_private_identity(
     assert stat.S_IMODE(adopted.identity_path.stat().st_mode) == 0o600
     stored = json.loads(adopted.identity_path.read_text(encoding="utf-8"))
     assert set(stored) == consolidation_identity.IDENTITY_RECORD_FIELDS
+
+
+def test_explicit_local_enrollment_binds_the_real_authenticated_identity(
+    tmp_path: Path,
+) -> None:
+    vault = _vault(tmp_path)
+    owner = principal.owner_principal(surface="cli")
+    identity = consolidation_identity.adopt_local_identity(
+        vault,
+        principal=owner,
+        now=1_800_000_000,
+    )
+
+    state = consolidation_enrollment.enroll_local(
+        vault,
+        principal=owner,
+        now=1_800_000_001,
+    )
+
+    assert state.kind == "open"
+    assert state.revision == 0
+    assert state.vault_binding_digest == identity.record_digest
 
 
 def test_local_adoption_refuses_untrusted_or_caller_selected_identity(

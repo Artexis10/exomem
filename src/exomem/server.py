@@ -495,7 +495,10 @@ def build_server(*, require_auth: bool) -> FastMCP:
             consolidation_binding=runtime.hosted_binding,
         )
     else:
-        runtime_activation = LocalRuntimeActivation(runtime.vault_root)
+        runtime_activation = LocalRuntimeActivation(
+            runtime.vault_root,
+            runtime_presence=runtime.local_runtime_presence,
+        )
         auth = build_oauth(require_auth=require_auth, base_url=runtime.base_url)
         mcp = ExomemFastMCP(
             "exomem",
