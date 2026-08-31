@@ -792,6 +792,18 @@ def _literal_string_values(annotation: object) -> tuple[str, ...]:
     return ()
 
 
+def _is_nullable_dict(annotation: object) -> bool:
+    """Whether an annotated public mapping also admits JSON null."""
+    if typing.get_origin(annotation) is typing.Annotated:
+        annotation = typing.get_args(annotation)[0]
+    origin = typing.get_origin(annotation)
+    if origin is not typing.Union and origin is not types.UnionType:
+        return False
+    args = typing.get_args(annotation)
+    non_none = [item for item in args if item is not type(None)]
+    return type(None) in args and len(non_none) == 1 and type_tag(non_none[0]) == "dict"
+
+
 def derive_params(
     leaf: Callable, *, skip: int, positional: str | None = None
 ) -> tuple[Param, ...]:
@@ -815,10 +827,11 @@ def derive_params(
             None,
         ) if typing.get_origin(ann) is typing.Annotated else None
         literal_values = _literal_string_values(ann)
+        param_type = "nullable_dict" if schema and _is_nullable_dict(ann) else type_tag(ann)
         params.append(
             Param(
                 name=p.name,
-                type=type_tag(ann),
+                type=param_type,
                 required=p.default is inspect.Parameter.empty,
                 help=helps.get(p.name, ""),
                 cli_positional=(p.name == positional),

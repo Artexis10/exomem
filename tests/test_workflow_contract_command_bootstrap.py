@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -323,6 +324,41 @@ def test_live_workflow_context_refusals_and_schema_match_across_surfaces(
     assert rest.json() == {"success": True, "data": direct}
     assert cli_result(invalid_request["context"]) == {"success": True, "data": direct}
 
+    null_context = {**invalid_request, "context": None}
+    null_expected = _schema(vault, "resolve", context=None)
+    assert null_expected == {
+        "resolved": False,
+        "code": "WORKFLOW_CONTRACT_INVALID_ARGUMENTS",
+    }
+    assert asyncio.run(
+        mcp.call_tool("schema_memory", null_context, run_middleware=True)
+    ).structured_content == null_expected
+    null_rest = TestClient(mcp.http_app()).post(
+        "/api/schema_memory",
+        json=null_context,
+        headers={"Authorization": "Bearer sekret"},
+    )
+    assert null_rest.status_code == 200, null_rest.text
+    assert null_rest.json() == {"success": True, "data": null_expected}
+    null_cli = subprocess.run(
+        [
+            str(Path(__file__).resolve().parents[1] / ".venv" / "bin" / "kb"),
+            "schema_memory",
+            "--subject",
+            "workflow-contracts",
+            "--operation",
+            "resolve",
+            "--context",
+            "null",
+            "--json",
+        ],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    assert null_cli.returncode == 0, null_cli.stderr
+    assert json.loads(null_cli.stdout) == {"success": True, "data": null_expected}
+
     for malformed in (1, [], {}):
         request = {**invalid_request, "context": {"project": malformed}}
         expected = _schema(vault, "resolve", context=request["context"])
@@ -340,12 +376,19 @@ def test_live_workflow_context_refusals_and_schema_match_across_surfaces(
         assert cli_result(request["context"]) == {"success": True, "data": expected}
 
     non_mapping = {**invalid_request, "context": []}
-    assert _schema(vault, "resolve", context=[]) == {
-        "resolved": False,
-        "code": "WORKFLOW_CONTRACT_INVALID_ARGUMENTS",
-    }
-    with pytest.raises(ValidationError, match="context"):
-        asyncio.run(mcp.call_tool("schema_memory", non_mapping, run_middleware=True))
+    for malformed_context in ([], "text", 1, False):
+        assert _schema(vault, "resolve", context=malformed_context) == {
+            "resolved": False,
+            "code": "WORKFLOW_CONTRACT_INVALID_ARGUMENTS",
+        }
+        with pytest.raises(ValidationError, match="context"):
+            asyncio.run(
+                mcp.call_tool(
+                    "schema_memory",
+                    {**invalid_request, "context": malformed_context},
+                    run_middleware=True,
+                )
+            )
     non_mapping_rest = TestClient(mcp.http_app()).post(
         "/api/schema_memory",
         json=non_mapping,
