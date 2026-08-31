@@ -10,6 +10,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 from uuid import UUID
 
@@ -50,7 +51,7 @@ _FIELDS = (
     "capture",
     "planning_transition",
 )
-_RENDERER_TEMPLATE = {
+_RENDERER_TEMPLATE = MappingProxyType({
     "algorithm_version": 1,
     "open": "<!-- exomem:workflow-contract-presentation:start -->",
     "close": "<!-- exomem:workflow-contract-presentation:end -->",
@@ -58,7 +59,9 @@ _RENDERER_TEMPLATE = {
     "heading": "## Workflow contract: {title}",
     "scope": "This active policy applies to {scope}.",
     "scope_dimensions": ("projects", "domains", "activities"),
-    "scope_labels": {"projects": "projects", "domains": "domains", "activities": "activities"},
+    "scope_labels": MappingProxyType(
+        {"projects": "projects", "domains": "domains", "activities": "activities"}
+    ),
     "scope_dimension": "{dimension}: {values}",
     "all_scope": "all work",
     "standalone_ownership": "Planning holds the complete durable work hierarchy.",
@@ -82,7 +85,7 @@ _RENDERER_TEMPLATE = {
     ),
     "records": "Records holds observed outcomes; it never completes Planning automatically.",
     "max_bytes": 4096,
-}
+})
 
 
 class WorkflowContractError(ValueError):
@@ -159,12 +162,21 @@ def portable_projection() -> dict[str, Any]:
         "context_semantics": {"missing": "unknown", "null": "known-absent"},
         "precedence": ("explicit", "scoped", "default", "builtin"),
         "argument_semantics": "exact-v1",
-        "renderer_template": _RENDERER_TEMPLATE,
+        "renderer_template": _renderer_template_projection(),
     }
     return {
         **semantic,
         "digest": hashlib.sha256(_semantic_bytes(semantic)).hexdigest(),
     }
+
+
+def _renderer_template_projection() -> dict[str, Any]:
+    """Return a JSON-shaped portable copy without sharing renderer state."""
+    template = dict(_RENDERER_TEMPLATE)
+    template["scope_dimensions"] = list(_RENDERER_TEMPLATE["scope_dimensions"])
+    template["scope_labels"] = dict(_RENDERER_TEMPLATE["scope_labels"])
+    template["line_layout"] = list(_RENDERER_TEMPLATE["line_layout"])
+    return template
 
 
 def contract_directory(vault_root: Path) -> Path:

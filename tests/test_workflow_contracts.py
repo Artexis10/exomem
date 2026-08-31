@@ -52,22 +52,13 @@ def _write_withholding_governance(
 ) -> None:
     governance = vault / "Knowledge Base" / "_Governance"
     scopes = governance / "scopes" / "workflow-contracts.yaml"
-    rules = governance / "rules" / "workflow-contracts-external.yaml"
     scopes.parent.mkdir(parents=True, exist_ok=True)
-    rules.parent.mkdir(parents=True, exist_ok=True)
     scopes.write_text(
         "governance_version: 1\n"
         "id: 01ARZ3NDEKTSV4RRFFQ69G5FAV\n"
         "name: Workflow contracts\n"
-        f'paths: ["{patterns}"]\n',
-        encoding="utf-8",
-    )
-    rules.write_text(
-        "governance_version: 1\n"
-        "id: 01ARZ3NDEKTSV4RRFFQ69G5FB0\n"
-        'scope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FAV"]\n'
-        "audience: external\n"
-        "ceiling: 0\n",
+        f'paths: ["{patterns}"]\n'
+        "default_deny: true\n",
         encoding="utf-8",
     )
 
@@ -272,6 +263,32 @@ def test_portable_renderer_declaration_reconstructs_standalone_and_companion_ren
 
     assert workflow_contracts.render_presentation(standalone) == reconstruct(standalone)
     assert workflow_contracts.render_presentation(companion) == reconstruct(companion)
+
+
+def test_portable_renderer_projection_is_detached_from_the_immutable_renderer_template() -> None:
+    from exomem import workflow_contracts
+
+    contract = workflow_contracts.parse_proposal(
+        _proposal(
+            scope={"projects": ["example-project"], "domains": [], "activities": []},
+        )
+    )
+    rendered = workflow_contracts.render_presentation(contract)
+    first = workflow_contracts.portable_projection()
+    digest = first["digest"]
+    labels = first["renderer_template"]["scope_labels"]
+    original = labels["projects"]
+    try:
+        labels["projects"] = "mutated projection label"
+        assert workflow_contracts.render_presentation(contract) == rendered
+        second = workflow_contracts.portable_projection()
+        assert second["digest"] == digest
+        assert second["renderer_template"]["scope_labels"]["projects"] == original
+    finally:
+        labels["projects"] = original
+
+    with pytest.raises(TypeError):
+        workflow_contracts._RENDERER_TEMPLATE["scope_labels"]["projects"] = "mutate source"
 
 
 def test_contract_storage_uses_configured_kb_name_and_rejects_casefolded_filename_collision(
@@ -898,6 +915,7 @@ def test_title_edit_preserves_identity_and_reports_presentation_drift(tmp_path: 
 
 def test_public_schema_memory_hides_unreleased_contracts_before_every_scan_bound(tmp_path: Path) -> None:
     from exomem import commands, workflow_contracts
+    from exomem.governance import policy
     from exomem.governance.principal import RequestPrincipal, request_scope
 
     visible = _proposal(
@@ -907,6 +925,7 @@ def test_public_schema_memory_hides_unreleased_contracts_before_every_scan_bound
     )
     _write_contract(tmp_path, visible, "visible.md")
     _write_withholding_governance(tmp_path, patterns="_Schema/contracts/workflow/hidden-*")
+    assert policy.load(tmp_path).scopes["01ARZ3NDEKTSV4RRFFQ69G5FAV"].default_deny is True
     principal = RequestPrincipal(audience_id="external", surface="mcp")
     context = {"project": "example-project", "domain": "software", "activity": "implementation"}
     with request_scope(principal):
