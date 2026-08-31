@@ -47,7 +47,9 @@ def _write_contract(vault: Path, proposal: dict[str, object], filename: str) -> 
     return path
 
 
-def _write_withholding_governance(vault: Path) -> None:
+def _write_withholding_governance(
+    vault: Path, *, patterns: str = "_Schema/contracts/workflow/**"
+) -> None:
     governance = vault / "Knowledge Base" / "_Governance"
     scopes = governance / "scopes" / "workflow-contracts.yaml"
     rules = governance / "rules" / "workflow-contracts-external.yaml"
@@ -57,7 +59,7 @@ def _write_withholding_governance(vault: Path) -> None:
         "governance_version: 1\n"
         "id: 01ARZ3NDEKTSV4RRFFQ69G5FAV\n"
         "name: Workflow contracts\n"
-        'paths: ["_Schema/contracts/workflow/**"]\n',
+        f'paths: ["{patterns}"]\n',
         encoding="utf-8",
     )
     rules.write_text(
@@ -197,30 +199,79 @@ def test_withheld_contracts_cannot_change_inventory_or_resolution_bytes(tmp_path
     assert json.dumps(after, sort_keys=True) == json.dumps(before, sort_keys=True)
 
 
-def test_portable_renderer_declaration_includes_every_fixed_rendering_semantic() -> None:
+def test_portable_renderer_declaration_reconstructs_standalone_and_companion_rendering() -> None:
     from exomem import workflow_contracts
 
     template = workflow_contracts.portable_projection()["renderer_template"]
+    assert template["algorithm_version"] == 1
 
-    assert template == {
-        "version": 1,
-        "open": "<!-- exomem:workflow-contract-presentation:start -->",
-        "close": "<!-- exomem:workflow-contract-presentation:end -->",
-        "derived_notice": "<!-- Derived from workflow-contract frontmatter; refresh restores this block. -->",
-        "heading": "## Workflow contract: {title}",
-        "scope": "This active policy applies to {scope}.",
-        "all_scope": "all work",
-        "standalone_ownership": "Planning holds the complete durable work hierarchy.",
-        "companion_ownership": "Planning retains durable intent; declared companion ownership is {companions}.",
-        "companion_separator": "; ",
-        "companion_overflow": "; … (+{remaining})",
-        "list_separator": ", ",
-        "list_overflow": ", … (+{remaining})",
-        "display_value": "{name} ({owns})",
-        "item_cap": 4,
-        "records": "Records holds observed outcomes; it never completes Planning automatically.",
-        "max_bytes": 4096,
-    }
+    def quote(value: str) -> str:
+        return json.dumps(value, ensure_ascii=template["json_ensure_ascii"])
+
+    def values(items: list[str]) -> str:
+        cap = template["item_cap"]
+        rendered = template["list_separator"].join(quote(item) for item in items[:cap])
+        return (
+            rendered
+            if len(items) <= cap
+            else rendered + template["list_overflow"].format(remaining=len(items) - cap)
+        )
+
+    def reconstruct(contract: object) -> str:
+        data = contract.data  # type: ignore[attr-defined]
+        scope = template["list_separator"].join(
+            template["scope_dimension"].format(
+                dimension=template["scope_labels"][dimension], values=values(data["scope"][dimension])
+            )
+            for dimension in template["scope_dimensions"]
+            if data["scope"][dimension]
+        ) or template["all_scope"]
+        if data["planning"]["mode"] == "standalone":
+            ownership = template["standalone_ownership"]
+        else:
+            companions = template["companion_separator"].join(
+                template["display_value"].format(name=quote(item["name"]), owns=values(item["owns"]))
+                for item in data["companions"][: template["item_cap"]]
+            )
+            if len(data["companions"]) > template["item_cap"]:
+                companions += template["companion_overflow"].format(
+                    remaining=len(data["companions"]) - template["item_cap"]
+                )
+            ownership = template["companion_ownership"].format(companions=companions)
+        lines = {
+            "open": template["open"],
+            "derived_notice": template["derived_notice"],
+            "heading": template["heading"].format(title=quote(data["title"])),
+            "blank": "",
+            "scope": template["scope"].format(scope=scope),
+            "ownership": ownership,
+            "records": template["records"],
+            "close": template["close"],
+        }
+        return "\n".join(lines[name] for name in template["line_layout"])
+
+    standalone = workflow_contracts.parse_proposal(
+        _proposal(
+            scope={"projects": [], "domains": [], "activities": []},
+            planning={"mode": "standalone"},
+            companions=[],
+        )
+    )
+    companion = workflow_contracts.parse_proposal(
+        _proposal(
+            companions=[
+                {
+                    "key": f"tool-{number}",
+                    "name": f"Tool {number}",
+                    "owns": [f"software.owner-{number}"],
+                }
+                for number in range(5)
+            ]
+        )
+    )
+
+    assert workflow_contracts.render_presentation(standalone) == reconstruct(standalone)
+    assert workflow_contracts.render_presentation(companion) == reconstruct(companion)
 
 
 def test_contract_storage_uses_configured_kb_name_and_rejects_casefolded_filename_collision(
@@ -702,6 +753,212 @@ def test_inventory_order_is_independent_of_manual_filename_order(tmp_path: Path)
     inventory = workflow_contracts.inventory_contracts(tmp_path)
 
     assert [item["key"] for item in inventory["summaries"]] == ["alpha", "beta"]
+
+
+def test_refresh_replaces_only_managed_presentation_and_is_idempotent(tmp_path: Path) -> None:
+    from exomem import workflow_contracts
+    from exomem.init import init_vault
+
+    init_vault(tmp_path)
+    contract = workflow_contracts.parse_proposal(_proposal())
+    saved = workflow_contracts.save_contract(tmp_path, contract, why="reviewed")
+    path = tmp_path / saved["path"]
+    rationale = "\n## Human rationale\n\nKeep every byte.\n"
+    path.write_text(path.read_text(encoding="utf-8") + rationale, encoding="utf-8")
+    before = path.read_text(encoding="utf-8")
+
+    first = workflow_contracts.save_contract(
+        tmp_path,
+        contract,
+        why="refresh",
+        name=contract.key,
+        expected_hash=workflow_contracts.source_hash(before),
+    )
+    second = workflow_contracts.save_contract(
+        tmp_path,
+        contract,
+        why="refresh",
+        name=contract.key,
+        expected_hash=first["content_hash"],
+    )
+
+    open_marker = workflow_contracts.portable_projection()["renderer_template"]["open"]
+    close_marker = workflow_contracts.portable_projection()["renderer_template"]["close"]
+
+    def outside(content: str) -> str:
+        start = content.index(open_marker)
+        end = content.index(close_marker, start) + len(close_marker)
+        return content[:start] + content[end:]
+
+    assert outside(first["content"]) == outside(before)
+    assert second["content"] == first["content"]
+
+
+def test_ambiguity_candidates_are_canonical_and_manual_rename_invariant(tmp_path: Path) -> None:
+    from exomem import workflow_contracts
+
+    entries = (
+        ("z-last.md", "alpha", "123e4567-e89b-12d3-a456-426614174080"),
+        ("a-first.md", "zeta", "123e4567-e89b-12d3-a456-426614174079"),
+    )
+    for filename, key, contract_id in entries:
+        _write_contract(
+            tmp_path,
+            _proposal(
+                contract_id=contract_id,
+                key=key,
+                title=key.title(),
+                scope={"projects": ["example-project"], "domains": [], "activities": []},
+            ),
+            filename,
+        )
+
+    context = {"project": "example-project", "domain": None, "activity": None}
+    before = workflow_contracts.resolve_contracts(tmp_path, context)
+    root = workflow_contracts.contract_directory(tmp_path)
+    (root / "a-first.md").rename(root / "manual-name.md")
+    (root / "z-last.md").rename(root / "another-manual-name.md")
+    after = workflow_contracts.resolve_contracts(tmp_path, context)
+
+    assert before == after
+    assert before["candidates"] == [
+        {"key": "zeta", "contract_id": "123e4567-e89b-12d3-a456-426614174079"},
+        {"key": "alpha", "contract_id": "123e4567-e89b-12d3-a456-426614174080"},
+    ]
+
+
+def test_released_read_error_becomes_bounded_inventory_finding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import workflow_contracts
+
+    _write_contract(tmp_path, _proposal(), "read-error.md")
+
+    def unreadable(*_args: object, **_kwargs: object) -> object:
+        raise OSError("read denied")
+
+    monkeypatch.setattr(workflow_contracts, "read_bounded_guarded_bytes", unreadable)
+
+    inventory = workflow_contracts.inventory_contracts(tmp_path)
+    resolved = workflow_contracts.resolve_contracts(
+        tmp_path,
+        {"project": "example-project", "domain": "software", "activity": "implementation"},
+    )
+
+    assert inventory["valid"] is False
+    assert inventory["findings"] == [
+        {
+            "code": "WORKFLOW_CONTRACT_INVALID",
+            "detail": "unreadable contract",
+            "path": "Knowledge Base/_Schema/contracts/workflow/read-error.md",
+        }
+    ]
+    assert resolved == {"resolved": False, "code": "WORKFLOW_CONTRACT_INVALID_INVENTORY"}
+
+
+def test_explicit_selection_refuses_invalid_envelope_with_the_same_key(tmp_path: Path) -> None:
+    from exomem import workflow_contracts
+
+    _write_contract(tmp_path, _proposal(), "valid.md")
+    invalid = workflow_contracts.contract_directory(tmp_path) / "invalid.md"
+    invalid.write_text(
+        "---\n"
+        "type: workflow-contract\n"
+        "key: software-delivery\n"
+        "schema_version: 99\n"
+        "---\n",
+        encoding="utf-8",
+    )
+
+    result = workflow_contracts.resolve_contracts(tmp_path, {}, name="software-delivery")
+
+    assert result["resolved"] is False
+    assert result["code"] == "WORKFLOW_CONTRACT_INVALID"
+
+
+def test_title_edit_preserves_identity_and_reports_presentation_drift(tmp_path: Path) -> None:
+    from exomem import workflow_contracts
+    from exomem.init import init_vault
+
+    init_vault(tmp_path)
+    contract = workflow_contracts.parse_proposal(_proposal())
+    saved = workflow_contracts.save_contract(tmp_path, contract, why="reviewed")
+    path = tmp_path / saved["path"]
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("title: Software Delivery", "title: Renamed Delivery"),
+        encoding="utf-8",
+    )
+
+    inspected = workflow_contracts.inspect_contract(tmp_path, contract.key)
+
+    assert inspected["contract"]["contract_id"] == contract.contract_id
+    assert inspected["contract"]["title"] == "Renamed Delivery"
+    assert inspected["presentation_drift"] is True
+
+
+def test_public_schema_memory_hides_unreleased_contracts_before_every_scan_bound(tmp_path: Path) -> None:
+    from exomem import commands, workflow_contracts
+    from exomem.governance.principal import RequestPrincipal, request_scope
+
+    visible = _proposal(
+        contract_id="123e4567-e89b-12d3-a456-426614174090",
+        key="visible",
+        title="Visible",
+    )
+    _write_contract(tmp_path, visible, "visible.md")
+    _write_withholding_governance(tmp_path, patterns="_Schema/contracts/workflow/hidden-*")
+    principal = RequestPrincipal(audience_id="external", surface="mcp")
+    context = {"project": "example-project", "domain": "software", "activity": "implementation"}
+    with request_scope(principal):
+        before = {
+            "inventory": commands.op_schema_memory(
+                tmp_path, subject="workflow-contracts", operation="inventory"
+            ),
+            "resolve": commands.op_schema_memory(
+                tmp_path, subject="workflow-contracts", operation="resolve", context=context
+            ),
+        }
+        _write_contract(tmp_path, _proposal(key="hidden-winner", title="Hidden Winner"), "hidden-winner.md")
+        _write_contract(
+            tmp_path,
+            _proposal(
+                contract_id="123e4567-e89b-12d3-a456-426614174091",
+                key="hidden-tie",
+                title="Hidden Tie",
+            ),
+            "hidden-tie.md",
+        )
+        _write_contract(
+            tmp_path,
+            _proposal(
+                contract_id="123e4567-e89b-12d3-a456-426614174092",
+                key="hidden-default",
+                title="Hidden Default",
+                scope={"projects": [], "domains": [], "activities": []},
+                planning={"mode": "standalone"},
+                companions=[],
+                capture={"durable_intent": "explicit", "observed_outcomes": "explicit"},
+                planning_transition="explicit-only",
+            ),
+            "hidden-default.md",
+        )
+        hidden_root = workflow_contracts.contract_directory(tmp_path)
+        (hidden_root / "hidden-invalid.md").write_text("not a contract\n", encoding="utf-8")
+        (hidden_root / "hidden-oversize.md").write_bytes(
+            b"x" * (workflow_contracts.MAX_FILE_BYTES + 1)
+        )
+        for number in range(workflow_contracts.MAX_FILES + 1):
+            (hidden_root / f"hidden-extra-{number:03d}.md").write_text("bad\n", encoding="utf-8")
+        after = {
+            "inventory": commands.op_schema_memory(
+                tmp_path, subject="workflow-contracts", operation="inventory"
+            ),
+            "resolve": commands.op_schema_memory(
+                tmp_path, subject="workflow-contracts", operation="resolve", context=context
+            ),
+        }
+
+    assert json.dumps(after, sort_keys=True) == json.dumps(before, sort_keys=True)
 
 
 def test_workflow_contract_round_trips_to_a_deterministic_markdown_document(tmp_path: Path) -> None:

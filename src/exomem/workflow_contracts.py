@@ -51,12 +51,15 @@ _FIELDS = (
     "planning_transition",
 )
 _RENDERER_TEMPLATE = {
-    "version": 1,
+    "algorithm_version": 1,
     "open": "<!-- exomem:workflow-contract-presentation:start -->",
     "close": "<!-- exomem:workflow-contract-presentation:end -->",
     "derived_notice": "<!-- Derived from workflow-contract frontmatter; refresh restores this block. -->",
     "heading": "## Workflow contract: {title}",
     "scope": "This active policy applies to {scope}.",
+    "scope_dimensions": ("projects", "domains", "activities"),
+    "scope_labels": {"projects": "projects", "domains": "domains", "activities": "activities"},
+    "scope_dimension": "{dimension}: {values}",
     "all_scope": "all work",
     "standalone_ownership": "Planning holds the complete durable work hierarchy.",
     "companion_ownership": "Planning retains durable intent; declared companion ownership is {companions}.",
@@ -66,6 +69,17 @@ _RENDERER_TEMPLATE = {
     "list_overflow": ", … (+{remaining})",
     "display_value": "{name} ({owns})",
     "item_cap": 4,
+    "json_ensure_ascii": False,
+    "line_layout": (
+        "open",
+        "derived_notice",
+        "heading",
+        "blank",
+        "scope",
+        "ownership",
+        "records",
+        "close",
+    ),
     "records": "Records holds observed outcomes; it never completes Planning automatically.",
     "max_bytes": 4096,
 }
@@ -289,7 +303,11 @@ def canonical_content(contract: WorkflowContract, authored_body: str = "") -> st
         width=4096,
     ).rstrip("\n")
     presentation = render_presentation(contract)
-    authored = _without_presentation(authored_body)
+    managed = _presentation_span(authored_body)
+    if managed is not None:
+        start, end = managed
+        return f"---\n{frontmatter}\n---\n" + authored_body[:start] + presentation + authored_body[end:]
+    authored = authored_body
     if authored and not authored.endswith("\n"):
         authored += "\n"
     return f"---\n{frontmatter}\n---\n\n{presentation}\n{authored}"
@@ -299,7 +317,12 @@ def render_presentation(contract: WorkflowContract) -> str:
     scope = contract.data["scope"]
     selected = (
         _RENDERER_TEMPLATE["list_separator"].join(
-            f"{dimension}: {_quoted_values(values)}" for dimension, values in scope.items() if values
+            _RENDERER_TEMPLATE["scope_dimension"].format(
+                dimension=_RENDERER_TEMPLATE["scope_labels"][dimension],
+                values=_quoted_values(scope[dimension]),
+            )
+            for dimension in _RENDERER_TEMPLATE["scope_dimensions"]
+            if scope[dimension]
         )
         or _RENDERER_TEMPLATE["all_scope"]
     )
@@ -320,17 +343,18 @@ def render_presentation(contract: WorkflowContract) -> str:
         ownership = _RENDERER_TEMPLATE["companion_ownership"].format(
             companions=companions
         )
+    lines = {
+        "open": _RENDERER_TEMPLATE["open"],
+        "derived_notice": _RENDERER_TEMPLATE["derived_notice"],
+        "heading": _RENDERER_TEMPLATE["heading"].format(title=_quoted(contract.title)),
+        "blank": "",
+        "scope": _RENDERER_TEMPLATE["scope"].format(scope=selected),
+        "ownership": ownership,
+        "records": _RENDERER_TEMPLATE["records"],
+        "close": _RENDERER_TEMPLATE["close"],
+    }
     rendered = "\n".join(
-        (
-            _RENDERER_TEMPLATE["open"],
-            _RENDERER_TEMPLATE["derived_notice"],
-            _RENDERER_TEMPLATE["heading"].format(title=_quoted(contract.title)),
-            "",
-            _RENDERER_TEMPLATE["scope"].format(scope=selected),
-            ownership,
-            _RENDERER_TEMPLATE["records"],
-            _RENDERER_TEMPLATE["close"],
-        )
+        lines[name] for name in _RENDERER_TEMPLATE["line_layout"]
     )
     if len(rendered.encode("utf-8")) > _RENDERER_TEMPLATE["max_bytes"]:
         raise WorkflowContractError("WORKFLOW_CONTRACT_INVALID", "presentation exceeds bound")
@@ -338,7 +362,7 @@ def render_presentation(contract: WorkflowContract) -> str:
 
 
 def _quoted(value: str) -> str:
-    return json.dumps(value, ensure_ascii=False)
+    return json.dumps(value, ensure_ascii=_RENDERER_TEMPLATE["json_ensure_ascii"])
 
 
 def _quoted_values(values: list[str]) -> str:
@@ -596,13 +620,13 @@ def resolve_contracts(
     if limited:
         return _refusal("WORKFLOW_CONTRACT_SCAN_LIMIT")
     if name:
+        invalid = next((item for item in findings if item.get("key") == name), None)
+        if invalid is not None:
+            return _refusal("WORKFLOW_CONTRACT_INVALID", finding=invalid)
         matches = [
             (contract, path, source) for contract, path, source in contracts if contract.key == name
         ]
         if not matches:
-            invalid = next((item for item in findings if item.get("key") == name), None)
-            if invalid is not None:
-                return _refusal("WORKFLOW_CONTRACT_INVALID", finding=invalid)
             return _refusal("WORKFLOW_CONTRACT_NOT_FOUND")
         if len(matches) != 1:
             return _refusal("WORKFLOW_CONTRACT_DUPLICATE_IDENTITY")
@@ -718,7 +742,7 @@ def _scan(
             raw, _guard = read_bounded_guarded_bytes(
                 Path(vault_root), relative, limit=MAX_SCAN_BYTES - scanned_bytes
             )
-        except PathGuardError:
+        except (OSError, PathGuardError):
             findings.append(
                 {
                     "code": "WORKFLOW_CONTRACT_INVALID",
@@ -830,14 +854,14 @@ def _body(source: str) -> str:
     return source[closing + 5 :] if closing >= 0 else ""
 
 
-def _without_presentation(body: str) -> str:
+def _presentation_span(body: str) -> tuple[int, int] | None:
     start = body.find(_RENDERER_TEMPLATE["open"])
     if start < 0:
-        return body
+        return None
     end = body.find(_RENDERER_TEMPLATE["close"], start)
     if end < 0:
-        return body
-    return body[:start] + body[end + len(_RENDERER_TEMPLATE["close"]) :]
+        return None
+    return start, end + len(_RENDERER_TEMPLATE["close"])
 
 
 def _semantic_bytes(data: Mapping[str, Any]) -> bytes:
@@ -964,7 +988,7 @@ def _refusal(code: str, **detail: Any) -> dict[str, Any]:
 def _candidates(items: list[tuple[Any, ...]]) -> list[dict[str, str]]:
     return [
         {"key": item[0].key, "contract_id": item[0].contract_id}
-        for item in items[:16]
+        for item in sorted(items, key=lambda item: (item[0].contract_id, item[0].key))[:16]
     ]
 
 
