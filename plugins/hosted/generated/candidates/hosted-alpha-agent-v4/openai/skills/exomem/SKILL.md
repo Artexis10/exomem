@@ -20,7 +20,7 @@ The search itself is quiet; the result is not. Cite a useful retrieved note in t
 
 ## Capture
 
-Save at every stepping stone, and keep the bar low: a clear reusable decision, a solved problem, a diagnosed failure, a reusable pattern, a research finding, or a durable fact about a recurring person, project, or organisation. When torn between saving and letting it pass, save. Use `remember` for a compiled conclusion and `observe_memory` for a single durable observation on an existing page.
+Save at every stepping stone, and keep the bar low: a clear reusable decision, a solved problem, a diagnosed failure, a reusable pattern, a research finding, a durable fact about a recurring person, project, or organisation, or a method the user actually carried out and reported the result of (worked, failed, or bounded a parameter). When torn between saving and letting it pass, save. Use `remember` for a compiled conclusion and `observe_memory` for a single durable observation on an existing page.
 
 Write a concise compiled outcome, never raw conversation transcripts. Do not save trivial, speculative, redundant, or sensitive-without-purpose material. Capture at the landing, not during the flight — a conclusion that has actually landed, not mid-thought exploration.
 

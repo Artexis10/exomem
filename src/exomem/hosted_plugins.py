@@ -56,7 +56,7 @@ CANDIDATE_SKILL_NAMES: Mapping[str, tuple[str, ...]] = MappingProxyType(
         DEFAULT_CANDIDATE: (),
         LIFECYCLE_CANDIDATE: ("exomem-records",),
         EPISTEMIC_CANDIDATE: ("exomem-records", "exomem-supersede"),
-        PARITY_CANDIDATE: ("exomem-records", "exomem-supersede"),
+        PARITY_CANDIDATE: ("exomem", "exomem-records", "exomem-supersede"),
     }
 )
 PLATFORMS = ("claude", "openai")

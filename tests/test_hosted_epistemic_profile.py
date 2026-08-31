@@ -181,6 +181,19 @@ def test_v3_skills_teach_supersession_planning_and_correction() -> None:
     }
 
 
+def test_v4_packages_its_candidate_scoped_core_skill() -> None:
+    source = (
+        REPO_ROOT
+        / "plugins/hosted/candidates/hosted-alpha-agent-v4/skills/exomem/SKILL.md"
+    )
+
+    assert "exomem" in hosted_plugins.CANDIDATE_SKILL_NAMES[hosted_plugins.PARITY_CANDIDATE]
+    files = hosted_plugins.candidate_files(
+        REPO_ROOT, platform="claude", candidate=hosted_plugins.PARITY_CANDIDATE
+    )
+    assert files["claude/skills/exomem/SKILL.md"] == source.read_bytes()
+
+
 def test_v3_compatibility_binds_the_records_reader_floor_and_its_own_selection_cases() -> None:
     manifest = hosted_plugins.compatibility_manifest(
         REPO_ROOT, candidate=hosted_plugins.EPISTEMIC_CANDIDATE
