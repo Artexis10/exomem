@@ -451,6 +451,14 @@ def test_framework_adapters_receive_explicit_thread_budget(monkeypatch: pytest.M
     assert created == [{"device": "cpu", "compute_type": "int8", "cpu_threads": 3, "num_workers": 1}]
 
 
+def test_torch_thread_budget_is_optional_when_torch_is_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(sys.modules, "torch", None)
+
+    runtime_resources.configure_torch()
+
+
 def test_media_child_lowers_background_priority(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[int] = []
     monkeypatch.setattr(runtime_resources.os, "nice", lambda amount: calls.append(amount))

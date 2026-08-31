@@ -169,6 +169,8 @@ def _nvidia_headroom() -> tuple[tuple[int, int] | None, str | None]:
             ["nvidia-smi", "--query-gpu=compute_cap,memory.free", "--format=csv,noheader,nounits"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=5,
             check=True,
         )

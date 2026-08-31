@@ -103,9 +103,14 @@ def bootstrap() -> ComputePolicy:
 
 
 def configure_torch(torch: Any | None = None) -> None:
-    """Apply explicit PyTorch limits immediately before model construction."""
+    """Apply explicit PyTorch limits when the optional runtime is installed."""
     if torch is None:
-        import torch as torch_module
+        try:
+            import torch as torch_module
+        except ModuleNotFoundError as exc:
+            if exc.name != "torch":
+                raise
+            return
 
         torch = torch_module
     policy = resolve_policy()
