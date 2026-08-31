@@ -420,7 +420,7 @@ def _bind_to_stored_plan(
     bundle: object,
     manifest: VerificationManifest,
 ) -> None:
-    """Bind exact manifest contracts to their plan and delegated attestations."""
+    """Bind exact contracts and require the full approved principal/purpose matrix."""
 
     preimage = getattr(plan, "preimage", None)
     verification = preimage.get("verification_plan") if isinstance(preimage, Mapping) else None
@@ -439,16 +439,62 @@ def _bind_to_stored_plan(
     ):
         _fail()
     attestations = getattr(bundle, "attestations", None)
-    if not isinstance(attestations, Sequence):
+    principal_requirements = getattr(bundle, "principal_requirements", None)
+    if (
+        not isinstance(attestations, Sequence)
+        or isinstance(attestations, (str, bytes))
+        or not isinstance(principal_requirements, Sequence)
+        or isinstance(principal_requirements, (str, bytes))
+    ):
         _fail()
     by_fingerprint: dict[str, object] = {}
+    by_principal: dict[str, object] = {}
     for attestation in attestations:
         fingerprint = getattr(attestation, "fingerprint", None)
-        if type(fingerprint) is not str or _DIGEST.fullmatch(fingerprint) is None:
+        principal_id = getattr(attestation, "principal_id", None)
+        purposes = getattr(attestation, "purposes", None)
+        if (
+            type(fingerprint) is not str
+            or _DIGEST.fullmatch(fingerprint) is None
+            or type(principal_id) is not str
+            or not isinstance(purposes, Sequence)
+            or isinstance(purposes, (str, bytes))
+        ):
             _fail()
-        if fingerprint in by_fingerprint:
+        checked_principal = _identifier(principal_id)
+        checked_purposes = tuple(_identifier(purpose) for purpose in purposes)
+        if not checked_purposes or checked_purposes != tuple(sorted(set(checked_purposes))):
+            _fail()
+        if fingerprint in by_fingerprint or checked_principal in by_principal:
             _fail()
         by_fingerprint[fingerprint] = attestation
+        by_principal[checked_principal] = attestation
+    required_pairs: set[tuple[str, str]] = set()
+    for requirement in principal_requirements:
+        if type(requirement) is not tuple or len(requirement) != 2:
+            _fail()
+        principal_id, purposes = requirement
+        if (
+            type(principal_id) is not str
+            or not isinstance(purposes, Sequence)
+            or isinstance(purposes, (str, bytes))
+        ):
+            _fail()
+        checked_principal = _identifier(principal_id)
+        checked_purposes = tuple(_identifier(purpose) for purpose in purposes)
+        if not checked_purposes or checked_purposes != tuple(sorted(set(checked_purposes))):
+            _fail()
+        attestation = by_principal.get(checked_principal)
+        attested_purposes = tuple(getattr(attestation, "purposes", ()))
+        for purpose in checked_purposes:
+            if purpose not in attested_purposes:
+                _fail()
+            pair = (checked_principal, purpose)
+            if pair in required_pairs:
+                _fail()
+            required_pairs.add(pair)
+    if set(by_principal) != {principal_id for principal_id, _purpose in required_pairs}:
+        _fail()
     for contract in manifest.contracts:
         if contract.principal_kind == "owner":
             continue
@@ -461,6 +507,22 @@ def _bind_to_stored_plan(
             or contract.purpose not in purposes
         ):
             _fail()
+    positive_pairs = {
+        (contract.principal_id, contract.purpose)
+        for contract in manifest.positive_contracts
+        if contract.principal_kind == "delegated"
+    }
+    negative_pairs = {
+        (contract.principal_id, contract.purpose)
+        for contract in manifest.negative_contracts
+        if contract.principal_kind == "delegated"
+    }
+    if (
+        not any(contract.principal_kind == "owner" for contract in manifest.positive_contracts)
+        or not required_pairs <= positive_pairs
+        or not required_pairs <= negative_pairs
+    ):
+        _fail()
 
 
 @contextmanager
