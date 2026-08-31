@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import anyio
+
 from . import (
     env_compat,
     hosted_runtime,
@@ -106,6 +108,7 @@ class LocalRuntimeActivation:
         self.fallback_seconds = fallback_seconds
         self._lock = threading.Lock()
         self._started = False
+        self._shutdown = threading.Event()
         self._timer: threading.Timer | None = None
         self._thread: threading.Thread | None = None
         self.media_worker: Any | None = None
@@ -114,31 +117,44 @@ class LocalRuntimeActivation:
     def start(self) -> None:
         """Launch local workers once; safe from health and timer races."""
         with self._lock:
-            if self._started:
+            if self._started or self._shutdown.is_set():
                 return
             self._started = True
             timer = self._timer
+            thread = threading.Thread(
+                target=self._activate,
+                name="exomem-local-activation",
+                daemon=True,
+            )
+            self._thread = thread
+            thread.start()
         if timer is not None:
             timer.cancel()
-        thread = threading.Thread(
-            target=self._activate,
-            name="exomem-local-activation",
-            daemon=True,
-        )
-        with self._lock:
-            self._thread = thread
-        thread.start()
 
     def _activate(self) -> None:
+        if self._shutdown.is_set():
+            return
         self._start_component("file watcher", self._start_file_watcher)
+        if self._shutdown.is_set():
+            self._stop_background_workers()
+            return
         if self.file_watcher is None:
             # A maintained projection is authoritative only while something is
             # actually maintaining it.  The explicit watcher-off mode and a
             # watcher startup failure retain the supported walk-backed path.
             self._downgrade_recall_runtime()
         self._wait_for_recall_seed()
+        if self._shutdown.is_set():
+            self._stop_background_workers()
+            return
         self._start_component("retrieval", _start_compute_runtime)
+        if self._shutdown.is_set():
+            self._stop_background_workers()
+            return
         self._wait_for_required_admission()
+        if self._shutdown.is_set():
+            self._stop_background_workers()
+            return
         self._start_component(
             "file watcher recovery",
             self._finish_file_watcher_startup,
@@ -148,7 +164,11 @@ class LocalRuntimeActivation:
             ("media", self._start_media_worker),
         )
         for label, starter in starters:
+            if self._shutdown.is_set():
+                break
             self._start_component(label, starter)
+        if self._shutdown.is_set():
+            self._stop_background_workers()
 
     def _wait_for_recall_seed(self) -> None:
         """Order maintained-catalog verification behind watcher authority."""
@@ -196,7 +216,7 @@ class LocalRuntimeActivation:
 
         if not warmup.warmup_enabled():
             return
-        while True:
+        while not self._shutdown.is_set():
             catalog_ready = readiness.is_ready("retrieval_catalog")
             semantic_ready = readiness.is_ready("semantic_corpus")
             if catalog_ready and (semantic_ready or not readiness.is_warming()):
@@ -210,6 +230,20 @@ class LocalRuntimeActivation:
                 return
             missing = "retrieval_catalog" if not catalog_ready else "semantic_corpus"
             readiness.wait(missing, timeout=0.1)
+
+    def _stop_background_workers(self) -> None:
+        """Stop workers already owned by this activation during shutdown."""
+        for label, worker in (
+            ("media", self.media_worker),
+            ("file watcher", self.file_watcher),
+        ):
+            stop = getattr(worker, "stop", None)
+            if not callable(stop):
+                continue
+            try:
+                stop()
+            except Exception:  # noqa: BLE001 - shutdown still has to join activation
+                log.warning("%s runtime shutdown failed", label, exc_info=True)
 
     def _start_component(self, label: str, starter: Callable[[Path], Any]) -> None:
         try:
@@ -248,7 +282,16 @@ class LocalRuntimeActivation:
             try:
                 yield {}
             finally:
-                timer.cancel()
+                with self._lock:
+                    self._shutdown.set()
+                    timer = self._timer
+                    self._timer = None
+                    thread = self._thread
+                if timer is not None:
+                    timer.cancel()
+                self._stop_background_workers()
+                if thread is not None and thread is not threading.current_thread():
+                    await anyio.to_thread.run_sync(thread.join)
 
         return _lifespan
 
