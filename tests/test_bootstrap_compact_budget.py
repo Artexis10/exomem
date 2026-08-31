@@ -398,6 +398,10 @@ def test_compact_stays_under_its_byte_ceiling(payloads):
         )
 
 
+def test_compact_clears_the_warning_headroom(payloads):
+    assert COMPACT_BYTE_CEILING - _size(payloads["compact"]) >= HEADROOM_WARNING_BYTES
+
+
 def test_compact_is_materially_smaller_than_full(payloads):
     compact, full = _size(payloads["compact"]), _size(payloads["full"])
     saving = (full - compact) / full

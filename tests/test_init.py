@@ -294,3 +294,20 @@ def test_refresh_on_a_vault_without_a_knowledge_base_is_inert(tmp_path: Path) ->
     vault.mkdir()
 
     assert init_module.refresh_shipped_schema(vault) == []
+
+
+def test_refresh_refuses_a_symlinked_shipped_schema_ancestor(tmp_path: Path) -> None:
+    from exomem import init as init_module
+    from exomem.workflow_contracts import WorkflowContractError
+
+    vault = tmp_path / "vault"
+    outside = tmp_path / "outside"
+    vault.mkdir()
+    outside.mkdir()
+    (vault / "Knowledge Base").mkdir()
+    (vault / ".exomem").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(WorkflowContractError, match="WORKFLOW_CONTRACT_MIGRATION_INDETERMINATE"):
+        init_module.refresh_shipped_schema(vault)
+
+    assert list(outside.iterdir()) == []
