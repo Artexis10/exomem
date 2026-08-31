@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
@@ -239,13 +240,13 @@ def test_context_is_exact_at_runtime_and_in_the_published_schema() -> None:
     }
 
 
-def test_live_mcp_rejects_unknown_context_keys_without_dropping_them(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_live_workflow_context_refusals_and_schema_match_across_surfaces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     from conftest import initialize_vault_state_offline
-    from fastmcp.exceptions import ValidationError
 
     from exomem import server as server_module
+    from exomem.__main__ import main
     from exomem.init import init_vault
 
     vault = tmp_path / "vault"
@@ -268,14 +269,13 @@ def test_live_mcp_rejects_unknown_context_keys_without_dropping_them(
         "operation": "resolve",
         "context": {"unexpected": "value"},
     }
-    with pytest.raises(ValidationError, match="context.unexpected"):
-        asyncio.run(
-            mcp.call_tool(
-                "schema_memory",
-                invalid_request,
-                run_middleware=True,
-            )
+    invalid = asyncio.run(
+        mcp.call_tool(
+            "schema_memory",
+            invalid_request,
+            run_middleware=True,
         )
+    )
     valid = asyncio.run(
         mcp.call_tool(
             "schema_memory",
@@ -296,6 +296,7 @@ def test_live_mcp_rejects_unknown_context_keys_without_dropping_them(
     }
 
     direct = _schema(vault, "resolve", context=invalid_request["context"])
+    assert invalid.structured_content == direct
     rest = TestClient(mcp.http_app()).post(
         "/api/schema_memory",
         json=invalid_request,
@@ -303,3 +304,29 @@ def test_live_mcp_rejects_unknown_context_keys_without_dropping_them(
     )
     assert rest.status_code == 200, rest.text
     assert rest.json() == {"success": True, "data": direct}
+
+    assert main(
+        [
+            "schema_memory",
+            "--subject",
+            "workflow-contracts",
+            "--operation",
+            "resolve",
+            "--context",
+            json.dumps(invalid_request["context"]),
+            "--json",
+        ]
+    ) == 0
+    assert json.loads(capsys.readouterr().out) == {"success": True, "data": direct}
+
+    mcp_schema = next(
+        tool.to_mcp_tool().model_dump(mode="json")["inputSchema"]["properties"]["context"]
+        for tool in asyncio.run(mcp.list_tools())
+        if tool.name == "schema_memory"
+    )
+    rest_schema = TestClient(mcp.http_app()).get("/api/openapi.json").json()["paths"][
+        "/api/schema_memory"
+    ]["post"]["requestBody"]["content"]["application/json"]["schema"]["properties"][
+        "context"
+    ]
+    assert rest_schema == mcp_schema

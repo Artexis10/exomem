@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import logging
 import os
@@ -450,9 +451,13 @@ def register_rest_facade(
             properties: dict = {}
             required: list[str] = []
             for prm in cmd.params:
-                schema_obj = dict(_OPENAPI_TYPES.get(prm.type, {}))
-                if prm.help:
+                schema_obj = dict(prm.schema or _OPENAPI_TYPES.get(prm.type, {}))
+                if prm.schema_description:
+                    schema_obj["description"] = prm.schema_description
+                elif prm.help:
                     schema_obj["description"] = prm.help
+                if prm.schema_default is not inspect.Parameter.empty:
+                    schema_obj["default"] = prm.schema_default
                 if prm.choices:
                     schema_obj["enum"] = list(prm.choices)
                 properties[prm.name] = schema_obj
