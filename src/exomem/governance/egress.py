@@ -2921,7 +2921,6 @@ _METADATA_ONLY_COMMANDS: frozenset[str] = frozenset(
         "capture_source",
         "preserve_evidence",
         "preserve_artifacts",
-        "compile_source",
         "observe_memory",
         "replace_memory",
         "edit_memory",
@@ -2931,9 +2930,6 @@ _METADATA_ONLY_COMMANDS: frozenset[str] = frozenset(
         "adopt_vault",
         "adoption_studio",
         "triage_memory",
-        "query_dataset",
-        "read_media",
-        "list_trash",
     }
 )
 
@@ -2966,6 +2962,7 @@ _COMMAND_PROJECTOR_KIND: dict[str, str] = {
     "audit": "structure",
     "overview": "structure",
     "list_directory": "structure",
+    "list_trash": "structure",
     "list_inbound_links": "structure",
     "evolution": "structure",
     "propose_compilation": "structure",
@@ -2993,6 +2990,7 @@ _COMMAND_OUTCOME_ADAPTER: dict[str, str] = {
             "audit",
             "overview",
             "list_directory",
+            "list_trash",
             "list_inbound_links",
             "evolution",
             "propose_compilation",
@@ -3113,13 +3111,244 @@ _SELECTOR_TOMBSTONE_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
     for key, values in _SELECTOR_ADAPTERS.items()
 }
 
-_EXPLICIT_TOMBSTONE_ROUTES: dict[str, str] = {
-    "direct-read": "page",
-    "download": "binary",
-    "frame": "binary",
-    "prompt": "artifact-reference",
-    "resource": "artifact-reference",
+_MUTATION_CAPABILITY: dict[str, str] = {
+    "projector": "not-applicable",
+    "receipt": "mutation",
+    "tombstone": "not-applicable",
 }
+
+# Every decorator-registered Exomem surface is named here, including branches
+# that are content-free or are generated from the command registry.  The
+# release test compares this set with the AST of the real registrations.  A
+# newly decorated route is therefore unknown until it receives an explicit
+# disposition; putting it in a module that already contains a gate is not
+# enough.
+_SURFACE_ROUTE_DISPOSITIONS: dict[str, str] = {
+    "hosted_transfer_routes:upload_options": "no-vault-content",
+    "hosted_transfer_routes:download_options": "no-vault-content",
+    "hosted_transfer_routes:upload": "governed",
+    "hosted_transfer_routes:download": "governed",
+    "server:continue_adoption": "governed",
+    "server:adoption_runs": "governed",
+    "server:adoption_run_resource": "governed",
+    "server_assets:_health": "no-vault-content",
+    "server_assets:_runtime_ready": "no-vault-content",
+    "server_assets:_metrics_json": "no-vault-content",
+    "server_assets:_favicon_ico": "no-vault-content",
+    "server_assets:_favicon_svg": "no-vault-content",
+    "server_assets:_studio_redirect": "no-vault-content",
+    "server_assets:_studio_shell": "no-vault-content",
+    "server_assets:_studio_asset": "no-vault-content",
+    "server_assets:_openid_configuration": "no-vault-content",
+    "server_assets:_oauth_protected_resource_bare": "no-vault-content",
+    "server_hosted:_contract": "no-vault-content",
+    "server_hosted:_agent_contract": "no-vault-content",
+    "server_hosted:_reader_status": "no-vault-content",
+    "server_hosted:_live": "no-vault-content",
+    "server_hosted:_ready": "no-vault-content",
+    "server_hosted:_command": "command-registry",
+    "server_hosted:_agent_command": "command-registry",
+    "server_hosted:_quiesce": "no-vault-content",
+    "server_hosted:_attest_authorization_membership": "no-vault-content",
+    # Private lifecycle portability is an authenticated operator-control lane:
+    # public routing is stopped, the cell is quiesced, and its own portability
+    # checkpoint governs the archive.  It is not an agent/product disclosure
+    # route and must not acquire paper projector or receipt adapters here.
+    "server_hosted:_export": "operator-control",
+    "server_hosted:_export_download": "operator-control",
+    "server_hosted:_release_export": "no-vault-content",
+    "server_hosted:_resume": "no-vault-content",
+    "server_hosted:_seal": "no-vault-content",
+    "server_hosted:_upload": "governed",
+    "server_hosted:_download": "governed",
+    "server_rest:_api_openapi": "no-vault-content",
+    "server_rest:_handler": "command-registry",
+    "server_transfer:_upload": "governed",
+    "server_transfer:_upload_form": "no-vault-content",
+    "server_transfer:_download": "governed",
+}
+_SURFACE_ROUTE_DISPOSITION_VALUES = frozenset(
+    {"command-registry", "governed", "no-vault-content", "operator-control"}
+)
+
+# Capabilities name the concrete release/reduction path each governed residual
+# uses. Operator-control portability is classified above rather than pretending
+# its lifecycle checkpoint is a disclosure projector or tombstone filter.
+_NON_COMMAND_ROUTE_CAPABILITIES: dict[str, dict[str, str]] = {
+    "hosted_transfer_routes:upload": dict(_MUTATION_CAPABILITY),
+    "hosted_transfer_routes:download": {
+        "projector": "binary",
+        "receipt": "binary",
+        "tombstone": "binary",
+        "seal": "transfer",
+        "probe": "positive-negative",
+    },
+    "server:continue_adoption": {
+        "projector": "structure",
+        "receipt": "structure",
+        "tombstone": "structure",
+        "seal": "read",
+        "probe": "positive-negative",
+    },
+    "server:adoption_runs": {
+        "projector": "structure",
+        "receipt": "structure",
+        "tombstone": "structure",
+        "seal": "read",
+        "probe": "positive-negative",
+    },
+    "server:adoption_run_resource": {
+        "projector": "structure",
+        "receipt": "structure",
+        "tombstone": "structure",
+        "seal": "read",
+        "probe": "positive-negative",
+    },
+    "server_hosted:_upload": dict(_MUTATION_CAPABILITY),
+    "server_hosted:_download": {
+        "projector": "binary",
+        "receipt": "binary",
+        "tombstone": "binary",
+        "seal": "transfer",
+        "probe": "positive-negative",
+    },
+    "server_transfer:_upload": dict(_MUTATION_CAPABILITY),
+    "server_transfer:_download": {
+        "projector": "binary",
+        "receipt": "binary",
+        "tombstone": "binary",
+        "seal": "transfer",
+        "probe": "positive-negative",
+    },
+}
+
+for _mutation_route in (
+    "hosted_transfer_routes:upload",
+    "server_hosted:_upload",
+    "server_transfer:_upload",
+):
+    _NON_COMMAND_ROUTE_CAPABILITIES[_mutation_route].update(
+        {"seal": "mutation", "probe": "seal-only"}
+    )
+
+_INTERNAL_RESIDUAL_ROUTE_CAPABILITIES: dict[str, dict[str, str]] = {
+    "internal:direct-read": {
+        "projector": "page",
+        "receipt": "page",
+        "tombstone": "page",
+        "seal": "read",
+        "probe": "positive-negative",
+    },
+    "internal:frame": {
+        "projector": "binary",
+        "receipt": "frames",
+        "tombstone": "frames",
+        "seal": "transfer",
+        "probe": "positive-negative",
+    },
+}
+
+
+def _coverage_command_names(registry: Mapping[str, Any]) -> tuple[str, ...]:
+    """Content-returning commands plus every command that can mutate state."""
+
+    if not isinstance(registry, Mapping):
+        raise TypeError("coverage commands require a {name: command} mapping")
+    mutations: set[str] = set()
+    for name, command in registry.items():
+        read_only = getattr(command, "read_only", None)
+        if type(read_only) is not bool:
+            raise TypeError("coverage command read_only dispositions must be boolean")
+        if not read_only:
+            mutations.add(name)
+    return tuple(sorted(set(content_returning_commands(registry)) | mutations))
+
+
+def command_capability_registry(registry: Mapping[str, Any]) -> dict[str, dict[str, str]]:
+    """Return complete release rows for content and mutation commands."""
+
+    assert_projectors_registered(registry)
+    assert_outcomes_registered(registry)
+    assert_tombstone_coverage()
+    capabilities: dict[str, dict[str, str]] = {}
+    content_commands = frozenset(content_returning_commands(registry))
+    for name in _coverage_command_names(registry):
+        if name not in content_commands:
+            if name not in _METADATA_ONLY_COMMANDS:
+                raise RuntimeError(
+                    "RELEASE_COVERAGE_MISSING: mutation lacks an explicit reduction disposition"
+                )
+            capabilities[name] = dict(_MUTATION_CAPABILITY)
+            continue
+        projector = _COMMAND_PROJECTOR_KIND.get(name)
+        receipt = _COMMAND_OUTCOME_ADAPTER.get(name)
+        tombstone = _COMMAND_TOMBSTONE_ADAPTER.get(name)
+        if not projector or not receipt or not tombstone:
+            raise RuntimeError(
+                "RELEASE_COVERAGE_MISSING: content command has an incomplete capability row"
+            )
+        capabilities[name] = {
+            "projector": projector,
+            "receipt": receipt,
+            "tombstone": tombstone,
+        }
+    return capabilities
+
+
+def alias_capability_registry(
+    alias_registry: Mapping[str, Any], leaf_registry: Mapping[str, Any]
+) -> dict[str, dict[str, str]]:
+    """Return capabilities derived from product leaves and selector branches."""
+
+    assert_alias_projectors_registered(alias_registry, leaf_registry)
+    leaves = command_capability_registry(leaf_registry)
+    capabilities: dict[str, dict[str, str]] = {}
+    for name in _coverage_command_names(alias_registry):
+        alias = alias_registry[name]
+        routes = set(derived_routes(getattr(alias, "leaf", None))) & set(leaf_registry)
+        if name in leaf_registry:
+            routes.add(name)
+        rows = []
+        for route in routes:
+            row = leaves.get(route)
+            if row is None:
+                raise RuntimeError(
+                    "RELEASE_COVERAGE_MISSING: alias route lacks a release capability row: "
+                    f"{name}->{route}"
+                )
+            rows.append(row)
+        for (command_name, _selector), values in _SELECTOR_ADAPTERS.items():
+            if command_name != name:
+                continue
+            tombstones = _SELECTOR_TOMBSTONE_ADAPTERS.get(
+                (command_name, _selector), {}
+            )
+            for value, outcome in values.items():
+                tombstone = tombstones.get(value)
+                if not tombstone:
+                    raise RuntimeError(
+                        "RELEASE_COVERAGE_MISSING: selector lacks a tombstone disposition"
+                    )
+                rows.append(
+                    {
+                        "projector": (
+                            "not-applicable" if outcome == "mutation" else outcome
+                        ),
+                        "receipt": outcome,
+                        "tombstone": tombstone,
+                    }
+                )
+        if not rows and not alias.read_only and name in _METADATA_ONLY_COMMANDS:
+            rows.append(dict(_MUTATION_CAPABILITY))
+        if not rows:
+            raise RuntimeError(
+                "RELEASE_COVERAGE_MISSING: product alias has no derived release disposition"
+            )
+        capabilities[name] = {
+            field: "+".join(sorted({row[field] for row in rows}))
+            for field in ("projector", "receipt", "tombstone")
+        }
+    return capabilities
 
 
 def selector_registry() -> dict[tuple[str, str], dict[str, str]]:
@@ -3141,6 +3370,48 @@ def selector_capability_registry() -> dict[tuple[str, str], dict[str, dict[str, 
     }
 
 
+def surface_route_disposition_registry() -> dict[str, str]:
+    """Return the reviewed classification of every decorated Exomem route."""
+
+    if not set(_SURFACE_ROUTE_DISPOSITIONS.values()) <= _SURFACE_ROUTE_DISPOSITION_VALUES:
+        raise RuntimeError("RELEASE_COVERAGE_MISSING: surface route disposition is unknown")
+    return dict(_SURFACE_ROUTE_DISPOSITIONS)
+
+
+def assert_surface_route_registrations_covered(registrations: Iterable[str]) -> None:
+    """Release-gate an inventory discovered from the real route decorators."""
+
+    surface_route_disposition_registry()
+    actual = frozenset(registrations)
+    expected = frozenset(_SURFACE_ROUTE_DISPOSITIONS)
+    if actual != expected:
+        raise RuntimeError(
+            "RELEASE_COVERAGE_MISSING: registered surface routes lack an explicit disposition"
+        )
+
+
+def non_command_route_capability_registry() -> dict[str, dict[str, str]]:
+    """Return capabilities for governed decorated and internal residual routes."""
+
+    surface_route_disposition_registry()
+    governed = {
+        route
+        for route, disposition in _SURFACE_ROUTE_DISPOSITIONS.items()
+        if disposition == "governed"
+    }
+    if governed != set(_NON_COMMAND_ROUTE_CAPABILITIES):
+        raise RuntimeError(
+            "RELEASE_COVERAGE_MISSING: governed route dispositions lack capability rows"
+        )
+    return {
+        route: dict(capability)
+        for route, capability in {
+            **_NON_COMMAND_ROUTE_CAPABILITIES,
+            **_INTERNAL_RESIDUAL_ROUTE_CAPABILITIES,
+        }.items()
+    }
+
+
 def assert_tombstone_coverage() -> None:
     missing: list[str] = []
     for command in _COMMAND_OUTCOME_ADAPTER:
@@ -3152,7 +3423,12 @@ def assert_tombstone_coverage() -> None:
             f"{command}.{selector}={value}" for value in values if not declared.get(value)
         )
     missing.extend(
-        f"explicit:{route}" for route, adapter in _EXPLICIT_TOMBSTONE_ROUTES.items() if not adapter
+        f"explicit:{route}"
+        for route, capability in {
+            **_NON_COMMAND_ROUTE_CAPABILITIES,
+            **_INTERNAL_RESIDUAL_ROUTE_CAPABILITIES,
+        }.items()
+        if not capability.get("tombstone")
     )
     if missing:
         raise RuntimeError(
