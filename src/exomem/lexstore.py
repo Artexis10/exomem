@@ -4792,8 +4792,12 @@ class LexicalStore:
         """
         from . import freshness as freshness_module
 
-        readiness = self.catalog_readiness(
-            scope, freshness, recall_checkpoint=recall_checkpoint
+        readiness = (
+            self.catalog_readiness(scope, freshness)
+            if recall_checkpoint is None
+            else self.catalog_readiness(
+                scope, freshness, recall_checkpoint=recall_checkpoint
+            )
         )
         if not readiness.complete:
             return CatalogQueryResult(None, readiness)
