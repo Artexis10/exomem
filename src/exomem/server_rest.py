@@ -19,7 +19,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from . import capabilities, cf_access, cli_ops, edit_operations, upload_tokens
+from . import capabilities, cf_access, cli_ops, edit_operations, runtime_resources, upload_tokens
 from . import commands as commands_module
 from .command_surface import canonical_request_id
 from .governance import authorization_request, authorization_transport
@@ -411,6 +411,20 @@ def register_rest_facade(
                         )
 
                 result = await run_in_threadpool(invoke_bound)
+            except runtime_resources.ModelBusyError as exc:
+                err = cli_ops.error_dict(exc)
+                _log_rest_failure(
+                    tool=_cmd.name,
+                    request_id=request_id,
+                    code=str(err.get("code") or "MODEL_BUSY"),
+                    duration_ms=round((time.perf_counter() - t0) * 1000, 2),
+                    message=str(err.get("message") or ""),
+                    scope="cf_access" if principal_scope else "api_key",
+                )
+                return RestJSONResponse(
+                    cli_ops.envelope(False, error=err),
+                    status_code=cli_ops.http_status_for(err["code"]),
+                )
             except (
                 authorization_request.AuthorizationContextUnavailable,
                 authorization_request.AuthorizationRouteUnclassified,

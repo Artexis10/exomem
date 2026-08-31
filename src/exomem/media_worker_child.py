@@ -57,6 +57,9 @@ class _VaultLock:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from .runtime_resources import bootstrap
+
+    bootstrap()
     from .logging_config import configure_logging, resolve_log_dir
 
     configure_logging(resolve_log_dir(), process="media")
@@ -72,6 +75,9 @@ def main(argv: list[str] | None = None) -> int:
     if not lock.acquire():
         return 0
     try:
+        from .runtime_resources import lower_background_priority
+
+        lower_background_priority()
         from .media_worker import run_child
 
         return run_child(

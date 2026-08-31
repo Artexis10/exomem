@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import commands
+from exomem import cli_ops, commands, runtime_resources
 from exomem import embeddings as embeddings_module
 from exomem import find as find_module
 
@@ -65,6 +65,27 @@ def test_healthy_keyword_find_has_no_degraded_marker(vault: Path) -> None:
     result = commands.op_find(vault, query="metabolic", mode="keyword", scope="kb-only")
 
     assert isinstance(result, list), f"clean find should be a bare list, got {type(result)}"
+    assert find_module.degradation_counts() == {}
+
+
+def test_model_busy_from_actual_find_command_is_retryable_not_degraded(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setattr(
+        embeddings_module,
+        "embed_texts",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            runtime_resources.ModelBusyError("model compute is busy; retry shortly")
+        ),
+    )
+
+    with pytest.raises(runtime_resources.ModelBusyError) as caught:
+        commands.op_find(vault, query="metabolic health", mode="hybrid", scope="kb-only")
+
+    public = cli_ops.error_dict(caught.value)
+    assert public["code"] == "MODEL_BUSY"
+    assert cli_ops.http_status_for(public["code"]) == 503
     assert find_module.degradation_counts() == {}
 
 

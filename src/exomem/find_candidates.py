@@ -161,7 +161,7 @@ def collect_candidates(
     capture_trace: bool = False,
 ) -> CandidateBundle:
     """Collect vector/BM25/keyword/CLIP/graph/temporal lanes and fuse them."""
-    from . import bm25, embeddings, epistemic_graph, fusion, lexstore, readiness
+    from . import bm25, embeddings, epistemic_graph, fusion, lexstore, readiness, runtime_resources
 
     usage_map: dict[str, float] = {}
     if prefer_used:
@@ -254,6 +254,8 @@ def collect_candidates(
             log.info("vector search unavailable (%s); keyword/BM25-only ranking", e)
             if timings is not None:
                 timings.error("vector", e)
+        except runtime_resources.ModelBusyError:
+            raise
         except Exception as e:  # noqa: BLE001 - vector search is best-effort
             if capture_trace:
                 lane_statuses["vector"] = {
@@ -340,6 +342,8 @@ def collect_candidates(
                 failed_out.append("clip")
             if timings is not None:
                 timings.error("clip", e)
+        except runtime_resources.ModelBusyError:
+            raise
         except Exception as e:  # noqa: BLE001 - image search is best-effort
             if capture_trace:
                 lane_statuses["clip"] = {

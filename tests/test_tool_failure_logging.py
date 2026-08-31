@@ -16,7 +16,7 @@ from types import SimpleNamespace
 import pytest
 from starlette.testclient import TestClient
 
-from exomem import command_surface, metrics, server
+from exomem import command_surface, metrics, runtime_resources, server
 from exomem import server as server_module
 from exomem.cli_ops import OpError
 from exomem.governance import principal as principal_module
@@ -401,6 +401,27 @@ def test_rest_success_bumps_success_counter_exactly_once(
         "exomem_tool_calls_total",
         (("outcome", "failure"), ("tool", "ask_memory")),
     ) not in counters
+
+
+def test_rest_ask_memory_model_busy_uses_retryable_shared_error_envelope(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = _rest_client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
+    monkeypatch.setattr(
+        "exomem.writer_lease.invoke_command",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            runtime_resources.ModelBusyError("model compute is busy; retry shortly")
+        ),
+    )
+
+    response = client.post(
+        "/api/ask_memory",
+        json={"query": "metabolism", "mode": "keyword", "detail": "full"},
+        headers={"Authorization": "Bearer sekret"},
+    )
+
+    assert response.status_code == 503, response.text
+    assert response.json()["error"]["code"] == "MODEL_BUSY"
 
 
 # --- Hosted command routes (server_hosted.py) -------------------------------

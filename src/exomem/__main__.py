@@ -128,6 +128,10 @@ def _is_cli_only_invocation(raw: list[str]) -> bool:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from .runtime_resources import bootstrap, preload_local_dotenv_policy
+
+    preload_local_dotenv_policy()
+    bootstrap()
     # Wrapped so *every* exit drains, including the early returns above
     # `_run_cli`. A graph rebuild no longer blocks the write that caused it, and
     # it runs on a daemon thread. That is right for the long-lived server and

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from exomem import sidecar_repair
 
 FRONTMATTER = """---
@@ -29,6 +31,23 @@ def _sidecar(*levels: str) -> str:
         block = f"{HEAD}\n## Extracted text\n\n{text}\n".lstrip("\n")
         body = block if not body else f"{block}\n## Preserved notes\n\n{body}"
     return FRONTMATTER + "\n" + body
+
+
+def _sidecar_with_preserved_residual(extraction: str, residual: str) -> str:
+    return (
+        FRONTMATTER
+        + "\n"
+        + f"{HEAD}\n## Extracted text\n\n{extraction}\n\n"
+        + f"## Preserved notes\n\n{residual}\n"
+    )
+
+
+def _empty_extraction_with_preserved_residual(residual: str) -> str:
+    return (
+        FRONTMATTER
+        + "\n"
+        + f"{HEAD}\n## Extracted text\n\n## Preserved notes\n\n{residual}\n"
+    )
 
 
 def test_clean_sidecar_is_untouched() -> None:
@@ -67,6 +86,18 @@ def test_crlf_nested_copies_collapse_without_preserving_scaffolding() -> None:
     assert repaired.count(sidecar_repair.EXTRACTED_HEADING) == 1
     assert repaired.count(text) == 1
     assert sidecar_repair.analyze(repaired, Path("report.pdf.md")) is None
+
+
+def test_crlf_frontmatter_bytes_are_preserved_during_repair() -> None:
+    content = _sidecar("Extraction body.", "Extraction body.").replace("\n", "\r\n")
+    frontmatter = content.split("\r\n---\r\n", 1)[0] + "\r\n---\r\n"
+
+    repaired = sidecar_repair.repair(content)
+
+    assert repaired.startswith(frontmatter)
+    assert sidecar_repair.analyze(content, Path("report.pdf.md")) is not None
+    assert sidecar_repair.repair_is_safe(content, repaired)
+    assert sidecar_repair.analyze(_sidecar("clean").replace("\n", "\r\n"), Path("clean.md")) is None
 
 
 def test_repair_is_idempotent() -> None:
@@ -112,6 +143,121 @@ def test_extraction_containing_h2_headings_survives() -> None:
     repaired = sidecar_repair.repair(content)
     assert table in repaired
     assert sidecar_repair.repair_is_safe(content, repaired)
+
+
+def test_repeated_extraction_residual_collapses_without_preserved_notes() -> None:
+    extraction = "# Report\n\n## Findings\n\nA result.\n\n### Detail\n\nMore detail."
+    content = _sidecar_with_preserved_residual(extraction, "\n\n\n".join([extraction] * 720))
+
+    repaired = sidecar_repair.repair(content)
+
+    assert repaired.count(extraction) == 1
+    assert sidecar_repair.PRESERVED_HEADING not in repaired
+    assert sidecar_repair.repair_is_safe(content, repaired)
+    assert sidecar_repair.repair(repaired) == repaired
+
+
+def test_repeated_extraction_residual_with_prose_is_preserved() -> None:
+    extraction = "# Report\n\n## Findings\n\nA result."
+    prose = "The author confirmed this finding after the call."
+    content = _sidecar_with_preserved_residual(extraction, f"{extraction}\n\n{prose}")
+
+    repaired = sidecar_repair.repair(content)
+
+    assert sidecar_repair.PRESERVED_HEADING in repaired
+    assert repaired.count(extraction) == 2
+    assert prose in repaired
+
+
+def test_clean_sentinel_preserved_notes_are_not_repaired() -> None:
+    content = (
+        FRONTMATTER
+        + "# Evidence: report.pdf\n\nPreserved under `Evidence/Case/`.\n\n"
+        + "## Extracted text\n\nExtraction body.\n\n"
+        + "<!-- exomem:sidecar-preserved-notes -->\n## Preserved notes\n\nAuthored note.\n"
+    )
+
+    assert sidecar_repair.repair(content) == content
+    assert sidecar_repair.analyze(content, Path("sentinel.pdf.md")) is None
+
+
+def test_sentinel_boundary_keeps_literal_preserved_notes_in_extraction() -> None:
+    content = (
+        FRONTMATTER
+        + "# Evidence: report.pdf\n\nPreserved under `Evidence/Case/`.\n\n"
+        + "## Extracted text\n\n# Document\n\n"
+        + "<!-- exomem:sidecar-preserved-notes -->\n## Preserved notes\n\n"
+        + "This is literal extracted content, not sidecar structure.\n\n"
+        + "<!-- exomem:sidecar-preserved-notes -->\n"
+        + "## Preserved notes\n\nAuthored note.\n"
+    )
+
+    assert sidecar_repair.repair(content) == content
+    assert sidecar_repair.analyze(content, Path("collision.pdf.md")) is None
+
+
+def test_empty_extraction_keeps_sentinel_marked_repeated_residual_without_candidate() -> None:
+    block = "# Repeated document\n\n## Body\n\nExact content."
+    content = _empty_extraction_with_preserved_residual("\n\n".join([block] * 3)).replace(
+        "## Preserved notes",
+        "<!-- exomem:sidecar-preserved-notes -->\n## Preserved notes",
+    )
+
+    repaired = sidecar_repair.repair(content)
+
+    assert repaired == content
+    damage = sidecar_repair.analyze(content, Path("sentinel.pdf.md"))
+    assert damage is not None
+    assert damage.recovered_chars == 0
+
+
+@pytest.mark.parametrize(
+    ("halves", "units"),
+    [(2, 3), (2, 4), (2, 5), (3, 3), (3, 4), (4, 3)],
+)
+def test_empty_extraction_refuses_ambiguous_periodic_residual(
+    halves: int, units: int
+) -> None:
+    half = "# Repeated half\n\n## Body\n\nExact content."
+    unit = "\n\n".join([half] * halves)
+    residual = "\n\n".join([unit] * units)
+    content = _empty_extraction_with_preserved_residual(residual)
+
+    repaired = sidecar_repair.repair(content)
+
+    assert repaired == content
+    damage = sidecar_repair.analyze(content, Path("periodic.pdf.md"))
+    assert damage is not None
+    assert damage.recovered_chars == 0
+    assert sidecar_repair.repair_is_safe(content, repaired)
+
+
+def test_empty_extraction_keeps_repeated_preserved_block_without_candidate() -> None:
+    block = "# Product MVP Requirements\n\n## Overview\n\nA requirement.\n\n## Scope\n\nAnother requirement."
+    content = _empty_extraction_with_preserved_residual("\n\n".join([block] * 100))
+
+    repaired = sidecar_repair.repair(content)
+
+    assert repaired == content
+    damage = sidecar_repair.analyze(content, Path("requirements.xlsx.md"))
+    assert damage is not None
+    assert damage.recovered_chars == 0
+    assert damage.source_reextraction_required is True
+    assert sidecar_repair.repair_is_safe(content, repaired)
+
+
+@pytest.mark.parametrize("copies", [2, 3])
+def test_empty_extraction_keeps_residual_without_exact_three_copy_proof(copies: int) -> None:
+    block = "# Repeated document\n\n## Body\n\nExact content."
+    residual = "\n\n".join([block] * copies)
+    if copies == 3:
+        residual += "\n\nA genuine differing byte."
+    content = _empty_extraction_with_preserved_residual(residual)
+
+    repaired = sidecar_repair.repair(content)
+
+    assert sidecar_repair.PRESERVED_HEADING in repaired
+    assert residual in repaired
 
 
 def test_hand_written_prose_is_kept_once() -> None:

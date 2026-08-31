@@ -365,6 +365,30 @@ def test_media_runtime_requests_diagnostic_snapshot(
     assert calls == [True]
 
 
+def test_media_runtime_compute_block_uses_runtime_remediation(vault: Path, monkeypatch) -> None:
+    from exomem import media_jobs
+
+    monkeypatch.setattr(
+        media_jobs,
+        "status",
+        lambda *_args, **_kwargs: {
+            "healthy": True,
+            "counts": {"blocked": 1, "failed": 0},
+            "compute_runtime_count": 1,
+            "jobs": [{"error": "ASRRuntimeRefusal: no CTranslate2 CUDA device"}],
+        },
+    )
+    check = doctor_module._check_media_runtime(vault)
+    assert check is not None
+    assert "CUDA/cuBLAS/cuDNN runtime" in check.remediation
+
+
+def test_resource_posture_details_include_allocation_free_asr_policy() -> None:
+    check = doctor_module._check_resource_posture("lean")
+    assert "asr" in check.details
+    assert "ASR policy" in check.message
+
+
 def test_doctor_json_cli(vault: Path, capsys) -> None:
     code, out, err = _run(["doctor", "--vault", str(vault), "--json"], capsys)
 
