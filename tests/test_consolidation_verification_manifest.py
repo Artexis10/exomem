@@ -91,6 +91,9 @@ def _install_stored_plan(
     manifest,
     *,
     attestation_fingerprint: str = ATTESTATION_FINGERPRINT,
+    principal_requirements: tuple[tuple[str, tuple[str, ...]], ...] = (
+        ("external", ("support",)),
+    ),
 ) -> None:
     from exomem.governance import consolidation_plan_store
 
@@ -107,12 +110,15 @@ def _install_stored_plan(
         },
     )
     policy_bundle = SimpleNamespace(
-        attestations=(
+        attestations=tuple(
             SimpleNamespace(
-                principal_id="external",
+                principal_id=principal_id,
                 fingerprint=attestation_fingerprint,
-            ),
+                purposes=purposes,
+            )
+            for principal_id, purposes in principal_requirements
         ),
+        principal_requirements=principal_requirements,
     )
     monkeypatch.setattr(
         consolidation_plan_store.ConsolidationPlanStore,
@@ -242,3 +248,130 @@ def test_manifest_store_refuses_unattested_or_plan_mismatched_contracts(
         consolidation_verification_manifest.ConsolidationVerificationManifestStore(vault).persist(
             RUN_ID, PLAN_DIGEST, manifest
         )
+
+
+@pytest.mark.parametrize("missing_kind", ["positive", "negative"])
+def test_manifest_store_requires_both_probe_kinds_for_every_delegated_purpose(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    missing_kind: str,
+) -> None:
+    from exomem.governance import consolidation_verification_manifest
+
+    support_positive = _delegated_contract()
+    support_negative = _negative_contract()
+    audit_positive = {
+        **_delegated_contract(),
+        "probe_id": "delegated-audit-approved",
+        "purpose": "audit",
+        "expected_result_digest": _digest("delegated-audit-approved:wire"),
+    }
+    audit_negative = {
+        **_negative_contract(),
+        "probe_id": "delegated-audit-denied",
+        "purpose": "audit",
+        "expected_result_digest": _digest("delegated-audit-denied:wire"),
+    }
+    manifest = consolidation_verification_manifest.build_verification_manifest(
+        positive_contracts=(
+            _owner_contract(),
+            support_positive,
+            *((audit_positive,) if missing_kind == "negative" else ()),
+        ),
+        negative_contracts=(
+            support_negative,
+            *((audit_negative,) if missing_kind == "positive" else ()),
+        ),
+    )
+    _install_stored_plan(
+        monkeypatch,
+        manifest,
+        principal_requirements=(("external", ("audit", "support")),),
+    )
+
+    with pytest.raises(
+        consolidation_verification_manifest.ConsolidationVerificationManifestUnavailable,
+        match="^CONSOLIDATION_VERIFICATION_MANIFEST_UNAVAILABLE$",
+    ):
+        consolidation_verification_manifest.ConsolidationVerificationManifestStore(
+            tmp_path / "vault"
+        ).persist(RUN_ID, PLAN_DIGEST, manifest)
+
+
+def test_manifest_store_requires_a_positive_owner_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance import consolidation_verification_manifest
+
+    manifest = consolidation_verification_manifest.build_verification_manifest(
+        positive_contracts=(_delegated_contract(),),
+        negative_contracts=(_negative_contract(),),
+    )
+    _install_stored_plan(monkeypatch, manifest)
+
+    with pytest.raises(
+        consolidation_verification_manifest.ConsolidationVerificationManifestUnavailable,
+        match="^CONSOLIDATION_VERIFICATION_MANIFEST_UNAVAILABLE$",
+    ):
+        consolidation_verification_manifest.ConsolidationVerificationManifestStore(
+            tmp_path / "vault"
+        ).persist(RUN_ID, PLAN_DIGEST, manifest)
+
+
+def test_manifest_store_accepts_the_complete_owner_and_delegated_purpose_matrix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance import consolidation_verification_manifest
+
+    audit_positive = {
+        **_delegated_contract(),
+        "probe_id": "delegated-audit-approved",
+        "purpose": "audit",
+        "expected_result_digest": _digest("delegated-audit-approved:wire"),
+    }
+    audit_negative = {
+        **_negative_contract(),
+        "probe_id": "delegated-audit-denied",
+        "purpose": "audit",
+        "expected_result_digest": _digest("delegated-audit-denied:wire"),
+    }
+    manifest = consolidation_verification_manifest.build_verification_manifest(
+        positive_contracts=(_owner_contract(), _delegated_contract(), audit_positive),
+        negative_contracts=(_negative_contract(), audit_negative),
+    )
+    _install_stored_plan(
+        monkeypatch,
+        manifest,
+        principal_requirements=(("external", ("audit", "support")),),
+    )
+
+    store = consolidation_verification_manifest.ConsolidationVerificationManifestStore(
+        tmp_path / "vault"
+    )
+    assert store.persist(RUN_ID, PLAN_DIGEST, manifest) == manifest
+
+
+def test_manifest_store_accepts_an_owner_only_destination_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance import consolidation_verification_manifest
+
+    owner_negative = {
+        **_owner_contract(),
+        "probe_id": "owner-private-absent",
+        "arguments": {"path": "Knowledge Base/Notes/private.md"},
+        "expected_result_digest": _digest("owner-private-absent:wire"),
+    }
+    manifest = consolidation_verification_manifest.build_verification_manifest(
+        positive_contracts=(_owner_contract(),),
+        negative_contracts=(owner_negative,),
+    )
+    _install_stored_plan(monkeypatch, manifest, principal_requirements=())
+
+    store = consolidation_verification_manifest.ConsolidationVerificationManifestStore(
+        tmp_path / "vault"
+    )
+    assert store.persist(RUN_ID, PLAN_DIGEST, manifest) == manifest
