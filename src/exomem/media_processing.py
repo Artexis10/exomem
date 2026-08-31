@@ -134,9 +134,7 @@ class _BinaryProvenance:
     inode: int
 
 
-_EXTRACTED_SECTION_RE = re.compile(
-    r"(?ms)^## Extracted text\s*\n(.*?)(?=^## |\Z)"
-)
+_EXTRACTED_HEADING_RE = re.compile(r"(?m)^## Extracted text[ \t]*\r?\n")
 _PRESERVED_HEADING = "## Preserved notes"
 # The title + locator lines _render_sidecar emits. Re-emitted on every render, so
 # they are regenerated rather than preserved.
@@ -706,11 +704,51 @@ def _is_completed_transcript_shape(
         and frontmatter.get("processing_state") in (None, "completed")
         and engine.lower() not in _INCOMPLETE_ENGINES
         and not engine.lower().startswith("failed")
-        and any(
-            bool(match.group(1).strip())
-            for match in _EXTRACTED_SECTION_RE.finditer(body)
-        )
+        and _has_nonempty_extracted_text(body)
     )
+
+
+def _has_nonempty_extracted_text(body: str) -> bool:
+    """Recognize document headings inside source-derived extraction.
+
+    MarkItDown legitimately emits H2 headings for document sections and
+    spreadsheet tabs.  Those headings are extraction content, not the end of
+    the sidecar-owned ``## Extracted text`` section.  Only an owned notes or
+    artifact marker ends that section; the two legacy empty-section shapes are
+    retained so authored notes and artifact metadata cannot impersonate a
+    completed transcript.
+    """
+    preserve = _preserve_module()
+    logical = body.replace("\r\n", "\n").replace("\r", "\n")
+    owned_boundaries = (
+        logical.rfind(
+            f"\n{preserve.SIDECAR_PRESERVED_NOTES_SENTINEL}\n"
+            f"{_PRESERVED_HEADING}"
+        ),
+        logical.rfind(
+            f"\n{preserve.SIDECAR_ARTIFACT_SENTINEL}\n## Artifact"
+        ),
+    )
+    owned_boundary = max(owned_boundaries)
+    scan_end = owned_boundary if owned_boundary != -1 else len(logical)
+    headings = list(_EXTRACTED_HEADING_RE.finditer(logical, 0, scan_end))
+    for index, heading in enumerate(headings):
+        start = heading.end()
+        end = headings[index + 1].start() if index + 1 < len(headings) else scan_end
+        if owned_boundary == -1 and re.match(
+            r"^[ \t\n]*## Preserved notes[ \t]*(?:\n|\Z)", logical[start:]
+        ):
+            return False
+        if owned_boundary == -1:
+            legacy_artifact = preserve._LEGACY_ARTIFACT_BLOCK_RE.search(
+                logical, start
+            )
+            if legacy_artifact is not None:
+                end = min(end, legacy_artifact.start())
+        payload = logical[start:end]
+        if payload.strip():
+            return True
+    return False
 
 
 def has_completed_transcript(content: str, *, media_type: str) -> bool:
@@ -1167,9 +1205,9 @@ def _preservable_notes(body: str) -> str | None:
 
 def _strip_empty_extracted_sections(text: str) -> str:
     """Drop `## Extracted text` anchors that carry no transcript."""
-    return _EXTRACTED_SECTION_RE.sub(
-        lambda match: "" if not match.group(1).strip() else match.group(0), text
-    )
+    if _has_nonempty_extracted_text(text):
+        return text
+    return _EXTRACTED_HEADING_RE.sub("", text)
 
 
 def _pending_fields(provenance: _BinaryProvenance) -> tuple[tuple[str, object], ...]:

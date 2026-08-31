@@ -2786,6 +2786,52 @@ def test_claimed_job_skips_asr_when_sidecar_completed_before_worker_runs(
     assert media_jobs.status(vault)["jobs"] == []
 
 
+def test_claimed_document_job_skips_extraction_for_h2_first_completed_text(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _preserve_media_stub(vault, filename="claim-race.xlsx")
+    binary = vault / result.path
+    sidecar = vault / result.sidecar_path
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(
+        media_jobs.MediaJob(
+            binary_path=binary,
+            sidecar_path=sidecar,
+            media_type="xlsx",
+        )
+    )
+    claimed = store.claim_next()
+    assert claimed is not None
+    completed = sidecar.read_text(encoding="utf-8").replace(
+        "extracted_by: pending", "extracted_by: markitdown"
+    ).replace("processing_state: pending", "processing_state: completed")
+    completed = completed.replace(
+        "## Extracted text\n",
+        "## Extracted text\n\n"
+        "## Requirements\n\n"
+        "| Requirement | Owner |\n"
+        "| --- | --- |\n"
+        "| Bound CPU | Runtime |\n",
+        1,
+    )
+    sidecar.write_text(completed, encoding="utf-8")
+    before = sidecar.read_bytes()
+
+    monkeypatch.setattr(
+        extract,
+        "extract_text",
+        lambda *_a, **_kw: pytest.fail(
+            "document extraction must not rerun for a completed transcript"
+        ),
+    )
+    worker = media_worker.MediaWorker(vault, execution_mode="inline")
+
+    outcome = worker._process(claimed)
+
+    assert outcome.state == "complete"
+    assert sidecar.read_bytes() == before
+
+
 def test_external_completed_transcript_written_during_asr_wins_final_commit_race(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:

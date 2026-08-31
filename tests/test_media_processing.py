@@ -689,6 +689,78 @@ def test_completed_sidecar_clears_stale_crash_window_job(vault: Path) -> None:
     assert _job_count(vault) == 0
 
 
+def test_completed_spreadsheet_extraction_starting_with_h2_is_not_requeued(
+    vault: Path,
+) -> None:
+    media_processing = _media_processing()
+    binary = _drop_media(vault, "heading-first.xlsx")
+    result = media_processing.reconcile_media(vault, binary)
+    completed = result.sidecar_path.read_text(encoding="utf-8").replace(
+        "extracted_by: pending", "extracted_by: markitdown"
+    ).replace("processing_state: pending", "processing_state: completed")
+    extraction = (
+        "## Worksheet one\n\n"
+        "| Requirement | Owner |\n"
+        "| --- | --- |\n"
+        "| Bound CPU | Runtime |\n"
+    )
+    completed = completed.replace(
+        "## Extracted text\n",
+        f"## Extracted text\n\n{extraction}",
+        1,
+    )
+    result.sidecar_path.write_text(completed, encoding="utf-8")
+    store = media_jobs.MediaJobStore(vault)
+    store.discard(
+        media_jobs.MediaJob(
+            binary_path=binary,
+            sidecar_path=result.sidecar_path,
+            media_type="xlsx",
+        )
+    )
+    before = result.sidecar_path.read_bytes()
+
+    assert media_processing.has_completed_transcript(completed, media_type="xlsx")
+    assert media_processing.reconcile_all_media(vault, limit=1) == 0
+    assert media_processing.reconcile_all_media(vault, limit=1) == 0
+    assert result.sidecar_path.read_bytes() == before
+    assert store.has_binary(binary) is False
+
+
+@pytest.mark.parametrize("owned_boundary", [False, True])
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+def test_preserved_notes_do_not_make_an_empty_extraction_complete(
+    vault: Path,
+    owned_boundary: bool,
+    newline: str,
+) -> None:
+    media_processing = _media_processing()
+    binary = _drop_media(vault, f"empty-with-notes-{owned_boundary}.docx")
+    result = media_processing.reconcile_media(vault, binary)
+    completed = result.sidecar_path.read_text(encoding="utf-8").replace(
+        "extracted_by: pending", "extracted_by: markitdown"
+    ).replace("processing_state: pending", "processing_state: completed")
+    boundary = (
+        "<!-- exomem:sidecar-preserved-notes -->\n" if owned_boundary else ""
+    )
+    completed = completed.replace(
+        "## Extracted text\n",
+        "## Extracted text\n\n"
+        f"{boundary}## Preserved notes\n\n"
+        "This authored note is not source-derived extraction.\n\n"
+        "## Extracted text\n\n"
+        "This literal heading is still part of the authored note.\n",
+        1,
+    )
+    if newline == "\r\n":
+        completed = completed.replace("\n", newline)
+
+    assert (
+        media_processing.has_completed_transcript(completed, media_type="docx")
+        is False
+    )
+
+
 def test_reconciliation_is_byte_stable_and_job_deduplicated(vault: Path) -> None:
     media_processing = _media_processing()
     binary = _drop_media(vault, "repeat.m4a")
