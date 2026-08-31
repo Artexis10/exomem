@@ -438,6 +438,13 @@ _EVIDENCE_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType(
         ),
     }
 )
+_LEARNED_RESULT_FIELDS: Mapping[str, str] = MappingProxyType(
+    {
+        "rebuild-kind": "rebuild_result_digest",
+        "abort-rebuild-kind": "rebuild_result_digest",
+        "rollback-rebuild-kind": "rebuild_result_digest",
+    }
+)
 _SPECIALIZED_ORDINALS = frozenset(
     {"batch_ordinal", "rebuild_ordinal", "probe_ordinal", "page_ordinal"}
 )
@@ -567,15 +574,24 @@ def _evidence_schema(kind: str) -> str:
     return f"exomem.consolidation-event-evidence/{kind}/v1"
 
 
-def build_evidence(
+def _evidence_fields(kind: str, *, role: str) -> frozenset[str]:
+    expected = _EVIDENCE_FIELDS.get(kind)
+    if expected is None or role not in _ROLES:
+        _fail()
+    learned = _LEARNED_RESULT_FIELDS.get(kind)
+    if learned is not None and role in {"intent", "aborted"}:
+        return expected - {learned}
+    return expected
+
+
+def _build_evidence(
     *,
     kind: str,
     digests: Mapping[str, object],
+    role: str,
 ) -> Mapping[str, object]:
-    """Build one closed digest-only evidence object for an effect kind."""
-
-    expected = _EVIDENCE_FIELDS.get(kind)
-    if expected is None or not isinstance(digests, Mapping):
+    expected = _evidence_fields(kind, role=role)
+    if not isinstance(digests, Mapping):
         _fail()
     try:
         supplied = dict(digests)
@@ -596,7 +612,22 @@ def build_evidence(
     return MappingProxyType(evidence)
 
 
-def _validated_evidence(value: object, *, kind: str) -> Mapping[str, object]:
+def build_evidence(
+    *,
+    kind: str,
+    digests: Mapping[str, object],
+) -> Mapping[str, object]:
+    """Build the closed digest-only evidence declared before an effect."""
+
+    return _build_evidence(kind=kind, digests=digests, role="intent")
+
+
+def _validated_evidence(
+    value: object,
+    *,
+    kind: str,
+    role: str,
+) -> Mapping[str, object]:
     if not isinstance(value, Mapping):
         _fail()
     try:
@@ -608,7 +639,7 @@ def _validated_evidence(value: object, *, kind: str) -> Mapping[str, object]:
     digests = dict(snapshot)
     digests.pop("schema")
     digests.pop("kind")
-    return build_evidence(kind=kind, digests=digests)
+    return _build_evidence(kind=kind, digests=digests, role=role)
 
 
 def _evidence_digest(evidence: Mapping[str, object], *, kind: str) -> str:
@@ -678,7 +709,11 @@ def validate_nested(
     _digest(snapshot["request_digest"])
     _digest(snapshot["prior_digest"])
     _digest(snapshot["target_digest"])
-    evidence = _validated_evidence(snapshot["evidence"], kind=kind)
+    evidence = _validated_evidence(
+        snapshot["evidence"],
+        kind=kind,
+        role=role,
+    )
     snapshot["evidence"] = dict(evidence)
     if _digest(snapshot["evidence_digest"]) != _evidence_digest(
         evidence,
@@ -716,7 +751,14 @@ def validate_nested(
         if "observed_digest" in snapshot:
             _fail()
     else:
-        _digest(snapshot["observed_digest"])
+        observed_digest = _digest(snapshot["observed_digest"])
+        learned_result = _LEARNED_RESULT_FIELDS.get(kind)
+        if (
+            role == "committed"
+            and learned_result is not None
+            and evidence[learned_result] != observed_digest
+        ):
+            _fail()
     if has_seed:
         _digest(snapshot["successor_context_seed_digest"])
     supplied_digest = _digest(snapshot["payload_digest"])
@@ -788,7 +830,11 @@ def build_intent(
             semantic_parent_payload_digest
         ),
     }
-    checked_evidence = _validated_evidence(evidence, kind=kind)
+    checked_evidence = _validated_evidence(
+        evidence,
+        kind=kind,
+        role="intent",
+    )
     payload["evidence"] = dict(checked_evidence)
     payload["evidence_digest"] = _evidence_digest(checked_evidence, kind=kind)
     optional = {
@@ -835,8 +881,26 @@ def build_terminal(
     payload["semantic_parent_event_id"] = intent.event_id
     payload["semantic_parent_payload_digest"] = intent.payload_digest
     payload["observed_digest"] = _digest(observed_digest)
-    payload.pop("payload_digest")
     kind = str(payload["kind"])
+    learned_result = _LEARNED_RESULT_FIELDS.get(kind)
+    if learned_result is not None and role == "committed":
+        evidence = dict(payload["evidence"])
+        evidence[learned_result] = payload["observed_digest"]
+        checked_evidence = _build_evidence(
+            kind=kind,
+            digests={
+                key: value
+                for key, value in evidence.items()
+                if key not in {"schema", "kind"}
+            },
+            role=role,
+        )
+        payload["evidence"] = dict(checked_evidence)
+        payload["evidence_digest"] = _evidence_digest(
+            checked_evidence,
+            kind=kind,
+        )
+    payload.pop("payload_digest")
     payload["payload_digest"] = _framed_digest(
         f"exomem.consolidation-event-payload/{kind}/{role}/v1".encode("ascii"),
         payload,

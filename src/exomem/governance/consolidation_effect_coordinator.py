@@ -38,6 +38,9 @@ _MAX_SAFE_INTEGER = (1 << 53) - 1
 _MAX_JOURNAL_BYTES = 512 * 1024
 _STATES = frozenset({"prior", "prepared", "target", "mixed"})
 _TERMINAL_ROLES = frozenset({"committed", "aborted"})
+_LEARNED_RESULT_KINDS = frozenset(
+    {"rebuild-kind", "abort-rebuild-kind", "rollback-rebuild-kind"}
+)
 _REFERENCE_FIELDS = frozenset(
     {
         "event_id",
@@ -494,7 +497,11 @@ def _observation(value: object, *, event: consolidation_receipts.ConsolidationEv
     }.get(value.state)
     if expected_field is not None:
         expected = event.payload.get(expected_field)
-        if expected is None or digest != expected:
+        learned_result = (
+            value.state == "target"
+            and event.payload.get("kind") in _LEARNED_RESULT_KINDS
+        )
+        if expected is None or (digest != expected and not learned_result):
             _fail()
     return EffectObservation(state=value.state, digest=digest)
 
