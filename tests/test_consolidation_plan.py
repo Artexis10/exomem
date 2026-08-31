@@ -185,15 +185,44 @@ def _verification_manifest():
             {
                 **common,
                 "probe_id": "owner-destination-present",
-                "arguments": {"path": "Knowledge Base/Notes/destination.md"},
+                "arguments": {
+                    "path": "Knowledge Base/Notes/destination.md",
+                    "include_raw": True,
+                },
                 "expected_result_digest": _digest("destination-present-wire"),
+            },
+            {
+                **common,
+                "probe_id": "owner-keyword-present",
+                "command_name": "ask_memory",
+                "arguments": {
+                    "query": "destination",
+                    "mode": "keyword",
+                    "graph": False,
+                    "rerank": False,
+                },
+                "expected_result_digest": _digest("keyword-present-wire"),
+            },
+            {
+                **common,
+                "probe_id": "owner-graph-present",
+                "command_name": "connect_memory",
+                "arguments": {
+                    "operation": "graph-context",
+                    "path": "Knowledge Base/Notes/destination.md",
+                    "include_model_suggestions": False,
+                },
+                "expected_result_digest": _digest("graph-present-wire"),
             },
         ),
         negative_contracts=(
             {
                 **common,
                 "probe_id": "owner-private-absent",
-                "arguments": {"path": "Knowledge Base/Notes/private.md"},
+                "arguments": {
+                    "path": "Knowledge Base/Notes/private.md",
+                    "include_raw": True,
+                },
                 "expected_result_digest": _digest("private-absent-wire"),
             },
         ),

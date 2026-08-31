@@ -26,6 +26,7 @@ _UUID4 = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}\Z")
 _COMMAND = re.compile(r"[a-z][a-z0-9_]{0,127}\Z")
 _SURFACES = frozenset({"cli", "hosted", "mcp", "rest"})
+_MANDATORY_VERIFICATION_ROWS = frozenset({"graph", "keyword", "raw-read", "security"})
 _FORBIDDEN_ARGUMENT_KEYS = frozenset(
     {
         "authorization_session_credential",
@@ -412,6 +413,61 @@ def _parsed_contract_input(value: object, probe_kind: str) -> dict[str, object]:
     return result
 
 
+def _mandatory_rows_for_contract(contract: VerificationContract) -> frozenset[str]:
+    if contract.surface != "rest":
+        return frozenset()
+    arguments = contract_arguments(contract)
+    query = arguments.get("query")
+    path = arguments.get("path")
+    rows: set[str] = set()
+    search_row: str | None = None
+    if (
+        contract.command_name == "ask_memory"
+        and type(query) is str
+        and bool(query.strip())
+        and arguments.get("mode") == "keyword"
+        and arguments.get("graph") is False
+        and arguments.get("rerank") is False
+        and arguments.get("deep", False) is False
+        and arguments.get("graph_enrich", False) is False
+    ):
+        search_row = "keyword"
+    elif (
+        contract.command_name == "connect_memory"
+        and arguments.get("operation") == "graph-context"
+        and type(path) is str
+        and bool(path.strip())
+        and "query" not in arguments
+        and "unit_ref" not in arguments
+        and arguments.get("include_model_suggestions", False) is False
+    ):
+        search_row = "graph"
+    raw_read = (
+        contract.command_name == "read_memory"
+        and type(path) is str
+        and bool(path.strip())
+        and arguments.get("include_raw") is True
+        and arguments.get("frontmatter_only", False) is False
+        and "unit_ref" not in arguments
+    )
+    if contract.probe_kind == "positive":
+        if search_row is not None:
+            rows.add(search_row)
+        if raw_read:
+            rows.add("raw-read")
+    elif search_row is not None or raw_read:
+        rows.add("security")
+    return frozenset(rows)
+
+
+def _require_mandatory_verification_rows(manifest: VerificationManifest) -> None:
+    rows = frozenset(
+        row for contract in manifest.contracts for row in _mandatory_rows_for_contract(contract)
+    )
+    if not _MANDATORY_VERIFICATION_ROWS <= rows:
+        _fail()
+
+
 def _bind_to_stored_plan(
     *,
     run_id: str,
@@ -438,6 +494,7 @@ def _bind_to_stored_plan(
         != manifest.verification_plan.negative_probe_digest
     ):
         _fail()
+    _require_mandatory_verification_rows(manifest)
     attestations = getattr(bundle, "attestations", None)
     principal_requirements = getattr(bundle, "principal_requirements", None)
     if (
@@ -500,6 +557,8 @@ def _bind_to_stored_plan(
             continue
         attestation = by_fingerprint.get(contract.principal_attestation_fingerprint or "")
         purposes = getattr(attestation, "purposes", (contract.purpose,))
+        if not isinstance(purposes, Sequence) or isinstance(purposes, (str, bytes)):
+            _fail()
         if (
             attestation is None
             or getattr(attestation, "principal_id", None) != contract.principal_id

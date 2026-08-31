@@ -160,6 +160,68 @@ def test_owner_probe_crosses_real_dispatch_egress_receipt_and_rest_adapter(
     )
 
 
+def test_mandatory_graph_probe_executes_the_live_product_route_without_models(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import commands, embeddings, find
+    from exomem.governance import (
+        consolidation_verification_manifest,
+        consolidation_verification_registry,
+    )
+
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    monkeypatch.setenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", "1")
+    vault = tmp_path / "vault"
+    public = vault / "Knowledge Base" / "Notes" / "public.md"
+    related = vault / "Knowledge Base" / "Notes" / "related.md"
+    public.parent.mkdir(parents=True)
+    public.write_text("# Public\n\n[[Knowledge Base/Notes/related.md]]\n", encoding="utf-8")
+    related.write_text("# Related\n\nGraph neighbour.\n", encoding="utf-8")
+
+    def forbid_model(*_args, **_kwargs):
+        raise AssertionError("mandatory graph verification must not invoke a model lane")
+
+    monkeypatch.setattr(embeddings, "embed_texts", forbid_model)
+    monkeypatch.setattr(find, "find", forbid_model)
+    arguments = {
+        "operation": "graph-context",
+        "path": "Knowledge Base/Notes/public.md",
+        "include_model_suggestions": False,
+        "depth": 1,
+    }
+    expected = commands.op_connect_memory(vault, **arguments)
+    wire = consolidation_verification_registry.render_rest_verification_wire(
+        success=True,
+        data=expected,
+    )
+    contract = {
+        "probe_id": "owner-graph-context",
+        "executor_id": "canonical-governance-surface-v1",
+        "surface": "rest",
+        "principal_kind": "owner",
+        "principal_id": "owner",
+        "purpose": "consolidation-verification",
+        "command_name": "connect_memory",
+        "arguments": arguments,
+        "expected_result_digest": (
+            consolidation_verification_registry.verification_wire_result_digest("rest", wire)
+        ),
+    }
+    manifest = consolidation_verification_manifest.build_verification_manifest(
+        positive_contracts=(contract,),
+        negative_contracts=({**contract, "probe_id": "owner-graph-context-negative"},),
+    )
+
+    terminal = consolidation_verification_registry.run_probe(
+        manifest.verification_plan.positive_probes[0],
+        _context(vault, manifest),
+    )
+
+    assert terminal.result_digest == contract["expected_result_digest"]
+    assert terminal.outcome == "passed"
+
+
 def test_probe_refuses_forged_authority_and_mismatched_contract_before_dispatch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
