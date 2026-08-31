@@ -136,8 +136,8 @@ def _append_policy_active_parent(vault: Path) -> dict[str, object]:
             prior_digest=hashlib.sha256(f"{kind}:prior".encode()).hexdigest(),
             target_digest=hashlib.sha256(f"{kind}:target".encode()).hexdigest(),
             prepared_digest=(
-                hashlib.sha256(b"preimage:prepared").hexdigest()
-                if kind == "preimage"
+                hashlib.sha256(f"{kind}:prepared".encode()).hexdigest()
+                if kind in {"preimage", "policy-prepare", "policy-active"}
                 else None
             ),
             evidence=consolidation_receipts.build_evidence(

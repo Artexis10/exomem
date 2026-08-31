@@ -32,6 +32,39 @@ APPLY_PHASES = (
 )
 
 
+@pytest.fixture(autouse=True)
+def _allow_synthetic_policy_terminals_in_batch_unit_tests(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if request.node.name == (
+        "test_forged_committed_policy_terminal_never_reaches_batch_journal"
+    ):
+        return
+    from exomem.governance import consolidation_saga
+
+    def accept_synthetic_terminal(
+        *,
+        vault_root: Path,
+        terminal: consolidation_saga.PolicyActivationTerminal,
+        expected_policy_fingerprint: str,
+        vault_binding_digest: str,
+    ) -> consolidation_saga.PolicyActivationTerminal:
+        del vault_root
+        del vault_binding_digest
+        return consolidation_saga._policy_terminal(  # noqa: SLF001
+            terminal,
+            expected_policy_fingerprint=expected_policy_fingerprint,
+        )
+
+    monkeypatch.setattr(
+        consolidation_saga,
+        "_verify_policy_terminal_receipt",
+        accept_synthetic_terminal,
+        raising=False,
+    )
+
+
 def _authority(phase: str, *, action: str = "apply"):
     from exomem.governance import consolidation_authority
 
@@ -396,6 +429,7 @@ def test_policy_terminal_precedes_every_content_batch(
         content_actions=actions,
         approved_partition_digest=partition.digest,
         expected_policy_fingerprint=POLICY_FINGERPRINT,
+        vault_binding_digest=VAULT_BINDING,
         activate_policy=activate_policy,
         journal=Journal(),
         vault_root=tmp_path,
@@ -454,6 +488,7 @@ def test_policy_activation_failure_never_reaches_content_publication() -> None:
             content_actions=actions,
             approved_partition_digest=partition.digest,
             expected_policy_fingerprint=POLICY_FINGERPRINT,
+            vault_binding_digest=VAULT_BINDING,
             activate_policy=activate_policy,
             journal=Journal(),
             vault_root=Path("unused"),
@@ -474,6 +509,7 @@ def test_changed_approved_batch_partition_refuses_before_policy_activation() -> 
             content_actions=actions,
             approved_partition_digest=hashlib.sha256(b"different-partition").hexdigest(),
             expected_policy_fingerprint=POLICY_FINGERPRINT,
+            vault_binding_digest=VAULT_BINDING,
             activate_policy=lambda: effects.append("policy") or None,  # type: ignore[arg-type,return-value]
             journal=None,  # type: ignore[arg-type]
             vault_root=Path("unused"),
@@ -496,6 +532,7 @@ def test_noncommitted_policy_terminal_never_reaches_batch_journal() -> None:
             content_actions=actions,
             approved_partition_digest=partition.digest,
             expected_policy_fingerprint=POLICY_FINGERPRINT,
+            vault_binding_digest=VAULT_BINDING,
             activate_policy=lambda: consolidation_saga.PolicyActivationTerminal(
                 schema="exomem.consolidation-policy-activation-terminal/v1",
                 policy_fingerprint=POLICY_FINGERPRINT,
@@ -510,6 +547,45 @@ def test_noncommitted_policy_terminal_never_reaches_batch_journal() -> None:
         )
 
     assert effects == []
+
+
+def test_forged_committed_policy_terminal_never_reaches_batch_journal(
+    tmp_path: Path,
+) -> None:
+    from exomem.governance import consolidation_plan, consolidation_saga
+
+    actions = (_content_action(0, 0),)
+    target = tmp_path / str(actions[0]["destination_path"])
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"before-0")
+    partition = consolidation_plan.derive_journal_batch_partition(actions)
+    effects: list[str] = []
+
+    class Journal:
+        def batch_status(self, batch: consolidation_saga.ContentBatch) -> str:
+            effects.append(f"journal-status:{batch.ordinal}")
+            return "prior"
+
+        def prepare_batch(self, batch: consolidation_saga.ContentBatch) -> None:
+            effects.append(f"journal-prepare:{batch.ordinal}")
+
+        def commit_batch(self, batch: consolidation_saga.ContentBatch) -> None:
+            effects.append(f"journal-final:{batch.ordinal}")
+
+    with pytest.raises(consolidation_saga.PolicyFirstPublicationUnavailable):
+        consolidation_saga.publish_policy_first(
+            content_actions=actions,
+            approved_partition_digest=partition.digest,
+            expected_policy_fingerprint=POLICY_FINGERPRINT,
+            vault_binding_digest=VAULT_BINDING,
+            activate_policy=_publication_terminal,
+            journal=Journal(),
+            vault_root=tmp_path,
+            materialize_batch=lambda batch: (),
+        )
+
+    assert effects == []
+    assert target.read_bytes() == b"before-0"
 
 
 def _publication_terminal():
@@ -724,6 +800,7 @@ def test_policy_first_retry_performs_only_the_missing_batch_effect(
         content_actions=actions,
         approved_partition_digest=partition.digest,
         expected_policy_fingerprint=POLICY_FINGERPRINT,
+        vault_binding_digest=VAULT_BINDING,
         activate_policy=_publication_terminal,
         journal=Journal(),
         vault_root=root,
@@ -779,6 +856,7 @@ def test_policy_first_retry_refuses_inconsistent_journal_and_live_bytes(
             content_actions=actions,
             approved_partition_digest=partition.digest,
             expected_policy_fingerprint=POLICY_FINGERPRINT,
+            vault_binding_digest=VAULT_BINDING,
             activate_policy=_publication_terminal,
             journal=Journal(),
             vault_root=root,
@@ -853,6 +931,7 @@ def test_persisted_multi_batch_retry_skips_final_and_resumes_prepared(
         content_actions=actions,
         approved_partition_digest=partition.digest,
         expected_policy_fingerprint=POLICY_FINGERPRINT,
+        vault_binding_digest=VAULT_BINDING,
         activate_policy=_publication_terminal,
         journal=consolidation_batch_journal.ConsolidationBatchJournalStore(
             root,
@@ -953,6 +1032,7 @@ def test_policy_first_rejects_materialized_writes_outside_the_approved_action(
             content_actions=(action,),
             approved_partition_digest=partition.digest,
             expected_policy_fingerprint=POLICY_FINGERPRINT,
+            vault_binding_digest=VAULT_BINDING,
             activate_policy=_publication_terminal,
             journal=Journal(),
             vault_root=root,

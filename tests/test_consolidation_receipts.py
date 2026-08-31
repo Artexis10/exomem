@@ -40,6 +40,11 @@ _EVIDENCE_FIELDS = {
     "start": ("identity_binding_digest", "run_request_digest"),
     "intake": ("archive_attestation_digest", "intake_manifest_digest"),
     "preimage": ("preimage_manifest_digest",),
+    "policy-active": (
+        "policy_active_digest",
+        "policy_bundle_digest",
+        "policy_fingerprint",
+    ),
     "content-batch": ("batch_manifest_digest", "classification_digest"),
     "complete": ("completion_digest", "verification_basis_digest"),
     "render-page": (
@@ -219,6 +224,31 @@ def test_preimage_receipt_requires_its_distinct_prepared_manifest_state() -> Non
         _intent(
             kind="preimage",
             phase="preimage",
+            batch_ordinal=None,
+            prepared_digest=None,
+        )
+
+
+def test_policy_active_receipt_requires_its_distinct_recovery_state() -> None:
+    from exomem.governance import consolidation_receipts
+
+    event = _intent(
+        kind="policy-active",
+        phase="policy",
+        batch_ordinal=None,
+    )
+
+    assert event.payload["prepared_digest"] == PREPARED_DIGEST
+    assert event.payload["evidence"]["policy_fingerprint"] == hashlib.sha256(
+        b"policy-active:policy_fingerprint"
+    ).hexdigest()
+    with pytest.raises(
+        consolidation_receipts.ConsolidationReceiptUnavailable,
+        match="^CONSOLIDATION_RECEIPT_UNAVAILABLE$",
+    ):
+        _intent(
+            kind="policy-active",
+            phase="policy",
             batch_ordinal=None,
             prepared_digest=None,
         )
