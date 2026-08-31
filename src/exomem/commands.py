@@ -130,7 +130,6 @@ from .governance import projection_runtime as projection_runtime_module
 from .governance import tool as governance_tool_module
 from .kbdir import kb_dirname
 from .vault import (
-    PathGuardError,
     VaultPathError,
     resolve_under_vault,
 )
@@ -398,7 +397,8 @@ def op_bootstrap(
     workflow_portable_identity = {
         key: workflow_portable[key] for key in ("family", "schema_version", "digest")
     }
-    workflow_status = workflow_inventory.get("status")
+    workflow_complete = "total" in workflow_inventory
+    workflow_status = workflow_inventory.get("status") or workflow_inventory.get("code")
     workflow_findings = workflow_inventory.get("findings", [])
     workflow_route = {
         "tool": "schema_memory",
@@ -411,11 +411,16 @@ def op_bootstrap(
         "builtin_fallback": workflow_portable["builtin_fallback"],
         "resolution_available": workflow_callable,
         "proactive_routing_available": bool(workflow_callable and workflow_status is None),
-        "default": workflow_defaults[:1],
-        "scoped": workflow_scoped[:8],
-        "total": workflow_inventory.get("total", 0),
-        "truncated": bool(workflow_inventory.get("truncated", False)),
     }
+    if workflow_complete:
+        workflow_projection_base.update(
+            {
+                "default": workflow_defaults[:1],
+                "scoped": workflow_scoped[:8],
+                "total": workflow_inventory["total"],
+                "truncated": bool(workflow_inventory["truncated"]),
+            }
+        )
     if profile == "compact":
         workflow_contract_projection = {
             **workflow_projection_base,
@@ -6884,7 +6889,7 @@ def op_schema_memory(
     include_model_suggestions: bool = False,
     context: Mapping[str, str | None] | None = None,
 ) -> dict:
-    """Infer, validate, diff, or save governed memory schemas.
+    """Infer, validate, diff, or save governed memory schemas and workflow contracts.
 
     Contracts describe recurring frontmatter fields, semantic blocks, and typed
     relations without changing ordinary write validation. Inference is read-only
@@ -6894,19 +6899,21 @@ def op_schema_memory(
     Args:
         operation: infer, validate, diff, save-entity-types, or a workflow-contract operation.
         name: Lowercase contract slug; required only for `subject="contract"`.
-        subject: `contract`, `categories`, `relations`, or `traversal-profiles`.
+        subject: `contract`, `categories`, `relations`, `traversal-profiles`, or
+            `workflow-contracts`. Workflow contracts support inventory, inspect,
+            validate, resolve, preview, save, and refresh with their exact argument matrix.
         project: Optional project scope for inference.
         page_type: Optional page-type scope for inference.
         save: Persist an inferred proposal. Default false.
         expected_hash: Required current hash when overwriting a saved contract.
         strict: In validate mode, signal a failing CLI/CI outcome on findings.
         compare_to: In diff mode, compare to this saved contract instead of corpus reality.
-        proposal: Reviewed semantic-language, relation, or traversal-profile proposal.
-        why: Required audit reason for save-entity-types.
+        proposal: Reviewed semantic-language, relation, traversal-profile, or workflow-contract proposal.
+        why: Required audit reason for workflow and entity-type saves.
         include_model_suggestions: Request response-only optional relation suggestions.
 
     Returns:
-        A structured profile/proposal, validation report, or contract diff.
+        A structured profile/proposal, validation report, contract diff, or workflow result.
     """
     operation = operation.strip().lower()
     subject = subject.strip().lower()
@@ -7206,6 +7213,10 @@ def _workflow_contract_schema_operation(
     ):
         return {"resolved": False, "code": "WORKFLOW_CONTRACT_INVALID_ARGUMENTS"}
     invalid = {"resolved": False, "code": "WORKFLOW_CONTRACT_INVALID_ARGUMENTS"}
+
+    def saved_name(value: object) -> bool:
+        return workflow_contracts_module.is_saved_contract_key(value)
+
     try:
         if operation == "inventory":
             if (
@@ -7222,7 +7233,7 @@ def _workflow_contract_schema_operation(
             }
         if operation == "inspect":
             if (
-                not name
+                not saved_name(name)
                 or proposal is not None
                 or expected_hash is not None
                 or why is not None
@@ -7239,6 +7250,7 @@ def _workflow_contract_schema_operation(
                 or why is not None
                 or context is not None
                 or bool(name) == bool(proposal)
+                or (name is not None and not saved_name(name))
             ):
                 return invalid
             if name:
@@ -7260,7 +7272,12 @@ def _workflow_contract_schema_operation(
                 "fingerprint": contract.fingerprint,
             }
         if operation == "resolve":
-            if context is None or expected_hash is not None or why is not None:
+            if (
+                context is None
+                or expected_hash is not None
+                or why is not None
+                or (name is not None and name != "@standalone" and not saved_name(name))
+            ):
                 return invalid
             return {
                 "subject": "workflow-contracts",
@@ -7274,42 +7291,19 @@ def _workflow_contract_schema_operation(
                 or expected_hash is not None
                 or why is not None
                 or context is not None
+                or (name is not None and not saved_name(name))
             ):
                 return invalid
             contract = family.parser(proposal)
-            if name:
-                inspected = workflow_contracts_module.inspect_contract(vault_root, name)
-                if inspected["contract"]["contract_id"] != contract.contract_id:
-                    return {"resolved": False, "code": "WORKFLOW_CONTRACT_INVALID"}
-                try:
-                    source, _guard = workflow_contracts_module._guarded_source(
-                        vault_root, Path(vault_root) / inspected["path"]
-                    )
-                except PathGuardError as error:
-                    raise workflow_contracts_module.WorkflowContractError(
-                        "WORKFLOW_CONTRACT_INVALID", "unsafe contract path"
-                    ) from error
-                content = workflow_contracts_module.canonical_content(
-                    contract, workflow_contracts_module._body(source)
-                )
-                return {
-                    "subject": "workflow-contracts",
-                    "content": content,
-                    "current_hash": inspected["content_hash"],
-                    "fingerprint": contract.fingerprint,
-                    "path": inspected["path"],
-                }
-            filename = vault.sanitize_title_filename(contract.title, max_length=100) or contract.key
+            path, content, _guard, current_hash = workflow_contracts_module.prepare_contract_save(
+                vault_root, contract, name=name, require_expected_hash=False
+            )
             return {
                 "subject": "workflow-contracts",
-                "content": workflow_contracts_module.canonical_content(contract),
-                "current_hash": None,
+                "content": content,
+                "current_hash": current_hash,
                 "fingerprint": contract.fingerprint,
-                "path": (
-                    workflow_contracts_module.contract_directory(vault_root) / f"{filename}.md"
-                )
-                .relative_to(vault_root)
-                .as_posix(),
+                "path": path.relative_to(vault_root).as_posix(),
             }
         if operation == "save":
             if (
@@ -7318,6 +7312,7 @@ def _workflow_contract_schema_operation(
                 or context is not None
                 or (name is not None and expected_hash is None)
                 or (name is None and expected_hash is not None)
+                or (name is not None and not saved_name(name))
             ):
                 return invalid
             contract = family.parser(proposal)
@@ -7333,7 +7328,7 @@ def _workflow_contract_schema_operation(
             return result
         if operation == "refresh":
             if (
-                not name
+                not saved_name(name)
                 or proposal is not None
                 or not expected_hash
                 or not why

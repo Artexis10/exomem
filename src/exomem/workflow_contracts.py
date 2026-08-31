@@ -398,6 +398,59 @@ def save_contract(
 ) -> dict[str, Any]:
     if not isinstance(why, str) or not why.strip():
         raise WorkflowContractError("WORKFLOW_CONTRACT_INVALID_ARGUMENTS", "why is required")
+    path, content, guard, _current_hash = prepare_contract_save(
+        vault_root,
+        contract,
+        name=name,
+        expected_hash=expected_hash,
+    )
+    try:
+        log_plan = plan_log_writes(
+            Path(vault_root),
+            date_iso=date.today().isoformat(),
+            op="schema_memory",
+            rel_path_no_ext=path.relative_to(vault_root).with_suffix("").as_posix(),
+            body="Workflow contract mutation "
+            + json.dumps(
+                {"key": contract.key, "contract_id": contract.contract_id, "rationale": why},
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
+            operation_token="workflow-contract:"
+            + hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        )
+        if log_plan.warning is not None:
+            raise WorkflowContractError("WORKFLOW_CONTRACT_AUDIT_UNAVAILABLE")
+        batch_atomic_write(
+            [
+                PlannedWrite(path=path, content=content, create_only=name is None, guard=guard),
+                *log_plan.writes,
+            ],
+            vault_root=Path(vault_root),
+        )
+    except PathGuardError as error:
+        raise WorkflowContractError("WORKFLOW_CONTRACT_INVALID", "contract write was refused") from error
+    return {
+        "key": contract.key,
+        "contract_id": contract.contract_id,
+        "path": path.relative_to(vault_root).as_posix(),
+        "content": content,
+        "content_hash": source_hash(content),
+        "fingerprint": contract.fingerprint,
+        "why": why,
+    }
+
+
+def prepare_contract_save(
+    vault_root: Path,
+    contract: WorkflowContract,
+    *,
+    name: str | None = None,
+    expected_hash: str | None = None,
+    require_expected_hash: bool = True,
+) -> tuple[Path, str, PathGuard, str | None]:
+    """Run the complete read-only precondition shared by preview and save."""
     if migration_required(vault_root) is None:
         raise WorkflowContractError("WORKFLOW_CONTRACT_MIGRATION_INDETERMINATE")
     root = contract_directory(vault_root)
@@ -408,16 +461,20 @@ def save_contract(
         raise WorkflowContractError("WORKFLOW_CONTRACT_SCAN_LIMIT")
     if findings:
         raise WorkflowContractError("WORKFLOW_CONTRACT_INVALID_INVENTORY")
-    existing = _find_by_key(vault_root, name or contract.key, released_only=False)
     if name is not None:
-        if existing is None:
+        existing = [item for item in contracts if item[0].key == name]
+        if not existing:
             raise WorkflowContractError("WORKFLOW_CONTRACT_NOT_FOUND")
-        old_contract, path, source = existing
+        if len(existing) != 1:
+            raise WorkflowContractError("WORKFLOW_CONTRACT_DUPLICATE_IDENTITY")
+        old_contract, path, _source = existing[0]
         try:
             guarded_source, guard = _guarded_source(vault_root, path)
         except PathGuardError as error:
             raise WorkflowContractError("WORKFLOW_CONTRACT_INVALID", "unsafe contract path") from error
-        if expected_hash is None or guard.expected_content_hash != expected_hash:
+        if require_expected_hash and (
+            expected_hash is None or guard.expected_content_hash != expected_hash
+        ):
             raise WorkflowContractError("WORKFLOW_CONTRACT_STALE")
         if old_contract.contract_id != contract.contract_id:
             raise WorkflowContractError(
@@ -426,6 +483,7 @@ def save_contract(
         if old_contract.key != contract.key:
             raise WorkflowContractError("WORKFLOW_CONTRACT_INVALID", "contract key is immutable")
         content = canonical_content(contract, _body(guarded_source))
+        current_hash = source_hash(guarded_source)
     else:
         if any(
             item.contract_id == contract.contract_id or item.key == contract.key
@@ -447,47 +505,18 @@ def save_contract(
                 ) from error
             raise WorkflowContractError("WORKFLOW_CONTRACT_INVALID", "unsafe contract path") from error
         content = canonical_content(contract)
-    try:
-        log_plan = plan_log_writes(
-            Path(vault_root),
-            date_iso=date.today().isoformat(),
-            op="schema_memory",
-            rel_path_no_ext=path.relative_to(vault_root).with_suffix("").as_posix(),
-            body="Workflow contract mutation "
-            + json.dumps(
-                {"key": contract.key, "contract_id": contract.contract_id, "rationale": why},
-                ensure_ascii=False,
-                separators=(",", ":"),
-                sort_keys=True,
-            ),
-            operation_token="workflow-contract:"
-            + hashlib.sha256(content.encode("utf-8")).hexdigest(),
-        )
-        if log_plan.warning is not None:
-            raise WorkflowContractError("WORKFLOW_CONTRACT_AUDIT_UNAVAILABLE")
-        batch_atomic_write(
-            [
-                PlannedWrite(
-                    path=path,
-                    content=content,
-                    create_only=name is None,
-                    guard=guard,
-                ),
-                *log_plan.writes,
-            ],
-            vault_root=Path(vault_root),
-        )
-    except PathGuardError as error:
-        raise WorkflowContractError("WORKFLOW_CONTRACT_INVALID", "contract write was refused") from error
-    return {
-        "key": contract.key,
-        "contract_id": contract.contract_id,
-        "path": path.relative_to(vault_root).as_posix(),
-        "content": content,
-        "content_hash": source_hash(content),
-        "fingerprint": contract.fingerprint,
-        "why": why,
-    }
+        current_hash = None
+    return path, content, guard, current_hash
+
+
+def is_saved_contract_key(value: object) -> bool:
+    """Return whether ``value`` is a legal saved workflow-contract key."""
+    return (
+        isinstance(value, str)
+        and len(value.encode("ascii", "ignore")) == len(value)
+        and 1 <= len(value) <= 64
+        and _KEY.fullmatch(value) is not None
+    )
 
 
 def _guarded_source(vault_root: Path, path: Path) -> tuple[str, PathGuard]:

@@ -9,14 +9,14 @@
 
 ## 2. One product surface
 
-- [ ] 2.1 Add red-first command-schema and exact argument-matrix/result tests for `schema_memory` subject `workflow-contracts`: inventory, inspect, validate, resolve, preview, guarded save, and refresh, including stable refusal codes.
+- [x] 2.1 Add red-first command-schema and exact argument-matrix/result tests for `schema_memory` subject `workflow-contracts`: inventory, inspect, validate, resolve, preview, guarded save, and refresh, including stable refusal codes.
 - [x] 2.2 Wire every workflow-contract operation through the registered `schema_memory` command so MCP, REST, CLI, envelopes, dry-run semantics, stale-write errors, and audit receipts remain one implementation; add selector-level lease/receipt classification while keeping the command statically mixed/write-capable.
 - [x] 2.3 Add the workflow-specific default-deny egress path and release filtering before inventory/resolution; prove an unreleased winner/tie/default is physically absent and cannot change result bytes, refusals, counts, or ambiguity sets.
-- [ ] 2.4 Update public command schemas, governance selector registries, generated fixtures, help, and capability descriptions; prove the active command surface gains no new top-level product command or unsupported partial profile.
+- [x] 2.4 Update public command schemas, governance selector registries, generated fixtures, help, and capability descriptions; prove the active command surface gains no new top-level product command or unsupported partial profile.
 
 ## 3. Bootstrap and portable contract
 
-- [ ] 3.1 Add red-first bootstrap tests for immutable Planning/Records ownership, built-in standalone fallback, one released default/eight scoped summary caps, released-only totals, exact resolve route only when callable, `workflow_resolution_unavailable` on reduced profiles, empty-vault behaviour, and separation from governance and companion availability.
+- [x] 3.1 Add red-first bootstrap tests for immutable Planning/Records ownership, built-in standalone fallback, one released default/eight scoped summary caps, released-only totals, exact resolve route only when callable, `workflow_resolution_unavailable` on reduced profiles, empty-vault behaviour, and separation from governance and companion availability.
 - [x] 3.2 Project the workflow-contract protocol through full and compact bootstrap, portable export, and knowledge packs from the code-owned machine source; update the hand-authored generic scaffold and parity pins without generating it from a vault; remove product-specific OpenSpec behaviour from normative generic guidance.
 - [x] 3.3 Add a generic inactive OpenSpec companion example outside the active contract directory, with no personal vault labels or assumption that OpenSpec exists.
 - [x] 3.4 Implement and test the durable migration marker before scaffold refresh: known pre-feature vaults require review, fresh vaults do not, valid markers are preserved, missing markers beside sentinels are conservative, and invalid/unsafe markers refuse without overwrite.
