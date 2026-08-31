@@ -21,6 +21,27 @@ An explicit rollforward operation SHALL move one existing hosted cell to a newer
 - **WHEN** a rollforward plan selects a successor cell, replacement volume, tenant destruction, binding rewrite, or entitlement change
 - **THEN** it is refused before the selected tenant resource is mutated
 
+### Requirement: Serving pods preserve private storage custody
+
+A serving pod SHALL NOT use a pod-level filesystem group or another recursive ownership rewrite over the tenant persistent volume or projected credential bundle. Canonical vault directories and files SHALL remain runtime-owned and owner-only across initial pod creation and restart. Projected credentials SHALL remain root-owned, read-only regular files. The authorization source SHALL be visible only to the non-root custody initializer, which SHALL create one owner-only, non-symlink child beneath the Kubernetes-provided memory-volume wrapper and copy exactly the governed authorization files into that child as owner-only regular files. The serving container SHALL mount the wrapper read-only and receive only paths beneath that private child.
+
+#### Scenario: Fresh serving pod mounts an existing private vault
+
+- **WHEN** a serving pod is created for a tenant volume containing owner-only directories and files
+- **THEN** pod admission and startup do not change their owner, group, setgid bit, mode, or bytes
+- **AND** root-owned projected credentials remain read-only and pass the runtime custody check
+
+#### Scenario: Serving pod restarts
+
+- **WHEN** Kubernetes replaces or restarts a serving pod against the same persistent volume
+- **THEN** the canonical vault retains the same owner-only modes and byte fingerprint
+- **AND** the new initializer produces only the expected owner-only authorization custody files beneath a new private child
+
+#### Scenario: Workload requests group ownership or broad custody
+
+- **WHEN** a serving workload sets a filesystem group, broadens a governed projection, mounts the authorization source into the serving container, writes custody outside the private child, or adds another custody writer
+- **THEN** exact hosted admission refuses the workload before creation
+
 ### Requirement: Cell rollforward is operator-authorized, forward-only, and replay safe
 
 The target release, protocol, profile, command fingerprint, schema digest, and compatibility digest SHALL come from an operator-authorized rollout assignment and SHALL be carried through one leased, checkpointed lifecycle operation. The target MUST be newer than the cell's recorded release. Durable checkpoints and idempotency keys SHALL let a reconciler resume without replaying a completed migration, runtime transition, observation write, or other destructive step.
@@ -63,7 +84,7 @@ When the authorized target declares a privileged tree migration, rollforward SHA
 
 ### Requirement: Authorized intent is confirmed before runtime identity moves
 
-After the runtime transition, the operation SHALL read private authenticated readiness and require exact equality with the authorized release, protocol, profile, command fingerprint, schema digest, and compatibility digest. It SHALL also prove the post-transition canonical-vault fingerprint equals the quiesced pre-transition fingerprint except for an explicit bounded set of rebuildable derived indexes. Both fingerprints SHALL be produced by one fixed no-argument command from the immutable provisioner image, with only the canonical vault mounted read-only under an exact restricted admission contract; the selected tenant runtime MUST NOT be required to contain an upgrade-only evidence command. The provisioner fingerprint classification SHALL remain parity-tested against the runtime portability contract. Only then MAY it update the routable observation for the same cell identity and restore routing. The cell's report MAY veto a transition but MUST NOT originate trusted identity.
+After the runtime transition, the operation SHALL read private authenticated readiness and require exact equality with the authorized release, protocol, profile, command fingerprint, schema digest, and compatibility digest. The closed readiness schema SHALL include a typed authorization-session membership summary, and the operator probe SHALL require it to prove one current serving replica, no draining replica, and a positive authenticated membership epoch. It SHALL also prove the post-transition canonical-vault fingerprint equals the quiesced pre-transition fingerprint except for an explicit bounded set of rebuildable derived indexes. Both fingerprints SHALL be produced by one fixed no-argument command from the immutable provisioner image, with only the canonical vault mounted read-only under an exact restricted admission contract; the selected tenant runtime MUST NOT be required to contain an upgrade-only evidence command. The provisioner fingerprint classification SHALL remain parity-tested against the runtime portability contract. Only then MAY it update the routable observation for the same cell identity and restore routing. The cell's report MAY veto a transition but MUST NOT originate trusted identity.
 
 #### Scenario: Cell and vault confirm the authorized target
 
@@ -76,6 +97,11 @@ After the runtime transition, the operation SHALL read private authenticated rea
 - **WHEN** any advertised release, protocol, profile, fingerprint, or digest differs from the authorized target
 - **THEN** no target observation is recorded on the strength of the cell's claim
 - **AND** the transition fails and invokes the bounded pre-record recovery path
+
+#### Scenario: Authorization membership is absent or draining
+
+- **WHEN** private readiness omits the authorization-session summary, changes its closed schema, reports no serving replica, or reports a draining replica
+- **THEN** the hardened operator probe refuses readiness without recording a rollout or credential proof
 
 #### Scenario: Canonical vault bytes differ
 

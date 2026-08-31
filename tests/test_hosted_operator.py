@@ -442,6 +442,28 @@ def test_operator_main_rejects_handler_output_outside_frozen_success_schema() ->
     assert "must-never-pass-through" not in rendered
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("servingReplicaCount", True),
+        ("drainingReplicaCount", False),
+    ],
+)
+def test_probe_success_rejects_boolean_authorization_membership_counts(
+    field: str, value: bool
+) -> None:
+    membership: dict[str, object] = {
+        "ready": True,
+        "code": "AUTHORIZATION_MEMBERSHIP_READY",
+        "servingMembershipEpoch": 1,
+        "servingReplicaCount": 1,
+        "drainingReplicaCount": 0,
+    }
+    membership[field] = value
+
+    assert hosted_operator._ready_authorization_session(membership) is False
+
+
 def test_top_level_cli_lazy_dispatches_only_exact_hosted_prefix(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

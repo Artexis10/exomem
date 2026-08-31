@@ -277,6 +277,7 @@ _SUCCESS_FIELDS = {
         "security_revision",
         "service_authenticated",
         "mutation_authority",
+        "authorization_session",
         "admission_phase",
         "read_admission",
         "write_admission",
@@ -387,6 +388,29 @@ def _valid_revision(value: object) -> bool:
         isinstance(value, int)
         and not isinstance(value, bool)
         and 1 <= value <= 9_223_372_036_854_775_807
+    )
+
+
+def _ready_authorization_session(value: object) -> bool:
+    return (
+        isinstance(value, dict)
+        and set(value)
+        == {
+            "ready",
+            "code",
+            "servingMembershipEpoch",
+            "servingReplicaCount",
+            "drainingReplicaCount",
+        }
+        and value["ready"] is True
+        and value["code"] == "AUTHORIZATION_MEMBERSHIP_READY"
+        and _positive_integer(value["servingMembershipEpoch"])
+        and isinstance(value["servingReplicaCount"], int)
+        and not isinstance(value["servingReplicaCount"], bool)
+        and value["servingReplicaCount"] == 1
+        and isinstance(value["drainingReplicaCount"], int)
+        and not isinstance(value["drainingReplicaCount"], bool)
+        and value["drainingReplicaCount"] == 0
     )
 
 
@@ -780,6 +804,7 @@ def _validate_success(
             and data["security_revision"] == request["expected_revision"]
             and data["service_authenticated"] is True
             and data["mutation_authority"] is True
+            and _ready_authorization_session(data["authorization_session"])
             and data["admission_phase"] == "active"
             and data["read_admission"] is True
             and data["write_admission"] is True

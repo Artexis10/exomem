@@ -123,11 +123,17 @@ compatibility remain observable for backward-compatible health and inventory.
 
 Sequential execution was chosen over parallel batches because the alpha fleet is small, per-cell downtime is already bounded, and one-at-a-time rollout gives a clean canary and limits data risk. A future capability may add bounded batching without changing the per-cell contract.
 
-### 6. Treat observation as confirmation, never authority
+### 6. Keep serving storage outside Kubernetes group-ownership rewrites
 
-The operation's reviewed target authorizes what may be recorded. The cell's private readiness response can only confirm exact equality or veto the transition. It cannot originate or widen its own trusted identity. This preserves the control-plane security model while eliminating the stale-record problem of out-of-band Helm changes.
+The serving pod does not set a pod-level `fsGroup`. Kubernetes therefore has no authority to recursively widen or rewrite the owner, group, setgid bit, or mode of the tenant PVC or root-owned credential projection when a pod is created or restarted. The canonical vault remains owned by the runtime user with owner-only directories and files, and the projected credential bundle remains root-owned and read-only.
 
-### 7. Contract only after a zero-legacy proof
+The authorization source Secret is mounted only into the non-root custody initializer with read-only projection modes. Because Kubernetes supplies an `emptyDir` wrapper with broad default permissions on the supported cluster version, that wrapper is not itself trusted custody. The initializer creates one non-symlink, owner-only child directory beneath it and copies exactly the governed authorization files there as owner-only regular files. The serving container mounts the wrapper read-only and receives paths only to that private child. Admission pins this shape and rejects group-ownership rewrites, broader source modes, alternate paths, or additional custody writers.
+
+### 7. Treat observation as confirmation, never authority
+
+The operation's reviewed target authorizes what may be recorded. The cell's private readiness response can only confirm exact equality or veto the transition. It cannot originate or widen its own trusted identity. The hardened operator probe validates the complete closed response schema, including the typed authorization-session membership summary, and accepts rollout readiness only when that summary proves one current serving replica and no draining replica. This preserves the control-plane security model while eliminating the stale-record problem of out-of-band Helm changes.
+
+### 8. Contract only after a zero-legacy proof
 
 Contract mode is eligible only when a fresh inventory proves all of the following:
 
@@ -139,13 +145,13 @@ Contract mode is eligible only when a fresh inventory proves all of the followin
 
 The contract lock must share the expand lock's exact component and catalog lineage and differ only in immutable admission mode. A stale or partial zero count is insufficient.
 
-### 8. Promotion and acceptance close the release, not the deployment
+### 9. Promotion and acceptance close the release, not the deployment
 
 After contract cutover, the reviewer flow runs its free preflight, prepares immutable Claude and OpenAI artifacts, spends reviewer authority only when the human is ready, imports both evidence chains within their real validity, and promotes the target cohort. When the bounded operator-client partition is full, reuse is allowed only for an explicitly supplied, disabled, exact-configuration, never-authorized pinned client that Substrate revalidates; the harness never auto-selects or directly enables one.
 
 A non-reviewer personal account then proves target identity, OAuth, bootstrap, recall, governed write/read-back, refresh, reconnect, and cleanup/leak checks. Deployment readiness alone is not adoption success.
 
-### 9. Rollback preserves tenants and depends on the last completed phase
+### 10. Rollback preserves tenants and depends on the last completed phase
 
 - Before expand deployment: discard only uncommitted target artifacts.
 - After expand but before any target cell exists: restore the prior platform lock and expire target stages.
@@ -155,7 +161,7 @@ A non-reviewer personal account then proves target identity, OAuth, bootstrap, r
 
 This makes rollback a safe stop-and-recover procedure rather than a promise that all forward-only tenant mutations are globally reversible.
 
-### 10. Keep concrete releases in execution records
+### 11. Keep concrete releases in execution records
 
 The generic specification contains target/current roles and invariants. A release execution records the actual version, source commit, image/candidate digests, Substrate and Exomem commits, expand/contract lock hashes, fleet inventory hashes, per-cell operation IDs and preservation evidence, promotion evidence, acceptance results, and final state. Later releases reuse the same schema and workflow with new reviewed values.
 
@@ -163,6 +169,7 @@ The generic specification contains target/current roles and invariants. A releas
 
 - **[Control-plane and cluster state disagree]** → Stop before mutation and require explicit reconciliation; never infer an empty fleet from one table.
 - **[A target needs a privileged filesystem migration]** → Declare it in signed release metadata, run a bounded TTL job with the existing minimal capability set, and leave the serving container unprivileged.
+- **[Pod security context widens private storage modes]** → Give the serving pod no `fsGroup`, treat the Kubernetes-created custody volume root as an untrusted wrapper, and prove fresh-pod and restart modes against a real cluster before release.
 - **[A cell is unavailable during rollforward]** → Route fails closed for only that tenant; sequence cells so there is no global maintenance window.
 - **[Vault content changes during comparison]** → Quiesce and drain before the first fingerprint; exclude only named rebuildable indexes, never arbitrary paths.
 - **[The selected stable runtime predates the upgrade evidence command]** → Run canonical fingerprinting from the immutable provisioner image under an exact admission policy, and prove its classification remains byte-for-byte equivalent to the runtime portability contract.

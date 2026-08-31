@@ -28,8 +28,6 @@ spec:
       restartPolicy: Always
       terminationGracePeriodSeconds: 30
       securityContext:
-        fsGroup: {{ .Values.runtimeGid }}
-        fsGroupChangePolicy: OnRootMismatch
         seccompProfile:
           type: RuntimeDefault
       initContainers:
@@ -110,11 +108,11 @@ spec:
             - name: EXOMEM_HOSTED_LIFECYCLE_ACTIONS_ENABLED
               value: {{ .Values.lifecycleActionsEnabled | quote }}
             - name: EXOMEM_AUTH_SESSION_KEYRING_FILE
-              value: /run/exomem/authorization-session/keyring.json
+              value: /run/exomem/authorization-session/private/keyring.json
             - name: EXOMEM_AUTH_SESSION_CONTROL_FILE
-              value: /run/exomem/authorization-session/control.json
+              value: /run/exomem/authorization-session/private/control.json
             - name: EXOMEM_AUTH_SESSION_MEMBERSHIP_FILE
-              value: /run/exomem/authorization-session/serving-membership.json
+              value: /run/exomem/authorization-session/private/serving-membership.json
             - name: EXOMEM_AUTH_SESSION_REPLICA_ID
               valueFrom:
                 fieldRef:
@@ -224,7 +222,7 @@ spec:
         - name: authorization-session-source
           secret:
             secretName: {{ .Values.authorizationSessionSecretName }}
-            defaultMode: 0440
+            defaultMode: 0444
         - name: authorization-session-custody
           emptyDir:
             medium: Memory
