@@ -190,13 +190,22 @@ class _PlanAdmission:
     __seal: object
 
     def __init__(self, plan_digest: str, seal: object) -> None:
-        self.__plan_digest = plan_digest
-        self.__seal = seal
+        object.__setattr__(self, "_PlanAdmission__plan_digest", plan_digest)
+        object.__setattr__(self, "_PlanAdmission__seal", seal)
+
+    def __setattr__(self, _name: str, _value: object) -> NoReturn:
+        raise TypeError("transport verification plan admission is immutable")
 
     def _matches(self, plan_digest: str) -> bool:
         return self.__seal is _PLAN_SEAL and self.__plan_digest == plan_digest
 
     def __reduce__(self) -> NoReturn:
+        raise TypeError("transport verification plan admission is process-local")
+
+    def __copy__(self) -> NoReturn:
+        raise TypeError("transport verification plan admission is process-local")
+
+    def __deepcopy__(self, _memo: object) -> NoReturn:
         raise TypeError("transport verification plan admission is process-local")
 
 
