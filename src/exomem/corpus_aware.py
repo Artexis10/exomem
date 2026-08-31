@@ -244,13 +244,21 @@ def _render_identified_write_advisory(
     kind: str,
     candidate: DupCandidate,
     identity: WriteAdvisoryIdentity,
+    quiet_offer: dict | None = None,
 ) -> str:
     suffix = f" [review: {identity.ref}; fingerprint: {identity.fingerprint}]"
     prose = _render_write_advisory(kind, candidate)
+    offer_clause = ""
+    if quiet_offer:
+        offer_clause = (
+            " [quiet offer: ref="
+            f"{quiet_offer['ref']}; action=quiet; reason required]"
+        )
     budget = _WRITE_ADVISORY_WARNING_CHARS - len(suffix)
-    if len(prose) > budget:
-        prose = prose[: max(0, budget - 1)].rstrip() + "…"
-    return prose + suffix
+    prose_budget = budget - len(offer_clause)
+    if len(prose) > prose_budget:
+        prose = prose[: max(0, prose_budget - 1)].rstrip() + "…"
+    return prose + offer_clause + suffix
 
 
 def emit_write_advisories(
@@ -330,8 +338,8 @@ def emit_write_advisory_groups(
         store = review_state.ReviewStateStore(root)
         payload = store.load()
         excluded_kinds = _excluded_advisory_kinds(payload)
-        emitted: list[str] = []
-        surfaced: list[tuple[str, str]] = []
+        emitted: list[tuple[str, DupCandidate, WriteAdvisoryIdentity]] = []
+        surfaced: list[tuple[str, str, str]] = []
         for kind, candidate, candidate_rel in eligible:
             if kind in excluded_kinds:
                 # The user said this KIND of advisory is noise in this vault.
@@ -353,10 +361,17 @@ def emit_write_advisory_groups(
             )
             if state in {"dismissed", "snoozed"}:
                 continue
-            emitted.append(_render_identified_write_advisory(kind, candidate, identity))
-            surfaced.append((identity.review_id, identity.fingerprint))
-        warnings.extend(emitted)
-        _record_surfaced_advisories(root, surfaced, known=payload)
+            emitted.append((kind, candidate, identity))
+            surfaced.append((identity.review_id, identity.fingerprint, kind))
+        ledgered = _record_surfaced_advisories(root, surfaced, known=payload)
+        for kind, candidate, identity in emitted:
+            offer = None
+            if ledgered:
+                try:
+                    offer = store.arm_quiet_offer(kind, known=payload)
+                except Exception as error:  # noqa: BLE001 — optional state fails open
+                    log.debug("write advisory quiet offer failed open: %s", error)
+            warnings.append(_render_identified_write_advisory(kind, candidate, identity, offer))
     except Exception as error:  # noqa: BLE001 — advisory state must fail open
         log.debug("write advisory suppression failed open: %s", error)
         warnings.extend(
@@ -384,8 +399,8 @@ def _excluded_advisory_kinds(payload: dict) -> frozenset[str]:
 
 
 def _record_surfaced_advisories(
-    vault_root: Path, entries: list[tuple[str, str]], *, known: dict | None = None
-) -> None:
+    vault_root: Path, entries: list[tuple[str, str, str]], *, known: dict | None = None
+) -> bool:
     """Stamp the first surfacing of advisories that were actually emitted.
 
     Not the suppressed ones and not the disposition-excluded ones: the ledger
@@ -393,15 +408,17 @@ def _record_surfaced_advisories(
     reached nobody.
     """
     if not entries:
-        return
+        return False
     from . import review_state
 
     try:
-        review_state.record_surfaced(
-            vault_root, entries, surface="write", known=known
+        _stamps, persisted = review_state.record_surfaced(
+            vault_root, entries, surface="write", known=known, return_success=True
         )
+        return persisted
     except Exception as error:  # noqa: BLE001 — advisory state must fail open
         log.debug("first-surfaced ledger not recorded for advisories: %s", error)
+        return False
 
 
 def detected_overlap_advisory_groups(
@@ -444,6 +461,7 @@ def triage_write_advisory(
         )
     review_id = parse_write_advisory_ref(ref)
     store = review_state.ReviewStateStore(vault_root)
+    payload = store.load()
     if normalized == "reopen":
         # Reopen clears every historical fingerprint for the stable pair identity.
         result = store.apply(
@@ -465,6 +483,7 @@ def triage_write_advisory(
             action=normalized,
             until=until,
             why=why,
+            family=review_state.surfaced_family(payload, review_id, expected_fingerprint),
         )
     result["ref"] = write_advisory_ref(review_id)
     return result

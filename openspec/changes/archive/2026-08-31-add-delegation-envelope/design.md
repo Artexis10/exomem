@@ -69,6 +69,12 @@ reported and ignored at read — reading the envelope never breaks bootstrap.
 derivation, which is today's shipped behaviour; no migration is needed in
 either direction.
 
+The supported control route is the existing triage surface:
+`exomem://envelope/<action-class>` with an allowed disposition as `action`, or
+`reset`. It dispatches before family and item references, accepts neither
+`until` nor `expected_fingerprint`, and returns the served class, ceiling,
+disposition, provenance, and stable ref. No tool input schema moves.
+
 Derivation is a pure function `derive_envelope(prominence_level) -> dict` in
 `prominence.py`'s import-cheap tier: no I/O, pinned by test against the table
 above, so the served envelope is always attributable to (level, overrides).
@@ -95,12 +101,16 @@ Only explicit triage history moves anything, and only by offering:
 - Three **manual-origin dismissal events** in one family arm the next surfacing
   of that family with exactly one quiet-offer annotation. Events are counted
   from the durable review-state records themselves — not from the live surface
-  index — so the count never decreases when items later vanish, and
-  automatic-origin decisions never count. The offer is recorded durably
+  index — with an `updated_at` strictly after that family's durable normal-reset
+  epoch. Pre-reset and automatic-origin decisions never count. The offer is recorded durably
   against the family (`quiet_offered_at`), written through the review-state
   store's existing concurrent-write discipline. It is cleared only by an
   explicit reset of the family to `normal` (which clears the family's slate);
-  a decline without a reset never re-offers.
+  a decline without a reset never re-offers. A write advisory records its kind
+  in the exact first-surfaced ledger row; on the first eligible warning that
+  same warning carries the compact quiet offer before its unchanged terminal
+  review ref and fingerprint. Ledger or offer failure stays fail-open and does
+  not spend the offer marker.
 - No behavioural inference from reads, queries or engagement; the spec bans the
   input, not just the current implementation.
 

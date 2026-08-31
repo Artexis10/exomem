@@ -62,6 +62,9 @@ Each block is self-contained. Paste it into:
 
 Replace the connector name if you named yours something other than Exomem. Otherwise
 paste the block as it stands rather than writing your own shorter version of it.
+These blocks set how much Exomem speaks up; what it may DO on its own is the
+delegation envelope, with its own block in
+[What Exomem does on its own](#what-exomem-does-on-its-own) below.
 
 **Each item in the capture list is a separate switch, not an example of a general
 idea.** An assistant treats that list as the definition of what is worth saving, so
@@ -140,3 +143,42 @@ The level governs *when* Exomem acts, never what it is allowed to touch. Governe
 writes stay inside the Knowledge Base folder at every level, `Sources/` and `Evidence/`
 stay append-only, and access policy is enforced independently. `maximal` is more
 eager, not more privileged.
+
+---
+
+## What Exomem does on its own
+
+The level says how much Exomem speaks up. A second, separate contract — the
+**delegation envelope** — says what it may do on its own, per kind of action,
+and it is the one that keeps an eager level from turning into an eager hand.
+
+Each kind of action carries a hard **ceiling**, which is product law: no level,
+no setting and no amount of use authorizes anything above it. Below the ceiling
+each kind carries a disposition — `off`, `advisory`, `silent`, `confirm` or
+`confirm-shortcut` — derived from your level unless you set one explicitly.
+
+You do not have to memorise the table and you should not paste one: `bootstrap()`
+reports the live envelope under `engagement`, and
+`review_memory(mode="dispositions")` shows it beside whatever you have quieted.
+Append this to your custom instructions instead:
+
+```
+Exomem serves a delegation envelope under `engagement` when you call bootstrap. Follow it: name the action class before you act; treat an intent above that class's ceiling as a proposal rather than an act; honour the class disposition (off — do not start it on your own, though anything I ask for outright is never blocked; advisory — tell me in plain language and stop; silent — go ahead, and narrate as the level says; confirm or confirm-shortcut — get my confirmation first). Record what I decide through triage so it sticks. Restructure application, supersession, entity creation and deletion always need my confirmation, and "always allow that from now on" does not exist yet — say so rather than inventing either a refusal or a permission for it; it is a founder decision, not yours or mine. If I ask you to stop suggesting some KIND of thing, quiet that signal family rather than lowering my level, which silences everything: the registered family names are listed by review_memory(mode="dispositions"), and you pick the one my words mean.
+```
+
+That block is deliberately not a table. The envelope moves when you change level
+or set an override, so a pasted copy of today's values is a copy that goes
+stale in every account that ever used it — and unlike the level blocks above,
+nobody re-pastes this one.
+
+To set or reset a served class, use
+`triage_memory(ref="exomem://envelope/<action-class>", action="<disposition>|reset")`.
+
+Two consequences worth knowing as a user. **Confirm-required is not advice.**
+Deletion, restructure application, supersession and entity creation ask you every time,
+whatever your level; some of those are enforced by the server and some are the
+assistant honouring the contract, and the served envelope says which is which
+rather than implying a gate that is not there. **Nothing here adapts behind your
+back.** Three items of one family put down by hand earns one offer to quiet that
+family, once; declining it by saying nothing is durable, and nothing is ever
+quieted, loosened or tightened except by a decision you actually make.

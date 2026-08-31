@@ -95,8 +95,15 @@ def test_the_store_has_no_schema_retention_or_compaction_today(vault: Path) -> N
     for section in ("dispositions", "surfaced", "stats"):
         if section not in payload:
             missing.append(f"no `{section}` section")
-    if payload.get("version") != 2:
-        missing.append(f"schema version is {payload.get('version')}, not 2")
+    # Derived from the constant, never restated. The subject here is that the
+    # store HAS a versioned sectioned schema; a literal would turn every later
+    # version bump into a failure of this gap proof rather than of anything it
+    # is about (it did, on the delegation-envelope migration).
+    if payload.get("version") != review_state.SCHEMA_VERSION:
+        missing.append(
+            f"schema version is {payload.get('version')}, "
+            f"not {review_state.SCHEMA_VERSION}"
+        )
     if not hasattr(store, "compact"):
         missing.append("the store cannot compact")
     if review_state._STATE_READ_LIMIT <= 4 * 1024 * 1024:
@@ -142,7 +149,10 @@ def test_a_previous_schema_store_keeps_its_decisions(vault: Path) -> None:
     store.apply("c" * 24, "d" * 24, action="dismiss", why="handled: new one")
 
     written = json.loads(path.read_text(encoding="utf-8"))
-    assert written["version"] == 2
+    # The CURRENT schema, read from the module rather than restated: the
+    # property is "a previous-schema file is rewritten forward", not "forward
+    # means 2".
+    assert written["version"] == review_state.SCHEMA_VERSION
     assert store.effective_state("a" * 24, "b" * 24)[0] == "dismissed"
     assert store.effective_state("c" * 24, "d" * 24)[0] == "dismissed"
 
