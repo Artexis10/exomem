@@ -144,6 +144,7 @@ DECIDER_PROTOCOL: tuple[str, ...] = (
 )
 
 _CONFIG_KEY = "envelope"
+ENVELOPE_PREFIX = "exomem://envelope/"
 
 
 def _normalize_class(value: str | None) -> str:
@@ -152,6 +153,23 @@ def _normalize_class(value: str | None) -> str:
 
 def _normalize_disposition(value: str | None) -> str:
     return str(value or "").strip().lower().replace("_", "-")
+
+
+def envelope_ref(action_class: str) -> str:
+    """The stable triage reference for one envelope action class."""
+    return f"{ENVELOPE_PREFIX}{_normalize_class(action_class)}"
+
+
+def is_envelope_ref(value: str) -> bool:
+    return str(value or "").strip().lower().startswith(ENVELOPE_PREFIX)
+
+
+def parse_envelope_ref(value: str) -> str:
+    """Return the addressed class; setters retain the canonical refusals."""
+    raw = str(value or "").strip()
+    if not raw.lower().startswith(ENVELOPE_PREFIX):
+        raise ValueError(f"INVALID_ENVELOPE_REFERENCE: expected {ENVELOPE_PREFIX}<action-class>")
+    return _normalize_class(raw[len(ENVELOPE_PREFIX) :])
 
 
 def derive_envelope(level: str) -> dict[str, str]:

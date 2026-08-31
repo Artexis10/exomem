@@ -205,6 +205,9 @@ why="<code>: ...")` rather than lowering prominence, which silences everything.
 `review_memory(mode="dispositions")` lists the registered family vocabulary
 alongside the envelope block and what is currently quiet and why.
 
+Set or reset a served envelope class through the same triage surface:
+`triage_memory(ref="exomem://envelope/<action-class>", action="<disposition>|reset")`.
+
 ## Agent write loop
 
 Use this loop whenever a durable conclusion should enter Exomem:

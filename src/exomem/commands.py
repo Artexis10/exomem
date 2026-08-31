@@ -59,6 +59,7 @@ from . import edit as edit_module
 from . import edit_operations as edit_operations_module
 from . import entity_candidates as entity_candidates_module
 from . import entity_types as entity_types_module
+from . import envelope as envelope_module
 from . import epistemic_graph as epistemic_graph_module
 from . import evolution as evolution_module
 from . import find as find_module
@@ -6211,6 +6212,26 @@ def op_triage_memory(
             the write and asks the caller to refresh.
     """
     normalized_action = str(action or "").strip().lower()
+    if envelope_module.is_envelope_ref(ref):
+        if until is not None:
+            raise ValueError("INVALID_REVIEW_ACTION: envelope triage does not accept `until`")
+        if expected_fingerprint is not None:
+            raise ValueError(
+                "INVALID_REVIEW_ACTION: envelope triage does not accept `expected_fingerprint`"
+            )
+        action_class = envelope_module.parse_envelope_ref(ref)
+        if normalized_action == "reset":
+            envelope_module.reset_disposition(action_class)
+        else:
+            envelope_module.set_disposition(action_class, normalized_action)
+        served = envelope_module.resolved()["classes"][action_class]
+        return {
+            "class": action_class,
+            "ceiling": served["ceiling"],
+            "disposition": served["disposition"],
+            "provenance": served["provenance"],
+            "ref": envelope_module.envelope_ref(action_class),
+        }
     if review_state_module.is_family_ref(ref):
         # BEFORE every other namespace: a family reference names a KIND of
         # signal, so none of the item-shaped branches below can resolve it, and

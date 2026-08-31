@@ -209,9 +209,12 @@ def test_an_explicit_reset_clears_the_slate_and_one_new_offer_may_appear(
 
     assert _slate(vault) is None, "a reset clears the family's slate"
 
+    overdue_prediction(vault, "nag-seven")
     for slug in ("nag-four", "nag-five"):
         _dismiss(vault, slug)
 
+    assert _offered_families(_surface(vault)) == []
+    _dismiss(vault, "nag-six")
     assert _offered_families(_surface(vault)) == [FAMILY]
     assert _offered_families(_surface(vault)) == []
 

@@ -240,3 +240,35 @@ def test_a_refused_standing_delegation_leaves_the_envelope_untouched(
 
     assert envelope.resolved() == before
     assert "restructure_execution" not in (config.read_text("utf-8"))
+
+
+# ------------------------------------------ `off` is silence, not a server-side gate
+
+
+def test_a_class_set_to_off_blocks_no_explicit_request(config, tmp_path: Path) -> None:
+    """`off` withdraws the agent's initiative; it withdraws no capability."""
+
+    def structural_review_on_request(root: Path) -> dict:
+        vault = _legacy_vault(root)
+        run_id = commands.op_adoption_studio(vault, action="start")["run_id"]
+        commands.op_adoption_studio(vault, action="select", run_id=run_id, include=["Old Notes"])
+        return adoption_run.plan(vault, run_id=run_id, today=TODAY)["plan"]
+
+    prominence.write_prominence("balanced")
+    envelope.set_disposition("structural_suggestions", "advisory")
+    advisory = structural_review_on_request(tmp_path / "advisory")
+
+    envelope.set_disposition("structural_suggestions", "off")
+    served = commands.op_bootstrap(tmp_path / "advisory" / "vault", profile="compact")[
+        "engagement"
+    ]["envelope"]
+    assert served["classes"]["structural_suggestions"]["disposition"] == "off"
+
+    silent = structural_review_on_request(tmp_path / "off")
+
+    assert [item["original_path"] for item in silent["items"]] == [
+        "Old Notes/quarterly-planning.md"
+    ]
+    assert silent["items"] == advisory["items"]
+    assert silent["skipped"] == advisory["skipped"]
+    assert silent["plan_id"] == advisory["plan_id"]

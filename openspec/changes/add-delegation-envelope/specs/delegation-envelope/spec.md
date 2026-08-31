@@ -84,6 +84,13 @@ from the same surface that lists family dispositions, structurally separated
 from the family rows so the two vocabularies never share a column. A reset
 SHALL restore pure derivation for the named class.
 
+The existing triage surface SHALL support `exomem://envelope/<action-class>`
+before family and item references. Its `action` SHALL be an allowed disposition
+or `reset`; it SHALL refuse irrelevant `until` and `expected_fingerprint`,
+delegate the canonical class refusal unchanged, and return class, ceiling,
+disposition, provenance, and the stable envelope ref. This adds no tool input
+parameter.
+
 #### Scenario: An override outlives a prominence change and a restart
 
 - **WHEN** `proactive_capture` is explicitly set `advisory` while prominence is
@@ -115,14 +122,26 @@ Envelope and family-disposition adaptation SHALL derive only from explicit
 triage decisions. When the durable review-state records hold three
 manual-origin dismissal events in one registered family — dismissal events,
 counted from the records themselves so the count never decreases when items
-later vanish, with automatic-origin decisions excluded — the next surfacing of
-that family SHALL carry exactly one offer to quiet it. The offer SHALL be
-recorded durably against the family, SHALL change nothing by itself, and SHALL
+later vanish, with automatic-origin and pre-normal-reset decisions excluded —
+the next surfacing of that family SHALL carry exactly one offer to quiet it. A
+normal reset SHALL atomically remove the disposition row and record that
+family's UTC adaptation epoch; only records with `updated_at` strictly after it
+are eligible. The offer SHALL be recorded durably against the family, SHALL
+change nothing by itself, and SHALL
 be made at most once: it is cleared only when the family is explicitly reset to
 `normal`, which clears the family's slate; a decline without a reset never
 re-offers. Usage logs, query history, read counts, and any engagement measure
 SHALL NOT be inputs to any adaptation. Nothing SHALL be quieted, turned off, or
 made more permissive except by an explicit decision.
+
+When a write advisory is actually surfaced, its registered kind SHALL be stored
+on that exact first-surfaced ledger row. Write-advisory triage SHALL resolve the
+family from that key and pass it to the review-state decision. The first
+eligible post-third warning SHALL contain one bounded quiet-offer clause while
+retaining its existing terminal review ref and fingerprint unchanged; it SHALL
+not increase warning count or exceed the 300-character warning budget. Ledger
+or offer persistence failure SHALL remain fail-open and SHALL not spend the
+offer marker.
 
 #### Scenario: Three dismissals earn one offer, once
 

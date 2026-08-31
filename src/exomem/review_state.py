@@ -741,15 +741,12 @@ class ReviewStateStore:
                     "updated_at": timestamp,
                     "origin": origin if origin in ORIGINS else MANUAL,
                 }
-                if record is None:
-                    # Nothing to clear: still a valid, idempotent decision, and
-                    # writing nothing keeps the store free of `normal` rows that
-                    # would then have to be filtered out of every read.
-                    stored["cleared"] = False
-                else:
-                    stored["cleared"] = True
-                    _compact_if_due(payload, now=moment, path=self.path)
-                    self._write(payload)
+                stored["cleared"] = record is not None
+                # An explicit normal decision begins a new adaptation epoch
+                # without erasing the durable review history.
+                payload["adaptation_resets"][family] = timestamp
+                _compact_if_due(payload, now=moment, path=self.path)
+                self._write(payload)
                 return stored
             stored = {
                 "family": family,
@@ -877,11 +874,12 @@ class ReviewStateStore:
 
 
 def empty_state() -> dict[str, Any]:
-    """A fresh v2 payload. One definition, because five readers build this."""
+    """A fresh v3 payload. One definition, because five readers build this."""
     return {
         "version": SCHEMA_VERSION,
         "records": {},
         "dispositions": {},
+        "adaptation_resets": {},
         "surfaced": {},
         "stats": {},
     }
@@ -898,7 +896,7 @@ def _migrated(payload: dict[str, Any]) -> dict[str, Any]:
     same way afterwards. Nothing is written here: the rewrite happens on the
     next write, which is the one moment the file is already being replaced.
     """
-    for section in ("dispositions", "surfaced", "stats"):
+    for section in ("dispositions", "adaptation_resets", "surfaced", "stats"):
         if not isinstance(payload.get(section), dict):
             payload[section] = {}
     if payload.get("version") == SCHEMA_VERSION:
@@ -982,6 +980,9 @@ def manual_dismissal_events(payload: dict[str, Any] | None, family: str) -> int:
     wanted = str(family or "")
     if not wanted:
         return 0
+    reset_at = _parse_stamp(
+        ((payload or {}).get("adaptation_resets") or {}).get(wanted)
+    )
     events: set[str] = set()
     for record in ((payload or {}).get("records") or {}).values():
         if not isinstance(record, dict):
@@ -991,6 +992,9 @@ def manual_dismissal_events(payload: dict[str, Any] | None, family: str) -> int:
         if record.get("origin", MANUAL) != MANUAL:
             continue
         if str(record.get("family") or "") != wanted:
+            continue
+        updated_at = _parse_stamp(record.get("updated_at"))
+        if reset_at is not None and (updated_at is None or updated_at <= reset_at):
             continue
         events.add(str(record.get("item_id") or ""))
     events.discard("")
@@ -1061,7 +1065,8 @@ def record_surfaced(
     surface: str,
     now: dt.datetime | None = None,
     known: dict[str, Any] | None = None,
-) -> dict[str, str]:
+    return_success: bool = False,
+) -> dict[str, str] | tuple[dict[str, str], bool]:
     """Stamp the first time each signal reached a served surface. Best effort.
 
     Returns `key -> first_surfaced_at` for every entry, whether it was already
@@ -1094,19 +1099,29 @@ def record_surfaced(
     """
     if surface not in SURFACES:
         raise ValueError(f"INVALID_SURFACE: surface must be one of {list(SURFACES)}")
-    pairs = [
-        (str(review_id), str(fingerprint))
-        for review_id, fingerprint in entries
-        if review_id and fingerprint
-    ]
+    pairs = []
+    families: dict[tuple[str, str], str] = {}
+    for entry in entries:
+        if not isinstance(entry, (tuple, list)) or len(entry) < 2:
+            continue
+        review_id, fingerprint = str(entry[0]), str(entry[1])
+        if not review_id or not fingerprint:
+            continue
+        pairs.append((review_id, fingerprint))
+        if len(entry) > 2 and entry[2]:
+            families[(review_id, fingerprint)] = str(entry[2])
     if not pairs:
-        return {}
+        return ({}, True) if return_success else {}
     timestamp = _stamp(now or dt.datetime.now(dt.UTC))
     stamps: dict[str, str] = {}
     if known is not None:
         cached = _cached_stamps(pairs, known)
-        if cached is not None:
-            return cached
+        families_current = all(
+            surfaced_family(known, review_id, fingerprint) == family
+            for (review_id, fingerprint), family in families.items()
+        )
+        if cached is not None and families_current:
+            return (cached, True) if return_success else cached
     store = ReviewStateStore(vault_root)
     try:
         with _LOCK:
@@ -1117,6 +1132,10 @@ def record_surfaced(
                 key = _record_key(review_id, fingerprint)
                 existing = ledger.get(key)
                 if isinstance(existing, dict) and existing.get("first_surfaced_at"):
+                    family = families.get((review_id, fingerprint))
+                    if family and existing.get("family") != family:
+                        existing["family"] = family
+                        added = True
                     stamps[key] = str(existing["first_surfaced_at"])
                     continue
                 ledger[key] = {
@@ -1125,6 +1144,9 @@ def record_surfaced(
                     # The runtime decided to show this, not a person.
                     "origin": AUTOMATIC,
                 }
+                family = families.get((review_id, fingerprint))
+                if family:
+                    ledger[key]["family"] = family
                 stamps[key] = timestamp
                 added = True
             if added:
@@ -1133,7 +1155,8 @@ def record_surfaced(
         log.debug("first-surfaced ledger not recorded: %s", error)
         for review_id, fingerprint in pairs:
             stamps.setdefault(_record_key(review_id, fingerprint), timestamp)
-    return stamps
+        return (stamps, False) if return_success else stamps
+    return (stamps, True) if return_success else stamps
 
 
 def _cached_stamps(
@@ -1167,6 +1190,17 @@ def first_surfaced_map(payload: dict[str, Any] | None) -> dict[str, str]:
         for key, row in ledger.items()
         if isinstance(row, dict) and row.get("first_surfaced_at")
     }
+
+
+def surfaced_family(
+    payload: dict[str, Any] | None, review_id: str, signal_fingerprint: str
+) -> str | None:
+    """The family recorded on this exact surfaced ledger identity, if any."""
+    row = ((payload or {}).get("surfaced") or {}).get(
+        _record_key(review_id, signal_fingerprint)
+    )
+    value = row.get("family") if isinstance(row, dict) else None
+    return str(value) if value else None
 
 
 # --------------------------------------------------------------------------

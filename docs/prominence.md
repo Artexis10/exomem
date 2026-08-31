@@ -171,6 +171,9 @@ or set an override, so a pasted copy of today's values is a copy that goes
 stale in every account that ever used it — and unlike the level blocks above,
 nobody re-pastes this one.
 
+To set or reset a served class, use
+`triage_memory(ref="exomem://envelope/<action-class>", action="<disposition>|reset")`.
+
 Two consequences worth knowing as a user. **Confirm-required is not advice.**
 Deletion, restructure application, supersession and entity creation ask you every time,
 whatever your level; some of those are enforced by the server and some are the
