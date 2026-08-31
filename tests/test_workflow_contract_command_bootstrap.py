@@ -104,6 +104,44 @@ def test_schema_memory_help_names_workflow_contracts_as_a_supported_subject() ->
     assert "workflow-contracts" in (commands.op_schema_memory.__doc__ or "")
 
 
+def test_schema_memory_entity_type_selector_reaches_the_mcp_leaf(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from conftest import initialize_vault_state_offline
+
+    from exomem import server as server_module
+    from exomem.init import init_vault
+
+    vault = tmp_path / "vault"
+    init_vault(vault)
+    initialize_vault_state_offline(vault, source="schema-memory selector dispatch")
+    monkeypatch.setattr(server_module, "load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    monkeypatch.setenv("EXOMEM_DISABLE_RELEVANCE_CHECK", "1")
+    monkeypatch.setenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", "1")
+    monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
+    monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "python")
+    monkeypatch.setenv("EXOMEM_DISABLE_FILE_WATCHER", "1")
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-lease"))
+    mcp = server_module.build_server(require_auth=False)
+
+    saved = asyncio.run(
+        mcp.call_tool(
+            "schema_memory",
+            {
+                "operation": "save-entity-types",
+                "proposal": {"schema_version": 1, "entity_types": {}},
+                "why": "Exercise the public selector classifier.",
+            },
+            run_middleware=True,
+        )
+    )
+
+    assert "RECEIPT_OUTCOME_MISSING" not in json.dumps(saved.structured_content)
+    assert (vault / "Knowledge Base" / "_Schema" / "entity-types.yaml").is_file()
+
+
 def test_bootstrap_is_bounded_sorted_and_omits_route_when_schema_is_unavailable(
     tmp_path: Path,
 ) -> None:

@@ -15,6 +15,7 @@ from typing import Any
 from uuid import UUID
 
 import yaml
+from yaml.constructor import ConstructorError
 
 from .kbdir import kb_dirname
 from .vault import (
@@ -168,6 +169,47 @@ class WorkflowContractError(ValueError):
         super().__init__(f"{code}: {detail}" if detail else code)
 
 
+class _UniqueKeySafeLoader(yaml.SafeLoader):
+    """Keep SafeLoader's type boundary while refusing ambiguous mappings."""
+
+
+def _construct_unique_mapping(
+    loader: _UniqueKeySafeLoader, node: yaml.MappingNode, deep: bool = False
+) -> dict[Any, Any]:
+    loader.flatten_mapping(node)
+    mapping: dict[Any, Any] = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        try:
+            duplicate = key in mapping
+        except TypeError as error:
+            raise ConstructorError(
+                "while constructing a mapping",
+                node.start_mark,
+                "found unhashable key",
+                key_node.start_mark,
+            ) from error
+        if duplicate:
+            raise ConstructorError(
+                "while constructing a mapping",
+                node.start_mark,
+                f"found duplicate key {key!r}",
+                key_node.start_mark,
+            )
+        mapping[key] = loader.construct_object(value_node, deep=deep)
+    return mapping
+
+
+_UniqueKeySafeLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _construct_unique_mapping
+)
+
+
+def _safe_load_mapping(source: str) -> Any:
+    """Parse workflow YAML through SafeLoader without last-key-wins semantics."""
+    return yaml.load(source, Loader=_UniqueKeySafeLoader)
+
+
 @dataclass(frozen=True)
 class WorkflowContract:
     data: dict[str, Any]
@@ -319,7 +361,7 @@ def ensure_migration_marker(vault_root: Path, *, review_required: bool = False) 
         raise WorkflowContractError("WORKFLOW_CONTRACT_MIGRATION_INDETERMINATE") from error
     if source is not None:
         try:
-            marker = yaml.safe_load(source)
+            marker = _safe_load_mapping(source)
         except yaml.YAMLError as error:
             raise WorkflowContractError("WORKFLOW_CONTRACT_MIGRATION_INDETERMINATE") from error
         if (
@@ -380,7 +422,7 @@ def migration_required(vault_root: Path) -> bool | None:
     except (OSError, UnicodeDecodeError, PathGuardError):
         return None
     try:
-        marker = yaml.safe_load(source)
+        marker = _safe_load_mapping(source)
     except yaml.YAMLError:
         return None
     if (
@@ -1036,7 +1078,7 @@ def _frontmatter(source: str) -> dict[str, Any]:
     closing = source.find("\n---\n", 4)
     if closing < 0:
         raise WorkflowContractError("WORKFLOW_CONTRACT_INVALID", "frontmatter not closed")
-    loaded = yaml.safe_load(source[4:closing])
+    loaded = _safe_load_mapping(source[4:closing])
     if not isinstance(loaded, dict):
         raise WorkflowContractError("WORKFLOW_CONTRACT_INVALID", "frontmatter is not mapping")
     return loaded
@@ -1048,13 +1090,19 @@ def _body(source: str) -> str:
 
 
 def _presentation_span(body: str) -> tuple[int, int] | None:
-    start = body.find(_RENDERER_TEMPLATE["open"])
-    if start < 0:
+    open_marker = _RENDERER_TEMPLATE["open"]
+    close_marker = _RENDERER_TEMPLATE["close"]
+    open_count = body.count(open_marker)
+    close_count = body.count(close_marker)
+    if open_count == close_count == 0:
         return None
-    end = body.find(_RENDERER_TEMPLATE["close"], start)
-    if end < 0:
-        return None
-    return start, end + len(_RENDERER_TEMPLATE["close"])
+    if open_count != 1 or close_count != 1:
+        raise WorkflowContractError("WORKFLOW_CONTRACT_INVALID", "presentation topology")
+    start = body.index(open_marker)
+    close = body.index(close_marker)
+    if close < start:
+        raise WorkflowContractError("WORKFLOW_CONTRACT_INVALID", "presentation topology")
+    return start, close + len(close_marker)
 
 
 def _semantic_bytes(data: Mapping[str, Any]) -> bytes:

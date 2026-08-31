@@ -3087,6 +3087,7 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "preview": "structure",
         "save": "mutation",
         "refresh": "mutation",
+        "save-entity-types": "mutation",
     },
     ("record_memory", "action"): {
         "describe": "structure",

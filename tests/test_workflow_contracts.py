@@ -422,6 +422,136 @@ def test_guarded_update_preserves_authored_markdown_outside_the_presentation_blo
     assert path.read_text(encoding="utf-8").endswith(rationale)
 
 
+def test_refresh_refuses_malformed_managed_presentation_without_rewriting_authored_markdown(
+    tmp_path: Path,
+) -> None:
+    from exomem import commands, workflow_contracts
+    from exomem.init import init_vault
+
+    init_vault(tmp_path)
+    contract = workflow_contracts.parse_proposal(_proposal())
+    saved = workflow_contracts.save_contract(tmp_path, contract, why="reviewed")
+    path = tmp_path / saved["path"]
+    open_marker = workflow_contracts.portable_projection()["renderer_template"]["open"]
+    close_marker = workflow_contracts.portable_projection()["renderer_template"]["close"]
+    authored = "\n## Human rationale\n\nKeep every authored byte.\n"
+    path.write_text(saved["content"] + authored, encoding="utf-8")
+    valid_source = path.read_text(encoding="utf-8")
+
+    valid = commands.op_schema_memory(
+        tmp_path,
+        subject="workflow-contracts",
+        operation="refresh",
+        name=contract.key,
+        expected_hash=workflow_contracts.source_hash(valid_source),
+        why="refresh presentation",
+    )
+
+    assert valid["saved"]["content"].endswith(authored)
+    assert path.read_text(encoding="utf-8").endswith(authored)
+
+    for malformed in (
+        lambda content: content + f"\n{open_marker}\n",
+        lambda content: content + f"\n{close_marker}\n",
+        lambda content: content.replace(close_marker, ""),
+        lambda content: content.replace(open_marker, ""),
+    ):
+        path.write_text(malformed(saved["content"]), encoding="utf-8")
+        before = path.read_bytes()
+
+        result = commands.op_schema_memory(
+            tmp_path,
+            subject="workflow-contracts",
+            operation="refresh",
+            name=contract.key,
+            expected_hash=workflow_contracts.source_hash(before.decode("utf-8")),
+            why="refresh presentation",
+        )
+
+        assert result == {"resolved": False, "code": "WORKFLOW_CONTRACT_INVALID"}
+        assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "duplicate",
+    (
+        "title: Software Delivery\ntitle: Replaced Title\n",
+        "scope:\n  projects: []\n",
+        "  name: Specification Tool\n  name: Replaced Tool\n",
+    ),
+)
+def test_duplicate_workflow_frontmatter_keys_refuse_without_builtin_fallback_or_write(
+    tmp_path: Path, duplicate: str
+) -> None:
+    from exomem import commands, workflow_contracts
+    from exomem.init import init_vault
+
+    init_vault(tmp_path)
+    contract = workflow_contracts.parse_proposal(_proposal())
+    saved = workflow_contracts.save_contract(tmp_path, contract, why="reviewed")
+    path = tmp_path / saved["path"]
+    source = path.read_text(encoding="utf-8")
+    if duplicate.startswith("title"):
+        source = source.replace("title: Software Delivery\n", duplicate)
+    elif duplicate.startswith("scope"):
+        source = source.replace("scope:\n", duplicate)
+    else:
+        source = source.replace("  name: Specification Tool\n", duplicate)
+    path.write_text(source, encoding="utf-8")
+    before = path.read_bytes()
+
+    assert commands.op_schema_memory(
+        tmp_path, subject="workflow-contracts", operation="inspect", name=contract.key
+    ) == {"resolved": False, "code": "WORKFLOW_CONTRACT_INVALID"}
+    assert workflow_contracts.resolve_contracts(tmp_path, {})["resolved"] is False
+    assert commands.op_schema_memory(
+        tmp_path,
+        subject="workflow-contracts",
+        operation="save",
+        name=contract.key,
+        proposal=contract.as_dict(),
+        expected_hash=workflow_contracts.source_hash(source),
+        why="reviewed",
+    ) == {"resolved": False, "code": "WORKFLOW_CONTRACT_INVALID_INVENTORY"}
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("duplicate_key", ("schema_version", "review_required"))
+def test_duplicate_migration_marker_keys_refuse_without_builtin_fallback_or_refresh_write(
+    tmp_path: Path, duplicate_key: str
+) -> None:
+    from exomem import commands, workflow_contracts
+    from exomem.init import init_vault
+
+    init_vault(tmp_path)
+    contract = workflow_contracts.parse_proposal(_proposal())
+    saved = workflow_contracts.save_contract(tmp_path, contract, why="reviewed")
+    path = tmp_path / saved["path"]
+    marker = workflow_contracts.migration_marker_path(tmp_path)
+    marker.write_text(
+        "schema_version: 1\n"
+        f"{duplicate_key}: {'1' if duplicate_key == 'schema_version' else 'false'}\n"
+        "review_required: false\n",
+        encoding="utf-8",
+    )
+    before = path.read_bytes()
+
+    assert workflow_contracts.migration_required(tmp_path) is None
+    assert workflow_contracts.resolve_contracts(tmp_path, {}) == {
+        "resolved": False,
+        "code": "WORKFLOW_CONTRACT_MIGRATION_INDETERMINATE",
+    }
+    assert commands.op_schema_memory(
+        tmp_path,
+        subject="workflow-contracts",
+        operation="refresh",
+        name=contract.key,
+        expected_hash=saved["content_hash"],
+        why="refresh presentation",
+    ) == {"resolved": False, "code": "WORKFLOW_CONTRACT_MIGRATION_INDETERMINATE"}
+    assert path.read_bytes() == before
+
+
 def test_v1_rejects_noncanonical_scope_companion_and_display_values() -> None:
     from exomem import workflow_contracts
 
