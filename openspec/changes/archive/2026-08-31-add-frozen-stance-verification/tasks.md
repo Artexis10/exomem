@@ -380,6 +380,13 @@ the task is ticked, not estimated.
     `Would make no changes`. `uv lock` strips the
     `# x-release-please-version` marker from the `exomem` entry in `uv.lock`;
     it was restored by hand, so the lock diff is only the `nli` extra.
+  - **Post-review constructor compatibility pin** — the hardened loader passes
+    `local_files_only=True` directly to `CrossEncoder`, whose constructor gained
+    that parameter in sentence-transformers 3.0. The original `>=2.7` lower
+    bound could therefore install a supported dependency that always refused at
+    load time. The extra now requires `sentence-transformers>=3.0`; its packaging
+    test rejects 2.7 and admits 3.0. Red before the bound change, green after.
+    Targeted evidence: `1 failed in 0.12s` before; `1 passed in 0.09s` after.
   - `pyproject.toml` gains the `nli` extra (sentence-transformers + torch on the
     same cu132 index the `embeddings` extra uses). Default-off twice over: it is
     in no profile's extra set (`doctor._profile_extras` never names it, pinned by

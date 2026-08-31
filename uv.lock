@@ -724,7 +724,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "rank-bm25", specifier = ">=0.2.2" },
     { name = "sentence-transformers", marker = "extra == 'embeddings'", specifier = ">=2.7" },
-    { name = "sentence-transformers", marker = "extra == 'nli'", specifier = ">=2.7" },
+    { name = "sentence-transformers", marker = "extra == 'nli'", specifier = ">=3.0" },
     { name = "snowballstemmer", specifier = ">=2.2" },
     { name = "speechbrain", marker = "extra == 'diarization'", specifier = ">=1.0" },
     { name = "sqlite-vec", marker = "extra == 'embeddings'", specifier = ">=0.1.6" },

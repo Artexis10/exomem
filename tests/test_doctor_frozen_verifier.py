@@ -12,6 +12,8 @@ import tomllib
 from pathlib import Path
 
 import pytest
+from packaging.requirements import Requirement
+from packaging.version import Version
 
 from exomem import claims, doctor
 
@@ -35,6 +37,13 @@ def test_nli_is_a_default_off_optional_extra() -> None:
     assert "nli" in extras
     joined = " ".join(extras["nli"])
     assert "sentence-transformers" in joined
+    sentence_transformers = next(
+        Requirement(requirement)
+        for requirement in extras["nli"]
+        if Requirement(requirement).name == "sentence-transformers"
+    )
+    assert Version("2.7.0") not in sentence_transformers.specifier
+    assert Version("3.0.0") in sentence_transformers.specifier
     # Default-off: it is in no profile's extra set, so no install path pulls it in.
     for profile in doctor.VALID_PROFILES:
         assert "nli" not in doctor._profile_extras(profile)

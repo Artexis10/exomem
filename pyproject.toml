@@ -93,7 +93,7 @@ embeddings-onnx = [
 # other surface is byte-identical to a build with no verifier tier at all. Install
 # with `uv sync --extra nli`.
 nli = [
-    "sentence-transformers>=2.7",
+    "sentence-transformers>=3.0",
     "torch>=2.12",
 ]
 # Server-side media extraction (transduction, not a brain): ASR for audio/video,
