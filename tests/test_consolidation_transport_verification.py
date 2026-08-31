@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import copy
 import hashlib
 import pickle
@@ -22,7 +23,12 @@ TRUST_DIGEST = hashlib.sha256(b"transport-trust").hexdigest()
 PRINCIPAL_MAPPING_DIGEST = hashlib.sha256(b"transport-principal-mapping").hexdigest()
 ROUTING_STOP_DIGEST = hashlib.sha256(b"transport-routing-stop").hexdigest()
 SUPERVISOR_READINESS_DIGEST = hashlib.sha256(b"transport-supervisor-readiness").hexdigest()
-PROBE_DIGEST = hashlib.sha256(b"transport-rest-positive-probe").hexdigest()
+HOSTED_PROFILE_SELECTION_DIGEST = hashlib.sha256(
+    b"transport-hosted-profile-selection"
+).hexdigest()
+HOSTED_OWNER_ENTITLEMENT_READINESS_DIGEST = hashlib.sha256(
+    b"transport-hosted-owner-entitlement-readiness"
+).hexdigest()
 T0 = "2026-08-31T12:00:00.000Z"
 
 
@@ -101,7 +107,11 @@ def _transport_basis(**changes: object) -> dict[str, object]:
         "principal_mapping_digest": PRINCIPAL_MAPPING_DIGEST,
         "routing_stop_digest": ROUTING_STOP_DIGEST,
         "transport_supervisor_readiness_digest": SUPERVISOR_READINESS_DIGEST,
-        "destination_kind": "real",
+        "hosted_profile_selection_record_digest": HOSTED_PROFILE_SELECTION_DIGEST,
+        "hosted_profile_selection_verifier_generation": 7,
+        "hosted_owner_entitlement_verifier_readiness_digest": (
+            HOSTED_OWNER_ENTITLEMENT_READINESS_DIGEST
+        ),
         **changes,
     }
 
@@ -124,13 +134,40 @@ def _surface_contracts() -> tuple[dict[str, object], ...]:
     )
 
 
-def test_transport_plan_binds_exact_real_cell_basis_and_every_surface_polarity() -> None:
+def _exact_destination_binding(basis: dict[str, object]):
+    from exomem.governance import (
+        consolidation_authority,
+        consolidation_transport_verification,
+    )
+
+    authority = consolidation_authority.issue_authority(
+        vault_binding_digest=VAULT_BINDING,
+        run_id=RUN_ID,
+        operation_id=OPERATION_ID,
+        journal_digest=JOURNAL_DIGEST,
+        phase="transport-stopping",
+        action="apply",
+    )
+    return consolidation_transport_verification.issue_exact_destination_binding(
+        authority,
+        journal_digest=JOURNAL_DIGEST,
+        basis=basis,
+    )
+
+
+def _transport_plan():
     from exomem.governance import consolidation_transport_verification
 
-    plan = consolidation_transport_verification.build_transport_verification_plan(
-        basis=_transport_basis(),
+    basis = _transport_basis()
+    return consolidation_transport_verification.build_transport_verification_plan(
+        basis=basis,
         contracts=_surface_contracts(),
+        exact_destination_binding=_exact_destination_binding(basis),
     )
+
+
+def test_transport_plan_binds_exact_real_cell_basis_and_every_surface_polarity() -> None:
+    plan = _transport_plan()
 
     assert plan.basis.destination_kind == "real"
     assert plan.basis.canonical_census_digest == CENSUS_DIGEST
@@ -163,8 +200,9 @@ def test_transport_plan_refuses_missing_surface_or_polarity(
         consolidation_transport_verification.ConsolidationTransportVerificationUnavailable
     ):
         consolidation_transport_verification.build_transport_verification_plan(
-            basis=_transport_basis(),
+            basis=(basis := _transport_basis()),
             contracts=contracts,
+            exact_destination_binding=_exact_destination_binding(basis),
         )
 
 
@@ -179,31 +217,50 @@ def test_transport_plan_refuses_missing_surface_or_polarity(
         ("principal_mapping_digest", "5" * 64),
         ("routing_stop_digest", "6" * 64),
         ("transport_supervisor_readiness_digest", "7" * 64),
+        ("hosted_profile_selection_record_digest", "8" * 64),
+        ("hosted_profile_selection_verifier_generation", 8),
+        ("hosted_owner_entitlement_verifier_readiness_digest", "a" * 64),
     ],
 )
-def test_each_transport_basis_field_changes_the_plan_digest(field: str, changed: str) -> None:
+def test_each_transport_basis_field_changes_the_plan_digest(field: str, changed: object) -> None:
     from exomem.governance import consolidation_transport_verification
 
-    baseline = consolidation_transport_verification.build_transport_verification_plan(
-        basis=_transport_basis(),
-        contracts=_surface_contracts(),
-    )
+    baseline = _transport_plan()
+    mutated_basis = _transport_basis(**{field: changed})
     mutated = consolidation_transport_verification.build_transport_verification_plan(
-        basis=_transport_basis(**{field: changed}),
+        basis=mutated_basis,
         contracts=_surface_contracts(),
+        exact_destination_binding=_exact_destination_binding(mutated_basis),
     )
     assert mutated.digest != baseline.digest
 
 
-def test_clone_transport_evidence_cannot_build_the_real_cell_gate() -> None:
+def test_exact_destination_binding_cannot_be_reused_after_basis_drift() -> None:
     from exomem.governance import consolidation_transport_verification
 
+    basis = _transport_basis()
+    binding = _exact_destination_binding(basis)
     with pytest.raises(
         consolidation_transport_verification.ConsolidationTransportVerificationUnavailable
     ):
         consolidation_transport_verification.build_transport_verification_plan(
-            basis=_transport_basis(destination_kind="clone"),
+            basis={**basis, "canonical_census_digest": "b" * 64},
             contracts=_surface_contracts(),
+            exact_destination_binding=binding,
+        )
+
+
+def test_caller_label_or_forged_binding_cannot_make_clone_evidence_real() -> None:
+    from exomem.governance import consolidation_transport_verification
+
+    basis = _transport_basis(destination_kind="real")
+    with pytest.raises(
+        consolidation_transport_verification.ConsolidationTransportVerificationUnavailable
+    ):
+        consolidation_transport_verification.build_transport_verification_plan(
+            basis=basis,
+            contracts=_surface_contracts(),
+            exact_destination_binding=object(),
         )
 
 
@@ -227,13 +284,17 @@ def test_exact_supervised_route_bypasses_only_read_admission_and_never_request_a
         with admission.admit_read():
             pass
 
+    plan = _transport_plan()
+    probe = next(
+        candidate
+        for candidate in plan.probes
+        if candidate.surface == "rest" and candidate.probe_kind == "positive"
+    )
     route = consolidation_transport_verification.issue_transport_probe_route(
         _probe_authority(),
-        vault_binding_digest=VAULT_BINDING,
-        run_id=RUN_ID,
-        operation_id=OPERATION_ID,
         journal_digest=JOURNAL_DIGEST,
-        probe_digest=PROBE_DIGEST,
+        plan=plan,
+        probe=probe,
     )
     request = {
         "command": "ask_memory",
@@ -243,16 +304,11 @@ def test_exact_supervised_route_bypasses_only_read_admission_and_never_request_a
     assert "authority" not in repr(request).lower()
     assert "probe_digest" not in repr(request)
 
-    with consolidation_transport_verification.transport_probe_route_scope(route):
-        consolidation_transport_verification.require_active_transport_probe_route(
-            probe_digest=PROBE_DIGEST
-        )
-        with pytest.raises(
-            consolidation_transport_verification.ConsolidationTransportVerificationUnavailable
-        ):
-            consolidation_transport_verification.require_active_transport_probe_route(
-                probe_digest="9" * 64
-            )
+    with consolidation_transport_verification.transport_probe_route_scope(
+        route,
+        plan=plan,
+        probe=probe,
+    ):
         with admission.admit_read():
             pass
         for enter in (
@@ -288,13 +344,13 @@ def test_transport_route_is_process_local_unforgeable_and_not_inherited_by_threa
         tmp_path,
         vault_binding_digest=VAULT_BINDING,
     )
+    plan = _transport_plan()
+    probe = plan.probes[0]
     route = consolidation_transport_verification.issue_transport_probe_route(
         _probe_authority(),
-        vault_binding_digest=VAULT_BINDING,
-        run_id=RUN_ID,
-        operation_id=OPERATION_ID,
         journal_digest=JOURNAL_DIGEST,
-        probe_digest=PROBE_DIGEST,
+        plan=plan,
+        probe=probe,
     )
     for serializer in (pickle.dumps, copy.copy, copy.deepcopy):
         with pytest.raises(TypeError):
@@ -309,13 +365,106 @@ def test_transport_route_is_process_local_unforgeable_and_not_inherited_by_threa
         except consolidation_admission.ConsolidationAdmissionUnavailable as error:
             failures.append(error.code)
 
-    with consolidation_transport_verification.transport_probe_route_scope(route):
+    with consolidation_transport_verification.transport_probe_route_scope(
+        route,
+        plan=plan,
+        probe=probe,
+    ):
         worker = threading.Thread(target=unrelated_client)
         worker.start()
         worker.join()
         with admission.admit_read():
             pass
     assert failures == ["CONSOLIDATION_SEALED"]
+
+
+def test_transport_route_is_revoked_in_async_child_when_parent_scope_exits(
+    tmp_path: Path,
+) -> None:
+    from exomem.governance import (
+        consolidation_admission,
+        consolidation_transport_verification,
+    )
+
+    _sealed_at_transport_verifying(tmp_path)
+    admission = consolidation_admission.ConsolidationAdmission(
+        tmp_path,
+        vault_binding_digest=VAULT_BINDING,
+    )
+    plan = _transport_plan()
+    probe = plan.probes[0]
+    route = consolidation_transport_verification.issue_transport_probe_route(
+        _probe_authority(),
+        journal_digest=JOURNAL_DIGEST,
+        plan=plan,
+        probe=probe,
+    )
+
+    async def exercise() -> str:
+        release = asyncio.Event()
+
+        async def delayed_child() -> str:
+            await release.wait()
+            try:
+                with admission.admit_read():
+                    pass
+            except consolidation_admission.ConsolidationAdmissionUnavailable as error:
+                return error.code
+            return "admitted"
+
+        with consolidation_transport_verification.transport_probe_route_scope(
+            route,
+            plan=plan,
+            probe=probe,
+        ):
+            child = asyncio.create_task(delayed_child())
+        release.set()
+        return await child
+
+    assert asyncio.run(exercise()) == "CONSOLIDATION_SEALED"
+
+
+def test_nonmember_probe_cannot_issue_or_enter_a_transport_route() -> None:
+    from exomem.governance import consolidation_transport_verification
+
+    plan = _transport_plan()
+    foreign_plan = _transport_plan()
+    foreign_probe = copy.copy(foreign_plan.probes[0])
+    forged_probe = consolidation_transport_verification.TransportProbe(
+        schema=foreign_probe.schema,
+        ordinal=foreign_probe.ordinal,
+        probe_id=foreign_probe.probe_id,
+        probe_kind=foreign_probe.probe_kind,
+        surface=foreign_probe.surface,
+        contract_digest=foreign_probe.contract_digest,
+        expected_result_digest=foreign_probe.expected_result_digest,
+        probe_digest="9" * 64,
+    )
+    with pytest.raises(
+        consolidation_transport_verification.ConsolidationTransportVerificationUnavailable
+    ):
+        consolidation_transport_verification.issue_transport_probe_route(
+            _probe_authority(),
+            journal_digest=JOURNAL_DIGEST,
+            plan=plan,
+            probe=forged_probe,
+        )
+
+    route = consolidation_transport_verification.issue_transport_probe_route(
+        _probe_authority(),
+        journal_digest=JOURNAL_DIGEST,
+        plan=plan,
+        probe=plan.probes[0],
+    )
+    with pytest.raises(
+        consolidation_transport_verification.ConsolidationTransportVerificationUnavailable
+    ):
+        with consolidation_transport_verification.transport_probe_route_scope(
+            route,
+            plan=plan,
+            probe=forged_probe,
+        ):
+            pass
 
 
 def test_wrong_transport_authority_or_binding_never_opens_probe_route() -> None:
@@ -337,20 +486,16 @@ def test_wrong_transport_authority_or_binding_never_opens_probe_route() -> None:
     ):
         consolidation_transport_verification.issue_transport_probe_route(
             wrong_phase,
-            vault_binding_digest=VAULT_BINDING,
-            run_id=RUN_ID,
-            operation_id=OPERATION_ID,
             journal_digest=JOURNAL_DIGEST,
-            probe_digest=PROBE_DIGEST,
+            plan=(plan := _transport_plan()),
+            probe=plan.probes[0],
         )
     with pytest.raises(
         consolidation_transport_verification.ConsolidationTransportVerificationUnavailable
     ):
         consolidation_transport_verification.issue_transport_probe_route(
             _probe_authority(),
-            vault_binding_digest="f" * 64,
-            run_id=RUN_ID,
-            operation_id=OPERATION_ID,
-            journal_digest=JOURNAL_DIGEST,
-            probe_digest=PROBE_DIGEST,
+            journal_digest="f" * 64,
+            plan=plan,
+            probe=plan.probes[0],
         )
