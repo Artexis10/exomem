@@ -1058,6 +1058,34 @@ function Assert-ExomemStoppedResumeAuthority {
     Write-Host "Explicit stopped-transition recovery authority proven: $ServiceName"
 }
 
+function Test-ExomemProcessTreeMembership {
+    <# Prove that CandidatePid is RootPid or one of its descendants. #>
+    param(
+        [int]$RootPid,
+        [int]$CandidatePid,
+        [int]$MaxDepth = 64
+    )
+
+    if ($RootPid -le 0 -or $CandidatePid -le 0 -or $MaxDepth -le 0) { return $false }
+    $currentPid = $CandidatePid
+    $seen = @{}
+    foreach ($depth in 1..$MaxDepth) {
+        if ($currentPid -eq $RootPid) { return $true }
+        if ($currentPid -le 0 -or $seen.ContainsKey($currentPid)) { return $false }
+        $seen[$currentPid] = $true
+        try {
+            $process = Get-CimInstance Win32_Process `
+                -Filter "ProcessId=$currentPid" `
+                -ErrorAction Stop | Select-Object -First 1
+        } catch {
+            return $false
+        }
+        if (-not $process) { return $false }
+        $currentPid = [int]$process.ParentProcessId
+    }
+    return $false
+}
+
 function Assert-ExomemListenerOwnedByWorker {
     param(
         [string]$ServiceName = "exomem",
@@ -1068,12 +1096,15 @@ function Assert-ExomemListenerOwnedByWorker {
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
     do {
         $listeners = @(Get-ExomemConfiguredListenerPids -ServiceName $ServiceName)
-        if ($listeners.Count -eq 1 -and [int]$listeners[0] -eq $WorkerPid) {
-            Write-Host "Configured listener belongs to the selected worker: $WorkerPid"
-            return
+        if ($listeners.Count -eq 1) {
+            $listenerPid = [int]$listeners[0]
+            if (Test-ExomemProcessTreeMembership -RootPid $WorkerPid -CandidatePid $listenerPid) {
+                Write-Host "Configured listener belongs to the selected worker process tree: $WorkerPid -> $listenerPid"
+                return
+            }
         }
         if ($listeners.Count -ne 0) {
-            throw "The configured listener is not owned by the newly selected service worker pid $WorkerPid."
+            throw "The configured listener is not owned by the newly selected service worker process tree rooted at pid $WorkerPid."
         }
         Start-Sleep -Milliseconds 250
     } while ((Get-Date) -lt $deadline)
