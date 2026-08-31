@@ -4127,6 +4127,17 @@ def active_mutation_request_id() -> str | None:
     return trace[0] if trace is not None else None
 
 
+def active_mutation_committed() -> bool:
+    """Whether this invocation's canonical writer already crossed its commit boundary.
+
+    The read side of `mark_active_mutation_committed`, and the one honest signal
+    for "this invocation will have a committed terminal to carry an advisory on".
+    False outside an invocation, on a verified replay (which writes nothing), and
+    on any pass that found nothing to commit.
+    """
+    return _ACTIVE_MUTATION_COMMITTED.get()
+
+
 def active_direct_mutation_guard(vault_root: os.PathLike[str] | str, *, state_root: Path) -> bool:
     """Return whether this thread owns this manager-root boundary directly."""
     boundary = _direct_mutation_boundary(vault_root, state_root)

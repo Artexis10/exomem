@@ -8,6 +8,12 @@ most one block" a mechanism rather than an accident of where the terminal sits.
 
 The first test is the GAP PROOF: the projection file records neither count, and
 there is no batch scope to wrap a bulk command in.
+
+Two tests here were built as tripwires on the missing bulk carrier and have
+been INVERTED by `extend-due-state-to-bulk-carriers`, which made the operation
+leaves carriers: `test_a_multi_write_command_carries_one_block` and
+`test_the_batch_scope_on_this_leaf_suppresses_nothing_today`. Their old
+expectation — the measured zero — is what their red run proved had changed.
 """
 
 from __future__ import annotations
@@ -263,11 +269,18 @@ def test_a_multi_write_command_carries_one_block(vault: Path) -> None:
     command path — so the mutation terminal that admits the block actually runs;
     calling the leaf directly skips the only code that can put one there.
 
-    The assertion is the MEASURED truth for this leaf — the response carries no
-    block at all — and not the weaker `<= 1`. A dict cannot hold a key twice, so
-    counting `due_state` keys in a response could only ever return 0 or 1 and
-    `<= 1` was a tautology dressed as a governance check. What actually bounds
-    this leaf is measured and is NOT the batch scope: see
+    INVERTED on purpose, and this was the tripwire that said so. Until the
+    operation leaves became carriers, this asserted the measured zero — the
+    response carried no block at all — and its docstring named the day it would
+    have to change. That day is `extend-due-state-to-bulk-carriers`: twelve
+    governed writes in one invocation, one block at its terminal, one emission
+    in the ledger.
+
+    Still not the weaker `<= 1`. A dict cannot hold a key twice, so counting
+    `due_state` keys in a response could only ever return 0 or 1 and `<= 1` was
+    a tautology dressed as a governance check. What bounds this leaf to one is
+    the response terminal, which runs once per invocation — and that is still
+    NOT the batch scope: see
     `test_the_batch_scope_on_this_leaf_suppresses_nothing_today` below.
     """
     overdue_prediction(vault)
@@ -278,27 +291,35 @@ def test_a_multi_write_command_carries_one_block(vault: Path) -> None:
 
     response = _adopt_twelve(vault)
 
-    assert "due_state" not in response, response
+    assert "due_state" in response, response
     ledger = _projection(vault)["emission"]
     assert ledger["writes"] - before["writes"] == 12
-    assert ledger["emissions"] - before["emissions"] == 0
+    assert ledger["emissions"] - before["emissions"] == 1
 
 
 def test_the_batch_scope_on_this_leaf_suppresses_nothing_today(vault: Path) -> None:
-    """Measured, because "the scope keeps it to one block" was never verified.
+    """Compare independent sessions, because the leaf's scope suppresses nothing.
 
-    `op_adopt_vault` reaches the write carrier ZERO times: `op_adopt` copies
-    files through the vault writer and `_apply_batch_deltas` then applies the
-    projection deltas with `apply_write_delta`, which produces no block. So the
-    scope on this leaf suppresses nothing, and removing it changes nothing — the
-    one block the caller can receive is bounded by the response terminal (D9),
-    which runs once per invocation whatever the scope did.
+    `op_adopt_vault` still reaches the PER-WRITE carrier ZERO times, and that
+    half of the measurement is unchanged by
+    `extend-due-state-to-bulk-carriers`: `op_adopt` copies files through the
+    vault writer and `_apply_batch_deltas` applies the projection deltas with
+    `apply_write_delta`, which produces no block. The block the leaf now carries
+    is a BATCH block — `due_state.block_for_batch`, served once at the end of the
+    invocation — so the scope on this leaf still suppresses nothing, and removing
+    it still changes nothing. What bounds the caller to one block is the response
+    terminal (D9), which runs once per invocation whatever the scope did.
+
+    Both independent-session runs now carry: reset the process-local governor
+    between them so change-only quieting cannot mask whether removing the scope
+    altered the terminal delivery.
 
     This is pinned rather than left implicit because the scope IS load-bearing
-    at the carrier (`test_removing_the_batch_scope_emits_once_per_write`), and
-    the difference between "defends nothing yet" and "defends nothing ever"
-    matters: the day this leaf commits through `semantic_writes`, the carrier
-    count below stops being zero and this test says so.
+    at the per-write carrier
+    (`test_removing_the_batch_scope_emits_once_per_write`), and the difference
+    between "defends nothing yet" and "defends nothing ever" matters: the day
+    this leaf commits through `semantic_writes`, the carrier count below stops
+    being zero and this test says so.
 
     The unscoped leg is a real removal — `due_state.batch_scope` monkeypatched
     to a no-op, so the leaf genuinely runs without it. An earlier version wrapped
@@ -324,6 +345,7 @@ def test_the_batch_scope_on_this_leaf_suppresses_nothing_today(vault: Path) -> N
         scoped_calls = list(carried)
 
         carried.clear()
+        due_state_module.reset_emission_state()
         due_state_module.batch_scope = lambda *a, **k: contextlib.nullcontext()
         try:
             unscoped = _adopt_twelve(vault, directory="legacy2")
@@ -336,8 +358,8 @@ def test_the_batch_scope_on_this_leaf_suppresses_nothing_today(vault: Path) -> N
 
     assert scoped_calls == [], "the scoped leaf reached the write carrier"
     assert unscoped_calls == [], "the leaf reached the write carrier without the scope"
-    assert "due_state" not in scoped
-    assert "due_state" not in unscoped
+    assert "due_state" in scoped, scoped
+    assert "due_state" in unscoped, unscoped
 
 
 def test_the_ledger_records_the_size_of_the_block_it_delivered(vault: Path) -> None:

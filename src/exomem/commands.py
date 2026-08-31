@@ -5438,9 +5438,15 @@ def op_preserve_artifacts(
     # One invocation preserves N artifacts. The batch scope is what keeps that
     # one counters block rather than N: see `due_state.batch_scope`.
     with due_state_module.batch_scope(vault_root):
-        return client_artifacts.preserve_artifacts(
+        result = client_artifacts.preserve_artifacts(
             vault_root, scope=scope, category=category, files=files
         )
+    # No batch deltas: Evidence blobs author no predictions, questions,
+    # experiments or supersession pointers, so this leaf's own writes never move
+    # a projected category (design D3). The carriage value is the session
+    # channel — a first qualifying response, and change-only deltas from
+    # elsewhere in the conversation.
+    return _carrying_due_state(vault_root, result)
 
 
 def op_transfer_artifact(
@@ -5504,7 +5510,11 @@ def op_process_media(
     # Bounded all-media work writes one transcript per artifact, so the no-path
     # form is a batch and must not deliver one counters block per artifact.
     with due_state_module.batch_scope(vault_root):
-        return _process_media(vault_root, path=path, operation=operation)
+        result = _process_media(vault_root, path=path, operation=operation)
+    # `retry` re-enqueues in the machine-local job store and commits nothing, so
+    # the commit gate inside the carrier keeps it silent — that is the contract,
+    # not an omission.
+    return _carrying_due_state(vault_root, result)
 
 
 def _process_media(
@@ -5926,6 +5936,22 @@ def _adopted_paths(result: Any) -> list[str]:
     return list(dict.fromkeys(out))
 
 
+def _audit_fix_paths(result: Any) -> list[str]:
+    """The pages a `fix` pass actually rewrote, in first-seen order.
+
+    Read off `fixed` rather than `files_rewritten`, which is a count. A dry-run
+    preview reports the same rows without having written them, so it is excluded
+    here as well as by the carrier's commit gate.
+    """
+    if not isinstance(result, dict) or result.get("dry_run"):
+        return []
+    out: list[str] = []
+    for row in result.get("fixed") or []:
+        if isinstance(row, dict) and isinstance(row.get("path"), str):
+            out.append(row["path"])
+    return list(dict.fromkeys(out))
+
+
 def _apply_batch_deltas(vault_root: Path, rel_paths: list[str]) -> None:
     """Bring the due-state projection up to date for a batch's governed writes.
 
@@ -5945,6 +5971,49 @@ def _apply_batch_deltas(vault_root: Path, rel_paths: list[str]) -> None:
             due_state_module.apply_write_delta(vault_root, rel_path)
         except Exception:  # noqa: BLE001 — a projection delta never breaks a write
             log.debug("due-state delta failed for %s", rel_path, exc_info=True)
+
+
+def _carrying_due_state(vault_root: Path, result: Any) -> Any:
+    """Attach the post-batch advisory due-state block for the terminal to decide on.
+
+    The operation leaves are batch carriers: one invocation commits many governed
+    writes, so the block belongs at the end of the batch rather than once per
+    write. The batch scope each leaf already opens keeps the governor quiet
+    throughout; this runs after the batch's deltas have been applied, so the
+    number served is the projection AFTER the batch and not a stale read.
+
+    Produces only, exactly like `semantic_writes._due_state_block` and
+    `records._due_state_block`: emission is decided at the mutation terminal,
+    which is the only place that knows whether the response will actually carry
+    the block. The vault rides along under the same server-internal `_vault` key
+    the terminal reads for the emission key and never puts on the wire.
+
+    Gated on an actual commit (design D1). Carriage rides the committed terminal,
+    which exists only when `mark_active_mutation_committed` fired: a clean-vault
+    repair pass, already-valid media, a `retry` re-enqueue and a verified replay
+    all commit nothing, have no terminal to carry a block on, and would otherwise
+    leak an ungoverned advisory — plus `_vault` — straight into a raw leaf result.
+    The gate is also what keeps `structured-files`' closed receipt shape valid on
+    the replay path that validates it.
+
+    A failure here costs the caller an advisory and never the operation.
+    """
+    from .writer_lease import active_mutation_committed
+
+    if not isinstance(result, dict) or "due_state" in result:
+        return result
+    if not active_mutation_committed():
+        return result
+    try:
+        from . import due_state as due_state_module
+
+        block = due_state_module.block_for_batch(vault_root)
+    except Exception:  # noqa: BLE001 — an advisory never breaks a committed batch
+        log.debug("due-state batch block failed (non-fatal)", exc_info=True)
+        return result
+    if not block:
+        return result
+    return {**result, "due_state": {**block, "_vault": str(vault_root)}}
 
 
 def _set_family_disposition(
@@ -6493,7 +6562,7 @@ def op_adopt_vault(
             semantic_example_limit=semantic_example_limit,
         )
         _apply_batch_deltas(vault_root, _adopted_paths(result))
-    return result
+    return _carrying_due_state(vault_root, result)
 
 
 _ADOPTION_STUDIO_ACTIONS = (
@@ -6638,7 +6707,7 @@ def op_adoption_studio(
                     only_paths=only_paths,
                 )
                 _apply_batch_deltas(vault_root, _adoption_run_paths(applied))
-            return applied
+            return _carrying_due_state(vault_root, applied)
         if action == "cancel":
             return adoption_run_module.cancel(vault_root, run_id=run_id, why=why)
         if action == "finish":
@@ -6656,14 +6725,21 @@ def op_adoption_studio(
             )
         if action == "propose":
             return proposals_module.propose(vault_root, run_id=run_id, proposals=proposals or [])
-        # apply-proposal
-        return proposals_module.apply_proposal(
-            vault_root,
-            ref=ref,
-            expected_fingerprint=expected_fingerprint,
-            why=why,
-            expected_hash=expected_hash,
-        )
+        # apply-proposal. The other six registry actions are run bookkeeping or
+        # previews and deliberately do NOT carry: letting a `plan` preview
+        # deliver would burn the session's single change-only emission before
+        # the apply the caller is actually waiting on (design D2).
+        from . import due_state as due_state_module
+
+        with due_state_module.batch_scope(vault_root):
+            applied_proposal = proposals_module.apply_proposal(
+                vault_root,
+                ref=ref,
+                expected_fingerprint=expected_fingerprint,
+                why=why,
+                expected_hash=expected_hash,
+            )
+        return _carrying_due_state(vault_root, applied_proposal)
     except adoption_run_module.AdoptionRunError as exc:
         raise ValueError(f"{exc.code}: {exc.reason}") from exc
     except Exception as exc:  # structured proposal errors carry code/reason
@@ -6759,13 +6835,20 @@ def op_maintain_memory(
             raise ValueError(
                 "INVALID_ARGUMENTS: structured-files apply requires true and exact preview guards"
             )
-        return structured_files_module.apply(
-            vault_root,
-            collection,
-            plan_id=plan_id,
-            source_snapshot=source_snapshot,
-            why=why,
-        )
+        from . import due_state as due_state_module
+
+        with due_state_module.batch_scope(vault_root):
+            migrated = structured_files_module.apply(
+                vault_root,
+                collection,
+                plan_id=plan_id,
+                source_snapshot=source_snapshot,
+                why=why,
+            )
+        # Renames and rendered bodies, not authored obligations, so no batch
+        # deltas. A verified replay commits nothing and the carrier's commit
+        # gate keeps its closed receipt shape untouched.
+        return _carrying_due_state(vault_root, migrated)
     if mode == "audit":
         return op_audit(
             vault_root,
@@ -6780,23 +6863,35 @@ def op_maintain_memory(
         # the whole projection: both are batches, and neither should be able to
         # deliver one counters block per file it touched.
         with due_state_module.batch_scope(vault_root):
-            return op_audit_fix(
+            report = op_audit_fix(
                 vault_root,
                 dry_run=True if dry_run is None else dry_run,
                 rebuild_embeddings=rebuild_embeddings,
             )
+            # `fix` has no full recompute of its own — unlike `reconcile`, which
+            # heals the whole projection — so without these deltas the block it
+            # carries would describe the vault as it was BEFORE the pass that
+            # just rewrote it (design D3, task 1.5).
+            _apply_batch_deltas(vault_root, _audit_fix_paths(report))
+        return _carrying_due_state(vault_root, report)
     if mode == "reconcile":
         with due_state_module.batch_scope(vault_root):
-            return op_reconcile(
+            # No batch deltas here on purpose: `op_reconcile` already runs
+            # `due_state.reconcile`, a full recompute, which is a strictly
+            # stronger settlement than a per-path delta (design D3, task 1.5).
+            report = op_reconcile(
                 vault_root,
                 dry_run=False if dry_run is None else dry_run,
                 rebuild_graph=rebuild_graph,
             )
+        return _carrying_due_state(vault_root, report)
     if mode == "backfill-ids":
         with due_state_module.batch_scope(vault_root):
-            return memory_refs_module.backfill_ids(
+            report = memory_refs_module.backfill_ids(
                 vault_root, dry_run=True if dry_run is None else dry_run
             )
+            _apply_batch_deltas(vault_root, list(report.get("updated") or []))
+        return _carrying_due_state(vault_root, report)
     raise ValueError(
         "INVALID_MODE: maintain_memory mode must be audit, fix, reconcile, "
         "backfill-ids, or structured-files"
