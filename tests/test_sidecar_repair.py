@@ -181,7 +181,7 @@ def test_clean_sentinel_preserved_notes_are_not_repaired() -> None:
     assert sidecar_repair.analyze(content, Path("sentinel.pdf.md")) is None
 
 
-def test_empty_extraction_recovers_sentinel_marked_repeated_residual() -> None:
+def test_empty_extraction_keeps_sentinel_marked_repeated_residual_without_candidate() -> None:
     block = "# Repeated document\n\n## Body\n\nExact content."
     content = _empty_extraction_with_preserved_residual("\n\n".join([block] * 3)).replace(
         "## Preserved notes",
@@ -190,35 +190,44 @@ def test_empty_extraction_recovers_sentinel_marked_repeated_residual() -> None:
 
     repaired = sidecar_repair.repair(content)
 
-    assert repaired.count(block) == 1
-    assert sidecar_repair.PRESERVED_HEADING not in repaired
+    assert repaired == content
+    damage = sidecar_repair.analyze(content, Path("sentinel.pdf.md"))
+    assert damage is not None
+    assert damage.recovered_chars == 0
 
 
-def test_empty_extraction_refuses_ambiguous_periodic_residual() -> None:
+@pytest.mark.parametrize(
+    ("halves", "units"),
+    [(2, 3), (2, 4), (2, 5), (3, 3), (3, 4), (4, 3)],
+)
+def test_empty_extraction_refuses_ambiguous_periodic_residual(
+    halves: int, units: int
+) -> None:
     half = "# Repeated half\n\n## Body\n\nExact content."
-    unit = f"{half}\n\n{half}"
-    residual = "\n\n".join([unit] * 3)
+    unit = "\n\n".join([half] * halves)
+    residual = "\n\n".join([unit] * units)
     content = _empty_extraction_with_preserved_residual(residual)
 
     repaired = sidecar_repair.repair(content)
 
-    assert sidecar_repair.PRESERVED_HEADING in repaired
-    assert residual in repaired
+    assert repaired == content
+    damage = sidecar_repair.analyze(content, Path("periodic.pdf.md"))
+    assert damage is not None
+    assert damage.recovered_chars == 0
+    assert sidecar_repair.repair_is_safe(content, repaired)
 
 
-def test_empty_extraction_recovers_repeated_preserved_block() -> None:
+def test_empty_extraction_keeps_repeated_preserved_block_without_candidate() -> None:
     block = "# Product MVP Requirements\n\n## Overview\n\nA requirement.\n\n## Scope\n\nAnother requirement."
     content = _empty_extraction_with_preserved_residual("\n\n".join([block] * 100))
 
     repaired = sidecar_repair.repair(content)
-    damage = sidecar_repair.analyze(content, Path("requirements.xlsx.md"))
 
-    assert repaired.count(block) == 1
-    assert sidecar_repair.PRESERVED_HEADING not in repaired
-    assert damage is not None and damage.recovery_only
-    assert damage.recovered_chars == len(block)
+    assert repaired == content
+    damage = sidecar_repair.analyze(content, Path("requirements.xlsx.md"))
+    assert damage is not None
+    assert damage.recovered_chars == 0
     assert sidecar_repair.repair_is_safe(content, repaired)
-    assert sidecar_repair.repair(repaired) == repaired
 
 
 @pytest.mark.parametrize("copies", [2, 3])

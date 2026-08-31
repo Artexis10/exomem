@@ -2341,6 +2341,83 @@ def test_child_marks_explicit_cuda_refusal_blocked_with_runtime_remediation(
     assert "runtime" in status["next_action"]
 
 
+def test_child_blocks_ambiguous_sidecar_boundary_without_writing_it(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    result = _preserve_media_stub(vault, filename="ambiguous-boundary.m4a")
+    sidecar = vault / result.sidecar_path
+    sidecar.write_text(
+        sidecar.read_text(encoding="utf-8")
+        + "# Existing document heading\n\n## Preserved notes\n\nAuthored note.\n",
+        encoding="utf-8",
+    )
+    before = sidecar.read_bytes()
+    monkeypatch.setattr(
+        extract,
+        "extract_text",
+        lambda *_args, **_kwargs: extract.ExtractResult(
+            text="[0:00] Fresh transcript.",
+            media_type="audio",
+            engine="faster-whisper:test",
+        ),
+    )
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(
+        media_jobs.MediaJob(
+            binary_path=vault / result.path,
+            sidecar_path=sidecar,
+            media_type="audio",
+        )
+    )
+
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
+
+    [status] = media_jobs.status(vault)["jobs"]
+    assert status["state"] == media_jobs.BLOCKED
+    assert status["retryable"] is True
+    assert status["error"].startswith("AMBIGUOUS_SIDECAR_BOUNDARY:")
+    assert status["next_action"] == "review the sidecar's preserved-notes boundary, then retry"
+    assert sidecar.read_bytes() == before
+
+
+def test_child_keeps_other_preserve_errors_as_failed_extraction(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    result = _preserve_media_stub(vault, filename="other-preserve-error.m4a")
+    monkeypatch.setattr(
+        extract,
+        "extract_text",
+        lambda *_args, **_kwargs: extract.ExtractResult(
+            text="[0:00] Fresh transcript.",
+            media_type="audio",
+            engine="faster-whisper:test",
+        ),
+    )
+
+    def _other_preserve_error(*_args, **_kwargs):
+        raise preserve.PreserveError("OTHER_PRESERVE_ERROR", [], "unexpected write refusal")
+
+    monkeypatch.setattr(preserve, "update_sidecar_extraction", _other_preserve_error)
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(
+        media_jobs.MediaJob(
+            binary_path=vault / result.path,
+            sidecar_path=vault / result.sidecar_path,
+            media_type="audio",
+        )
+    )
+
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
+
+    [status] = media_jobs.status(vault)["jobs"]
+    assert status["state"] == media_jobs.FAILED
+    assert status["error"].startswith("PreserveError:")
+
+
 def test_child_circuit_breaks_following_asr_jobs_after_cuda_failure(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:

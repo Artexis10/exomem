@@ -476,15 +476,21 @@ class MediaWorker:
         text = result.text.strip() or "(no text detected)"
         committed = False
         for commit_attempt in range(3):
-            committed = self._commit_sidecar_extraction(
-                job,
-                expected_sidecar=expected_sidecar,
-                expected_binary=expected_binary,
-                text=text,
-                engine=result.engine,
-                speakers=result.speakers,
-                speaker_verification=result.speaker_verification or "unavailable",
-            )
+            try:
+                committed = self._commit_sidecar_extraction(
+                    job,
+                    expected_sidecar=expected_sidecar,
+                    expected_binary=expected_binary,
+                    text=text,
+                    engine=result.engine,
+                    speakers=result.speakers,
+                    speaker_verification=result.speaker_verification or "unavailable",
+                )
+            except preserve.PreserveError as exc:
+                if exc.code != "AMBIGUOUS_SIDECAR_BOUNDARY":
+                    raise
+                error = f"{exc.code}: {exc.reason}"
+                return _ProcessOutcome(BLOCKED, error)
             if committed:
                 break
             if (

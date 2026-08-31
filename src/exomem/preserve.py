@@ -943,6 +943,22 @@ def _has_ambiguous_legacy_preserved_notes(content: str) -> bool:
     return notes != -1 and bool(content[start:notes].strip())
 
 
+def _is_repeated_extraction_residual(boundary: str, text: str) -> bool:
+    """Whether a trusted notes section is only repeated fresh extraction output."""
+    marker = f"{SIDECAR_PRESERVED_NOTES_SENTINEL}\n"
+    if boundary.startswith(marker):
+        boundary = boundary.removeprefix(marker)
+    prefix = "## Preserved notes\n\n"
+    if not boundary.startswith(prefix):
+        return False
+    extraction = text.strip()
+    if not extraction:
+        return False
+    residual = boundary.removeprefix(prefix).strip()
+    copy = re.escape(extraction)
+    return re.fullmatch(rf"{copy}(?:\s+{copy}){{2,}}", residual) is not None
+
+
 def update_sidecar_extraction(
     vault_root: Path, sidecar_path: Path, *, text: str, engine: str,
     speakers: list[dict] | None = None,
@@ -1197,6 +1213,10 @@ def _set_extracted_text(content: str, text: str) -> str:
     if after == -1:
         return content[:idx] + block
     boundary = content[after + 1 :]
+    if (after == boundaries[0] or legacy_preserved) and _is_repeated_extraction_residual(
+        boundary, text
+    ):
+        return content[:idx] + block
     if legacy_preserved:
         boundary = f"{SIDECAR_PRESERVED_NOTES_SENTINEL}\n{boundary}"
     return content[:idx] + block + "\n" + boundary

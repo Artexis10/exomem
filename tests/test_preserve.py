@@ -194,11 +194,11 @@ def test_update_sidecar_extraction_keeps_renderer_artifact_after_internal_headin
 
 
 @pytest.mark.parametrize(
-    ("heading", "updates_extraction"),
-    [("## Artifact", True), ("## Preserved notes", False)],
+    ("heading", "declines"),
+    [("## Artifact", False), ("## Preserved notes", True)],
 )
 def test_update_sidecar_extraction_does_not_treat_document_titles_as_boundaries(
-    vault: Path, heading: str, updates_extraction: bool
+    vault: Path, heading: str, declines: bool
 ) -> None:
     result = preserve_module.preserve_bytes(
         vault, scope="Test", category="docs", filename="collision.docx", data=b"BINARY"
@@ -210,18 +210,24 @@ def test_update_sidecar_extraction_does_not_treat_document_titles_as_boundaries(
     )
     first = "# First H1\n\n## First H2\n\nFirst extraction."
     second = "# Second H1\n\n## Second H2\n\nSecond extraction."
+    before = sidecar.read_bytes()
+
+    if declines:
+        with pytest.raises(preserve_module.PreserveError) as raised:
+            preserve_module.update_sidecar_extraction(
+                vault, sidecar, text=first, engine="markitdown"
+            )
+        assert raised.value.code == "AMBIGUOUS_SIDECAR_BOUNDARY"
+        assert sidecar.read_bytes() == before
+        return
 
     preserve_module.update_sidecar_extraction(vault, sidecar, text=first, engine="markitdown")
     preserve_module.update_sidecar_extraction(vault, sidecar, text=second, engine="markitdown")
 
     body = _read(sidecar)
-    if updates_extraction:
-        assert body.count(second) == 1
-        assert "First extraction." not in body
-        assert "Literal document section." not in body
-    else:
-        assert second not in body
-        assert body.count("Literal document section.") == 1
+    assert body.count(second) == 1
+    assert "First extraction." not in body
+    assert "Literal document section." not in body
 
 
 @pytest.mark.parametrize(
@@ -276,6 +282,90 @@ def test_update_sidecar_extraction_upgrades_empty_legacy_preserved_notes() -> No
 
     assert _PRESERVED_NOTES_SENTINEL in updated
     assert updated.endswith("## Preserved notes\n\nKeep this authored note.\n")
+
+
+def test_update_sidecar_extraction_drops_owned_repeated_known_extraction(vault: Path) -> None:
+    result = preserve_module.preserve_bytes(
+        vault, scope="Test", category="docs", filename="repeated.docx", data=b"BINARY"
+    )
+    sidecar = vault / result.sidecar_path
+    extraction = "# Repeated document\n\n## Body\n\nExact content."
+    sidecar.write_text(
+        _read(sidecar)
+        + f"{_PRESERVED_NOTES_SENTINEL}\n## Preserved notes\n\n"
+        + "\n\n".join([extraction] * 3)
+        + "\n",
+        encoding="utf-8",
+    )
+
+    preserve_module.update_sidecar_extraction(
+        vault, sidecar, text=extraction, engine="markitdown"
+    )
+
+    updated = _read(sidecar)
+    assert updated.count(extraction) == 1
+    assert _PRESERVED_NOTES_SENTINEL not in updated
+    assert "## Preserved notes" not in updated
+
+
+def test_update_sidecar_extraction_drops_legacy_repeated_known_extraction(vault: Path) -> None:
+    result = preserve_module.preserve_bytes(
+        vault, scope="Test", category="docs", filename="legacy-repeated.docx", data=b"BINARY"
+    )
+    sidecar = vault / result.sidecar_path
+    extraction = "# Repeated document\n\n## Body\n\nExact content."
+    sidecar.write_text(
+        _read(sidecar)
+        + "## Preserved notes\n\n"
+        + "\n\n".join([extraction] * 3)
+        + "\n",
+        encoding="utf-8",
+    )
+
+    preserve_module.update_sidecar_extraction(
+        vault, sidecar, text=extraction, engine="markitdown"
+    )
+
+    updated = _read(sidecar)
+    assert updated.count(extraction) == 1
+    assert _PRESERVED_NOTES_SENTINEL not in updated
+    assert "## Preserved notes" not in updated
+
+
+@pytest.mark.parametrize(
+    ("residual", "copies", "prose"),
+    [
+        ("two", 2, None),
+        ("differing", 3, "The author added this note."),
+    ],
+)
+def test_update_sidecar_extraction_keeps_unproven_preserved_residual(
+    vault: Path, residual: str, copies: int, prose: str | None
+) -> None:
+    result = preserve_module.preserve_bytes(
+        vault, scope="Test", category="docs", filename=f"{residual}.docx", data=b"BINARY"
+    )
+    sidecar = vault / result.sidecar_path
+    extraction = "# Repeated document\n\n## Body\n\nExact content."
+    notes = "\n\n".join([extraction] * copies)
+    if prose:
+        notes += f"\n\n{prose}"
+    sidecar.write_text(
+        _read(sidecar)
+        + f"{_PRESERVED_NOTES_SENTINEL}\n## Preserved notes\n\n{notes}\n",
+        encoding="utf-8",
+    )
+
+    preserve_module.update_sidecar_extraction(
+        vault, sidecar, text=extraction, engine="markitdown"
+    )
+
+    updated = _read(sidecar)
+    assert updated.count(extraction) == copies + 1
+    assert _PRESERVED_NOTES_SENTINEL in updated
+    assert "## Preserved notes" in updated
+    if prose:
+        assert prose in updated
 
 
 def test_update_sidecar_extraction_declines_ambiguous_legacy_notes_before_metadata_write(

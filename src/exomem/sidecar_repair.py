@@ -13,8 +13,8 @@ one left behind. It is deliberately conservative:
 
 * The longest surviving `## Extracted text` block wins. That matters — for the
   sidecars whose top-level block was blanked by a re-render, the ONLY copy of the
-  extraction lives in a nested `## Preserved notes` section, so truncating at the
-  first heading (the obvious repair) would destroy it.
+  extraction can live in a nested `## Preserved notes` section, so truncating at
+  the first heading (the obvious repair) would destroy it.
 * Prose that is not regenerated scaffolding is kept, deduplicated, under a single
   `## Preserved notes` heading.
 * Frontmatter is never rewritten here. A sidecar left `extracted_by: pending`
@@ -76,65 +76,10 @@ def _is_repeated_extraction_residual(residual: str, extraction: str) -> bool:
     return re.fullmatch(rf"{copy}(?:\s+{copy})*", residual) is not None
 
 
-def _repeated_residual_block(residual: str, *, minimum_copies: int = 3) -> str | None:
-    """Recover one block only when the entire residual proves exact repetition."""
-    first_line_end = residual.find("\n")
-    if first_line_end == -1:
-        first_space = next((i for i, char in enumerate(residual) if char.isspace()), len(residual))
-        anchor = residual[:first_space]
-    else:
-        anchor = residual[: first_line_end + 1]
-    if not anchor.strip():
-        return None
-    position = residual.find(anchor, len(anchor))
-    attempts = 0
-    while position != -1 and attempts < 64:
-        attempts += 1
-        block = residual[:position].rstrip()
-        copies = _exact_block_run_count(residual, block)
-        # Six primitive copies cannot prove whether this was six documents or
-        # three documents whose bodies happen to have two identical halves.
-        if copies == minimum_copies * 2:
-            return None
-        if copies >= minimum_copies:
-            return block
-        position = residual.find(anchor, position + 1)
-    return None
-
-
-def _exact_block_run_count(residual: str, block: str) -> int:
-    """Return whole-block copies when all of `residual` is an exact run."""
-    position = 0
-    copies = 0
-    while residual.startswith(block, position):
-        copies += 1
-        position += len(block)
-        if position == len(residual):
-            return copies
-        separator_start = position
-        while position < len(residual) and residual[position].isspace():
-            position += 1
-        if position == separator_start:
-            return 0
-        if position == len(residual):
-            return copies
-    return 0
-
-
 def _selected_extraction(segments: list[tuple[str, str]]) -> str:
-    """Return the longest extraction or an exactly provable recovered block."""
+    """Return the longest actual extraction block, if one survives."""
     blocks = [extraction.strip() for _prose, extraction in segments if extraction.strip()]
-    if blocks:
-        return max(blocks, key=len)
-    top = segments[0][1].strip() if segments else ""
-    if top:
-        return ""
-    residuals = [
-        _BOILERPLATE_RE.sub("", prose).strip()
-        for prose, _extraction in segments[1:]
-        if _BOILERPLATE_RE.sub("", prose).strip()
-    ]
-    return (_repeated_residual_block(residuals[0]) or "") if len(residuals) == 1 else ""
+    return max(blocks, key=len) if blocks else ""
 
 
 @dataclass(frozen=True)
@@ -167,18 +112,19 @@ def analyze(content: str, path: Path) -> SidecarDamage | None:
     body = body if raw is not None else logical_content
     if PRESERVED_HEADING not in body:
         return None
-    # A single `## Preserved notes` holding genuine prose is the correct end
-    # state, not damage — so "damaged" means "the repair would change this",
-    # which also makes a repaired vault report clean on the next pass.
-    repaired = repair(content)
-    if _logical_text(repaired) == logical_content:
-        return None
     segments = _segments(body)
     blocks = _extraction_blocks(body)
     # Deliberately the FIRST segment's block, empty or not — an empty one is what
     # makes a sidecar recovery-only.
     top = segments[0][1].strip() if segments else ""
     best = _selected_extraction(segments)
+    # A single `## Preserved notes` holding genuine prose is the correct end
+    # state, not damage — so "damaged" means "the repair would change this",
+    # which also makes a repaired vault report clean on the next pass.
+    repaired = repair(content)
+    if _logical_text(repaired) == logical_content:
+        if top or best:
+            return None
     return SidecarDamage(
         path=path,
         depth=body.count(PRESERVED_HEADING),
@@ -203,6 +149,10 @@ def repair(content: str) -> str:
     has_preserved_sentinel = f"{PRESERVED_NOTES_SENTINEL}\n{PRESERVED_HEADING}" in body
     segments = _segments(body)
     best = _selected_extraction(segments)
+    if not best:
+        # Repetition alone cannot prove what one authored preserved unit was.
+        # A fresh worker extraction is the only safe candidate for that cleanup.
+        return content
 
     head_text = "\n\n".join(
         line.strip() for line in _BOILERPLATE_RE.findall(segments[0][0]) if line.strip()

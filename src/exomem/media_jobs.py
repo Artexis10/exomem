@@ -1279,6 +1279,8 @@ def _status_job(row: Any) -> dict[str, Any]:
         )
     if state == BLOCKED and error and error.startswith("MediaRuntimeUnavailable:"):
         actions[BLOCKED] = "fix the media runtime configuration, restart the service, then retry"
+    if state == BLOCKED and error and error.startswith("AMBIGUOUS_SIDECAR_BOUNDARY:"):
+        actions[BLOCKED] = "review the sidecar's preserved-notes boundary, then retry"
     if state == BLOCKED and (
         is_compute_runtime_error(error) or (error or "").startswith("ASRRuntimeRefusal:")
     ):
