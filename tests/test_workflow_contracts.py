@@ -1023,6 +1023,66 @@ def test_explicit_selection_refuses_invalid_envelope_with_the_same_key(tmp_path:
     assert result["code"] == "WORKFLOW_CONTRACT_INVALID"
 
 
+def test_explicit_selection_recovers_a_same_key_nested_duplicate_and_keeps_other_keys_usable(
+    tmp_path: Path,
+) -> None:
+    from exomem import workflow_contracts
+
+    _write_contract(tmp_path, _proposal(), "valid.md")
+    other = _proposal(
+        contract_id="123e4567-e89b-12d3-a456-426614174082",
+        key="other-delivery",
+        title="Other Delivery",
+    )
+    _write_contract(tmp_path, other, "other.md")
+    invalid = workflow_contracts.contract_directory(tmp_path) / "invalid.md"
+    source = workflow_contracts.canonical_content(
+        workflow_contracts.parse_proposal(_proposal())
+    )
+    invalid.write_text(
+        source.replace("scope:\n", "scope:\n  projects: []\n"),
+        encoding="utf-8",
+    )
+
+    selected = workflow_contracts.resolve_contracts(tmp_path, {}, name="software-delivery")
+    unrelated = workflow_contracts.resolve_contracts(tmp_path, {}, name="other-delivery")
+
+    assert selected["resolved"] is False
+    assert selected["code"] == "WORKFLOW_CONTRACT_INVALID"
+    assert unrelated["resolved"] is True
+    assert unrelated["key"] == "other-delivery"
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    (
+        lambda content, open_marker, _close_marker: content + f"\n{open_marker}\n",
+        lambda content, _open_marker, close_marker: content + f"\n{close_marker}\n",
+        lambda content, _open_marker, close_marker: content.replace(close_marker, ""),
+        lambda content, open_marker, _close_marker: content.replace(open_marker, ""),
+    ),
+)
+def test_inspection_reports_presentation_drift_for_malformed_marker_topology(
+    tmp_path: Path, malformed: object
+) -> None:
+    from exomem import workflow_contracts
+    from exomem.init import init_vault
+
+    init_vault(tmp_path)
+    contract = workflow_contracts.parse_proposal(_proposal())
+    saved = workflow_contracts.save_contract(tmp_path, contract, why="reviewed")
+    path = tmp_path / saved["path"]
+    template = workflow_contracts.portable_projection()["renderer_template"]
+    path.write_text(
+        malformed(saved["content"], template["open"], template["close"]),  # type: ignore[operator]
+        encoding="utf-8",
+    )
+
+    inspected = workflow_contracts.inspect_contract(tmp_path, contract.key)
+
+    assert inspected["presentation_drift"] is True
+
+
 def test_title_edit_preserves_identity_and_reports_presentation_drift(tmp_path: Path) -> None:
     from exomem import workflow_contracts
     from exomem.init import init_vault

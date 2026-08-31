@@ -719,7 +719,7 @@ def inspect_contract(vault_root: Path, name: str) -> dict[str, Any]:
         "path": path.relative_to(vault_root).as_posix(),
         "content_hash": source_hash(source),
         "fingerprint": contract.fingerprint,
-        "presentation_drift": render_presentation(contract) not in _body(source),
+        "presentation_drift": _presentation_drift(contract, source),
     }
 
 
@@ -750,7 +750,7 @@ def validate_saved_contract(vault_root: Path, name: str) -> dict[str, Any]:
         "fingerprint": contract.fingerprint,
         "path": path.relative_to(vault_root).as_posix(),
         "content_hash": source_hash(source),
-        "presentation_drift": render_presentation(contract) not in _body(source),
+        "presentation_drift": _presentation_drift(contract, source),
     }
 
 
@@ -1003,13 +1003,10 @@ def _scan(
             frontmatter = _frontmatter(source)
             contracts.append((parse_proposal(frontmatter), path, source))
         except (UnicodeDecodeError, yaml.YAMLError, WorkflowContractError):
-            key = None
             try:
-                envelope = _frontmatter(raw.decode("utf-8"))
-                if isinstance(envelope.get("key"), str):
-                    key = envelope["key"]
-            except (UnicodeDecodeError, yaml.YAMLError, WorkflowContractError):
-                pass
+                key = _recovered_top_level_key(raw.decode("utf-8"))
+            except UnicodeDecodeError:
+                key = None
             findings.append(
                 {
                     "code": "WORKFLOW_CONTRACT_INVALID",
@@ -1084,6 +1081,30 @@ def _frontmatter(source: str) -> dict[str, Any]:
     return loaded
 
 
+def _recovered_top_level_key(source: str) -> str | None:
+    """Recover one literal top-level key without accepting an invalid contract."""
+    if not source.startswith("---\n"):
+        return None
+    closing = source.find("\n---\n", 4)
+    if closing < 0:
+        return None
+    try:
+        document = yaml.compose(source[4:closing], Loader=yaml.SafeLoader)
+    except yaml.YAMLError:
+        return None
+    if not isinstance(document, yaml.MappingNode):
+        return None
+    keys = [
+        value_node.value
+        for key_node, value_node in document.value
+        if isinstance(key_node, yaml.ScalarNode)
+        and key_node.value == "key"
+        and isinstance(value_node, yaml.ScalarNode)
+        and value_node.tag == "tag:yaml.org,2002:str"
+    ]
+    return keys[0] if len(keys) == 1 else None
+
+
 def _body(source: str) -> str:
     closing = source.find("\n---\n", 4)
     return source[closing + 5 :] if closing >= 0 else ""
@@ -1103,6 +1124,15 @@ def _presentation_span(body: str) -> tuple[int, int] | None:
     if close < start:
         raise WorkflowContractError("WORKFLOW_CONTRACT_INVALID", "presentation topology")
     return start, close + len(close_marker)
+
+
+def _presentation_drift(contract: WorkflowContract, source: str) -> bool:
+    body = _body(source)
+    try:
+        span = _presentation_span(body)
+    except WorkflowContractError:
+        return True
+    return span is None or body[slice(*span)] != render_presentation(contract)
 
 
 def _semantic_bytes(data: Mapping[str, Any]) -> bytes:
