@@ -463,11 +463,13 @@ def collect_candidates(
     admitted_raw_paths = set().union(*raw_rankings) & recall_paths
     parent_hints: Mapping[str, str | None] | None = None
     if admitted_raw_paths:
+        recall_checkpoint = snapshot.recall_checkpoint(scope)
         hint_result = lexstore.emitted_parent_hints_result(
             vault_root,
             admitted_raw_paths,
             scope=scope,
             freshness=snapshot.for_scope(scope),
+            recall_checkpoint=recall_checkpoint,
         )
         if hint_result.readiness.complete:
             parent_hints = hint_result.value
