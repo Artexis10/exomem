@@ -604,6 +604,7 @@ render_systemd_unit() {
         "$SERVICE_ENV_FILE" \
         "$BIND_HOST" \
         "$PORT" <<'PY'
+import os
 from pathlib import Path
 from sys import argv
 
@@ -616,6 +617,12 @@ def scalar_path(value: str) -> str:
 def exec_path(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"')
 
+try:
+    online_cpus = len(os.sched_getaffinity(0))
+except (AttributeError, OSError):
+    online_cpus = os.cpu_count() or 1
+quota = f"{min(400, 50 * max(1, online_cpus))}%"
+
 text = Path(src).read_text(encoding="utf-8")
 replacements = {
     "__VENV_PYTHON__": exec_path(python),
@@ -623,6 +630,7 @@ replacements = {
     "__SERVICE_ENV_FILE__": scalar_path(env_file),
     "__BIND_HOST__": host,
     "__PORT__": port,
+    "__CPU_QUOTA__": quota,
 }
 for marker, value in replacements.items():
     text = text.replace(marker, value)

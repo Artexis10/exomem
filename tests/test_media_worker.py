@@ -20,6 +20,7 @@ from exomem import (
     media_jobs,
     media_worker,
     preserve,
+    runtime_resources,
     server_runtime,
 )
 from exomem import find as find_module
@@ -1998,6 +1999,78 @@ def test_child_defers_transient_writer_failure_without_poisoning_job(
     assert status["state"] == media_jobs.PENDING
     assert status["attempts"] == 0
     assert status["error"] is None
+
+
+def test_child_defers_model_admission_refusal_without_sidecar_failure(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    result = _preserve_media_stub(vault, filename="model-busy.mp3")
+    sidecar = vault / result.sidecar_path
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(
+        media_jobs.MediaJob(
+            binary_path=vault / result.path,
+            sidecar_path=sidecar,
+            media_type="audio",
+        )
+    )
+
+    monkeypatch.setattr(
+        extract,
+        "extract_text",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            runtime_resources.ModelBusyError("model compute is busy; retry shortly")
+        ),
+    )
+
+    assert (
+        media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1)
+        == media_worker._TRANSIENT_EXIT_CODE
+    )
+    [pending] = media_jobs.status(vault)["jobs"]
+    assert pending["state"] == media_jobs.PENDING
+    assert pending["attempts"] == 0
+    assert pending["error"] is None
+    assert "extracted_by: pending" in sidecar.read_text(encoding="utf-8")
+
+
+def test_clip_model_admission_refusal_reaches_child_defer(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    result = _preserve_media_stub(vault, filename="clip-busy.mp3")
+    sidecar = vault / result.sidecar_path
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(
+        media_jobs.MediaJob(
+            binary_path=vault / result.path,
+            sidecar_path=sidecar,
+            media_type="audio",
+            do_ocr=False,
+            do_clip=True,
+        )
+    )
+    monkeypatch.setattr(
+        media_worker.MediaWorker,
+        "_run_clip",
+        lambda _self, _job: (_ for _ in ()).throw(
+            runtime_resources.ModelBusyError("model compute is busy; retry shortly")
+        ),
+    )
+
+    assert (
+        media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1)
+        == media_worker._TRANSIENT_EXIT_CODE
+    )
+    [pending] = media_jobs.status(vault)["jobs"]
+    assert pending["state"] == media_jobs.PENDING
+    assert pending["attempts"] == 0
+    assert pending["error"] is None
+    assert "extracted_by: pending" in sidecar.read_text(encoding="utf-8")
 
 
 def test_child_requeues_guarded_sidecar_sharing_violation_then_succeeds(

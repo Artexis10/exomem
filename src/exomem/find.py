@@ -31,6 +31,7 @@ from . import (
     find_types,
     freshness,
     recall_policy,
+    runtime_resources,
     structured_filters,
 )
 from . import ranking_config as _ranking_config
@@ -1938,6 +1939,8 @@ def _vector_unit_candidates(
             {"status": "unavailable", "reason": "dependency_unavailable", "model": model_name},
             "kb",
         )
+    except runtime_resources.ModelBusyError:
+        raise
     except Exception as error:  # noqa: BLE001 - vector lane soft-falls back
         log.warning("semantic-unit vector search failed: %s; using lexical ranking", error)
         _record_degradation("vector")
@@ -3547,6 +3550,8 @@ def _find_semantic(
                     "decision": "unavailable",
                     "reason": "dependency_unavailable",
                 }
+            except runtime_resources.ModelBusyError:
+                raise
             except Exception as e:  # noqa: BLE001 - optional reranker must soft-fail.
                 log.warning("rerank failed: %s; returning fused order", e)
                 if timings is not None:

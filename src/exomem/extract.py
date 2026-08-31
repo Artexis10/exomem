@@ -48,7 +48,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
-from . import accel
+from . import accel, runtime_resources
 from .media_types import (
     DOC_EXTS as _DOC_EXTS,
 )
@@ -241,24 +241,31 @@ _WHISPER_LOCK = threading.Lock()
 
 def _get_whisper():
     global _WHISPER
-    if _WHISPER is not None:
-        return _WHISPER
-    # Serialize the load so a prewarm thread and a real job can't double-load the model
-    # (two ~3 GB WhisperModels briefly in VRAM). Double-checked: skip the lock once warm.
-    with _WHISPER_LOCK:
+    with runtime_resources.model_execution():
         if _WHISPER is not None:
             return _WHISPER
-        _ensure_cuda_dll_path()
-        try:
-            from faster_whisper import WhisperModel
-        except ImportError as e:
-            raise ExtractionUnavailable(f"faster-whisper not installed: {e}") from e
-        device = _device()
-        # int8_float16 on GPU keeps large-v3 light without accuracy loss; int8 on CPU.
-        compute_type = "int8_float16" if device == "cuda" else "int8"
-        log.info("loading faster-whisper %s on %s (%s)", WHISPER_MODEL, device, compute_type)
-        _WHISPER = WhisperModel(WHISPER_MODEL, device=device, compute_type=compute_type)
-    return _WHISPER
+        # Serialize the load so a prewarm thread and a real job can't double-load the model
+        # (two ~3 GB WhisperModels briefly in VRAM). Double-checked: skip the lock once warm.
+        with _WHISPER_LOCK:
+            if _WHISPER is not None:
+                return _WHISPER
+            _ensure_cuda_dll_path()
+            try:
+                from faster_whisper import WhisperModel
+            except ImportError as e:
+                raise ExtractionUnavailable(f"faster-whisper not installed: {e}") from e
+            device = _device()
+            # int8_float16 on GPU keeps large-v3 light without accuracy loss; int8 on CPU.
+            compute_type = "int8_float16" if device == "cuda" else "int8"
+            log.info("loading faster-whisper %s on %s (%s)", WHISPER_MODEL, device, compute_type)
+            _WHISPER = WhisperModel(
+                WHISPER_MODEL,
+                device=device,
+                compute_type=compute_type,
+                cpu_threads=runtime_resources.resolve_policy().cpu_threads,
+                num_workers=1,
+            )
+        return _WHISPER
 
 
 def asr_prewarm_enabled() -> bool:
@@ -342,11 +349,15 @@ class FasterWhisperBackend:
     live in `_get_whisper`; this wrapper keeps the loader seam that tests patch."""
 
     def transcribe(self, path: Path) -> tuple[Iterable[TranscriptionSegment], str]:
-        model = _get_whisper()
         # faster-whisper decodes the media's audio stream via PyAV (handles video
         # containers too), so a video file can be passed directly — no ffmpeg step.
-        segments, _info = model.transcribe(str(path))
-        return segments, f"faster-whisper:{WHISPER_MODEL}"
+        def guarded_segments():
+            with runtime_resources.model_execution():
+                model = _get_whisper()
+                segments, _info = model.transcribe(str(path))
+                yield from segments
+
+        return guarded_segments(), f"faster-whisper:{WHISPER_MODEL}"
 
     def prewarm(self) -> None:
         _get_whisper()

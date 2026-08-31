@@ -148,7 +148,7 @@ def runtime_info() -> dict[str, Any]:
 
 def collect(vault_root: Path | None = None) -> dict[str, Any]:
     """Collect process-local resource status without allocating heavy resources."""
-    from . import media_jobs
+    from . import media_jobs, runtime_resources
 
     policy = mode.resolved()
     return {
@@ -161,6 +161,7 @@ def collect(vault_root: Path | None = None) -> dict[str, Any]:
         "caches": _cache_residency(),
         "deferred_work": _deferred_work(vault_root),
         "media": media_jobs.status(vault_root),
+        "compute": runtime_resources.status(),
         "cuda": cuda_accounting_if_initialized(),
     }
 
@@ -245,6 +246,8 @@ def gpu_headroom() -> dict[str, Any]:
 
 
 def resource_posture() -> dict[str, Any]:
+    from . import runtime_resources
+
     policy = mode.resolved()
     return {
         "runtime": runtime_info(),
@@ -252,6 +255,7 @@ def resource_posture() -> dict[str, Any]:
         "source": _mode_source(),
         "policy": policy,
         "cpu_baseline": True,
+        "compute": runtime_resources.status(),
         "gpu": gpu_headroom(),
         "cuda": cuda_accounting_if_initialized(),
     }

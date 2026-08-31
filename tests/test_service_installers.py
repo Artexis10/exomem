@@ -158,6 +158,10 @@ def _fake_python(path: Path) -> None:
         if len(sys.argv) > 1 and sys.argv[1] == "-" and len(sys.argv) == 9:
             _, _, src, dest, python, working_dir, env_file, host, port = sys.argv
             text = Path(src).read_text(encoding="utf-8")
+            try:
+                online_cpus = len(os.sched_getaffinity(0))
+            except (AttributeError, OSError):
+                online_cpus = os.cpu_count() or 1
             def scalar_path(value):
                 escaped = {" ": "\\x20", "\t": "\\x09", "\n": "\\x0a", "\r": "\\x0d", "\\": "\\x5c"}
                 return "".join(escaped.get(char, char) for char in value)
@@ -167,6 +171,7 @@ def _fake_python(path: Path) -> None:
                 "__SERVICE_ENV_FILE__": scalar_path(env_file),
                 "__BIND_HOST__": host,
                 "__PORT__": port,
+                "__CPU_QUOTA__": f"{min(400, 50 * max(1, online_cpus))}%",
             }
             for marker, value in replacements.items():
                 text = text.replace(marker, value)
@@ -454,6 +459,8 @@ def test_linux_release_install_renders_env_gates_then_verifies(tmp_path: Path) -
     unit_text = unit.read_text(encoding="utf-8")
     assert str(service_root / ".venv" / "bin" / "python") in unit_text
     assert "EnvironmentFile=" in unit_text
+    assert "CPUWeight=20" in unit_text
+    assert f"CPUQuota={min(400, 50 * max(1, len(os.sched_getaffinity(0))))}%" in unit_text
     assert "__" not in unit_text
 
     if shutil.which("systemd-analyze"):

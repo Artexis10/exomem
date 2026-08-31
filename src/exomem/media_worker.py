@@ -36,6 +36,7 @@ from . import (
     index_sync,
     preserve,
     recall_policy,
+    runtime_resources,
     scene_frames,
     semantic_segments,
 )
@@ -428,6 +429,8 @@ class MediaWorker:
                 next_action=_BLOCKED_ACTION,
             )
             return _ProcessOutcome(BLOCKED, error) if committed else _ProcessOutcome(_STALE)
+        except runtime_resources.ModelBusyError:
+            raise
         except Exception as e:  # noqa: BLE001 — a corrupt file shouldn't re-loop forever
             error = f"{type(e).__name__}: {e}"
             log.exception("extraction failed for %s", job.binary_path.name)
@@ -698,6 +701,8 @@ class MediaWorker:
         except embeddings.ClipUnavailable as e:
             log.warning("CLIP unavailable for %s: %s", job.binary_path.name, e)
             return
+        except runtime_resources.ModelBusyError:
+            raise
         except Exception:  # noqa: BLE001 — a bad image must not kill the worker
             log.exception("CLIP embedding failed for %s", job.binary_path.name)
             return
@@ -1037,6 +1042,11 @@ def run_child(vault_root: Path, *, parent_pid: int, idle_seconds: float) -> int:
             last_work = time.monotonic()
             try:
                 outcome = worker._process(job)
+            except runtime_resources.ModelBusyError:
+                assert job.id is not None
+                store.defer(job.id)
+                log.info("media worker: deferred %s after model admission refusal", job.binary_path)
+                return _TRANSIENT_EXIT_CODE
             except OpError as exc:
                 assert job.id is not None
                 if exc.code in _TRANSIENT_OPERATION_CODES:

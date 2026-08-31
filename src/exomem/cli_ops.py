@@ -92,6 +92,7 @@ _REMEDIATION: dict[str, str] = {
     "MUTATION_LOCK_UNAVAILABLE": (
         "Check that the runtime state root is writable and supports host file locking."
     ),
+    "MODEL_BUSY": "Retry shortly; model compute is at its admitted capacity.",
     "INVALID_MEDIA_OPERATION": "Use operation=process, operation=status, or operation=retry.",
     "INVALID_RECORD_ARGUMENTS": "Use only the arguments accepted by the selected record action.",
     "INVALID_PLAN_ARGUMENTS": "Use only the arguments accepted by the selected Planning action.",
@@ -135,6 +136,7 @@ _SERVICE_UNAVAILABLE_CODES = frozenset(
         "WRITER_COORDINATOR_UNAVAILABLE",
         "WRITER_COORDINATOR_CONTRACT_ABSENT",
         "MUTATION_LOCK_UNAVAILABLE",
+        "MODEL_BUSY",
         # Retrieval-index-reliability (restore-indexed-category-recall): a safe
         # exact category/kind plan whose maintained semantic catalog cannot yet
         # prove completeness — retryable with bounded `retry_after_ms`, never a
