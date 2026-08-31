@@ -31,7 +31,7 @@
 
 ## 5. Verify Active Host Cooperation
 
-- [ ] 5.1 Extend the resource-envelope verifier with deterministic process-tree metric tests and a real Linux active-cgroup mode that starts a transient unit containing a sample-vault Exomem server plus a non-cooperative child; verify aggregate five-second CPU stays within quota plus 0.25 core, every health/status probe stays below one second, thread count is diagnostic, and unsupported systemd is not reported as a pass.
+- [x] 5.1 Extend the resource-envelope verifier with deterministic process-tree metric tests and a real Linux active-cgroup mode that starts a transient unit containing a sample-vault Exomem server plus a non-cooperative child; verify aggregate five-second CPU stays within quota plus 0.25 core, every health/status probe stays below one second, thread count is diagnostic, and unsupported systemd is not reported as a pass.
 - [x] 5.2 Run the focused CPU-envelope, media-worker, extraction, status/doctor, installer, and verification-script suites plus Ruff; record exact scoped commands and results in the lane result.
 - [x] 5.3 Have an author-independent reviewer inspect and reproduce the CPU-envelope diff, return findings to the implementation lane, and verify every accepted finding is fixed before accelerator work is accepted.
 - [x] 5.4 Have a fresh author-independent reviewer inspect and reproduce the accelerator/runtime/failure-state diff, return findings to the implementation lane, and verify every accepted finding is fixed.
@@ -40,6 +40,6 @@
 ## 6. Completion and Release Evidence
 
 - [ ] 6.1 Run `openspec validate --all --strict`, focused changed-behavior tests, lock/install checks, and Ruff locally; use the pull request's required CI for the full lean corpus and verify it is green or document only demonstrably unrelated baseline red with failure-name evidence.
-- [ ] 6.2 Run the active systemd cgroup probe and real tiny-model ASR child probe in the target service interpreter where host access permits; record selected device/type/runtime, aggregate process-tree CPU, diagnostic threads, health/status latency, and any explicit environment limitation without treating enumeration as GPU proof.
-- [ ] 6.3 Reconcile the implemented behavior with every OpenSpec task and delta scenario, check only evidence-backed boxes, and leave the change ready for post-merge spec sync/archive rather than claiming unshipped closure.
+- [x] 6.2 Run the active systemd cgroup probe and real tiny-model ASR child probe in the target service interpreter where host access permits; record selected device/type/runtime, aggregate process-tree CPU, diagnostic threads, health/status latency, and any explicit environment limitation without treating enumeration as GPU proof.
+- [x] 6.3 Reconcile the implemented behavior with every OpenSpec task and delta scenario, check only evidence-backed boxes, and leave the change ready for post-merge spec sync/archive rather than claiming unshipped closure.
 - [ ] 6.4 Commit only the intended scope, integrate current `origin/main` safely in the isolated task workspace, push the branch, and open a ready Conventional Commit pull request containing rationale and verification evidence; keep the workstation containment drop-ins until the released build is deployed and measured.
