@@ -170,3 +170,73 @@ def test_the_first_eligible_write_advisory_carries_one_quiet_offer(vault) -> Non
     assert "quiet" not in again.lower()
     assert identity.ref in again
     assert len(again) <= 300
+
+
+def test_an_offer_failure_does_not_resurrect_a_dismissed_write_advisory(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = vault / "Knowledge Base/Notes/target.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("# Target\n", encoding="utf-8")
+    dismissed = vault / "Knowledge Base/Notes/dismissed.md"
+    open_candidate = vault / "Knowledge Base/Notes/open.md"
+    dismissed.write_text("# Dismissed\n", encoding="utf-8")
+    open_candidate.write_text("# Open\n", encoding="utf-8")
+    candidates = [
+        corpus_aware.DupCandidate(
+            path="Knowledge Base/Notes/dismissed.md", title="Dismissed", cosine=0.9
+        ),
+        corpus_aware.DupCandidate(path="Knowledge Base/Notes/open.md", title="Open", cosine=0.9),
+    ]
+    identities = [
+        corpus_aware.write_advisory_identity(
+            vault,
+            kind="near-duplicate",
+            self_path="Knowledge Base/Notes/target.md",
+            candidate=candidate,
+        )
+        for candidate in candidates
+    ]
+    corpus_aware.emit_write_advisories(
+        vault,
+        self_path="Knowledge Base/Notes/target.md",
+        kind="near-duplicate",
+        candidates=candidates,
+    )
+    commands.op_triage_memory(
+        vault,
+        ref=identities[0].ref,
+        action="dismiss",
+        expected_fingerprint=identities[0].fingerprint,
+        why="handled: already reviewed",
+    )
+    store = review_state.ReviewStateStore(vault)
+    for number in range(3):
+        store.apply(
+            f"{'e' * 23}{number}",
+            f"{'f' * 23}{number}",
+            action="dismiss",
+            family="near-duplicate",
+        )
+
+    def fail_offer(*args, **kwargs):
+        raise OSError("offer store unavailable")
+
+    monkeypatch.setattr(review_state.ReviewStateStore, "arm_quiet_offer", fail_offer)
+    warnings = corpus_aware.emit_write_advisories(
+        vault,
+        self_path="Knowledge Base/Notes/target.md",
+        kind="near-duplicate",
+        candidates=candidates,
+    )
+
+    assert len(warnings) == 1
+    warning = warnings[0]
+    assert identities[1].ref in warning
+    assert warning.endswith(
+        f"[review: {identities[1].ref}; fingerprint: {identities[1].fingerprint}]"
+    )
+    assert identities[0].ref not in warning
+    assert "quiet offer" not in warning
+    assert len(warning) <= 300
+    assert review_state.quiet_offered_at(store.load(), "near-duplicate") is None

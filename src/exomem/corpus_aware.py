@@ -365,7 +365,12 @@ def emit_write_advisory_groups(
             surfaced.append((identity.review_id, identity.fingerprint, kind))
         ledgered = _record_surfaced_advisories(root, surfaced, known=payload)
         for kind, candidate, identity in emitted:
-            offer = store.arm_quiet_offer(kind, known=payload) if ledgered else None
+            offer = None
+            if ledgered:
+                try:
+                    offer = store.arm_quiet_offer(kind, known=payload)
+                except Exception as error:  # noqa: BLE001 — optional state fails open
+                    log.debug("write advisory quiet offer failed open: %s", error)
             warnings.append(_render_identified_write_advisory(kind, candidate, identity, offer))
     except Exception as error:  # noqa: BLE001 — advisory state must fail open
         log.debug("write advisory suppression failed open: %s", error)
