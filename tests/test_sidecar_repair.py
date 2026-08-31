@@ -78,6 +78,17 @@ def test_crlf_nested_copies_collapse_without_preserving_scaffolding() -> None:
     assert sidecar_repair.analyze(repaired, Path("report.pdf.md")) is None
 
 
+def test_crlf_frontmatter_bytes_are_preserved_during_repair() -> None:
+    content = _sidecar("Extraction body.", "Extraction body.").replace("\n", "\r\n")
+    frontmatter = content.split("\r\n---\r\n", 1)[0] + "\r\n---"
+
+    repaired = sidecar_repair.repair(content)
+
+    assert repaired[: len(frontmatter)].encode() == frontmatter.encode()
+    assert sidecar_repair.analyze(content, Path("report.pdf.md")) is not None
+    assert sidecar_repair.repair_is_safe(content, repaired)
+
+
 def test_repair_is_idempotent() -> None:
     text = "Extraction body."
     once = sidecar_repair.repair(_sidecar(text, text, text))

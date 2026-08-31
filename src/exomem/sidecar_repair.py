@@ -99,16 +99,16 @@ class SidecarDamage:
 
 def analyze(content: str, path: Path) -> SidecarDamage | None:
     """Describe the duplication in `content`, or None when it is clean."""
-    content = _logical_text(content)
-    _frontmatter, body, raw = parse_frontmatter(content)
-    body = body if raw is not None else content
+    logical_content = _logical_text(content)
+    _frontmatter, body, raw = parse_frontmatter(logical_content)
+    body = body if raw is not None else logical_content
     if PRESERVED_HEADING not in body:
         return None
     # A single `## Preserved notes` holding genuine prose is the correct end
     # state, not damage — so "damaged" means "the repair would change this",
     # which also makes a repaired vault report clean on the next pass.
     repaired = repair(content)
-    if repaired == content:
+    if _logical_text(repaired) == logical_content:
         return None
     segments = _segments(body)
     blocks = _extraction_blocks(body)
@@ -122,7 +122,7 @@ def analyze(content: str, path: Path) -> SidecarDamage | None:
         distinct_extractions=len(set(blocks)),
         top_level_chars=len(top),
         recovered_chars=len(best),
-        duplicate_chars=max(0, len(content) - len(repaired)),
+        duplicate_chars=max(0, len(logical_content) - len(_logical_text(repaired))),
     )
 
 
@@ -132,8 +132,8 @@ def repair(content: str) -> str:
     Keeps frontmatter verbatim so a still-`pending` sidecar stays queued for a
     real re-extraction.
     """
-    content = _logical_text(content)
     frontmatter_text, body = _split_frontmatter(content)
+    body = _logical_text(body)
     if PRESERVED_HEADING not in body:
         return content
 
