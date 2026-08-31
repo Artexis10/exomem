@@ -149,6 +149,65 @@ landing, not during the flight.
 Do not wait to be asked. "Did you save that?" arriving after a result already
 landed is the failure, not the prompt.
 
+## What Exomem does on its own
+
+Prominence says how much Exomem speaks up. The **delegation envelope** says what
+it may do on its own, per kind of action. `bootstrap()` reports the active one
+under `engagement.envelope`; read it there rather than assuming, because a user
+can move a class below its ceiling and the served envelope is the only place
+that shows it.
+
+Each action class carries a hard **ceiling** — product law. No prominence level,
+override or adaptation authorizes behaviour above it. Below the ceiling the
+class carries a **disposition**, either derived from the prominence level, fixed,
+or explicitly overridden by the user.
+
+| Action class | Ceiling | What it covers |
+|---|---|---|
+| `hygiene_writes` | silent | index, log and back-reference upkeep riding a governed write |
+| `proactive_capture` | silent-capable | capture, record and plan writes you start yourself |
+| `link_acceptance` | confirm | accepting a suggested relation |
+| `structural_suggestions` | advisory | structural advice on any channel — surface only |
+| `restructure_execution` | confirm-required | restructure application, supersession commit, entity creation, deletion |
+| `disclosure` | governed by the governance plane | no disposition; not envelope-configurable |
+
+**The decider protocol**, for every action you are about to take:
+
+1. **Name the action class.** An action that fits none of them has no envelope
+   cell and therefore no authority — propose it instead.
+2. **Check the ceiling.** An intent above it becomes a proposal, never an act.
+3. **Check the disposition.** `off`: do not initiate — an explicit request from
+   the user is never blocked. `advisory`: surface it in the user's own language
+   and stop. `silent`: act, narrating as the prominence contract says.
+   `confirm` / `confirm-shortcut`: obtain the confirmation first; a
+   confirm-shortcut is an inline one-action approval of that one named item, so
+   the confirmation step is never skipped.
+4. **Record the outcome through triage**, so the decision is durable and the
+   signal family is countable.
+
+Confirm-required binds at three tiers: the served envelope marks the class, you
+obtain the confirmation in the conversation, and the server-side gates still
+apply — deletion needs its explicit confirm, and the adoption apply surface
+commits only a plan that was previewed. Supersession and entity creation have no
+server-side gate today; that is named future work, not an implied gate, so the
+confirmation is yours to obtain.
+
+**Standing delegation does not exist in v1.** "Always allow this" or "do this
+kind of thing from now on" for restructure execution is refused by name: it
+would be an envelope cell above the current ceiling, and only a deliberate
+founder ratification may ever create one. Say that, rather than improvising
+either a refusal or a consent.
+
+When the user asks to stop hearing about a KIND of suggestion, that is a signal
+family rather than an envelope class: quiet the family through
+`triage_memory(ref="exomem://review/family/<family>", action="quiet",
+why="<code>: ...")` rather than lowering prominence, which silences everything.
+`review_memory(mode="dispositions")` lists the registered family vocabulary
+alongside the envelope block and what is currently quiet and why.
+
+Set or reset a served envelope class through the same triage surface:
+`triage_memory(ref="exomem://envelope/<action-class>", action="<disposition>|reset")`.
+
 ## Agent write loop
 
 Use this loop whenever a durable conclusion should enter Exomem:

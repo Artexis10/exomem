@@ -59,6 +59,7 @@ from . import edit as edit_module
 from . import edit_operations as edit_operations_module
 from . import entity_candidates as entity_candidates_module
 from . import entity_types as entity_types_module
+from . import envelope as envelope_module
 from . import epistemic_graph as epistemic_graph_module
 from . import evolution as evolution_module
 from . import find as find_module
@@ -378,12 +379,23 @@ def op_bootstrap(
     except PackageNotFoundError:
         package_version = "0+unknown"
 
+    from . import envelope as envelope_module
     from . import mode as mode_module
     from . import prominence as prominence_module
     from . import tool_surface as tool_surface_module
 
     compute_policy = mode_module.resolved()
     engagement_policy = prominence_module.resolved()
+    # The delegation envelope rides INSIDE the engagement block rather than beside
+    # it: prominence sets its defaults, so a client reading one without the other
+    # would learn how eager Exomem is without learning what it is allowed to do on
+    # its own. Every string here is deliberately command-free, exactly like the
+    # epistemic commitments — `_filter_bootstrap_payload` deletes any value naming
+    # a command the active surface cannot call, and a ceiling that vanished on a
+    # reduced surface would be a ceiling nobody was told about.
+    engagement_policy["envelope"] = envelope_module.resolved(
+        level=engagement_policy["level"]
+    )
     active_descriptor = _active_bootstrap_descriptor()
     active_product_names = frozenset(active_descriptor.product_commands)
     requested_workflow = workflow.strip() if workflow and workflow.strip() else "general"
@@ -840,7 +852,7 @@ def op_bootstrap(
                 "due_state_authority": "advisory only; the counts measure authored state, and the runtime never judges, resolves, closes, archives, or writes on their behalf, and never changes retrieval ordering",
                 "review_reason": "every review decision records WHY as a closed code: lead the `why` with intentional:, false_positive:, handled:, deferred:, or too_frequent: followed by the free text. Anything else records unspecified",
                 "family_disposition": "when the user asks to stop hearing about a KIND of signal, quiet that family rather than lowering prominence, which silences everything: triage_memory(ref='exomem://review/family/<family>', action='quiet'|'off'|'normal', why='<code>: ...'). quiet drops it from the default review union and every carrier; off also drops it from explicit category review; normal restores it",
-                "family_disposition_reading": "a quiet family is silent, not clean. It stays reviewable on request, review_memory(mode='dispositions') lists what is quiet and why, and the audit still measures it — so a due-state block that omits a family is never evidence that family has nothing due",
+                "family_disposition_reading": "a quiet family is silent, not clean. It stays reviewable on request, review_memory(mode='dispositions') lists the registered family vocabulary, what is quiet and why, and the delegation envelope beside it, and the audit still measures it — so a due-state block that omits a family is never evidence that family has nothing due",
                 # Carried by EVERY profile. It was full-only while compact sat 24
                 # bytes under its ceiling; the queued compact-bootstrap trim has
                 # since paid for it out of redundancy elsewhere in the payload, and
@@ -6063,6 +6075,13 @@ def _dispositions_view(vault_root: Path) -> dict:
         record = dispositions[family]
         if not isinstance(record, dict):
             continue
+        if str(record.get("disposition") or "") not in {"quiet", "off"}:
+            # A slate-only row: the family carries a durable `quiet_offered_at`
+            # while its disposition is still `normal`. It is not a decision and
+            # must not be listed as one -- this view answers "what have I
+            # quieted", and a row saying `normal` would be an answer to a
+            # different question.
+            continue
         rows.append(
             {
                 "family": family,
@@ -6075,6 +6094,8 @@ def _dispositions_view(vault_root: Path) -> dict:
                 "manual_dismissals": counts.get(family, 0),
             }
         )
+    from . import envelope as envelope_module
+
     return {
         "dispositions": rows,
         "registered_families": sorted(review_state_module.registered_families()),
@@ -6084,6 +6105,21 @@ def _dispositions_view(vault_root: Path) -> dict:
             "still reviewable by naming its category. It is not evidence the family "
             "is clean."
         ),
+        # A structurally SEPARATE block, never rows mixed into the one above.
+        # The two vocabularies share the word `off` and mean different things by
+        # it, and a reader looking at one list has no way to tell which is which:
+        # a family `off` is a review-state decision about one KIND of signal, an
+        # envelope `off` is "the agent does not initiate this CLASS of action".
+        "envelope": {
+            **envelope_module.resolved(),
+            "note": (
+                "Action classes, not signal families. An envelope `off` means the "
+                "agent does not initiate that class on its own; it never blocks an "
+                "explicit request. A family `off` is the review-state decision "
+                "listed above. A ceiling is product law: no level, override or "
+                "adaptation authorizes behaviour above it."
+            ),
+        },
     }
 
 
@@ -6176,6 +6212,26 @@ def op_triage_memory(
             the write and asks the caller to refresh.
     """
     normalized_action = str(action or "").strip().lower()
+    if envelope_module.is_envelope_ref(ref):
+        if until is not None:
+            raise ValueError("INVALID_REVIEW_ACTION: envelope triage does not accept `until`")
+        if expected_fingerprint is not None:
+            raise ValueError(
+                "INVALID_REVIEW_ACTION: envelope triage does not accept `expected_fingerprint`"
+            )
+        action_class = envelope_module.parse_envelope_ref(ref)
+        if normalized_action == "reset":
+            envelope_module.reset_disposition(action_class)
+        else:
+            envelope_module.set_disposition(action_class, normalized_action)
+        served = envelope_module.resolved()["classes"][action_class]
+        return {
+            "class": action_class,
+            "ceiling": served["ceiling"],
+            "disposition": served["disposition"],
+            "provenance": served["provenance"],
+            "ref": envelope_module.envelope_ref(action_class),
+        }
     if review_state_module.is_family_ref(ref):
         # BEFORE every other namespace: a family reference names a KIND of
         # signal, so none of the item-shaped branches below can resolve it, and
