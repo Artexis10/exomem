@@ -1,17 +1,17 @@
 ## 1. Pin the Active-Compute Failure Contracts
 
-- [ ] 1.1 Add red pure-logic tests for `EXOMEM_CPU_THREADS` and `EXOMEM_SYNC_WORKERS` defaults, valid overrides, rejection below two sync workers, derived `min(4, floor(sync/2))` model admission across 2/3/4/8/16 workers, the explicit unsafe native-override escape hatch, and allocation-free status collection; verify the focused tests fail for the missing policy.
-- [ ] 1.2 Add red subprocess tests proving both product entrypoints replace inherited BLAS/OpenMP/Rayon/tokenizer values before importing NumPy or model modules; verify an inherited value of 32 survives today and the current oversized thread posture is reproducible.
-- [ ] 1.3 Add red tests for a common local/hosted AnyIO lifespan, eight default general workers, derived model admission that always reserves at least half/one general worker, reentrant one-at-a-time model execution, and retryable rejection beyond that queue; test the default four-model-call case plus smaller override matrices while a quick sync status call completes within the latency ceiling.
-- [ ] 1.4 Add red adapter tests for explicit CTranslate2, ONNX Runtime, and PyTorch thread arguments, media-child background priority, and systemd quota rendering at 1/2/8/32 online CPUs; verify each fails against the current unbounded wiring.
+- [x] 1.1 Add red pure-logic tests for `EXOMEM_CPU_THREADS` and `EXOMEM_SYNC_WORKERS` defaults, valid overrides, rejection below two sync workers, derived `min(4, floor(sync/2))` model admission across 2/3/4/8/16 workers, the explicit unsafe native-override escape hatch, and allocation-free status collection; verify the focused tests fail for the missing policy.
+- [x] 1.2 Add red subprocess tests proving both product entrypoints replace inherited BLAS/OpenMP/Rayon/tokenizer values before importing NumPy or model modules; verify an inherited value of 32 survives today and the current oversized thread posture is reproducible.
+- [x] 1.3 Add red tests for a common local/hosted AnyIO lifespan, eight default general workers, derived model admission that always reserves at least half/one general worker, reentrant one-at-a-time model execution, and retryable rejection beyond that queue; test the default four-model-call case plus smaller override matrices while a quick sync status call completes within the latency ceiling.
+- [x] 1.4 Add red adapter tests for explicit CTranslate2, ONNX Runtime, and PyTorch thread arguments, media-child background priority, and systemd quota rendering at 1/2/8/32 online CPUs; verify each fails against the current unbounded wiring.
 
 ## 2. Implement the Portable Compute Envelope
 
-- [ ] 2.1 Add the dependency-light runtime resource policy, bootstrap it from the server/CLI and media-child entrypoints, and verify the policy and early-import subprocess tests pass.
-- [ ] 2.2 Apply the authoritative budget explicitly to CTranslate2, ONNX Runtime, PyTorch, indirect BLAS/OpenMP/Rayon/tokenizer users, and the common AnyIO lifespan; verify larger inherited library values are replaced unless the unsafe escape is explicit and optional model stacks stay absent from status paths.
-- [ ] 2.3 Add bounded reentrant model admission and one-at-a-time execution for embedding/reranker/CLIP/ASR seams while retaining general sync-tool capacity; verify four held model callers cannot overlap or block a quick status call and a fifth model caller fails retryably without consuming another worker.
-- [ ] 2.4 Lower disposable media-child scheduling priority and render `CPUWeight=20` plus `CPUQuota=min(400, 50 * online-logical-cpus)%` into the Linux user service; verify POSIX/Windows priority fakes, 50/100/400/400 quota cases, and service-installer tests pass.
-- [ ] 2.5 Expose the effective native-thread budget, sync-worker budget, model admission/execution posture, override sources, unsafe escape, and scheduling posture through resource status and doctor; verify no-allocation/instant-start tests prove no model import, accelerator initialization, or worker launch.
+- [x] 2.1 Add the dependency-light runtime resource policy, bootstrap it from the server/CLI and media-child entrypoints, and verify the policy and early-import subprocess tests pass.
+- [x] 2.2 Apply the authoritative budget explicitly to CTranslate2, ONNX Runtime, PyTorch, indirect BLAS/OpenMP/Rayon/tokenizer users, and the common AnyIO lifespan; verify larger inherited library values are replaced unless the unsafe escape is explicit and optional model stacks stay absent from status paths.
+- [x] 2.3 Add bounded reentrant model admission and one-at-a-time execution for embedding/reranker/CLIP/ASR seams while retaining general sync-tool capacity; verify four held model callers cannot overlap or block a quick status call and a fifth model caller fails retryably without consuming another worker.
+- [x] 2.4 Lower disposable media-child scheduling priority and render `CPUWeight=20` plus `CPUQuota=min(400, 50 * online-logical-cpus)%` into the Linux user service; verify POSIX/Windows priority fakes, 50/100/400/400 quota cases, and service-installer tests pass.
+- [x] 2.5 Expose the effective native-thread budget, sync-worker budget, model admission/execution posture, override sources, unsafe escape, and scheduling posture through resource status and doctor; verify no-allocation/instant-start tests prove no model import, accelerator initialization, or worker launch.
 
 ## 3. Pin the Accelerator and Failure-State Contracts
 
@@ -31,8 +31,8 @@
 ## 5. Verify Active Host Cooperation
 
 - [ ] 5.1 Extend the resource-envelope verifier with deterministic process-tree metric tests and a real Linux active-cgroup mode that starts a transient unit containing a sample-vault Exomem server plus a non-cooperative child; verify aggregate five-second CPU stays within quota plus 0.25 core, every health/status probe stays below one second, thread count is diagnostic, and unsupported systemd is not reported as a pass.
-- [ ] 5.2 Run the focused CPU-envelope, media-worker, extraction, status/doctor, installer, and verification-script suites plus Ruff; record exact scoped commands and results in the lane result.
-- [ ] 5.3 Have an author-independent reviewer inspect and reproduce the CPU-envelope diff, return findings to the implementation lane, and verify every accepted finding is fixed before accelerator work is accepted.
+- [x] 5.2 Run the focused CPU-envelope, media-worker, extraction, status/doctor, installer, and verification-script suites plus Ruff; record exact scoped commands and results in the lane result.
+- [x] 5.3 Have an author-independent reviewer inspect and reproduce the CPU-envelope diff, return findings to the implementation lane, and verify every accepted finding is fixed before accelerator work is accepted.
 - [ ] 5.4 Have a fresh author-independent reviewer inspect and reproduce the accelerator/runtime/failure-state diff, return findings to the implementation lane, and verify every accepted finding is fixed.
 
 ## 6. Completion and Release Evidence
