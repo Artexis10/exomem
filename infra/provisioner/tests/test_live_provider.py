@@ -729,6 +729,9 @@ async def test_live_rollforward_uses_target_fingerprint_and_original_helm_author
         )
         == "f" * 64
     )
+    plane._now = lambda: 1_900_001_000
+    await plane.run_runtime_migration(current, request, config, "rollforward-alpha")
+    plane._now = lambda: 1_900_000_030
     await plane.quiesce(current, request, "rollforward-alpha")
     await plane.run_runtime_migration(current, request, config, "rollforward-alpha")
     await plane.upgrade_runtime(current, request, config, "rollforward-alpha")
@@ -751,6 +754,7 @@ async def test_live_rollforward_uses_target_fingerprint_and_original_helm_author
     assert fingerprints == [(current, "rollforward-alpha", "before")]
     assert quiesced_protocols == ["legacy-protocol"]
     assert [values["workloadMode"] for _owner, values, _operation in transitions] == [
+        "migrate",
         "migrate",
         "serve",
     ]

@@ -232,6 +232,11 @@ checkpoint identity. Repetition SHALL verify the existing receipt without a seco
 - **WHEN** the retargeted operation resumes while its never-routed source-runtime Helm release and retained volume still exist
 - **THEN** the worker proves the runtime stopped, fingerprints the same vault, runs the deployment lock's declared migration, upgrades the existing release in place, proves the fingerprint unchanged and exact target health, and only then admits the runtime and opens routes
 
+#### Scenario: A failed retarget resume is recovered once without weakening authorization
+
+- **WHEN** that exact retargeted operation fails closed before tenant mutation because its source authorization bundle is stale
+- **THEN** a separately invoked signed recovery validates both prior recovery receipts, the selected target request, the unchanged four-resource identity, active reservation, stable unrouted live state, and absence of conflicts before making the same operation claimable once; the offline migration may read the stale bundle only to render its non-serving Job, and serving still requires a freshly transitioned target-version bundle
+
 #### Scenario: Retarget mismatch is a no-op
 
 - **WHEN** any request, receipt, claim, fence, resource, reservation, live identity, runtime, route, result, or compare-and-swap invariant differs

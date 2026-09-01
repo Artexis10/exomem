@@ -121,6 +121,9 @@ def test_recovery_command_has_only_fixed_modes_and_environment_free_help(
         "retarget-preflight",
         "retarget",
         "verify-retarget",
+        "resume-retarget-preflight",
+        "resume-retarget",
+        "verify-resume-retarget",
     ):
         assert parser.parse_args([mode, "--stdin"]).mode == mode
     with pytest.raises(recovery.RecoveryRefusal):
@@ -397,6 +400,65 @@ def test_retarget_marker_is_exact_content_free_and_one_way() -> None:
     assert b"secret" not in recovery.canonical_receipt_bytes(marker)
     with pytest.raises(recovery.RecoveryRefusal):
         recovery.parse_retarget_marker({**marker, "tenantId": "tenant-alpha"})
+
+
+def test_retarget_resume_accepts_only_the_exact_failed_retarget() -> None:
+    recovery = _module()
+    before = recovery.RetargetResumePreState(
+        action="provision",
+        state="error",
+        checkpoint="failed",
+        error_code="PROVISIONER_PROVIDER_METADATA_CONFLICT",
+        has_claim=False,
+        has_result=False,
+        finalized=True,
+        has_recovery_marker=True,
+        has_retarget_marker=True,
+        has_resume_marker=False,
+    )
+
+    transition = recovery.retarget_resume_transition_values(before)
+
+    assert transition["state"].value == "pending"
+    assert transition["checkpoint"] == "volume-owned"
+    assert transition["error_code"] is None
+    assert transition["finalized_at"] is None
+    for changed in (
+        {"state": "pending"},
+        {"checkpoint": "retarget-runtime-stopped"},
+        {"error_code": None},
+        {"has_claim": True},
+        {"has_result": True},
+        {"finalized": False},
+        {"has_recovery_marker": False},
+        {"has_retarget_marker": False},
+        {"has_resume_marker": True},
+    ):
+        with pytest.raises(recovery.RecoveryRefusal):
+            recovery.retarget_resume_transition_values(replace(before, **changed))
+
+
+def test_retarget_resume_marker_is_exact_and_bound_to_the_retarget_receipt() -> None:
+    recovery = _module()
+    marker = recovery.retarget_resume_marker(
+        retarget_marker_sha256="a" * 64,
+        preflight_sha256="b" * 64,
+        helper_source_sha256="c" * 64,
+        claim_generation=4,
+        committed_at=datetime(2030, 1, 2, tzinfo=UTC),
+    )
+
+    assert recovery.parse_retarget_resume_marker(marker) == marker
+    assert set(marker) == {
+        "schema",
+        "retarget_marker_sha256",
+        "preflight_sha256",
+        "helper_source_sha256",
+        "claim_generation",
+        "committed_at",
+    }
+    with pytest.raises(recovery.RecoveryRefusal):
+        recovery.parse_retarget_resume_marker({**marker, "cellId": "cell-alpha"})
 
 
 def test_database_stays_at_0006_without_recovery_receipt_table() -> None:
