@@ -816,6 +816,7 @@ def test_platform_renders_a_read_only_recovery_operator_identity() -> None:
         ("", "persistentvolumeclaims"),
         ("", "persistentvolumes"),
         ("", "configmaps"),
+        ("", "pods"),
         ("apps", "statefulsets"),
         ("batch", "jobs"),
         ("traefik.io", "ingressroutes"),
@@ -832,6 +833,7 @@ def test_platform_renders_a_read_only_recovery_operator_identity() -> None:
     )
     runbook = (ROOT / "docs/runbooks/hosted/cell.md").read_text(encoding="utf-8")
     assert "exomem-init-retry-recovery" in runbook
+    assert "ConfigMaps, Pods, StatefulSets" in runbook
     assert (
         "spec:\n  enableServiceLinks: false\n  serviceAccountName: exomem-init-retry-recovery"
         in runbook
