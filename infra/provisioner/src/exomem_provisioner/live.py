@@ -629,6 +629,8 @@ class LiveLifecyclePlane:
         self,
         metadata: OpaqueProviderMetadata,
         request: dict[str, Any],
+        *,
+        require_fresh: bool = True,
     ) -> str:
         """Ensure one authenticated bootstrap generation before Helm can start a pod."""
 
@@ -676,6 +678,7 @@ class LiveLifecyclePlane:
                 expected_schema_version=AUTHORIZATION_SESSION_SCHEMA_VERSION,
                 expected_recovery_envelope=recovery_envelope,
                 now=current,
+                _require_fresh=require_fresh,
             )
         return bundle.revision
 
@@ -684,10 +687,12 @@ class LiveLifecyclePlane:
         metadata: OpaqueProviderMetadata,
         request: dict[str, Any],
         values: dict[str, Any],
+        *,
+        require_fresh: bool = True,
     ) -> dict[str, Any]:
         desired = dict(values)
         desired["authorizationSessionRevision"] = await self._authorization_session_revision(
-            metadata, request
+            metadata, request, require_fresh=require_fresh
         )
         return desired
 
@@ -1244,7 +1249,9 @@ class LiveLifecyclePlane:
         if config.migration_mode not in {"binding-v1-to-v2", "state-root-v1"}:
             raise MetadataConflict("runtime migration was not declared by the deployment lock")
         values = self._rollforward_helm_values(metadata, request, config)
-        values = await self._authorization_helm_values(metadata, request, values)
+        values = await self._authorization_helm_values(
+            metadata, request, values, require_fresh=False
+        )
         values["workloadMode"] = "migrate"
         values["routes"]["enabled"] = False
         values["initOperationId"] = operation_id
