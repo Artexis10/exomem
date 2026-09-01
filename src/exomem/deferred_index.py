@@ -211,10 +211,17 @@ def _ensure_derived_batch_schema(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE write_advisory_results ADD COLUMN target_rel_path TEXT"
         )
-    conn.execute(
-        "INSERT OR IGNORE INTO maintenance_state(key, value) VALUES (?, '0')",
+    # Seed the fence only when it is genuinely absent.  An unconditional write
+    # here would make every ``create=True`` open queue for the SQLite write lock
+    # behind a live writer, which is exactly what the read seams must not do.
+    if conn.execute(
+        "SELECT 1 FROM maintenance_state WHERE key = ?",
         (_PENDING_VISIBILITY_GENERATION_KEY,),
-    )
+    ).fetchone() is None:
+        conn.execute(
+            "INSERT OR IGNORE INTO maintenance_state(key, value) VALUES (?, '0')",
+            (_PENDING_VISIBILITY_GENERATION_KEY,),
+        )
     for event in ("INSERT", "UPDATE", "DELETE"):
         conn.execute(
             f"CREATE TRIGGER IF NOT EXISTS pending_visibility_generation_{event.lower()} "

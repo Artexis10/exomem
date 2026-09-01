@@ -15,7 +15,7 @@ from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
 from . import deferred_index
 
@@ -26,6 +26,7 @@ _MAX_REF = 256
 _MAX_OWNER = 128
 _MAX_FAILURE_CODE = 64
 _MAX_WARNING = 300
+_MAX_REL_PATH = 1024
 _MAX_ADVISORY_CANDIDATES = 8
 
 _COMPONENT_STATES = frozenset(
@@ -152,6 +153,16 @@ def _bounded(value: object, *, label: str, maximum: int) -> str:
     return value
 
 
+def _safe_rel_path(value: object, *, label: str) -> str:
+    """Normalize one persisted identity and bound it to the stored column."""
+    rel = deferred_index._safe_markdown_rel_path(value)
+    if rel is None or rel != value or len(rel) > _MAX_REL_PATH:
+        raise ValueError(
+            f"{label} must be a bounded safe canonical Markdown rel_path"
+        )
+    return rel
+
+
 def _digest(value: object, *, label: str) -> str:
     text = _bounded(value, label=label, maximum=64).lower()
     if len(text) != 64 or any(character not in "0123456789abcdef" for character in text):
@@ -174,9 +185,7 @@ class DerivedBatchPath:
     stable_memory_ref: str | None = None
 
     def __post_init__(self) -> None:
-        rel = deferred_index._safe_markdown_rel_path(self.rel_path)
-        if rel is None or rel != self.rel_path:
-            raise ValueError("derived receipt path must be a safe canonical Markdown path")
+        _safe_rel_path(self.rel_path, label="rel_path")
         if self.before_hash is not None:
             object.__setattr__(
                 self,
@@ -308,9 +317,7 @@ class PendingVisibilityRow:
     state: str
 
     def __post_init__(self) -> None:
-        rel = deferred_index._safe_markdown_rel_path(self.rel_path)
-        if rel is None or rel != self.rel_path:
-            raise ValueError("pending visibility path must be safe canonical Markdown")
+        _safe_rel_path(self.rel_path, label="pending visibility rel_path")
         if self.component_revision < 1:
             raise ValueError("pending visibility revision must be positive")
         _bounded(
@@ -377,9 +384,7 @@ class DerivedAdvisoryCandidate:
     triage_fingerprint: str
 
     def __post_init__(self) -> None:
-        rel = deferred_index._safe_markdown_rel_path(self.counterpart_rel_path)
-        if rel is None or rel != self.counterpart_rel_path:
-            raise ValueError("advisory counterpart path must be safe canonical Markdown")
+        _safe_rel_path(self.counterpart_rel_path, label="counterpart_rel_path")
         _bounded(
             self.counterpart_fingerprint,
             label="counterpart_fingerprint",
@@ -431,9 +436,7 @@ class DerivedAdvisoryResult:
         if self.component_revision < 1 or self.publication_revision < 1:
             raise ValueError("advisory result revisions must be positive")
         if self.target_rel_path is not None:
-            rel = deferred_index._safe_markdown_rel_path(self.target_rel_path)
-            if rel is None or rel != self.target_rel_path:
-                raise ValueError("advisory target path must be safe canonical Markdown")
+            _safe_rel_path(self.target_rel_path, label="target_rel_path")
         _bounded(
             self.target_fingerprint,
             label="target_fingerprint",
@@ -567,20 +570,48 @@ def _receipt_from_connection(
     )
 
 
+def _receipt_schema_is_current(connection: sqlite3.Connection) -> bool:
+    """Report whether this store already carries the whole extended schema."""
+    components = {
+        str(row[1])
+        for row in connection.execute("PRAGMA table_info(derived_batch_components)")
+    }
+    advisory = {
+        str(row[1])
+        for row in connection.execute("PRAGMA table_info(write_advisory_results)")
+    }
+    present = {
+        str(row[0])
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE name IN "
+            "('write_advisory_result_candidates', "
+            "'pending_visibility_generation_insert', "
+            "'pending_visibility_generation_update', "
+            "'pending_visibility_generation_delete')"
+        )
+    }
+    return (
+        "lease_revision" in components
+        and "target_rel_path" in advisory
+        and len(present) == 4
+    )
+
+
 def _connect_receipt_read(vault_root: Path) -> sqlite3.Connection:
-    """Open typed custody, repairing the supported rejected schema if needed."""
+    """Open typed custody, repairing the supported rejected schema if needed.
+
+    Opening with ``create=True`` runs schema migration, and migration needs the
+    SQLite write lock.  A read seam must never queue behind a live writer for
+    work an already-migrated store does not need, so probe first and migrate
+    only when the store is genuinely stale.
+    """
     connection = deferred_index._connect(vault_root, create=False)
     try:
-        columns = {
-            str(row[1])
-            for row in connection.execute(
-                "PRAGMA table_info(derived_batch_components)"
-            )
-        }
+        current = _receipt_schema_is_current(connection)
     except Exception:
         connection.close()
         raise
-    if "lease_revision" in columns:
+    if current:
         return connection
     connection.close()
     return deferred_index._connect(vault_root, create=True)
@@ -650,7 +681,15 @@ def prepare_batch(
     advisory_retention_until: float | None = None,
     now: float | None = None,
 ) -> DerivedBatchReceipt:
-    """Prepare every path/component/visibility/result row in one transaction."""
+    """Prepare every path/component/visibility/result row in one transaction.
+
+    When ``write_advisory`` custody is required, ``advisory_target_rel_path``
+    must name a path in this batch and ``advisory_target_fingerprint`` must be
+    that path's intended ``after_hash`` -- the exact sha256 the advisory will
+    later be asked to re-observe.  Binding the two removes the possibility of
+    publishing a result against a generation the batch never intended.  When
+    advisory custody does not apply, both must be absent.
+    """
     batch_id = _bounded(batch_id, label="batch_id", maximum=_MAX_BATCH_ID)
     mutation_attempt_digest = _digest(
         mutation_attempt_digest, label="mutation_attempt_digest"
@@ -670,9 +709,7 @@ def prepare_batch(
     required = frozenset(DerivedComponent(component) for component in required_components)
     advisory_required = DerivedComponent.WRITE_ADVISORY in required
     if advisory_required:
-        rel = deferred_index._safe_markdown_rel_path(advisory_target_rel_path)
-        if rel is None or rel != advisory_target_rel_path:
-            raise ValueError("advisory custody requires a safe target path")
+        rel = _safe_rel_path(advisory_target_rel_path, label="advisory target path")
         if rel not in {path.rel_path for path in normalized_paths}:
             raise ValueError("advisory target path must exist in the prepared batch")
         advisory_target_rel_path = rel
@@ -681,6 +718,15 @@ def prepare_batch(
             label="advisory_target_fingerprint",
             maximum=_MAX_IDENTITY,
         )
+        target_after_hash = next(
+            path.after_hash
+            for path in normalized_paths
+            if path.rel_path == advisory_target_rel_path
+        )
+        if target_after_hash is None or advisory_target_fingerprint != target_after_hash:
+            raise ValueError(
+                "advisory_target_fingerprint must equal the target path's after hash"
+            )
         if terminal_replay_until is None:
             raise ValueError("advisory custody requires terminal replay lifetime")
         replay_until = _timestamp(terminal_replay_until)
@@ -997,7 +1043,7 @@ def _newer_visibility_covers(
                 str(row[0])
                 for row in connection.execute(
                     "SELECT rel_path FROM pending_recall_rows "
-                    "WHERE batch_id = ? AND state = 'live'",
+                    "WHERE batch_id = ? AND state IN ('live', 'retired')",
                     (candidate_id,),
                 ).fetchall()
             }
@@ -1083,6 +1129,13 @@ def _prove_committed_guarded(
                     "UPDATE derived_batch_components SET state = 'superseded', "
                     "claim_owner = NULL, claim_expires_at = NULL, updated_at = ? "
                     "WHERE batch_id = ? AND state != 'not_required'",
+                    (observed_at, current.batch_id),
+                )
+                # Newer exact custody already shadows these paths, so the dead
+                # batch must stop consuming the bounded snapshot limit.
+                connection.execute(
+                    "UPDATE pending_recall_rows SET state = 'retired', "
+                    "updated_at = ? WHERE batch_id = ? AND state != 'retired'",
                     (observed_at, current.batch_id),
                 )
                 connection.execute(
@@ -1203,7 +1256,7 @@ def publish_pending_visibility(
                 remaining = int(
                     connection.execute(
                         "SELECT count(*) FROM pending_recall_rows "
-                        "WHERE batch_id = ? AND state != 'live'",
+                        "WHERE batch_id = ? AND state = 'prepared'",
                         (current.batch_id,),
                     ).fetchone()[0]
                 )
@@ -1283,7 +1336,7 @@ def snapshot_pending_visibility(
     connection: sqlite3.Connection | None = None
     generation = 0
     try:
-        connection = deferred_index._connect(vault_root, create=True)
+        connection = _connect_receipt_read(vault_root)
         connection.execute("BEGIN")
         generation = _pending_visibility_generation(connection)
         rows = connection.execute(
@@ -1357,7 +1410,7 @@ def pending_visibility_snapshot_is_current(
     if not deferred_index.store_path(vault_root).exists():
         return snapshot_generation == 0
     try:
-        connection = deferred_index._connect(vault_root, create=True)
+        connection = _connect_receipt_read(vault_root)
         try:
             return _pending_visibility_generation(connection) == snapshot_generation
         finally:
@@ -1398,6 +1451,11 @@ def retire_pending_visibility(
         if all(str(row[3]) == "retired" for row in current):
             connection.commit()
             return PendingVisibilityRetirement(outcome="retired")
+        # A never-published row still gates its batch's components. Retiring it
+        # would strand them behind a publication that can no longer complete.
+        if any(str(row[3]) == "prepared" for row in current):
+            connection.rollback()
+            return PendingVisibilityRetirement(outcome="stale")
         if any(
             str(row[3]) != expected.state
             for row, expected in zip(current, batch.rows, strict=True)
@@ -1463,7 +1521,7 @@ def _advisory_candidates_from_connection(
 
 def _project_advisory_result(
     connection: sqlite3.Connection,
-    row: sqlite3.Row | tuple[object, ...],
+    row: Sequence[Any],
 ) -> DerivedAdvisoryResult:
     result_id = str(row[0])
     target_rel_path = None if row[3] is None else str(row[3])
@@ -1473,6 +1531,10 @@ def _project_advisory_result(
     if target_rel_path is None:
         state = "failed"
         failure_code = "legacy_result_unverifiable"
+    elif state == "superseded":
+        # Supersession releases no content, so orphan candidate rows left by an
+        # interrupted cleanup cannot turn a closed outcome into a failure.
+        failure_code = None
     else:
         try:
             candidates = _advisory_candidates_from_connection(connection, result_id)
@@ -1514,7 +1576,7 @@ def read_advisory_result(
         return None
     observed_at = _timestamp(now)
     try:
-        connection = deferred_index._connect(vault_root, create=True)
+        connection = _connect_receipt_read(vault_root)
         try:
             row = connection.execute(
                 "SELECT result_id, batch_id, component_revision, target_rel_path, "
@@ -1734,7 +1796,7 @@ def _pending_visibility_complete(
     return not bool(
         connection.execute(
             "SELECT 1 FROM pending_recall_rows "
-            "WHERE batch_id = ? AND state != 'live' LIMIT 1",
+            "WHERE batch_id = ? AND state = 'prepared' LIMIT 1",
             (batch_id,),
         ).fetchone()
     )
@@ -1815,7 +1877,7 @@ def recover_prepared_batches(
                 "(b.state IN ('prepared', 'reconcile_required') OR ("
                 "b.state = 'ready' AND EXISTS ("
                 "SELECT 1 FROM pending_recall_rows AS p "
-                "WHERE p.batch_id = b.batch_id AND p.state != 'live'))) "
+                "WHERE p.batch_id = b.batch_id AND p.state = 'prepared'))) "
                 "AND EXISTS (SELECT 1 FROM derived_batch_components AS c "
                 "WHERE c.batch_id = b.batch_id AND c.state IN "
                 "('prepared', 'ready', 'reconcile_required') "
@@ -1901,7 +1963,7 @@ def recoverable_batch_count(vault_root: Path) -> int:
                 "b.state IN ('prepared', 'reconcile_required') OR ("
                 "b.state = 'ready' AND EXISTS ("
                 "SELECT 1 FROM pending_recall_rows AS p "
-                "WHERE p.batch_id = b.batch_id AND p.state != 'live'))"
+                "WHERE p.batch_id = b.batch_id AND p.state = 'prepared'))"
             ).fetchone()[0]
         )
     finally:
@@ -1937,7 +1999,7 @@ def claim_ready_components(
                 "(c.state = 'retryable' AND c.next_attempt_at <= ?) OR "
                 "(c.state = 'claimed' AND c.claim_expires_at <= ?)) AND NOT EXISTS ("
                 "SELECT 1 FROM pending_recall_rows AS p WHERE "
-                "p.batch_id = c.batch_id AND p.state != 'live') "
+                "p.batch_id = c.batch_id AND p.state = 'prepared') "
                 f"ORDER BY c.next_attempt_at, c.updated_at, b.created_at, c.batch_id, "
                 f"{_COMPONENT_ORDER_SQL} LIMIT ?",
                 (claimed_at, claimed_at, int(limit)),
@@ -2158,7 +2220,7 @@ def due_component_count(vault_root: Path, *, now: float | None = None) -> int:
                 "(c.state = 'retryable' AND c.next_attempt_at <= ?) OR "
                 "(c.state = 'claimed' AND c.claim_expires_at <= ?)) "
                 "AND NOT EXISTS (SELECT 1 FROM pending_recall_rows AS p "
-                "WHERE p.batch_id = c.batch_id AND p.state != 'live')",
+                "WHERE p.batch_id = c.batch_id AND p.state = 'prepared')",
                 (current, current),
             ).fetchone()[0]
         )

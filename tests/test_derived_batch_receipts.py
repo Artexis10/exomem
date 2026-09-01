@@ -107,9 +107,9 @@ def _prepare_one(
         else frozenset(required)
     )
     if protocol.DerivedComponent.WRITE_ADVISORY in components:
-        advisory_target_fingerprint = (
-            advisory_target_fingerprint or hashlib.sha256(b"target").hexdigest()
-        )
+        # The frozen contract binds the advisory target fingerprint to the
+        # prepared after hash, so the default has to be exactly that.
+        advisory_target_fingerprint = advisory_target_fingerprint or _hash_bytes(after)
         terminal_replay_until = (
             100.0 if terminal_replay_until is None else terminal_replay_until
         )
@@ -428,7 +428,7 @@ def test_frozen_protocol_fake_matches_public_typed_shapes() -> None:
             protocol.DerivedComponent.WRITE_ADVISORY,
         },
         advisory_target_rel_path=path.rel_path,
-        advisory_target_fingerprint=hashlib.sha256(b"target").hexdigest(),
+        advisory_target_fingerprint=_hash_bytes(b"fake"),
         terminal_replay_until=100.0,
         now=1.0,
     )
@@ -814,7 +814,7 @@ def test_claim_attempts_preserve_pending_and_advisory_component_lineage(
     vault: Path,
 ) -> None:
     protocol = _protocol()
-    target_fingerprint = hashlib.sha256(b"target").hexdigest()
+    target_fingerprint = _hash_bytes(b"after")
     receipt, target, _before, after = _prepare_one(
         vault,
         batch_id="lineage",
@@ -1653,12 +1653,12 @@ def _prepare_advisory_claim(
     now: float = 1.0,
 ):
     protocol = _protocol()
-    fingerprint = target_fingerprint or hashlib.sha256(
-        f"{batch_id}:target".encode()
-    ).hexdigest()
+    body = f"after-{batch_id}".encode()
+    fingerprint = target_fingerprint or _hash_bytes(body)
     receipt, target, _before, after = _prepare_one(
         vault,
         batch_id=batch_id,
+        after=body,
         required={protocol.DerivedComponent.WRITE_ADVISORY},
         advisory_target_fingerprint=fingerprint,
         terminal_replay_until=100.0,
@@ -1863,7 +1863,7 @@ def test_advisory_prepare_requires_exact_target_path_and_replays_it(vault: Path)
         _path(protocol, rel_a, before=None, after=b"a"),
         _path(protocol, rel_b, before=None, after=b"b"),
     )
-    fingerprint = hashlib.sha256(b"target").hexdigest()
+    fingerprint = _hash_bytes(b"a")
 
     with pytest.raises(ValueError, match="target path"):
         _prepare(
@@ -1911,7 +1911,7 @@ def test_advisory_prepare_requires_exact_target_path_and_replays_it(vault: Path)
             paths=paths,
             required={protocol.DerivedComponent.WRITE_ADVISORY},
             advisory_target_rel_path=rel_b,
-            advisory_target_fingerprint=fingerprint,
+            advisory_target_fingerprint=_hash_bytes(b"b"),
             terminal_replay_until=120.0,
         )
 
@@ -2456,7 +2456,7 @@ def test_frozen_protocol_fake_drives_the_store_consumer_lifecycle() -> None:
     fake = DerivedReceiptProtocolFake()
     rel = "Knowledge Base/Notes/fake-consumer.md"
     path = _path(protocol, rel, before=None, after=b"consumer")
-    fingerprint = hashlib.sha256(b"consumer-target").hexdigest()
+    fingerprint = _hash_bytes(b"consumer")
     receipt = fake.prepare_batch(
         Path("vault"),
         batch_id="fake-consumer",
@@ -2534,9 +2534,10 @@ def test_frozen_protocol_fake_drives_the_store_consumer_lifecycle() -> None:
     assert isinstance(retirement, protocol.PendingVisibilityRetirement)
     assert retirement.outcome == "retired"
     assert fake.snapshot_pending_visibility(Path("vault"), limit=8).batches == ()
+    # Production retires idempotently once custody already converged.
     assert fake.retire_pending_visibility(
         Path("vault"), live.batches[0]
-    ).outcome == "stale"
+    ).outcome == "retired"
 
     assert fake.call_order == (
         "prepare_batch",
@@ -2568,3 +2569,581 @@ def test_frozen_protocol_fake_drives_the_store_consumer_lifecycle() -> None:
     assert fake.snapshot_pending_visibility(
         Path("vault"), limit=8
     ).outcome == "unprovable"
+
+
+# --- Correction round 1 -------------------------------------------------------
+
+
+_OVERLONG_REL = "Knowledge Base/Notes/" + ("a" * 1100) + ".md"
+
+
+def test_retired_pending_rows_do_not_strand_unfinished_components(
+    vault: Path,
+) -> None:
+    protocol = _protocol()
+    receipt, target, _before, after = _prepare_one(
+        vault,
+        batch_id="retire-strand",
+        required={
+            protocol.DerivedComponent.LEXSTORE,
+            protocol.DerivedComponent.GRAPH,
+        },
+    )
+    _commit_and_prove(vault, receipt, target, after)
+    [lexstore] = protocol.claim_ready_components(
+        vault, owner="worker-a", limit=1, lease_seconds=30.0, now=20.0
+    )
+    assert lexstore.component is protocol.DerivedComponent.LEXSTORE
+    assert protocol.complete_component(
+        vault, lexstore, current_generation=receipt.canonical_generation, now=21.0
+    )
+
+    batch = _snapshot_batch(protocol, vault, receipt.batch_id)
+    assert protocol.retire_pending_visibility(
+        vault, batch, now=22.0
+    ).outcome == "retired"
+
+    # `retired` is terminal beyond `live`: only never-published rows may block.
+    assert protocol.due_component_count(vault, now=23.0) == 1
+    assert protocol.recoverable_batch_count(vault) == 0
+    [graph] = protocol.claim_ready_components(
+        vault, owner="worker-b", limit=1, lease_seconds=30.0, now=23.0
+    )
+    assert graph.component is protocol.DerivedComponent.GRAPH
+    assert protocol.complete_component(
+        vault, graph, current_generation=receipt.canonical_generation, now=24.0
+    )
+    assert protocol.recover_prepared_batches(
+        vault,
+        observe_current_generation=lambda _root: receipt.canonical_generation,
+        visibility_publisher=lambda _root, _receipt: True,
+        limit=8,
+        now=25.0,
+    ) == 0
+    assert protocol.component_status(
+        vault, receipt, protocol.DerivedComponent.GRAPH
+    ).failure_code is None
+
+
+def test_retiring_an_unpublished_prepared_row_is_refused(vault: Path) -> None:
+    protocol = _protocol()
+    receipt, target, _before, after = _prepare_one(vault, batch_id="prepared-retire")
+    batch = _snapshot_batch(protocol, vault, receipt.batch_id)
+    assert tuple(row.state for row in batch.rows) == ("prepared",)
+
+    assert protocol.retire_pending_visibility(
+        vault, batch, now=12.0
+    ).outcome == "stale"
+    with sqlite3.connect(deferred_index.store_path(vault)) as connection:
+        assert connection.execute(
+            "SELECT state FROM pending_recall_rows WHERE batch_id = ?",
+            (receipt.batch_id,),
+        ).fetchone() == ("prepared",)
+
+    # The unpublished row survives, so ordinary publication still succeeds
+    # instead of raising "pending visibility publication was incomplete".
+    _commit_and_prove(vault, receipt, target, after)
+
+
+def test_supersession_retires_the_shadowed_pending_rows(vault: Path) -> None:
+    protocol = _protocol()
+    old, target, _before, middle = _prepare_one(
+        vault,
+        batch_id="superseded-rows",
+        generation="generation-1",
+        after=b"middle",
+        now=1.0,
+    )
+    _commit_and_prove(vault, old, target, middle)
+    rel = old.paths[0].rel_path
+    newer = _prepare(
+        vault,
+        batch_id="newer-rows",
+        generation="generation-2",
+        paths=(_path(protocol, rel, before=middle, after=b"after"),),
+        required={protocol.DerivedComponent.LEXSTORE},
+        now=3.0,
+    )
+    _write(target, b"after")
+    assert protocol.prove_committed(
+        vault, newer, current_generation="generation-2", now=4.0
+    ).outcome == "ready"
+    assert protocol.publish_pending_visibility(
+        vault, newer, publisher=lambda _root, _receipt: True, now=4.0
+    )
+
+    assert protocol.prove_committed(
+        vault, old, current_generation="generation-2", now=5.0
+    ).outcome == "superseded"
+
+    # A dead batch stops consuming the bounded snapshot limit.
+    with sqlite3.connect(deferred_index.store_path(vault)) as connection:
+        assert connection.execute(
+            "SELECT state FROM pending_recall_rows WHERE batch_id = ?",
+            (old.batch_id,),
+        ).fetchone() == ("retired",)
+    snapshot = protocol.snapshot_pending_visibility(vault, limit=8)
+    assert snapshot.outcome == "complete"
+    assert {batch.receipt.batch_id for batch in snapshot.batches} == {newer.batch_id}
+
+
+def test_read_seams_do_not_block_behind_a_held_write_lock(vault: Path) -> None:
+    protocol = _protocol()
+    receipt, target, _before, after = _prepare_one(
+        vault,
+        batch_id="lock-free-reads",
+        required={protocol.DerivedComponent.WRITE_ADVISORY},
+    )
+    _commit_and_prove(vault, receipt, target, after)
+    result_ref = protocol.advisory_result_ref(vault, receipt)
+    baseline = protocol.snapshot_pending_visibility(vault, limit=8)
+    assert baseline.outcome == "complete"
+
+    writer = sqlite3.connect(deferred_index.store_path(vault), timeout=30.0)
+    try:
+        writer.execute("BEGIN IMMEDIATE")
+        writer.execute(
+            "INSERT INTO maintenance_state(key, value) VALUES "
+            "('correction-round-probe', '1') "
+            "ON CONFLICT(key) DO UPDATE SET value = '1'"
+        )
+        started = time.monotonic()
+        snapshot = protocol.snapshot_pending_visibility(vault, limit=8)
+        fenced = protocol.pending_visibility_snapshot_is_current(
+            vault, snapshot.snapshot_generation
+        )
+        advisory = protocol.read_advisory_result(vault, result_ref, now=20.0)
+        elapsed = time.monotonic() - started
+    finally:
+        writer.rollback()
+        writer.close()
+
+    assert snapshot.outcome == "complete"
+    assert {batch.receipt.batch_id for batch in snapshot.batches} == {receipt.batch_id}
+    assert fenced is True
+    assert advisory is not None and advisory.state == "pending"
+    assert elapsed < 1.0, f"read seams blocked behind the write lock for {elapsed:.3f}s"
+
+
+def test_advisory_publication_refuses_an_expired_lease(vault: Path) -> None:
+    protocol = _protocol()
+    _receipt, claimed, fingerprint = _prepare_advisory_claim(
+        vault, batch_id="expired-lease"
+    )
+    assert claimed.claim_expires_at is not None
+
+    assert protocol.publish_advisory_result(
+        vault,
+        claimed,
+        state="ready",
+        candidates=(_advisory_candidate(protocol),),
+        observed_target_fingerprint=fingerprint,
+        now=claimed.claim_expires_at + 1.0,
+    ).outcome == "stale_claim"
+    assert protocol.publish_advisory_result(
+        vault,
+        claimed,
+        state="ready",
+        candidates=(_advisory_candidate(protocol),),
+        observed_target_fingerprint=fingerprint,
+        now=claimed.claim_expires_at - 1.0,
+    ).outcome == "published"
+
+
+def test_pending_snapshot_at_exactly_the_limit_is_complete(vault: Path) -> None:
+    protocol = _protocol()
+    for index in range(2):
+        _prepare_one(vault, batch_id=f"exact-limit-{index}")
+
+    snapshot = protocol.snapshot_pending_visibility(vault, limit=2)
+
+    assert snapshot.outcome == "complete"
+    assert len(snapshot.batches) == 2
+    assert snapshot.failure_code is None
+
+
+def test_advisory_result_within_terminal_replay_survives_retention_expiry(
+    vault: Path,
+) -> None:
+    protocol = _protocol()
+    receipt, _target, _before, _after = _prepare_one(
+        vault,
+        batch_id="replay-window",
+        required={protocol.DerivedComponent.WRITE_ADVISORY},
+    )
+    result_ref = protocol.advisory_result_ref(vault, receipt)
+    with sqlite3.connect(deferred_index.store_path(vault)) as connection:
+        connection.execute(
+            "UPDATE write_advisory_results SET retention_deadline = 5, "
+            "terminal_replay_until = 100 WHERE batch_id = ?",
+            (receipt.batch_id,),
+        )
+
+    # Retention has passed but the mutation terminal can still replay, so the
+    # ref must still resolve. Only both deadlines together expire a result.
+    still_live = protocol.read_advisory_result(vault, result_ref, now=50.0)
+    assert still_live is not None
+    assert still_live.state == "pending"
+    assert protocol.read_advisory_result(vault, result_ref, now=101.0) is None
+
+
+def test_deleting_a_pending_row_advances_the_visibility_generation(
+    vault: Path,
+) -> None:
+    protocol = _protocol()
+    receipt, _target, _before, _after = _prepare_one(vault, batch_id="delete-fence")
+    snapshot = protocol.snapshot_pending_visibility(vault, limit=8)
+    assert protocol.pending_visibility_snapshot_is_current(
+        vault, snapshot.snapshot_generation
+    )
+
+    with sqlite3.connect(deferred_index.store_path(vault)) as connection:
+        connection.execute(
+            "DELETE FROM pending_recall_rows WHERE batch_id = ?",
+            (receipt.batch_id,),
+        )
+
+    assert not protocol.pending_visibility_snapshot_is_current(
+        vault, snapshot.snapshot_generation
+    )
+
+
+def test_pending_snapshot_lineage_mismatch_is_unprovable(vault: Path) -> None:
+    protocol = _protocol()
+    receipt, _target, _before, _after = _prepare_one(vault, batch_id="lineage-drift")
+    with sqlite3.connect(deferred_index.store_path(vault)) as connection:
+        connection.execute(
+            "UPDATE pending_recall_rows SET canonical_generation = 'generation-other' "
+            "WHERE batch_id = ?",
+            (receipt.batch_id,),
+        )
+
+    snapshot = protocol.snapshot_pending_visibility(vault, limit=8)
+
+    assert snapshot.outcome == "unprovable"
+    assert snapshot.batches == ()
+    assert snapshot.failure_code == "pending_visibility_unprovable"
+
+
+def test_partly_retired_custody_cannot_be_retired_again(vault: Path) -> None:
+    protocol = _protocol()
+    rel_a = "Knowledge Base/Notes/partly-a.md"
+    rel_b = "Knowledge Base/Notes/partly-b.md"
+    for rel, body in ((rel_a, b"a"), (rel_b, b"b")):
+        _write(vault / rel, body)
+    receipt = _prepare(
+        vault,
+        batch_id="partly-retired",
+        paths=(
+            _path(protocol, rel_a, before=b"a", after=b"a-after"),
+            _path(protocol, rel_b, before=b"b", after=b"b-after"),
+        ),
+        required={protocol.DerivedComponent.LEXSTORE},
+    )
+    _write(vault / rel_a, b"a-after")
+    _write(vault / rel_b, b"b-after")
+    assert protocol.prove_committed(
+        vault, receipt, current_generation=receipt.canonical_generation
+    ).outcome == "ready"
+    assert protocol.publish_pending_visibility(
+        vault, receipt, publisher=lambda _root, _receipt: True
+    )
+    batch = _snapshot_batch(protocol, vault, receipt.batch_id)
+    with sqlite3.connect(deferred_index.store_path(vault)) as connection:
+        connection.execute(
+            "UPDATE pending_recall_rows SET state = 'retired' "
+            "WHERE batch_id = ? AND rel_path = ?",
+            (receipt.batch_id, rel_a),
+        )
+
+    assert protocol.retire_pending_visibility(vault, batch).outcome == "stale"
+    with sqlite3.connect(deferred_index.store_path(vault)) as connection:
+        assert sorted(
+            connection.execute(
+                "SELECT rel_path, state FROM pending_recall_rows WHERE batch_id = ?",
+                (receipt.batch_id,),
+            ).fetchall()
+        ) == [(rel_a, "retired"), (rel_b, "live")]
+
+
+def test_advisory_target_fingerprint_must_equal_the_prepared_after_hash(
+    vault: Path,
+) -> None:
+    protocol = _protocol()
+    rel = "Knowledge Base/Notes/fingerprint-contract.md"
+    paths = (_path(protocol, rel, before=None, after=b"body"),)
+    exact = _hash_bytes(b"body")
+
+    with pytest.raises(ValueError, match="after hash"):
+        _prepare(
+            vault,
+            batch_id="fingerprint-mismatch",
+            paths=paths,
+            required={protocol.DerivedComponent.WRITE_ADVISORY},
+            advisory_target_rel_path=rel,
+            advisory_target_fingerprint=_hash_bytes(b"something-else"),
+            terminal_replay_until=100.0,
+        )
+    receipt = _prepare(
+        vault,
+        batch_id="fingerprint-exact",
+        paths=paths,
+        required={protocol.DerivedComponent.WRITE_ADVISORY},
+        advisory_target_rel_path=rel,
+        advisory_target_fingerprint=exact,
+        terminal_replay_until=100.0,
+    )
+    assert protocol.advisory_result_ref(vault, receipt) is not None
+    with pytest.raises(ValueError, match="cannot carry target identity"):
+        _prepare(
+            vault,
+            batch_id="fingerprint-not-required",
+            paths=paths,
+            required={protocol.DerivedComponent.LEXSTORE},
+            advisory_target_fingerprint=exact,
+        )
+
+
+def test_superseded_result_projects_closed_even_with_orphan_candidates(
+    vault: Path,
+) -> None:
+    protocol = _protocol()
+    receipt, claimed, fingerprint = _prepare_advisory_claim(
+        vault, batch_id="orphan-superseded"
+    )
+    result_ref = protocol.advisory_result_ref(vault, receipt)
+    assert protocol.publish_advisory_result(
+        vault,
+        claimed,
+        state="ready",
+        candidates=(_advisory_candidate(protocol),),
+        observed_target_fingerprint=fingerprint,
+        now=3.0,
+    ).outcome == "published"
+    with sqlite3.connect(deferred_index.store_path(vault)) as connection:
+        connection.execute(
+            "UPDATE write_advisory_results SET state = 'superseded', "
+            "failure_code = NULL WHERE batch_id = ?",
+            (receipt.batch_id,),
+        )
+
+    superseded = protocol.read_advisory_result(vault, result_ref, now=4.0)
+
+    assert superseded is not None
+    assert superseded.state == "superseded"
+    assert superseded.failure_code is None
+    assert superseded.candidates == ()
+
+
+def test_typed_values_bound_every_relative_path(vault: Path) -> None:
+    protocol = _protocol()
+    assert deferred_index._safe_markdown_rel_path(_OVERLONG_REL) == _OVERLONG_REL
+
+    with pytest.raises(ValueError, match="rel_path"):
+        protocol.DerivedBatchPath(
+            rel_path=_OVERLONG_REL,
+            before_hash=None,
+            after_hash=_hash_bytes(b"x"),
+        )
+    with pytest.raises(ValueError, match="rel_path"):
+        protocol.PendingVisibilityRow(
+            rel_path=_OVERLONG_REL,
+            component_revision=1,
+            canonical_generation="generation-1",
+            state="live",
+        )
+    with pytest.raises(ValueError, match="rel_path"):
+        replace(_advisory_candidate(protocol), counterpart_rel_path=_OVERLONG_REL)
+
+
+def test_cleanup_treats_a_nonpositive_limit_as_zero(vault: Path) -> None:
+    protocol = _protocol()
+    receipt, _target, _before, _after = _prepare_one(
+        vault,
+        batch_id="nonpositive-limit",
+        required={protocol.DerivedComponent.WRITE_ADVISORY},
+    )
+    with sqlite3.connect(deferred_index.store_path(vault)) as connection:
+        connection.execute(
+            "UPDATE write_advisory_results SET retention_deadline = 1, "
+            "terminal_replay_until = 1 WHERE batch_id = ?",
+            (receipt.batch_id,),
+        )
+
+    assert protocol.cleanup_advisory_results(vault, now=50.0, limit=-1) == 0
+    assert protocol.cleanup_advisory_results(vault, now=50.0, limit=0) == 0
+    with sqlite3.connect(deferred_index.store_path(vault)) as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM write_advisory_results WHERE batch_id = ?",
+            (receipt.batch_id,),
+        ).fetchone() == (1,)
+    assert protocol.cleanup_advisory_results(vault, now=50.0, limit=8) == 1
+
+
+def test_fake_refuses_every_input_production_refuses() -> None:
+    protocol = _protocol()
+    rel = "Knowledge Base/Notes/fake-parity.md"
+    path = _path(protocol, rel, before=None, after=b"body")
+    exact = _hash_bytes(b"body")
+
+    def _fresh():
+        fake = DerivedReceiptProtocolFake()
+        return fake
+
+    def _prepared(fake, batch_id="parity"):
+        return fake.prepare_batch(
+            Path("vault"),
+            batch_id=batch_id,
+            mutation_attempt_digest=hashlib.sha256(batch_id.encode()).hexdigest(),
+            canonical_generation="generation-fake",
+            checkpoint_id="checkpoint-fake",
+            paths=(path,),
+            required_components={protocol.DerivedComponent.WRITE_ADVISORY},
+            advisory_target_rel_path=rel,
+            advisory_target_fingerprint=exact,
+            terminal_replay_until=100.0,
+            now=1.0,
+        )
+
+    # prepare_batch: advisory required without a target path.
+    with pytest.raises(ValueError, match="target path"):
+        _fresh().prepare_batch(
+            Path("vault"),
+            batch_id="no-target",
+            mutation_attempt_digest=hashlib.sha256(b"no-target").hexdigest(),
+            canonical_generation="generation-fake",
+            checkpoint_id="checkpoint-fake",
+            paths=(path,),
+            required_components={protocol.DerivedComponent.WRITE_ADVISORY},
+            advisory_target_fingerprint=exact,
+            terminal_replay_until=100.0,
+        )
+    # prepare_batch: target path absent from the prepared batch.
+    with pytest.raises(ValueError, match="prepared batch"):
+        _fresh().prepare_batch(
+            Path("vault"),
+            batch_id="foreign-target",
+            mutation_attempt_digest=hashlib.sha256(b"foreign-target").hexdigest(),
+            canonical_generation="generation-fake",
+            checkpoint_id="checkpoint-fake",
+            paths=(path,),
+            required_components={protocol.DerivedComponent.WRITE_ADVISORY},
+            advisory_target_rel_path="Knowledge Base/Notes/elsewhere.md",
+            advisory_target_fingerprint=exact,
+            terminal_replay_until=100.0,
+        )
+    # prepare_batch: fingerprint that is not the prepared after hash.
+    with pytest.raises(ValueError, match="after hash"):
+        _fresh().prepare_batch(
+            Path("vault"),
+            batch_id="wrong-fingerprint",
+            mutation_attempt_digest=hashlib.sha256(b"wrong-fingerprint").hexdigest(),
+            canonical_generation="generation-fake",
+            checkpoint_id="checkpoint-fake",
+            paths=(path,),
+            required_components={protocol.DerivedComponent.WRITE_ADVISORY},
+            advisory_target_rel_path=rel,
+            advisory_target_fingerprint=_hash_bytes(b"other"),
+            terminal_replay_until=100.0,
+        )
+    # prepare_batch: target identity supplied when advisory is not required.
+    with pytest.raises(ValueError, match="cannot carry target identity"):
+        _fresh().prepare_batch(
+            Path("vault"),
+            batch_id="unwanted-target",
+            mutation_attempt_digest=hashlib.sha256(b"unwanted-target").hexdigest(),
+            canonical_generation="generation-fake",
+            checkpoint_id="checkpoint-fake",
+            paths=(path,),
+            required_components={protocol.DerivedComponent.LEXSTORE},
+            advisory_target_rel_path=rel,
+            advisory_target_fingerprint=exact,
+        )
+
+    candidate = _advisory_candidate(protocol)
+    claimed_of = lambda fake, receipt: replace(  # noqa: E731
+        fake.component_status(
+            Path("vault"), receipt, protocol.DerivedComponent.WRITE_ADVISORY
+        ),
+        state="claimed",
+        claim_owner="fake-worker",
+        claim_expires_at=60.0,
+    )
+
+    # publish_advisory_result: state=pending is not a publishable outcome.
+    fake = _fresh()
+    receipt = _prepared(fake)
+    with pytest.raises(ValueError, match="ready or failed"):
+        fake.publish_advisory_result(
+            Path("vault"),
+            claimed_of(fake, receipt),
+            state="pending",
+            observed_target_fingerprint=exact,
+        )
+    # publish_advisory_result: duplicate candidates.
+    with pytest.raises(ValueError, match="unique"):
+        fake.publish_advisory_result(
+            Path("vault"),
+            claimed_of(fake, receipt),
+            state="ready",
+            candidates=(candidate, candidate),
+            observed_target_fingerprint=exact,
+        )
+    # publish_advisory_result: unbounded observed fingerprints.
+    for bad in ("", None, "f" * 129):
+        with pytest.raises(ValueError, match="observed_target_fingerprint"):
+            fake.publish_advisory_result(
+                Path("vault"),
+                claimed_of(fake, receipt),
+                state="ready",
+                candidates=(candidate,),
+                observed_target_fingerprint=bad,
+            )
+
+
+def test_fake_retirement_replay_is_idempotent_like_production() -> None:
+    protocol = _protocol()
+    rel = "Knowledge Base/Notes/fake-idempotent.md"
+    path = _path(protocol, rel, before=None, after=b"body")
+    fake = DerivedReceiptProtocolFake()
+    receipt = fake.prepare_batch(
+        Path("vault"),
+        batch_id="idempotent-retire",
+        mutation_attempt_digest=hashlib.sha256(b"idempotent-retire").hexdigest(),
+        canonical_generation="generation-fake",
+        checkpoint_id="checkpoint-fake",
+        paths=(path,),
+        required_components={protocol.DerivedComponent.LEXSTORE},
+        now=1.0,
+    )
+    assert fake.publish_pending_visibility(
+        Path("vault"), receipt, publisher=lambda _root, _receipt: True
+    )
+    live = fake.snapshot_pending_visibility(Path("vault"), limit=8)
+    [batch] = live.batches
+
+    assert fake.retire_pending_visibility(Path("vault"), batch).outcome == "retired"
+    # Production returns `retired` for the identical replay; the fake must too.
+    assert fake.retire_pending_visibility(Path("vault"), batch).outcome == "retired"
+
+
+def test_fake_refuses_retiring_an_unpublished_prepared_row() -> None:
+    protocol = _protocol()
+    rel = "Knowledge Base/Notes/fake-prepared.md"
+    path = _path(protocol, rel, before=None, after=b"body")
+    fake = DerivedReceiptProtocolFake()
+    receipt = fake.prepare_batch(
+        Path("vault"),
+        batch_id="fake-prepared-retire",
+        mutation_attempt_digest=hashlib.sha256(b"fake-prepared-retire").hexdigest(),
+        canonical_generation="generation-fake",
+        checkpoint_id="checkpoint-fake",
+        paths=(path,),
+        required_components={protocol.DerivedComponent.LEXSTORE},
+        now=1.0,
+    )
+    assert receipt.batch_id == "fake-prepared-retire"
+    [batch] = fake.snapshot_pending_visibility(Path("vault"), limit=8).batches
+    assert tuple(row.state for row in batch.rows) == ("prepared",)
+
+    assert fake.retire_pending_visibility(Path("vault"), batch).outcome == "stale"

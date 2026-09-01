@@ -28,6 +28,14 @@ if TYPE_CHECKING:
     )
 
 
+def _identity(rows) -> tuple[tuple[str, int, str], ...]:
+    """Project the durable custody identity a retirement must match exactly."""
+    return tuple(
+        (row.rel_path, row.component_revision, row.canonical_generation)
+        for row in rows
+    )
+
+
 def _protocol():
     return importlib.import_module("exomem.derived_receipts")
 
@@ -118,13 +126,51 @@ class DerivedReceiptProtocolFake:
         protocol = _protocol()
         required = frozenset(required_components)
         prepared_at = float(now if now is not None else 0.0)
+        normalized_paths = tuple(paths)
         result_ref = None
         if protocol.DerivedComponent.WRITE_ADVISORY in required:
+            # Run production's own validation so a child lane cannot pass
+            # against the fake and then fail against the real store.
+            target = protocol._safe_rel_path(
+                advisory_target_rel_path, label="advisory target path"
+            )
+            if target not in {path.rel_path for path in normalized_paths}:
+                raise ValueError(
+                    "advisory target path must exist in the prepared batch"
+                )
+            advisory_target_rel_path = target
+            advisory_target_fingerprint = protocol._bounded(
+                advisory_target_fingerprint,
+                label="advisory_target_fingerprint",
+                maximum=protocol._MAX_IDENTITY,
+            )
+            target_after_hash = next(
+                path.after_hash
+                for path in normalized_paths
+                if path.rel_path == advisory_target_rel_path
+            )
+            if (
+                target_after_hash is None
+                or advisory_target_fingerprint != target_after_hash
+            ):
+                raise ValueError(
+                    "advisory_target_fingerprint must equal the target path's "
+                    "after hash"
+                )
+            if terminal_replay_until is None:
+                raise ValueError("advisory custody requires terminal replay lifetime")
             digest = hashlib.sha256(
                 f"{batch_id}:write_advisory:1:{advisory_target_rel_path}:"
                 f"{advisory_target_fingerprint}".encode()
             ).hexdigest()[:32]
             result_ref = f"exomem://write-advisory-result/{digest}"
+        elif (
+            advisory_target_rel_path is not None
+            or advisory_target_fingerprint is not None
+        ):
+            raise ValueError(
+                "inapplicable advisory custody cannot carry target identity"
+            )
         components = tuple(
             protocol.DerivedComponentStatus(
                 batch_id=batch_id,
@@ -356,7 +402,14 @@ class DerivedReceiptProtocolFake:
             return injected
         protocol = _protocol()
         current = self._pending_batches.get(batch.receipt.batch_id)
-        if current is None or current.rows != batch.rows:
+        if current is None or _identity(current.rows) != _identity(batch.rows):
+            return protocol.PendingVisibilityRetirement(outcome="stale")
+        if all(row.state == "retired" for row in current.rows):
+            # Production retires idempotently once custody already converged.
+            return protocol.PendingVisibilityRetirement(outcome="retired")
+        if any(row.state == "prepared" for row in current.rows):
+            return protocol.PendingVisibilityRetirement(outcome="stale")
+        if current.rows != batch.rows:
             return protocol.PendingVisibilityRetirement(outcome="stale")
         self._pending_batches[batch.receipt.batch_id] = protocol.PendingVisibilityBatch(
             receipt=current.receipt,
@@ -412,6 +465,23 @@ class DerivedReceiptProtocolFake:
         if injected is not None:
             return injected
         protocol = _protocol()
+        if state not in {"ready", "failed"}:
+            raise ValueError("advisory publication state must be ready or failed")
+        normalized = tuple(candidates)
+        if len(normalized) > protocol._MAX_ADVISORY_CANDIDATES:
+            raise ValueError("advisory publication supports at most eight candidates")
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("advisory publication candidates must be unique")
+        if state == "ready":
+            if failure_code is not None:
+                raise ValueError("ready advisory publication cannot carry failure")
+        elif normalized or failure_code not in protocol._ADVISORY_FAILURE_CODES:
+            raise ValueError("failed advisory publication requires one closed code")
+        protocol._bounded(
+            observed_target_fingerprint,
+            label="observed_target_fingerprint",
+            maximum=protocol._MAX_IDENTITY,
+        )
         ref = claimed_status.advisory_result_ref
         current = None if ref is None else self._advisory_results.get(ref)
         if (
@@ -431,7 +501,6 @@ class DerivedReceiptProtocolFake:
                 updated_at=float(now if now is not None else 0.0),
             )
             return protocol.DerivedAdvisoryPublication(outcome="superseded")
-        normalized = tuple(candidates)
         if current.state != "pending":
             outcome = (
                 "already_published"
