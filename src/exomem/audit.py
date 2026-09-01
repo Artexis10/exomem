@@ -5563,9 +5563,24 @@ def _entity_recurrence_finding(
                 0, candidate.facet_count - len(candidate.facets)
             ),
             "type_cues": list(candidate.type_cues),
+            "type_cue_count": candidate.type_cue_count,
+            "returned_type_cue_count": len(candidate.type_cues),
+            "omitted_type_cue_count": max(
+                0, candidate.type_cue_count - len(candidate.type_cues)
+            ),
             "active_type_cues": list(candidate.type_cues),
+            "active_type_cue_count": candidate.type_cue_count,
+            "returned_active_type_cue_count": len(candidate.type_cues),
+            "omitted_active_type_cue_count": max(
+                0, candidate.type_cue_count - len(candidate.type_cues)
+            ),
             "unresolved_type_cues": [],
             "entity_families": list(candidate.family_cues),
+            "entity_family_count": candidate.family_cue_count,
+            "returned_entity_family_count": len(candidate.family_cues),
+            "omitted_entity_family_count": max(
+                0, candidate.family_cue_count - len(candidate.family_cues)
+            ),
             "role_or_membership_language": sorted(
                 {
                     str(facet.get("predicate_id"))

@@ -265,7 +265,7 @@ def test_lexical_matching_uses_nfkc_casefold_for_length_changing_cues() -> None:
     ]
 
 
-def test_span_rejection_classes_and_maximal_span_do_not_create_candidates(
+def test_span_rejection_classes_and_relation_only_spans_do_not_create_candidates(
     tmp_path: Path,
 ) -> None:
     rejected = (
@@ -274,8 +274,6 @@ def test_span_rejection_classes_and_maximal_span_do_not_create_candidates(
         "I work with person@example.invalid.",
         "I work with /srv/private/file.",
         "I work with 2026-08-31.",
-        "I work with September 1 2026.",
-        "I work with 8 pm.",
         "I work with `inline name`.",
         "I work with this.",
         "organization: organization.",
@@ -292,20 +290,9 @@ def test_span_rejection_classes_and_maximal_span_do_not_create_candidates(
 
 @pytest.mark.parametrize(
     "candidate",
-    [
-        "the organization",
-        "September 1 2026",
-        "1 September 2026",
-        "8 pm",
-        "8am",
-        "8 o'clock pm",
-        "1st of September 2026",
-        "[[amber guild]]",
-    ],
+    ["2026-08-31", "12:30", "12:30:45", "08h30", "8 pm", "8:30am"],
 )
-def test_article_cue_natural_datetime_and_unaliased_link_targets_are_rejected(
-    candidate: str,
-) -> None:
+def test_only_the_four_frozen_datetime_shapes_are_rejected(candidate: str) -> None:
     rows = entity_recurrence.extract_identity_frames(
         f"I work with {candidate}.",
         path="Knowledge Base/Notes/rejected-natural.md",
@@ -317,44 +304,163 @@ def test_article_cue_natural_datetime_and_unaliased_link_targets_are_rejected(
     assert rows == ()
 
 
-def test_determiner_cue_and_oclock_time_reject_without_hiding_real_identity() -> None:
+@pytest.mark.parametrize(
+    "candidate",
+    [
+        "the organization",
+        "September 1 2026",
+        "1 September 2026",
+        "8 o'clock pm",
+        "next Monday",
+        "half eight",
+    ],
+)
+def test_natural_language_spans_are_not_hidden_by_a_semantic_blacklist(
+    candidate: str,
+) -> None:
     rows = entity_recurrence.extract_identity_frames(
-        "I work with this organization.\n"
-        "I work with 8 o'clock.\n"
-        "I work with amber guild.",
-        path="Knowledge Base/Notes/rejected-categorical.md",
-        origin="page:rejected-categorical",
+        f"I work with {candidate}.",
+        path="Knowledge Base/Notes/structural-only.md",
+        origin="page:structural-only",
         entity_types=entity_types.core_registry(),
         registry=entity_recurrence.RegistryIndex(entries=(), identities=frozenset()),
     )
 
-    assert [row.identity for row in rows] == ["amber guild"]
+    assert [row.identity for row in rows] == [entity_candidates.identity_key(candidate)]
 
 
 @pytest.mark.parametrize(
-    ("rejected", "stable_identity"),
+    "candidate",
     [
-        ("some organization", "somewhere organization"),
-        ("another organization", "another organization guild"),
-        ("quarter past eight", "quarter past eight studio"),
-        ("08h30", "08h30 studio"),
-        ("next Monday", "next monday club"),
-        ("September first 2026", "september first guild"),
+        "one organization",
+        "three organizations",
+        "today",
+        "tomorrow morning",
+        "monday morning",
+        "next week",
+        "half eight",
+        "amber guild",
     ],
 )
-def test_structural_generic_and_datetime_rejection_preserves_stable_identities(
-    rejected: str,
-    stable_identity: str,
+def test_unresolved_relation_only_recurrence_never_seeds_promotion(
+    tmp_path: Path,
+    candidate: str,
 ) -> None:
-    rows = entity_recurrence.extract_identity_frames(
-        f"I work with {rejected}.\nI work with {stable_identity}.",
-        path="Knowledge Base/Notes/structural-rejection.md",
-        origin="page:structural-rejection",
-        entity_types=entity_types.core_registry(),
-        registry=entity_recurrence.RegistryIndex(entries=(), identities=frozenset()),
+    bodies = (
+        f"I work with {candidate}.",
+        f"I use {candidate}.",
+        f"I attend {candidate}.",
     )
+    for index, body in enumerate(bodies):
+        rows = entity_recurrence.extract_identity_frames(
+            body,
+            path=f"Knowledge Base/Notes/note-{index:02d}.md",
+            origin=f"page:{index}",
+            entity_types=entity_types.core_registry(),
+            registry=entity_recurrence.RegistryIndex(
+                entries=(), identities=frozenset()
+            ),
+        )
+        assert [row.identity for row in rows] == [
+            entity_candidates.identity_key(candidate)
+        ]
+        _note(tmp_path, index, body)
 
-    assert [row.identity for row in rows] == [stable_identity]
+    assert _findings(tmp_path) == []
+
+
+@pytest.mark.parametrize("candidate", ["amber guild", "北方圈"])
+def test_one_direct_witness_composes_with_relation_facets_across_origins(
+    tmp_path: Path,
+    candidate: str,
+) -> None:
+    for index, body in enumerate(
+        (
+            f"{candidate} is an organization.",
+            f"I work with {candidate}.",
+            f"I use {candidate}.",
+        )
+    ):
+        _note(tmp_path, index, body)
+
+    findings = _findings(tmp_path)
+
+    assert len(findings) == 1
+    assert findings[0].meta["candidate_state"] == "promotion"
+    assert {row["frame_type"] for row in findings[0].meta["contexts"]} == {
+        "typed-copula",
+        "subject-relation",
+    }
+
+
+def test_vault_defined_community_cue_witnesses_without_a_release(tmp_path: Path) -> None:
+    registry_path = tmp_path / "Knowledge Base/_Schema/entity-types.yaml"
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    registry_path.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "entity_types": {
+                    "community": _definition(
+                        "Communities", "Community", parent="organization"
+                    )
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    for index, body in enumerate(
+        (
+            "amber guild is a community.",
+            "I work with amber guild.",
+            "I attend amber guild.",
+        )
+    ):
+        _note(tmp_path, index, body)
+
+    finding = _findings(tmp_path)[0]
+
+    assert finding.meta["candidate_state"] == "promotion"
+    assert finding.meta["type_cues"] == ["community"]
+    assert finding.meta["entity_families"] == ["organization"]
+
+
+def test_relation_only_resolution_warrants_hydration_or_exact_ambiguity(
+    tmp_path: Path,
+) -> None:
+    corpus = tmp_path / "corpus"
+    for index, predicate in enumerate(("work with", "use", "attend")):
+        _note(corpus, index, f"I {predicate} amber guild.")
+    assert _findings(corpus) == []
+
+    one = tmp_path / "one"
+    _entity(one, "amber", title="Amber Guild")
+    for index, predicate in enumerate(("work with", "use", "attend")):
+        _note(one, index, f"I {predicate} amber guild.")
+    hydration = _findings(one)
+    assert len(hydration) == 1
+    assert hydration[0].meta["candidate_state"] == "hydration"
+    assert hydration[0].meta["resolved_entity"]["title"] == "Amber Guild"
+
+    several = tmp_path / "several"
+    _entity(several, "one", title="First Guild", aliases=("amber guild",))
+    _entity(several, "two", title="Second Guild", aliases=("amber guild",))
+    for index, predicate in enumerate(("work with", "use", "attend")):
+        _note(several, index, f"I {predicate} amber guild.")
+    ambiguous = _findings(several)
+    assert len(ambiguous) == 1
+    assert ambiguous[0].meta["candidate_state"] == "ambiguous"
+    assert ambiguous[0].meta["resolved_entity"] is None
+
+
+def test_witness_without_distinct_relation_facet_remains_below_gate(
+    tmp_path: Path,
+) -> None:
+    for index in range(3):
+        _note(tmp_path, index, "amber guild is an organization.")
+
+    assert _findings(tmp_path) == []
 
 
 def test_empty_wikilink_display_masks_with_separator_and_preserves_legacy_target(
@@ -578,6 +684,87 @@ def _definition(
     if parent is not None:
         item["parent"] = parent
     return item
+
+
+def _assert_taxonomy_projection(
+    payload: dict[str, object],
+    *,
+    expected_types: list[str],
+    expected_families: list[str],
+) -> None:
+    assert payload["type_cues"] == expected_types
+    assert payload["type_cue_count"] == 12
+    assert payload["returned_type_cue_count"] == 8
+    assert payload["omitted_type_cue_count"] == 4
+    assert payload["active_type_cues"] == expected_types
+    assert payload["active_type_cue_count"] == 12
+    assert payload["returned_active_type_cue_count"] == 8
+    assert payload["omitted_active_type_cue_count"] == 4
+    assert payload["entity_families"] == expected_families
+    assert payload["entity_family_count"] == 12
+    assert payload["returned_entity_family_count"] == 8
+    assert payload["omitted_entity_family_count"] == 4
+
+
+def test_open_taxonomy_projection_is_bounded_top_level_and_nested(
+    tmp_path: Path,
+) -> None:
+    definitions = {
+        f"kind-{index:02d}": {
+            **_definition(f"Kinds{index:02d}", f"Kind {index:02d}", parent=None),
+            "cue_nouns": ["collective"],
+        }
+        for index in range(12)
+    }
+    registry_path = tmp_path / "Knowledge Base/_Schema/entity-types.yaml"
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    registry_path.write_text(
+        yaml.safe_dump(
+            {"schema_version": 1, "entity_types": definitions},
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    for index, body in enumerate(
+        (
+            "amber guild is a collective.",
+            "I work with amber guild.",
+            "I use amber guild.",
+        )
+    ):
+        _note(tmp_path, index, body)
+
+    first = _findings(tmp_path)[0].meta
+    expected = [f"kind-{index:02d}" for index in range(8)]
+    _assert_taxonomy_projection(
+        first,
+        expected_types=expected,
+        expected_families=expected,
+    )
+    witnessed = next(
+        row for row in first["contexts"] if row["frame_type"] == "typed-copula"
+    )
+    _assert_taxonomy_projection(
+        witnessed,
+        expected_types=expected,
+        expected_families=expected,
+    )
+
+    definitions["kind-08"]["cue_nouns"] = ["collective", "omitted cue"]
+    registry_path.write_text(
+        yaml.safe_dump(
+            {"schema_version": 1, "entity_types": definitions},
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    find.clear_cache()
+    changed = _findings(tmp_path)[0].meta
+
+    assert changed["type_cues"] == first["type_cues"]
+    assert changed["entity_families"] == first["entity_families"]
+    assert changed["registry_fingerprint"] != first["registry_fingerprint"]
+    assert changed["signal_version"] != first["signal_version"]
 
 
 def test_registry_derives_core_parented_and_parentless_families_deterministically(
@@ -1029,6 +1216,7 @@ def test_two_independently_qualifying_incompatible_family_components_are_ambiguo
 def test_incompatible_component_projection_has_an_exact_top_level_cap(
     tmp_path: Path,
 ) -> None:
+    _entity(tmp_path, "shared", title="Shared Label")
     for component in range(12):
         anchor = f"Anchor {component:02d}"
         _entity(tmp_path, f"anchor-{component:02d}", title=anchor)
@@ -1041,8 +1229,9 @@ def test_incompatible_component_projection_has_an_exact_top_level_cap(
 
     findings = _findings(tmp_path)
 
-    assert len(findings) == 1
-    meta = findings[0].meta
+    meta = next(
+        item.meta for item in findings if item.meta["candidate"] == "shared label"
+    )
     assert meta["candidate_state"] == "ambiguous"
     assert meta["incompatible_component_count"] == 12
     assert meta["returned_incompatible_component_count"] == 8
@@ -1060,6 +1249,7 @@ def test_incompatible_component_projection_has_an_exact_top_level_cap(
 def test_incompatible_component_provenance_has_exact_nested_caps(
     tmp_path: Path,
 ) -> None:
+    _entity(tmp_path, "shared", title="Shared Label")
     _entity(tmp_path, "anchor-a", title="Anchor A")
     _entity(tmp_path, "anchor-b", title="Anchor B")
     predicates = list(entity_recurrence.PREDICATE_TABLE["relation"])[:18]
@@ -1071,8 +1261,9 @@ def test_incompatible_component_provenance_has_exact_nested_caps(
 
     findings = _findings(tmp_path)
 
-    assert len(findings) == 1
-    meta = findings[0].meta
+    meta = next(
+        item.meta for item in findings if item.meta["candidate"] == "shared label"
+    )
     assert meta["candidate_state"] == "ambiguous"
     component = meta["incompatible_components"][0]
     assert component["page_count"] == 36
