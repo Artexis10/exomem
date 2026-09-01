@@ -56,7 +56,9 @@ uniquely resolved Entity; otherwise write one concise compiled observation. Use
 Records only for an observed measurement accepted by a compatible existing
 collection. Fleeting preferences, one-off activity, incidental associations, trivial
 metrics, and tentative claims stay quiet; this never authorizes creating an Entity,
-collection, or schema.
+collection, or schema. A concise observation or narrow Entity facet follows
+`proactive_capture`; an affiliation relation requires `link_acceptance`; Entity
+creation or substantial curation requires confirmed `restructure_execution`.
 
 ## Simple actions for agents
 

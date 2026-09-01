@@ -75,7 +75,9 @@ REMINDER = (
     "in source/note context. Capture conclusions as distilled "
     "compiled notes, not transcripts. To supersede an active conclusion, use replace_memory, "
     "not a correction beside it. Route stated intent to Planning with plan_memory and "
-    "observed outcome to Records with record_memory. "
+    "observed outcome to Records with record_memory. A concise observation or narrow Entity "
+    "facet follows proactive_capture; an affiliation relation requires link_acceptance; Entity "
+    "creation or substantial curation requires confirmed restructure_execution. "
     "If neither case applies, or no Knowledge Base is configured, do nothing and stop."
 )
 

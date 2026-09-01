@@ -435,7 +435,9 @@ own — or just start writing; the writer auto-registers new keys as you use the
 > Entity receives its facet; otherwise capture one concise compiled observation;
 > an observed measurement uses only compatible existing Records. Fleeting
 > preferences, one-off activity, incidental associations, trivial metrics, and
-> tentative claims stay quiet.
+> tentative claims stay quiet. A concise observation or narrow Entity facet follows
+> `proactive_capture`; an affiliation relation requires `link_acceptance`; Entity
+> creation or substantial curation requires confirmed `restructure_execution`.
 >
 > **Other MCP clients.** ChatGPT, Codex, Cursor, Gemini, Windsurf, or any client
 > without Skill support should call `bootstrap()` once after connecting. It returns

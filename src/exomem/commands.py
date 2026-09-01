@@ -407,7 +407,7 @@ def op_bootstrap(
 
     compute_policy = mode_module.resolved()
     engagement_policy = prominence_module.resolved()
-    if profile == "compact":
+    if profile == "compact" and engagement_policy["level"] in {"balanced", "maximal"}:
         # The full prominence prose remains available from the full and diagnostics
         # projections. Keep this command-free predicate in compact so all three
         # projections teach the new class without spending the compact budget twice

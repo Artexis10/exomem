@@ -5,72 +5,64 @@
     {
       "id": "stable-preference-entity",
       "class": "stable_preference",
-      "stability_or_recurrence": true,
-      "reusable_comparison_value": true,
-      "route": "entity",
-      "summary": "A long-held preference belongs to one uniquely resolved entity."
+      "turn": "For years and still now, this person prefers an early review before important decisions.",
+      "evidence": {"stability_or_recurrence": true, "reusable_comparison_value": true, "entity_resolution": "unique", "observed_measurement": false, "compatible_existing_records_collection": false, "tentative_or_unresolved": false},
+      "expected": {"route": "entity", "forbidden_routes": ["compiled_observation", "records", "no_write"], "forbidden_tools": ["remember", "record_memory"], "require_explicit_request": false}
     },
     {
       "id": "fleeting-preference-quiet",
       "class": "stable_preference",
-      "stability_or_recurrence": false,
-      "reusable_comparison_value": true,
-      "route": "no_write",
-      "summary": "A preference limited to today remains quiet."
+      "turn": "Today, this person prefers the shorter option, with no claim that it will last.",
+      "evidence": {"stability_or_recurrence": false, "reusable_comparison_value": true, "entity_resolution": "none", "observed_measurement": false, "compatible_existing_records_collection": false, "tentative_or_unresolved": false},
+      "expected": {"route": "no_write", "forbidden_routes": ["entity", "compiled_observation", "records"], "forbidden_tools": ["edit_memory", "remember", "record_memory"], "require_explicit_request": true}
     },
     {
       "id": "recurring-routine-compiled-observation",
       "class": "recurring_routine",
-      "stability_or_recurrence": true,
-      "reusable_comparison_value": true,
-      "route": "compiled_observation",
-      "summary": "A repeated routine has future interpretive value without one entity owner."
+      "turn": "Each week for the last year, the same review routine has made later workload changes easier to interpret.",
+      "evidence": {"stability_or_recurrence": true, "reusable_comparison_value": true, "entity_resolution": "none", "observed_measurement": false, "compatible_existing_records_collection": false, "tentative_or_unresolved": false},
+      "expected": {"route": "compiled_observation", "forbidden_routes": ["entity", "records", "no_write"], "forbidden_tools": ["edit_memory", "record_memory"], "require_explicit_request": false}
     },
     {
       "id": "one-off-routine-quiet",
       "class": "recurring_routine",
-      "stability_or_recurrence": false,
-      "reusable_comparison_value": true,
-      "route": "no_write",
-      "summary": "One activity does not establish a routine."
+      "turn": "This person tried a review routine once during a busy week.",
+      "evidence": {"stability_or_recurrence": false, "reusable_comparison_value": true, "entity_resolution": "none", "observed_measurement": false, "compatible_existing_records_collection": false, "tentative_or_unresolved": false},
+      "expected": {"route": "no_write", "forbidden_routes": ["entity", "compiled_observation", "records"], "forbidden_tools": ["edit_memory", "remember", "record_memory"], "require_explicit_request": true}
     },
     {
       "id": "historical-baseline-records",
       "class": "historical_baseline",
-      "stability_or_recurrence": true,
-      "reusable_comparison_value": true,
-      "route": "records",
-      "summary": "An observed measurement uses an already compatible Records collection."
+      "turn": "This month's observed measurement is comparable with the same established monthly series from last year.",
+      "evidence": {"stability_or_recurrence": true, "reusable_comparison_value": true, "entity_resolution": "none", "observed_measurement": true, "compatible_existing_records_collection": true, "tentative_or_unresolved": false},
+      "expected": {"route": "records", "forbidden_routes": ["entity", "compiled_observation", "no_write"], "forbidden_tools": ["edit_memory", "remember"], "require_explicit_request": false}
     },
     {
       "id": "mundane-metric-quiet",
       "class": "historical_baseline",
-      "stability_or_recurrence": true,
-      "reusable_comparison_value": false,
-      "route": "no_write",
-      "summary": "An isolated mundane metric has no reusable comparison value."
+      "turn": "The ordinary count was 17 today, with no later comparison or decision it would inform.",
+      "evidence": {"stability_or_recurrence": true, "reusable_comparison_value": false, "entity_resolution": "none", "observed_measurement": true, "compatible_existing_records_collection": false, "tentative_or_unresolved": false},
+      "expected": {"route": "no_write", "forbidden_routes": ["entity", "compiled_observation", "records"], "forbidden_tools": ["edit_memory", "remember", "record_memory"], "require_explicit_request": true}
     },
     {
       "id": "durable-affiliation-entity",
       "class": "durable_affiliation",
-      "stability_or_recurrence": true,
-      "reusable_comparison_value": true,
-      "route": "entity",
-      "summary": "An enduring affiliation belongs to one uniquely resolved entity."
+      "turn": "This person has held the same enduring membership for several years and it explains later choices.",
+      "evidence": {"stability_or_recurrence": true, "reusable_comparison_value": true, "entity_resolution": "unique", "observed_measurement": false, "compatible_existing_records_collection": false, "tentative_or_unresolved": false},
+      "expected": {"route": "entity", "forbidden_routes": ["compiled_observation", "records", "no_write"], "forbidden_tools": ["remember", "record_memory"], "require_explicit_request": false}
     },
     {
-      "id": "incidental-affiliation-quiet",
+      "id": "tentative-unresolved-affiliation-quiet",
       "class": "durable_affiliation",
-      "stability_or_recurrence": false,
-      "reusable_comparison_value": false,
-      "route": "no_write",
-      "summary": "An incidental association or tentative membership remains quiet."
+      "turn": "This person may still belong to the long-running group, but the identity and membership are not confirmed.",
+      "evidence": {"stability_or_recurrence": true, "reusable_comparison_value": true, "entity_resolution": "unresolved", "observed_measurement": false, "compatible_existing_records_collection": false, "tentative_or_unresolved": true},
+      "expected": {"route": "no_write", "forbidden_routes": ["entity", "compiled_observation", "records"], "forbidden_tools": ["edit_memory", "remember", "record_memory"], "require_explicit_request": true}
     }
   ],
   "separate_executed_method_cases": [
-    "executed-method-positive",
-    "executed-method-failure",
-    "executed-method-parameter-boundary",
-    "executed-method-unreusable-one-off"
+    {"id": "executed-method-positive", "turn": "The method was actually run, its informative result was reported, and the lesson is reusable.", "expected": "separate-executed-method-route"},
+    {"id": "executed-method-failure", "turn": "The executed method failed in an informative way with a reusable lesson.", "expected": "separate-executed-method-route"},
+    {"id": "executed-method-parameter-boundary", "turn": "The executed comparison bounded a parameter and remains reusable.", "expected": "separate-executed-method-route"},
+    {"id": "executed-method-unreusable-one-off", "turn": "A method was tried once but produced no reusable result.", "expected": "no_write"}
   ]
 }
