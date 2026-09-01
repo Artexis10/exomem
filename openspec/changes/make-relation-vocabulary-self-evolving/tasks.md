@@ -42,10 +42,10 @@
 
 ## 6. Lane E — Studio relation worklist
 
-- [ ] 6.1 After Lanes C and D are accepted, add red-first Studio model/browser tests for server-order preservation, source-hint payloads, stale refresh, visible coverage/truncation, and distinct warming/pending/unavailable states; verify existing UI behavior fails the new states
-- [ ] 6.2 Update versioned Studio assets to render bounded relation queue states and send source path/hash/fingerprint/audit inputs without client-side reranking or per-page fallback; verify `uv run python -m pytest -q tests/test_studio_ui_model.py tests/test_studio_governed_flows.py tests/test_studio_routes.py`
-- [ ] 6.3 Inspect the real local Studio in Chrome DevTools at narrow and desktop widths and complete a keyboard-only queue refresh, accept, drift-refusal, dismiss, snooze, warming, and truncated flow; verify focus, labels, status semantics, network payloads, and console remain correct
-- [ ] 6.4 Have a fresh reviewer exercise the rendered Studio and its browser tests independently, return usability/accessibility or contract findings to the author, and verify acceptance only after fixes
+- [x] 6.1 After Lanes C and D are accepted, add red-first Studio model/browser tests for server-order preservation, source-hint payloads, stale refresh, visible coverage/truncation, and distinct warming/pending/unavailable states; verify existing UI behavior fails the new states
+- [x] 6.2 Update versioned Studio assets to render bounded relation queue states and send source path/hash/fingerprint/audit inputs without client-side reranking or per-page fallback; verify `uv run python -m pytest -q tests/test_studio_ui_model.py tests/test_studio_governed_flows.py tests/test_studio_routes.py`
+- [x] 6.3 Inspect the real local Studio in Chrome DevTools at narrow and desktop widths and complete a keyboard-only queue refresh, accept, drift-refusal, dismiss, snooze, warming, and truncated flow; verify focus, labels, status semantics, network payloads, and console remain correct
+- [x] 6.4 Have a fresh reviewer exercise the rendered Studio and its browser tests independently, return usability/accessibility or contract findings to the author, and verify acceptance only after fixes
 
 ## 7. Lane F — synthetic lifecycle, census, performance, and docs
 
