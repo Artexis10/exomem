@@ -18,6 +18,19 @@
     "lean": {"full_claim": false, "description": "model-free native fixture and shared local-core gates"},
     "full": {"full_claim": true, "description": "pinned direct contenders with models, media, and paired performance", "media_completion_timeout_seconds": 180}
   },
+  "relation_lifecycle": {
+    "version": 1,
+    "cases": [
+      {"id": "policy-applicability-extension", "description": "A policy applicability edge requires a reviewed namespaced extension."},
+      {"id": "core-part-of-reuse", "description": "Child-to-parent membership reuses portable part_of after caller choice."},
+      {"id": "alias-reuse-without-duplicate", "description": "A different clean alias reuses the existing extension without proposal."},
+      {"id": "honest-generic-relation", "description": "A durable generic connection is explicitly authored as relates_to."},
+      {"id": "topical-proximity-abstains", "description": "Topical proximity alone selects and writes no directional relation."},
+      {"id": "extension-parent-rollup", "description": "An extension remains exact while appearing through its parent family."},
+      {"id": "survivor-directed-replacement", "description": "Deprecated predecessor observations retain raw and canonical identity through their survivor."},
+      {"id": "vault-registry-isolation", "description": "Two synthetic vault registries, caches, graph results, and explanations remain isolated."}
+    ]
+  },
   "performance": {
     "counterbalanced": true,
     "index_duration_ratio_max": 2.0,

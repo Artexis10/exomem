@@ -22,7 +22,9 @@ def perfect_fixture(tmp_path_factory: pytest.TempPathFactory):
     manifest = bench.load_manifest()
     corpus = bench.render_exomem(manifest, tmp_path_factory.mktemp("graph-value") / "exomem")
     before = bench.corpus_hash(corpus.root)
-    run = bench.run_exomem_fixture(manifest, corpus, revision="fixture-revision")
+    run = bench.run_exomem_fixture(
+        manifest, corpus, revision="fixture-revision", include_relation_lifecycle=True
+    )
     return manifest, corpus, before, run
 
 
@@ -87,9 +89,50 @@ def test_exomem_fixture_passes_every_dimension_without_mutating_markdown(
     assert run.mutation_safe is True
     assert before == bench.corpus_hash(corpus.root)
     assert run.renderer_parity == corpus.parity
+    assert all(run.relation_lifecycle["checks"].values())
     assert {case for metric in scores.values() for case in metric.case_ids} == {
         str(task["id"]) for task in manifest["tasks"]
     }
+
+
+def test_relation_lifecycle_fixture_uses_public_surfaces_and_keeps_resolution_non_authoritative(
+    tmp_path: Path,
+) -> None:
+    """The synthetic relation lifecycle is a caller-decision gate, not a rank gate."""
+    manifest = bench.load_manifest()
+
+    result = bench.run_relation_lifecycle_fixture(
+        manifest, tmp_path / "relation-lifecycle"
+    )
+
+    expected_cases = {
+        "policy-applicability-extension",
+        "core-part-of-reuse",
+        "alias-reuse-without-duplicate",
+        "honest-generic-relation",
+        "topical-proximity-abstains",
+        "extension-parent-rollup",
+        "survivor-directed-replacement",
+        "vault-registry-isolation",
+    }
+    assert set(result["checks"]) == expected_cases
+    assert all(result["checks"].values()), json.dumps(result, sort_keys=True)
+    assert result["evidence"]["resolution_only"]["markdown_unchanged"] is True
+    assert result["evidence"]["resolution_only"]["registry_unchanged"] is True
+    assert result["evidence"]["topical-proximity-abstains"]["selected_relation"] is None
+    assert result["evidence"]["topical-proximity-abstains"]["authored_relation"] is None
+
+
+def test_scripted_relation_decision_marks_an_explicit_false_directional_choice_false_positive() -> None:
+    abstention = bench.score_scripted_relation_decision(
+        selected_relation=None, authored_relation=None, truthful=False
+    )
+    false_directional = bench.score_scripted_relation_decision(
+        selected_relation=None, authored_relation="supports", truthful=False
+    )
+
+    assert abstention == {"false_positive": False, "passed": True}
+    assert false_directional == {"false_positive": True, "passed": False}
 
 
 def test_graph_mistakes_remain_independent(perfect_fixture) -> None:
@@ -231,6 +274,7 @@ def test_reports_are_aggregate_reproducible_and_privacy_safe(perfect_fixture) ->
     assert "renderer_parity" in encoded
     assert report["contenders"]["exomem"]["fact_parity"] == corpus.fact_parity
     assert report["contenders"]["basic_memory"]["fact_parity"] == basic_corpus.fact_parity
+    assert report["contenders"]["exomem"]["relation_lifecycle"]["checks"]
     assert str(corpus.root) not in encoded
     assert "/home/" not in encoded
     assert "C:\\" not in encoded

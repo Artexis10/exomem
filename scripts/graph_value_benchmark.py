@@ -173,6 +173,7 @@ class ContenderRun:
     fingerprint: dict[str, Any] = field(default_factory=dict)
     index_duration_ms: float | None = None
     preflight_valid: bool = True
+    relation_lifecycle: dict[str, Any] = field(default_factory=dict)
 
     def public_dict(self) -> dict[str, Any]:
         return {
@@ -192,6 +193,7 @@ class ContenderRun:
                 round(self.index_duration_ms, 3) if self.index_duration_ms is not None else None
             ),
             "preflight_valid": self.preflight_valid,
+            "relation_lifecycle": self.relation_lifecycle,
         }
 
 
@@ -260,6 +262,7 @@ def load_manifest(path: Path = DEFAULT_MANIFEST) -> dict[str, Any]:
         "datasets",
         "media",
         "tasks",
+        "relation_lifecycle",
     }
     missing = required - set(data)
     if missing:
@@ -269,12 +272,15 @@ def load_manifest(path: Path = DEFAULT_MANIFEST) -> dict[str, Any]:
     note_ids = [str(note["id"]) for note in data["notes"]]
     task_ids = [str(task["id"]) for task in data["tasks"]]
     probe_ids = [str(probe["id"]) for probe in data["probes"]]
+    lifecycle_ids = [str(case["id"]) for case in data["relation_lifecycle"]["cases"]]
     if len(note_ids) != len(set(note_ids)):
         raise ValueError("local-core manifest note ids must be unique")
     if len(task_ids) != len(set(task_ids)):
         raise ValueError("local-core manifest task ids must be unique")
     if len(probe_ids) != len(set(probe_ids)):
         raise ValueError("local-core manifest probe ids must be unique")
+    if len(lifecycle_ids) != len(set(lifecycle_ids)):
+        raise ValueError("local-core relation lifecycle case ids must be unique")
     unknown_dimensions = {str(task["dimension"]) for task in data["tasks"]} - set(ALL_DIMENSIONS)
     if unknown_dimensions:
         raise ValueError(f"graph manifest has unknown dimensions: {sorted(unknown_dimensions)}")
@@ -1203,6 +1209,7 @@ def evaluate_local_core_gates(
     basic_results: dict[str, ProbeResult],
     preflight_valid: bool,
     profile: str,
+    relation_lifecycle: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if profile not in manifest["profiles"]:
         raise ValueError(f"unknown local-core profile: {profile}")
@@ -1228,6 +1235,17 @@ def evaluate_local_core_gates(
             "missing": missing,
             "failed": failed,
         }
+    if relation_lifecycle is not None:
+        lifecycle_checks = relation_lifecycle.get("checks") or {}
+        lifecycle_failed = sorted(
+            str(case_id) for case_id, passed in lifecycle_checks.items() if not passed
+        )
+        lifecycle_complete = bool(lifecycle_checks) and not lifecycle_failed
+        gates["lifecycle_integrity"]["relation_lifecycle"] = {
+            "passed": lifecycle_complete,
+            "failed": lifecycle_failed,
+        }
+        gates["lifecycle_integrity"]["passed"] &= lifecycle_complete
     paired_regressions = sorted(
         probe_id
         for probe_id, probe in probes.items()
@@ -1799,12 +1817,23 @@ def markdown_hashes(root: Path) -> dict[str, str]:
 
 
 def run_exomem_fixture(
-    manifest: dict[str, Any], corpus: RenderedCorpus, *, revision: str = ""
+    manifest: dict[str, Any],
+    corpus: RenderedCorpus,
+    *,
+    revision: str = "",
+    include_relation_lifecycle: bool = False,
 ) -> ContenderRun:
     from exomem import epistemic_graph
 
     before = corpus_hash(corpus.root)
     epistemic_graph.EpistemicGraphIndex(corpus.root).rebuild_all()
+    relation_lifecycle = (
+        run_relation_lifecycle_fixture(
+            manifest, corpus.root.parent / f"{corpus.root.name}-relation-lifecycle"
+        )
+        if include_relation_lifecycle
+        else {}
+    )
     cases: dict[str, CaseResult] = {}
     for task in manifest["tasks"]:
         if str(task["dimension"]) == "recall_visibility":
@@ -1836,7 +1865,395 @@ def run_exomem_fixture(
         notes=["model-free in-process shared graph leaf"],
         renderer_parity=corpus.parity,
         fact_parity=corpus.fact_parity,
+        relation_lifecycle=relation_lifecycle,
     )
+
+
+def _lifecycle_markdown_hash(root: Path) -> str:
+    """Hash only authored fixture Markdown, not derived graph state."""
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*.md")):
+        digest.update(path.relative_to(root).as_posix().encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _lifecycle_registry_hash(root: Path) -> str:
+    from exomem import relation_registry
+
+    path = relation_registry.extension_registry_path(root)
+    return hashlib.sha256(path.read_bytes() if path.exists() else b"").hexdigest()
+
+
+def _lifecycle_note(root: Path, slug: str, text: str) -> str:
+    rel = f"Knowledge Base/Notes/Insights/{slug}.md"
+    path = root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "---\n"
+        "type: insight\n"
+        "status: active\n"
+        "created: 2026-01-01\n"
+        "---\n\n"
+        f"# {slug.replace('-', ' ').title()}\n\n{text}\n\n## Relations\n",
+        encoding="utf-8",
+    )
+    return rel
+
+
+def _scripted_author_relation(root: Path, source: str, target: str, relation: str) -> None:
+    """A deliberately tiny caller decision; resolution never reaches this writer."""
+    from exomem import commands
+
+    target_link = _canonical_wikilink(target)
+    commands.op_edit_memory(
+        root,
+        path=source,
+        why="Synthetic lifecycle caller explicitly chose a truthful relation.",
+        operation={
+            "kind": "replace_string",
+            "old_string": "## Relations\n",
+            "new_string": f"## Relations\n- {relation} [[{target_link}]]\n",
+        },
+    )
+
+
+def _lifecycle_propose_and_save(
+    root: Path, *, label: str, description: str, parent: str = "relates_to"
+) -> str:
+    from exomem import commands
+
+    proposal = commands.op_schema_memory(
+        root,
+        subject="relations",
+        operation="propose-relation",
+        proposal={
+            "requested_label": label,
+            "parent": parent,
+            "description": description,
+            "direction": "directed",
+        },
+    )
+    if not proposal["valid"]:
+        raise ValueError(f"synthetic relation proposal failed: {proposal['findings']}")
+    commands.op_schema_memory(
+        root,
+        subject="relations",
+        operation="save-relations",
+        proposal=proposal["delta"],
+        expected_hash=proposal["content_hash"],
+        why="Synthetic graph-value lifecycle relation review.",
+    )
+    return f"vault.{label}"
+
+
+def _lifecycle_rebuild(root: Path) -> None:
+    from exomem import epistemic_graph, graph_sync
+
+    # A governed registry save may already have registered the one durable
+    # convergence job.  Wait only for that typed in-flight owner, then use the
+    # same public graph projection the benchmark subsequently queries.
+    for attempt in range(10):
+        try:
+            epistemic_graph.EpistemicGraphIndex(root).rebuild_all()
+            return
+        except graph_sync.GraphRebuildInProgress:
+            if attempt == 9:
+                raise
+            time.sleep(0.05)
+
+
+def _graph_relation_types(root: Path, path: str) -> list[dict[str, Any]]:
+    from exomem import commands
+
+    payload = commands.op_connect_memory(root, operation="graph-context", path=path, depth=1)
+    return list((payload.get("graph") or {}).get("edges", []))
+
+
+def _relation_filter_explanation(root: Path, relation: str) -> list[dict[str, Any]]:
+    from exomem import commands
+
+    response = commands.op_ask_memory(
+        root,
+        query="",
+        relations=[relation],
+        mode="keyword",
+        graph=False,
+        explain=True,
+        scope="kb-only",
+    )
+    return list(response["hits"])
+
+
+def score_scripted_relation_decision(
+    *, selected_relation: str | None, authored_relation: str | None, truthful: bool
+) -> dict[str, bool]:
+    """Score the caller's explicit decision independently of resolver evidence."""
+    false_positive = bool(authored_relation) and not truthful
+    return {
+        "false_positive": false_positive,
+        "passed": selected_relation is None and not false_positive,
+    }
+
+
+def run_relation_lifecycle_fixture(manifest: dict[str, Any], root: Path) -> dict[str, Any]:
+    """Exercise the governed lifecycle through public command surfaces.
+
+    The corpus is deliberately tiny and entirely synthetic.  Candidate evidence
+    is recorded before the scripted caller performs a separate write so neither
+    resolver ordering nor a candidate's presence can inflate the graph score.
+    """
+    from exomem import commands, relation_registry
+
+    required_cases = {
+        "policy-applicability-extension",
+        "core-part-of-reuse",
+        "alias-reuse-without-duplicate",
+        "honest-generic-relation",
+        "topical-proximity-abstains",
+        "extension-parent-rollup",
+        "survivor-directed-replacement",
+        "vault-registry-isolation",
+    }
+    declared_cases = {str(case["id"]) for case in manifest["relation_lifecycle"]["cases"]}
+    if declared_cases != required_cases:
+        raise ValueError("relation lifecycle manifest must declare the complete synthetic corpus")
+
+    root = Path(root)
+    primary = root / "primary"
+    primary.mkdir(parents=True, exist_ok=True)
+    policy = _lifecycle_note(
+        primary,
+        "policy",
+        "A synthetic organisation policy applies to a specific employee case.",
+    )
+    employee_case = _lifecycle_note(primary, "employee-case", "A synthetic employee case.")
+    part_child = _lifecycle_note(primary, "child-organisation", "A child organisation.")
+    part_parent = _lifecycle_note(primary, "parent-organisation", "A parent organisation.")
+    generic_left = _lifecycle_note(primary, "generic-left", "A durable but generic connection.")
+    generic_right = _lifecycle_note(primary, "generic-right", "The other generic connection.")
+    topical_left = _lifecycle_note(primary, "topic-left", "Both notes mention synthetic leave policy.")
+    _lifecycle_note(primary, "topic-right", "This note also mentions synthetic leave policy.")
+    predecessor = _lifecycle_note(primary, "old-applicability", "Historical applicability.")
+
+    # The policy observation predates review. It supplies recurrence/activation
+    # evidence but cannot itself select or register the extension.
+    _scripted_author_relation(primary, policy, employee_case, "applies_to")
+    # Establish the synthetic graph before the registry delta so the accepted
+    # save exercises the registry-rebind route rather than a first-build path.
+    _lifecycle_rebuild(primary)
+    before_resolution = {
+        "markdown": _lifecycle_markdown_hash(primary),
+        "registry": _lifecycle_registry_hash(primary),
+    }
+    policy_resolution = commands.op_connect_memory(
+        primary,
+        operation="resolve-relation",
+        query="an organisation policy applies to a specific employee case",
+        requested_relation="applies_to",
+    )
+    after_resolution = {
+        "markdown": _lifecycle_markdown_hash(primary),
+        "registry": _lifecycle_registry_hash(primary),
+    }
+    canonical_applicability = _lifecycle_propose_and_save(
+        primary,
+        label="applies_to",
+        description="A synthetic organisation policy applies to a specific employee case.",
+    )
+    policy_edges = _graph_relation_types(primary, policy)
+    policy_filter = _relation_filter_explanation(primary, "applies_to")
+
+    part_before = _lifecycle_markdown_hash(primary)
+    part_resolution = commands.op_connect_memory(
+        primary,
+        operation="resolve-relation",
+        query="a child organisation belongs to its parent organisation",
+        requested_relation="part_of",
+    )
+    part_after = _lifecycle_markdown_hash(primary)
+    _scripted_author_relation(primary, part_child, part_parent, "part_of")
+    part_edges = _graph_relation_types(primary, part_child)
+
+    alias_before = _lifecycle_registry_hash(primary)
+    alias_resolution = commands.op_connect_memory(
+        primary,
+        operation="resolve-relation",
+        query="a policy applies in a case",
+        requested_relation="applies-to",
+    )
+    alias_proposal = commands.op_schema_memory(
+        primary,
+        subject="relations",
+        operation="propose-relation",
+        proposal={
+            "requested_label": "applies-to",
+            "parent": "relates_to",
+            "description": "A duplicate synthetic applicability meaning.",
+            "direction": "directed",
+        },
+    )
+    alias_after = _lifecycle_registry_hash(primary)
+
+    generic_resolution = commands.op_connect_memory(
+        primary,
+        operation="resolve-relation",
+        query="a meaningful generic connection with no specific predicate",
+        requested_relation="relates_to",
+    )
+    _scripted_author_relation(primary, generic_left, generic_right, "relates_to")
+    generic_edges = _graph_relation_types(primary, generic_left)
+
+    topical_before = {
+        "markdown": _lifecycle_markdown_hash(primary),
+        "registry": _lifecycle_registry_hash(primary),
+    }
+    topical_resolution = commands.op_connect_memory(
+        primary,
+        operation="resolve-relation",
+        query="two notes discuss the same synthetic leave policy topic",
+        requested_relation="supports",
+    )
+    topical_after = {
+        "markdown": _lifecycle_markdown_hash(primary),
+        "registry": _lifecycle_registry_hash(primary),
+    }
+    topical_decision = score_scripted_relation_decision(
+        selected_relation=topical_resolution["selected_relation"],
+        authored_relation=None,
+        truthful=False,
+    )
+    false_directional_trial = score_scripted_relation_decision(
+        selected_relation=None,
+        authored_relation="supports",
+        truthful=False,
+    )
+
+    old_applicability = _lifecycle_propose_and_save(
+        primary,
+        label="applicable_to",
+        description="A historical synthetic policy applicability relation.",
+    )
+    _scripted_author_relation(primary, predecessor, employee_case, "applicable_to")
+    current = relation_registry.load_registry(primary)
+    commands.op_schema_memory(
+        primary,
+        subject="relations",
+        operation="save-relations",
+        proposal={"deprecate": {old_applicability: canonical_applicability}},
+        expected_hash=current.extension_hash,
+        why="Synthetic lifecycle migration to the surviving applicability relation.",
+    )
+    replacement_edges = _graph_relation_types(primary, predecessor)
+    survivor_filter = _relation_filter_explanation(primary, canonical_applicability)
+    deprecated_filter = _relation_filter_explanation(primary, old_applicability)
+
+    tenant_a = root / "tenant-a"
+    tenant_b = root / "tenant-b"
+    tenant_a_source = _lifecycle_note(tenant_a, "tenant-a-source", "Tenant A synthetic policy.")
+    tenant_a_target = _lifecycle_note(tenant_a, "tenant-a-target", "Tenant A synthetic case.")
+    tenant_b_source = _lifecycle_note(tenant_b, "tenant-b-source", "Tenant B synthetic policy.")
+    tenant_b_target = _lifecycle_note(tenant_b, "tenant-b-target", "Tenant B synthetic case.")
+    _scripted_author_relation(tenant_a, tenant_a_source, tenant_a_target, "governs")
+    _scripted_author_relation(tenant_b, tenant_b_source, tenant_b_target, "enables")
+    tenant_a_relation = _lifecycle_propose_and_save(
+        tenant_a, label="governs", description="Tenant A synthetic policy governs its case."
+    )
+    tenant_b_relation = _lifecycle_propose_and_save(
+        tenant_b, label="enables", description="Tenant B synthetic policy enables its case."
+    )
+    _lifecycle_rebuild(tenant_a)
+    _lifecycle_rebuild(tenant_b)
+    tenant_a_resolution = commands.op_connect_memory(
+        tenant_a, operation="resolve-relation", query="tenant policy", requested_relation="governs"
+    )
+    tenant_b_resolution = commands.op_connect_memory(
+        tenant_b, operation="resolve-relation", query="tenant policy", requested_relation="enables"
+    )
+    tenant_a_hits = _relation_filter_explanation(tenant_a, "governs")
+    tenant_b_hits = _relation_filter_explanation(tenant_b, "enables")
+
+    policy_edge = next((edge for edge in policy_edges if edge.get("raw_relation") == "applies_to"), {})
+    policy_match = next(
+        (match for hit in policy_filter if (match := hit.get("relation_match")) and match.get("relation_type") == canonical_applicability),
+        {},
+    )
+    replacement_edge = next(
+        (edge for edge in replacement_edges if edge.get("raw_relation") == "applicable_to"), {}
+    )
+    checks = {
+        "policy-applicability-extension": (
+            policy_resolution["selected_relation"] is None
+            and policy_edge.get("raw_relation") == "applies_to"
+            and policy_edge.get("relation_type") == canonical_applicability
+            and policy_edge.get("origin") == "markdown_relation"
+            and bool(policy_edge.get("source_anchor"))
+            and policy_match.get("direction") in {"outbound", "inbound"}
+            and policy_match.get("matched_via") == "relation_type"
+        ),
+        "core-part-of-reuse": (
+            any(item.get("key") == "part_of" for item in part_resolution["core_vocabulary"])
+            and part_before == part_after
+            and any(edge.get("relation_type") == "part_of" for edge in part_edges)
+        ),
+        "alias-reuse-without-duplicate": (
+            alias_before == alias_after
+            and any(item.get("canonical") == canonical_applicability for item in alias_resolution["exact_matches"])
+            and any(
+                item.get("canonical") == canonical_applicability
+                for item in alias_proposal["duplicate_evidence"]["exact_matches"]
+            )
+            and not alias_proposal["valid"]
+        ),
+        "honest-generic-relation": (
+            generic_resolution["selected_relation"] is None
+            and any(edge.get("relation_type") == "relates_to" for edge in generic_edges)
+        ),
+        "topical-proximity-abstains": (
+            topical_decision["passed"]
+            and false_directional_trial["false_positive"]
+            and not false_directional_trial["passed"]
+            and topical_before == topical_after
+            and not any(edge.get("relation_type") == "supports" for edge in _graph_relation_types(primary, topical_left))
+        ),
+        "extension-parent-rollup": (
+            policy_edge.get("raw_relation") == "applies_to"
+            and policy_edge.get("relation_type") == canonical_applicability
+            and any(hit.get("relation_match", {}).get("matched_via") == "parent_relation" for hit in _relation_filter_explanation(primary, "relates_to"))
+        ),
+        "survivor-directed-replacement": (
+            replacement_edge.get("raw_relation") == "applicable_to"
+            and replacement_edge.get("relation_type") == old_applicability
+            and any(hit.get("relation_match", {}).get("matched_via") == "replacement" for hit in survivor_filter)
+            and any(hit.get("path") == predecessor for hit in deprecated_filter)
+        ),
+        "vault-registry-isolation": (
+            tenant_a_relation != tenant_b_relation
+            and not any(item.get("canonical") == tenant_b_relation for item in tenant_a_resolution["candidates"])
+            and not any(item.get("canonical") == tenant_a_relation for item in tenant_b_resolution["candidates"])
+            and all(hit.get("path", "").endswith(("tenant-a-source.md", "tenant-a-target.md")) for hit in tenant_a_hits)
+            and all(hit.get("path", "").endswith(("tenant-b-source.md", "tenant-b-target.md")) for hit in tenant_b_hits)
+        ),
+    }
+    return {
+        "checks": checks,
+        "evidence": {
+            "resolution_only": {
+                "markdown_unchanged": before_resolution["markdown"] == after_resolution["markdown"],
+                "registry_unchanged": before_resolution["registry"] == after_resolution["registry"],
+                "candidate_count": len(policy_resolution["candidates"]),
+            },
+            "topical-proximity-abstains": {
+                "selected_relation": topical_resolution["selected_relation"],
+                "authored_relation": None,
+                "false_directional_choice_scores_false_positive": false_directional_trial[
+                    "false_positive"
+                ],
+            },
+        },
+    }
 
 
 def _probe_result_from_checks(
@@ -5206,6 +5623,7 @@ def build_report(
                 and adapter_valid
             ),
             profile=profile,
+            relation_lifecycle=exomem_run.relation_lifecycle,
         )
         if exomem_run.probes
         else None
@@ -6593,7 +7011,9 @@ def _execute(args: argparse.Namespace, manifest: dict[str, Any], work: Path) -> 
             run_direct_comparison(manifest, exomem_corpus, basic_corpus, args)
         )
     else:
-        exomem_run = run_exomem_fixture(manifest, exomem_corpus)
+        exomem_run = run_exomem_fixture(
+            manifest, exomem_corpus, include_relation_lifecycle=True
+        )
         exomem_run.probes = run_exomem_local_core_fixture(manifest, work / "exomem-local-core")
         discovered = exomem_registry_inventory()
         exomem_run.inventory = {
