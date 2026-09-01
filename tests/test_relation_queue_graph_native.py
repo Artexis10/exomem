@@ -15,6 +15,7 @@ from exomem import (
     graph_sync,
     relation_queue,
     semantic_contract,
+    vault,
     writer_lease,
 )
 
@@ -285,6 +286,186 @@ def test_hinted_triage_revalidates_only_one_source(
     assert page_reads == [source]
 
 
+@pytest.mark.parametrize("decision", ("accept", "triage"))
+def test_newly_returned_item_after_filter_headroom_is_hinted_actionable(
+    tmp_path: Path,
+    decision: str,
+) -> None:
+    root = tmp_path / decision
+    source = f"{KB}/source.md"
+    filtered_targets = [f"{KB}/filtered-{number:02d}.md" for number in range(40)]
+    returned_target = f"{KB}/returned-source.md"
+    for target in [*filtered_targets, returned_target]:
+        _write(root, target, "A target.")
+    source_file = root / source
+    source_file.parent.mkdir(parents=True, exist_ok=True)
+    source_file.write_text(
+        "---\ntype: insight\nstatus: active\n"
+        f"sources:\n  - {returned_target}\n---\n# source\n\n"
+        "## Relations\n\n"
+        + "\n".join(
+            f"- links_to [[{target.removesuffix('.md')}]]"
+            for target in filtered_targets
+        )
+        + "\n\n## Context\n\n"
+        + "\n".join(
+            f"See [[{target.removesuffix('.md')}]]." for target in filtered_targets
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _build_current(root)
+    queue = relation_queue.build_queue(root)
+    item = next(
+        item
+        for item in _items(queue)
+        if item["from"] == source and item["to"] == returned_target
+    )
+    assert item["method"] == "frontmatter_sources"
+
+    if decision == "accept":
+        edits: list[dict[str, Any]] = []
+        result = relation_queue.accept(
+            root,
+            ref=item["ref"],
+            source_path=item["source_path"],
+            expected_hash=item["source_content_hash"],
+            expected_fingerprint=item["fingerprint"],
+            why="Accept candidate beyond filtered method prefix.",
+            edit_memory=lambda _root, **kwargs: edits.append(kwargs)
+            or {"mutated": True},
+        )
+        assert result["accepted"] is True
+        assert edits[0]["path"] == source
+    else:
+        result = relation_queue.triage(
+            root,
+            ref=item["ref"],
+            source_path=item["source_path"],
+            action="dismiss",
+            expected_fingerprint=item["fingerprint"],
+            why="Dismiss candidate beyond filtered method prefix.",
+        )
+        assert result["state"] == "dismissed"
+
+
+def test_every_item_returned_at_supported_64_cap_is_hinted_actionable(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "vault"
+    source = f"{KB}/000-source.md"
+    shared = f"{KB}/shared-evidence.md"
+    _write(root, shared, "Shared evidence.")
+
+    def write_sourced(rel_path: str) -> None:
+        path = root / rel_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "---\ntype: insight\nstatus: active\nsources:\n"
+            f"  - {shared}\n---\n# {path.stem}\n\nA sourced claim.\n",
+            encoding="utf-8",
+        )
+
+    write_sourced(source)
+    for number in range(64):
+        write_sourced(f"{KB}/peer-{number:02d}.md")
+    _build_current(root)
+    queue = relation_queue.build_queue(root, limit_per_page=64)
+    items = next(group["items"] for group in queue["groups"] if group["path"] == source)
+    assert len(items) == 64
+    assert items[0]["method"] == "frontmatter_sources"
+    assert items[-1]["method"] == "shared_sources"
+
+    for item in items:
+        resolved = relation_queue.resolve_candidate(
+            root, item["ref"], source_path=item["source_path"]
+        )
+        assert resolved.ref == item["ref"]
+        assert resolved.fingerprint == item["fingerprint"]
+        assert resolved.candidate["evidence"] == item["evidence"]
+
+    accepted = relation_queue.accept(
+        root,
+        ref=items[-1]["ref"],
+        source_path=items[-1]["source_path"],
+        expected_hash=items[-1]["source_content_hash"],
+        expected_fingerprint=items[-1]["fingerprint"],
+        why="Accept the final supported-cap item.",
+        edit_memory=lambda *_args, **_kwargs: {"mutated": True},
+    )
+    triaged = relation_queue.triage(
+        root,
+        ref=items[-2]["ref"],
+        source_path=items[-2]["source_path"],
+        action="dismiss",
+        expected_fingerprint=items[-2]["fingerprint"],
+        why="Dismiss the penultimate supported-cap item.",
+    )
+    assert accepted["accepted"] is True
+    assert triaged["state"] == "dismissed"
+
+
+def test_hinted_wikilink_regeneration_preserves_graph_indexed_body_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "vault"
+    source = f"{KB}/source.md"
+    target = f"{KB}/TargetCase.md"
+    _write(root, target, "A target.")
+    source_file = root / source
+    source_file.parent.mkdir(parents=True, exist_ok=True)
+    source_file.write_text(
+        "---\ntype: insight\nstatus: active\n---\n# source\n\n"
+        "## Relations\n\n"
+        f"- supports [[{target.removesuffix('.md')}]]\n\n"
+        "## Context\n\n"
+        f"The exact body spelling is [[{target}|display spelling]].\n",
+        encoding="utf-8",
+    )
+    _build_current(root)
+    item = next(
+        item
+        for item in _items(relation_queue.build_queue(root))
+        if item["from"] == source and item["method"] == "wikilink"
+    )
+    assert item["evidence"] == {"source_path": source, "target": target}
+    find.evict_resolver_caches(root)
+    monkeypatch.setattr(
+        vault,
+        "walk_vault_md",
+        lambda *_args, **_kwargs: pytest.fail("hinted regeneration walked corpus"),
+    )
+
+    resolved = relation_queue.resolve_candidate(
+        root, item["ref"], source_path=item["source_path"]
+    )
+    assert resolved.candidate["evidence"] == item["evidence"]
+    assert resolved.fingerprint == item["fingerprint"]
+    accepted = relation_queue.accept(
+        root,
+        ref=item["ref"],
+        source_path=item["source_path"],
+        expected_hash=item["source_content_hash"],
+        expected_fingerprint=item["fingerprint"],
+        why="Accept the exact graph-indexed body signal.",
+        edit_memory=lambda *_args, **_kwargs: {"mutated": True},
+    )
+    triaged = relation_queue.triage(
+        root,
+        ref=item["ref"],
+        source_path=item["source_path"],
+        action="dismiss",
+        expected_fingerprint=item["fingerprint"],
+        why="Dismiss the exact graph-indexed body signal.",
+    )
+    assert accepted["accepted"] is True
+    assert triaged["state"] == "dismissed"
+    assert item["ref"] not in {
+        queued["ref"] for queued in _items(relation_queue.build_queue(root))
+    }
+
+
 def test_hinted_accept_refuses_fingerprint_drift_before_edit(
     tmp_path: Path,
 ) -> None:
@@ -369,6 +550,23 @@ def test_hinted_accept_refuses_newly_authored_and_dismissed_candidates(
             why="Synthetic authored guard proof.",
             edit_memory=lambda *_args, **_kwargs: pytest.fail(
                 "authored candidate reached edit"
+            ),
+        )
+    current = relation_queue.resolve_candidate(
+        authored_root,
+        authored_item["ref"],
+        source_path=authored_item["source_path"],
+    )
+    with pytest.raises(ValueError, match=r"REVIEW_ITEM_CHANGED.*authored_edge"):
+        relation_queue.accept(
+            authored_root,
+            ref=authored_item["ref"],
+            source_path=authored_item["source_path"],
+            expected_hash=vault.content_hash(source_file.read_text(encoding="utf-8")),
+            expected_fingerprint=current.fingerprint,
+            why="Synthetic live authored guard proof.",
+            edit_memory=lambda *_args, **_kwargs: pytest.fail(
+                "live authored candidate reached edit"
             ),
         )
 

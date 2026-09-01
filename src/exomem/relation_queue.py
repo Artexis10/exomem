@@ -15,6 +15,7 @@ by — activation or attention items (the #198 isolation rule).
 from __future__ import annotations
 
 import json
+import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -133,15 +134,20 @@ def _candidate_fingerprint(
     )
 
 
-def _authored_targets(page: Any, vault_root: Path) -> set[tuple[str, str]]:
-    """Set of `(relation_type, target.md)` already authored under ``## Relations``."""
-    document = semantic_units.parse_semantic_units(
+def _relation_document(page: Any, vault_root: Path) -> Any:
+    """Parse one already-read source with the current semantic registries."""
+    return semantic_units.parse_semantic_units(
         page.body,
         validate=False,
         language_registry=semantic_language_registry.load_registry(vault_root),
         relation_registry=relation_registry.load_registry(vault_root),
         page_type=page.page_type,
     )
+
+
+def _authored_targets(page: Any, vault_root: Path) -> set[tuple[str, str]]:
+    """Set of `(relation_type, target.md)` already authored under ``## Relations``."""
+    document = _relation_document(page, vault_root)
     authored: set[tuple[str, str]] = set()
     for relation in document.canonical_note_relations:
         try:
@@ -158,6 +164,52 @@ def _authored_targets(page: Any, vault_root: Path) -> set[tuple[str, str]]:
 
 def _is_placeholder_target(vault_root: Path, target: str) -> bool:
     return not (Path(vault_root) / epistemic_graph_module._with_md(target)).is_file()
+
+
+def _current_candidate_is_authored(
+    vault_root: Path,
+    page: Any,
+    candidate: dict[str, Any],
+) -> bool:
+    """Check one candidate against canonical relations on the current page."""
+    relation_type = str(candidate.get("relation_type") or "")
+    target = epistemic_graph_module._with_md(str(candidate.get("to") or ""))
+    if not relation_type or not target:
+        return False
+    index = epistemic_graph_module.EpistemicGraphIndex(vault_root)
+    connection = index._open_read_snapshot()
+    title: str | None = None
+    if connection is not None:
+        try:
+            row = connection.execute(
+                "SELECT title FROM graph_nodes WHERE kind = 'file' AND path = ?",
+                (target,),
+            ).fetchone()
+            if row is not None and row[0] is not None and str(row[0]).strip():
+                title = str(row[0])
+        except sqlite3.Error:
+            pass
+        finally:
+            connection.close()
+    resolver = vault_module.WikilinkResolver.from_entries(
+        vault_root,
+        [(target, title)],
+    )
+    for relation in _relation_document(page, vault_root).canonical_note_relations:
+        if relation.kind != relation_type:
+            continue
+        try:
+            canonical, warning = vault_module.normalize_wikilink(
+                relation.target,
+                vault_root,
+                resolver=resolver,
+                strict=False,
+            )
+        except Exception:  # noqa: BLE001 - malformed authored links are ignored
+            continue
+        if not warning and epistemic_graph_module._with_md(canonical) == target:
+            return True
+    return False
 
 
 def _eligible_pages(vault_root: Path) -> list[Any]:
@@ -210,11 +262,146 @@ def _page_content_hash(page: Any) -> str:
 #: group, and the genuinely open candidates behind them never surfaced on any
 #: read, however many times the queue was rebuilt.
 #:
-#: Bounded rather than unlimited because generation includes embedding
-#: proximity, which is the expensive generator; the ceiling stops an adversarial
-#: page from turning one queue read into a full-corpus scoring pass.
+#: Decision regeneration excludes embeddings, but each deterministic method is
+#: still capped to the same supported 64-candidate prefix as Lane B.  The cap is
+#: PER METHOD: a visible item can legitimately follow a full filtered prefix
+#: from an earlier method.
 _CLASSIFICATION_HEADROOM = 4
-_MAX_GENERATED_PER_PAGE = 64
+_MAX_GENERATED_PER_METHOD = 64
+
+
+def _body_wikilink_candidates(
+    vault_root: Path,
+    page: Any,
+    *,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Reproduce Lane B's indexed body-wikilink evidence for one source."""
+    document = _relation_document(page, vault_root)
+    canonical_lines = {
+        relation.line for relation in document.note_relations if relation.canonical
+    }
+    index = epistemic_graph_module.EpistemicGraphIndex(vault_root)
+    connection = index._open_read_snapshot()
+    if connection is None:
+        return []
+    try:
+        rows = connection.execute(
+            "SELECT d.path, d.title, e.review_evidence "
+            "FROM graph_edges e JOIN graph_nodes d "
+            "ON d.node_key = e.dst_key AND d.kind = 'file' "
+            "WHERE e.origin = 'wikilink' AND e.source_path = ? "
+            "ORDER BY COALESCE(CAST(json_extract(e.review_evidence, "
+            "'$.internal.occurrence') AS INTEGER), e.rowid), d.path, e.rowid "
+            "LIMIT ?",
+            (page.rel_path, max(0, int(limit))),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    finally:
+        connection.close()
+
+    indexed: dict[tuple[Any, ...], dict[str, Any]] = {}
+    resolver_entries: list[tuple[str, str | None]] = []
+    for target_path, title, raw_evidence in rows:
+        try:
+            payload = json.loads(str(raw_evidence or "{}"))
+        except (TypeError, json.JSONDecodeError):
+            continue
+        evidence = payload.get("evidence") or {}
+        internal = payload.get("internal") or {}
+        key = (
+            str(target_path),
+            str(evidence.get("target") or ""),
+            int(internal.get("occurrence", -1)),
+            int(internal.get("start", -1)),
+            int(internal.get("end", -1)),
+            int(internal.get("line", -1)),
+        )
+        indexed[key] = evidence
+        resolver_entries.append((str(target_path), str(title) if title else None))
+    resolver = vault_module.WikilinkResolver.from_entries(
+        vault_root,
+        resolver_entries,
+    )
+    observations = epistemic_graph_module._body_wikilink_observations(
+        vault_root,
+        page.body,
+        skip_lines=canonical_lines,
+        resolver=resolver,
+    )
+    candidates: list[dict[str, Any]] = []
+    for observation in observations:
+        key = (
+            str(observation["target_path"]),
+            str(observation["target"]),
+            int(observation["occurrence"]),
+            int(observation["start"]),
+            int(observation["end"]),
+            int(observation["line"]),
+        )
+        evidence = indexed.get(key)
+        if evidence is None:
+            continue
+        candidates.append(
+            {
+                "from": page.rel_path,
+                "to": str(observation["target_path"]),
+                "relation_type": "links_to",
+                "method": "wikilink",
+                "evidence": evidence,
+            }
+        )
+    return candidates
+
+
+def _shared_source_candidates(
+    vault_root: Path,
+    rel_path: str,
+    *,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Reproduce Lane B's bounded shared-source candidates for one source."""
+    index = epistemic_graph_module.EpistemicGraphIndex(vault_root)
+    connection = index._open_read_snapshot()
+    if connection is None:
+        return []
+    try:
+        rows = connection.execute(
+            "SELECT e2.source_path, e1.dst_key "
+            "FROM graph_edges e1 JOIN graph_edges e2 ON e2.dst_key = e1.dst_key "
+            "JOIN graph_nodes d ON d.node_key = ('file:' || e2.source_path) "
+            "WHERE e1.source_path = ? "
+            "AND e1.origin = 'frontmatter' AND e1.source_anchor = 'sources' "
+            "AND e1.relation_type = 'derived_from' "
+            "AND e2.origin = 'frontmatter' AND e2.source_anchor = 'sources' "
+            "AND e2.relation_type = 'derived_from' "
+            "AND e2.source_path <> e1.source_path "
+            "AND NOT EXISTS (SELECT 1 FROM graph_edges p "
+            "WHERE p.src_key = ('file:' || e1.source_path) "
+            "AND p.dst_key = ('file:' || e2.source_path) "
+            "AND p.relation_type = 'relates_to') "
+            "ORDER BY e2.source_path, e1.dst_key LIMIT ?",
+            (rel_path, max(0, int(limit))),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    finally:
+        connection.close()
+    return [
+        {
+            "from": rel_path,
+            "to": epistemic_graph_module._with_md(str(target_path)),
+            "relation_type": "relates_to",
+            "method": "shared_sources",
+            "evidence": {
+                "shared_source": epistemic_graph_module._with_md(
+                    str(shared_key or "").removeprefix("file:")
+                )
+            },
+        }
+        for target_path, shared_key in rows
+    ]
 
 
 def _page_candidates(
@@ -228,19 +415,19 @@ def _page_candidates(
     that discovery method; relation review decisions never recompute it.
     """
     budget = max(0, int(limit_per_page))
+    method_cap = min(
+        _MAX_GENERATED_PER_METHOD,
+        max(1, budget * _CLASSIFICATION_HEADROOM),
+    )
     generated = [
-        *epistemic_graph_module._structural_candidates(vault_root, page.rel_path),
-        *epistemic_graph_module._wikilink_candidates(
-            vault_root, page.body, page.rel_path
-        ),
-        *epistemic_graph_module._frontmatter_source_candidates(page),
-        *epistemic_graph_module._shared_source_candidates(
+        *epistemic_graph_module._structural_candidates(
             vault_root, page.rel_path
-        ),
+        )[:method_cap],
+        *_body_wikilink_candidates(vault_root, page, limit=method_cap),
+        *epistemic_graph_module._frontmatter_source_candidates(page)[:method_cap],
+        *_shared_source_candidates(vault_root, page.rel_path, limit=method_cap),
     ]
-    return epistemic_graph_module._dedupe_candidates(generated)[
-        : min(_MAX_GENERATED_PER_PAGE, budget * _CLASSIFICATION_HEADROOM)
-    ]
+    return epistemic_graph_module._dedupe_candidates(generated)
 
 
 def _page_for(vault_root: Path, rel_path: str) -> Any | None:
@@ -458,7 +645,7 @@ def resolve_candidate(
     if page is None or not activation_module._eligible(vault_root, page):
         raise _refresh_required(ref)
     for candidate in _page_candidates(
-        vault_root, page, limit_per_page=_DEFAULT_LIMIT_PER_PAGE
+        vault_root, page, limit_per_page=_MAX_GENERATED_PER_METHOD
     ):
         if str(candidate.get("from") or page.rel_path) != rel_path:
             continue
@@ -557,7 +744,23 @@ def accept(
         )
     store = review_state_module.ReviewStateStore(vault_root)
     reason, _enriched = _classify_candidate(
-        vault_root, page, candidate, store=store, state_payload=store.load()
+        vault_root,
+        page,
+        candidate,
+        store=store,
+        state_payload=store.load(),
+        authored=(
+            {
+                (
+                    str(candidate.get("relation_type") or ""),
+                    epistemic_graph_module._with_md(
+                        str(candidate.get("to") or "")
+                    ),
+                )
+            }
+            if _current_candidate_is_authored(vault_root, page, candidate)
+            else set()
+        ),
     )
     if reason is not None:
         raise ValueError(
