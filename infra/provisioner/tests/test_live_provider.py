@@ -38,6 +38,7 @@ from exomem_provisioner.provider_identity import (
     cell_provider_recovery_envelopes,
     provider_operation_resource_name,
 )
+from exomem_provisioner.repository import canonical_request_sha256
 
 
 class _NotFound(Exception):
@@ -764,7 +765,11 @@ async def test_live_rollforward_uses_target_fingerprint_and_original_helm_author
         assert values["image"] == config.image
         assert values["providerRecoveryEnvelopes"] == original_request["_providerRecoveryEnvelopes"]
         assert values["routes"]["enabled"] is False
-    assert transitions[0][1]["initOperationId"] == "rollforward-alpha"
+    migration_operation_id = (
+        f"rollforward-alpha:runtime-migration:{canonical_request_sha256(request)}"
+    )
+    assert transitions[0][1]["initOperationId"] == migration_operation_id
+    assert transitions[1][1]["initOperationId"] == migration_operation_id
     assert rollbacks == [(owner, "rollforward-alpha")]
 
 

@@ -237,6 +237,16 @@ checkpoint identity. Repetition SHALL verify the existing receipt without a seco
 - **WHEN** that exact retargeted operation fails closed before tenant mutation because its source authorization bundle is stale
 - **THEN** a separately invoked signed recovery validates both prior recovery receipts, the selected target request, the unchanged four-resource identity, active reservation, stable unrouted live state, and absence of conflicts before making the same operation claimable once; the offline migration may read the stale bundle only to render its non-serving Job, and serving still requires a freshly transitioned target-version bundle
 
+#### Scenario: Offline migration replay identity is bound to the selected target request
+
+- **WHEN** a recovered retarget runs its target-image migration after an earlier initialization proof exists for the same provider operation lineage
+- **THEN** the migration initialization identity is derived from the durable operation and canonical selected-target request digest, so retries of that exact request are byte-stable and a different target request cannot collide with its proof
+
+#### Scenario: A failed resumed retarget receives one separately attributed retry
+
+- **WHEN** that resumed retarget fails closed with a provider-metadata conflict before migration while the same four resources remain stopped, unrouted, reserved, and conflict-free
+- **THEN** a separately invoked signed retry validates the original recovery, retarget, and resume receipts plus the unchanged selected-target request and live identity before appending one content-free retry receipt and making the same operation claimable once more
+
 #### Scenario: Retarget mismatch is a no-op
 
 - **WHEN** any request, receipt, claim, fence, resource, reservation, live identity, runtime, route, result, or compare-and-swap invariant differs
