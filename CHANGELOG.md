@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.68.2](https://github.com/Artexis10/exomem/compare/v0.68.1...v0.68.2) (2026-09-01)
+
+
+### Bug Fixes
+
+* **delegation:** isolate worker preflight state ([b66e4cb](https://github.com/Artexis10/exomem/commit/b66e4cb389bf8715db8fae1ab06ebdb8f110aa27))
+* **deploy:** prove listener process-tree ownership ([#1025](https://github.com/Artexis10/exomem/issues/1025)) ([c8e17af](https://github.com/Artexis10/exomem/commit/c8e17af1f79240da3fd43e77cf3cad7bd43c0323))
+* **hosted:** let recovery operator inspect pods ([#1032](https://github.com/Artexis10/exomem/issues/1032)) ([5a35ba0](https://github.com/Artexis10/exomem/commit/5a35ba0d73911f03c1d2457bb48a176945c7bb3b))
+* **planning:** guide invalid kind and area ([e3fca5a](https://github.com/Artexis10/exomem/commit/e3fca5ae4d56886a0579980ddc4c8e3af79cfb08))
+* **planning:** tolerate legacy updated metadata ([51133fa](https://github.com/Artexis10/exomem/commit/51133fa171f95619dd9f36d4218ef921c978fac8))
+* **recall:** bound corpus context flight joins ([#1031](https://github.com/Artexis10/exomem/issues/1031)) ([c493c65](https://github.com/Artexis10/exomem/commit/c493c65b99413d5ce56212a36f36ae2507e4576e))
+* **records:** close workflow dogfood mutation gaps ([#1033](https://github.com/Artexis10/exomem/issues/1033)) ([dc22c29](https://github.com/Artexis10/exomem/commit/dc22c29a5a4ad44fc0f18c1005e2611ddbb8cda3))
+* **records:** recover creates and allow optional tables ([#1034](https://github.com/Artexis10/exomem/issues/1034)) ([3e56db9](https://github.com/Artexis10/exomem/commit/3e56db9ff0d1da9f3c4dfd541d3b3be44eae42cb))
+
 ## [0.68.1](https://github.com/Artexis10/exomem/compare/v0.68.0...v0.68.1) (2026-08-31)
 
 
