@@ -13,14 +13,3 @@
 #### Scenario: Ordinary edit remains guarded
 - **WHEN** `edit_memory` omits `validate_only` or sets it false
 - **THEN** the command is classified as a mutation and uses normal writer, idempotency, and vault-boundary safeguards
-
-### Requirement: Entity Surfaces Derive From The Active Registry
-The MCP, REST, CLI, OpenAPI, and bootstrap surfaces SHALL expose entity kinds and guidance derived from the same active registry used by the canonical entity leaf. A registered kind MUST NOT require an independently edited command description or hard-coded validation tuple, and a kind absent from the registry MUST be rejected consistently on every surface.
-
-#### Scenario: Organization is visible everywhere
-- **WHEN** the built-in registry contains `organization`
-- **THEN** bootstrap and generated entity guidance list it, and MCP, REST, and CLI all accept it through the same leaf
-
-#### Scenario: Surface drift gate runs
-- **WHEN** tests compare registry definitions with generated schemas, bootstrap catalogs, scaffold registry documentation, and entity indexes
-- **THEN** the build fails if a supported kind is missing or independently enumerated on a required surface
