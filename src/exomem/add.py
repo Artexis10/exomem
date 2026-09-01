@@ -18,7 +18,7 @@ import datetime as dt
 import hashlib
 import logging
 import os
-import shutil
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -33,8 +33,10 @@ from . import (
 )
 from .kbdir import kb_prefix
 from .vault import (
+    MISSING_CONTENT_HASH,
     InvalidSlugError,
     PlannedWrite,
+    PreparedBinaryContent,
     batch_atomic_write,
     kb_root,
     resolve_filename_slug,
@@ -81,6 +83,7 @@ class AddResult:
     artifact_path: str | None = None
     artifact_hash: str | None = None
     artifact_size: int | None = None
+    adoption: dict[str, object] | None = None
 
     def as_dict(self) -> dict:
         out = {"path": self.path, "ref": self.ref, "warnings": self.warnings}
@@ -93,6 +96,8 @@ class AddResult:
             out["hash"] = self.artifact_hash
             out["hash_algorithm"] = "sha256"
             out["size"] = self.artifact_size
+        if self.adoption is not None:
+            out["adoption"] = self.adoption
         return out
 
 
@@ -180,6 +185,7 @@ def add(
     projects: list[str] | None = None,
     today: dt.date | None = None,
     artifact: SourceArtifact | None = None,
+    adoption_seed: Mapping[str, object] | None = None,
 ) -> AddResult:
     """Capture a raw source into the KB and update indexes/log atomically.
 
@@ -302,6 +308,25 @@ def add(
         # change and the citation resolver is fixed once rather than per layout.
         artifact_path, source_path = _artifact_pair(folder_path, stem, artifact_suffix)
 
+    adoption_receipt: dict[str, object] | None = None
+    if adoption_seed is not None:
+        if artifact is None or artifact_path is None or artifact_digest is None or artifact_size is None:
+            raise AddError(
+                code="INVALID_SOURCE",
+                missing=["artifact"],
+                reason="artifact adoption requires exact staged bytes",
+            )
+        from .preserve import _complete_adoption_receipt
+
+        adoption_receipt = _complete_adoption_receipt(
+            adoption_seed,
+            stored_path=artifact_path.relative_to(vault_root).as_posix(),
+            page_path=source_path.relative_to(vault_root).as_posix(),
+            digest=artifact_digest,
+            size=artifact_size,
+            content_type=artifact.content_type,
+        )
+
     tags_clean = _clean_tags(tags)
     exomem_id = memory_refs.new_id()
 
@@ -326,6 +351,7 @@ def add(
         ),
         artifact_digest=artifact_digest,
         artifact_size=artifact_size,
+        adoption_receipt=adoption_receipt,
     )
 
     # Plan the source file write so the counts in compute_updates() are
@@ -407,21 +433,35 @@ def add(
     # Cap-50 trim is recorded in log.md per SKILL.md trim discipline; no need
     # to also surface it as a per-write warning.
 
-    # The bytes land before the batch because `batch_atomic_write` is text-only,
-    # and are removed again if the batch fails — otherwise a failed capture
-    # would leave an orphaned binary with no page, which is exactly the
-    # unaddressable state this change exists to remove.
+    # The binary and its Source page share the held batch. No canonical byte
+    # path becomes visible before the page (and any adoption receipt it owns)
+    # can publish in the same rollback set.
+    artifact_stream = None
     if artifact is not None and artifact_path is not None:
-        shutil.copyfile(artifact.staged_path, artifact_path)
+        assert artifact_digest is not None and artifact_size is not None
+        artifact_stream = artifact.staged_path.open("rb")
+        writes.append(
+            PlannedWrite(
+                path=artifact_path,
+                content=PreparedBinaryContent(
+                    artifact_stream,
+                    artifact_size,
+                    artifact_digest,
+                ),
+                create_only=True,
+                expected_hash=MISSING_CONTENT_HASH,
+            )
+        )
 
     try:
         batch_atomic_write(writes, vault_root=vault_root)
     except Exception as e:
         log.exception("partial write during add(); some files may be updated")
-        if artifact_path is not None:
-            artifact_path.unlink(missing_ok=True)
         warnings.append(f"partial write — reconcile on desktop: {e}")
         raise
+    finally:
+        if artifact_stream is not None:
+            artifact_stream.close()
 
     try:
         self_path = source_path.relative_to(vault_root).as_posix()
@@ -458,6 +498,7 @@ def add(
         structure_suggestion=_classification_suggestion(
             folder_path, kind, domain_resolution
         ),
+        adoption=adoption_receipt,
     )
 
 
@@ -624,6 +665,7 @@ def _render_source(
     artifact_rel: str | None = None,
     artifact_digest: str | None = None,
     artifact_size: int | None = None,
+    adoption_receipt: Mapping[str, object] | None = None,
 ) -> str:
     """Emit the source page markdown matching frontmatter.md's example shape.
 
@@ -662,6 +704,10 @@ def _render_source(
             lines.append(f"binary_sha256: {artifact_digest}")
         if artifact_size is not None:
             lines.append(f"binary_size: {artifact_size}")
+    if adoption_receipt is not None:
+        from .preserve import _render_adoption_receipt_lines
+
+        lines.extend(_render_adoption_receipt_lines(adoption_receipt))
     if url:
         lines.append(f"url: {yaml_scalar(url)}")
     if tags:
