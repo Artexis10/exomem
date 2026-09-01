@@ -710,12 +710,17 @@ def create_collection(
             ),
         )
         try:
+            source_is_written = any(write.path == source for write in writes)
             vault.batch_atomic_write(
                 [*writes, *log_plan.writes],
                 vault_root=root,
                 required_guards=(
                     *_portable_absence_guards(root, path, source),
-                    *((source_guard,) if source_guard is not None else ()),
+                    *(
+                        (source_guard,)
+                        if source_guard is not None and not source_is_written
+                        else ()
+                    ),
                 ),
             )
         except vault.BatchWriteError:
@@ -2537,6 +2542,11 @@ def _expect_hash(expected: str | None, actual: str, kind: str) -> None:
 
 def _publication_error(error: Exception) -> collections.CollectionError:
     if isinstance(error, vault.PathGuardError):
+        if error.code in {"BATCH_RESIDUE_LIMIT", "BATCH_RESIDUE_UNSAFE"}:
+            return collections.CollectionError(
+                "RECORD_RECOVERY_REQUIRED",
+                "private transaction residue blocks safe publication",
+            )
         return collections.CollectionError("STALE_RECORD", "canonical record changed before commit")
     if isinstance(error, vault.CreateOnlyConflict):
         return collections.CollectionError(

@@ -439,6 +439,67 @@ item_schema:
         records.create_collection(tmp_path, manifest_path, manifest, why="retry creation")
 
 
+def test_create_markdown_log_inside_an_existing_empty_collection_directory(
+    tmp_path: Path,
+) -> None:
+    from exomem import records
+
+    _activity_log(tmp_path)
+    collection = tmp_path / "Knowledge Base/Records/Project/Delivery Outcomes"
+    collection.mkdir(parents=True)
+    manifest_path = collection.relative_to(tmp_path).joinpath("_collection.md").as_posix()
+    manifest = """---
+type: collection
+exomem_id: 7f2f8a4d-67b5-4d6d-9b91-b5b97b25dd7a
+title: Delivery outcomes
+semantic_profile: records
+collection_version: 1
+schema_version: 1
+lifecycle: active
+storage:
+  strategy: markdown-log
+  source: Delivery log.md
+  format_version: 1
+  section: {level: 2, title: Outcomes}
+  item_heading:
+    level: 3
+    fields:
+      - {name: observed_on, type: date, format: "%Y-%m-%d"}
+      - {name: change_key, type: string}
+      - {name: outcome, type: string}
+    separator: " · "
+    note: {field: summary, open: " (", close: ")"}
+  child_rows:
+    prefix: "- "
+    delimiter: "|"
+    fields: [field, value]
+    container_field: details
+  insertion: newest-first
+item_schema:
+  natural_key: [observed_on, change_key, outcome]
+  fields:
+    observed_on: {type: date, required: true}
+    change_key: {type: string, required: true}
+    outcome: {type: string, required: true}
+    summary: {type: string, required: true}
+    details:
+      type: array
+      items: {type: object}
+---
+"""
+
+    result = records.create_collection(
+        tmp_path,
+        manifest_path,
+        manifest,
+        why="create an observed delivery log",
+    )
+
+    assert result["outcome"] == "committed"
+    assert (collection / "_collection.md").is_file()
+    assert (collection / "Delivery log.md").read_text(encoding="utf-8") == "## Outcomes\n"
+
+
 def test_create_collection_without_scaffold_has_an_audited_absent_source_state(
     tmp_path: Path,
 ) -> None:
