@@ -393,6 +393,7 @@ def infer_relation_registry(
         observations = [
             item for item in observations if item["source_path"] in included_paths
         ]
+    census = _relation_census(pages, observations, included_paths, denominators)
     grouped: dict[str, dict[str, Any]] = {}
     for item in observations:
         key = str(item["raw_relation"])
@@ -500,6 +501,7 @@ def infer_relation_registry(
         "sample_size": len(pages),
         "observation_count": len(observations),
         "date_denominators": denominators,
+        "census": census,
         "counts": {
             key: counts.get(key, 0)
             for key in (
@@ -541,6 +543,51 @@ def infer_relation_registry(
         "model_suggestions_attribution": "optional model; response-only"
         if include_model_suggestions
         else None,
+    }
+
+
+def _relation_census(
+    pages: list[Any],
+    observations: list[dict[str, Any]],
+    included_paths: set[str],
+    denominators: dict[str, int],
+) -> dict[str, dict[str, int]]:
+    """Return aggregate-only relation evidence for the selected page cohort."""
+    relation_counts = {
+        "core": 0,
+        "extension": 0,
+        "deprecated": 0,
+        "generic": 0,
+        "unregistered": 0,
+    }
+    authored_paths: set[str] = set()
+    for item in observations:
+        authored_paths.add(str(item["source_path"]))
+        status = item["registry_status"]
+        canonical = item["canonical"]
+        if status == "deprecated":
+            relation_counts["deprecated"] += 1
+        elif status == "unregistered":
+            relation_counts["unregistered"] += 1
+        elif canonical == "relates_to":
+            relation_counts["generic"] += 1
+        elif status == "core":
+            relation_counts["core"] += 1
+        elif status in {"extension", "alias"}:
+            relation_counts["extension"] += 1
+
+    cohort_pages = [page for page in pages if page.rel_path in included_paths]
+    return {
+        "relation_counts": relation_counts,
+        "page_counts": {
+            "zero_authored_relation_rows": sum(
+                page.rel_path not in authored_paths for page in cohort_pages
+            ),
+            "zero_body_connections": sum(
+                not vault.find_body_wikilinks(page.body) for page in cohort_pages
+            ),
+        },
+        "denominators": dict(denominators),
     }
 
 

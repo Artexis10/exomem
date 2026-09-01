@@ -83,6 +83,20 @@ Validation failures leave the dialog and draft intact. Proposal generation and
 cancellation never mutate the vault. Existing server validation, expected-hash
 guards, write logs, access policy, and audit behavior remain authoritative.
 
+## Relation queue states
+
+The Relation worklist is graph-native and preserves server order. Its `status`
+is one of `available`, `warming`, `pending`, or `unavailable`; these states are
+not empty queue results. `warming`, `pending`, and `unavailable` are retryable
+and show no fabricated fallback candidates. `truncated` and coverage fields
+remain visible whenever a bounded response omitted work.
+
+An accept or triage action uses the queue item's `source_path`,
+`source_content_hash`, and `fingerprint` as source hints and drift guards. A
+changed signal produces `REVIEW_ITEM_CHANGED`; a legacy reference outside the
+bounded current prefix produces `REVIEW_REFRESH_REQUIRED`. The Studio refreshes
+instead of widening a search or re-ranking candidates client-side.
+
 ## Recorded evolution, not generated narrative
 
 The Evolution panel displays stored supersession pointers in order, with

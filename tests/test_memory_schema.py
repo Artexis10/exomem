@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -8,9 +9,11 @@ from conftest import initialize_vault_state_offline
 from exomem import (
     audit,
     commands,
+    epistemic_graph,
     memory_schema,
     relation_registry,
     semantic_language_registry,
+    state_paths,
 )
 from exomem.__main__ import main
 
@@ -483,6 +486,122 @@ def test_relation_inference_preserves_raw_census_and_aggregates_promotions(
         alias for item in candidates for alias in item["aliases"]
     ]
     assert len(identities) == len(set(identities))
+
+
+def test_relation_inference_census_is_scoped_aggregate_and_non_authoring(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    notes = vault / "Knowledge Base" / "Notes"
+    schema = vault / "Knowledge Base" / "_Schema"
+    notes.mkdir(parents=True)
+    schema.mkdir()
+    (schema / "relation-registry.yaml").write_text(
+        """\
+schema_version: 1
+extensions:
+  vault.applies_to:
+    parent: relates_to
+    description: A synthetic applicability relation.
+    direction: directed
+    aliases: [applies_to]
+  vault.legacy_applies:
+    parent: relates_to
+    description: A retired synthetic applicability relation.
+    direction: directed
+    status: deprecated
+    replaced_by: vault.applies_to
+""",
+        encoding="utf-8",
+    )
+    pages = {
+        "old-core.md": "---\ncreated: 2020-01-10\ntype: insight\n---\n- supports [[Target]]\n",
+        "old-extension.md": "---\ncaptured: 2020-02-10\ntype: procedure\n---\n- applies_to [[Target]]\n",
+        "old-deprecated.md": "---\ncreated: 2020-03-10\ntype: insight\n---\n- vault.legacy_applies [[Target]]\n",
+        "old-generic.md": "---\ncreated: 2020-04-10\ntype: insight\n---\n- relates_to [[Target]]\n",
+        "current-unregistered.md": "---\ncreated: 2026-01-10\ntype: insight\n---\n- unregistered.label: [[Target]]\n",
+        "current-body-only.md": "---\ncreated: 2026-02-10\ntype: insight\n---\nA body-only [[Target]] connection.\n",
+        "undated.md": (
+            "---\nupdated: 1999-01-01\ntype: insight\n---\n"
+            "Synthetic disconnected page.\n\n"
+            "```text\n[[Ignored fenced target]]\n```\n"
+            "Escaped \\[\\[Ignored escaped target\\]\\] and `[[Ignored inline target]]`.\n"
+        ),
+    }
+    for name, body in pages.items():
+        (notes / name).write_text(body, encoding="utf-8")
+    before = {path: path.read_bytes() for path in vault.rglob("*") if path.is_file()}
+    derived_state = state_paths.vault_state_dir(vault)
+    before_derived = (
+        {path: path.read_bytes() for path in derived_state.rglob("*") if path.is_file()}
+        if derived_state.exists()
+        else {}
+    )
+    assert not epistemic_graph.sidecar_path(vault).exists()
+
+    all_pages = commands.op_schema_memory(
+        vault, operation="infer", subject="relations"
+    )
+    census = all_pages["census"]
+    assert census == {
+        "relation_counts": {
+            "core": 1,
+            "extension": 1,
+            "deprecated": 1,
+            "generic": 1,
+            "unregistered": 1,
+        },
+        "page_counts": {
+            "zero_authored_relation_rows": 2,
+            "zero_body_connections": 1,
+        },
+        "denominators": {
+            "sampled": 7,
+            "included": 6,
+            "undated": 1,
+            "excluded": 0,
+        },
+    }
+    assert {path: path.read_bytes() for path in vault.rglob("*") if path.is_file()} == before
+    after_derived = (
+        {path: path.read_bytes() for path in derived_state.rglob("*") if path.is_file()}
+        if derived_state.exists()
+        else {}
+    )
+    assert after_derived == before_derived
+    assert not epistemic_graph.sidecar_path(vault).exists()
+    serialized = json.dumps(census, sort_keys=True)
+    assert "Knowledge Base" not in serialized
+    assert "Target" not in serialized
+    assert "Synthetic" not in serialized
+
+    current = commands.op_schema_memory(
+        vault,
+        operation="infer",
+        subject="relations",
+        page_type="insight",
+        date_from="2026-01-01",
+        date_to="2026-12-31",
+    )["census"]
+    assert current == {
+        "relation_counts": {
+            "core": 0,
+            "extension": 0,
+            "deprecated": 0,
+            "generic": 0,
+            "unregistered": 1,
+        },
+        "page_counts": {
+            "zero_authored_relation_rows": 1,
+            "zero_body_connections": 0,
+        },
+        "denominators": {
+            "sampled": 6,
+            "included": 2,
+            "undated": 1,
+            "excluded": 3,
+        },
+    }
 
 
 def test_relation_inference_reserves_canonical_keys_across_distinct_aliases(
