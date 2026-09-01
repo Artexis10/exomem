@@ -7,6 +7,7 @@ import pytest
 
 from exomem import (
     activation_manifest,
+    memory_refs,
     memory_schema,
     relation_registry,
     semantic_contract,
@@ -89,6 +90,89 @@ def _identity_census(
             for state in states
         )
     )
+
+
+def test_identity_census_precomputes_immutable_reference_index_equivalent_view() -> None:
+    unique = "Knowledge Base/Notes/Insights/unique.md"
+    duplicate = "Knowledge Base/Notes/Insights/duplicate.md"
+    duplicate_record = "Knowledge Base/Records/duplicate.md"
+    missing = "Knowledge Base/Notes/Insights/missing.md"
+    excluded_duplicate = "Knowledge Base/_Schema/excluded.md"
+    census = semantic_contract.StableIdentityCensus(
+        (
+            semantic_contract.StableIdentityEntry(unique, _ID_A),
+            semantic_contract.StableIdentityEntry(excluded_duplicate, _ID_A),
+            semantic_contract.StableIdentityEntry(duplicate, _ID_B),
+            semantic_contract.StableIdentityEntry(duplicate_record, _ID_B),
+            semantic_contract.StableIdentityEntry(missing, None),
+        )
+    )
+
+    serialized = census.as_dict()
+    assert serialized["entry_count"] == 5
+    assert "reference_paths" not in serialized
+    assert "canonical_refs_by_path" not in serialized
+    assert census._reference_paths == frozenset(
+        {unique, duplicate, duplicate_record, missing}
+    )
+    assert dict(census._canonical_refs_by_path) == {
+        unique: memory_refs.memory_ref(_ID_A),
+        duplicate: None,
+        duplicate_record: None,
+        missing: None,
+    }
+    with pytest.raises(TypeError):
+        census._canonical_refs_by_path[unique] = None  # type: ignore[index]
+
+
+def test_identity_census_reference_view_matches_real_reference_index_semantics(
+    tmp_path: Path,
+) -> None:
+    paths = {
+        "unique": "Knowledge Base/Notes/Insights/unique.md",
+        "duplicate": "Knowledge Base/Notes/Insights/duplicate.md",
+        "duplicate_record": "Knowledge Base/Records/duplicate.md",
+        "malformed": "Knowledge Base/Notes/Insights/malformed.md",
+        "missing": "Knowledge Base/Notes/Insights/missing.md",
+        "excluded": "Knowledge Base/_Schema/excluded.md",
+    }
+    identities = {
+        "unique": _ID_A,
+        "duplicate": _ID_B,
+        "duplicate_record": _ID_B,
+        "malformed": "not-a-canonical-id",
+        "missing": None,
+        "excluded": _ID_A,
+    }
+    for name, rel in paths.items():
+        page = tmp_path / rel
+        page.parent.mkdir(parents=True, exist_ok=True)
+        identity = identities[name]
+        page.write_text(
+            "---\ntitle: Page\n"
+            + (f"exomem_id: {identity}\n" if identity is not None else "")
+            + "---\n# Page\n",
+            encoding="utf-8",
+        )
+
+    census, _sources = semantic_contract._build_identity_census(tmp_path)
+    reference_index = memory_refs.ReferenceIndex(tmp_path)
+    reference_index.rebuild_all()
+    admitted = [
+        path for name, path in paths.items() if name != "excluded"
+    ]
+
+    assert census._reference_paths == frozenset(admitted)
+    assert dict(census._canonical_refs_by_path) == reference_index.refs_for_paths(
+        admitted
+    )
+    assert census._canonical_refs_by_path[paths["unique"]] == memory_refs.memory_ref(
+        _ID_A
+    )
+    assert census._canonical_refs_by_path[paths["duplicate"]] is None
+    assert census._canonical_refs_by_path[paths["duplicate_record"]] is None
+    assert census._canonical_refs_by_path[paths["malformed"]] is None
+    assert census._canonical_refs_by_path[paths["missing"]] is None
 
 
 def _contracts(

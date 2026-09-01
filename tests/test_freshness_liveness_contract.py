@@ -34,6 +34,7 @@ from __future__ import annotations
 import sqlite3
 import time
 from contextlib import closing
+from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 
 import pytest
@@ -141,6 +142,101 @@ class TestCorpusHalf:
         yield
         semantic_contract.reset_corpus_context_cache()
         freshness.clear()
+
+    def test_current_identity_snapshot_uses_full_checkpoint_without_corpus_work(
+        self, vault: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        context = semantic_contract.build_corpus_context(vault)
+        censuses, builds = _spy_corpus_work(monkeypatch)
+        monkeypatch.setattr(
+            semantic_contract,
+            "_build_identity_census",
+            lambda *_args, **_kwargs: pytest.fail("identity snapshot rebuilt census"),
+        )
+        monkeypatch.setattr(
+            vault_module,
+            "parse_frontmatter",
+            lambda *_args, **_kwargs: pytest.fail("identity snapshot parsed Markdown"),
+        )
+
+        snapshot = semantic_contract.current_reference_identity_snapshot(vault)
+
+        assert snapshot is not None
+        assert snapshot.checkpoint == freshness.consumer_checkpoint(vault, "vault")
+        assert snapshot.reference_paths is context.identity_census._reference_paths
+        assert snapshot.canonical_refs_by_path is context.identity_census._canonical_refs_by_path
+        assert semantic_contract.reference_identity_snapshot_is_current(vault, snapshot) is True
+        assert (censuses, builds) == ([], [])
+        with pytest.raises(FrozenInstanceError):
+            snapshot.checkpoint = freshness.consumer_checkpoint(vault, "vault")  # type: ignore[misc]
+
+    def test_current_identity_snapshot_fails_closed_for_cold_foreign_moved_and_pending(
+        self, vault: Path
+    ) -> None:
+        assert semantic_contract.current_reference_identity_snapshot(vault) is None
+        semantic_contract.build_corpus_context(vault)
+        snapshot = semantic_contract.current_reference_identity_snapshot(vault)
+        assert snapshot is not None
+
+        foreign = replace(
+            snapshot,
+            checkpoint=freshness.FreshnessCheckpoint(
+                "foreign-instance",
+                snapshot.checkpoint.generation,
+                snapshot.checkpoint.triple,
+            ),
+        )
+        assert semantic_contract.reference_identity_snapshot_is_current(vault, foreign) is False
+
+        pending = freshness.mark_external_pending(vault)
+        assert semantic_contract.current_reference_identity_snapshot(vault) is None
+        assert semantic_contract.reference_identity_snapshot_is_current(vault, snapshot) is False
+        freshness.clear_external_pending(vault, through=pending)
+
+        page = vault / _PAGE_REL
+        page.write_text(_corpus_page(title="Moved"), encoding="utf-8")
+        freshness.on_files_changed(vault, changed=(page,))
+        assert semantic_contract.current_reference_identity_snapshot(vault) is None
+        assert semantic_contract.reference_identity_snapshot_is_current(vault, snapshot) is False
+
+    def test_identity_snapshot_rejects_distinct_cached_context_reusing_census(
+        self, vault: Path
+    ) -> None:
+        original = semantic_contract.build_corpus_context(vault)
+        snapshot = semantic_contract.current_reference_identity_snapshot(vault)
+        assert snapshot is not None
+        cache_key = semantic_contract._corpus_cache_key(vault)
+
+        with semantic_contract._CORPUS_CONTEXT_UPDATE_LOCK:
+            with semantic_contract._CORPUS_CONTEXT_CACHE_LOCK:
+                entry = semantic_contract._CORPUS_CONTEXT_CACHE[cache_key]
+                replacement = replace(entry[1])
+                assert entry[1] is original
+                assert replacement is not original
+                assert replacement.identity_census is original.identity_census
+                assert (
+                    semantic_contract._CORPUS_CONTEXT_EVENT_CHECKPOINTS[cache_key]
+                    == snapshot.checkpoint
+                )
+                semantic_contract._CORPUS_CONTEXT_CACHE[cache_key] = (
+                    entry[0],
+                    replacement,
+                )
+
+        assert semantic_contract.reference_identity_snapshot_is_current(vault, snapshot) is False
+
+    def test_identity_snapshot_is_withdrawn_after_projection_publication_failure(
+        self, vault: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        semantic_contract.build_corpus_context(vault)
+        assert semantic_contract.current_reference_identity_snapshot(vault) is not None
+        page = vault / _PAGE_REL
+        page.write_text(_corpus_page(title="Projection failure"), encoding="utf-8")
+        _poison_corpus_patch(monkeypatch)
+
+        assert index_sync.publish_corpus_delta(vault, changed=(page,)) is False
+
+        assert semantic_contract.current_reference_identity_snapshot(vault) is None
 
     def test_refused_corpus_patch_does_not_cool_vault_freshness(
         self,
