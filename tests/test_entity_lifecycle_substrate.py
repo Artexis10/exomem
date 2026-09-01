@@ -151,6 +151,36 @@ def test_overlapping_source_sets_are_one_derivative_origin(tmp_path: Path) -> No
     assert _findings(tmp_path) == []
 
 
+def test_unrelated_source_bridge_does_not_collapse_identity_origins(
+    tmp_path: Path,
+) -> None:
+    for index, (source, body) in enumerate(
+        (
+            ("Sources/alpha", "amber guild is an organization."),
+            ("Sources/beta", "organization: amber guild."),
+            ("Sources/gamma", "Membership: amber guild."),
+        )
+    ):
+        _note(tmp_path, index, body, source=source)
+    _write(
+        tmp_path,
+        "Knowledge Base/Notes/unrelated-bridge.md",
+        "---\n"
+        "type: insight\n"
+        "title: Unrelated Bridge\n"
+        "status: active\n"
+        "sources: ['[[Sources/alpha]]', '[[Sources/beta]]']\n"
+        "---\n\n"
+        "This page contributes no amber guild identity frame.\n",
+    )
+
+    findings = _findings(tmp_path)
+
+    assert len(findings) == 1
+    assert findings[0].meta["candidate"] == "amber guild"
+    assert findings[0].meta["origin_count"] == 3
+
+
 def test_frozen_predicate_table_carries_every_exact_id_and_digest() -> None:
     table = getattr(entity_recurrence, "PREDICATE_TABLE", None)
     digest = getattr(entity_recurrence, "PREDICATE_TABLE_DIGEST", None)
@@ -286,6 +316,42 @@ def test_article_cue_natural_datetime_and_unaliased_link_targets_are_rejected(
     assert rows == ()
 
 
+def test_determiner_cue_and_oclock_time_reject_without_hiding_real_identity() -> None:
+    rows = entity_recurrence.extract_identity_frames(
+        "I work with this organization.\n"
+        "I work with 8 o'clock.\n"
+        "I work with amber guild.",
+        path="Knowledge Base/Notes/rejected-categorical.md",
+        origin="page:rejected-categorical",
+        entity_types=entity_types.core_registry(),
+        registry=entity_recurrence.RegistryIndex(entries=(), identities=frozenset()),
+    )
+
+    assert [row.identity for row in rows] == ["amber guild"]
+
+
+def test_empty_wikilink_display_masks_with_separator_and_preserves_legacy_target(
+    tmp_path: Path,
+) -> None:
+    rows = entity_recurrence.extract_identity_frames(
+        "I work with amber[[Hidden|]]guild.\n"
+        "I work with [[Visible Target|amber guild]].",
+        path="Knowledge Base/Notes/empty-display.md",
+        origin="page:empty-display",
+        entity_types=entity_types.core_registry(),
+        registry=entity_recurrence.RegistryIndex(entries=(), identities=frozenset()),
+    )
+
+    assert [row.identity for row in rows] == ["amber guild"]
+
+    for index in range(3):
+        _note(tmp_path, index, "See [[Hidden|]].")
+    findings = _findings(tmp_path)
+    assert len(findings) == 1
+    assert findings[0].meta["candidate"] == "Hidden"
+    assert findings[0].meta["reasons"] == ["unresolved_identity_recurs"]
+
+
 def test_hydration_batches_bind_full_disconnected_set_and_close_from_links(
     tmp_path: Path,
 ) -> None:
@@ -401,6 +467,26 @@ def test_unrelated_page_link_does_not_connect_qualifying_hydration_contexts(
     assert len(findings) == 1
     assert findings[0].meta["candidate_state"] == "hydration"
     assert findings[0].meta["disconnected_context_count"] == 3
+
+
+def test_separate_accepted_relations_close_exact_hydration_paths(
+    tmp_path: Path,
+) -> None:
+    _entity(tmp_path, "juniper", title="Juniper Circle")
+    for index, body in enumerate(
+        (
+            "juniper circle is an organization.",
+            "organization: juniper circle.",
+            "Membership: juniper circle.",
+        )
+    ):
+        _note(
+            tmp_path,
+            index,
+            f"{body}\n\n## Relations\n\n- relates_to [[Juniper Circle]]",
+        )
+
+    assert _findings(tmp_path) == []
 
 
 def test_cross_page_copy_of_existing_facet_does_not_change_signal_version(

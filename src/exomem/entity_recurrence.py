@@ -44,7 +44,7 @@ import json
 import re
 import unicodedata
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Any
@@ -219,6 +219,22 @@ _PRONOUNS = frozenset(
     }
 )
 _ARTICLES = frozenset({"a", "an", "the"})
+_DETERMINERS = frozenset(
+    {
+        *_ARTICLES,
+        "her",
+        "his",
+        "its",
+        "my",
+        "our",
+        "that",
+        "their",
+        "these",
+        "this",
+        "those",
+        "your",
+    }
+)
 _MONTHS = frozenset(
     {
         "january",
@@ -689,7 +705,7 @@ def _markdown_text(body: str) -> str:
         # With no authored display text the only words are a Markdown target,
         # which the closed grammar categorically excludes. Keep whitespace so
         # masking never joins the surrounding prose into a synthetic token.
-        return display.strip() if separator else " "
+        return (display.strip() or " ") if separator else " "
 
     text = re.sub(r"\[\[([^\[\]\n]+)\]\]", _wikilink, text)
     # The visible label is ordinary prose; the Markdown target is never a span.
@@ -767,12 +783,12 @@ def _valid_span(value: str, *, cue_nouns: frozenset[str]) -> str | None:
     if set(folded_tokens) <= _PRONOUNS or set(folded_tokens) <= _SPAN_STOPWORDS:
         return None
     folded = identity_key(normalized)
-    articleless = (
+    determinerless = (
         " ".join(folded_tokens[1:])
-        if folded_tokens and folded_tokens[0] in _ARTICLES
+        if folded_tokens and folded_tokens[0] in _DETERMINERS
         else folded
     )
-    if folded in cue_nouns or articleless in cue_nouns:
+    if folded in cue_nouns or determinerless in cue_nouns:
         return None
     if re.fullmatch(r"\d{4}-\d{1,2}-\d{1,2}", folded):
         return None
@@ -791,6 +807,8 @@ def _valid_span(value: str, *, cue_nouns: frozenset[str]) -> str | None:
     if folded in _WEEKDAYS:
         return None
     if re.fullmatch(r"\d{1,2}(?:(?: |:)\d{2})? ?(?:am|pm)", folded):
+        return None
+    if re.fullmatch(r"\d{1,2} ?o['’]clock(?: ?(?:am|pm))?", folded):
         return None
     if folded in {"midday", "midnight", "noon"}:
         return None
@@ -1124,14 +1142,19 @@ def _target_dict(entry: RegistryEntry) -> dict[str, Any]:
 
 
 def _segment_connects(raw_segment: str, identities: set[str]) -> bool:
-    """Whether one authored Markdown segment connects to the resolved target."""
+    """Whether one qualifying Markdown segment links to the resolved target."""
     for match in find_body_wikilinks(raw_segment):
         link = parse_link(match.group(1))
         if link is None:
             continue
         if identity_key(link.name) in identities or identity_key(link.target) in identities:
             return True
-    document = markdown_relations.parse_markdown_relations(raw_segment)
+    return False
+
+
+def _accepted_relation_connects(body: str, identities: set[str]) -> bool:
+    """Whether this page has an accepted canonical relation to the target."""
+    document = markdown_relations.parse_markdown_relations(body)
     return any(
         identity_key(relation.target) in identities
         or identity_key(relation.target.rsplit("/", 1)[-1]) in identities
@@ -1150,6 +1173,8 @@ def _connected(context: EvidenceContext, page: Any, target: RegistryEntry) -> bo
     identities = set(target.identities)
     identities.add(identity_key(target.path.removesuffix(".md")))
     identities.add(identity_key(Path(target.path).stem))
+    if _accepted_relation_connects(page.body, identities):
+        return True
     wanted_excerpt = " ".join(context.excerpt.split())
     for raw_line in page.body.splitlines():
         if (
@@ -1185,7 +1210,6 @@ def collect(
         if not str(page.rel_path).startswith(entities)
         and counts_as_evidence(page, indexable=indexable(str(page.rel_path)))
     )
-    origins_by_path = _origin_refs(eligible_pages)
     mentions: dict[str, dict[str, str]] = {}
     suffixed: dict[str, set[str]] = {}
     ordinary: dict[str, list[EvidenceContext]] = {}
@@ -1200,7 +1224,7 @@ def collect(
         for context in extract_identity_frames(
             page.body,
             path=rel_path,
-            origin=origins_by_path[rel_path],
+            origin=_origin_ref(page),
             entity_types=entity_types,
             registry=registry,
         ):
@@ -1239,7 +1263,7 @@ def collect(
         if legacy_qualifies and registry.resolves(identity):
             legacy_qualifies = False
 
-        rows = tuple(
+        raw_rows = tuple(
             sorted(
                 {
                     (row.path, row.facet_hash, row.identity): row
@@ -1247,6 +1271,14 @@ def collect(
                 }.values(),
                 key=lambda row: (row.path, row.context_hash),
             )
+        )
+        contributing_pages = tuple(
+            pages_by_path[path]
+            for path in sorted({row.path for row in raw_rows})
+        )
+        identity_origins = _origin_refs(contributing_pages)
+        rows = tuple(
+            replace(row, origin=identity_origins[row.path]) for row in raw_rows
         )
         ordinary_qualifies = _qualifies(rows)
         if not legacy_qualifies and not ordinary_qualifies:
