@@ -74,9 +74,12 @@ explicit opt-in path instead, which is out of scope here.
 
 ### Deferred is a distinct outcome, not a degraded success
 
-The deferred result must survive the default response projection. If it is only visible
-under `response_detail="full"`, the default caller cannot tell a bounded result from a
-completed one, and the bound becomes invisible in exactly the situation it fired.
+The timeout occurs in correctness preflight, before canonical mutation. It therefore
+uses the existing retryable `MUTATION_WARMING` public shape with `committed: false` and
+`retry_after_ms: 2000`. The write does not continue without a validation corpus, and the
+change does not introduce a committed `corpus_context_sync` terminal that would overlap
+the later durable-acknowledgement contract. The outcome survives the default response
+projection exactly as the existing startup semantic-corpus warming gate does.
 
 ### The waiter never disturbs the owner
 
@@ -85,9 +88,10 @@ a build that never completes, which is the livelock this is meant to reduce.
 
 ## Risks / Trade-offs
 
-- **A waiter can now return without a corpus context it previously blocked for.** That is
-  the intended trade. Every consumer of the deferred outcome must be checked for a path
-  that assumed a context was always present.
+- **A waiter can now refuse pre-commit where it previously blocked for a corpus context.**
+  That is the intended trade. Every consumer must propagate the typed warming refusal
+  without performing canonical mutation or laundering it into a semantic validation
+  failure.
 - **The bound could fire routinely if builds stay slow.** That would be a true signal
   rather than a regression, but it makes the deferred path hot, so its correctness
   matters as much as the bound itself.
@@ -99,4 +103,5 @@ a build that never completes, which is the livelock this is meant to reduce.
 
 None. The consumer migration surface is a mandatory implementation audit rather than an
 open design choice: every current call site must handle the typed deferred outcome
-explicitly or prove that it cannot receive one.
+explicitly or prove that it cannot receive one. The carrier is the existing retryable
+`MUTATION_WARMING` response, not an optional corpus value.

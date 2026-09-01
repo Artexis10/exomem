@@ -20,20 +20,23 @@
   `semantic_contract.py:2475` with `flight.done.wait(timeout=2.0)`. Distinguish
   "completed" from "expired" by the wait's own return value, not by inspecting flight
   state afterwards.
-- [ ] 2.3 On expiry, return the typed deferred outcome and release admitted capacity in
-  `finally`, on every completion, cancellation, and failure path.
+- [ ] 2.3 On expiry, return the existing retryable `MUTATION_WARMING` outcome with
+  `committed: false` and `retry_after_ms: 2000`, and release admitted capacity in
+  `finally` on every completion, cancellation, and failure path. Do not continue to
+  semantic validation or canonical mutation without the context.
 - [ ] 2.4 Leave the owner's build, registry cleanup, and `flight.done.set()` paths
   untouched; assert by test that an expired waiter does not disturb the owner.
 - [ ] 2.5 Preserve the existing `same_inputs` recomputation branch exactly.
 
 ## 3. Make the deferred outcome visible
 
-- [ ] 3.1 Represent the deferred corpus context as a typed outcome distinct from both a
-  completed context and an error.
-- [ ] 3.2 Surface it in the default response projection, not only under
+- [ ] 3.1 Reuse the existing pre-commit `MUTATION_WARMING` carrier rather than adding an
+  optional corpus value or a committed terminal-sync field.
+- [ ] 3.2 Surface code `MUTATION_WARMING`, status `retryable`, `committed: false`, and
+  `retry_after_ms: 2000` in the default response projection, not only under
   `response_detail="full"` or `"legacy"`.
-- [ ] 3.3 Add a test asserting a deferred result is not byte-identical to a completed one
-  in the default projection.
+- [ ] 3.3 Add a test asserting timeout returns that exact default projection and that no
+  canonical mutation occurs.
 - [ ] 3.4 Audit consumers of `build_corpus_context_with_census` for paths that assume a
   context is always present, and handle the deferred case explicitly at each. The audit
   MUST cover `semantic_contract.py`, `relation_review.py`, and `semantic_writes.py` and

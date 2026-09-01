@@ -21,7 +21,8 @@ pattern note predicted would survive a site-by-site fix.
 
 - Bound the corpus-context flight join by one fixed 2.0-second caller-side interactive
   budget rather than by how long the owner's build takes. A waiter that exceeds the
-  bound returns a typed deferred outcome instead of continuing to block.
+  bound returns the existing retryable `MUTATION_WARMING` outcome with
+  `committed: false` and `retry_after_ms: 2000` instead of continuing to block.
 - Return immediately when the joined flight is already settled. The zero-work path
   MUST NOT invoke the timed wait or spend the 2.0-second budget merely to discover
   completion that is already observable.
@@ -42,8 +43,9 @@ pattern note predicted would survive a site-by-site fix.
 
 - `corpus-context-availability`: an interactive caller joining an in-flight corpus-context
   build must be bounded by one fixed 2.0-second caller budget, must return immediately
-  when the flight is already settled, must observe a typed deferred outcome only on
-  timeout, and must never have a build error laundered into a deferral.
+  when the flight is already settled, must observe the existing pre-commit
+  `MUTATION_WARMING` outcome only on timeout, and must never have a build error
+  laundered into a deferral.
 
 ### Modified Capabilities
 
