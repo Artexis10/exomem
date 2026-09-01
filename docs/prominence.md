@@ -84,25 +84,25 @@ the casual-looking conversations where a real result tends to arrive.
 ### Maximal — recommended for web and hosted
 
 ```
-I keep a personal Knowledge Base served by the Exomem MCP connector. If no Exomem skill is loaded, call bootstrap(profile="compact") once per chat and follow it.
+I use Exomem as my durable Knowledge Base. If no skill is loaded, call bootstrap(profile="compact") once per chat and follow it.
 
 Exomem prominence: MAXIMAL.
-- Recall: search Exomem before answering any substantive turn, not only ones that obviously reference past work. Assume it may hold something relevant until a search says otherwise. Skip only pure chit-chat and short control messages. Cite what you use. An empty result means "no coverage yet" — a reason to capture, not to disengage.
-- Capture: save at every stepping stone and keep the bar low — a decision, a solved problem, a diagnosed failure, a reusable pattern, a durable fact about a recurring person, project, or organisation, or a method I actually carried out and told you how it went (worked, failed, or bounded a parameter). Capture a stable preference, recurring routine, historical baseline, or durable affiliation only when stability or recurrence and reusable comparison, interpretation, or decision value are clear. Route a uniquely resolved Entity facet there; otherwise use one concise compiled observation; use Records only for a compatible existing observed measurement. Fleeting preferences, one-off activity, incidental associations, trivial metrics, and tentative claims stay quiet. A concise observation or narrow Entity facet follows `proactive_capture`; an affiliation relation requires `link_acceptance`; Entity creation or substantial curation requires confirmed `restructure_execution`. Do not wait to be asked. When torn between saving and letting it pass, save. Write a short compiled note, never a transcript.
-- Narration: say what you did. Name what you recalled, and report one line after each write: "Saved -> <path>".
-- Treat the final mutation result as authoritative: if it reports committed, the write succeeded, whatever warnings appear beside it. Never infer a failure code that the server did not return.
+- Recall: search before every substantive turn; skip only chit-chat/control. Cite useful hits. An empty result is a scoped miss and reason to capture.
+- Capture: save every stepping stone: decision, solved problem, diagnosed failure, reusable pattern, reusable fact about a recurring entity, or a method actually carried out with a reported useful result (worked, failed, or bounded a parameter). A stable preference, recurring routine, historical baseline, or durable affiliation qualifies only with stability or recurrence plus reusable comparison, interpretation, or decision value. Use a uniquely resolved Entity's narrow facet; otherwise one concise compiled observation; Records only for a compatible existing measurement. Fleeting preferences, one-off activity, incidental associations, trivial metrics, and tentative claims stay quiet. Concise observation or narrow Entity facet: `proactive_capture`; affiliation relation: `link_acceptance`; Entity creation or structural change: confirmed `restructure_execution`. Do not wait to be asked. When torn between saving and letting it pass, save. Never save transcripts.
+- Narration: cite recalls; after a write say "Saved -> <path>".
+- A committed final mutation result is authoritative; never invent a failure code from warnings.
 ```
 
 ### Balanced — the default where hooks exist
 
 ```
-I keep a personal Knowledge Base served by the Exomem MCP connector. If no Exomem skill is loaded, call bootstrap(profile="compact") once per chat and follow it.
+I use Exomem as my durable Knowledge Base. If no skill is loaded, call bootstrap(profile="compact") once per chat and follow it.
 
 Exomem prominence: BALANCED.
-- Recall: search Exomem when a turn references one of my projects, domains, named entities, or asks what I concluded, tried, or decided. Skip chit-chat, control messages, and follow-ups the current conversation already answers. Cite what you use.
-- Capture: save when the conversation reaches a stepping stone — a durable conclusion lands, a recurring entity gains reusable facts, or a method I carried out reached a result worth repeating or avoiding. Capture a stable preference, recurring routine, historical baseline, or durable affiliation only when stability or recurrence and reusable comparison, interpretation, or decision value are clear. Route a uniquely resolved Entity facet there; otherwise use one concise compiled observation; use Records only for a compatible existing observed measurement. Fleeting preferences, one-off activity, incidental associations, trivial metrics, and tentative claims stay quiet. A concise observation or narrow Entity facet follows `proactive_capture`; an affiliation relation requires `link_acceptance`; Entity creation or substantial curation requires confirmed `restructure_execution`. Not mid-thought exploration, tangents, or open questions. Short compiled note, not a transcript.
-- Narration: stay quiet. Mention the KB only when a search returned something you used, and report one line after a write: "Saved -> <path>".
-- Treat the final mutation result as authoritative: if it reports committed, the write succeeded, whatever warnings appear beside it.
+- Recall: search when a turn concerns my projects, domains, named entities, or prior conclusions, attempts, or decisions. Skip chit-chat, control, and answered follow-ups; cite useful hits.
+- Capture: save at a stepping stone: a durable conclusion, reusable fact about a recurring entity, or a method actually carried out with a reported reusable result. A stable preference, recurring routine, historical baseline, or durable affiliation qualifies only with stability or recurrence plus reusable comparison, interpretation, or decision value. Use a uniquely resolved Entity's narrow facet; otherwise one concise compiled observation; Records only for a compatible existing measurement. Fleeting preferences, one-off activity, incidental associations, trivial metrics, and tentative claims stay quiet. Concise observation or narrow Entity facet: `proactive_capture`; affiliation relation: `link_acceptance`; Entity creation or structural change: confirmed `restructure_execution`. Not mid-thought exploration, tangents, or open questions. Never save transcripts.
+- Narration: stay quiet; cite useful recalls and after a write say "Saved -> <path>".
+- A committed final mutation result is authoritative despite adjacent warnings.
 ```
 
 ### Light — when it is getting in the way

@@ -298,36 +298,13 @@ this**: both load the real skills from disk via `exomem setup`.
 Trim the tone line to your preference.
 
 ```text
-Use Exomem as my durable Knowledge Base.
+Use Exomem for governed knowledge, sources, evidence, decisions, and reusable conclusions; assistant-native memory is short-term/behavioural only.
 
-Treat Claude, ChatGPT, Codex, and other assistants' native memory as short-term
-or behavioural memory for preferences, routing, and working context. Exomem is
-the long-term governed store for project/domain knowledge, sources, evidence,
-decisions, and reusable conclusions.
+Without a loaded skill, call bootstrap(profile="compact") once per session and follow it.
 
-If no Exomem skill is loaded, call bootstrap(profile="compact") once at the
-start of a session and follow the returned contract.
+Search for prior projects, decisions, sources, failures, experiments, or domains; skip unrelated chit-chat/control and answered follow-ups. Cite hits. Empty is a scoped miss; retry terms or scope="vault" when absence matters.
 
-Search Exomem before answering when a turn touches my prior projects, notes,
-decisions, sources, failures, experiments, or domains. Do not search on unrelated
-chit-chat, short control prompts, or follow-ups where the current conversation
-already contains the needed KB evidence. Cite relevant hits. Treat an empty
-search as a scoped miss, not proof of absence; retry with better terms or
-scope="vault" when absence matters.
-
-Save durable conclusions on your own: decisions, solved problems, diagnosed
-failures, reusable patterns, stable project context, and a stable preference,
-recurring routine, historical baseline, or durable affiliation only when stability
-or recurrence and reusable comparison, interpretation, or decision value are clear.
-Use a uniquely resolved Entity facet or one concise compiled observation; use Records
-only for a compatible existing observed measurement. Fleeting preferences, one-off
-activity, incidental associations, trivial metrics, and tentative claims stay quiet.
-An eligible concise observation or narrow Entity facet follows `proactive_capture`;
-an affiliation relation requires `link_acceptance`; Entity creation or structural
-change requires confirmed `restructure_execution`.
-Save concise compiled notes, not transcripts. Preserve raw sources or proof-bearing records separately
-when provenance matters. Use `edit_memory` for small corrections and
-`replace_memory` when a newer conclusion supersedes an older one.
+Save durable conclusions on your own: decisions, solved problems, diagnosed failures, reusable patterns/context, or a method actually carried out with a reported reusable result. A stable preference, recurring routine, historical baseline, or durable affiliation qualifies only with stability or recurrence plus reusable comparison, interpretation, or decision value. Use a uniquely resolved Entity's narrow facet; else one concise compiled observation; Records only for a compatible existing measurement. Fleeting preferences, one-off activity, incidental associations, trivial metrics, and tentative claims stay quiet. Concise observation or narrow Entity facet: `proactive_capture`; affiliation relation: `link_acceptance`; Entity creation or structural change: confirmed `restructure_execution`. Save compiled notes, not transcripts; keep raw sources/evidence separate. Use `edit_memory` for small corrections, `replace_memory` for supersession.
 ```
 
 ## Codex CLI

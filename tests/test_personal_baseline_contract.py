@@ -9,10 +9,15 @@ import re
 from pathlib import Path
 
 import pytest
+from jsonschema import Draft202012Validator
 
 from exomem import commands, envelope, prominence
 from exomem._hooks import exomem_capture_nudge as capture_hook
 from exomem.capabilities import ActiveSurfaceDescriptor, active_surface
+from exomem.edit_operations import (
+    normalize_edit_surface_arguments,
+    public_edit_operation_schema,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "tests" / "fixtures" / "hosted_v5_contributions" / "personal_baselines.json"
@@ -115,10 +120,45 @@ _CREATE_ENTITY_OPERATION = {
     "tool": "connect_memory",
     "arguments": {"operation": "create-entity"},
 }
+_REPLACE_BODY_OPERATION = {
+    "tool": "edit_memory",
+    "arguments": {"operation": {"kind": "replace_body"}},
+}
+_ENTITY_FACET_OPERATIONS = {
+    "stable-preference-entity-facet": {
+        "tool": "edit_memory",
+        "arguments": {
+            "path": "Knowledge Base/Entities/People/Example Person.md",
+            "why": "Add the confirmed durable preference to the resolved Entity.",
+            "operation": {
+                "kind": "edit_section",
+                "heading": "## Profile",
+                "new_string": (
+                    "- Stable preference: early review before important decisions."
+                ),
+                "section_position": "append",
+            },
+        },
+    },
+    "durable-affiliation-entity-facet": {
+        "tool": "edit_memory",
+        "arguments": {
+            "path": "Knowledge Base/Entities/People/Example Person.md",
+            "why": "Add the confirmed durable affiliation to the resolved Entity.",
+            "operation": {
+                "kind": "edit_section",
+                "heading": "## Profile",
+                "new_string": (
+                    "- Durable affiliation: Example Professional Association."
+                ),
+                "section_position": "append",
+            },
+        },
+    },
+}
 _ROUTE_CONTRACT = {
     "entity_facet": {
         "expected_tools": ["edit_memory"],
-        "operation": {"tool": "edit_memory", "arguments": {}},
         "authority": {
             "action_class": "proactive_capture",
             "disposition": "silent",
@@ -167,6 +207,14 @@ _ROUTE_CONTRACT = {
 }
 
 
+def _expected_operation(case: dict) -> dict | None:
+    route = case["expected"]["route"]
+    if route == "entity_facet":
+        assert case["id"] in _ENTITY_FACET_OPERATIONS
+        return _ENTITY_FACET_OPERATIONS[case["id"]]
+    return _ROUTE_CONTRACT[route]["operation"]
+
+
 def _expected_route(case: dict) -> str:
     evidence = case["evidence"]
     context = case["starting_context"]
@@ -192,13 +240,20 @@ def _validate_case(case: dict) -> None:
     route = expected["route"]
     assert route == _expected_route(case)
     contract = _ROUTE_CONTRACT[route]
-    for key in ("expected_tools", "operation", "authority"):
+    for key in ("expected_tools", "authority"):
         assert expected[key] == contract[key], (case["id"], key)
+    assert expected["operation"] == _expected_operation(case), (
+        case["id"],
+        "operation",
+    )
     assert set(expected["forbidden_routes"]) == _ROUTES - {route}
     assert set(expected["forbidden_tools"]) == (
         _BASELINE_WRITE_TOOLS - set(expected["expected_tools"])
     )
-    assert expected["forbidden_operations"] == [_CREATE_ENTITY_OPERATION]
+    forbidden_operations = [_CREATE_ENTITY_OPERATION]
+    if route == "entity_facet":
+        forbidden_operations.append(_REPLACE_BODY_OPERATION)
+    assert expected["forbidden_operations"] == forbidden_operations
     assert expected["require_explicit_request"] is (route == "no_write")
 
 
@@ -284,10 +339,9 @@ def test_unique_entity_facet_and_relation_use_distinct_governed_operations() -> 
 
     assert facet["turn"] == relation["turn"]
     assert facet["starting_context"]["entity_write_shape"] == "additive_facet"
-    assert facet["expected"]["operation"] == {
-        "tool": "edit_memory",
-        "arguments": {},
-    }
+    assert facet["expected"]["operation"] == _ENTITY_FACET_OPERATIONS[
+        "durable-affiliation-entity-facet"
+    ]
     assert facet["expected"]["authority"]["action_class"] == "proactive_capture"
     assert relation["starting_context"]["entity_write_shape"] == "accepted_relation"
     assert relation["expected"]["operation"] == {
@@ -297,6 +351,56 @@ def test_unique_entity_facet_and_relation_use_distinct_governed_operations() -> 
     assert relation["expected"]["authority"]["action_class"] == "link_acceptance"
     assert _CREATE_ENTITY_OPERATION in facet["expected"]["forbidden_operations"]
     assert _CREATE_ENTITY_OPERATION in relation["expected"]["forbidden_operations"]
+
+
+def test_entity_facet_operation_is_valid_narrow_and_rejects_broad_mutants() -> None:
+    facets = [
+        case
+        for case in _fixture()["cases"]
+        if case["expected"]["route"] == "entity_facet"
+    ]
+
+    edit_command = next(
+        command
+        for command in commands.product_commands_for("mcp")
+        if command.name == "edit_memory"
+    )
+    params = {param.name: param for param in edit_command.params}
+    required_params = {name for name, param in params.items() if param.required}
+    for facet in facets:
+        operation = facet["expected"]["operation"]
+        assert operation == _ENTITY_FACET_OPERATIONS[facet["id"]]
+        assert _REPLACE_BODY_OPERATION in facet["expected"]["forbidden_operations"]
+        arguments = operation["arguments"]
+        assert {"path", "why", "operation"} <= required_params
+        assert set(arguments) <= set(params)
+        Draft202012Validator(public_edit_operation_schema()).validate(
+            arguments["operation"]
+        )
+        normalized = normalize_edit_surface_arguments(arguments)
+        assert normalized["path"] == arguments["path"]
+        assert normalized["why"] == arguments["why"]
+        assert normalized["operation"]["kind"] == "edit_section"
+
+    facet = next(case for case in facets if case["class"] == "stable_preference")
+    arguments = facet["expected"]["operation"]["arguments"]
+    broad = copy.deepcopy(facet)
+    broad["expected"]["operation"] = {
+        "tool": "edit_memory",
+        "arguments": {
+            "path": arguments["path"],
+            "why": "Replace the whole Entity to add one facet.",
+            "operation": {
+                "kind": "replace_body",
+                "new_body": "# Example Person\n\nOne durable facet.\n",
+            },
+        },
+    }
+    assert normalize_edit_surface_arguments(
+        broad["expected"]["operation"]["arguments"]
+    )["operation"]["kind"] == "replace_body"
+    with pytest.raises(AssertionError):
+        _validate_case(broad)
 
 
 def test_stable_low_reuse_trivia_kills_the_reusable_value_mutant() -> None:
@@ -381,6 +485,39 @@ def _fenced_block_after(path: Path, anchor: str) -> str:
     opening = re.search(r"```[^\n]*\n", tail)
     assert opening is not None, path
     return tail[opening.end() :].split("```", 1)[0]
+
+
+def test_every_actual_copyable_instruction_fits_the_web_byte_budget() -> None:
+    prominence_doc = ROOT / "docs" / "prominence.md"
+    quickstart = _fenced_block_after(
+        ROOT / "QUICKSTART.md",
+        "### Make the KB proactive in the Claude app (custom instructions)",
+    )
+    # QUICKSTART explicitly calls its first paragraph optional tone guidance;
+    # the Exomem paragraph is the standing instruction users paste into the
+    # separately capped custom-instructions field.
+    quickstart_exomem = "I keep" + quickstart.split("I keep", 1)[1]
+    blocks = {
+        "prominence maximal": _fenced_block_after(
+            prominence_doc, "### Maximal — recommended for web and hosted"
+        ),
+        "prominence balanced": _fenced_block_after(
+            prominence_doc, "### Balanced — the default where hooks exist"
+        ),
+        "prominence light": _fenced_block_after(
+            prominence_doc, "### Light — when it is getting in the way"
+        ),
+        "prominence off": _fenced_block_after(
+            prominence_doc, "### Off — explicit invocation only"
+        ),
+        "assistant guide": _fenced_block_after(
+            ROOT / "docs" / "ai-assistant-guide.md", "## Copyable instruction block"
+        ),
+        "quickstart": quickstart_exomem,
+    }
+    for name, block in blocks.items():
+        size = len(block.rstrip().encode("utf-8"))
+        assert size <= 1_500, f"{name} is {size} bytes, over the 1,500-byte web cap"
 
 
 def _assert_baseline_authority_mapping(name: str, block: str) -> None:
