@@ -44,6 +44,21 @@ function relationQueue({status = "available", groups = relationGroups} = {}) {
   };
 }
 
+function governedResponseBarrier() {
+  let markArrived;
+  let releaseResponse;
+  const arrived = new Promise((resolve) => { markArrived = resolve; });
+  const released = new Promise((resolve) => { releaseResponse = resolve; });
+  return {
+    arrived,
+    hold: async () => {
+      markArrived();
+      await released;
+    },
+    release: () => releaseResponse(),
+  };
+}
+
 function contextFor(item) {
   return {
     item,
@@ -100,6 +115,7 @@ async function mockApi(page, calls, controls = {}) {
           await route.fulfill({status: 200, contentType: "application/json", body: JSON.stringify({success: false, error: {code, message: `Synthetic ${code} refusal.`}})});
           return;
         }
+        if (controls.decisionBarrier) await controls.decisionBarrier.hold();
         controls.removedRefs.add(body.ref);
         data = {accepted: true};
       } else {
@@ -111,6 +127,7 @@ async function mockApi(page, calls, controls = {}) {
         await route.fulfill({status: 200, contentType: "application/json", body: JSON.stringify({success: false, error: {code, message: `Synthetic ${code} refusal.`}})});
         return;
       }
+      if (controls.decisionBarrier) await controls.decisionBarrier.hold();
       controls.removedRefs.add(body.ref);
       data = {state: body.action};
     } else {
@@ -268,6 +285,42 @@ test("relation queue preserves order, bounded truth, and complete governed paylo
     expected_fingerprint: "fp-a-only",
   });
   expect(controls.relationQueueCalls).toBe(4);
+  expect(consoleErrors).toEqual([]);
+  expect(failedRequests).toEqual([]);
+});
+
+test("relation queue waits for the governed response before refreshing", async ({page}) => {
+  const calls = [];
+  const decisionBarrier = governedResponseBarrier();
+  const controls = {decisionBarrier};
+  const consoleErrors = [];
+  const failedRequests = [];
+  page.on("console", (message) => {
+    if (message.type() === "error") consoleErrors.push(message.text());
+  });
+  page.on("requestfailed", (request) => failedRequests.push(request.url()));
+  await connectRelations(page, calls, controls);
+
+  const accept = page.getByRole("button", {name: /Accept supports.*target-two/});
+  await accept.focus();
+  await page.keyboard.press("Enter");
+  await page.getByLabel("Audit reason").fill("Accepted after delayed governed response");
+  const confirm = page.getByRole("button", {name: "Confirm governed accept"});
+  await confirm.focus();
+  await page.keyboard.press("Enter");
+  await decisionBarrier.arrived;
+
+  expect(controls.relationQueueCalls).toBe(1);
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await expect(confirm).toBeDisabled();
+  await expect(accept).toHaveCount(1);
+
+  decisionBarrier.release();
+  await expect.poll(() => controls.relationQueueCalls).toBe(2);
+  await expect(accept).toHaveCount(0);
+  await expect(page.getByRole("dialog")).toBeHidden();
+  await expect(page.getByRole("button", {name: /Accept part_of.*target-one/})).toBeFocused();
+  expect(controls.relationQueueCalls).toBe(2);
   expect(consoleErrors).toEqual([]);
   expect(failedRequests).toEqual([]);
 });
