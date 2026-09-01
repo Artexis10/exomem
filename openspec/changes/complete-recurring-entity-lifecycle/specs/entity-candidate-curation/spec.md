@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: One bounded candidate represents each recurring identity
-The system SHALL project at most one open entity candidate per normalised identity. A candidate SHALL preserve the identity key, deterministic display form, candidate state, full recurrence counts, bounded contributing page and origin references, bounded material facet atoms, role or membership evidence, co-occurring resolved entities, active and unresolved type cues, bounded resolution candidates, grammar version, predicate-table digest, and the entity-type registry identity. The contract SHALL be identical for every core or vault-defined kind.
+The system SHALL project at most one open entity candidate per normalised identity. A candidate SHALL preserve the identity key, deterministic display form, candidate state, full recurrence counts, bounded contributing page and origin references, bounded material facet atoms, role or membership evidence, co-occurring resolved entities, bounded active and unresolved type cues and entity families with full/returned/omitted counts, bounded resolution candidates, grammar version, predicate-table digest, and the entity-type registry identity. Nested contexts SHALL apply the same cue/family bound. The contract SHALL be identical for every core or vault-defined kind.
 
 #### Scenario: Different identity kinds share one payload
 - **WHEN** qualifying evidence describes a person, community, organisation, place, product, venue, account, project, or vault-defined kind
@@ -9,7 +9,7 @@ The system SHALL project at most one open entity candidate per normalised identi
 - **AND** no kind-specific detector is required for eligibility
 
 #### Scenario: Evidence samples are bounded without hiding totals
-- **WHEN** an identity has more contexts, facets, or near matches than the response bounds
+- **WHEN** an identity has more contexts, facets, near matches, type cues, or entity families than the response bounds
 - **THEN** the candidate returns deterministic bounded samples, full counts, and explicit truncation
 - **AND** ordering is independent of insertion order
 
