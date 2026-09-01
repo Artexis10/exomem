@@ -663,6 +663,13 @@ class LifecyclePlane(Protocol):
         request: dict[str, Any],
         values: dict[str, Any],
     ) -> None: ...
+    async def provision_retarget_required(
+        self,
+        metadata: OpaqueProviderMetadata,
+        request: dict[str, Any],
+        config: LifecycleConfig,
+    ) -> bool: ...
+    async def stop_stranded_provision(self, metadata: OpaqueProviderMetadata) -> None: ...
     async def volume_claim_bound(self, metadata: OpaqueProviderMetadata) -> bool: ...
     def is_initialized(self, metadata: OpaqueProviderMetadata) -> bool: ...
     async def initialize(
@@ -962,6 +969,34 @@ class HighFidelityProviderPlane:
         if self._lose_after_bind:
             self._lose_after_bind = False
             raise LostAcknowledgement("CSI binding committed before acknowledgement")
+
+    async def provision_retarget_required(
+        self,
+        metadata: OpaqueProviderMetadata,
+        request: dict[str, Any],
+        config: LifecycleConfig,
+    ) -> bool:
+        cell = self._require_cell(metadata)
+        desired = _fixed_helm_values(metadata, request, config)
+        changed = any(
+            cell.helm_values.get(key) != desired[key]
+            for key in ("image", "expectedRelease", "expectedProtocol")
+        )
+        if not changed:
+            return False
+        if cell.runtime_admitted or cell.control_route or cell.transfer_route:
+            raise MetadataConflict("retargeted provision is already admitted or routed")
+        if config.migration_mode not in {"binding-v1-to-v2", "state-root-v1"}:
+            raise MetadataConflict("retargeted provision requires a declared migration")
+        return True
+
+    async def stop_stranded_provision(self, metadata: OpaqueProviderMetadata) -> None:
+        cell = self._require_cell(metadata)
+        if cell.runtime_admitted or cell.control_route or cell.transfer_route:
+            raise MetadataConflict("retargeted provision is already admitted or routed")
+        cell.in_flight = 0
+        cell.quiesced = True
+        cell.replicas = 0
 
     def lose_acknowledgement_after_csi_bind_once(self) -> None:
         self._lose_after_bind = True
@@ -1979,6 +2014,7 @@ class CellLifecycleDriver:
         self, request: dict[str, Any], context: EffectContext
     ) -> DriverPending | DriverFinal:
         metadata = _metadata_from_context(context)
+        operation_id = context.provider_operation_id
         if not self._plane.has_namespace(metadata):
             await self._plane.ensure_namespace(metadata, request)
             return DriverPending(
@@ -2006,7 +2042,12 @@ class CellLifecycleDriver:
             "initialized",
             "runtime-admitted",
             "routes-open",
-        }:
+            "retarget-runtime-stop-wait",
+            "retarget-runtime-stopped",
+        } and not (
+            context.checkpoint.startswith("retarget-vault-fingerprinted-")
+            or context.checkpoint.startswith("retarget-migration-complete-")
+        ):
             return DriverPending(
                 "release-applied",
                 1,
@@ -2023,7 +2064,12 @@ class CellLifecycleDriver:
             "initialized",
             "runtime-admitted",
             "routes-open",
-        }:
+            "retarget-runtime-stop-wait",
+            "retarget-runtime-stopped",
+        } and not (
+            context.checkpoint.startswith("retarget-vault-fingerprinted-")
+            or context.checkpoint.startswith("retarget-migration-complete-")
+        ):
             return DriverPending("volume-registration-required", 1)
         if request["provisionMode"] == "restore-candidate":
             return DriverFinal(
@@ -2034,6 +2080,46 @@ class CellLifecycleDriver:
                     ),
                 }
             )
+        if context.checkpoint == "volume-owned" and await self._plane.provision_retarget_required(
+            metadata, request, self._config
+        ):
+            await self._plane.stop_stranded_provision(metadata)
+            return DriverPending("retarget-runtime-stop-wait", 1)
+        if context.checkpoint == "retarget-runtime-stop-wait":
+            if not await self._plane.runtime_stopped(metadata):
+                return DriverPending("retarget-runtime-stop-wait", 1)
+            return DriverPending("retarget-runtime-stopped", 1)
+        if context.checkpoint == "retarget-runtime-stopped":
+            before = await self._plane.canonical_vault_fingerprint(
+                metadata, request, operation_id, phase="before"
+            )
+            if re.fullmatch(r"[0-9a-f]{64}", before) is None:
+                raise DriverTerminal("PROVISIONER_VAULT_FINGERPRINT_INVALID")
+            return DriverPending(f"retarget-vault-fingerprinted-{before}", 1)
+        if context.checkpoint.startswith("retarget-vault-fingerprinted-"):
+            fingerprint = context.checkpoint.removeprefix("retarget-vault-fingerprinted-")
+            if re.fullmatch(r"[0-9a-f]{64}", fingerprint) is None:
+                raise DriverTerminal("PROVISIONER_CHECKPOINT_INVALID")
+            if not await self._plane.runtime_stopped(metadata):
+                return DriverPending("retarget-runtime-stop-wait", 1)
+            await self._plane.run_runtime_migration(metadata, request, self._config, operation_id)
+            return DriverPending(f"retarget-migration-complete-{fingerprint}", 1)
+        if context.checkpoint.startswith("retarget-migration-complete-"):
+            fingerprint = context.checkpoint.removeprefix("retarget-migration-complete-")
+            if re.fullmatch(r"[0-9a-f]{64}", fingerprint) is None:
+                raise DriverTerminal("PROVISIONER_CHECKPOINT_INVALID")
+            try:
+                await self._plane.upgrade_runtime(metadata, request, self._config, operation_id)
+                after = await self._plane.canonical_vault_fingerprint(
+                    metadata, request, operation_id, phase="after"
+                )
+                if after != fingerprint:
+                    raise DriverTerminal("PROVISIONER_VAULT_PRESERVATION_MISMATCH")
+                await self._exact_health(metadata, request, context)
+                return DriverPending("initialized", 1)
+            except (DriverTerminal, MetadataConflict):
+                await self._stop_failed_rollforward(metadata)
+                raise
         if not self._plane.is_initialized(metadata):
             if not await self._plane.initialize(metadata, request, self._config):
                 return DriverPending("initializing", 2)

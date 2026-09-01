@@ -227,6 +227,11 @@ checkpoint identity. Repetition SHALL verify the existing receipt without a seco
 - **WHEN** the operator authorizes a recovered `volume-owned` provision with no route, result, admitted runtime, conflicting operation, or active claim
 - **THEN** one compare-and-swap transaction retargets that same operation to the selected runtime and makes it claimable without replacing its cell or volume
 
+#### Scenario: A retargeted stranded provision resumes through the declared migration
+
+- **WHEN** the retargeted operation resumes while its never-routed source-runtime Helm release and retained volume still exist
+- **THEN** the worker proves the runtime stopped, fingerprints the same vault, runs the deployment lock's declared migration, upgrades the existing release in place, proves the fingerprint unchanged and exact target health, and only then admits the runtime and opens routes
+
 #### Scenario: Retarget mismatch is a no-op
 
 - **WHEN** any request, receipt, claim, fence, resource, reservation, live identity, runtime, route, result, or compare-and-swap invariant differs
