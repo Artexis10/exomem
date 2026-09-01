@@ -57,7 +57,7 @@
 
 ## 8. Integration and completion gates
 
-- [ ] 8.1 Reconcile the integration branch against every independently accepted lane diff in dependency order, resolve shared signature/generated-fixture changes in the orchestrator lane, and verify branch bytes, review dispositions, and task state agree before running `git diff --check` plus the combined focused relation/graph/queue/terminal/bootstrap/Studio/benchmark suite
+- [x] 8.1 Reconcile the integration branch against every independently accepted lane diff in dependency order, resolve shared signature/generated-fixture changes in the orchestrator lane, and verify branch bytes, review dispositions, and task state agree before running `git diff --check` plus the combined focused relation/graph/queue/terminal/bootstrap/Studio/benchmark suite
 - [ ] 8.2 Run `uv run ruff check .`, the repository lean test suite, and `tests/test_latency_gate.py` on its supported Linux gate; verify any red is classified against the pre-change baseline and all attributable failures are fixed
 - [ ] 8.3 On a quiesced machine, run `PYTHONPATH=src EXOMEM_DISABLE_EMBEDDINGS=1 uv run python -m pytest -q` and the dedicated relation-review scale/concurrency gate; verify no assertion or teardown failure remains before claiming completion
 - [ ] 8.4 Run a synthetic end-to-end public-surface smoke test that authors an unknown alias, receives compact guidance, resolves/proposes/saves it, proves the committed registry has a durable graph epoch across a simulated restart, then traverses and filters the exact extension, parent family, clean alias, active-survivor predecessor, and deprecated-key history while preserving raw identity
