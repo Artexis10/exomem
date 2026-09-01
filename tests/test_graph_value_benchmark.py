@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import copy
+import dataclasses
 import importlib.util
 import json
 import sys
@@ -121,6 +123,85 @@ def test_relation_lifecycle_fixture_uses_public_surfaces_and_keeps_resolution_no
     assert result["evidence"]["resolution_only"]["registry_unchanged"] is True
     assert result["evidence"]["topical-proximity-abstains"]["selected_relation"] is None
     assert result["evidence"]["topical-proximity-abstains"]["authored_relation"] is None
+
+
+def test_relation_lifecycle_records_exact_public_graph_filter_and_explain_calls(
+    tmp_path: Path,
+) -> None:
+    result = bench.run_relation_lifecycle_fixture(
+        bench.load_manifest(), tmp_path / "relation-lifecycle-trace"
+    )
+    calls = result["evidence"]["public_calls"]
+    assert any(
+        item == {
+            "surface": "connect_memory",
+            "operation": "graph-context",
+            "path": "Knowledge Base/Notes/Insights/policy.md",
+            "depth": 1,
+        }
+        for item in calls
+    )
+    assert any(
+        item == {
+            "surface": "ask_memory",
+            "relations": ["applies_to"],
+            "mode": "keyword",
+            "graph": False,
+            "explain": True,
+            "scope": "kb-only",
+        }
+        for item in calls
+    )
+
+
+@pytest.mark.parametrize("surface", ["graph", "filter"])
+def test_lifecycle_gate_refuses_literal_public_surface_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, surface: str
+) -> None:
+    if surface == "graph":
+        monkeypatch.setattr(bench, "_graph_relation_types", lambda *_args, **_kwargs: [])
+    else:
+        monkeypatch.setattr(bench, "_relation_filter_explanation", lambda *_args, **_kwargs: [])
+
+    result = bench.run_relation_lifecycle_fixture(
+        bench.load_manifest(), tmp_path / f"literal-{surface}"
+    )
+
+    assert result["evidence"]["public_surface_complete"] is False
+    assert not any(result["checks"].values())
+
+def test_lifecycle_gate_is_present_in_a_report_and_names_each_failed_case() -> None:
+    manifest = bench.load_manifest()
+    exomem_probes, basic_probes = _perfect_probe_results(manifest)
+    lifecycle = {"checks": {str(item["id"]): True for item in manifest["relation_lifecycle"]["cases"]}}
+    exomem = bench.ContenderRun(
+        contender="exomem",
+        available=True,
+        version="test",
+        revision="test",
+        corpus_hash="test",
+        mutation_safe=True,
+        probes=exomem_probes,
+        relation_lifecycle=lifecycle,
+    )
+    basic = bench.ContenderRun(
+        contender="basic-memory",
+        available=True,
+        version="test",
+        revision="test",
+        corpus_hash="test",
+        mutation_safe=True,
+        probes=basic_probes,
+    )
+
+    report = bench.build_report(manifest, exomem, basic)
+    assert report["local_core"]["evaluation"]["gates"]["lifecycle_integrity"]["relation_lifecycle"]["passed"] is True
+    failed = copy.deepcopy(lifecycle)
+    failed["checks"]["core-part-of-reuse"] = False
+    report = bench.build_report(manifest, dataclasses.replace(exomem, relation_lifecycle=failed), basic)
+    lifecycle_gate = report["local_core"]["evaluation"]["gates"]["lifecycle_integrity"]
+    assert lifecycle_gate["passed"] is False
+    assert lifecycle_gate["relation_lifecycle"]["failed"] == ["core-part-of-reuse"]
 
 
 def test_scripted_relation_decision_marks_an_explicit_false_directional_choice_false_positive() -> None:

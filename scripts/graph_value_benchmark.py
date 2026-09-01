@@ -1965,25 +1965,34 @@ def _lifecycle_rebuild(root: Path) -> None:
             time.sleep(0.05)
 
 
-def _graph_relation_types(root: Path, path: str) -> list[dict[str, Any]]:
+def _graph_relation_types(
+    root: Path, path: str, *, trace: list[dict[str, Any]] | None = None
+) -> list[dict[str, Any]]:
     from exomem import commands
 
-    payload = commands.op_connect_memory(root, operation="graph-context", path=path, depth=1)
+    arguments = {"operation": "graph-context", "path": path, "depth": 1}
+    if trace is not None:
+        trace.append({"surface": "connect_memory", **arguments})
+    payload = commands.op_connect_memory(root, **arguments)
     return list((payload.get("graph") or {}).get("edges", []))
 
 
-def _relation_filter_explanation(root: Path, relation: str) -> list[dict[str, Any]]:
+def _relation_filter_explanation(
+    root: Path, relation: str, *, trace: list[dict[str, Any]] | None = None
+) -> list[dict[str, Any]]:
     from exomem import commands
 
-    response = commands.op_ask_memory(
-        root,
-        query="",
-        relations=[relation],
-        mode="keyword",
-        graph=False,
-        explain=True,
-        scope="kb-only",
-    )
+    arguments = {
+        "query": "",
+        "relations": [relation],
+        "mode": "keyword",
+        "graph": False,
+        "explain": True,
+        "scope": "kb-only",
+    }
+    if trace is not None:
+        trace.append({"surface": "ask_memory", **arguments})
+    response = commands.op_ask_memory(root, **arguments)
     return list(response["hits"])
 
 
@@ -2022,6 +2031,7 @@ def run_relation_lifecycle_fixture(manifest: dict[str, Any], root: Path) -> dict
         raise ValueError("relation lifecycle manifest must declare the complete synthetic corpus")
 
     root = Path(root)
+    public_calls: list[dict[str, Any]] = []
     primary = root / "primary"
     primary.mkdir(parents=True, exist_ok=True)
     policy = _lifecycle_note(
@@ -2063,33 +2073,52 @@ def run_relation_lifecycle_fixture(manifest: dict[str, Any], root: Path) -> dict
         label="applies_to",
         description="A synthetic organisation policy applies to a specific employee case.",
     )
-    policy_edges = _graph_relation_types(primary, policy)
-    policy_filter = _relation_filter_explanation(primary, "applies_to")
+    current = relation_registry.load_registry(primary)
+    commands.op_schema_memory(
+        primary,
+        subject="relations",
+        operation="save-relations",
+        proposal={"upsert": {canonical_applicability: {"aliases": ["policy_applies"]}}},
+        expected_hash=current.extension_hash,
+        why="Synthetic lifecycle adds a distinct clean authoring alias.",
+    )
+    policy_edges = _graph_relation_types(primary, policy, trace=public_calls)
+    policy_filter = _relation_filter_explanation(primary, "applies_to", trace=public_calls)
+    policy_canonical_filter = _relation_filter_explanation(
+        primary, canonical_applicability, trace=public_calls
+    )
+    policy_parent_filter = _relation_filter_explanation(primary, "relates_to", trace=public_calls)
 
-    part_before = _lifecycle_markdown_hash(primary)
+    part_before = {
+        "markdown": _lifecycle_markdown_hash(primary),
+        "registry": _lifecycle_registry_hash(primary),
+    }
     part_resolution = commands.op_connect_memory(
         primary,
         operation="resolve-relation",
         query="a child organisation belongs to its parent organisation",
         requested_relation="part_of",
     )
-    part_after = _lifecycle_markdown_hash(primary)
+    part_after = {
+        "markdown": _lifecycle_markdown_hash(primary),
+        "registry": _lifecycle_registry_hash(primary),
+    }
     _scripted_author_relation(primary, part_child, part_parent, "part_of")
-    part_edges = _graph_relation_types(primary, part_child)
+    part_edges = _graph_relation_types(primary, part_child, trace=public_calls)
 
     alias_before = _lifecycle_registry_hash(primary)
     alias_resolution = commands.op_connect_memory(
         primary,
         operation="resolve-relation",
         query="a policy applies in a case",
-        requested_relation="applies-to",
+        requested_relation="policy_applies",
     )
     alias_proposal = commands.op_schema_memory(
         primary,
         subject="relations",
         operation="propose-relation",
         proposal={
-            "requested_label": "applies-to",
+            "requested_label": "policy_applies",
             "parent": "relates_to",
             "description": "A duplicate synthetic applicability meaning.",
             "direction": "directed",
@@ -2104,7 +2133,7 @@ def run_relation_lifecycle_fixture(manifest: dict[str, Any], root: Path) -> dict
         requested_relation="relates_to",
     )
     _scripted_author_relation(primary, generic_left, generic_right, "relates_to")
-    generic_edges = _graph_relation_types(primary, generic_left)
+    generic_edges = _graph_relation_types(primary, generic_left, trace=public_calls)
 
     topical_before = {
         "markdown": _lifecycle_markdown_hash(primary),
@@ -2146,9 +2175,17 @@ def run_relation_lifecycle_fixture(manifest: dict[str, Any], root: Path) -> dict
         expected_hash=current.extension_hash,
         why="Synthetic lifecycle migration to the surviving applicability relation.",
     )
-    replacement_edges = _graph_relation_types(primary, predecessor)
-    survivor_filter = _relation_filter_explanation(primary, canonical_applicability)
-    deprecated_filter = _relation_filter_explanation(primary, old_applicability)
+    replacement_edges = _graph_relation_types(primary, predecessor, trace=public_calls)
+    replacement_resolution = commands.op_connect_memory(
+        primary,
+        operation="resolve-relation",
+        query="historical policy applicability",
+        requested_relation=old_applicability,
+    )
+    survivor_filter = _relation_filter_explanation(
+        primary, canonical_applicability, trace=public_calls
+    )
+    deprecated_filter = _relation_filter_explanation(primary, old_applicability, trace=public_calls)
 
     tenant_a = root / "tenant-a"
     tenant_b = root / "tenant-b"
@@ -2167,18 +2204,71 @@ def run_relation_lifecycle_fixture(manifest: dict[str, Any], root: Path) -> dict
     _lifecycle_rebuild(tenant_a)
     _lifecycle_rebuild(tenant_b)
     tenant_a_resolution = commands.op_connect_memory(
-        tenant_a, operation="resolve-relation", query="tenant policy", requested_relation="governs"
+        tenant_a,
+        operation="resolve-relation",
+        query="tenant policy",
+        requested_relation="governs",
+        path=tenant_a_source,
+        target=tenant_a_target,
     )
     tenant_b_resolution = commands.op_connect_memory(
-        tenant_b, operation="resolve-relation", query="tenant policy", requested_relation="enables"
+        tenant_b,
+        operation="resolve-relation",
+        query="tenant policy",
+        requested_relation="enables",
+        path=tenant_b_source,
+        target=tenant_b_target,
     )
-    tenant_a_hits = _relation_filter_explanation(tenant_a, "governs")
-    tenant_b_hits = _relation_filter_explanation(tenant_b, "enables")
+    tenant_a_cross = commands.op_connect_memory(
+        tenant_a,
+        operation="resolve-relation",
+        query="tenant policy",
+        requested_relation="enables",
+        path=tenant_b_source,
+        target=tenant_b_target,
+    )
+    tenant_b_cross = commands.op_connect_memory(
+        tenant_b,
+        operation="resolve-relation",
+        query="tenant policy",
+        requested_relation="governs",
+        path=tenant_a_source,
+        target=tenant_a_target,
+    )
+    tenant_a_edges = _graph_relation_types(tenant_a, tenant_a_source, trace=public_calls)
+    tenant_b_edges = _graph_relation_types(tenant_b, tenant_b_source, trace=public_calls)
+    tenant_a_hits = _relation_filter_explanation(tenant_a, "governs", trace=public_calls)
+    tenant_b_hits = _relation_filter_explanation(tenant_b, "enables", trace=public_calls)
+    tenant_a_registry = relation_registry.load_registry(tenant_a)
+    tenant_b_registry = relation_registry.load_registry(tenant_b)
 
     policy_edge = next((edge for edge in policy_edges if edge.get("raw_relation") == "applies_to"), {})
     policy_match = next(
         (match for hit in policy_filter if (match := hit.get("relation_match")) and match.get("relation_type") == canonical_applicability),
         {},
+    )
+    policy_canonical_match = next(
+        (
+            match
+            for hit in policy_canonical_filter
+            if (match := hit.get("relation_match"))
+            and hit.get("path") == policy
+            and match.get("counterpart") == employee_case
+        ),
+        {},
+    )
+    policy_parent_match = next(
+        (
+            match
+            for hit in policy_parent_filter
+            if (match := hit.get("relation_match"))
+            and hit.get("path") == policy
+            and match.get("counterpart") == employee_case
+        ),
+        {},
+    )
+    part_core = next(
+        (item for item in part_resolution["core_vocabulary"] if item.get("key") == "part_of"), {}
     )
     replacement_edge = next(
         (edge for edge in replacement_edges if edge.get("raw_relation") == "applicable_to"), {}
@@ -2192,9 +2282,17 @@ def run_relation_lifecycle_fixture(manifest: dict[str, Any], root: Path) -> dict
             and bool(policy_edge.get("source_anchor"))
             and policy_match.get("direction") in {"outbound", "inbound"}
             and policy_match.get("matched_via") == "relation_type"
+            and policy_canonical_match.get("requested_relation") == canonical_applicability
+            and policy_canonical_match.get("resolved_relation") == canonical_applicability
+            and policy_parent_match.get("requested_relation") == "relates_to"
+            and policy_parent_match.get("matched_via") == "parent_relation"
         ),
         "core-part-of-reuse": (
-            any(item.get("key") == "part_of" for item in part_resolution["core_vocabulary"])
+            part_core.get("key") == "part_of"
+            and part_core.get("direction") == "directed"
+            and bool(part_core.get("inverse"))
+            and part_resolution["selected_relation"] is None
+            and part_resolution["proposed_relation"] is None
             and part_before == part_after
             and any(edge.get("relation_type") == "part_of" for edge in part_edges)
         ),
@@ -2206,6 +2304,11 @@ def run_relation_lifecycle_fixture(manifest: dict[str, Any], root: Path) -> dict
                 for item in alias_proposal["duplicate_evidence"]["exact_matches"]
             )
             and not alias_proposal["valid"]
+            and alias_proposal["duplicate_evidence"]["extensions"]["total"] >= 1
+            and {"total", "returned", "omitted", "continuation"}
+            <= set(alias_proposal["duplicate_evidence"]["extensions"])
+            and {"total", "returned", "omitted", "continuation"}
+            <= set(alias_proposal["duplicate_evidence"]["observations"])
         ),
         "honest-generic-relation": (
             generic_resolution["selected_relation"] is None
@@ -2216,30 +2319,101 @@ def run_relation_lifecycle_fixture(manifest: dict[str, Any], root: Path) -> dict
             and false_directional_trial["false_positive"]
             and not false_directional_trial["passed"]
             and topical_before == topical_after
-            and not any(edge.get("relation_type") == "supports" for edge in _graph_relation_types(primary, topical_left))
+            and not any(
+                edge.get("relation_type") == "supports"
+                for edge in _graph_relation_types(primary, topical_left, trace=public_calls)
+            )
         ),
         "extension-parent-rollup": (
             policy_edge.get("raw_relation") == "applies_to"
             and policy_edge.get("relation_type") == canonical_applicability
-            and any(hit.get("relation_match", {}).get("matched_via") == "parent_relation" for hit in _relation_filter_explanation(primary, "relates_to"))
+            and policy_parent_match.get("matched_via") == "parent_relation"
         ),
         "survivor-directed-replacement": (
             replacement_edge.get("raw_relation") == "applicable_to"
             and replacement_edge.get("relation_type") == old_applicability
-            and any(hit.get("relation_match", {}).get("matched_via") == "replacement" for hit in survivor_filter)
-            and any(hit.get("path") == predecessor for hit in deprecated_filter)
+            and replacement_edge.get("metadata", {}).get("replacement") == canonical_applicability
+            and any(
+                hit.get("path") == predecessor
+                and hit.get("relation_match", {}).get("matched_via") == "replacement"
+                and hit.get("relation_match", {}).get("requested_relation") == canonical_applicability
+                and hit.get("relation_match", {}).get("resolved_relation") == canonical_applicability
+                for hit in survivor_filter
+            )
+            and any(
+                hit.get("path") == predecessor
+                and hit.get("relation_match", {}).get("requested_relation") == old_applicability
+                for hit in deprecated_filter
+            )
+            and any(
+                item.get("canonical") == old_applicability
+                and item.get("immediate_replacement") == canonical_applicability
+                and item.get("terminal_replacement") == canonical_applicability
+                for item in replacement_resolution["exact_matches"]
+            )
         ),
         "vault-registry-isolation": (
             tenant_a_relation != tenant_b_relation
-            and not any(item.get("canonical") == tenant_b_relation for item in tenant_a_resolution["candidates"])
-            and not any(item.get("canonical") == tenant_a_relation for item in tenant_b_resolution["candidates"])
-            and all(hit.get("path", "").endswith(("tenant-a-source.md", "tenant-a-target.md")) for hit in tenant_a_hits)
-            and all(hit.get("path", "").endswith(("tenant-b-source.md", "tenant-b-target.md")) for hit in tenant_b_hits)
+            and tenant_a_registry.extension_hash != tenant_b_registry.extension_hash
+            and tenant_a_registry.definition(tenant_a_relation) is not None
+            and tenant_b_registry.definition(tenant_b_relation) is not None
+            and tenant_a_registry.definition(tenant_b_relation) is None
+            and tenant_b_registry.definition(tenant_a_relation) is None
+            and any(item.get("canonical") == tenant_a_relation for item in tenant_a_resolution["exact_matches"])
+            and any(item.get("canonical") == tenant_b_relation for item in tenant_b_resolution["exact_matches"])
+            and not tenant_a_cross["exact_matches"]
+            and not tenant_b_cross["exact_matches"]
+            and tenant_a_cross["context"] == {"path": tenant_b_source, "target": tenant_b_target}
+            and tenant_b_cross["context"] == {"path": tenant_a_source, "target": tenant_a_target}
+            and any(
+                edge.get("source_path") == tenant_a_source
+                and edge.get("relation_type") == tenant_a_relation
+                and edge.get("dst_key", "").endswith("tenant-a-target.md")
+                for edge in tenant_a_edges
+            )
+            and any(
+                edge.get("source_path") == tenant_b_source
+                and edge.get("relation_type") == tenant_b_relation
+                and edge.get("dst_key", "").endswith("tenant-b-target.md")
+                for edge in tenant_b_edges
+            )
+            and bool(tenant_a_hits)
+            and bool(tenant_b_hits)
+            and all(
+                hit.get("path", "").endswith(("tenant-a-source.md", "tenant-a-target.md"))
+                and hit.get("relation_match", {}).get("requested_relation") == "governs"
+                and hit.get("relation_match", {}).get("resolved_relation") == tenant_a_relation
+                and "ranking_explanation" in hit
+                for hit in tenant_a_hits
+            )
+            and all(
+                hit.get("path", "").endswith(("tenant-b-source.md", "tenant-b-target.md"))
+                and hit.get("relation_match", {}).get("requested_relation") == "enables"
+                and hit.get("relation_match", {}).get("resolved_relation") == tenant_b_relation
+                and "ranking_explanation" in hit
+                for hit in tenant_b_hits
+            )
         ),
     }
+    required_public_calls = {
+        ("connect_memory", "graph-context", policy),
+        ("ask_memory", "applies_to", None),
+    }
+    observed_public_calls = {
+        (
+            str(item.get("surface")),
+            str(item.get("operation") or item.get("relations", [""])[0]),
+            item.get("path"),
+        )
+        for item in public_calls
+    }
+    public_surface_complete = required_public_calls <= observed_public_calls
+    checks = {case_id: passed and public_surface_complete for case_id, passed in checks.items()}
     return {
         "checks": checks,
         "evidence": {
+            "public_calls": public_calls,
+            "public_surface_complete": public_surface_complete,
             "resolution_only": {
                 "markdown_unchanged": before_resolution["markdown"] == after_resolution["markdown"],
                 "registry_unchanged": before_resolution["registry"] == after_resolution["registry"],
@@ -6188,6 +6362,7 @@ async def _run_exomem_mcp(
     cases: dict[str, CaseResult] = {}
     probes: dict[str, ProbeResult] = {}
     inventory: dict[str, Any] = {}
+    relation_lifecycle: dict[str, Any] = {}
     effective_timeout = max(timeout, 600.0) if profile == "full" else timeout
     client = Client(
         transport,
@@ -6290,6 +6465,11 @@ async def _run_exomem_mcp(
                     graph_cases=cases,
                     media_modules=media_modules,
                 )
+            )
+            relation_lifecycle = await asyncio.to_thread(
+                run_relation_lifecycle_fixture,
+                manifest,
+                corpus.root.parent / "direct-relation-lifecycle",
             )
     inventory = attach_operation_execution(
         manifest,
@@ -6396,6 +6576,7 @@ async def _run_exomem_mcp(
         fingerprint=fingerprint,
         index_duration_ms=index_duration_ms,
         preflight_valid=preflight_valid,
+        relation_lifecycle=relation_lifecycle,
     )
 
 
