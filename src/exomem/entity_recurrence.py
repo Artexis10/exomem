@@ -218,6 +218,46 @@ _PRONOUNS = frozenset(
         "yours",
     }
 )
+_ARTICLES = frozenset({"a", "an", "the"})
+_MONTHS = frozenset(
+    {
+        "january",
+        "february",
+        "march",
+        "april",
+        "may",
+        "june",
+        "july",
+        "august",
+        "september",
+        "october",
+        "november",
+        "december",
+        "jan",
+        "feb",
+        "mar",
+        "apr",
+        "jun",
+        "jul",
+        "aug",
+        "sep",
+        "sept",
+        "oct",
+        "nov",
+        "dec",
+    }
+)
+_WEEKDAYS = frozenset(
+    {
+        "monday",
+        "tuesday",
+        "wednesday",
+        "thursday",
+        "friday",
+        "saturday",
+        "sunday",
+    }
+)
 
 # ---------------------------------------------------------------------------
 # PROVISIONAL thresholds.
@@ -555,9 +595,8 @@ def _digest(value: object) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _origin_ref(page: Any) -> str:
-    """Collapse derivatives of one authored Source onto one origin key."""
-
+def _source_refs(page: Any) -> frozenset[str]:
+    """Return every normalized authored Source reference on one page."""
     def _strings(value: object) -> list[str]:
         if isinstance(value, str):
             return [value]
@@ -569,20 +608,61 @@ def _origin_ref(page: Any) -> str:
     for raw in _strings(page.frontmatter.get("sources")):
         links = re.findall(r"\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]", raw)
         source_refs.extend(links or [raw])
-    normalized_sources = sorted(
+    return frozenset(
         {identity_key(value.strip().removesuffix(".md")) for value in source_refs}
         - {""}
     )
+
+
+def _origin_ref(page: Any) -> str:
+    """Return a stable standalone origin key for a page."""
+    normalized_sources = sorted(_source_refs(page))
     if normalized_sources:
-        # A context cannot attribute one clause among several cited Sources.
-        # Binding the complete sorted set avoids pretending it can, while still
-        # collapsing two derivatives with the same provenance declaration.
         return "source:" + _digest(normalized_sources)
     for key in ("session_ref", "session", "conversation_ref", "thread_ref"):
         value = identity_key(page.frontmatter.get(key))
         if value:
             return f"session:{value}"
     return f"page:{identity_key(page.rel_path)}"
+
+
+def _origin_refs(pages: tuple[Any, ...]) -> dict[str, str]:
+    """Collapse overlapping Source declarations into derivative components."""
+    parent = list(range(len(pages)))
+
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    def union(left: int, right: int) -> None:
+        left_root = find(left)
+        right_root = find(right)
+        if left_root != right_root:
+            parent[max(left_root, right_root)] = min(left_root, right_root)
+
+    sources_by_index = tuple(_source_refs(page) for page in pages)
+    first_by_source: dict[str, int] = {}
+    for index, sources in enumerate(sources_by_index):
+        for source in sorted(sources):
+            previous = first_by_source.setdefault(source, index)
+            union(index, previous)
+
+    component_sources: dict[int, set[str]] = {}
+    for index, sources in enumerate(sources_by_index):
+        if sources:
+            component_sources.setdefault(find(index), set()).update(sources)
+
+    origins: dict[str, str] = {}
+    for index, page in enumerate(pages):
+        sources = sources_by_index[index]
+        origins[str(page.rel_path)] = (
+            "source:" + _digest(sorted(component_sources[find(index)]))
+            if sources
+            else _origin_ref(page)
+        )
+    return origins
 
 
 def _cue_snapshot(
@@ -605,14 +685,41 @@ def _markdown_text(body: str) -> str:
 
     def _wikilink(match: re.Match[str]) -> str:
         raw = match.group(1)
-        target, separator, display = raw.partition("|")
-        visible = display if separator else target.split("#", 1)[0].rsplit("/", 1)[-1]
-        return visible.strip()
+        _target, separator, display = raw.partition("|")
+        # With no authored display text the only words are a Markdown target,
+        # which the closed grammar categorically excludes. Keep whitespace so
+        # masking never joins the surrounding prose into a synthetic token.
+        return display.strip() if separator else " "
 
     text = re.sub(r"\[\[([^\[\]\n]+)\]\]", _wikilink, text)
     # The visible label is ordinary prose; the Markdown target is never a span.
     text = re.sub(r"\[([^\]\n]+)\]\([^\)\n]+\)", r"\1", text)
     return unicodedata.normalize("NFKC", text)
+
+
+@dataclass(frozen=True, slots=True)
+class _CasefoldView:
+    original: str
+    folded: str
+    owners: tuple[int, ...]
+
+    def group(self, match: re.Match[str], name: str) -> str:
+        start, end = match.span(name)
+        if start < 0 or end <= start:
+            return ""
+        return self.original[self.owners[start] : self.owners[end - 1] + 1]
+
+
+def _casefold_view(value: str) -> _CasefoldView:
+    """NFKC-casefold text while retaining exact display-span boundaries."""
+    original = unicodedata.normalize("NFKC", value)
+    folded_parts: list[str] = []
+    owners: list[int] = []
+    for index, char in enumerate(original):
+        part = char.casefold()
+        folded_parts.append(part)
+        owners.extend([index] * len(part))
+    return _CasefoldView(original, "".join(folded_parts), tuple(owners))
 
 
 def _span_tokens(value: str) -> tuple[str, ...]:
@@ -660,11 +767,32 @@ def _valid_span(value: str, *, cue_nouns: frozenset[str]) -> str | None:
     if set(folded_tokens) <= _PRONOUNS or set(folded_tokens) <= _SPAN_STOPWORDS:
         return None
     folded = identity_key(normalized)
-    if folded in cue_nouns:
+    articleless = (
+        " ".join(folded_tokens[1:])
+        if folded_tokens and folded_tokens[0] in _ARTICLES
+        else folded
+    )
+    if folded in cue_nouns or articleless in cue_nouns:
         return None
     if re.fullmatch(r"\d{4}-\d{1,2}-\d{1,2}", folded):
         return None
     if re.fullmatch(r"\d{1,2}:\d{2}(?::\d{2})?", folded):
+        return None
+    day_token = r"\d{1,2}(?:st|nd|rd|th)?"
+    month_token = "(?:" + "|".join(sorted(_MONTHS)) + ")"
+    if re.fullmatch(rf"{month_token}(?: {day_token})?(?: \d{{2,4}})?", folded):
+        return None
+    if re.fullmatch(rf"{day_token} {month_token}(?: \d{{2,4}})?", folded):
+        return None
+    if re.fullmatch(rf"{day_token} of {month_token}(?: \d{{2,4}})?", folded):
+        return None
+    if re.fullmatch(rf"\d{{2,4}} {month_token}(?: {day_token})?", folded):
+        return None
+    if folded in _WEEKDAYS:
+        return None
+    if re.fullmatch(r"\d{1,2}(?:(?: |:)\d{2})? ?(?:am|pm)", folded):
+        return None
+    if folded in {"midday", "midnight", "noon"}:
         return None
     if "://" in folded or "@" in folded or "/" in folded or "\\" in folded:
         return None
@@ -710,7 +838,10 @@ def _context(
         facet_hash=facet_hash,
         # Copies of one material facet on one page are one context. Punctuation,
         # excerpt spelling, and scan order therefore cannot move signal identity.
-        context_hash=_digest((identity, path, origin, facet_hash)),
+        # A copied facet is the same material context even when pasted on a new
+        # page. Path and origin remain in the row for hydration work, but cannot
+        # churn the lifecycle signal on their own.
+        context_hash=_digest((identity, facet_hash)),
         excerpt=excerpt[:240],
         registry_fingerprint=registry_fingerprint,
     )
@@ -789,16 +920,16 @@ def extract_identity_frames(
         line = re.sub(r"^\s*(?:[-*+]\s+|>\s*)?", "", raw_line).strip()
         if not line or line.startswith("#"):
             continue
+        line_view = _casefold_view(line)
         # body-field owns comma separation; ordinary clauses use comma as a stop.
         field = re.fullmatch(
             rf"(?P<label>{field_pattern})\s*:\s*(?P<values>.+?)\s*[.;!?]?",
-            line,
-            flags=re.IGNORECASE,
+            line_view.folded,
         )
         if field is not None:
             label = identity_key(field.group("label"))
             predicate_id = _BODY_FIELDS[label]
-            for candidate in field.group("values").split(","):
+            for candidate in line_view.group(field, "values").split(","):
                 clean = candidate.strip().rstrip(".;:!?").strip()
                 add(
                     clean,
@@ -812,19 +943,19 @@ def extract_identity_frames(
 
         clauses = [part.strip() for part in re.split(r"[.,;!?]+", line) if part.strip()]
         for clause in clauses:
+            clause_view = _casefold_view(clause)
             if cue_pattern:
                 copula = re.fullmatch(
                     rf"(?P<candidate>.+?)\s+(?P<copula>is|was|are|were)\s+"
                     rf"(?:(?:a|an|the)\s+)?(?P<cue>{cue_pattern})",
-                    clause,
-                    flags=re.IGNORECASE,
+                    clause_view.folded,
                 )
                 if copula is not None:
                     cue = identity_key(copula.group("cue"))
                     pairs = cue_snapshot[cue]
                     copula_token = identity_key(copula.group("copula"))
                     add(
-                        copula.group("candidate"),
+                        clause_view.group(copula, "candidate"),
                         frame_type="typed-copula",
                         predicate_id=_COPULAS[copula_token],
                         cue=cue,
@@ -836,15 +967,14 @@ def extract_identity_frames(
 
                 label = re.fullmatch(
                     rf"(?P<cue>{cue_pattern})\s*(?P<delimiter>:|—)\s*(?P<candidate>.+)",
-                    clause,
-                    flags=re.IGNORECASE,
+                    clause_view.folded,
                 )
                 if label is not None:
                     cue = identity_key(label.group("cue"))
                     pairs = cue_snapshot[cue]
                     delimiter = label.group("delimiter")
                     add(
-                        label.group("candidate"),
+                        clause_view.group(label, "candidate"),
                         frame_type="typed-label",
                         predicate_id=_LABEL_DELIMITERS[delimiter],
                         cue=cue,
@@ -858,8 +988,7 @@ def extract_identity_frames(
             subject = re.fullmatch(
                 rf"(?P<subject>{subject_options})\s+(?P<predicate>{relation_pattern})\s+"
                 rf"(?P<candidate>.+)",
-                clause,
-                flags=re.IGNORECASE,
+                clause_view.folded,
             )
             if subject is not None:
                 subject_name = identity_key(subject.group("subject"))
@@ -868,7 +997,7 @@ def extract_identity_frames(
                 predicate = identity_key(subject.group("predicate"))
                 cue = anchor_ref or subject_name
                 add(
-                    subject.group("candidate"),
+                    clause_view.group(subject, "candidate"),
                     frame_type="subject-relation",
                     predicate_id=_RELATIONS[predicate],
                     cue=cue,
@@ -881,15 +1010,14 @@ def extract_identity_frames(
                 object_frame = re.fullmatch(
                     rf"(?P<candidate>.+?)\s+(?P<predicate>{relation_pattern})\s+"
                     rf"(?P<object>{anchor_pattern})",
-                    clause,
-                    flags=re.IGNORECASE,
+                    clause_view.folded,
                 )
                 if object_frame is not None:
                     object_name = identity_key(object_frame.group("object"))
                     anchor = resolved_anchors[object_name]
                     predicate = identity_key(object_frame.group("predicate"))
                     add(
-                        object_frame.group("candidate"),
+                        clause_view.group(object_frame, "candidate"),
                         frame_type="identity-relation",
                         predicate_id=_RELATIONS[predicate],
                         cue=anchor.path,
@@ -995,22 +1123,47 @@ def _target_dict(entry: RegistryEntry) -> dict[str, Any]:
     }
 
 
-def _connected(page: Any, target: RegistryEntry) -> bool:
-    identities = set(target.identities)
-    identities.add(identity_key(target.path.removesuffix(".md")))
-    identities.add(identity_key(Path(target.path).stem))
-    for match in find_body_wikilinks(page.body):
+def _segment_connects(raw_segment: str, identities: set[str]) -> bool:
+    """Whether one authored Markdown segment connects to the resolved target."""
+    for match in find_body_wikilinks(raw_segment):
         link = parse_link(match.group(1))
         if link is None:
             continue
         if identity_key(link.name) in identities or identity_key(link.target) in identities:
             return True
-    document = markdown_relations.parse_markdown_relations(page.body)
+    document = markdown_relations.parse_markdown_relations(raw_segment)
     return any(
         identity_key(relation.target) in identities
         or identity_key(relation.target.rsplit("/", 1)[-1]) in identities
         for relation in document.canonical_relations
     )
+
+
+def _visible_excerpt(raw_segment: str) -> str:
+    visible = _markdown_text(raw_segment)
+    visible = re.sub(r"^\s*(?:[-*+]\s+|>\s*)?", "", visible).strip()
+    return " ".join(visible.split())
+
+
+def _connected(context: EvidenceContext, page: Any, target: RegistryEntry) -> bool:
+    """Whether this exact qualifying context visibly connects to the target."""
+    identities = set(target.identities)
+    identities.add(identity_key(target.path.removesuffix(".md")))
+    identities.add(identity_key(Path(target.path).stem))
+    wanted_excerpt = " ".join(context.excerpt.split())
+    for raw_line in page.body.splitlines():
+        if (
+            _visible_excerpt(raw_line) == wanted_excerpt
+            and _segment_connects(raw_line, identities)
+        ):
+            return True
+        for raw_clause in re.split(r"[.,;!?]+", raw_line):
+            if (
+                _visible_excerpt(raw_clause) == wanted_excerpt
+                and _segment_connects(raw_clause, identities)
+            ):
+                return True
+    return False
 
 
 def collect(
@@ -1026,16 +1179,19 @@ def collect(
     """Collect legacy links and closed-frame evidence into one lifecycle row."""
     page_rows = tuple(sorted(pages, key=lambda page: str(page.rel_path)))
     entities = entities_prefix()
+    eligible_pages = tuple(
+        page
+        for page in page_rows
+        if not str(page.rel_path).startswith(entities)
+        and counts_as_evidence(page, indexable=indexable(str(page.rel_path)))
+    )
+    origins_by_path = _origin_refs(eligible_pages)
     mentions: dict[str, dict[str, str]] = {}
     suffixed: dict[str, set[str]] = {}
     ordinary: dict[str, list[EvidenceContext]] = {}
     pages_by_path: dict[str, Any] = {}
-    for page in page_rows:
+    for page in eligible_pages:
         rel_path = str(page.rel_path)
-        if rel_path.startswith(entities):
-            continue
-        if not counts_as_evidence(page, indexable=indexable(rel_path)):
-            continue
         pages_by_path[rel_path] = page
         self_identities = {
             identity_key(page.title),
@@ -1044,7 +1200,7 @@ def collect(
         for context in extract_identity_frames(
             page.body,
             path=rel_path,
-            origin=_origin_ref(page),
+            origin=origins_by_path[rel_path],
             entity_types=entity_types,
             registry=registry,
         ):
@@ -1118,15 +1274,10 @@ def collect(
         elif len(matches) == 1:
             state = "hydration"
             resolved_target = matches[0]
-            connected_paths = {
-                path
-                for path in {row.path for row in rows}
-                if _connected(pages_by_path[path], resolved_target)
-            }
             disconnected = tuple(
                 row
                 for row in rows
-                if row.path not in connected_paths
+                if not _connected(row, pages_by_path[row.path], resolved_target)
             )
             if not disconnected:
                 continue
@@ -1161,7 +1312,7 @@ def collect(
                 "predicate_table": PREDICATE_TABLE_DIGEST,
                 "registry": entity_types.fingerprint,
                 "facets": sorted(facet_by_hash),
-                "contexts": sorted(row.context_hash for row in rows),
+                "contexts": sorted({row.context_hash for row in rows}),
             }
         )
         signal_version = _digest(
@@ -1172,7 +1323,7 @@ def collect(
                 "registry": entity_types.fingerprint,
                 "facets": sorted(facet_by_hash),
                 "disconnected_contexts": sorted(
-                    row.context_hash for row in disconnected
+                    {row.context_hash for row in disconnected}
                 ),
                 "targets": target_refs,
                 "families": family_cues,
@@ -1183,7 +1334,9 @@ def collect(
                 {
                     "identity": identity,
                     "target": resolved_target.path if resolved_target else None,
-                    "contexts": [row["context_hash"] for row in batch],
+                    "contexts": [
+                        [row["path"], row["context_hash"]] for row in batch
+                    ],
                     "signal_version": signal_version,
                 }
             )

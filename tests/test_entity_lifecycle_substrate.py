@@ -10,12 +10,15 @@ import yaml
 from exomem import (
     attention,
     audit,
+    embeddings,
     entity_candidates,
     entity_recurrence,
     entity_types,
     epistemic_graph,
     find,
     referent_resolution,
+    runtime_resources,
+    vault,
 )
 
 
@@ -125,6 +128,29 @@ def test_origin_and_facet_gates_are_independent(tmp_path: Path) -> None:
     assert _findings(other) == []
 
 
+def test_overlapping_source_sets_are_one_derivative_origin(tmp_path: Path) -> None:
+    for index, (unique_source, body) in enumerate(
+        (
+            ("Sources/alpha", "cobalt workshop is an organization."),
+            ("Sources/beta", "organization: cobalt workshop."),
+            ("Sources/gamma", "Membership: cobalt workshop."),
+        )
+    ):
+        _write(
+            tmp_path,
+            f"Knowledge Base/Notes/derived-{index}.md",
+            "---\n"
+            "type: insight\n"
+            f"title: Derived {index}\n"
+            "status: active\n"
+            f"sources: ['[[Sources/shared]]', '[[{unique_source}]]']\n"
+            "---\n\n"
+            f"{body}\n",
+        )
+
+    assert _findings(tmp_path) == []
+
+
 def test_frozen_predicate_table_carries_every_exact_id_and_digest() -> None:
     table = getattr(entity_recurrence, "PREDICATE_TABLE", None)
     digest = getattr(entity_recurrence, "PREDICATE_TABLE_DIGEST", None)
@@ -183,6 +209,32 @@ def test_lowercase_non_latin_and_all_five_frames_are_collected(tmp_path: Path) -
     assert all(facet["predicate_id"] for facet in item.meta["material_facets"])
 
 
+def test_lexical_matching_uses_nfkc_casefold_for_length_changing_cues() -> None:
+    street = _definition("StreetKinds", "Street Kind", parent="concept")
+    street["cue_nouns"] = ["straße"]
+    idea = _definition("IdeaKinds", "Idea Kind", parent="concept")
+    idea["cue_nouns"] = ["İdea"]
+    registry = entity_types.load_entity_types(
+        proposal={
+            "schema_version": 1,
+            "entity_types": {"street-kind": street, "idea-kind": idea},
+        }
+    )
+
+    rows = entity_recurrence.extract_identity_frames(
+        "amber guild is a Straße.\ncobalt circle is an İdea.",
+        path="Knowledge Base/Notes/unicode-cues.md",
+        origin="page:unicode-cues",
+        entity_types=registry,
+        registry=entity_recurrence.RegistryIndex(entries=(), identities=frozenset()),
+    )
+
+    assert [(row.identity, row.cue) for row in rows] == [
+        ("amber guild", "strasse"),
+        ("cobalt circle", "i̇dea"),
+    ]
+
+
 def test_span_rejection_classes_and_maximal_span_do_not_create_candidates(
     tmp_path: Path,
 ) -> None:
@@ -192,9 +244,12 @@ def test_span_rejection_classes_and_maximal_span_do_not_create_candidates(
         "I work with person@example.invalid.",
         "I work with /srv/private/file.",
         "I work with 2026-08-31.",
+        "I work with September 1 2026.",
+        "I work with 8 pm.",
         "I work with `inline name`.",
         "I work with this.",
         "organization: organization.",
+        "the organization is an organization.",
         "I work with one two three four five six seven eight nine.",
         "I work with amber consortium beside the station.",
     )
@@ -203,6 +258,32 @@ def test_span_rejection_classes_and_maximal_span_do_not_create_candidates(
             _note(tmp_path, offset * 3 + copy, text)
 
     assert _findings(tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "candidate",
+    [
+        "the organization",
+        "September 1 2026",
+        "1 September 2026",
+        "8 pm",
+        "8am",
+        "1st of September 2026",
+        "[[amber guild]]",
+    ],
+)
+def test_article_cue_natural_datetime_and_unaliased_link_targets_are_rejected(
+    candidate: str,
+) -> None:
+    rows = entity_recurrence.extract_identity_frames(
+        f"I work with {candidate}.",
+        path="Knowledge Base/Notes/rejected-natural.md",
+        origin="page:rejected-natural",
+        entity_types=entity_types.core_registry(),
+        registry=entity_recurrence.RegistryIndex(entries=(), identities=frozenset()),
+    )
+
+    assert rows == ()
 
 
 def test_hydration_batches_bind_full_disconnected_set_and_close_from_links(
@@ -235,7 +316,7 @@ def test_hydration_batches_bind_full_disconnected_set_and_close_from_links(
         path = tmp_path / rel
         path.write_text(
             path.read_text(encoding="utf-8").replace(
-                "juniper circle", "[[Juniper Circle]]"
+                "juniper circle", "[[Juniper Circle|juniper circle]]"
             ),
             encoding="utf-8",
         )
@@ -246,7 +327,10 @@ def test_hydration_batches_bind_full_disconnected_set_and_close_from_links(
     second_meta = second[0].meta
     assert second_meta["disconnected_context_count"] == 2
     assert second_meta["remaining_disconnected_count"] == 0
-    assert second_meta["signal_version"] != first_signal
+    # Only redundant copies of the same two material contexts remain, so the
+    # lifecycle signal is stable while the actionable path batch advances.
+    assert second_meta["signal_version"] == first_signal
+    assert second_meta["batch_fingerprint"] != meta["batch_fingerprint"]
     assert not set(first_batch) & {
         row["path"] for row in second_meta["disconnected_contexts"]
     }
@@ -255,7 +339,7 @@ def test_hydration_batches_bind_full_disconnected_set_and_close_from_links(
         path = tmp_path / rel
         path.write_text(
             path.read_text(encoding="utf-8").replace(
-                "juniper circle", "[[Juniper Circle]]"
+                "juniper circle", "[[Juniper Circle|juniper circle]]"
             ),
             encoding="utf-8",
         )
@@ -267,20 +351,26 @@ def test_hydration_signal_binds_a_context_outside_the_returned_batch(
     tmp_path: Path,
 ) -> None:
     _entity(tmp_path, "juniper", title="Juniper Circle")
-    for index in range(10):
-        _note(
-            tmp_path,
-            index,
-            "juniper circle is an organization."
-            if index % 2 == 0
-            else "Membership: juniper circle.",
-        )
+    bodies = (
+        "juniper circle is an organization.",
+        "juniper circle was an organization.",
+        "organization: juniper circle.",
+        "organization — juniper circle.",
+        "I work with juniper circle.",
+        "I use juniper circle.",
+        "I attend juniper circle.",
+        "I maintain juniper circle.",
+        "I build juniper circle.",
+        "Membership: juniper circle.",
+    )
+    for index, body in enumerate(bodies):
+        _note(tmp_path, index, body)
     first = _findings(tmp_path)[0].meta
     first_paths = [row["path"] for row in first["disconnected_contexts"]]
     outside = tmp_path / "Knowledge Base/Notes/note-09.md"
     outside.write_text(
         outside.read_text(encoding="utf-8").replace(
-            "juniper circle", "[[Juniper Circle]]"
+            "juniper circle", "[[Juniper Circle|juniper circle]]"
         ),
         encoding="utf-8",
     )
@@ -291,6 +381,46 @@ def test_hydration_signal_binds_a_context_outside_the_returned_batch(
     assert [row["path"] for row in second["disconnected_contexts"]] == first_paths
     assert second["signal_version"] != first["signal_version"]
     assert second["batch_fingerprint"] != first["batch_fingerprint"]
+
+
+def test_unrelated_page_link_does_not_connect_qualifying_hydration_contexts(
+    tmp_path: Path,
+) -> None:
+    _entity(tmp_path, "juniper", title="Juniper Circle")
+    for index, body in enumerate(
+        (
+            "juniper circle is an organization.",
+            "organization: juniper circle.",
+            "juniper circle was an organization.",
+        )
+    ):
+        _note(tmp_path, index, f"{body} See [[Juniper Circle]].")
+
+    findings = _findings(tmp_path)
+
+    assert len(findings) == 1
+    assert findings[0].meta["candidate_state"] == "hydration"
+    assert findings[0].meta["disconnected_context_count"] == 3
+
+
+def test_cross_page_copy_of_existing_facet_does_not_change_signal_version(
+    tmp_path: Path,
+) -> None:
+    bodies = (
+        "amber guild is an organization.",
+        "organization: amber guild.",
+        "Membership: amber guild.",
+    )
+    for index, body in enumerate(bodies):
+        _note(tmp_path, index, body)
+    first = _findings(tmp_path)[0].meta
+
+    _note(tmp_path, 3, bodies[0])
+    second = _findings(tmp_path)[0].meta
+
+    assert second["page_count"] == 4
+    assert second["facet_count"] == first["facet_count"] == 3
+    assert second["signal_version"] == first["signal_version"]
 
 
 def test_multiple_alias_matches_are_ambiguous_and_select_no_target(tmp_path: Path) -> None:
@@ -492,6 +622,48 @@ def test_referent_family_cue_admits_child_without_weakening_identity_ambiguity(
     assert result.resolved[0].entity_type == "community"
     assert result.resolved[0].entity_family == "organization"
     assert result.as_dict()["resolved"][0]["entity_family"] == "organization"
+
+
+def test_multiple_exact_family_aware_referents_are_ambiguous() -> None:
+    proposal = {
+        "schema_version": 1,
+        "entity_types": {
+            "community": _definition(
+                "Communities", "Community", parent="organization"
+            )
+        },
+    }
+    registry = entity_types.load_entity_types(proposal=proposal)
+    cue = referent_resolution.ReferentCue(
+        entity_type="organization",
+        noun="organization",
+        expected_count=None,
+        descriptors=(),
+        qualifiers=(),
+        query="shared circle organization",
+    )
+    entities = [
+        referent_resolution.EntityRecord(
+            path=f"Knowledge Base/Entities/Communities/{name}.md",
+            title=title,
+            entity_type="community",
+            entity_family="organization",
+            status="active",
+            aliases=("shared circle",),
+        )
+        for name, title in (("one", "First Circle"), ("two", "Second Circle"))
+    ]
+
+    result = referent_resolution.resolve_referents(
+        cue=cue,
+        hits=[],
+        entities=entities,
+        edges=[],
+        registry=registry,
+    )
+
+    assert result.status == "ambiguous"
+    assert [item.title for item in result.resolved] == ["First Circle", "Second Circle"]
 
 
 def test_graph_traversal_uses_explicit_entity_families_and_reports_leaf_metadata(
@@ -800,6 +972,56 @@ def test_material_fingerprint_ignores_same_page_copies_and_binds_registry(
 
     assert third["registry_fingerprint"] != first["registry_fingerprint"]
     assert third["signal_version"] != first["signal_version"]
+
+
+def test_collection_never_invokes_model_embedding_or_write_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pages = [
+        type(
+            "Page",
+            (),
+            {
+                "rel_path": f"Knowledge Base/Notes/note-{index}.md",
+                "title": f"Note {index}",
+                "status": "active",
+                "frontmatter": {"type": "insight", "status": "active"},
+                "body": body,
+            },
+        )()
+        for index, body in enumerate(
+            (
+                "amber guild is an organization.",
+                "organization: amber guild.",
+                "Membership: amber guild.",
+            )
+        )
+    ]
+    registry = entity_types.core_registry()
+    entities = entity_recurrence.registry_index(pages, entity_types=registry)
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("recurrence collection crossed model, embedding, or write authority")
+
+    monkeypatch.setattr(embeddings, "get_model", forbidden)
+    monkeypatch.setattr(embeddings, "embed_texts", forbidden)
+    monkeypatch.setattr(runtime_resources, "model_execution", forbidden)
+    monkeypatch.setattr(vault, "batch_atomic_write", forbidden)
+    monkeypatch.setattr(Path, "write_text", forbidden)
+    monkeypatch.setattr(Path, "write_bytes", forbidden)
+
+    candidates = entity_recurrence.collect(
+        pages,
+        vault_root=tmp_path,
+        resolver=vault.WikilinkResolver.from_entries(tmp_path, ()),
+        registry=entities,
+        entity_types=registry,
+        indexable=lambda _path: True,
+        attachment_probe=lambda _path: False,
+    )
+
+    assert [item.identity for item in candidates] == ["amber guild"]
 
 
 def test_explicit_attention_projects_one_current_row_and_default_stays_quiet(

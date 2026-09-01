@@ -560,7 +560,17 @@ def resolve_referents(
     expected = cue.expected_count
     resolved_tuple = tuple(resolved)
     if expected is None:
-        status = "resolved" if resolved_tuple else "unresolved"
+        exact_match_count = sum(
+            any(evidence.kind == "exact_name" for evidence in item.evidence)
+            for item in resolved_tuple
+        )
+        status = (
+            "ambiguous"
+            if exact_match_count > 1
+            else "resolved"
+            if resolved_tuple
+            else "unresolved"
+        )
         unresolved_count = None
     elif len(resolved_tuple) > expected:
         status = "ambiguous"

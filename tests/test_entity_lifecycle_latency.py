@@ -51,44 +51,99 @@ def test_identity_frames_cold_collection_is_bounded_at_established_scale(
     assert elapsed < COLD_RUNTIME_CEILING_SECONDS
 
 
-def test_entity_family_projection_and_traversal_filter_are_bounded_at_scale() -> None:
-    registry = entity_types.load_entity_types(
-        proposal={
-            "schema_version": 1,
-            "entity_types": {
-                "community": {
-                    "folder": "Communities",
-                    "label": "Community",
-                    "aliases": [],
-                    "cue_nouns": ["community"],
-                    "capture_guidance": "A stable synthetic community identity.",
-                    "parent": "organization",
-                    "status": "active",
-                }
-            },
-        }
+def test_entity_family_graph_query_and_traversal_are_bounded_at_scale(
+    tmp_path: Path,
+) -> None:
+    registry_path = tmp_path / "Knowledge Base/_Schema/entity-types.yaml"
+    registry_path.parent.mkdir(parents=True)
+    registry_path.write_text(
+        "schema_version: 1\n"
+        "entity_types:\n"
+        "  community:\n"
+        "    folder: Communities\n"
+        "    label: Community\n"
+        "    aliases: []\n"
+        "    cue_nouns: [community]\n"
+        "    capture_guidance: A stable synthetic community identity.\n"
+        "    parent: organization\n"
+        "    status: active\n",
+        encoding="utf-8",
     )
+    seed_rel = "Knowledge Base/Notes/family-seed.md"
+    seed_path = tmp_path / seed_rel
+    seed_path.parent.mkdir(parents=True)
+    seed_path.write_text(
+        "---\ntype: insight\ntitle: Family Seed\nstatus: active\n---\n\n# Family Seed\n",
+        encoding="utf-8",
+    )
+    index = epistemic_graph.EpistemicGraphIndex(tmp_path)
+    index.rebuild_all()
+
     leaves = ("organization", "community", "concept", "community", "organization")
-    nodes = [
-        {
-            "node_key": f"file:{index}",
-            "kind": "file",
-            "metadata": {"page_type": "entity", "scope": leaves[index % len(leaves)]},
-        }
-        for index in range(5_000)
-    ]
+    seed_key = f"file:{seed_rel}"
+    connected_root = tmp_path / "Knowledge Base/Entities/Synthetic"
+    connected_root.mkdir(parents=True)
+    for item_index in range(120):
+        (connected_root / f"entity-{item_index:04d}.md").write_text(
+            "---\ntype: entity\nstatus: active\n---\n",
+            encoding="utf-8",
+        )
+    conn = index._connect()
+    try:
+        with conn:
+            for item_index in range(5_000):
+                leaf = leaves[item_index % len(leaves)]
+                rel = f"Knowledge Base/Entities/Synthetic/entity-{item_index:04d}.md"
+                node_key = f"file:{rel}"
+                epistemic_graph._insert_node(
+                    conn,
+                    epistemic_graph.GraphNode(
+                        node_key=node_key,
+                        kind="file",
+                        path=rel,
+                        anchor="page",
+                        title=f"Entity {item_index}",
+                        text=f"Entity {item_index}",
+                        source_hash=f"hash-{item_index}",
+                        metadata={
+                            "page_type": "entity",
+                            "status": "active",
+                            "scope": leaf,
+                            "entity_type": leaf,
+                            "origin": "file",
+                        },
+                    ),
+                )
+                if item_index < 120:
+                    epistemic_graph._insert_edge(
+                        conn,
+                        epistemic_graph._edge(
+                            seed_key,
+                            node_key,
+                            "links_to",
+                            "wikilink",
+                            source_path=seed_rel,
+                            source_anchor="page",
+                        ),
+                    )
+            epistemic_graph._bump_generation(conn)
+    finally:
+        conn.close()
 
     started = perf_counter()
-    matched = [
-        epistemic_graph._entity_family_metadata(node, registry)
-        for node in nodes
-        if epistemic_graph._matches_entity_families(
-            node, {"organization"}, registry
-        )
-    ]
+    result = epistemic_graph.graph_context(
+        tmp_path,
+        path=seed_rel,
+        depth=1,
+        max_nodes=200,
+        max_edges=200,
+        entity_type_families=["organization"],
+    )
     elapsed = perf_counter() - started
 
-    assert len(matched) == 4_000
+    matched = [node for node in result["nodes"] if node["path"] != seed_rel]
+    assert result["available"] is True
+    assert len(matched) == 96, result
     assert all(
         node["metadata"]["entity_family"] == "organization" for node in matched
     )
