@@ -2537,6 +2537,11 @@ def _expect_hash(expected: str | None, actual: str, kind: str) -> None:
 
 def _publication_error(error: Exception) -> collections.CollectionError:
     if isinstance(error, vault.PathGuardError):
+        if error.code in {"BATCH_RESIDUE_LIMIT", "BATCH_RESIDUE_UNSAFE"}:
+            return collections.CollectionError(
+                "RECORD_RECOVERY_REQUIRED",
+                "private transaction residue blocks safe publication",
+            )
         return collections.CollectionError("STALE_RECORD", "canonical record changed before commit")
     if isinstance(error, vault.CreateOnlyConflict):
         return collections.CollectionError(
