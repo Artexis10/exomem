@@ -49,6 +49,15 @@ problem, diagnosed failure, reusable pattern, stable project fact, or conclusion
 that future agents should find. Save a concise compiled note, not a transcript.
 Capture raw material separately when provenance matters.
 
+Capture a stable preference, recurring routine, historical baseline, or durable
+affiliation only when both stability or recurrence and reusable comparison,
+interpretation, or decision value are clear. Put a facet or affiliation on a
+uniquely resolved Entity; otherwise write one concise compiled observation. Use
+Records only for an observed measurement accepted by a compatible existing
+collection. Fleeting preferences, one-off activity, incidental associations, trivial
+metrics, and tentative claims stay quiet; this never authorizes creating an Entity,
+collection, or schema.
+
 ## Simple actions for agents
 
 Use the simple product actions as the first mental model. Product commands are
@@ -305,8 +314,13 @@ search as a scoped miss, not proof of absence; retry with better terms or
 scope="vault" when absence matters.
 
 Save durable conclusions on your own: decisions, solved problems, diagnosed
-failures, reusable patterns, and stable project context. Save concise compiled
-notes, not transcripts. Preserve raw sources or proof-bearing records separately
+failures, reusable patterns, stable project context, and a stable preference,
+recurring routine, historical baseline, or durable affiliation only when stability
+or recurrence and reusable comparison, interpretation, or decision value are clear.
+Use a uniquely resolved Entity facet or one concise compiled observation; use Records
+only for a compatible existing observed measurement. Fleeting preferences, one-off
+activity, incidental associations, trivial metrics, and tentative claims stay quiet.
+Save concise compiled notes, not transcripts. Preserve raw sources or proof-bearing records separately
 when provenance matters. Use `edit_memory` for small corrections and
 `replace_memory` when a newer conclusion supersedes an older one.
 ```

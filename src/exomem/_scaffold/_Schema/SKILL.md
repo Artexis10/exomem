@@ -100,6 +100,18 @@ accumulates reusable facts, history, or relations, **a method was actually
 carried out and the user reports how it went**, **a stated intent or commitment
 is made**, or **an observed outcome or event is reported** — capture it:
 
+- A **durable personal baseline** is also a stepping-stone: a stable preference,
+  recurring routine, historical baseline, or durable affiliation. Capture it only
+  when both stability or recurrence and reusable comparison, interpretation, or
+  decision value are clear. Attach a facet or affiliation to a uniquely resolved
+  Entity; otherwise save one concise compiled observation. Use Records only for an
+  observed measurement accepted by a compatible existing collection. Fleeting
+  preferences, one-off activity, incidental associations, trivial metrics, and
+  tentative claims stay quiet. Eligibility never creates an Entity, collection, or
+  schema: a relation uses `link_acceptance`; entity creation or substantial curation
+  uses confirmed `restructure_execution`; concise observations and narrow additive
+  facts follow `proactive_capture` and its active disposition.
+
 - Capture whether or not the KB already holds the topic. A durable conclusion on
   brand-new ground is first-class: it becomes the first page on that topic, which
   is how the corpus grows.

@@ -61,22 +61,21 @@ _KB_WRITE = re.compile(
 
 REMINDER = (
     "[Exomem capture check] This turn did substantial work. If your Exomem knowledge-base "
-    "skill is available, check whether the turn reached a durable conclusion or a "
-    "durable recurring entity recognized by the active entity registry, prioritizing "
-    "the selected knowledge packs. For an entity, first call "
-    'connect_memory(operation="resolve-entity", name=...). Update stable facts with '
-    "edit_memory or add a governed relation when one "
-    "active page matches. Only when none matches and the identity is stable, recurring, "
-    "central, and useful beyond this source may you call "
-    'connect_memory(operation="create-entity"). A single incidental mention, unresolved '
-    "identity, or transient participant stays in source/note context. Capture conclusions "
-    "as distilled compiled notes, not transcripts, then report Saved -> path. Where the "
-    "turn contradicted a conclusion an active page already states, supersede that page "
-    "with replace_memory instead of appending a correction beside it: nothing is "
-    "deleted either way, but two live versions of one conclusion both read as current. "
-    "Route a stated intent or commitment to Planning with plan_memory and an observed "
-    "outcome or event to Records with record_memory; when one landing does both, do "
-    "them together and report it once. "
+    "skill is available, let the active agent check for a durable conclusion, recurring "
+    "entity, or durable personal baseline: stable preference, recurring routine, historical "
+    "baseline, or durable affiliation only when stability or recurrence and reusable "
+    "comparison, interpretation, or decision value are clear. Route a uniquely resolved "
+    "Entity facet or affiliation there; otherwise one concise compiled observation; use "
+    "Records only for a compatible existing observed measurement. Fleeting preferences, "
+    "one-off activity, incidental associations, trivial metrics, and tentative claims stay "
+    "quiet. First resolve an entity against the active entity registry and selected knowledge packs with "
+    'connect_memory(operation="resolve-entity", name=...); edit_memory updates '
+    'an active match, while connect_memory(operation="create-entity") needs a stable, '
+    "recurring, central identity useful beyond this source. A single incidental mention stays "
+    "in source/note context. Capture conclusions as distilled "
+    "compiled notes, not transcripts. To supersede an active conclusion, use replace_memory, "
+    "not a correction beside it. Route stated intent to Planning with plan_memory and "
+    "observed outcome to Records with record_memory. "
     "If neither case applies, or no Knowledge Base is configured, do nothing and stop."
 )
 
@@ -180,7 +179,7 @@ def _hook_client() -> str:
         return explicit
     try:
         parts = {p.lower() for p in Path(__file__).resolve().parts}
-    except Exception:
+    except Exception:  # noqa: BLE001 — path resolution must not break the hook
         parts = set()
     if ".codex" in parts:
         return "codex"
@@ -264,7 +263,7 @@ def _latest_turn(path: str, max_bytes: int = 262_144) -> tuple[str, list[dict]]:
     for line in reversed([ln for ln in raw.splitlines() if ln.strip()]):
         try:
             obj = json.loads(line)
-        except Exception:
+        except Exception:  # noqa: BLE001 — malformed transcript rows are ignored
             continue
         payload = obj.get("payload")
         record = (
@@ -434,7 +433,7 @@ def _touch(stamp: Path) -> None:
     try:
         stamp.parent.mkdir(parents=True, exist_ok=True)
         stamp.write_text(str(time.time()), encoding="utf-8")
-    except Exception:
+    except Exception:  # noqa: BLE001 — the advisory marker is strictly best-effort
         pass
 
 
@@ -445,7 +444,7 @@ def _log(text: str) -> None:
         snippet = re.sub(r"\s+", " ", text)[-160:]
         with open(logp, "a", encoding="utf-8") as f:
             f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} nudge fired | {snippet}\n")
-    except Exception:
+    except Exception:  # noqa: BLE001 — logging must never break a stop hook
         pass
 
 
@@ -459,7 +458,7 @@ def main() -> int:
     try:
         raw = sys.stdin.read()
         data = json.loads(raw) if raw.strip() else {}
-    except Exception:
+    except Exception:  # noqa: BLE001 — malformed hook input must fail soft
         return 0
 
     if data.get("stop_hook_active") or data.get("stopHookActive"):  # already blocked once

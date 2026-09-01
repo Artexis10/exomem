@@ -12,6 +12,18 @@ Save durable conclusions and recurring entities at the right epistemic layer.
 ## When to use
 Use when the user asks to save or the session lands on durable reusable knowledge, including stable context about a recurring entity.
 
+## Durable personal baselines
+A stable preference, recurring routine, historical baseline, or durable affiliation
+is eligible only when both stability or recurrence and reusable comparison,
+interpretation, or decision value are clear. Attach a facet or affiliation to a
+uniquely resolved Entity; otherwise write one concise compiled observation. Use
+Records only for an observed measurement accepted by a compatible existing
+collection. Fleeting preferences, one-off activity, incidental associations, trivial
+metrics, and tentative claims stay quiet. Eligibility never creates an Entity,
+collection, or schema. Concise observations and narrow additive facts follow
+`proactive_capture`; affiliation relations use `link_acceptance`; Entity creation or
+substantial curation uses confirmed `restructure_execution`.
+
 ## Workflow
 1. Decide whether the material is raw evidence or a compiled conclusion.
 2. Use `capture_source` for raw captured text or source material. Classify it on

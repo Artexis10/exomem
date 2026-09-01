@@ -25,6 +25,19 @@ Do not ask users to choose internal folders, graph sidecars, or page types unles
 the distinction changes the write. Translate back to simple language when
 reporting results.
 
+## Durable personal baseline routing
+
+A stable preference, recurring routine, historical baseline, or durable affiliation
+is eligible only when both stability or recurrence and reusable comparison,
+interpretation, or decision value are clear. Attach a facet or affiliation to a
+uniquely resolved Entity; otherwise preserve one concise compiled observation. Use
+Records only for an observed measurement accepted by a compatible existing
+collection. Fleeting preferences, one-off activity, incidental associations, trivial
+metrics, and tentative claims stay quiet. Do not create an Entity, collection, or
+schema from eligibility alone: concise observations and narrow additive facts obey
+`proactive_capture`, affiliation relations require `link_acceptance`, and Entity
+creation or substantial curation requires confirmed `restructure_execution`.
+
 ## Planning
 
 `plan_memory` is the one public command for human-owned intended future state.

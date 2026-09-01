@@ -429,6 +429,13 @@ own — or just start writing; the writer auto-registers new keys as you use the
 > stepping-stone — a decision, a solved problem, a recognized pattern. There's
 > **no background daemon**: it won't save things while you're away from the chat,
 > and a fresh thread starts fresh. You can always just say *"save that to kb."*
+> A stable preference, recurring routine, historical baseline, or durable
+> affiliation is eligible only when stability or recurrence and reusable
+> comparison, interpretation, or decision value are clear. A uniquely resolved
+> Entity receives its facet; otherwise capture one concise compiled observation;
+> an observed measurement uses only compatible existing Records. Fleeting
+> preferences, one-off activity, incidental associations, trivial metrics, and
+> tentative claims stay quiet.
 >
 > **Other MCP clients.** ChatGPT, Codex, Cursor, Gemini, Windsurf, or any client
 > without Skill support should call `bootstrap()` once after connecting. It returns
@@ -642,7 +649,7 @@ preferences should Claude consider in responses?"**:
 ```
 Precise and non-performative: no hype, fluff, or motivational tone; clarity and correctness over filler. Use lists/structure only when they genuinely help; plain prose is fine. Match length to the substance, terse when simple and fuller when it's not.
 
-I keep a personal Knowledge Base served by the Exomem MCP. If no Exomem skill is loaded, call bootstrap(profile="compact") once at the start of a new chat and follow it. Exomem prominence: BALANCED. Use Exomem proactively: search first when a turn touches my projects, notes, decisions, or domains (cite what you find; an empty search is a gap, not a dead end). Do not search on unrelated chit-chat, small control prompts, or follow-ups where the current conversation already has the needed KB evidence. Capture durable conclusions on your own — a decision, solved problem, diagnosed failure, or recognized pattern — as a short compiled note, not a transcript, then report one line: "Saved -> <path>". Ask before saving only if type/scope is genuinely ambiguous. Stay quiet on chit-chat; don't narrate empty searches.
+I keep a personal Knowledge Base served by the Exomem MCP. If no Exomem skill is loaded, call bootstrap(profile="compact") once at the start of a new chat and follow it. Exomem prominence: BALANCED. Use Exomem proactively: search first when a turn touches my projects, notes, decisions, or domains (cite what you find; an empty search is a gap, not a dead end). Do not search on unrelated chit-chat, small control prompts, or follow-ups where the current conversation already has the needed KB evidence. Capture durable conclusions on your own — a decision, solved problem, diagnosed failure, recognized pattern, or stable preference, recurring routine, historical baseline, or durable affiliation when stability or recurrence and reusable comparison, interpretation, or decision value are clear. Route a uniquely resolved Entity facet there; otherwise write one concise compiled observation; an observed measurement uses only compatible existing Records. Fleeting preferences, one-off activity, incidental associations, trivial metrics, and tentative claims stay quiet. Save a short compiled note, not a transcript, then report one line: "Saved -> <path>". Ask before saving only if type/scope is genuinely ambiguous. Stay quiet on chit-chat; don't narrate empty searches.
 ```
 
 The first paragraph is general response style (trim to taste); the second is the KB

@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "family": "durable-personal-baselines",
+  "cases": [
+    {
+      "id": "stable-preference-entity",
+      "class": "stable_preference",
+      "stability_or_recurrence": true,
+      "reusable_comparison_value": true,
+      "route": "entity",
+      "summary": "A long-held preference belongs to one uniquely resolved entity."
+    },
+    {
+      "id": "fleeting-preference-quiet",
+      "class": "stable_preference",
+      "stability_or_recurrence": false,
+      "reusable_comparison_value": true,
+      "route": "no_write",
+      "summary": "A preference limited to today remains quiet."
+    },
+    {
+      "id": "recurring-routine-compiled-observation",
+      "class": "recurring_routine",
+      "stability_or_recurrence": true,
+      "reusable_comparison_value": true,
+      "route": "compiled_observation",
+      "summary": "A repeated routine has future interpretive value without one entity owner."
+    },
+    {
+      "id": "one-off-routine-quiet",
+      "class": "recurring_routine",
+      "stability_or_recurrence": false,
+      "reusable_comparison_value": true,
+      "route": "no_write",
+      "summary": "One activity does not establish a routine."
+    },
+    {
+      "id": "historical-baseline-records",
+      "class": "historical_baseline",
+      "stability_or_recurrence": true,
+      "reusable_comparison_value": true,
+      "route": "records",
+      "summary": "An observed measurement uses an already compatible Records collection."
+    },
+    {
+      "id": "mundane-metric-quiet",
+      "class": "historical_baseline",
+      "stability_or_recurrence": true,
+      "reusable_comparison_value": false,
+      "route": "no_write",
+      "summary": "An isolated mundane metric has no reusable comparison value."
+    },
+    {
+      "id": "durable-affiliation-entity",
+      "class": "durable_affiliation",
+      "stability_or_recurrence": true,
+      "reusable_comparison_value": true,
+      "route": "entity",
+      "summary": "An enduring affiliation belongs to one uniquely resolved entity."
+    },
+    {
+      "id": "incidental-affiliation-quiet",
+      "class": "durable_affiliation",
+      "stability_or_recurrence": false,
+      "reusable_comparison_value": false,
+      "route": "no_write",
+      "summary": "An incidental association or tentative membership remains quiet."
+    }
+  ],
+  "separate_executed_method_cases": [
+    "executed-method-positive",
+    "executed-method-failure",
+    "executed-method-parameter-boundary",
+    "executed-method-unreusable-one-off"
+  ]
+}

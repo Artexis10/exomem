@@ -407,6 +407,19 @@ def op_bootstrap(
 
     compute_policy = mode_module.resolved()
     engagement_policy = prominence_module.resolved()
+    if profile == "compact":
+        # The full prominence prose remains available from the full and diagnostics
+        # projections. Keep this command-free predicate in compact so all three
+        # projections teach the new class without spending the compact budget twice
+        # on adjacent lifecycle doctrine carried by their dedicated contracts.
+        engagement_policy["contract"]["capture"] = (
+            "Capture a stable preference, recurring routine, historical baseline, or durable "
+            "affiliation only when stable/recurrent and of reusable comparison, interpretation, "
+            "or decision value. A uniquely resolved Entity gets facet/affiliation; otherwise "
+            "concise compiled observation; only compatible existing Records gets observed "
+            "measurement. Fleeting preference, one-off activity, incidental association, trivia, "
+            "tentative claim stay quiet."
+        )
     # The delegation envelope rides INSIDE the engagement block rather than beside
     # it: prominence sets its defaults, so a client reading one without the other
     # would learn how eager Exomem is without learning what it is allowed to do on
