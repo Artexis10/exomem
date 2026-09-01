@@ -232,6 +232,7 @@ def resolve_for_find(
             entities=tuple(registry.values()),
             edges=edges,
             anchor_cap=anchor_cap,
+            registry=type_registry,
         )
         block = resolution.as_dict()
         if not block["resolved"] and not block["candidates"] and cue.expected_count is None:

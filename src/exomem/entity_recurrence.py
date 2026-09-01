@@ -39,11 +39,17 @@ Two known v1 trades, recorded rather than hidden:
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+import hashlib
+import json
+import re
+import unicodedata
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from types import MappingProxyType
 from typing import Any
 
+from . import markdown_relations
 from .entity_candidates import _aliases as alias_values
 from .entity_candidates import identity_key
 from .entity_types import EntityTypeRegistry
@@ -52,6 +58,7 @@ from .vault import (
     AmbiguousWikilinkError,
     UnresolvedWikilinkError,
     WikilinkResolver,
+    _mask_code_spans,
     find_body_wikilinks,
     normalize_wikilink,
 )
@@ -61,6 +68,156 @@ from .vault import (
 #: the same shape every other registered category uses.
 KIND = "entity_recurrence"
 REASON_UNRESOLVED_IDENTITY_RECURS = "unresolved_identity_recurs"
+REASON_ORDINARY_IDENTITY_RECURS = "ordinary_identity_recurs"
+GRAMMAR_VERSION = "identity-frames-v1"
+
+# The table is deliberately data rather than parser branches with invented IDs.
+# Canonical bytes are sorted ``frame<TAB>token<TAB>id`` rows and the digest is
+# returned with every ordinary-text finding. Adding one row therefore changes
+# detector identity even if a caller never exercises the new token.
+_COPULAS = {
+    "are": "copula.are",
+    "is": "copula.is",
+    "was": "copula.was",
+    "were": "copula.were",
+}
+_LABEL_DELIMITERS = {":": "label.colon", "—": "label.em_dash"}
+_RELATIONS = {
+    "member of": "membership.member_of",
+    "members of": "membership.members_of",
+    "joined": "membership.joined",
+    "belongs to": "membership.belongs_to",
+    "belong to": "membership.belong_to",
+    "works at": "work.works_at",
+    "work at": "work.work_at",
+    "works with": "work.works_with",
+    "work with": "work.work_with",
+    "uses": "use.uses",
+    "use": "use.use",
+    "attends": "attendance.attends",
+    "attend": "attendance.attend",
+    "lives in": "location.lives_in",
+    "live in": "location.live_in",
+    "based in": "location.based_in",
+    "buys from": "commerce.buys_from",
+    "buy from": "commerce.buy_from",
+    "maintains": "stewardship.maintains",
+    "maintain": "stewardship.maintain",
+    "builds": "stewardship.builds",
+    "build": "stewardship.build",
+    "organises": "stewardship.organises",
+    "organise": "stewardship.organise",
+    "organizes": "stewardship.organizes",
+    "organize": "stewardship.organize",
+}
+_BODY_FIELDS = {
+    "member of": "field.membership",
+    "membership": "field.membership",
+    "affiliation": "field.membership",
+    "works at": "field.work_at",
+    "works with": "field.work_with",
+    "uses": "field.uses",
+    "attends": "field.attends",
+    "location": "field.location",
+    "based in": "field.location",
+    "buys from": "field.buys_from",
+    "maintains": "field.maintains",
+    "builds": "field.builds",
+    "organises": "field.organises",
+    "organizes": "field.organises",
+}
+PREDICATE_TABLE: Mapping[str, Mapping[str, str]] = MappingProxyType(
+    {
+        "body-field": MappingProxyType(_BODY_FIELDS),
+        "relation": MappingProxyType(_RELATIONS),
+        "typed-copula": MappingProxyType(_COPULAS),
+        "typed-label": MappingProxyType(_LABEL_DELIMITERS),
+    }
+)
+PREDICATE_TABLE_BYTES = "\n".join(
+    f"{frame}\t{token}\t{predicate_id}"
+    for frame, values in sorted(PREDICATE_TABLE.items())
+    for token, predicate_id in sorted(values.items())
+).encode("utf-8")
+PREDICATE_TABLE_DIGEST = hashlib.sha256(PREDICATE_TABLE_BYTES).hexdigest()
+
+ORDINARY_MIN_ORIGINS = 3
+ORDINARY_MIN_FACETS = 2
+MAX_CONTEXT_SAMPLES = 8
+MAX_FACET_SAMPLES = 8
+MAX_ORIGIN_SAMPLES = 8
+HYDRATION_BATCH_SIZE = 8
+
+_SPAN_STOPWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "as",
+        "at",
+        "be",
+        "by",
+        "for",
+        "from",
+        "he",
+        "her",
+        "hers",
+        "him",
+        "his",
+        "i",
+        "in",
+        "it",
+        "its",
+        "me",
+        "my",
+        "of",
+        "on",
+        "our",
+        "ours",
+        "she",
+        "that",
+        "the",
+        "their",
+        "theirs",
+        "them",
+        "they",
+        "this",
+        "to",
+        "us",
+        "we",
+        "with",
+        "you",
+        "your",
+        "yours",
+    }
+)
+_PRONOUNS = frozenset(
+    {
+        "he",
+        "her",
+        "hers",
+        "him",
+        "his",
+        "i",
+        "it",
+        "its",
+        "me",
+        "my",
+        "our",
+        "ours",
+        "she",
+        "their",
+        "theirs",
+        "them",
+        "they",
+        "this",
+        "us",
+        "we",
+        "you",
+        "your",
+        "yours",
+    }
+)
 
 # ---------------------------------------------------------------------------
 # PROVISIONAL thresholds.
@@ -130,6 +287,8 @@ class RegistryEntry:
     identities: frozenset[str]
     #: The identity tokens of all of those names, for the lexical assist.
     tokens: frozenset[str]
+    entity_type: str
+    entity_family: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,6 +301,10 @@ class RegistryIndex:
     def resolves(self, identity: str) -> bool:
         """Whether the registry already answers to this identity (design D2.3)."""
         return identity in self.identities
+
+    def matches(self, identity: str) -> tuple[RegistryEntry, ...]:
+        """All active exact title/alias matches, in stable path order."""
+        return tuple(entry for entry in self.entries if identity in entry.identities)
 
     def near_matches(self, identity: str) -> tuple[dict[str, Any], ...]:
         """Bounded, deterministic registry entries sharing an identity token.
@@ -169,6 +332,10 @@ class RegistryIndex:
             for _count, entry in scored[:MAX_NEAR_MATCHES]
         )
 
+    def near_match_count(self, identity: str) -> int:
+        wanted = identity_tokens(identity)
+        return sum(bool(entry.tokens & wanted) for entry in self.entries) if wanted else 0
+
 
 @dataclass(frozen=True, slots=True)
 class Candidate:
@@ -179,11 +346,74 @@ class Candidate:
     candidate: str
     pages: tuple[str, ...]
     near_matches: tuple[dict[str, Any], ...]
+    near_match_count: int = 0
+    page_count: int = 0
+    state: str = "promotion"
+    reasons: tuple[str, ...] = (REASON_UNRESOLVED_IDENTITY_RECURS,)
+    origins: tuple[str, ...] = ()
+    origin_count: int = 0
+    contexts: tuple[dict[str, Any], ...] = ()
+    facets: tuple[dict[str, Any], ...] = ()
+    context_count: int = 0
+    facet_count: int = 0
+    resolved_entries: tuple[RegistryEntry, ...] = ()
+    disconnected_contexts: tuple[dict[str, Any], ...] = ()
+    disconnected_context_count: int = 0
+    remaining_disconnected_count: int = 0
+    batch_fingerprint: str | None = None
+    evidence_fingerprint: str | None = None
+    signal_version: str | None = None
+    registry_fingerprint: str | None = None
+    type_cues: tuple[str, ...] = ()
+    family_cues: tuple[str, ...] = ()
+    incompatible_components: tuple[dict[str, Any], ...] = ()
 
     @property
     def anchor(self) -> str:
         """Lexicographically smallest mentioning page (design D4)."""
         return self.pages[0]
+
+
+@dataclass(frozen=True, slots=True)
+class EvidenceContext:
+    """One deterministic ordinary-text frame before bounded projection."""
+
+    identity: str
+    display: str
+    path: str
+    origin: str
+    frame_type: str
+    predicate_id: str
+    cue: str
+    resolved_anchor: str | None
+    type_cues: tuple[str, ...]
+    family_cues: tuple[str, ...]
+    clause_skeleton: str
+    facet_hash: str
+    context_hash: str
+    excerpt: str
+    registry_fingerprint: str
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "identity": self.identity,
+            "display": self.display,
+            "path": self.path,
+            "origin": self.origin,
+            "frame_type": self.frame_type,
+            "predicate_id": self.predicate_id,
+            "cue": self.cue,
+            "resolved_entity_ref": self.resolved_anchor,
+            "type_cues": list(self.type_cues),
+            "family_cues": list(self.family_cues),
+            "clause_skeleton": self.clause_skeleton,
+            "facet_hash": self.facet_hash,
+            "context_hash": self.context_hash,
+            "excerpt": self.excerpt,
+            "grammar_version": GRAMMAR_VERSION,
+            "predicate_table_digest": PREDICATE_TABLE_DIGEST,
+            "registry_fingerprint": self.registry_fingerprint,
+        }
 
 
 def identity_tokens(value: str) -> frozenset[str]:
@@ -276,7 +506,8 @@ def registry_index(
             continue
         if str(frontmatter.get("status") or "").casefold() != "active":
             continue
-        if entity_types.resolve(str(frontmatter.get("entity_type") or "")) is None:
+        definition = entity_types.resolve(str(frontmatter.get("entity_type") or ""))
+        if definition is None:
             continue
         title = str(frontmatter.get("title") or Path(rel_path).stem).strip()
         names = (title, *alias_values(frontmatter.get("aliases")))
@@ -289,6 +520,8 @@ def registry_index(
                 title=title,
                 identities=identities,
                 tokens=frozenset().union(*(identity_tokens(n) for n in names)),
+                entity_type=definition.id,
+                entity_family=entity_types.family_of(definition.id) or definition.id,
             )
         )
     entries.sort(key=lambda entry: entry.path)
@@ -312,100 +545,700 @@ def counts_as_evidence(page: Any, *, indexable: bool) -> bool:
     return (page.status or "").casefold() not in INELIGIBLE_STATUSES
 
 
+def _digest(value: object) -> str:
+    payload = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _origin_ref(page: Any) -> str:
+    """Collapse derivatives of one authored Source onto one origin key."""
+
+    def _strings(value: object) -> list[str]:
+        if isinstance(value, str):
+            return [value]
+        if isinstance(value, list):
+            return [item for raw in value for item in _strings(raw)]
+        return []
+
+    source_refs: list[str] = []
+    for raw in _strings(page.frontmatter.get("sources")):
+        links = re.findall(r"\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]", raw)
+        source_refs.extend(links or [raw])
+    normalized_sources = sorted(
+        {identity_key(value.strip().removesuffix(".md")) for value in source_refs}
+        - {""}
+    )
+    if normalized_sources:
+        # A context cannot attribute one clause among several cited Sources.
+        # Binding the complete sorted set avoids pretending it can, while still
+        # collapsing two derivatives with the same provenance declaration.
+        return "source:" + _digest(normalized_sources)
+    for key in ("session_ref", "session", "conversation_ref", "thread_ref"):
+        value = identity_key(page.frontmatter.get(key))
+        if value:
+            return f"session:{value}"
+    return f"page:{identity_key(page.rel_path)}"
+
+
+def _cue_snapshot(
+    registry: EntityTypeRegistry,
+) -> dict[str, tuple[tuple[str, str], ...]]:
+    """Exact normalized cue noun -> deterministic (leaf, family) pairs."""
+    cues: dict[str, set[tuple[str, str]]] = {}
+    for definition in registry.active_definitions:
+        family = registry.family_of(definition.id) or definition.id
+        for raw in definition.cue_nouns:
+            cue = identity_key(raw)
+            if cue:
+                cues.setdefault(cue, set()).add((definition.id, family))
+    return {cue: tuple(sorted(values)) for cue, values in sorted(cues.items())}
+
+
+def _markdown_text(body: str) -> str:
+    """Mask code and expose link display text without exposing link targets."""
+    text = _mask_code_spans(body)
+
+    def _wikilink(match: re.Match[str]) -> str:
+        raw = match.group(1)
+        target, separator, display = raw.partition("|")
+        visible = display if separator else target.split("#", 1)[0].rsplit("/", 1)[-1]
+        return visible.strip()
+
+    text = re.sub(r"\[\[([^\[\]\n]+)\]\]", _wikilink, text)
+    # The visible label is ordinary prose; the Markdown target is never a span.
+    text = re.sub(r"\[([^\]\n]+)\]\([^\)\n]+\)", r"\1", text)
+    return unicodedata.normalize("NFKC", text)
+
+
+def _span_tokens(value: str) -> tuple[str, ...]:
+    tokens: list[str] = []
+    current: list[str] = []
+    for char in value:
+        if unicodedata.category(char)[:1] in {"L", "M", "N"}:
+            current.append(char)
+        elif current:
+            tokens.append("".join(current))
+            current = []
+    if current:
+        tokens.append("".join(current))
+    return tuple(tokens)
+
+
+def _valid_span(value: str, *, cue_nouns: frozenset[str]) -> str | None:
+    """Return the exact v1 candidate display span, or reject it categorically."""
+    normalized = unicodedata.normalize("NFKC", value).strip()
+    if not normalized or len(normalized.encode("utf-8")) not in range(2, 129):
+        return None
+    if "  " in normalized or any(char.isspace() and char != " " for char in normalized):
+        return None
+    allowed_separators = {" ", "-", "'", "’", "&"}
+    if any(
+        unicodedata.category(char)[:1] not in {"L", "M", "N"}
+        and char not in allowed_separators
+        for char in normalized
+    ):
+        return None
+    if normalized[0] in allowed_separators or normalized[-1] in allowed_separators:
+        return None
+    if any(
+        normalized[index] in allowed_separators
+        and normalized[index + 1] in allowed_separators
+        for index in range(len(normalized) - 1)
+    ):
+        return None
+    tokens = _span_tokens(normalized)
+    if not 1 <= len(tokens) <= 8:
+        return None
+    folded_tokens = tuple(identity_key(token) for token in tokens)
+    if all(not any(unicodedata.category(char)[:1] in {"L", "M"} for char in token) for token in tokens):
+        return None
+    if set(folded_tokens) <= _PRONOUNS or set(folded_tokens) <= _SPAN_STOPWORDS:
+        return None
+    folded = identity_key(normalized)
+    if folded in cue_nouns:
+        return None
+    if re.fullmatch(r"\d{4}-\d{1,2}-\d{1,2}", folded):
+        return None
+    if re.fullmatch(r"\d{1,2}:\d{2}(?::\d{2})?", folded):
+        return None
+    if "://" in folded or "@" in folded or "/" in folded or "\\" in folded:
+        return None
+    return normalized
+
+
+def _context(
+    *,
+    display: str,
+    path: str,
+    origin: str,
+    frame_type: str,
+    predicate_id: str,
+    cue: str,
+    resolved_anchor: str | None,
+    type_cues: tuple[str, ...],
+    family_cues: tuple[str, ...],
+    skeleton: str,
+    excerpt: str,
+    registry_fingerprint: str,
+) -> EvidenceContext:
+    identity = identity_key(display)
+    facet_value = (
+        GRAMMAR_VERSION,
+        frame_type,
+        predicate_id,
+        cue if resolved_anchor is None else resolved_anchor,
+        skeleton,
+    )
+    facet_hash = _digest(facet_value)
+    return EvidenceContext(
+        identity=identity,
+        display=display,
+        path=path,
+        origin=origin,
+        frame_type=frame_type,
+        predicate_id=predicate_id,
+        cue=cue,
+        resolved_anchor=resolved_anchor,
+        type_cues=type_cues,
+        family_cues=family_cues,
+        clause_skeleton=skeleton,
+        facet_hash=facet_hash,
+        # Copies of one material facet on one page are one context. Punctuation,
+        # excerpt spelling, and scan order therefore cannot move signal identity.
+        context_hash=_digest((identity, path, origin, facet_hash)),
+        excerpt=excerpt[:240],
+        registry_fingerprint=registry_fingerprint,
+    )
+
+
+def extract_identity_frames(
+    body: str,
+    *,
+    path: str,
+    origin: str,
+    entity_types: EntityTypeRegistry,
+    registry: RegistryIndex,
+) -> tuple[EvidenceContext, ...]:
+    """Extract only the five closed ``identity-frames-v1`` frame shapes."""
+    cue_snapshot = _cue_snapshot(entity_types)
+    cue_nouns = frozenset(cue_snapshot)
+    if not cue_nouns and not registry.entries:
+        return ()
+    cue_pattern = "|".join(
+        re.escape(value) for value in sorted(cue_snapshot, key=lambda item: (-len(item), item))
+    )
+    anchor_entries: dict[str, list[RegistryEntry]] = {}
+    for entry in registry.entries:
+        for name in entry.identities:
+            anchor_entries.setdefault(name, []).append(entry)
+    resolved_anchors = {
+        name: values[0]
+        for name, values in anchor_entries.items()
+        if len(values) == 1
+    }
+    anchor_pattern = "|".join(
+        re.escape(value)
+        for value in sorted(resolved_anchors, key=lambda item: (-len(item), item))
+    )
+    relation_pattern = "|".join(
+        re.escape(value) for value in sorted(_RELATIONS, key=lambda item: (-len(item), item))
+    )
+    field_pattern = "|".join(
+        re.escape(value) for value in sorted(_BODY_FIELDS, key=lambda item: (-len(item), item))
+    )
+    text = _markdown_text(body)
+    found: dict[tuple[str, str, str], EvidenceContext] = {}
+
+    def add(
+        raw_span: str,
+        *,
+        frame_type: str,
+        predicate_id: str,
+        cue: str,
+        resolved_anchor: str | None = None,
+        type_cues: tuple[str, ...] = (),
+        family_cues: tuple[str, ...] = (),
+        skeleton: str,
+        excerpt: str,
+    ) -> None:
+        display = _valid_span(raw_span, cue_nouns=cue_nouns)
+        if display is None:
+            return
+        row = _context(
+            display=display,
+            path=path,
+            origin=origin,
+            frame_type=frame_type,
+            predicate_id=predicate_id,
+            cue=cue,
+            resolved_anchor=resolved_anchor,
+            type_cues=type_cues,
+            family_cues=family_cues,
+            skeleton=skeleton,
+            excerpt=" ".join(excerpt.split()),
+            registry_fingerprint=entity_types.fingerprint,
+        )
+        found[(row.identity, row.path, row.facet_hash)] = row
+
+    for raw_line in text.splitlines():
+        line = re.sub(r"^\s*(?:[-*+]\s+|>\s*)?", "", raw_line).strip()
+        if not line or line.startswith("#"):
+            continue
+        # body-field owns comma separation; ordinary clauses use comma as a stop.
+        field = re.fullmatch(
+            rf"(?P<label>{field_pattern})\s*:\s*(?P<values>.+?)\s*[.;!?]?",
+            line,
+            flags=re.IGNORECASE,
+        )
+        if field is not None:
+            label = identity_key(field.group("label"))
+            predicate_id = _BODY_FIELDS[label]
+            for candidate in field.group("values").split(","):
+                clean = candidate.strip().rstrip(".;:!?").strip()
+                add(
+                    clean,
+                    frame_type="body-field",
+                    predicate_id=predicate_id,
+                    cue=label,
+                    skeleton=f"{label}: <identity>",
+                    excerpt=line,
+                )
+            continue
+
+        clauses = [part.strip() for part in re.split(r"[.,;!?]+", line) if part.strip()]
+        for clause in clauses:
+            if cue_pattern:
+                copula = re.fullmatch(
+                    rf"(?P<candidate>.+?)\s+(?P<copula>is|was|are|were)\s+"
+                    rf"(?:(?:a|an|the)\s+)?(?P<cue>{cue_pattern})",
+                    clause,
+                    flags=re.IGNORECASE,
+                )
+                if copula is not None:
+                    cue = identity_key(copula.group("cue"))
+                    pairs = cue_snapshot[cue]
+                    copula_token = identity_key(copula.group("copula"))
+                    add(
+                        copula.group("candidate"),
+                        frame_type="typed-copula",
+                        predicate_id=_COPULAS[copula_token],
+                        cue=cue,
+                        type_cues=tuple(item[0] for item in pairs),
+                        family_cues=tuple(sorted({item[1] for item in pairs})),
+                        skeleton=f"<identity> {copula_token} {cue}",
+                        excerpt=clause,
+                    )
+
+                label = re.fullmatch(
+                    rf"(?P<cue>{cue_pattern})\s*(?P<delimiter>:|—)\s*(?P<candidate>.+)",
+                    clause,
+                    flags=re.IGNORECASE,
+                )
+                if label is not None:
+                    cue = identity_key(label.group("cue"))
+                    pairs = cue_snapshot[cue]
+                    delimiter = label.group("delimiter")
+                    add(
+                        label.group("candidate"),
+                        frame_type="typed-label",
+                        predicate_id=_LABEL_DELIMITERS[delimiter],
+                        cue=cue,
+                        type_cues=tuple(item[0] for item in pairs),
+                        family_cues=tuple(sorted({item[1] for item in pairs})),
+                        skeleton=f"{cue} {delimiter} <identity>",
+                        excerpt=clause,
+                    )
+
+            subject_options = "i|we" + (f"|{anchor_pattern}" if anchor_pattern else "")
+            subject = re.fullmatch(
+                rf"(?P<subject>{subject_options})\s+(?P<predicate>{relation_pattern})\s+"
+                rf"(?P<candidate>.+)",
+                clause,
+                flags=re.IGNORECASE,
+            )
+            if subject is not None:
+                subject_name = identity_key(subject.group("subject"))
+                anchor = resolved_anchors.get(subject_name)
+                anchor_ref = anchor.path if anchor is not None else None
+                predicate = identity_key(subject.group("predicate"))
+                cue = anchor_ref or subject_name
+                add(
+                    subject.group("candidate"),
+                    frame_type="subject-relation",
+                    predicate_id=_RELATIONS[predicate],
+                    cue=cue,
+                    resolved_anchor=anchor_ref,
+                    skeleton=f"{cue} {predicate} <identity>",
+                    excerpt=clause,
+                )
+
+            if anchor_pattern:
+                object_frame = re.fullmatch(
+                    rf"(?P<candidate>.+?)\s+(?P<predicate>{relation_pattern})\s+"
+                    rf"(?P<object>{anchor_pattern})",
+                    clause,
+                    flags=re.IGNORECASE,
+                )
+                if object_frame is not None:
+                    object_name = identity_key(object_frame.group("object"))
+                    anchor = resolved_anchors[object_name]
+                    predicate = identity_key(object_frame.group("predicate"))
+                    add(
+                        object_frame.group("candidate"),
+                        frame_type="identity-relation",
+                        predicate_id=_RELATIONS[predicate],
+                        cue=anchor.path,
+                        resolved_anchor=anchor.path,
+                        skeleton=f"<identity> {predicate} {anchor.path}",
+                        excerpt=clause,
+                    )
+
+    return tuple(
+        sorted(
+            found.values(),
+            key=lambda row: (
+                row.identity,
+                row.path,
+                row.frame_type,
+                row.predicate_id,
+                row.facet_hash,
+            ),
+        )
+    )
+
+
+def _qualifies(contexts: Iterable[EvidenceContext]) -> bool:
+    rows = tuple(contexts)
+    return (
+        len({row.path for row in rows}) >= SPREAD_MIN_PAGES
+        and len({row.origin for row in rows}) >= ORDINARY_MIN_ORIGINS
+        and len({row.facet_hash for row in rows}) >= ORDINARY_MIN_FACETS
+    )
+
+
+def _components(
+    contexts: tuple[EvidenceContext, ...],
+) -> tuple[tuple[EvidenceContext, ...], ...]:
+    """Insertion-invariant compatibility components for one normalized label."""
+    parent = list(range(len(contexts)))
+
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    def union(left: int, right: int) -> None:
+        left_root = find(left)
+        right_root = find(right)
+        if left_root != right_root:
+            parent[max(left_root, right_root)] = min(left_root, right_root)
+
+    first_by_key: dict[tuple[str, str], int] = {}
+    for index, row in enumerate(contexts):
+        compatibility_keys = [("facet", row.facet_hash)]
+        if row.resolved_anchor:
+            compatibility_keys.append(("anchor", row.resolved_anchor))
+        compatibility_keys.extend(("family", family) for family in row.family_cues)
+        for key in compatibility_keys:
+            previous = first_by_key.setdefault(key, index)
+            union(index, previous)
+
+    grouped: dict[int, list[EvidenceContext]] = {}
+    for index, row in enumerate(contexts):
+        grouped.setdefault(find(index), []).append(row)
+    components = [tuple(rows) for rows in grouped.values()]
+    return tuple(
+        sorted(
+            components,
+            key=lambda rows: tuple(
+                (row.path, row.context_hash) for row in rows
+            ),
+        )
+    )
+
+
+def _incompatible_components(
+    contexts: tuple[EvidenceContext, ...],
+) -> tuple[tuple[EvidenceContext, ...], ...]:
+    qualifying = tuple(component for component in _components(contexts) if _qualifies(component))
+    if len(qualifying) < 2:
+        return ()
+    for index, left in enumerate(qualifying):
+        left_families = {family for row in left for family in row.family_cues}
+        left_anchors = {row.resolved_anchor for row in left if row.resolved_anchor}
+        for right in qualifying[index + 1 :]:
+            right_families = {family for row in right for family in row.family_cues}
+            right_anchors = {row.resolved_anchor for row in right if row.resolved_anchor}
+            family_conflict = bool(
+                left_families and right_families and left_families.isdisjoint(right_families)
+            )
+            anchor_conflict = bool(
+                left_anchors and right_anchors and left_anchors.isdisjoint(right_anchors)
+            )
+            if family_conflict or anchor_conflict:
+                return qualifying
+    return ()
+
+
+def _target_dict(entry: RegistryEntry) -> dict[str, Any]:
+    return {
+        "path": entry.path,
+        "title": entry.title,
+        "entity_type": entry.entity_type,
+        "entity_family": entry.entity_family,
+    }
+
+
+def _connected(page: Any, target: RegistryEntry) -> bool:
+    identities = set(target.identities)
+    identities.add(identity_key(target.path.removesuffix(".md")))
+    identities.add(identity_key(Path(target.path).stem))
+    for match in find_body_wikilinks(page.body):
+        link = parse_link(match.group(1))
+        if link is None:
+            continue
+        if identity_key(link.name) in identities or identity_key(link.target) in identities:
+            return True
+    document = markdown_relations.parse_markdown_relations(page.body)
+    return any(
+        identity_key(relation.target) in identities
+        or identity_key(relation.target.rsplit("/", 1)[-1]) in identities
+        for relation in document.canonical_relations
+    )
+
+
 def collect(
     pages: Iterable[Any],
     *,
     vault_root: Path,
     resolver: WikilinkResolver,
     registry: RegistryIndex,
+    entity_types: EntityTypeRegistry,
     indexable: Callable[[str], bool],
     attachment_probe: Callable[[str], bool],
 ) -> list[Candidate]:
-    """One pass over already-parsed bodies; every gate of design D2 applied.
-
-    Deterministic, and I/O-free in itself: the two things that genuinely need the
-    filesystem are INJECTED rather than reached for, so this function stays unit
-    testable and the cost of each stays visible at the call site. `indexable`
-    answers the access tier of one path (cached policy state, no read).
-    `attachment_probe` answers whether an ordinary file stands at one suffixed
-    target, and it is called ONLY for identities that already cleared spread and
-    the registry — a stat for the handful of dotted names that got that far,
-    never a stat per link.
-
-    Nothing can depend on the order `pages` arrives in: the per-page map is keyed
-    by path and every emitted sequence is sorted.
-
-    Absence is never evidence, and it is enforced upstream: a page the corpus
-    parser could not read never becomes a `ParsedPage` and so never reaches this
-    function, rather than arriving as a page that appears to mention nothing.
-    """
+    """Collect legacy links and closed-frame evidence into one lifecycle row."""
+    page_rows = tuple(sorted(pages, key=lambda page: str(page.rel_path)))
     entities = entities_prefix()
     mentions: dict[str, dict[str, str]] = {}
-    #: identity -> the distinct suffixed targets written for it, kept so the
-    #: file probe can run once per surviving candidate instead of once per link.
     suffixed: dict[str, set[str]] = {}
-    for page in pages:
+    ordinary: dict[str, list[EvidenceContext]] = {}
+    pages_by_path: dict[str, Any] = {}
+    for page in page_rows:
         rel_path = str(page.rel_path)
-        # D2.4 — the registry's own cross-links measure the registry, not attention.
         if rel_path.startswith(entities):
             continue
-        # D2.5 — retired and excluded pages are not present attention.
         if not counts_as_evidence(page, indexable=indexable(rel_path)):
             continue
+        pages_by_path[rel_path] = page
         self_identities = {
             identity_key(page.title),
             identity_key(Path(rel_path).stem),
         }
+        for context in extract_identity_frames(
+            page.body,
+            path=rel_path,
+            origin=_origin_ref(page),
+            entity_types=entity_types,
+            registry=registry,
+        ):
+            if context.identity and context.identity not in self_identities:
+                ordinary.setdefault(context.identity, []).append(context)
+
         for match in find_body_wikilinks(page.body):
             link = parse_link(match.group(1))
             if link is None:
                 continue
             identity = identity_key(link.name)
-            # D2.4 — a page reaching for its own name has recurred with nobody.
             if not identity or identity in self_identities:
                 continue
-            # D2.2 — a written-down page is not an unwritten identity. The link as
-            # written decides first; failing that, the NAME it ends in, because
-            # `[[Some/Wrong/Path/Marin Osk]]` is a misfiled link to a page that
-            # exists, not evidence that nobody has written Marin Osk down.
             if page_exists(link.target, vault_root, resolver):
                 continue
             if link.name != link.target and page_exists(link.name, vault_root, resolver):
                 continue
             seen = mentions.setdefault(identity, {})
             written = seen.get(rel_path)
-            # Per-page dedup: five mentions on one page contribute one page, and
-            # the form kept is the smallest, so the display name cannot depend on
-            # which mention the scanner reached first.
             if written is None or link.name < written:
                 seen[rel_path] = link.name
             if link.suffix:
                 suffixed.setdefault(identity, set()).add(link.target)
 
     candidates: list[Candidate] = []
-    for identity in sorted(mentions):
-        by_page = mentions[identity]
-        # D2.1 — spread, the whole arithmetic of this sensor.
-        if len(by_page) < SPREAD_MIN_PAGES:
+    all_identities = set(mentions) | set(ordinary)
+    for identity in sorted(all_identities):
+        by_page = mentions.get(identity, {})
+        legacy_qualifies = len(by_page) >= SPREAD_MIN_PAGES
+        if legacy_qualifies and any(
+            attachment_probe(target) for target in sorted(suffixed.get(identity, ()))
+        ):
+            legacy_qualifies = False
+        # Preserve the legacy alias/page suppression exactly. Ordinary evidence
+        # has a different state machine and is intentionally resolved below.
+        if legacy_qualifies and registry.resolves(identity):
+            legacy_qualifies = False
+
+        rows = tuple(
+            sorted(
+                {
+                    (row.path, row.facet_hash, row.identity): row
+                    for row in ordinary.get(identity, ())
+                }.values(),
+                key=lambda row: (row.path, row.context_hash),
+            )
+        )
+        ordinary_qualifies = _qualifies(rows)
+        if not legacy_qualifies and not ordinary_qualifies:
             continue
-        # D2.3 — a resolved identity is the registry's business, not a candidate.
-        # The TITLE half is largely subsumed by the page gate above (an entity
-        # page's title is in the resolver too); what this uniquely answers for is
-        # ALIASES, which no wikilink resolver indexes.
-        if registry.resolves(identity):
+        if not ordinary_qualifies:
+            ordered = tuple(sorted(by_page))
+            candidates.append(
+                Candidate(
+                    identity=identity,
+                    candidate=by_page[ordered[0]],
+                    pages=ordered,
+                    near_matches=registry.near_matches(identity),
+                    near_match_count=registry.near_match_count(identity),
+                    signal_version=hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16],
+                )
+            )
             continue
-        # D2.2, the attachment half — last, because it is the only gate that
-        # touches the filesystem, and by here at most a handful of identities
-        # remain. A dotted name is a file only when a file is actually there.
-        if any(attachment_probe(target) for target in sorted(suffixed.get(identity, ()))):
-            continue
-        ordered = tuple(sorted(by_page))
+
+        matches = registry.matches(identity)
+        incompatible = _incompatible_components(rows)
+        if len(matches) > 1 or incompatible:
+            state = "ambiguous"
+            resolved_target: RegistryEntry | None = None
+            disconnected = rows
+        elif len(matches) == 1:
+            state = "hydration"
+            resolved_target = matches[0]
+            connected_paths = {
+                path
+                for path in {row.path for row in rows}
+                if _connected(pages_by_path[path], resolved_target)
+            }
+            disconnected = tuple(
+                row
+                for row in rows
+                if row.path not in connected_paths
+            )
+            if not disconnected:
+                continue
+        else:
+            state = "promotion"
+            resolved_target = None
+            disconnected = rows
+
+        display = min(rows, key=lambda row: (row.path, row.display)).display
+        all_page_refs = tuple(sorted({row.path for row in rows} | set(by_page)))
+        all_origins = tuple(sorted({row.origin for row in rows}))
+        facet_by_hash = {row.facet_hash: row for row in rows}
+        facets = tuple(
+            {
+                "facet_hash": facet_hash,
+                "frame_type": facet_by_hash[facet_hash].frame_type,
+                "predicate_id": facet_by_hash[facet_hash].predicate_id,
+                "cue": facet_by_hash[facet_hash].cue,
+                "resolved_entity_ref": facet_by_hash[facet_hash].resolved_anchor,
+                "clause_skeleton": facet_by_hash[facet_hash].clause_skeleton,
+            }
+            for facet_hash in sorted(facet_by_hash)[:MAX_FACET_SAMPLES]
+        )
+        disconnected_dicts = tuple(row.as_dict() for row in disconnected)
+        batch = disconnected_dicts[:HYDRATION_BATCH_SIZE]
+        target_refs = tuple(entry.path for entry in matches)
+        family_cues = tuple(sorted({value for row in rows for value in row.family_cues}))
+        type_cues = tuple(sorted({value for row in rows for value in row.type_cues}))
+        evidence_fingerprint = _digest(
+            {
+                "grammar": GRAMMAR_VERSION,
+                "predicate_table": PREDICATE_TABLE_DIGEST,
+                "registry": entity_types.fingerprint,
+                "facets": sorted(facet_by_hash),
+                "contexts": sorted(row.context_hash for row in rows),
+            }
+        )
+        signal_version = _digest(
+            {
+                "state": state,
+                "grammar": GRAMMAR_VERSION,
+                "predicate_table": PREDICATE_TABLE_DIGEST,
+                "registry": entity_types.fingerprint,
+                "facets": sorted(facet_by_hash),
+                "disconnected_contexts": sorted(
+                    row.context_hash for row in disconnected
+                ),
+                "targets": target_refs,
+                "families": family_cues,
+            }
+        )
+        batch_fingerprint = (
+            _digest(
+                {
+                    "identity": identity,
+                    "target": resolved_target.path if resolved_target else None,
+                    "contexts": [row["context_hash"] for row in batch],
+                    "signal_version": signal_version,
+                }
+            )
+            if batch
+            else None
+        )
+        component_payload = tuple(
+            {
+                "pages": sorted({row.path for row in component}),
+                "origins": sorted({row.origin for row in component}),
+                "facet_hashes": sorted({row.facet_hash for row in component}),
+                "family_cues": sorted(
+                    {family for row in component for family in row.family_cues}
+                ),
+                "resolved_entity_refs": sorted(
+                    {row.resolved_anchor for row in component if row.resolved_anchor}
+                ),
+                "component_fingerprint": _digest(
+                    sorted(row.context_hash for row in component)
+                ),
+            }
+            for component in incompatible
+        )
+        reasons = (REASON_ORDINARY_IDENTITY_RECURS,)
+        if legacy_qualifies:
+            reasons = (REASON_UNRESOLVED_IDENTITY_RECURS, *reasons)
         candidates.append(
             Candidate(
                 identity=identity,
-                candidate=by_page[ordered[0]],
-                pages=ordered,
+                candidate=display,
+                pages=all_page_refs[:MAX_CONTEXT_SAMPLES],
                 near_matches=registry.near_matches(identity),
+                near_match_count=registry.near_match_count(identity),
+                page_count=len(all_page_refs),
+                state=state,
+                reasons=reasons,
+                origins=all_origins[:MAX_ORIGIN_SAMPLES],
+                origin_count=len(all_origins),
+                contexts=tuple(row.as_dict() for row in rows[:MAX_CONTEXT_SAMPLES]),
+                facets=facets,
+                context_count=len(rows),
+                facet_count=len(facet_by_hash),
+                resolved_entries=matches,
+                disconnected_contexts=batch,
+                disconnected_context_count=len(disconnected),
+                remaining_disconnected_count=max(
+                    0, len(disconnected) - HYDRATION_BATCH_SIZE
+                ),
+                batch_fingerprint=batch_fingerprint,
+                evidence_fingerprint=evidence_fingerprint,
+                signal_version=signal_version,
+                registry_fingerprint=entity_types.fingerprint,
+                type_cues=type_cues,
+                family_cues=family_cues,
+                incompatible_components=component_payload,
             )
         )
     return candidates

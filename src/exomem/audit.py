@@ -5453,6 +5453,62 @@ def _entity_recurrence_finding(
     re-raise a dismissal (design D4, PROVISIONAL, revisit with calibration).
     """
     near = [match["title"] for match in candidate.near_matches]
+    ordinary = (
+        entity_recurrence_module.REASON_ORDINARY_IDENTITY_RECURS
+        in candidate.reasons
+    )
+    if ordinary:
+        state_detail = {
+            "promotion": "has no active exact or alias Entity match",
+            "hydration": "has one active Entity with disconnected durable contexts",
+            "ambiguous": "has several exact/alias matches or incompatible evidence components",
+        }[candidate.state]
+        detail = (
+            f"{candidate.candidate} recurs through deterministic identity frames across "
+            f"{candidate.page_count} pages and {candidate.origin_count} independent origins; "
+            f"candidate state is {candidate.state} because it {state_detail}"
+        )
+        proposed_fix = (
+            "Review the bounded categorical evidence. Resolve ambiguity before choosing "
+            "anything; promote only through the governed Entity writer, or hydrate the "
+            "single resolved Entity by connecting the returned contexts. This audit is "
+            "read-only and authors no plan or mutation."
+        )
+    else:
+        detail = (
+            f"[[{candidate.candidate}]] is linked from {len(candidate.pages)} distinct "
+            "pages and resolves to neither a page nor a registry entity"
+            + (f" (nearest registry names: {', '.join(near)})" if near else "")
+        )
+        proposed_fix = (
+            "Surfaced for REVIEW only — a count of how often the corpus reaches for "
+            "this name, not a judgment that an entity is missing. Check the "
+            "near-matches first: a recurring name is often one the registry already "
+            "holds under a different spelling, and an alias belongs on that page "
+            "rather than on a new one. If it is genuinely a new entity, creating it "
+            "is your call, as is creating the linked page itself. Nothing is "
+            "auto-created."
+        )
+    resolution_candidates = [
+        {
+            "path": entry.path,
+            "title": entry.title,
+            "entity_type": entry.entity_type,
+            "entity_family": entry.entity_family,
+            "matched_by": (
+                "title"
+                if candidate.identity
+                == entity_recurrence_module.identity_key(entry.title)
+                else "alias"
+            ),
+        }
+        for entry in candidate.resolved_entries[:8]
+    ]
+    resolved_entity = (
+        resolution_candidates[0]
+        if candidate.state == "hydration" and len(candidate.resolved_entries) == 1
+        else None
+    )
     return AuditFinding(
         category=entity_recurrence_module.KIND,
         severity="info",
@@ -5464,22 +5520,10 @@ def _entity_recurrence_finding(
         # name again there would move the fingerprint on exactly the event v1
         # says must not re-raise a settled candidate. `attention` carries `meta`
         # into the reason payload, so the reader still sees every page.
-        detail=(
-            f"[[{candidate.candidate}]] is linked from {len(candidate.pages)} distinct "
-            "pages and resolves to neither a page nor a registry entity"
-            + (f" (nearest registry names: {', '.join(near)})" if near else "")
-        ),
-        proposed_fix=(
-            "Surfaced for REVIEW only — a count of how often the corpus reaches for "
-            "this name, not a judgment that an entity is missing. Check the "
-            "near-matches first: a recurring name is often one the registry already "
-            "holds under a different spelling, and an alias belongs on that page "
-            "rather than on a new one. If it is genuinely a new entity, creating it "
-            "is your call, as is creating the linked page itself. Nothing is "
-            "auto-created."
-        ),
+        detail=detail,
+        proposed_fix=proposed_fix,
         meta={
-            "reasons": [entity_recurrence_module.REASON_UNRESOLVED_IDENTITY_RECURS],
+            "reasons": list(candidate.reasons),
             "candidate": candidate.candidate,
             "identity": candidate.identity,
             # Two identities recurring across the same corpus routinely share an
@@ -5493,9 +5537,76 @@ def _entity_recurrence_finding(
             # `bridge_review` and `unreflected_outcomes` already use.
             "review_partition": candidate.identity,
             "pages": list(candidate.pages),
-            "page_count": len(candidate.pages),
+            "page_count": candidate.page_count or len(candidate.pages),
+            "pages_truncated": max(
+                0, (candidate.page_count or len(candidate.pages)) - len(candidate.pages)
+            ),
             "near_matches": [dict(match) for match in candidate.near_matches],
-            "signal_version": content_hash(candidate.identity)[:16],
+            "near_match_count": candidate.near_match_count,
+            "near_matches_truncated": max(
+                0, candidate.near_match_count - len(candidate.near_matches)
+            ),
+            "candidate_state": candidate.state,
+            "origins": list(candidate.origins),
+            "origin_count": candidate.origin_count,
+            "origins_truncated": max(
+                0, candidate.origin_count - len(candidate.origins)
+            ),
+            "contexts": [dict(context) for context in candidate.contexts],
+            "context_count": candidate.context_count if ordinary else len(candidate.pages),
+            "contexts_truncated": max(
+                0, candidate.context_count - len(candidate.contexts)
+            ),
+            "material_facets": [dict(facet) for facet in candidate.facets],
+            "facet_count": candidate.facet_count if ordinary else 0,
+            "facets_truncated": max(
+                0, candidate.facet_count - len(candidate.facets)
+            ),
+            "type_cues": list(candidate.type_cues),
+            "active_type_cues": list(candidate.type_cues),
+            "unresolved_type_cues": [],
+            "entity_families": list(candidate.family_cues),
+            "role_or_membership_language": sorted(
+                {
+                    str(facet.get("predicate_id"))
+                    for facet in candidate.facets
+                    if str(facet.get("predicate_id") or "").startswith(
+                        ("membership.", "work.", "attendance.", "field.membership")
+                    )
+                }
+            ),
+            "co_occurring_resolved_entities": sorted(
+                {
+                    str(context.get("resolved_entity_ref"))
+                    for context in candidate.contexts
+                    if context.get("resolved_entity_ref")
+                }
+            ),
+            "resolution_candidates": resolution_candidates,
+            "omitted_resolution_candidate_count": max(
+                0, len(candidate.resolved_entries) - len(resolution_candidates)
+            ),
+            "resolved_entity": resolved_entity,
+            "incompatible_components": [
+                dict(component) for component in candidate.incompatible_components
+            ],
+            "disconnected_contexts": [
+                dict(context) for context in candidate.disconnected_contexts
+            ],
+            "disconnected_context_count": candidate.disconnected_context_count,
+            "remaining_disconnected_count": candidate.remaining_disconnected_count,
+            "batch_fingerprint": candidate.batch_fingerprint,
+            "grammar_version": (
+                entity_recurrence_module.GRAMMAR_VERSION if ordinary else None
+            ),
+            "predicate_table_digest": (
+                entity_recurrence_module.PREDICATE_TABLE_DIGEST if ordinary else None
+            ),
+            "registry_fingerprint": candidate.registry_fingerprint,
+            "evidence_fingerprint": candidate.evidence_fingerprint,
+            "signal_version": (
+                candidate.signal_version or content_hash(candidate.identity)[:16]
+            ),
         },
     )
 
@@ -5562,8 +5673,9 @@ def _check_entity_recurrence(
     resolver = vault_module.WikilinkResolver.from_entries(
         vault_root, _entity_recurrence_resolution_entries(vault_root, pages).items()
     )
+    entity_types = entity_types_module.load_entity_types(vault_root)
     registry = entity_recurrence_module.registry_index(
-        pages, entity_types=entity_types_module.load_entity_types(vault_root)
+        pages, entity_types=entity_types
     )
 
     def attachment_probe(target: str) -> bool:
@@ -5585,6 +5697,7 @@ def _check_entity_recurrence(
             vault_root=vault_root,
             resolver=resolver,
             registry=registry,
+            entity_types=entity_types,
             indexable=lambda rel_path: access.is_indexable(vault_root, rel_path),
             attachment_probe=attachment_probe,
         )

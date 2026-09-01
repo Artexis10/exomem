@@ -188,6 +188,7 @@ class EntityRecord:
     title: str
     entity_type: str
     status: str
+    entity_family: str | None = None
     aliases: tuple[str, ...] = ()
     tags: tuple[str, ...] = ()
     relationship: str = ""
@@ -233,6 +234,7 @@ class ReferentMatch:
     title: str
     entity_type: str
     evidence: tuple[Evidence, ...]
+    entity_family: str | None = None
     ref: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
@@ -242,6 +244,8 @@ class ReferentMatch:
             "entity_type": self.entity_type,
             "evidence": [item.as_dict() for item in self.evidence],
         }
+        if self.entity_family:
+            out["entity_family"] = self.entity_family
         if self.ref:
             out["ref"] = self.ref
         return out
@@ -429,6 +433,7 @@ def resolve_referents(
     entities: tuple[EntityRecord, ...] | list[EntityRecord],
     edges: tuple[EdgeFact, ...] | list[EdgeFact],
     anchor_cap: int = 10,
+    registry: EntityTypeRegistry | None = None,
 ) -> ReferentResolution:
     """Compose categorical evidence without changing recall ordering."""
     ordered_hits = tuple(sorted(hits, key=lambda item: (item.rank, item.path)))
@@ -460,7 +465,11 @@ def resolve_referents(
             continue
         evidence: list[Evidence] = []
         exact = _exact_name(cue, entity)
-        if entity.entity_type != cue.entity_type and exact is None:
+        family_matches = bool(
+            registry is not None
+            and registry.matches_family(entity.entity_type, cue.entity_type)
+        )
+        if entity.entity_type != cue.entity_type and not family_matches and exact is None:
             reasons["type_mismatch"] += 1
             continue
         if exact is not None:
@@ -526,6 +535,10 @@ def resolve_referents(
             title=entity.title,
             entity_type=entity.entity_type,
             evidence=tuple(evidence),
+            entity_family=(
+                entity.entity_family
+                or (registry.family_of(entity.entity_type) if registry is not None else None)
+            ),
             ref=entity.ref,
         )
         non_exact_kinds = {item.kind for item in evidence if item.kind != "exact_name"}

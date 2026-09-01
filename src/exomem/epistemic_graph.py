@@ -46,6 +46,7 @@ from . import (
 from . import find as find_module
 from . import vault as vault_module
 from .cli_ops import OpError
+from .entity_types import EntityTypeRegistry, load_entity_types
 from .kbdir import kb_dirname, kb_prefix
 from .markdown_relations import MarkdownRelation
 
@@ -1383,6 +1384,7 @@ class EpistemicGraphIndex:
         self.vault_root = Path(vault_root)
         self.path = sidecar_path(self.vault_root)
         self.registry = relation_registry.load_registry(self.vault_root)
+        self.entity_types = load_entity_types(self.vault_root)
         self.language_registry = semantic_language_registry.load_registry(self.vault_root)
         if mutation_coordinator is None:
             from .writer_lease import active_manager, get_manager
@@ -4027,7 +4029,11 @@ class EpistemicGraphIndex:
         if conn is None:
             return []
         try:
-            return self._nodes_from_snapshot(conn, path=path)
+            entity_types = load_entity_types(self.vault_root)
+            return [
+                _entity_family_metadata(node, entity_types)
+                for node in self._nodes_from_snapshot(conn, path=path)
+            ]
         finally:
             conn.close()
 
@@ -4129,7 +4135,7 @@ class EpistemicGraphIndex:
             source=raw,
         )
         document = state.document
-        file_node = _file_node(page, raw)
+        file_node = _file_node(page, raw, entity_types=self.entity_types)
         unit_nodes = [
             _unit_node(page, unit, state) for unit in document.units if unit.unit_ref is not None
         ]
@@ -4552,6 +4558,45 @@ class EpistemicGraphIndex:
         return RelationEdgeResult(status="available", edges=tuple(edges))
 
 
+def _entity_family_metadata(
+    node: dict[str, Any], registry: EntityTypeRegistry
+) -> dict[str, Any]:
+    """Project leaf-plus-family metadata without mutating a graph row."""
+    metadata = dict(node.get("metadata") or {})
+    if metadata.get("page_type") != "entity":
+        return node
+    definition = registry.resolve(
+        str(metadata.get("entity_type") or metadata.get("scope") or "")
+    )
+    if definition is None:
+        return node
+    projected = dict(node)
+    projected["metadata"] = {
+        **metadata,
+        "entity_type": definition.id,
+        "entity_family": registry.family_of(definition.id) or definition.id,
+    }
+    return projected
+
+
+def _matches_entity_families(
+    node: dict[str, Any] | None,
+    families: frozenset[str] | set[str],
+    registry: EntityTypeRegistry,
+) -> bool:
+    """Explicit family selector; generic graph ``node_types`` stays untouched."""
+    if not families:
+        return True
+    if node is None:
+        return False
+    metadata = node.get("metadata") or {}
+    if metadata.get("page_type") != "entity":
+        return False
+    leaf = str(metadata.get("entity_type") or metadata.get("scope") or "")
+    family = registry.family_of(leaf)
+    return family is not None and family in families
+
+
 def graph_context(
     vault_root: Path,
     *,
@@ -4563,12 +4608,14 @@ def graph_context(
     depth: int = 1,
     relation_types: list[str] | None = None,
     node_types: list[str] | None = None,
+    entity_type_families: list[str] | None = None,
     max_nodes: int = 40,
     max_edges: int = 80,
     traversal_profile: str | None = None,
 ) -> dict[str, Any]:
     """Return a bounded, read-only graph neighborhood for a path or query."""
     idx = EpistemicGraphIndex(vault_root)
+    entity_type_registry = load_entity_types(vault_root)
     profile_registry = traversal_profiles.load_profiles(vault_root, registry=idx.registry)
     profile = profile_registry.resolve(traversal_profile)
     depth = min(max(0, int(depth)), profile.max_depth, traversal_profiles.MAX_DEPTH)
@@ -4772,6 +4819,12 @@ def graph_context(
                 empty["warnings"] = [_drift_warning(drift_counts)]
             return empty
         type_filter = set(node_types or [])
+        family_filter = {
+            entity_type_registry.family_of(value) or str(value).strip().casefold()
+            for value in (entity_type_families or [])
+            if str(value).strip()
+        }
+
         seen_nodes: set[str] = {s["node_key"] for s in seeds}
         seen_edges: dict[str, dict[str, Any]] = {}
         edge_cap_hit = False
@@ -4857,6 +4910,14 @@ def graph_context(
                             endpoint_excluded = True
                 if endpoint_excluded:
                     continue
+                if family_filter and any(
+                    key not in seen_nodes
+                    and not _matches_entity_families(
+                        endpoint_nodes.get(key), family_filter, entity_type_registry
+                    )
+                    for key in (edge["src_key"], edge["dst_key"])
+                ):
+                    continue
                 if edge["edge_key"] not in seen_edges:
                     if len(seen_edges) >= max_edges:
                         edge_cap_hit = True
@@ -4883,7 +4944,7 @@ def graph_context(
                 break
             frontier = next_frontier
         nodes = [
-            node
+            _entity_family_metadata(node, entity_type_registry)
             for node in _nodes_by_keys(conn, seen_nodes)
             if _current_record(node, parent_path=str(node.get("path") or ""))
             and _recall_path_allowed(vault_root, str(node.get("path") or ""))
@@ -4939,6 +5000,7 @@ def graph_context(
                 "core_version": idx.registry.core_version,
                 "extension_hash": idx.registry.extension_hash,
                 "profile_hash": profile_registry.content_hash,
+                "entity_type_fingerprint": entity_type_registry.fingerprint,
             },
             "included_relation_families": sorted(profile.families),
             "excluded": {
@@ -5519,7 +5581,27 @@ def graph_drift(vault_root: Path) -> list[dict[str, Any]]:
     return drift
 
 
-def _file_node(page, raw_text: str) -> GraphNode:
+def _file_node(
+    page,
+    raw_text: str,
+    *,
+    entity_types: EntityTypeRegistry | None = None,
+) -> GraphNode:
+    metadata: dict[str, Any] = {
+        "page_type": page.page_type,
+        "status": page.status,
+        "scope": page.scope,
+        "origin": "file",
+    }
+    if page.page_type == "entity" and entity_types is not None:
+        definition = entity_types.resolve(str(page.frontmatter.get("entity_type") or ""))
+        if definition is not None:
+            metadata.update(
+                {
+                    "entity_type": definition.id,
+                    "entity_family": entity_types.family_of(definition.id) or definition.id,
+                }
+            )
     return GraphNode(
         node_key=_file_key(page.rel_path),
         kind="file",
@@ -5528,12 +5610,7 @@ def _file_node(page, raw_text: str) -> GraphNode:
         title=page.title,
         text=page.title or page.rel_path,
         source_hash=vault_module.content_hash(raw_text),
-        metadata={
-            "page_type": page.page_type,
-            "status": page.status,
-            "scope": page.scope,
-            "origin": "file",
-        },
+        metadata=metadata,
     )
 
 
