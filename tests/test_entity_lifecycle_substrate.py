@@ -298,6 +298,7 @@ def test_span_rejection_classes_and_maximal_span_do_not_create_candidates(
         "1 September 2026",
         "8 pm",
         "8am",
+        "8 o'clock pm",
         "1st of September 2026",
         "[[amber guild]]",
     ],
@@ -328,6 +329,32 @@ def test_determiner_cue_and_oclock_time_reject_without_hiding_real_identity() ->
     )
 
     assert [row.identity for row in rows] == ["amber guild"]
+
+
+@pytest.mark.parametrize(
+    ("rejected", "stable_identity"),
+    [
+        ("some organization", "somewhere organization"),
+        ("another organization", "another organization guild"),
+        ("quarter past eight", "quarter past eight studio"),
+        ("08h30", "08h30 studio"),
+        ("next Monday", "next monday club"),
+        ("September first 2026", "september first guild"),
+    ],
+)
+def test_structural_generic_and_datetime_rejection_preserves_stable_identities(
+    rejected: str,
+    stable_identity: str,
+) -> None:
+    rows = entity_recurrence.extract_identity_frames(
+        f"I work with {rejected}.\nI work with {stable_identity}.",
+        path="Knowledge Base/Notes/structural-rejection.md",
+        origin="page:structural-rejection",
+        entity_types=entity_types.core_registry(),
+        registry=entity_recurrence.RegistryIndex(entries=(), identities=frozenset()),
+    )
+
+    assert [row.identity for row in rows] == [stable_identity]
 
 
 def test_empty_wikilink_display_masks_with_separator_and_preserves_legacy_target(
@@ -997,6 +1024,69 @@ def test_two_independently_qualifying_incompatible_family_components_are_ambiguo
     assert len(findings) == 1
     assert findings[0].meta["candidate_state"] == "ambiguous"
     assert len(findings[0].meta["incompatible_components"]) == 2
+
+
+def test_incompatible_component_projection_has_an_exact_top_level_cap(
+    tmp_path: Path,
+) -> None:
+    for component in range(12):
+        anchor = f"Anchor {component:02d}"
+        _entity(tmp_path, f"anchor-{component:02d}", title=anchor)
+        for offset, predicate in enumerate(("works with", "uses", "attends")):
+            _note(
+                tmp_path,
+                component * 3 + offset,
+                f"shared label {predicate} {anchor}.",
+            )
+
+    findings = _findings(tmp_path)
+
+    assert len(findings) == 1
+    meta = findings[0].meta
+    assert meta["candidate_state"] == "ambiguous"
+    assert meta["incompatible_component_count"] == 12
+    assert meta["returned_incompatible_component_count"] == 8
+    assert meta["incompatible_components_truncated"] == 4
+    assert len(meta["incompatible_components"]) == 8
+    assert [
+        component["resolved_entity_refs"][0]
+        for component in meta["incompatible_components"]
+    ] == [
+        f"Knowledge Base/Entities/Organizations/anchor-{index:02d}.md"
+        for index in range(8)
+    ]
+
+
+def test_incompatible_component_provenance_has_exact_nested_caps(
+    tmp_path: Path,
+) -> None:
+    _entity(tmp_path, "anchor-a", title="Anchor A")
+    _entity(tmp_path, "anchor-b", title="Anchor B")
+    predicates = list(entity_recurrence.PREDICATE_TABLE["relation"])[:18]
+    for index, predicate in enumerate(predicates):
+        _note(tmp_path, index, f"shared label {predicate} Anchor A.")
+        _note(tmp_path, index + 18, f"Anchor A {predicate} shared label.")
+    for offset, predicate in enumerate(("works with", "uses", "attends")):
+        _note(tmp_path, 36 + offset, f"shared label {predicate} Anchor B.")
+
+    findings = _findings(tmp_path)
+
+    assert len(findings) == 1
+    meta = findings[0].meta
+    assert meta["candidate_state"] == "ambiguous"
+    component = meta["incompatible_components"][0]
+    assert component["page_count"] == 36
+    assert component["returned_page_count"] == len(component["pages"]) == 8
+    assert component["pages_truncated"] == 28
+    assert component["origin_count"] == 36
+    assert component["returned_origin_count"] == len(component["origins"]) == 8
+    assert component["origins_truncated"] == 28
+    assert component["facet_count"] == 36
+    assert component["returned_facet_count"] == len(component["facet_hashes"]) == 8
+    assert component["facets_truncated"] == 28
+    assert component["resolved_entity_ref_count"] == 1
+    assert component["returned_resolved_entity_ref_count"] == 1
+    assert component["resolved_entity_refs_truncated"] == 0
 
 
 def test_small_incompatible_fragment_does_not_weaken_component_gate(

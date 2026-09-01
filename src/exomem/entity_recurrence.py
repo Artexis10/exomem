@@ -147,6 +147,8 @@ MAX_CONTEXT_SAMPLES = 8
 MAX_FACET_SAMPLES = 8
 MAX_ORIGIN_SAMPLES = 8
 HYDRATION_BATCH_SIZE = 8
+MAX_INCOMPATIBLE_COMPONENT_SAMPLES = 8
+MAX_COMPONENT_VALUE_SAMPLES = 8
 
 _SPAN_STOPWORDS = frozenset(
     {
@@ -218,24 +220,52 @@ _PRONOUNS = frozenset(
         "yours",
     }
 )
-_ARTICLES = frozenset({"a", "an", "the"})
-_DETERMINERS = frozenset(
+_GENERIC_CUE_PREFIXES = frozenset(
     {
-        *_ARTICLES,
+        "a",
+        "all",
+        "an",
+        "another",
+        "any",
+        "both",
+        "each",
+        "either",
+        "enough",
+        "every",
+        "few",
+        "fewer",
         "her",
         "his",
         "its",
+        "less",
+        "little",
+        "many",
+        "more",
+        "most",
+        "much",
         "my",
+        "neither",
+        "no",
+        "other",
         "our",
+        "several",
+        "some",
+        "such",
         "that",
+        "the",
         "their",
         "these",
         "this",
         "those",
+        "what",
+        "whatever",
+        "which",
+        "whichever",
+        "whose",
         "your",
     }
 )
-_MONTHS = frozenset(
+_MONTH_TOKENS = frozenset(
     {
         "january",
         "february",
@@ -263,7 +293,7 @@ _MONTHS = frozenset(
         "dec",
     }
 )
-_WEEKDAYS = frozenset(
+_WEEKDAY_TOKENS = frozenset(
     {
         "monday",
         "tuesday",
@@ -272,6 +302,60 @@ _WEEKDAYS = frozenset(
         "friday",
         "saturday",
         "sunday",
+    }
+)
+_RELATIVE_DATE_PREFIXES = frozenset({"coming", "last", "next", "this"})
+_CARDINAL_WORD_VALUES = MappingProxyType(
+    {
+        "zero": 0,
+        "one": 1,
+        "two": 2,
+        "three": 3,
+        "four": 4,
+        "five": 5,
+        "six": 6,
+        "seven": 7,
+        "eight": 8,
+        "nine": 9,
+        "ten": 10,
+        "eleven": 11,
+        "twelve": 12,
+        "thirteen": 13,
+        "fourteen": 14,
+        "fifteen": 15,
+        "sixteen": 16,
+        "seventeen": 17,
+        "eighteen": 18,
+        "nineteen": 19,
+        "twenty": 20,
+        "thirty": 30,
+        "forty": 40,
+        "fifty": 50,
+    }
+)
+_ORDINAL_WORD_VALUES = MappingProxyType(
+    {
+        "first": 1,
+        "second": 2,
+        "third": 3,
+        "fourth": 4,
+        "fifth": 5,
+        "sixth": 6,
+        "seventh": 7,
+        "eighth": 8,
+        "ninth": 9,
+        "tenth": 10,
+        "eleventh": 11,
+        "twelfth": 12,
+        "thirteenth": 13,
+        "fourteenth": 14,
+        "fifteenth": 15,
+        "sixteenth": 16,
+        "seventeenth": 17,
+        "eighteenth": 18,
+        "nineteenth": 19,
+        "twentieth": 20,
+        "thirtieth": 30,
     }
 )
 
@@ -423,6 +507,7 @@ class Candidate:
     type_cues: tuple[str, ...] = ()
     family_cues: tuple[str, ...] = ()
     incompatible_components: tuple[dict[str, Any], ...] = ()
+    incompatible_component_count: int = 0
 
     @property
     def anchor(self) -> str:
@@ -752,6 +837,138 @@ def _span_tokens(value: str) -> tuple[str, ...]:
     return tuple(tokens)
 
 
+def _is_generic_cue_group(
+    tokens: tuple[str, ...], cue_nouns: frozenset[str]
+) -> bool:
+    """Reject only a closed generic-prefix sequence plus one exact cue noun."""
+    for cue in cue_nouns:
+        cue_tokens = tuple(identity_key(token) for token in _span_tokens(cue))
+        if not cue_tokens or len(tokens) <= len(cue_tokens):
+            continue
+        prefix = tokens[: -len(cue_tokens)]
+        if tokens[-len(cue_tokens) :] == cue_tokens and all(
+            token in _GENERIC_CUE_PREFIXES for token in prefix
+        ):
+            return True
+    return False
+
+
+def _cardinal_value(tokens: tuple[str, ...], *, maximum: int) -> int | None:
+    """Parse one bounded numeric/cardinal token group without free-form NLP."""
+    value: int | None = None
+    if len(tokens) == 1:
+        token = tokens[0]
+        value = int(token) if token.isdecimal() else _CARDINAL_WORD_VALUES.get(token)
+    elif len(tokens) == 2:
+        tens = _CARDINAL_WORD_VALUES.get(tokens[0])
+        ones = _CARDINAL_WORD_VALUES.get(tokens[1])
+        if tens in {20, 30, 40, 50} and ones is not None and 1 <= ones <= 9:
+            value = tens + ones
+    return value if value is not None and 0 <= value <= maximum else None
+
+
+def _ordinal_day_value(tokens: tuple[str, ...]) -> int | None:
+    """Parse a day-of-month ordinal in numeric or bounded word form."""
+    value: int | None = None
+    if len(tokens) == 1:
+        numeric = re.fullmatch(r"(\d{1,2})(?:st|nd|rd|th)?", tokens[0])
+        value = (
+            int(numeric.group(1))
+            if numeric is not None
+            else _ORDINAL_WORD_VALUES.get(tokens[0])
+        )
+    elif len(tokens) == 2:
+        tens = _CARDINAL_WORD_VALUES.get(tokens[0])
+        ones = _ORDINAL_WORD_VALUES.get(tokens[1])
+        if tens in {20, 30} and ones is not None and 1 <= ones <= 9:
+            value = tens + ones
+    return value if value is not None and 1 <= value <= 31 else None
+
+
+def _day_prefix_length(tokens: tuple[str, ...]) -> int:
+    for size in (2, 1):
+        if len(tokens) >= size and _ordinal_day_value(tokens[:size]) is not None:
+            return size
+    return 0
+
+
+def _is_year_token(token: str) -> bool:
+    return re.fullmatch(r"\d{2,4}", token) is not None
+
+
+def _is_calendar_phrase(tokens: tuple[str, ...]) -> bool:
+    """Recognize closed month/day/year and relative-weekday phrase shapes."""
+    if not tokens:
+        return False
+    if len(tokens) == 1 and (
+        tokens[0] in _MONTH_TOKENS or tokens[0] in _WEEKDAY_TOKENS
+    ):
+        return True
+    if (
+        len(tokens) == 2
+        and tokens[0] in _RELATIVE_DATE_PREFIXES
+        and tokens[1] in _WEEKDAY_TOKENS
+    ):
+        return True
+
+    if tokens[0] in _MONTH_TOKENS:
+        rest = tokens[1:]
+        if len(rest) == 1 and _is_year_token(rest[0]):
+            return True
+        day_size = _day_prefix_length(rest)
+        tail = rest[day_size:]
+        return bool(day_size) and (not tail or len(tail) == 1 and _is_year_token(tail[0]))
+
+    day_size = _day_prefix_length(tokens)
+    if day_size:
+        rest = tokens[day_size:]
+        if rest[:1] == ("of",):
+            rest = rest[1:]
+        if rest and rest[0] in _MONTH_TOKENS:
+            tail = rest[1:]
+            return not tail or len(tail) == 1 and _is_year_token(tail[0])
+
+    if _is_year_token(tokens[0]) and len(tokens) >= 2 and tokens[1] in _MONTH_TOKENS:
+        rest = tokens[2:]
+        return not rest or _day_prefix_length(rest) == len(rest)
+    return False
+
+
+def _is_clock_phrase(folded: str, tokens: tuple[str, ...]) -> bool:
+    """Recognize bounded numeric and ordinary clock phrase shapes."""
+    if re.fullmatch(r"\d{1,2}:\d{2}(?::\d{2})?", folded):
+        return True
+    if re.fullmatch(r"(?:[01]?\d|2[0-3])h[0-5]\d", folded):
+        return True
+    if re.fullmatch(r"\d{1,2}(?:(?: |:)\d{2})? ?(?:am|pm)", folded):
+        return True
+    if folded in {"midday", "midnight", "noon"}:
+        return True
+    clock_tokens = tokens[:-1] if tokens[-1:] in {("am",), ("pm",)} else tokens
+    if len(clock_tokens) >= 3 and clock_tokens[-2:] == ("o", "clock"):
+        return _cardinal_value(clock_tokens[:-2], maximum=12) is not None
+    for direction in ("past", "to"):
+        if tokens.count(direction) != 1:
+            continue
+        position = tokens.index(direction)
+        minute_tokens = tokens[:position]
+        hour_tokens = tokens[position + 1 :]
+        minutes_ok = minute_tokens in {("half",), ("quarter",)} or (
+            _cardinal_value(minute_tokens, maximum=59) is not None
+        )
+        if minutes_ok and _cardinal_value(hour_tokens, maximum=12) is not None:
+            return True
+    return False
+
+
+def _is_datetime_phrase(folded: str, tokens: tuple[str, ...]) -> bool:
+    return (
+        re.fullmatch(r"\d{4}-\d{1,2}-\d{1,2}", folded) is not None
+        or _is_calendar_phrase(tokens)
+        or _is_clock_phrase(folded, tokens)
+    )
+
+
 def _valid_span(value: str, *, cue_nouns: frozenset[str]) -> str | None:
     """Return the exact v1 candidate display span, or reject it categorically."""
     normalized = unicodedata.normalize("NFKC", value).strip()
@@ -783,34 +1000,11 @@ def _valid_span(value: str, *, cue_nouns: frozenset[str]) -> str | None:
     if set(folded_tokens) <= _PRONOUNS or set(folded_tokens) <= _SPAN_STOPWORDS:
         return None
     folded = identity_key(normalized)
-    determinerless = (
-        " ".join(folded_tokens[1:])
-        if folded_tokens and folded_tokens[0] in _DETERMINERS
-        else folded
-    )
-    if folded in cue_nouns or determinerless in cue_nouns:
-        return None
-    if re.fullmatch(r"\d{4}-\d{1,2}-\d{1,2}", folded):
-        return None
-    if re.fullmatch(r"\d{1,2}:\d{2}(?::\d{2})?", folded):
-        return None
-    day_token = r"\d{1,2}(?:st|nd|rd|th)?"
-    month_token = "(?:" + "|".join(sorted(_MONTHS)) + ")"
-    if re.fullmatch(rf"{month_token}(?: {day_token})?(?: \d{{2,4}})?", folded):
-        return None
-    if re.fullmatch(rf"{day_token} {month_token}(?: \d{{2,4}})?", folded):
-        return None
-    if re.fullmatch(rf"{day_token} of {month_token}(?: \d{{2,4}})?", folded):
-        return None
-    if re.fullmatch(rf"\d{{2,4}} {month_token}(?: {day_token})?", folded):
-        return None
-    if folded in _WEEKDAYS:
-        return None
-    if re.fullmatch(r"\d{1,2}(?:(?: |:)\d{2})? ?(?:am|pm)", folded):
-        return None
-    if re.fullmatch(r"\d{1,2} ?o['’]clock(?: ?(?:am|pm))?", folded):
-        return None
-    if folded in {"midday", "midnight", "noon"}:
+    if (
+        folded in cue_nouns
+        or _is_generic_cue_group(folded_tokens, cue_nouns)
+        or _is_datetime_phrase(folded, folded_tokens)
+    ):
         return None
     if "://" in folded or "@" in folded or "/" in folded or "\\" in folded:
         return None
@@ -1132,6 +1326,50 @@ def _incompatible_components(
     return ()
 
 
+def _bounded_component_values(values: Iterable[str]) -> tuple[list[str], int]:
+    ordered = sorted(set(values))
+    return ordered[:MAX_COMPONENT_VALUE_SAMPLES], len(ordered)
+
+
+def _component_payload(component: tuple[EvidenceContext, ...]) -> dict[str, Any]:
+    pages, page_count = _bounded_component_values(row.path for row in component)
+    origins, origin_count = _bounded_component_values(row.origin for row in component)
+    facets, facet_count = _bounded_component_values(
+        row.facet_hash for row in component
+    )
+    families, family_count = _bounded_component_values(
+        family for row in component for family in row.family_cues
+    )
+    anchors, anchor_count = _bounded_component_values(
+        row.resolved_anchor for row in component if row.resolved_anchor
+    )
+    return {
+        "pages": pages,
+        "page_count": page_count,
+        "returned_page_count": len(pages),
+        "pages_truncated": page_count - len(pages),
+        "origins": origins,
+        "origin_count": origin_count,
+        "returned_origin_count": len(origins),
+        "origins_truncated": origin_count - len(origins),
+        "facet_hashes": facets,
+        "facet_count": facet_count,
+        "returned_facet_count": len(facets),
+        "facets_truncated": facet_count - len(facets),
+        "family_cues": families,
+        "family_cue_count": family_count,
+        "returned_family_cue_count": len(families),
+        "family_cues_truncated": family_count - len(families),
+        "resolved_entity_refs": anchors,
+        "resolved_entity_ref_count": anchor_count,
+        "returned_resolved_entity_ref_count": len(anchors),
+        "resolved_entity_refs_truncated": anchor_count - len(anchors),
+        "component_fingerprint": _digest(
+            sorted(row.context_hash for row in component)
+        ),
+    }
+
+
 def _target_dict(entry: RegistryEntry) -> dict[str, Any]:
     return {
         "path": entry.path,
@@ -1376,21 +1614,8 @@ def collect(
             else None
         )
         component_payload = tuple(
-            {
-                "pages": sorted({row.path for row in component}),
-                "origins": sorted({row.origin for row in component}),
-                "facet_hashes": sorted({row.facet_hash for row in component}),
-                "family_cues": sorted(
-                    {family for row in component for family in row.family_cues}
-                ),
-                "resolved_entity_refs": sorted(
-                    {row.resolved_anchor for row in component if row.resolved_anchor}
-                ),
-                "component_fingerprint": _digest(
-                    sorted(row.context_hash for row in component)
-                ),
-            }
-            for component in incompatible
+            _component_payload(component)
+            for component in incompatible[:MAX_INCOMPATIBLE_COMPONENT_SAMPLES]
         )
         reasons = (REASON_ORDINARY_IDENTITY_RECURS,)
         if legacy_qualifies:
@@ -1424,6 +1649,7 @@ def collect(
                 type_cues=type_cues,
                 family_cues=family_cues,
                 incompatible_components=component_payload,
+                incompatible_component_count=len(incompatible),
             )
         )
     return candidates

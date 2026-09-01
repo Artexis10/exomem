@@ -5590,6 +5590,15 @@ def _entity_recurrence_finding(
             "incompatible_components": [
                 dict(component) for component in candidate.incompatible_components
             ],
+            "incompatible_component_count": candidate.incompatible_component_count,
+            "returned_incompatible_component_count": len(
+                candidate.incompatible_components
+            ),
+            "incompatible_components_truncated": max(
+                0,
+                candidate.incompatible_component_count
+                - len(candidate.incompatible_components),
+            ),
             "disconnected_contexts": [
                 dict(context) for context in candidate.disconnected_contexts
             ],
