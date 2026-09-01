@@ -1,14 +1,18 @@
 ## ADDED Requirements
 
-### Requirement: Hosted admits exact reviewed curation without a bespoke executor
+### Requirement: Hosted v5 admits exact reviewed curation without a bespoke executor
 
-The current Hosted agent surface SHALL expose registry-derived
+The Hosted v5 agent surface SHALL expose registry-derived
 `maintain_memory(mode="curation")` and forward it to the same curation leaf used
 by standalone MCP, REST, and CLI. The gateway and cell MUST NOT add a Hosted-only
 plan format, command intercept, executor, persistence path, or semantic model.
 All tenant mapping, authenticated principal, entitlement, path confinement,
 writer authority, process-safe mutation boundary, terminal receipt, and
 tenant-scoped idempotency checks SHALL run normally.
+
+Hosted v1-v4 SHALL retain their pinned legacy `maintain_memory` schema and
+actual-wire identities and SHALL refuse curation-only arguments before manager
+dispatch.
 
 #### Scenario: Hosted user applies a reviewed plan
 
@@ -24,14 +28,22 @@ tenant-scoped idempotency checks SHALL run normally.
 - **THEN** resolution fails inside the mapped cell without revealing whether the
   other tenant's identity exists
 
+#### Scenario: Historical Hosted profile receives curation arguments
+
+- **WHEN** a v1-v4 caller supplies `mode="curation"` or another curation-only argument
+- **THEN** profile validation refuses the call before manager dispatch
+- **AND** the historical descriptor and actual-wire schema remain byte-identical
+
 ### Requirement: Remote maintenance refusal remains closed around curation
 
-The request-bound remote maintenance gate SHALL admit write execution only for
-`structured-files` and `curation`. `fix`, `reconcile`, `backfill-ids`, and every
-future unknown write mode SHALL retain the operator-only refusal before manager
-dispatch. Within curation, only an exact immutable reviewed plan may reach a
-content leaf; the mode MUST NOT become a wrapper for ordinary maintenance or an
-arbitrary command.
+For a profile whose pinned schema declares curation, the request-bound remote
+maintenance gate SHALL admit write execution only for `structured-files` and
+`curation`. `fix`, `reconcile`, `backfill-ids`, and every future unknown write
+mode SHALL retain the operator-only refusal before manager dispatch. Within
+curation, only an exact immutable reviewed plan may reach a content leaf; the
+mode MUST NOT become a wrapper for ordinary maintenance or an arbitrary
+command. Profiles whose pinned schema omits curation MUST NOT receive this
+exception.
 
 #### Scenario: Hosted reconcile remains refused
 

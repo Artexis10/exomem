@@ -57,7 +57,7 @@ After a local receipt exists, a definite sent, published, or delivered observati
 
 ### D7. Artifact behavior participates in the shared v5 candidate
 
-The single v5 candidate owned by `capture-durable-personal-baselines` preserves v4's command membership and order unless an actual gateway bridge changes the callable surface. Before that owner renders or locks v5, this change adds its artifact doctrine and candidate-scoped selection fixtures to the same candidate-owned core skill and combined fixture digest. It advertises direct preservation only when handles are available and otherwise reports a non-committing handoff requirement. This change cannot independently render, lock, promote, or roll back v5. V1-v4 bytes and identities do not change.
+The single v5 owner preserves v4's command membership and order unless an actual gateway bridge changes the callable surface. The artifact implementation supplies a generic synthetic contribution input at `tests/fixtures/hosted_v5_contributions/artifact_adoption.json`, outside the candidate tree. The owner validates, canonicalises, and freezes that input beside the baseline, recurring-entity, and governed-curation cases in the candidate-owned combined fixture before rendering or locking. V5 advertises direct preservation only when handles are available and otherwise reports a non-committing handoff requirement. The artifact lane does not edit, render, lock, archive, promote, or roll back v5 files. V1-v4 bytes and identities do not change.
 
 ### D8. Adoption eligibility and write authority are separate
 
@@ -78,7 +78,7 @@ Selection, approval, send, or publication establishes that one offered artifact 
 1. Add red-first selection, byte-identity, idempotency, atomicity, handoff, and delivery tests.
 2. Extend both Source and Evidence handle inputs, companion/page rendering and parsing, lookup, receipts, schemas, and projections compatibly.
 3. Update active-agent carriers and contribute doctrine and fixtures to the single owner-controlled v5 candidate before its first render.
-4. The v5 owner promotes only after both changes' real supported-client traces and historical immutability gates pass.
+4. The v5 owner promotes only after all four behavior families' real supported-client traces and historical immutability gates pass.
 
 Before the first shared-v5 lock, rollback removes failed artifact doctrine from the unpromoted candidate and rebuilds it. After promotion, v5 remains immutable and any correction ships in v6; selection may move away from v5. Stopping adoption envelopes leaves ordinary `capture_source`, `preserve_artifacts`, existing Source, and existing Evidence valid; no data backfill or destructive migration is required.
 

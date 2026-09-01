@@ -105,6 +105,19 @@ Agent-initiated candidate surfacing and plan proposals are `structural_suggestio
 
 `add-governed-curation-lane` MUST be implemented, independently reviewed, and merged before work begins on entity-candidate work-item resolution or proposal/apply integration. Detector, registry-family, and carrier work may proceed earlier, but this change cannot claim hydration or promotion execution until that prerequisite ships.
 
+### D11. Hosted doctrine joins the one immutable v5 composition
+
+The type-neutral recurring-identity cadence, resolve-before-create,
+ambiguity-stop, hydrate-before-duplicate, family metadata, and curation hand-off
+cases are supplied as a generic synthetic contribution input at
+`tests/fixtures/hosted_v5_contributions/recurring_entity_lifecycle.json`,
+outside the candidate tree. The single v5 owner validates, canonicalises, and
+freezes that input into the candidate-owned combined fixture before the first
+render or lock; the entity lane never edits v5 files. V1-v4 source/generated
+bytes, locks, archives, definitions, fixtures, promotion records, resolved
+command schemas, and actual-wire identities remain byte-identical; a correction
+after v5 promotion requires v6.
+
 ## Risks / Trade-offs
 
 - [Lexical false positives] -> Require independent origins, multiple material facets, a stable cue, and a frequency-matched zero-signal twin.
@@ -116,6 +129,7 @@ Agent-initiated candidate surfacing and plan proposals are `structural_suggestio
 - [Curation becomes a second executor] -> Reuse the closed S8 plan and step vocabulary with the same confirmations, receipts, recovery, and compensation.
 - [Unsupported prose lowers recall] -> Keep `identity-frames-v1` closed and measurable; add future frames only by versioned contract change rather than guessing.
 - [Large hydration sets starve behind truncation] -> Recompute deterministic confirmed batches until zero, binding all disconnected-context hashes into each signal version.
+- [Hosted doctrine ships partially] -> Give one lane ownership of v5 and require entity, curation, baseline, and artifact positive/negative fixtures in one combined digest before its first render.
 
 ## Migration Plan
 
@@ -124,7 +138,8 @@ Agent-initiated candidate surfacing and plan proposals are `structural_suggestio
 3. Add derived family indexes, treating parentless extensions as self-families, and invalidate them when registry identity changes; do not rewrite Entity frontmatter.
 4. Keep existing dismissed candidates quiet when their material signal is unchanged.
 5. Ship and independently verify `add-governed-curation-lane`, then integrate candidate work items and repeated hydration batches without changing f21's release gate.
-6. After this change and governed curation ship, synchronize canonical specs and archive through OpenSpec with strict validation.
+6. Contribute the entity-lifecycle doctrine and fixtures to the single owner-controlled v5 composition before its first render or lock without changing v1-v4.
+7. After this change and governed curation ship, synchronize canonical specs and archive through OpenSpec with strict validation.
 
 Rollback disables the new ordinary-text collector, candidate states, carrier cadence, and derived family indexes. Existing unresolved-wikilink findings, Entities, paths, registry definitions, and any already-confirmed curation receipts remain compatible and are never undone implicitly.
 
