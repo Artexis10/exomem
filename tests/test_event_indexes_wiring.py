@@ -137,14 +137,10 @@ def test_self_delete_updates_freshness_immediately(vault):
 
 
 def test_watcher_gate_decoupled_from_embeddings(vault, monkeypatch):
-    """The watcher now starts whenever EXOMEM_DISABLE_FILE_WATCHER is unset,
-    even with embeddings disabled (it maintains freshness/inbound); and it does
-    NOT start when EXOMEM_DISABLE_FILE_WATCHER is set."""
-    from exomem import server as server_module
+    """The deferred watcher remains independent from the embeddings gate."""
+    from exomem import server_runtime
 
-    monkeypatch.setattr(server_module, "load_dotenv", lambda *a, **k: None)
     monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
-    monkeypatch.setenv("EXOMEM_DISABLE_WARMUP", "1")
 
     started: list[str] = []
 
@@ -158,15 +154,15 @@ def test_watcher_gate_decoupled_from_embeddings(vault, monkeypatch):
 
     monkeypatch.setattr("exomem.file_watcher.FileWatcher", _FakeWatcher)
 
-    # Embeddings disabled but watcher NOT disabled → should start.
+    # Transport composition owns timing; this helper owns only watcher gating.
     monkeypatch.delenv("EXOMEM_DISABLE_FILE_WATCHER", raising=False)
-    server_module.build_server(require_auth=False)
+    server_runtime._start_file_watcher(vault)
     assert started, "watcher must start with embeddings disabled once decoupled"
 
     # Watcher explicitly disabled → must not start.
     started.clear()
     monkeypatch.setenv("EXOMEM_DISABLE_FILE_WATCHER", "1")
-    server_module.build_server(require_auth=False)
+    server_runtime._start_file_watcher(vault)
     assert not started, "EXOMEM_DISABLE_FILE_WATCHER must still suppress the watcher"
 
 

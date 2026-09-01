@@ -45,6 +45,40 @@ Each of the existing 14 action responses SHALL be a strict union of a pending ch
 - **WHEN** Substrate and the provisioner restart during a queued export, restore, or destroy
 - **THEN** replay of the original action/key resumes from durable progress without duplicate side effects
 
+### Requirement: Exceptional init-retry recovery is exact, private, and transactional
+The provisioner SHALL expose an operator-only helper inside the signed image that can reopen only an exact `PROVISION / ERROR / failed / PROVISIONER_PROVIDER_METADATA_CONFLICT` operation to `PROVISION / PENDING / volume-owned`. It MUST NOT expose a general operation editor or HTTP recovery endpoint, accept caller-selected lifecycle fields, or receive the confidential operation identifier through command-line arguments. Before mutation it SHALL validate the exact PostgreSQL role/schema/revision; old operation state; tenant fence and lock conflicts; decrypted canonical request and request hash; immutable tenant, cell, provider-operation, protocol, runtime-target, and fence identity; exact durable resource set and authenticated references; one unreleased USER reservation; and two stable non-terminating live provider observations. The init Job is absent in a valid observation when its TTL has already removed it. If present, it SHALL be authenticated and non-terminating and SHALL either still be running or reports `Complete=True`. A Failed-only init Job and a terminating init Job SHALL be refused. It SHALL preserve the request, identities, fences, resources, reservation, progress, retry interval, claim generation, result fields, and creation timestamp. The single compare-and-swap transition and one append-only content-free recovery receipt SHALL commit in the same PostgreSQL transaction or neither SHALL commit.
+
+#### Scenario: Exact historical false negative resumes in place
+- **WHEN** the stored operation has the exact eligible terminal shape, every durable and live identity matches, no conflicting claim or fence exists, and the second observation is stable
+- **THEN** one transaction records the immutable content-free receipt and reopens that same operation at `PENDING / volume-owned` without creating or replacing any resource or reservation
+
+#### Scenario: Recovery mismatch is a hard no-op
+- **WHEN** any state, request, fence, resource, reservation, runtime-target, live identity, termination, or compare-and-swap invariant differs
+- **THEN** the helper returns a fixed refusal and leaves the operation, receipt table, resources, and reservation unchanged
+
+#### Scenario: Repeated recovery cannot reopen again
+- **WHEN** the helper is invoked after the transition committed or after another actor progressed the operation
+- **THEN** it returns the verified existing receipt or `already-progressed` without another mutation
+
+#### Scenario: Init Job TTL expiry is a valid recovery observation
+
+- **WHEN** every recovery invariant matches and the init Job is absent because
+  its TTL removed it
+- **THEN** recovery may reopen the operation for the normal idempotent
+  initializer replay
+
+#### Scenario: Present init Job must be safe to observe
+
+- **WHEN** the init Job is authenticated, non-terminating, and either running
+  or reports `Complete=True`
+- **THEN** its state is eligible for the otherwise exact recovery preflight
+
+#### Scenario: Failed or terminating init Job refuses recovery
+
+- **WHEN** recovery observes a Failed-only init Job or a terminating init Job
+- **THEN** it refuses without changing the operation, receipt table,
+  resources, or reservation
+
 ### Requirement: Provision creates one fixed isolated cell
 Provision SHALL create a namespace and versioned Helm release with one single-replica StatefulSet, one 10 GiB encrypted PVC, one ClusterIP Service, one no-API ServiceAccount, private Secrets, ResourceQuota, LimitRange, restricted Pod Security labels, default-deny policies, and restricted routes. Kubernetes quota SHALL permit exactly that one 10 GiB claim and deny a second claim; the separate 5 GiB application entitlement MUST NOT be encoded as a 5 GiB PVC storage quota. It SHALL use only an opaque immutable cell identifier in resource names/labels, preserve the original cell ID in runtime configuration, and SHALL NOT store a person's name or email.
 
@@ -104,6 +138,10 @@ Quiesce SHALL reject new mutations and drain active work. Stop SHALL quiesce bef
 - **WHEN** credential rotation completes
 - **THEN** the pending token was accepted during overlap, the promoted token remains accepted, and the previous token is independently rejected
 
+#### Scenario: Maintenance release preserves Lease ownership
+- **WHEN** a worker releases a Kubernetes maintenance Lease after completing its guarded work
+- **THEN** deletion carries the unchanged owned Lease UID and resource-version preconditions through the installed client contract, and a replaced or foreign Lease is not deleted
+
 ### Requirement: Export and restore use portable runtime contracts
 Export SHALL call the quiesced cell export API with truthful routing-stopped assertion, stream and verify archive/manifest/size, envelope-encrypt provider output, persist opaque export/release references, and release the local checkpoint exactly once. Restore SHALL run the supported offline helper against a stopped empty candidate, validate/decrypt/prepare/publish atomically, exclude source hosted state, recreate candidate bindings, rebuild derived state, and require authenticated readiness.
 
@@ -121,6 +159,17 @@ Discard SHALL remove only the targeted failed candidate's compute, storage, rout
 #### Scenario: Tenant destroy discovers orphan resources
 - **WHEN** tenant destroy runs with an active cell, orphan candidate, retained volume, route, pending credential, export, and recovery backup
 - **THEN** it remains pending through retention and returns all true proofs only after every item is independently absent
+
+### Requirement: Deletion authority selects only the live destructive claim
+The deletion worker SHALL acquire authority only from the singleton operation matching the authenticated tenant and external operation ID, an action in the explicit `discard` or `destroy` set, the caller's fence, live `claimed` state, exact claim token, and an unexpired lease. It SHALL fail closed if more than one operation is eligible and SHALL preserve the `TenantFence -> Operation` lock order. Completed maintenance or destructive history rows sharing identifiers MUST NOT grant, shadow, or delay authority.
+
+#### Scenario: Maintenance history cannot shadow live destroy authority
+- **WHEN** completed `quiesce`, `seal`, or `discard` rows share tenant and external-operation identity with one live claimed `destroy`
+- **THEN** the worker selects the destroy claim and never treats an incidental historical row as authoritative
+
+#### Scenario: Ambiguous destructive claims fail closed
+- **WHEN** more than one live destructive row satisfies the complete authority predicate
+- **THEN** no claim is selected and no deletion side effect occurs
 
 ### Requirement: Provisioner privilege is bounded by platform policy
 Routine provisioner RBAC SHALL NOT permit node, CRD, PV mutation, cluster-role/binding, admission-policy, or unrelated platform-namespace changes. A separate volume lifecycle worker SHALL receive HCloud and narrowly scoped PV recovery privileges only for its job. Platform-owned validation SHALL reject unapproved images, privileged/host namespace settings, hostPath, and cross-cell Secret/PVC references.

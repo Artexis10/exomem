@@ -14,8 +14,8 @@ And "cache the attention summary" is a cache of something that is rebuilt on eve
 there is nothing there to cache. So the projection is persisted beside the review state and
 kept honest four ways: an incremental delta on write for the categories a written page can
 participate in; a day-boundary re-bucket that is a date comparison rather than a rescan;
-reconcile as the healer after out-of-band edits; and full recomputation as the recovery
-path when the persisted state is missing or unreadable.
+reconcile as the healer after out-of-band edits; and one background recomputation as the
+recovery path when the persisted state is missing or unreadable.
 
 **Why every entry carries a date.** A `check_by` passes at midnight with nothing happening,
 and no generation token, mtime or content hash can see that. The projection therefore stores
@@ -43,14 +43,16 @@ on the command: `writer_lease._NARROW_BOUNDARY_COMMANDS` release their guards be
 wide-boundary commands or under `EXOMEM_WIDE_MUTATION_BOUNDARY`. The bound has to hold
 either way, which is why it is argued from cost rather than from the lock.) So a write
 applies a bounded delta and nothing else; when there is no persisted state to delta, the
-write stays silent and the next read surface — bootstrap, recall, or reconcile — performs
-the recovery outside any lock. A quiet first write is the correct trade.
+write stays silent and the next read surface schedules recovery outside any lock. The
+advisory remains silent until recovery is ready. A quiet first write and first read are
+the correct trade.
 
-**A read surface may write.** Recovery persists: `served_entries` on a vault with no
-projection recomputes and saves `.due-state.json` into the KB directory, so a nominally
-read-only command can create a file. Where that write is refused the projection is kept in
-process instead (see `_remember_unpersisted`) so an unpersistable vault recomputes once per
-process rather than once per read.
+**A read surface may schedule a write.** Recovery persists: `served_entries` on a vault
+with no projection starts one daemon worker which recomputes and saves `.due-state.json`
+into the KB directory. The caller gets no advisory until that work is ready; a derived
+counter must never turn an interactive read into a vault-sized audit. Where persistence is
+refused the projection is kept in process instead (see `_remember_unpersisted`) so an
+unpersistable vault recomputes once per process rather than once per read.
 
 **Concurrency, and what is deliberately not solved.** The lock here is a `threading.Lock`,
 so it orders deltas within one process and not across processes. Two sessions in two
@@ -89,7 +91,6 @@ from pathlib import Path
 from typing import Any
 
 from . import review_state as review_state_module
-from .kbdir import kb_dirname
 
 log = logging.getLogger(__name__)
 
@@ -186,6 +187,12 @@ _EMISSION_CAP = 512
 _UNPERSISTED: dict[str, dict[str, Any]] = {}
 _UNPERSISTED_CAP = 8
 
+#: Vaults whose missing or unreadable projection is currently being rebuilt. A
+#: set is enough: callers never wait for the result, and the completed projection
+#: itself becomes the durable readiness signal. Entries exist only for the life
+#: of one worker, so the registry cannot grow with the number of vaults served.
+_WARMING: set[str] = set()
+
 #: The fallback session key for stdio and CLI, where the transport supplies no
 #: session identity. One key per process lifetime, which is exactly the scope of
 #: a stdio conversation.
@@ -199,7 +206,9 @@ _PROCESS_SESSION_KEY = f"process:{uuid.uuid4().hex}"
 
 def state_path(vault_root: Path) -> Path:
     """Beside the review state, and for the same reason: this is derived bookkeeping."""
-    return Path(vault_root) / kb_dirname() / STATE_FILENAME
+    from . import state_paths
+
+    return state_paths.vault_state_dir(vault_root) / STATE_FILENAME
 
 
 def load(vault_root: Path) -> dict[str, Any] | None:
@@ -230,9 +239,9 @@ def save(vault_root: Path, payload: dict[str, Any]) -> None:
     """Atomically replace the projection state. Best effort; never raises."""
     path = state_path(vault_root)
     try:
-        from . import vault
+        from . import state_paths, vault
 
-        path.parent.mkdir(parents=True, exist_ok=True)
+        state_paths.ensure_vault_state_dir(vault_root)
         handle_fd, temp_name = tempfile.mkstemp(
             prefix=f".{STATE_FILENAME}.", suffix=".tmp", dir=path.parent
         )
@@ -551,6 +560,64 @@ def reconcile(vault_root: Path, *, today: dt.date | None = None) -> dict[str, An
     save(vault_root, payload)
     _remember_unpersisted(vault_root, payload)
     return payload
+
+
+def _schedule_reconcile(
+    vault_root: Path, *, today: dt.date
+) -> dict[str, Any] | None:
+    """Start one fail-soft projection rebuild without delaying the caller."""
+    if os.environ.get("EXOMEM_SYNC_DUE_STATE_WARM", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }:
+        # The pytest suite creates hundreds of disposable vaults and then tears
+        # them down immediately. Let those tests preserve deterministic carrier
+        # assertions without leaving daemon workers racing tmpdir cleanup; the
+        # focused warm-up tests remove this seam and exercise the production path.
+        return reconcile(vault_root, today=today)
+    vault_root = Path(vault_root)
+    key = str(vault_root)
+
+    with _LOCK:
+        if key in _WARMING or key in _UNPERSISTED:
+            return
+        # A second caller can have observed the old missing state just before the
+        # first worker persisted its result. Recheck while schedulers are ordered
+        # so that stale observation cannot launch a second vault-wide audit.
+        if load(vault_root) is not None:
+            return
+        _WARMING.add(key)
+
+    def _run() -> None:
+        try:
+            reconcile(vault_root, today=today)
+        except Exception:  # noqa: BLE001
+            # Due state is advisory. Its recovery may be retried by a later read,
+            # but it must never fail the read that happened to notice the gap.
+            log.warning(
+                "background due-state projection rebuild failed for %s",
+                vault_root,
+                exc_info=True,
+            )
+        finally:
+            with _LOCK:
+                _WARMING.discard(key)
+
+    try:
+        threading.Thread(
+            target=_run,
+            name="exomem-due-state-warm",
+            daemon=True,
+        ).start()
+    except RuntimeError:
+        with _LOCK:
+            _WARMING.discard(key)
+        log.warning(
+            "could not start background due-state projection rebuild for %s",
+            vault_root,
+            exc_info=True,
+        )
 
 
 def _remember_unpersisted(vault_root: Path, payload: dict[str, Any]) -> None:
@@ -1296,7 +1363,13 @@ def _record_emission(
 
 
 def emission_ledger(vault_root: Path) -> dict[str, Any]:
-    """The persisted `{writes, emissions, last_digest, due_total}` a projector reads."""
+    """The persisted `{writes, emissions, last_digest, due_total}` a projector reads.
+
+    `writes` counts governed page or structured projection deltas applied here,
+    not every filesystem mutation and not terminal deliveries. A qualifying
+    carrier that authors no projected category can therefore add one emission
+    while leaving `writes` unchanged.
+    """
     return _emission_section(load(vault_root) or _UNPERSISTED.get(str(vault_root)))
 
 
@@ -1375,7 +1448,9 @@ def served_entries(
         # An unpersistable vault recomputes ONCE per process, not once per read.
         payload = _UNPERSISTED.get(str(vault_root))
     if payload is None:
-        payload = reconcile(vault_root, today=today)
+        payload = _schedule_reconcile(vault_root, today=today)
+        if payload is None:
+            return []
 
     if not _has_entries(payload):
         # Nothing stored, so nothing to filter, count or order — and no disclosure
@@ -1648,6 +1723,27 @@ def block_for_write(
     """
     if apply_write_delta(vault_root, rel_path, today=today) is None:
         return None
+    from .governance import egress as egress_module
+
+    with egress_module.disclosure_boundary(Path(vault_root), "due_state_advisory"):
+        return served(vault_root, today=today)
+
+
+def block_for_batch(
+    vault_root: Path, *, today: dt.date | None = None
+) -> dict[str, Any] | None:
+    """The block a completed multi-write batch may carry, or None.
+
+    The same serve as `block_for_write`, inside the same `due_state_advisory`
+    disclosure boundary and with the same produce-only posture — emission is
+    decided at the mutation terminal, after the batch scope has exited. It
+    differs in one way only: it applies no delta of its own, because a batch's
+    per-write deltas have already been applied (the operation leaves call
+    `_apply_batch_deltas`, and `reconcile` full-recomputes) by the time the
+    invocation reaches its terminal. Serving here therefore reports the
+    POST-batch projection; re-deltaing one arbitrary path of the batch would
+    report a number that belongs to no moment in particular.
+    """
     from .governance import egress as egress_module
 
     with egress_module.disclosure_boundary(Path(vault_root), "due_state_advisory"):

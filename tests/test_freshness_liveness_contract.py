@@ -45,6 +45,7 @@ from exomem import (
     index_sync,
     relation_registry,
     semantic_contract,
+    state_paths,
 )
 from exomem import find as find_module
 from exomem import vault as vault_module
@@ -460,12 +461,12 @@ def _drain_background_rebuilds(timeout: float = 20.0) -> None:
 
 def preserved_temporaries(root: Path) -> list[Path]:
     """Every retained `.graph-rebuild-*` artifact of a failed publication."""
-    kb = root / "Knowledge Base"
-    if not kb.is_dir():
+    state_dir = epistemic_graph.sidecar_path(root).parent
+    if not state_dir.is_dir():
         return []
     return sorted(
         candidate
-        for candidate in kb.iterdir()
+        for candidate in state_dir.iterdir()
         if vault_module.is_graph_rebuild_runtime_file_name(candidate.name)
     )
 
@@ -729,9 +730,13 @@ def test_classification_covers_the_contract_named_class_b_members() -> None:
     assert epistemic_graph.is_publication_failure(OpError("MUTATION_BUSY", "busy"))
     assert not epistemic_graph.is_publication_failure(OpError("VAULT_UNREADABLE", "gone"))
     assert not epistemic_graph.is_publication_failure(ValueError("unclassified"))
+    assert not epistemic_graph.is_publication_failure(graph_sync.GraphRebuildInProgress())
     # Class C already marked exactly once; a caller may not mark again (R1).
     assert not epistemic_graph.may_mark_external_pending(
         epistemic_graph.GraphProjectionMoved("moved")
+    )
+    assert not epistemic_graph.may_mark_external_pending(
+        graph_sync.GraphRebuildInProgress()
     )
     assert epistemic_graph.may_mark_external_pending(ValueError("unclassified"))
 
@@ -763,6 +768,97 @@ def test_watcher_recovery_allocates_no_new_epoch_for_a_refused_publication(
     assert clock_after == clock_before + 1, (
         "each recovery cycle must not allocate a fresh external-pending epoch"
     )
+
+
+def test_watcher_external_owner_contention_adds_no_failure_recovery_state(
+    contract_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem.file_watcher import FileWatcher
+
+    root = contract_vault
+    watcher = FileWatcher(root)
+    pending_epoch = freshness.mark_external_pending(root)
+    monkeypatch.setattr(
+        epistemic_graph.EpistemicGraphIndex,
+        "rebuild_all",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            graph_sync.GraphRebuildInProgress()
+        ),
+    )
+    monkeypatch.setattr(
+        epistemic_graph,
+        "record_publication_recovery_state",
+        lambda *_args, **_kwargs: pytest.fail(
+            "a verified external owner must not install failure recovery state"
+        ),
+    )
+
+    watcher._recover_external_pending(pending_epoch)
+
+    assert epistemic_graph.publication_refusal_active(root) is False
+
+
+def test_suspended_graph_recovery_does_not_resuspend_an_external_owner_publication(
+    contract_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = contract_vault
+    suspend_calls: list[str] = []
+    monkeypatch.setattr(epistemic_graph, "recovery_decline_reason", lambda _root: None)
+    monkeypatch.setattr(find_module, "evict_resolver_caches", lambda _root: None)
+    monkeypatch.setattr(vault_module, "evict_inbound_index", lambda _root: None)
+    monkeypatch.setattr(freshness, "external_pending", lambda _root: False)
+    monkeypatch.setattr(
+        epistemic_graph.EpistemicGraphIndex,
+        "withdraw_availability",
+        lambda _self: None,
+    )
+    monkeypatch.setattr(
+        epistemic_graph.EpistemicGraphIndex,
+        "rebuild_all",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            graph_sync.GraphRebuildInProgress()
+        ),
+    )
+    monkeypatch.setattr(
+        epistemic_graph.EpistemicGraphIndex,
+        "suspend_reads",
+        lambda _self: suspend_calls.append("suspended"),
+    )
+
+    assert epistemic_graph.recover_suspended_graph(root) is False
+    assert suspend_calls == []
+
+
+def test_watcher_seed_validation_does_not_resuspend_an_external_owner_publication(
+    contract_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem.file_watcher import FileWatcher
+
+    root = contract_vault
+    sidecar = state_paths.vault_state_dir(root) / ".graph.sqlite"
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    sidecar.write_bytes(b"owner")
+    suspend_calls: list[str] = []
+    monkeypatch.setattr(epistemic_graph, "sidecar_path", lambda _root: sidecar)
+    monkeypatch.setattr(epistemic_graph, "graph_enabled", lambda: True)
+    monkeypatch.setattr(find_module, "evict_resolver_caches", lambda _root: None)
+    monkeypatch.setattr(vault_module, "evict_inbound_index", lambda _root: None)
+    monkeypatch.setattr(index_sync, "recover_full_receipt_graph_epoch", lambda *_a, **_k: True)
+    monkeypatch.setattr(
+        epistemic_graph.EpistemicGraphIndex,
+        "suspend_reads",
+        lambda _self: suspend_calls.append("suspended"),
+    )
+    monkeypatch.setattr(
+        epistemic_graph.EpistemicGraphIndex,
+        "rebuild_all",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            graph_sync.GraphRebuildInProgress()
+        ),
+    )
+
+    assert FileWatcher(root)._validate_existing_graph_on_seed() is False
+    assert suspend_calls == ["suspended"]
 
 
 @pytest.mark.parametrize("graph_scheduling", [True, False], ids=["scheduled", "disabled"])

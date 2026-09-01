@@ -4,6 +4,7 @@ from pathlib import Path
 
 from exomem import find as find_module
 from exomem import freshness, recall_policy
+from exomem import vault as vault_module
 
 
 def test_peek_recall_publication_is_cold_and_never_reprojects(
@@ -290,6 +291,30 @@ def test_request_snapshots_reuse_live_relative_path_projection_until_checkpoint_
     assert third == {"Knowledge Base/Notes/added.md", "Knowledge Base/Notes/page.md"}
     assert calls == 2
     find_module.clear_cache()
+
+
+def test_cold_request_shares_projection_and_generic_vault_walk(
+    tmp_path: Path, monkeypatch
+) -> None:
+    find_module.clear_cache()
+    page = tmp_path / "Knowledge Base" / "Notes" / "page.md"
+    page.parent.mkdir(parents=True)
+    page.write_text("page", encoding="utf-8")
+    original_walk = vault_module.walk_vault_md
+    calls = 0
+
+    def counted_walk(root: Path):
+        nonlocal calls
+        calls += 1
+        yield from original_walk(root)
+
+    monkeypatch.setattr(vault_module, "walk_vault_md", counted_walk)
+
+    snapshot = find_module.FreshnessSnapshot(tmp_path)
+    assert snapshot.recall_paths("vault") == {"Knowledge Base/Notes/page.md"}
+    expected = find_module._walk_freshness_key(original_walk(tmp_path))
+    assert snapshot.vault() == expected
+    assert calls == 1
 
 
 def test_raw_event_moves_broad_cursor_not_live_recall_projection(tmp_path: Path) -> None:

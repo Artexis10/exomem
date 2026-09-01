@@ -75,7 +75,9 @@ def ref_from_markdown(markdown: str) -> str | None:
 
 
 def sidecar_path(vault_root: Path) -> Path:
-    return Path(vault_root) / kb_dirname() / ".refs.sqlite"
+    from . import state_paths
+
+    return state_paths.vault_state_dir(vault_root) / ".refs.sqlite"
 
 
 #: How many paths one identity lookup binds at a time. SQLite's compiled-in
@@ -173,6 +175,7 @@ class ReferenceIndex:
             with reserved_paths._identity_coordination_scope(
                 self.vault_root,
                 descriptor_ids=("refs-store",),
+                identity_may_change=False,
             ):
                 with reserved_paths._sqlite_owner_target_scope(
                     self.vault_root,

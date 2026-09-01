@@ -1,14 +1,16 @@
 ## Context
 
-Two caps bound a matrix lane, and they do different jobs. `--session-timeout`
+Two caps bound a matrix lane and they do different jobs. `--session-timeout`
 asks pytest to stop between test items, so the lane still prints a summary, the
-slowest-test durations, and a JUnit file. `timeout-minutes` is the runner
-killing the process, which produces none of that.
+slowest-test durations, and a JUnit file. `timeout-minutes` is the runner killing
+the process, which produces none of that. The session bound therefore has to stay
+under the job deadline — that gap is the diagnosis.
 
-The lean lane encodes the relationship: 1,500s inside 30 minutes. The
-cross-platform lane had 2,700s inside 60 minutes — the same idea with a much
-larger unused remainder, and no requirement pinning it, so when Windows runtime
-grew into the cap nothing objected.
+`install-readiness` already pins the pull-request tiers at 1.5x their predicted
+busiest shard, derived from `.test_durations.json` by running pytest-split's
+`least_duration` over the recorded node times. That rule is sound where the
+prediction and the runtime come from the same platform. This lane is the one
+place they do not.
 
 ## Goals / Non-Goals
 
@@ -16,21 +18,33 @@ grew into the cap nothing objected.
 firing. A genuine hang is still caught by pytest rather than the runner. The
 relationship is pinned so the margin cannot silently go negative again.
 
-**Non-Goals.** Making the suite faster. Rebalancing shards. Changing the lean
-lane, which is measured healthy.
+**Non-Goals.** Making the suite faster. Changing the pull-request tiers, which
+are measured healthy. Fixing the real Windows failures this lane reports once the
+clock noise is gone.
 
 ## Decisions
 
-**Claim the budget, keep the margin.** 3,300s inside a 60 minute job leaves the
-same five minutes the lean lane leaves. The margin exists for collection,
-teardown, and artifact upload, which happen outside the session and still need
-to fit.
+**Correct the prediction, do not abandon it.** The alternative was to pin the
+observed runtime as a constant, which is what the first draft of this change did
+(`the cap must be at least 46 minutes, because a shard was measured at 45:44`).
+That restates an observation and goes stale silently. Deriving from the durations
+file and applying one measured platform factor keeps the canonical input
+canonical, and the factor is the only thing that has to be measured because it is
+a property of the runners rather than of the tests.
 
-**Pin the relationship, not the number.** The test asserts three things: the cap
-is under the job deadline, the unclaimed remainder is at most five minutes, and
-the cap is above the slowest healthy shard yet measured (45:44). A future
-slowdown fails that last assertion, which is the signal — restating `3300`
-would only prove the file says what the file says.
+**The factor is 1.81 and it is checked, not asserted.** Three Windows sessions —
+2481s, 2449s, 2595s — against a predicted busiest four-way shard of 1385s. The
+corrected model then predicts 2507s for that same configuration against a
+measured mean of 2509s, so the correction is doing real work rather than
+absorbing the error into a fudge.
+
+**Six shards, not a longer cap.** At four, 1.5x of the corrected prediction is
+3763s against a 60-minute job: there is no timeout that satisfies the rule, so
+the split is the variable. At six it is 2509s and the existing 2700s cap holds at
+1.61x. The test asserts this directly — a split count that cannot hold the
+headroom inside the job deadline fails with "this lane needs more shards, not a
+longer timeout", so the next person meets the real choice instead of raising a
+number until it goes green.
 
 **Guard the folded scalar.** The first attempt put the explanation inline, and
 `yaml.safe_load` showed the `#` landing inside the command string, where folding
@@ -38,15 +52,19 @@ would have commented out `--session-timeout`, `--durations`, `--durations-min`
 and `--junitxml` for every shard on every platform. The test reads the raw file
 rather than the parsed tree, because `safe_load` discards the scalar style that
 is the entire distinction: a `#` is a shell comment in a literal `|` block and a
-command-killer in a folded `>` one. Five existing literal-block steps use `#`
-correctly and must not be flagged.
+command-killer in a folded `>` one. Existing literal-block steps use it correctly
+and must not be flagged.
 
 ## Risks / Trade-offs
 
-**A real hang now costs ten more minutes of runner time.** Accepted: the
-alternative was failing healthy runs, and the job deadline is unchanged.
+**Two more runners per platform, per night.** Accepted because the lane is
+nightly and manual only since #787; that change was protecting the per-PR
+allowance, which this does not touch.
 
-**The measured-runtime assertion will need revisiting.** It is written against
-45:44, the slowest healthy shard observed. If Windows runtime keeps growing, that
-assertion fails and someone has to decide between more shards, a faster suite,
-and a longer job — which is the decision this failure mode was hiding.
+**The factor will drift.** It is a property of the runner images and of how much
+of the suite is I/O bound, and nothing recomputes it. It is written down with its
+measurements so the next person can redo the division rather than guess, and the
+headroom assertion fails if it drifts far enough to matter.
+
+**A real hang is still bounded at 45 minutes rather than the job's 60.** That is
+deliberate and unchanged.

@@ -35,7 +35,23 @@ from exomem.__main__ import main as cli_main
 from exomem.governance import principal as principal_module
 
 _ALLOWED_WARMING_ERROR_KEYS = frozenset(
-    {"code", "message", "remediation", "ok", "error_code", "status", "complete", "retry_after_ms"}
+    {
+        "code",
+        "message",
+        "remediation",
+        "ok",
+        "error_code",
+        "status",
+        "complete",
+        "retry_after_ms",
+        # Content-free by CONSTRUCTION, not by assertion: RetrievalIndexWarming
+        # rejects any site outside `find.RETRIEVAL_WARMING_SITES` in its own
+        # constructor, so no call shape can smuggle a path or a query into this
+        # envelope. `waited_ms` is an integer duration. The checks below are a
+        # second layer over that runtime guarantee, not the guarantee itself.
+        "site",
+        "waited_ms",
+    }
 )
 _FORBIDDEN_SUBSTRINGS = (
     "warming-surface",  # the note's rel-path stem
@@ -133,6 +149,12 @@ def _assert_warming_error(error: dict) -> None:
 
 def _assert_no_leak(error: dict) -> None:
     assert set(error) <= _ALLOWED_WARMING_ERROR_KEYS, set(error) - _ALLOWED_WARMING_ERROR_KEYS
+    # The discriminator widens the envelope, so hold it to the closed
+    # vocabulary: an ad-hoc site string is exactly how content would get in.
+    if "site" in error:
+        assert error["site"] in find_module.RETRIEVAL_WARMING_SITES, error["site"]
+    if "waited_ms" in error:
+        assert isinstance(error["waited_ms"], int)
     blob = json.dumps(error, ensure_ascii=False)
     for sentinel in _FORBIDDEN_SUBSTRINGS:
         assert sentinel not in blob, f"leaked sentinel {sentinel!r} in {blob!r}"
@@ -215,6 +237,13 @@ def test_rest_openapi_error_schema_accepts_warming_fields(
     allowed_props = set(error_schema["properties"])
     assert error_schema["properties"]["retry_after_ms"]["type"] == "integer"
     assert error_schema["properties"]["complete"]["type"] == "boolean"
+    assert error_schema["properties"]["waited_ms"]["type"] == "integer"
+    # The published schema constrains `site` to the vocabulary itself, not to
+    # "some string": a client can rely on the enum, and a site added without
+    # updating the source of truth cannot be published.
+    site_schema = error_schema["properties"]["site"]
+    assert site_schema["type"] == "string"
+    assert tuple(site_schema["enum"]) == find_module.RETRIEVAL_WARMING_SITES
 
     ask_memory_responses = doc["paths"]["/api/ask_memory"]["post"]["responses"]
     assert "503" in ask_memory_responses

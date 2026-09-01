@@ -2,7 +2,9 @@
 
 ## Purpose
 TBD - created by archiving change add-first-class-records. Update Purpose after archive.
+
 ## Requirements
+
 ### Requirement: Records are observed state, not interpretation
 The Records profile SHALL represent what happened or what was measured: events, sessions, symptoms, measurements, transactions, state changes, status history, and durable operational facts. It SHALL NOT infer goals, priority, success, failure, regression, diagnoses, or personal judgments. Conclusions derived from Records SHALL be compiled explicitly into Notes with links back to the collection or items.
 
@@ -131,15 +133,32 @@ Existing knowledge-pack guidance MAY suggest Records use, folders, fields, templ
 - **THEN** the adjacent collection manifest remains the binding schema and the generic collection validator remains the only enforcement path
 
 ### Requirement: Opaque Planning reference contract
-A Record collection manifest MAY store one or more opaque Planning references paired with bounded Records query descriptors. A Record MAY link to a plan, goal, initiative, protocol, project, asset, person, entity, or decision. Records SHALL validate, round-trip, and governance-project these descriptors without resolving Planning, comparing intent with observations, copying record history, inferring progress/completion, or mutating either side.
+
+A Record collection manifest MAY store one or more opaque Planning references paired with bounded Records query descriptors. A Record MAY link to a plan, goal, initiative, protocol, project, asset, person, entity, or decision. A Planning reference MAY additionally carry a bounded `join`: one to four pairs mapping a declared record field to a plan field name, where the plan-side name is bounded non-empty text that Records does not check against the target. Records SHALL validate, round-trip, and governance-project these descriptors and the join without resolving Planning, comparing intent with observations, copying record history, inferring progress/completion, or mutating either side. The join is an authored declaration consumed only by the attention surface's `unreflected_outcomes` family; no Records operation SHALL resolve it.
 
 #### Scenario: Planning link round-trips without resolution
 - **WHEN** a manifest stores an opaque Planning reference plus a bounded query descriptor
 - **THEN** inspection returns the authorized descriptor unchanged and Records performs no Planning lookup or planned-versus-recorded comparison
 
+#### Scenario: Join round-trips without resolution
+- **WHEN** a manifest's Planning reference carries a join from a declared record field to a plan field
+- **THEN** inspection returns the join unchanged, `describe` documents the shape, and Records performs no lookup of the referenced Planning collection
+
+#### Scenario: Malformed join refuses
+- **WHEN** a join names a record field the schema does not declare, has more than four pairs, or has an empty plan-side name
+- **THEN** manifest validation refuses before acceptance and names the offending pair
+
 #### Scenario: External software execution truth remains external
 - **WHEN** a software initiative links to an accepted OpenSpec change, git state, tests, or deployment result
 - **THEN** Records may preserve the observed outcome and Planning may preserve intent, while repository/OpenSpec artifacts remain execution truth
+
+#### Scenario: Declared companion execution truth remains external
+- **WHEN** an initiative links to an artifact whose type the resolved workflow contract assigns to a companion
+- **THEN** Records may preserve an observed outcome and Planning may preserve intent, while the companion artifact remains opaque external execution truth
+
+#### Scenario: Pointer kind alone declares no authority
+- **WHEN** a Record or linked plan contains an OpenSpec, repository, issue, calendar, or unfamiliar companion pointer without a resolved workflow contract
+- **THEN** Records treats the pointer as opaque data and does not privilege that system, infer its state, or choose it as execution authority
 
 ### Requirement: Neutral observed-state query views
 Records query views SHALL display bounded observed values and provenance. Domain-specific interpretation SHALL require an explicit analysis or protocol layer and SHALL NOT be embedded in generic Records machinery. Planned-versus-recorded comparison SHALL live in the read-only plan-progress review rather than in Records machinery: a Records view SHALL remain the same neutral observed-state rendering whether it is read directly or read as bound Planning evidence, and Records SHALL NOT gain a comparison, progress, completion, or success semantic of its own.
@@ -303,3 +322,136 @@ A reviewer SHALL take only bounded provenance and counts from the envelope — t
 - **WHEN** a plan-progress review executes bound Records views repeatedly
 - **THEN** no Records manifest, canonical source, audit head, mutation receipt, or query cache is written, and the collection's next ordinary query is unaffected
 
+### Requirement: Records presentation recipes have one active owner
+
+A Records Markdown-item manifest SHALL declare at most one of legacy `record_presentation` and shared `item_presentation`. Existing legacy recipes SHALL retain their current rendering and safe child-projection semantics. Conversion SHALL require a complete guarded manifest revision and a transactional replacement of every owned block; implicit dual rendering is forbidden.
+
+#### Scenario: Existing Records manifest remains compatible
+
+- **WHEN** an existing collection declares only a valid `record_presentation`
+- **THEN** validation, mutation, query child projection, and managed rendering continue under the existing contract
+
+#### Scenario: Dual recipes refuse
+
+- **WHEN** a Records manifest declares both presentation recipe forms
+- **THEN** validation refuses before reading or writing item content
+
+#### Scenario: Conversion is explicit
+
+- **WHEN** a guarded revision replaces `record_presentation` with `item_presentation`
+- **THEN** the revision preview identifies every affected block and publication leaves exactly one current managed block per applicable item
+
+### Requirement: Human-owned Records representation remains neutral observation
+
+Records `item_filename` and `item_presentation` SHALL preserve exact observed values, nulls, inequalities, units, ranges, cancellation or status, precision, qualifiers, and provenance. They SHALL NOT add interpretation, diagnosis, ranking, reconstructed bounds, confidence, or advice. A field that cannot be represented without semantic coercion SHALL refuse rendering.
+
+#### Scenario: Event filename carries identity but not mutable status
+
+- **WHEN** a collection's natural key includes occurrence date, event title, and immutable event kind
+- **THEN** its filename may render those values but excludes usability, approval, processing, and other mutable state
+
+#### Scenario: Readable body preserves qualifiers
+
+- **WHEN** selected Record values contain null, less-than, cancellation, unit, or source qualifiers
+- **THEN** the managed body preserves each distinction exactly and adds no explanation of what it means
+
+### Requirement: Records inspection reports legacy and shared representation debt
+
+Records inspection SHALL apply the shared representation diagnostics to both presentation forms and SHALL continue to find owned legacy markers after the recipe is removed from the current manifest. The absence of a body recipe SHALL NOT make a stale or orphan block healthy.
+
+#### Scenario: Removed legacy recipe remains inspectable
+
+- **WHEN** a collection contains a legacy managed block but its current manifest declares no presentation recipe
+- **THEN** Records inspection reports the orphan and identifies explicit cleanup or manifest restoration as remediation
+
+### Requirement: Records inspection surfaces observed free-string vocabulary
+
+Collection inspection SHALL report, for every declared string-typed field that declares no
+`enum`, a bounded summary of the distinct values the authorized items already carry,
+paired with each value's occurrence count. The summary SHALL be additive: every existing
+inspection key keeps its shape and meaning.
+
+Values SHALL be counted by their full text with surrounding whitespace removed, and empty
+results SHALL be ignored. Counting SHALL NOT key on a shortened form: two distinct values
+that share a prefix long enough to collide once shortened SHALL remain two entries with
+their own counts.
+
+The summary SHALL be bounded independently of collection size. At most 20 distinct values
+per field SHALL be emitted, and when a field carries more, the retained values SHALL be the
+most frequent ones, ranked by descending count and breaking ties by ascending value, so
+that the cap drops the rarest terms rather than the ones the item pass happened to meet
+last. A per-field truncation flag SHALL say so whenever the distinct-value cap binds.
+
+Each emitted value SHALL be cut to a bounded display length and SHALL carry its own
+always-present flag stating whether that cut applied. Fields declaring an `enum` SHALL NOT
+be summarized, because the declaration is already the vocabulary.
+
+The summary SHALL be derived from the same authorized item pass that produces the rest of
+the inspection payload and SHALL carry the same serve-time filtering, under the same
+path-granular authorization that pass already applies. Neither a value nor a count SHALL
+reflect an item the requesting audience may not read. Inspection SHALL NOT perform an
+additional or unbounded scan to produce it, and SHALL omit the summary entirely when no
+item pass ran.
+
+#### Scenario: Free-string field reveals the vocabulary already in use
+- **GIVEN** a collection whose manifest declares a free-string field and whose items carry
+  three or more distinct values for it
+- **WHEN** a client inspects the collection
+- **THEN** the response reports each distinct value with its occurrence count and with the
+  flag stating that no display cut applied
+- **AND** an appending agent can reuse an existing term instead of echoing the user
+
+#### Scenario: Capped field keeps its most frequent terms
+- **WHEN** a free-string field carries more distinct values than the cap admits
+- **THEN** inspection reports exactly the capped number of distinct values, most frequent
+  first, with ties broken by ascending value
+- **AND** a term seen many times late in the item pass is retained over a term seen once
+- **AND** the field's summary is flagged as truncated rather than silently partial
+
+#### Scenario: Long values stay distinct and say they were cut
+- **WHEN** two distinct values share a prefix long enough to collide at the display length
+- **THEN** inspection reports two entries, each with its own count
+- **AND** each entry is flagged as display-truncated, even though their emitted text matches
+
+#### Scenario: Declared enum is not restated as observed usage
+- **WHEN** a manifest declares a field as `enum`
+- **THEN** inspection reports no observed-value summary for that field
+- **AND** the declared values remain discoverable through the authoring contract
+
+#### Scenario: Withheld item contributes neither a value nor a count
+- **GIVEN** governance withholds one item of an otherwise released collection
+- **WHEN** a client of that audience inspects the collection
+- **THEN** a value occurring only on the withheld item is absent from the summary
+- **AND** a value the withheld item shares with released items is counted from the released
+  items alone
+- **AND** the counts, the truncation flags, and the rest of the payload disclose no trace of
+  that value or of the item's existence
+
+#### Scenario: Unreadable collection claims no sweep
+- **WHEN** inspection cannot parse the collection's canonical items
+- **THEN** the response omits the observed-value summary entirely rather than reporting an
+  empty one, which would claim a sweep that never ran
+
+### Requirement: Observed outcomes close a contract-aware Planning feedback loop
+
+When a resolved workflow contract and prominence policy permit observed-outcome capture, a sufficiently identified report that work was produced, delivered, approved, published, failed, cancelled, or otherwise happened SHALL route to one compatible Records collection without requiring a magic log verb. The Record MAY carry opaque Planning and companion references. Records SHALL remain neutral observed state; it SHALL NOT infer success, completion, health, authority, or a Planning transition.
+
+#### Scenario: Shipped companion work becomes one observed event
+- **WHEN** a user reports that work represented by a plan and companion artifact shipped
+- **THEN** the agent appends one compatible Record linked opaquely to both references and does not copy the companion artifact into Records
+
+#### Scenario: Outcome prompts rather than invents a transition
+- **WHEN** an observed outcome joins to an open plan and the contract posture is `propose-after-outcome`
+- **THEN** the review surface may prompt an explicit Planning transition while Records and Planning remain unchanged until the user decides
+
+#### Scenario: Explicit user closure has two governed consequences
+- **WHEN** the user explicitly states both the observed outcome and that the intended work is complete
+- **THEN** the agent records the outcome and performs one guarded Planning transition, reporting both consequences without treating either store as a mirror of the other
+
+### Requirement: External execution truth is declared rather than hard-coded
+
+Records SHALL treat every companion artifact as an opaque external reference governed by the resolved workflow contract. The product SHALL NOT privilege OpenSpec, git, an issue tracker, calendar, or any other companion in Records semantics. A companion declaration SHALL NOT make its reported state an observed Record until the user or an authorized tool interaction supplies a concrete event in the active task context.
+
+#### Scenario: Different tools preserve the same Records semantics
+- **WHEN** two scopes use different companion tools for the same declared execution ownership
+- **THEN** observed outcomes use the same neutral Record schema and differ only in their opaque companion references

@@ -41,6 +41,9 @@ class ParsedPage:
     # state: never serialized, but lets the post-cache release gate detect a
     # retrieval-to-projection swap even when size/mtime are preserved.
     snapshot_hash: str | None = None
+    # Whether an authored frontmatter block parsed as a YAML mapping. This is
+    # private classification state, not part of any public result shape.
+    frontmatter_valid: bool = True
 
     @property
     def page_type(self) -> str | None:

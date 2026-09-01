@@ -19,7 +19,15 @@ from .entity_types import (
     load_entity_types,
 )
 from .kbdir import kb_dirname
-from .vault import render_wikilinks_for_vault, shipped_schema_target
+from .vault import (
+    PathGuard,
+    PathGuardError,
+    PlannedWrite,
+    batch_atomic_write,
+    read_guarded_text,
+    render_wikilinks_for_vault,
+    shipped_schema_target,
+)
 
 _SCAFFOLD = Path(__file__).parent / "_scaffold"
 
@@ -50,6 +58,7 @@ _FOLDERS = (
 #: traversal-profiles.yaml) or their own content, and is never overwritten.
 _SHIPPED_SCHEMA_GLOBS = (
     "_Schema/SKILL.md",
+    "_Schema/examples/**/*.md",
     "_Schema/references/*.md",
     "_Schema/workflow-skills/*/SKILL.md",
     # The registry of those skills. Product-owned for the same reason they are,
@@ -81,10 +90,15 @@ def refresh_shipped_schema(vault_root: Path) -> list[str]:
     including the per-vault YAML registries the user is expected to edit.
     """
     vault_root = Path(vault_root)
+    vault_root.mkdir(parents=True, exist_ok=True)
     kb = vault_root / kb_dirname()
     if not kb.is_dir():
         return []
+    from . import workflow_contracts
+
+    workflow_contracts.ensure_migration_marker(vault_root)
     refreshed: list[str] = []
+    writes: list[PlannedWrite] = []
     for src in shipped_schema_sources():
         # `_Schema/SKILL.md` -> `<vault>/.exomem/schema/SKILL.md`. The scaffold
         # keeps its `_Schema/` prefix because that is the shape the claude.ai
@@ -93,26 +107,54 @@ def refresh_shipped_schema(vault_root: Path) -> list[str]:
         relative = src.relative_to(_SCAFFOLD).as_posix().split("/", 1)[1]
         dest = shipped_schema_target(vault_root) / relative
         try:
-            if dest.is_file() and dest.read_bytes() == src.read_bytes():
+            current, guard = read_guarded_text(vault_root, dest)
+            if current == src.read_text(encoding="utf-8"):
                 continue
-        except OSError:
-            pass
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dest)
+        except FileNotFoundError:
+            try:
+                guard = PathGuard.capture(
+                    vault_root, dest.relative_to(vault_root).as_posix(), leaf_policy="absent"
+                )
+            except PathGuardError as error:
+                raise workflow_contracts.WorkflowContractError(
+                    "WORKFLOW_CONTRACT_MIGRATION_INDETERMINATE"
+                ) from error
+        except (OSError, UnicodeDecodeError, PathGuardError) as error:
+            raise workflow_contracts.WorkflowContractError(
+                "WORKFLOW_CONTRACT_MIGRATION_INDETERMINATE"
+            ) from error
+        writes.append(PlannedWrite(dest, src.read_text(encoding="utf-8"), guard=guard))
         refreshed.append(dest.relative_to(vault_root).as_posix())
+    if writes:
+        try:
+            batch_atomic_write(writes, vault_root=vault_root)
+        except PathGuardError as error:
+            raise workflow_contracts.WorkflowContractError(
+                "WORKFLOW_CONTRACT_MIGRATION_INDETERMINATE"
+            ) from error
     return refreshed
 
 
-def init_vault(vault_root: Path, *, force: bool = False) -> dict:
+def init_vault(
+    vault_root: Path,
+    *,
+    force: bool = False,
+    initialize_state: bool = True,
+) -> dict:
     """Create `<vault_root>/Knowledge Base/` with the starter scaffold.
 
     Copies the bundled scaffold (index.md, log.md, _Schema/) and lays down the
     typed folder tree. Raises ``FileExistsError`` if `Knowledge Base/` already
     exists, unless ``force=True`` (which overlays the scaffold without deleting
-    any existing files).
+    any existing files). A genuinely new vault also receives its empty external
+    state manifest. Callers building a renameable staging vault must pass
+    ``initialize_state=False`` and initialize state only after publication,
+    because the per-vault state key binds the final vault path.
     """
     vault_root = Path(vault_root)
+    vault_root.mkdir(parents=True, exist_ok=True)
     kb = vault_root / kb_dirname()
+    fresh_vault = not kb.exists()
     if kb.exists() and not force:
         raise FileExistsError(
             f"{kb} already exists. Pass force=True to overlay the scaffold "
@@ -120,6 +162,9 @@ def init_vault(vault_root: Path, *, force: bool = False) -> dict:
         )
 
     created: list[str] = []
+    from . import workflow_contracts
+
+    workflow_contracts.ensure_migration_marker(vault_root)
     # The product-owned markdown lands outside the note namespace; everything
     # else -- index.md, log.md, the typed tree, and the per-vault YAML registries
     # that also live under `_Schema/` -- is the user's and stays in the Knowledge
@@ -140,9 +185,7 @@ def init_vault(vault_root: Path, *, force: bool = False) -> dict:
             dest.mkdir(parents=True, exist_ok=True)
             continue
         dest.parent.mkdir(parents=True, exist_ok=True)
-        if dest.exists() and (
-            not force or scaffold_rel == Path("Entities") / "index.md"
-        ):
+        if dest.exists() and (not force or scaffold_rel == Path("Entities") / "index.md"):
             continue
         shutil.copy2(src, dest)
         created.append(dest.relative_to(vault_root).as_posix())
@@ -161,9 +204,7 @@ def init_vault(vault_root: Path, *, force: bool = False) -> dict:
         current = entity_index.read_text(encoding="utf-8")
         refreshed = indexes._refresh_entities_subindex_text(
             current,
-            counts_by_type=indexes._count_entities(
-                kb / "Entities", registry=entity_registry
-            ),
+            counts_by_type=indexes._count_entities(kb / "Entities", registry=entity_registry),
             registry=entity_registry,
         )
         refreshed = render_wikilinks_for_vault(refreshed, vault_root)
@@ -177,6 +218,17 @@ def init_vault(vault_root: Path, *, force: bool = False) -> dict:
     ensure_manifest(vault_root)
     if activation_missing:
         created.append(activation_path.relative_to(vault_root).as_posix())
+
+    if fresh_vault and initialize_state:
+        from . import state_migration
+
+        authority = state_migration.assert_offline_migration_authority(
+            source="fresh vault initialization",
+        )
+        state_migration.migrate_vault_state_offline(
+            vault_root,
+            authority=authority,
+        )
 
     return {"vault": str(vault_root), "kb": str(kb), "created": created}
 

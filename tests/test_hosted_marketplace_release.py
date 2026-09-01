@@ -537,7 +537,7 @@ def test_openai_listing_rejects_not_yet_been_built_variants(
 
 
 def test_marketplace_review_cases_bind_the_versioned_generic_fixture() -> None:
-    fixture_path = REPO_ROOT / "plugins/hosted/marketplace-review-fixture-v1.json"
+    fixture_path = REPO_ROOT / "plugins/hosted/marketplace-review-fixture-v2.json"
     assert fixture_path.is_file(), "the canonical generic reviewer fixture must be checked in"
 
     fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
@@ -566,7 +566,7 @@ def test_marketplace_review_cases_bind_the_versioned_generic_fixture() -> None:
 
 def test_marketplace_review_fixture_declares_an_absent_create_only_target() -> None:
     fixture = json.loads(
-        (REPO_ROOT / "plugins/hosted/marketplace-review-fixture-v1.json").read_text(
+        (REPO_ROOT / "plugins/hosted/marketplace-review-fixture-v2.json").read_text(
             encoding="utf-8"
         )
     )
@@ -609,7 +609,7 @@ def test_marketplace_review_fixture_declares_an_absent_create_only_target() -> N
 
 def test_marketplace_positive_cases_are_backed_by_explicit_fixture_material() -> None:
     fixture = json.loads(
-        (REPO_ROOT / "plugins/hosted/marketplace-review-fixture-v1.json").read_text(
+        (REPO_ROOT / "plugins/hosted/marketplace-review-fixture-v2.json").read_text(
             encoding="utf-8"
         )
     )
@@ -625,7 +625,10 @@ def test_marketplace_positive_cases_are_backed_by_explicit_fixture_material() ->
     assert "generic pricing decision is to keep provider review free of sales language" in notes[
         "pricing-decision"
     ]["content"]
-    assert "[[review-pricing-policy-source]]" in notes["pricing-decision"]["content"]
+    assert (
+        "[[Knowledge Base/Notes/Insights/review-pricing-policy-source]]"
+        in notes["pricing-decision"]["content"]
+    )
     assert "provider review uses no sales language" in notes["pricing-policy-source"]["content"]
 
     assert capture["fixture_references"] == ["review-durable-capture"]
@@ -643,7 +646,7 @@ def test_marketplace_positive_cases_are_backed_by_explicit_fixture_material() ->
         "Returns the explicit review-item fact that the pricing policy source remains linked "
         "before provider submission."
     )
-    assert "## Review Item" in notes["review-item"]["content"]
+    assert "## Requirement" in notes["review-item"]["content"]
     assert (
         "Confirm that the pricing policy source remains linked before provider submission."
         in notes["review-item"]["content"]
@@ -652,7 +655,7 @@ def test_marketplace_positive_cases_are_backed_by_explicit_fixture_material() ->
 
 def test_marketplace_review_fixture_rejects_preseeded_create_target(tmp_path: Path) -> None:
     root = copy_hosted_tree(tmp_path / "repo")
-    fixture_path = root / "plugins/hosted/marketplace-review-fixture-v1.json"
+    fixture_path = root / "plugins/hosted/marketplace-review-fixture-v2.json"
     fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
     assert "absent_notes" in fixture["payload"]
     target = fixture["payload"]["absent_notes"][0]
@@ -676,7 +679,7 @@ def test_marketplace_review_fixture_rejects_preseeded_create_target(tmp_path: Pa
 def test_marketplace_review_case_rejects_mismatched_create_reset_tool(tmp_path: Path) -> None:
     root = copy_hosted_tree(tmp_path / "repo")
     fixture = json.loads(
-        (root / "plugins/hosted/marketplace-review-fixture-v1.json").read_text(encoding="utf-8")
+        (root / "plugins/hosted/marketplace-review-fixture-v2.json").read_text(encoding="utf-8")
     )
     assert "absent_notes" in fixture["payload"]
     cases_path = root / "plugins/hosted/marketplace-review-cases.json"
@@ -703,7 +706,7 @@ def test_marketplace_review_case_rejects_extra_write_without_cleanup(tmp_path: P
 
 def test_marketplace_review_case_rejects_prompt_content_drift(tmp_path: Path) -> None:
     root = copy_hosted_tree(tmp_path / "repo")
-    fixture_path = root / "plugins/hosted/marketplace-review-fixture-v1.json"
+    fixture_path = root / "plugins/hosted/marketplace-review-fixture-v2.json"
     fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
     target = fixture["payload"]["absent_notes"][0]
     assert "content" in target
@@ -771,7 +774,7 @@ def test_marketplace_review_cases_reject_stale_fixture_bindings(
     tmp_path: Path, mutate: object, match: str
 ) -> None:
     root = copy_hosted_tree(tmp_path / "repo")
-    assert (root / "plugins/hosted/marketplace-review-fixture-v1.json").is_file()
+    assert (root / "plugins/hosted/marketplace-review-fixture-v2.json").is_file()
     mutate(root)
 
     with pytest.raises(ValueError, match=match):
@@ -802,7 +805,7 @@ def test_marketplace_review_fixture_rejects_mismatched_reset_reference_and_key(
     tmp_path: Path,
 ) -> None:
     root = copy_hosted_tree(tmp_path / "repo")
-    fixture_path = root / "plugins/hosted/marketplace-review-fixture-v1.json"
+    fixture_path = root / "plugins/hosted/marketplace-review-fixture-v2.json"
     fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
     fixture["reset"]["disposable_reference"] = "project-brief"
     fixture_path.write_text(json.dumps(fixture), encoding="utf-8")
@@ -823,7 +826,7 @@ def _mutate_review_cases(root: Path, mutate: object) -> None:
 
 
 def _mutate_fixture(root: Path, mutate: object) -> None:
-    path = root / "plugins/hosted/marketplace-review-fixture-v1.json"
+    path = root / "plugins/hosted/marketplace-review-fixture-v2.json"
     fixture = json.loads(path.read_text(encoding="utf-8"))
     mutate(fixture)
     path.write_text(json.dumps(fixture), encoding="utf-8")

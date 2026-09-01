@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import commands, semantic_index
+from exomem import commands, review_state, semantic_index
 from exomem import server as server_module
 
 
@@ -593,7 +593,7 @@ def test_triage_memory_mcp_write_is_explicit_and_reversible(vault: Path, monkeyp
         {"ref": item["ref"], "action": "dismiss", "why": "reviewed"},
     )
     assert dismissed["state"] == "dismissed"
-    assert (vault / "Knowledge Base/.review-state.json").exists()
+    assert review_state.state_path(vault).exists()
 
     reopened = _call(
         mcp,

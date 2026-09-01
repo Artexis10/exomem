@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Hosted client plugin candidates
 
 `plugins/hosted/definition.json` is the single tenant-neutral release input. It
@@ -120,6 +122,15 @@ that exact fixture. Only raw reviewer credentials, reviewer identities, tenant
 IDs and invites, live tenant exports or content, and content-bearing native
 client acceptance evidence stay in the approved secret-manager/provider handoff
 and out of Git and logs.
+
+Use `scripts/reviewer_bootstrap.py prepare` and then `run` for that handoff. The
+`run` command now requires the setup token exchange, polls the owner view to
+`CELL_READY`, creates and reads back every checked fixture note through normal
+Hosted MCP, and writes a mode-0600 content-free seed receipt before it asks the
+control plane for either provider credential. The later clean ChatGPT and Claude
+runs start from prepared state; they test natural recall and capture rather than
+manually reconstructing fixture Markdown. They still produce the genuine native
+client evidence—bootstrap does not stand in for provider acceptance.
 
 The signed, secret-free reviewer-access evidence is distinct from the provider
 credential. It binds the matching provider and deployment, enabled feature

@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "fixture_version": "v2",
+  "payload": {
+    "notes": [
+      {
+        "reference": "project-brief",
+        "key": "review-project-brief",
+        "title": "Project brief",
+        "content": "## Finding\n\nThe generic project has a validated provider contract and a documented pricing decision.\n\n## Next Step\n\nUse the launch plan to prepare the provider review packet."
+      },
+      {
+        "reference": "launch-plan",
+        "key": "review-launch-plan",
+        "title": "Launch plan",
+        "content": "## Decision\n\nThe generic launch plan is to validate the provider contract before preparing the provider review packet.\n\n## Next Step\n\nPrepare the provider review packet after contract validation."
+      },
+      {
+        "reference": "pricing-policy-source",
+        "key": "review-pricing-policy-source",
+        "title": "Pricing policy source",
+        "content": "## Source\n\nThe generic pricing policy source states that provider review uses no sales language and no paid-plan offer."
+      },
+      {
+        "reference": "pricing-decision",
+        "key": "review-pricing-decision",
+        "title": "Pricing decision",
+        "content": "## Decision\n\nThe generic pricing decision is to keep provider review free of sales language.\n\n## Provenance\n\nSee [[Knowledge Base/Notes/Insights/review-pricing-policy-source]] for the policy source."
+      },
+      {
+        "reference": "review-item",
+        "key": "review-review-item",
+        "title": "Review item",
+        "content": "## Requirement\n\nConfirm that the pricing policy source remains linked before provider submission."
+      }
+    ],
+    "absent_notes": [
+      {
+        "reference": "review-durable-capture",
+        "key": "review-durable-capture",
+        "title": "Review durable capture",
+        "create_tool": "remember",
+        "note_type": "insight",
+        "content": "## Observations\n\n- [review conclusion] Keep provider review fixtures deterministic. #review (marketplace review) ^review-durable-capture"
+      }
+    ]
+  },
+  "payload_sha256": "c1002e400b5b83a6ca5fc779b2aaa64134fc5b868438d8a7bc4c6418d0c32d65",
+  "reset": {
+    "disposable_reference": "review-durable-capture",
+    "disposable_key": "review-durable-capture",
+    "disposable_title": "Review durable capture",
+    "create_tool": "remember",
+    "procedure": "delete_created_note"
+  }
+}

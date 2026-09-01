@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Secret handoff and rotation
 
 This runbook is the only supported path from Terraform, an operator prompt, or

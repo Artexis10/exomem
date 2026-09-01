@@ -33,6 +33,7 @@ from functools import wraps
 from pathlib import Path
 from typing import Any
 
+from . import capabilities as capabilities_module
 from .cli_ops import OpError, leaf_contract_code
 from .mutation_lock import (
     VaultMutationCoordinator,
@@ -50,6 +51,7 @@ from .mutation_terminal import (
     replayed_terminal,
     split_response_detail,
     valid_collection_receipt,
+    valid_structured_files_receipt,
 )
 from .privacy_log import content_private_logging_enabled
 
@@ -63,6 +65,16 @@ _COORDINATOR_USER_AGENT = (
 # 60s was shorter than one abandoned-write investigation; 10 minutes covers a
 # human noticing the timeout, checking state, and retrying.
 _IMPLICIT_RETRY_TTL_SECONDS = 600.0
+
+_REQUEST_BOUND_REMOTE_SURFACES = frozenset({"mcp", "rest", "hosted", "hosted-agent"})
+REMOTE_MAINTENANCE_MESSAGE = (
+    "write-mode maintenance is unavailable through request-bound remote commands"
+)
+REMOTE_MAINTENANCE_REMEDIATION = (
+    "Run `exomem maintain --fix` or `exomem maintain --reconcile` on the host; "
+    "for ID backfill, run `exomem maintain_memory --mode backfill-ids "
+    "--no-dry-run`. Use audit or dry_run=true remotely."
+)
 
 # Commands whose `invoke()` boundary is narrowed to `writer_authority_guard`
 # (fence-only, no shared vault lock) instead of the full `mutation_guard`.
@@ -152,7 +164,11 @@ _ACTIVE_DIRECT_MUTATION_GUARDS: ContextVar[tuple[tuple[str, Path], ...]] = Conte
 def _direct_mutation_boundary(
     vault_root: os.PathLike[str] | str, state_root: Path
 ) -> tuple[str, Path]:
-    root = Path(vault_root) if isinstance(vault_root, str) and Path(vault_root).is_absolute() else vault_root
+    root = (
+        Path(vault_root)
+        if isinstance(vault_root, str) and Path(vault_root).is_absolute()
+        else vault_root
+    )
     return (
         canonical_mutation_identity(root),
         state_root.expanduser().resolve(strict=False),
@@ -203,11 +219,11 @@ def _durable_graph_outcome(vault_root: Path) -> Any:
 
 
 def _windows_library(ctypes_module: Any, name: str) -> Any:
-    return getattr(ctypes_module, "WinDLL")(name, use_last_error=True)
+    return ctypes_module.WinDLL(name, use_last_error=True)
 
 
 def _windows_last_error(ctypes_module: Any) -> int:
-    return int(getattr(ctypes_module, "get_last_error")())
+    return int(ctypes_module.get_last_error())
 
 
 def _log_mutation_event(phase: str, *, level: int = logging.INFO, **fields: Any) -> None:
@@ -320,23 +336,43 @@ class _WindowsDPAPISecretProtector:
         if protect:
             routine = crypt32.CryptProtectData
             routine.argtypes = [
-                ctypes.POINTER(_DataBlob), wintypes.LPCWSTR, ctypes.POINTER(_DataBlob),
-                wintypes.LPVOID, wintypes.LPVOID, wintypes.DWORD, ctypes.POINTER(_DataBlob),
+                ctypes.POINTER(_DataBlob),
+                wintypes.LPCWSTR,
+                ctypes.POINTER(_DataBlob),
+                wintypes.LPVOID,
+                wintypes.LPVOID,
+                wintypes.DWORD,
+                ctypes.POINTER(_DataBlob),
             ]
             ok = routine(
-                ctypes.byref(source), None, ctypes.byref(entropy_blob), None, None, 0x1,
+                ctypes.byref(source),
+                None,
+                ctypes.byref(entropy_blob),
+                None,
+                None,
+                0x1,
                 ctypes.byref(output),
             )
         else:
             routine = crypt32.CryptUnprotectData
             description = wintypes.LPWSTR()
             routine.argtypes = [
-                ctypes.POINTER(_DataBlob), ctypes.POINTER(wintypes.LPWSTR), ctypes.POINTER(_DataBlob),
-                wintypes.LPVOID, wintypes.LPVOID, wintypes.DWORD, ctypes.POINTER(_DataBlob),
+                ctypes.POINTER(_DataBlob),
+                ctypes.POINTER(wintypes.LPWSTR),
+                ctypes.POINTER(_DataBlob),
+                wintypes.LPVOID,
+                wintypes.LPVOID,
+                wintypes.DWORD,
+                ctypes.POINTER(_DataBlob),
             ]
             ok = routine(
-                ctypes.byref(source), ctypes.byref(description), ctypes.byref(entropy_blob), None,
-                None, 0x1, ctypes.byref(output),
+                ctypes.byref(source),
+                ctypes.byref(description),
+                ctypes.byref(entropy_blob),
+                None,
+                None,
+                0x1,
+                ctypes.byref(output),
             )
             if description:
                 _windows_library(ctypes, "kernel32").LocalFree(description)
@@ -545,7 +581,11 @@ def _receipt_result_summary(value: Any, *, depth: int = 0) -> dict[str, Any]:
                 )
             items.sort(
                 key=lambda item: json.dumps(
-                    item[0], allow_nan=False, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                    item[0],
+                    allow_nan=False,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
                 )
             )
         except Exception:  # noqa: BLE001 - an arbitrary mapping is summarized closed
@@ -685,6 +725,10 @@ class LeaseConfig:
     # `0` disables idle release entirely. A preferred replica is exempt —
     # see writer_lease.py's `_maybe_idle_release` docstring for why.
     idle_release_seconds: float = 60.0
+    # This is the binary's writer-side schema contract, not a caller-selected
+    # view of the vault. Pre-v4 clients omit the field entirely; the external
+    # coordinator interprets that released wire shape as schema 3.
+    schema_version: int = 4
 
     @property
     def enabled(self) -> bool:
@@ -762,24 +806,126 @@ class LeaseRecord:
     expires_at: float | None
     fencing_token: int
     granted: bool = False
+    required_schema_version: int | None = None
+    schema_fence_generation: int | None = None
+    governance_enrolled: bool = False
 
     @classmethod
     def from_json(cls, data: Mapping[str, Any]) -> LeaseRecord:
         holder = data.get("holder")
         expires = data.get("expires_at")
         token = data.get("fencing_token", 0)
+        granted = data.get("granted", False)
+        enrolled = data.get("governance_enrolled", False)
         if holder is not None and not isinstance(holder, str):
             raise ValueError("holder must be a string or null")
         if expires is not None and not isinstance(expires, (int, float)):
             raise ValueError("expires_at must be a number or null")
         if isinstance(token, bool) or not isinstance(token, int):
             raise ValueError("fencing_token must be an integer")
+        if not isinstance(granted, bool) or not isinstance(enrolled, bool):
+            raise ValueError("lease booleans are invalid")
+        required_schema = data.get("required_schema_version")
+        fence_generation = data.get("schema_fence_generation")
+        if required_schema is not None and (
+            isinstance(required_schema, bool)
+            or not isinstance(required_schema, int)
+            or required_schema not in {3, 4}
+        ):
+            raise ValueError("required_schema_version must be 3, 4, or null")
+        if fence_generation is not None and (
+            isinstance(fence_generation, bool)
+            or not isinstance(fence_generation, int)
+            or fence_generation < 1
+        ):
+            raise ValueError("schema_fence_generation must be a positive integer or null")
+        has_fence = required_schema is not None and fence_generation is not None
+        if enrolled != has_fence:
+            raise ValueError("schema fence metadata is inconsistent")
         return cls(
             holder,
             float(expires) if expires is not None else None,
             token,
-            bool(data.get("granted")),
+            granted,
+            required_schema,
+            fence_generation,
+            enrolled,
         )
+
+
+@dataclass(frozen=True)
+class SchemaAdmission:
+    admitted: bool
+    governance_enrolled: bool
+    required_schema_version: int | None
+    schema_fence_generation: int | None
+
+    @classmethod
+    def from_json(cls, data: Mapping[str, Any]) -> SchemaAdmission:
+        expected_fields = {
+            "admitted",
+            "governance_enrolled",
+            "required_schema_version",
+            "schema_fence_generation",
+        }
+        if set(data) != expected_fields:
+            raise ValueError("schema admission response fields are invalid")
+        admitted = data.get("admitted")
+        enrolled = data.get("governance_enrolled")
+        required = data.get("required_schema_version")
+        generation = data.get("schema_fence_generation")
+        if not isinstance(admitted, bool) or not isinstance(enrolled, bool):
+            raise ValueError("schema admission booleans are invalid")
+        if required is not None and (
+            isinstance(required, bool) or not isinstance(required, int) or required not in {3, 4}
+        ):
+            raise ValueError("required_schema_version is invalid")
+        if generation is not None and (
+            isinstance(generation, bool) or not isinstance(generation, int) or generation < 1
+        ):
+            raise ValueError("schema_fence_generation is invalid")
+        has_fence = required is not None and generation is not None
+        if enrolled != has_fence or (admitted and not enrolled):
+            raise ValueError("schema admission response has inconsistent authority")
+        return cls(admitted, enrolled, required, generation)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "admitted": self.admitted,
+            "governance_enrolled": self.governance_enrolled,
+            "required_schema_version": self.required_schema_version,
+            "schema_fence_generation": self.schema_fence_generation,
+        }
+
+
+@dataclass(frozen=True)
+class SchemaFenceState:
+    governance_enrolled: bool
+    schema_version: int
+    generation: int
+
+    @classmethod
+    def from_json(cls, data: Mapping[str, Any]) -> SchemaFenceState:
+        if set(data) != {"governance_enrolled", "schema_version", "generation"}:
+            raise ValueError("schema fence response fields are invalid")
+        enrolled = data.get("governance_enrolled")
+        schema_version = data.get("schema_version")
+        generation = data.get("generation")
+        if enrolled is not True:
+            raise ValueError("schema fence enrollment is invalid")
+        if (
+            isinstance(schema_version, bool)
+            or not isinstance(schema_version, int)
+            or schema_version not in {3, 4}
+        ):
+            raise ValueError("schema fence version is invalid")
+        if (
+            isinstance(generation, bool)
+            or not isinstance(generation, int)
+            or generation < 1
+        ):
+            raise ValueError("schema fence generation is invalid")
+        return cls(enrolled, schema_version, generation)
 
 
 #: Statuses that mean the URL answered and does not implement the lease
@@ -816,12 +962,11 @@ def _coordinator_unavailable_error(exc: BaseException) -> OpError:
     return OpError(
         "WRITER_COORDINATOR_UNAVAILABLE",
         f"writer coordinator could not confirm authority: {exc}",
-        "Check the coordinator URL, credentials, and service health; "
-        "reads remain available.",
+        "Check the coordinator URL, credentials, and service health; reads remain available.",
     )
 
 
-def _contract_absent_error(url: str, operation: str, status: int) -> OpError:
+def _contract_absent_error(url: str, route: str, status: int) -> OpError:
     """A URL that answers but does not serve the writer-lease contract.
 
     Fail-closed exactly like an unavailable coordinator -- authority is still
@@ -829,7 +974,6 @@ def _contract_absent_error(url: str, operation: str, status: int) -> OpError:
     configuration fault instead of an outage, and callers that poll can slow
     down instead of asking a 404 the same question every five seconds.
     """
-    route = "/v1/vaults/<id>/lease" + (f"/{operation}" if operation else "")
     safe_url = _redacted_coordinator_url(url)
     logger.warning(
         "writer-lease coordinator %s answered %d for %s; "
@@ -861,7 +1005,11 @@ class LeaseCoordinatorClient:
         return self._request(
             "POST",
             "acquire",
-            {"replica_id": self.config.replica_id, "ttl_seconds": self.config.ttl_seconds},
+            {
+                "replica_id": self.config.replica_id,
+                "ttl_seconds": self.config.ttl_seconds,
+                "schema_version": self.config.schema_version,
+            },
         )
 
     def renew(self, fencing_token: int) -> LeaseRecord:
@@ -872,6 +1020,7 @@ class LeaseCoordinatorClient:
                 "replica_id": self.config.replica_id,
                 "fencing_token": fencing_token,
                 "ttl_seconds": self.config.ttl_seconds,
+                "schema_version": self.config.schema_version,
             },
         )
 
@@ -896,10 +1045,103 @@ class LeaseCoordinatorClient:
     def status(self) -> LeaseRecord:
         return self._request("GET", "", None)
 
+    def schema_admission(self, schema_version: int) -> SchemaAdmission:
+        if isinstance(schema_version, bool) or schema_version not in {3, 4}:
+            raise ValueError("schema_version must be 3 or 4")
+        vault = urllib.parse.quote(str(self.config.vault_id), safe="")
+        payload = self._request_json(
+            "POST",
+            f"/v1/vaults/{vault}/schema-fence/admit",
+            {
+                "replica_id": self.config.replica_id,
+                "schema_version": schema_version,
+            },
+            contract_route="/v1/vaults/<id>/schema-fence/admit",
+        )
+        try:
+            admission = SchemaAdmission.from_json(payload)
+            expected_admission = bool(
+                admission.governance_enrolled
+                and admission.required_schema_version == schema_version
+            )
+            if admission.admitted != expected_admission:
+                raise ValueError("schema admission decision disagrees with its fence")
+            return admission
+        except ValueError as exc:
+            raise _coordinator_unavailable_error(exc) from None
+
+    def schema_fence(self) -> SchemaFenceState:
+        vault = urllib.parse.quote(str(self.config.vault_id), safe="")
+        payload = self._request_json(
+            "GET",
+            f"/v1/vaults/{vault}/schema-fence",
+            None,
+            contract_route="/v1/vaults/<id>/schema-fence",
+        )
+        try:
+            return SchemaFenceState.from_json(payload)
+        except ValueError as exc:
+            raise _coordinator_unavailable_error(exc) from None
+
+    def transition_schema_fence(
+        self,
+        *,
+        expected_generation: int,
+        schema_version: int,
+    ) -> SchemaFenceState:
+        if (
+            isinstance(expected_generation, bool)
+            or not isinstance(expected_generation, int)
+            or expected_generation < 1
+        ):
+            raise ValueError("expected_generation must be a positive integer")
+        if isinstance(schema_version, bool) or schema_version not in {3, 4}:
+            raise ValueError("schema_version must be 3 or 4")
+        vault = urllib.parse.quote(str(self.config.vault_id), safe="")
+        payload = self._request_json(
+            "PUT",
+            f"/v1/vaults/{vault}/schema-fence",
+            {
+                "expected_generation": expected_generation,
+                "schema_version": schema_version,
+            },
+            contract_route="/v1/vaults/<id>/schema-fence",
+        )
+        try:
+            state = SchemaFenceState.from_json(payload)
+            if (
+                state.schema_version != schema_version
+                or state.generation != expected_generation + 1
+            ):
+                raise ValueError("schema fence transition result is inconsistent")
+            return state
+        except ValueError as exc:
+            raise _coordinator_unavailable_error(exc) from None
+
     def _request(self, method: str, operation: str, body: dict | None) -> LeaseRecord:
         vault = urllib.parse.quote(str(self.config.vault_id), safe="")
         suffix = f"/{operation}" if operation else ""
-        url = f"{self.config.url}/v1/vaults/{vault}/lease{suffix}"
+        route = f"/v1/vaults/{vault}/lease{suffix}"
+        payload = self._request_json(
+            method,
+            route,
+            body,
+            contract_route="/v1/vaults/<id>/lease" + (f"/{operation}" if operation else ""),
+        )
+        try:
+            return LeaseRecord.from_json(payload)
+        except ValueError as exc:
+            raise _coordinator_unavailable_error(exc) from None
+
+    def _request_json(
+        self,
+        method: str,
+        route: str,
+        body: dict | None,
+        *,
+        contract_route: str,
+    ) -> dict[str, Any]:
+        url = f"{self.config.url}{route}"
         headers = {"Accept": "application/json", "User-Agent": _COORDINATOR_USER_AGENT}
         data = None
         if body is not None:
@@ -913,12 +1155,14 @@ class LeaseCoordinatorClient:
                 payload = json.loads(response.read().decode("utf-8"))
             if not isinstance(payload, dict):
                 raise ValueError("response is not an object")
-            return LeaseRecord.from_json(payload)
+            return payload
         except urllib.error.HTTPError as exc:
             # HTTPError subclasses URLError, so it has to be caught first for
             # the status to be visible at all.
             if exc.code in _CONTRACT_ABSENT_STATUSES:
-                raise _contract_absent_error(self.config.url, operation, exc.code) from None
+                raise _contract_absent_error(
+                    self.config.url, contract_route, exc.code
+                ) from None
             raise _coordinator_unavailable_error(exc) from None
         except (
             urllib.error.URLError,
@@ -928,6 +1172,105 @@ class LeaseCoordinatorClient:
             ValueError,
         ) as exc:
             raise _coordinator_unavailable_error(exc) from None
+
+
+def configured_schema_fence_operator_client(
+    env: Mapping[str, str] | None = None,
+) -> LeaseCoordinatorClient | None:
+    """Return the protected rollout client when writer coordination is configured."""
+
+    values = os.environ if env is None else env
+    config = LeaseConfig.from_env(values)
+    if not config.enabled:
+        return None
+    operator_token = values.get(
+        "EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN", ""
+    ).strip()
+    if not operator_token:
+        raise OpError(
+            "SCHEMA_FENCE_OPERATOR_UNAVAILABLE",
+            "schema fence operator credential is unavailable",
+            "Set EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN only in the protected "
+            "offline rollout environment.",
+        )
+    if operator_token == config.token:
+        raise OpError(
+            "SCHEMA_FENCE_OPERATOR_UNAVAILABLE",
+            "schema fence operator credential must be distinct from the writer lease credential",
+            "Provision a separate operator credential before changing the schema fence.",
+        )
+    return LeaseCoordinatorClient(replace(config, token=operator_token))
+
+
+def require_configured_schema_fence(
+    schema_version: int,
+) -> SchemaFenceState | None:
+    """Verify an optional external rollout fence without widening its state."""
+
+    if isinstance(schema_version, bool) or schema_version not in {3, 4}:
+        raise ValueError("schema_version must be 3 or 4")
+    client = configured_schema_fence_operator_client()
+    if client is None:
+        return None
+    state = client.schema_fence()
+    if state.schema_version != schema_version:
+        raise OpError(
+            "SCHEMA_FENCE_CONFLICT",
+            f"external schema fence requires v{state.schema_version}, not v{schema_version}",
+            "Reconcile the durable store and schema-fence generation before retrying.",
+            details={
+                "required_schema_version": state.schema_version,
+                "schema_fence_generation": state.generation,
+            },
+        )
+    return state
+
+
+def advance_configured_schema_fence(
+    *,
+    source_schema_version: int,
+    target_schema_version: int,
+) -> SchemaFenceState | None:
+    """CAS an optional rollout fence, accepting an exact lost-ack replay."""
+
+    if (
+        isinstance(source_schema_version, bool)
+        or isinstance(target_schema_version, bool)
+        or source_schema_version not in {3, 4}
+        or target_schema_version not in {3, 4}
+        or source_schema_version == target_schema_version
+    ):
+        raise ValueError("schema fence transition must be between v3 and v4")
+    client = configured_schema_fence_operator_client()
+    if client is None:
+        return None
+    current = client.schema_fence()
+    if current.schema_version == target_schema_version:
+        return current
+    if current.schema_version != source_schema_version:
+        raise OpError(
+            "SCHEMA_FENCE_CONFLICT",
+            "external schema fence does not match the transition predecessor",
+            "Reconcile the durable store and schema-fence generation before retrying.",
+            details={
+                "required_schema_version": current.schema_version,
+                "schema_fence_generation": current.generation,
+            },
+        )
+    advanced = client.transition_schema_fence(
+        expected_generation=current.generation,
+        schema_version=target_schema_version,
+    )
+    if (
+        advanced.schema_version != target_schema_version
+        or advanced.generation != current.generation + 1
+    ):
+        raise OpError(
+            "SCHEMA_FENCE_CONFLICT",
+            "external schema fence returned an inconsistent transition terminal",
+            "Reconcile the durable store and schema-fence generation before retrying.",
+        )
+    return advanced
 
 
 def _mutation_outcome_unknown_error() -> OpError:
@@ -1038,7 +1381,9 @@ class IdempotencyStore:
         self._secret_protector = (
             secret_protector
             if secret_protector is not None
-            else _WindowsDPAPISecretProtector() if os.name == "nt" else None
+            else _WindowsDPAPISecretProtector()
+            if os.name == "nt"
+            else None
         )
         self._condition = threading.Condition()
         self._attempts: dict[str, _ExecutionAttempt] = {}
@@ -1046,7 +1391,11 @@ class IdempotencyStore:
         state_dir_existed = path.parent.exists()
         owners_dir = _owner_lock_path(path.parent, "bootstrap").parent
         owners_dir_existed = owners_dir.exists()
-        private_paths = (path, path.with_name(f"{path.name}-wal"), path.with_name(f"{path.name}-shm"))
+        private_paths = (
+            path,
+            path.with_name(f"{path.name}-wal"),
+            path.with_name(f"{path.name}-shm"),
+        )
         preexisting_private_paths = {item for item in private_paths if item.exists()}
         if os.name != "nt":
             path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
@@ -1249,8 +1598,13 @@ class IdempotencyStore:
         protector = self._secret_protector
         if protector is None:
             return attempt.commit_secret
-        ciphertext = protector.protect(attempt.commit_secret, self._commit_secret_entropy(digest, attempt))
-        if not isinstance(ciphertext, bytes) or not 1 <= len(ciphertext) <= _WINDOWS_SECRET_ENVELOPE_MAX_CIPHERTEXT:
+        ciphertext = protector.protect(
+            attempt.commit_secret, self._commit_secret_entropy(digest, attempt)
+        )
+        if (
+            not isinstance(ciphertext, bytes)
+            or not 1 <= len(ciphertext) <= _WINDOWS_SECRET_ENVELOPE_MAX_CIPHERTEXT
+        ):
             raise RuntimeError("idempotency secret protector returned an invalid ciphertext")
         provider = getattr(protector, "provider", None)
         if type(provider) is not int or not 1 <= provider <= 255:
@@ -1341,9 +1695,7 @@ class IdempotencyStore:
                     # fabricated success: retain the stable fail-closed
                     # terminal for every exact replay.
                     try:
-                        self._persist_completed_from_canonical(
-                            key, digest, terminal_result
-                        )
+                        self._persist_completed_from_canonical(key, digest, terminal_result)
                     except Exception as storage_error:
                         raise _PostCommitOutcomeUncertain() from storage_error
                     self._notify_waiters()
@@ -1351,9 +1703,7 @@ class IdempotencyStore:
                     raise _mutation_outcome_unknown_error()
                 if isinstance(terminal_result, _CanonicalCommittedFailure):
                     try:
-                        self._persist_committed_failure(
-                            key, digest, terminal_result.payload
-                        )
+                        self._persist_committed_failure(key, digest, terminal_result.payload)
                     except Exception as storage_error:
                         raise _PostCommitOutcomeUncertain() from storage_error
                     self._notify_waiters()
@@ -1427,9 +1777,7 @@ class IdempotencyStore:
                     canonical_result = result
                     if committed_handoff:
                         assert committed_failure is not None
-                        canonical_result = _CanonicalCommittedFailure(
-                            result, committed_failure
-                        )
+                        canonical_result = _CanonicalCommittedFailure(result, committed_failure)
                     try:
                         self._persist_canonically_committed(
                             key,
@@ -1707,7 +2055,16 @@ class IdempotencyStore:
             except sqlite3.Error:
                 # A broken retry store cannot authorize a replay. Classify this
                 # observation fail-closed even when its durable marker cannot advance.
-                return (row[0], "completed", _OUTCOME_UNKNOWN_PAYLOAD, now, None, row[5], row[6], row[7])
+                return (
+                    row[0],
+                    "completed",
+                    _OUTCOME_UNKNOWN_PAYLOAD,
+                    now,
+                    None,
+                    row[5],
+                    row[6],
+                    row[7],
+                )
         if cursor.rowcount != 1:
             # Raced with another abandon/terminal transition; re-read rather
             # than assume which one won.
@@ -1717,9 +2074,7 @@ class IdempotencyStore:
                 (key,),
             ).fetchone()
             return refreshed if refreshed is not None else row
-        _log_mutation_event(
-            "abandoned", level=logging.WARNING, receipt=_receipt_tag(key)
-        )
+        _log_mutation_event("abandoned", level=logging.WARNING, receipt=_receipt_tag(key))
         self._notify_waiters()
         return (row[0], "completed", _OUTCOME_UNKNOWN_PAYLOAD, now, None, row[5], row[6], row[7])
 
@@ -1743,7 +2098,7 @@ class IdempotencyStore:
             for expired_key, expired_payload in expired_completed:
                 try:
                     completed = pickle.loads(expired_payload)  # noqa: S301 - trusted runtime state
-                except Exception:
+                except Exception:  # noqa: BLE001 - probe the alternate fail-closed encoding
                     try:
                         _deserialize_committed_failure_payload(expired_payload)
                     except Exception:  # noqa: BLE001 - corrupt terminals remain fail-closed
@@ -1780,7 +2135,7 @@ class IdempotencyStore:
         if row[1] == "completed":
             try:
                 completed = pickle.loads(row[2])  # noqa: S301 - trusted runtime state
-            except Exception:
+            except Exception:  # noqa: BLE001 - probe the alternate fail-closed encoding
                 try:
                     _deserialize_committed_failure_payload(row[2])
                 except Exception:  # noqa: BLE001 - corrupt terminals remain fail-closed
@@ -1798,7 +2153,11 @@ class IdempotencyStore:
         return updated_at <= now - expires_after
 
     def _decode_disposition(
-        self, row: tuple[Any, ...], digest: str, *, commit_evidence=None  # noqa: ANN001
+        self,
+        row: tuple[Any, ...],
+        digest: str,
+        *,
+        commit_evidence=None,  # noqa: ANN001
     ) -> tuple[str, Any]:
         if row[0] != digest:
             raise OpError(
@@ -1809,9 +2168,11 @@ class IdempotencyStore:
         if state == "completed":
             try:
                 completed = pickle.loads(row[2])  # noqa: S301 - trusted runtime state
-            except Exception:
+            except Exception:  # noqa: BLE001 - probe the alternate fail-closed encoding
                 try:
-                    failure = _CachedCommittedFailure(_deserialize_committed_failure_payload(row[2]))
+                    failure = _CachedCommittedFailure(
+                        _deserialize_committed_failure_payload(row[2])
+                    )
                 except Exception:  # noqa: BLE001 - corrupt state blocks mutation
                     raise self._reconciliation_error("cached completed mutation state") from None
                 return "committed_failure", failure
@@ -1905,9 +2266,17 @@ class IdempotencyStore:
                     stored_request_id = stored.get("request_id")
                     return replayed_terminal(
                         leaf,
-                        request_id=(stored_request_id if isinstance(stored_request_id, str) else str(uuid.uuid4())),
-                        receipt_id=stored.get("receipt_id") if isinstance(stored.get("receipt_id"), str) else None,
-                        idempotency_key=stored.get("idempotency_key") if isinstance(stored.get("idempotency_key"), str) else None,
+                        request_id=(
+                            stored_request_id
+                            if isinstance(stored_request_id, str)
+                            else str(uuid.uuid4())
+                        ),
+                        receipt_id=stored.get("receipt_id")
+                        if isinstance(stored.get("receipt_id"), str)
+                        else None,
+                        idempotency_key=stored.get("idempotency_key")
+                        if isinstance(stored.get("idempotency_key"), str)
+                        else None,
                     )
             return stored
         if disposition == "committed_failure":
@@ -2035,20 +2404,14 @@ class IdempotencyStore:
     def _read_exact_evidence(
         self, commit_evidence: Any, digest: str, attempt: _ExecutionAttempt
     ) -> Any:
-        if (
-            commit_evidence is None
-            or not attempt.attempt_id
-            or not attempt.commit_token
-        ):
+        if commit_evidence is None or not attempt.attempt_id or not attempt.commit_token:
             return None
         self._ensure_private_runtime_state()
         secret = self._unprotected_commit_secret(digest, attempt)
         if secret is None:
             return None
         try:
-            return commit_evidence(
-                digest, attempt.attempt_id, attempt.commit_token, secret
-            )
+            return commit_evidence(digest, attempt.attempt_id, attempt.commit_token, secret)
         except TypeError:
             try:
                 # Generic IdempotencyStore users may still provide their own
@@ -2058,7 +2421,9 @@ class IdempotencyStore:
             except TypeError:
                 return commit_evidence()
 
-    def _exact_evidence(self, commit_evidence: Any, digest: str, attempt: _ExecutionAttempt) -> bool:
+    def _exact_evidence(
+        self, commit_evidence: Any, digest: str, attempt: _ExecutionAttempt
+    ) -> bool:
         return bool(self._read_exact_evidence(commit_evidence, digest, attempt))
 
     def _notify_waiters(self) -> None:
@@ -2097,9 +2462,7 @@ class IdempotencyStore:
                     (_OUTCOME_UNKNOWN_PAYLOAD,),
                 ).fetchone()[0]
             oldest_pending_age_seconds = (
-                round(max(0.0, now - min(pending_updated_at)), 3)
-                if pending_updated_at
-                else None
+                round(max(0.0, now - min(pending_updated_at)), 3) if pending_updated_at else None
             )
             return {
                 "pending": len(pending_updated_at),
@@ -2298,6 +2661,22 @@ class LeaseManager:
                 self._record_coordinator_error(error.code)
                 self._record_lease_op("acquire", "error")
                 raise
+            if (
+                record.governance_enrolled
+                and record.required_schema_version is not None
+                and record.required_schema_version != self.config.schema_version
+            ):
+                self._record_lease_op("acquire", "schema_refused")
+                raise OpError(
+                    "WRITER_SCHEMA_FENCE_MISMATCH",
+                    "this replica does not match the enrolled writer schema",
+                    "Drain this replica and deploy the schema version selected by the "
+                    "external lease fence.",
+                    details={
+                        "required_schema_version": record.required_schema_version,
+                        "schema_fence_generation": record.schema_fence_generation,
+                    },
+                )
             if not record.granted or record.holder != self.config.replica_id:
                 self._record_lease_op("acquire", "refused")
                 raise OpError(
@@ -2344,24 +2723,22 @@ class LeaseManager:
         *,
         domains: Iterable[str],
         exclusive: bool,
+        advance_generation: bool = True,
         request_id: str | None = None,
         operation: str | None = None,
         holder_kind: str = "reserved-state",
-    ) -> Iterator[None]:
+    ) -> Iterator[str]:
         """Coordinate one owner's identities without serializing other owners."""
 
         ordered_domains = tuple(sorted(set(domains)))
         if not ordered_domains or any(
-            type(domain) is not str
-            or re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", domain) is None
+            type(domain) is not str or re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", domain) is None
             for domain in ordered_domains
         ):
             raise ValueError("reserved identity domains must be registered labels")
         vault_identity = canonical_mutation_identity(vault_root)
         deadline = time.monotonic() + self._mutation_timeout_seconds
-        gate = self._mutation_coordinator_for(
-            f"reserved-identity-v1:gate:{vault_identity}"
-        )
+        gate = self._mutation_coordinator_for(f"reserved-identity-v1:gate:{vault_identity}")
 
         def enter(
             stack: ExitStack,
@@ -2392,15 +2769,24 @@ class LeaseManager:
                 enter(gate_stack, gate, operation_label=gate_label)
                 with ExitStack() as domains_stack:
                     enter_domains(domains_stack)
-                    yield
+                    yield _read_reserved_identity_generation(self.config.state_dir, vault_root)
             return
 
         with ExitStack() as domains_stack:
             with ExitStack() as gate_stack:
                 gate_label = f"{operation}:gate" if operation is not None else "gate"
                 enter(gate_stack, gate, operation_label=gate_label)
+                # Admission order matches the exclusive scanner: gate first,
+                # then domains.  The domain stack outlives the gate so exact
+                # owners still release admission before doing their work,
+                # without the gate/domain inversion that can deadlock a scan.
                 enter_domains(domains_stack)
-            yield
+                generation = (
+                    _bump_reserved_identity_generation(self.config.state_dir, vault_root)
+                    if advance_generation
+                    else _read_reserved_identity_generation(self.config.state_dir, vault_root)
+                )
+            yield generation
 
     @contextmanager
     def mutation_guard(
@@ -2410,6 +2796,8 @@ class LeaseManager:
         request_id: str | None = None,
         operation: str | None = None,
         holder_kind: str = "command",
+        attachment_control: bool = False,
+        attachment_now: int | None = None,
     ) -> Iterator[VaultMutationCoordinator]:
         """Hold the shared vault mutation boundary and revalidate writer authority."""
         direct_boundary: tuple[str, Path] | None = None
@@ -2424,9 +2812,7 @@ class LeaseManager:
             direct_boundary = _direct_mutation_boundary(vault_root, self.config.state_dir)
             active_direct = _ACTIVE_DIRECT_MUTATION_GUARDS.get()
             outer_direct_boundary = direct_boundary not in active_direct
-            direct_token = _ACTIVE_DIRECT_MUTATION_GUARDS.set(
-                (*active_direct, direct_boundary)
-            )
+            direct_token = _ACTIVE_DIRECT_MUTATION_GUARDS.set((*active_direct, direct_boundary))
         manager_token = _ACTIVE_LEASE_MANAGER.set(self)
         try:
             with self.consistency_guard(
@@ -2436,7 +2822,11 @@ class LeaseManager:
                 holder_kind=holder_kind,
             ) as mutation:
                 try:
-                    with self.writer_authority_guard():
+                    with self.writer_authority_guard(
+                        vault_root=vault_root,
+                        attachment_control=attachment_control,
+                        attachment_now=attachment_now,
+                    ):
                         yield mutation
                 finally:
                     # Bump while the boundary is still held, so the counter is
@@ -2482,7 +2872,13 @@ class LeaseManager:
                 )
 
     @contextmanager
-    def writer_authority_guard(self) -> Iterator[None]:
+    def writer_authority_guard(
+        self,
+        *,
+        vault_root: os.PathLike[str] | str | None = None,
+        attachment_control: bool = False,
+        attachment_now: int | None = None,
+    ) -> Iterator[None]:
         """Revalidate writer authority without holding the vault mutation lock.
 
         The single choke point for idle-release accounting (R5): this is the
@@ -2492,6 +2888,24 @@ class LeaseManager:
         """
         fence_context: Token[tuple[Any, int] | None] | None = None
         counted = False
+        if vault_root is not None and not attachment_control:
+            from .governance import authorization_custody
+
+            try:
+                authorization_custody.require_standalone_mutation_admission(
+                    Path(vault_root),
+                    now=(
+                        int(time.time())
+                        if attachment_now is None
+                        else attachment_now
+                    ),
+                )
+            except authorization_custody.AuthorizationCustodyUnavailable:
+                raise OpError(
+                    "ATTACHMENT_DRAINING",
+                    "the registered vault attachment is not serving mutations",
+                    "Complete or recover the authenticated attachment transition before retrying.",
+                ) from None
         if self.config.enabled:
             lease = self.ensure_writer()
             fence_context = _ACTIVE_WRITE_FENCE.set((self, lease.fencing_token))
@@ -2530,14 +2944,25 @@ class LeaseManager:
             if configured_response_detail in {"compact", "full", "legacy"}
             else "compact"
         )
-        kwargs, response_detail = split_response_detail(
-            kwargs, default=response_detail_default
-        )
+        kwargs, response_detail = split_response_detail(kwargs, default=response_detail_default)
         if public_idempotency_key is _PUBLIC_IDEMPOTENCY_KEY_UNSET:
             effective_public_idempotency_key = idempotency_key
         else:
             assert public_idempotency_key is None or isinstance(public_idempotency_key, str)
             effective_public_idempotency_key = public_idempotency_key
+        authorization_issuance = (
+            command.name == "govern_memory"
+            and kwargs.get("operation") == "session"
+            and kwargs.get("session_action") in {"open", "rotate"}
+        )
+        if authorization_issuance:
+            # The generic mutation store pickles its terminal for replay. An
+            # authorization-session issuance terminal contains the one raw
+            # bearer occurrence the product may return, so it must never enter
+            # that durable cache (or be emitted a second time by replay).
+            idempotency_key = None
+            implicit_idempotency_scope = None
+            effective_public_idempotency_key = None
         invocation_read_only = command.read_only if read_only is None else read_only
         if invocation_read_only:
             # Reads never take the mutation boundary, hosted or local: every
@@ -2623,8 +3048,10 @@ class LeaseManager:
                 if (
                     command.name in {"record_memory", "plan_memory"}
                     and valid_collection_receipt(leaf_result)
-                    and leaf_result.get("outcome") == "replayed"
-                ):
+                    or command.name == "maintain_memory"
+                    and kwargs.get("mode") == "structured-files"
+                    and valid_structured_files_receipt(leaf_result)
+                ) and leaf_result.get("outcome") == "replayed":
                     return replayed_terminal(
                         leaf_result,
                         request_id=request_id,
@@ -2662,6 +3089,8 @@ class LeaseManager:
         def graph_failure(checkpoint: Any, error: BaseException | None = None) -> dict[str, str]:
             from . import graph_sync
 
+            if isinstance(error, graph_sync.GraphRebuildInProgress):
+                return graph_sync.committed_graph_pending(checkpoint)
             if isinstance(error, graph_sync.GraphRebuildRegistrationError):
                 return graph_sync.committed_graph_failure(
                     checkpoint, code=error.code, remediation=error.remediation
@@ -2714,9 +3143,7 @@ class LeaseManager:
                 root = receipt_vault_root
                 if root is None:
                     return terminal_result
-                required = graph_sync.registered_checkpoint(
-                    root, state_root=self.config.state_dir
-                )
+                required = graph_sync.registered_checkpoint(root, state_root=self.config.state_dir)
                 if required is None and not has_reconcile_handoff:
                     durable = _durable_graph_outcome(root)
                     if durable is not None:
@@ -2733,17 +3160,12 @@ class LeaseManager:
                     joins_unbounded = (
                         has_reconcile_handoff
                         or command.name == "reconcile"
-                        or (
-                            command.name == "maintain_memory"
-                            and kwargs.get("mode") == "reconcile"
-                        )
+                        or (command.name == "maintain_memory" and kwargs.get("mode") == "reconcile")
                     )
                     if joins_unbounded:
                         # graph-join: unbounded by design (reconcile proves the
                         # graph is readable in its own terminal).
-                        graph_sync.wait_for_registered(
-                            root, state_root=self.config.state_dir
-                        )
+                        graph_sync.wait_for_registered(root, state_root=self.config.state_dir)
                     elif not graph_sync.join_registered_if_settled(
                         root, state_root=self.config.state_dir
                     ):
@@ -2755,9 +3177,7 @@ class LeaseManager:
                             terminal_result, graph_sync.committed_graph_pending(required)
                         )
             except Exception as error:  # noqa: BLE001 - canonical commit remains terminal
-                terminal_result = finish_reconcile_graph_status(
-                    terminal_result, current=False
-                )
+                terminal_result = finish_reconcile_graph_status(terminal_result, current=False)
                 if has_reconcile_handoff and isinstance(terminal_result, Mapping):
                     if root is None:
                         return terminal_result
@@ -2775,9 +3195,7 @@ class LeaseManager:
                         root, terminal_result, state_root=self.config.state_dir
                     )
                 if isinstance(result, Mapping) and required is not None:
-                    return with_graph_outcome(
-                        terminal_result, graph_failure(required, error)
-                    )
+                    return with_graph_outcome(terminal_result, graph_failure(required, error))
                 return terminal_result
             if command.name == "reconcile" or (
                 command.name == "maintain_memory" and kwargs.get("mode") == "reconcile"
@@ -2843,14 +3261,9 @@ class LeaseManager:
                 root = receipt_vault_root
                 if root is None or not _is_receipt_vault_root(root):
                     raise _PostCommitOutcomeUncertain()
-                required = graph_sync.registered_checkpoint(
-                    root, state_root=self.config.state_dir
-                )
+                required = graph_sync.registered_checkpoint(root, state_root=self.config.state_dir)
                 current = graph_sync.read_checkpoint(root)
-                if (
-                    current is not None
-                    and current.mutation_id == attempt.commit_token
-                ):
+                if current is not None and current.mutation_id == attempt.commit_token:
                     required = current
                 projection = {
                     name: result.get(name)
@@ -2881,7 +3294,9 @@ class LeaseManager:
                     canonical_disposition=canonical_disposition,
                     terminal_projection=projection,
                     checkpoint_generation=(required.generation if required is not None else None),
-                    checkpoint_sha256=(required.checkpoint_sha256 if required is not None else None),
+                    checkpoint_sha256=(
+                        required.checkpoint_sha256 if required is not None else None
+                    ),
                     commit_secret=attempt.commit_secret,
                 )
                 graph_sync.write_graph_commit_receipt(root, evidence)
@@ -2980,9 +3395,7 @@ class LeaseManager:
                     # establish what crossed the multi-store cut.  A cleanup
                     # crash may leave the row but lose that trusted material;
                     # derived recovery cannot fabricate a success from it.
-                    if result is None and not isinstance(
-                        evidence, graph_sync.GraphCommitReceipt
-                    ):
+                    if result is None and not isinstance(evidence, graph_sync.GraphCommitReceipt):
                         return _OUTCOME_UNKNOWN_TERMINAL
                 if isinstance(result, _CanonicalCommittedFailure):
                     committed_failure = result.payload
@@ -2995,22 +3408,25 @@ class LeaseManager:
                     # paths/content. Keep the public terminal envelope valid
                     # with an empty local diagnostics projection.
                     terminal["leaf_result"] = {}
-                    receipt_only_failure = (
-                        evidence.canonical_disposition == "committed_failure"
-                    )
+                    receipt_only_failure = evidence.canonical_disposition == "committed_failure"
                     if terminal.get("_terminal") == "exomem.mutation-terminal":
                         if effective_public_idempotency_key is not None:
                             terminal["idempotency_key"] = effective_public_idempotency_key
                     if root is None or not _is_receipt_vault_root(root):
                         if receipt_only_failure:
                             return _OUTCOME_UNKNOWN_TERMINAL
-                        return retain_failure(with_graph_outcome(terminal, {
+                        return retain_failure(
+                            with_graph_outcome(
+                                terminal,
+                                {
                             "graph_sync": "failed",
                             "graph_sync_code": "GRAPH_SYNC_VAULT_AUTHORITY_MISSING",
                             "graph_sync_remediation": (
                                 "Configure the vault mount and run reconcile to recover the derived graph."
                             ),
-                        }))
+                                },
+                            )
+                        )
                     required = graph_sync.read_checkpoint(root)
                     if (evidence.checkpoint_generation, evidence.checkpoint_sha256) != (
                         required.generation if required is not None else None,
@@ -3019,23 +3435,34 @@ class LeaseManager:
                         if receipt_only_failure:
                             return _OUTCOME_UNKNOWN_TERMINAL
                         if required is not None:
-                            return retain_failure(with_graph_outcome(terminal, graph_failure(required)))
-                        return retain_failure(with_graph_outcome(terminal, {
+                            return retain_failure(
+                                with_graph_outcome(terminal, graph_failure(required))
+                            )
+                        return retain_failure(
+                            with_graph_outcome(
+                                terminal,
+                                {
                             "graph_sync": "failed",
                             "graph_sync_code": "GRAPH_SYNC_CHECKPOINT_MISSING",
                             "graph_sync_remediation": "Run reconcile to recover the derived graph.",
-                        }))
+                                },
+                            )
+                        )
                     if required is None:
                         if receipt_only_failure:
                             return _OUTCOME_UNKNOWN_TERMINAL
-                        return retain_failure(with_graph_outcome(terminal, {"graph_sync": "completed"}))
+                        return retain_failure(
+                            with_graph_outcome(terminal, {"graph_sync": "completed"})
+                        )
                     EpistemicGraphIndex(
                         root, mutation_coordinator=self._mutation_coordinator_for(root)
                     ).rebuild_all()
                     if graph_sync.status(root)["state"] == "current":
                         if receipt_only_failure:
                             return _OUTCOME_UNKNOWN_TERMINAL
-                        return retain_failure(with_graph_outcome(terminal, {"graph_sync": "completed"}))
+                        return retain_failure(
+                            with_graph_outcome(terminal, {"graph_sync": "completed"})
+                        )
                     if receipt_only_failure:
                         return _OUTCOME_UNKNOWN_TERMINAL
                     return retain_failure(with_graph_outcome(terminal, graph_failure(required)))
@@ -3043,15 +3470,22 @@ class LeaseManager:
                     return retain_failure(result)
                 if root is None or not _is_receipt_vault_root(root):
                     terminal = {
-                        key: value for key, value in result.items() if key != "_graph_sync_checkpoint"
+                        key: value
+                        for key, value in result.items()
+                        if key != "_graph_sync_checkpoint"
                     }
-                    return retain_failure(with_graph_outcome(terminal, {
+                    return retain_failure(
+                        with_graph_outcome(
+                            terminal,
+                            {
                         "graph_sync": "failed",
                         "graph_sync_code": "GRAPH_SYNC_VAULT_AUTHORITY_MISSING",
                         "graph_sync_remediation": (
                             "Configure the vault mount and run reconcile to recover the derived graph."
                         ),
-                    }))
+                            },
+                        )
+                    )
                 payload = result.get("_graph_sync_checkpoint")
                 if payload is None:
                     return retain_failure(result)
@@ -3063,22 +3497,28 @@ class LeaseManager:
                 if stored is None:
                     raise ValueError("graph-pending checkpoint payload is invalid")
                 required = graph_sync.read_checkpoint(root)
-                if (
-                    required is None
-                    or stored != required
-                ):
+                if required is None or stored != required:
                     terminal = {
-                        key: value for key, value in result.items() if key != "_graph_sync_checkpoint"
+                        key: value
+                        for key, value in result.items()
+                        if key != "_graph_sync_checkpoint"
                     }
                     if required is not None:
-                        return retain_failure(with_graph_outcome(
+                        return retain_failure(
+                            with_graph_outcome(
                             terminal, graph_sync.committed_graph_failure(required)
-                        ))
-                    return retain_failure(with_graph_outcome(terminal, {
+                            )
+                        )
+                    return retain_failure(
+                        with_graph_outcome(
+                            terminal,
+                            {
                         "graph_sync": "failed",
                         "graph_sync_code": "GRAPH_SYNC_CHECKPOINT_MISSING",
                         "graph_sync_remediation": "Run reconcile to recover the derived graph.",
-                    }))
+                            },
+                        )
+                    )
                 EpistemicGraphIndex(
                     root, mutation_coordinator=self._mutation_coordinator_for(root)
                 ).rebuild_all()
@@ -3088,7 +3528,9 @@ class LeaseManager:
                 if graph_sync.status(root)["state"] == "current":
                     terminal = finalize_graph_rebuild_handoff(terminal)
                     return retain_failure(with_graph_outcome(terminal, {"graph_sync": "completed"}))
-                return retain_failure(with_graph_outcome(terminal, graph_sync.committed_graph_failure(required)))
+                return retain_failure(
+                    with_graph_outcome(terminal, graph_sync.committed_graph_failure(required))
+                )
             except Exception as error:  # noqa: BLE001 - canonical commit remains terminal
                 if terminal is None:
                     if isinstance(result, Mapping):
@@ -3102,12 +3544,19 @@ class LeaseManager:
                     else:
                         terminal = {}
                 if required is not None:
-                    return retain_failure(with_graph_outcome(terminal, graph_failure(required, error)))
-                return retain_failure(with_graph_outcome(terminal, {
+                    return retain_failure(
+                        with_graph_outcome(terminal, graph_failure(required, error))
+                    )
+                return retain_failure(
+                    with_graph_outcome(
+                        terminal,
+                        {
                     "graph_sync": "failed",
                     "graph_sync_code": "GRAPH_SYNC_RESUME_FAILED",
                     "graph_sync_remediation": "Run reconcile to recover the derived graph.",
-                }))
+                        },
+                    )
+                )
 
         narrow_media_commit = command.name == "process_media" and kwargs.get(
             "operation", "process"
@@ -3128,9 +3577,25 @@ class LeaseManager:
             and kwargs.get("operation", "list") in {"create", "append"}
             and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
         )
+        # `capture_source` carries two lanes under one name. Its file lane
+        # stages client handles first -- up to eight network fetches against a
+        # batch deadline -- and its leaf takes the mutation boundary itself,
+        # once per committed artifact (`client_artifacts.capture_source_artifacts`),
+        # exactly as `preserve_artifacts` does. Its text lane routes to `add`,
+        # which guards nothing and depends on this outer boundary. So the name
+        # cannot join `_NARROW_BOUNDARY_COMMANDS`: narrowing it wholesale would
+        # leave a text capture unguarded, and leaving it out holds the vault
+        # lock across every fetch and blocks all other writers for the
+        # duration. The boundary follows the invocation, not the command.
+        narrow_source_artifact_commit = (
+            command.name == "capture_source"
+            and bool(kwargs.get("files"))
+            and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
+        )
         narrow_boundary = (
             narrow_media_commit
             or narrow_tier2_file_commit
+            or narrow_source_artifact_commit
             or (
                 command.name in _NARROW_BOUNDARY_COMMANDS
                 and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
@@ -3364,10 +3829,13 @@ class LeaseManager:
 
                 vault_root = Path(vault_or_cell)
                 graph_status = graph_sync.status(vault_root)
-                if graph_status["state"] == "current" and not epistemic_graph.EpistemicGraphIndex(
+                if (
+                    graph_status["state"] == "current"
+                    and not epistemic_graph.EpistemicGraphIndex(
                     vault_root,
                     mutation_coordinator=self._mutation_coordinator_for(vault_root),
-                ).available():
+                    ).available()
+                ):
                     graph_status = {
                         "state": "unavailable",
                         "generation": graph_status["generation"],
@@ -3552,15 +4020,65 @@ def get_manager() -> LeaseManager:
         return manager
 
 
-def _commit_generation_path(
-    state_dir: Path, vault_or_cell: os.PathLike[str] | str
-) -> Path:
+def _commit_generation_path(state_dir: Path, vault_or_cell: os.PathLike[str] | str) -> Path:
     from .mutation_lock import canonical_mutation_identity
 
-    digest = hashlib.sha256(
-        canonical_mutation_identity(vault_or_cell).encode("utf-8")
-    ).hexdigest()[:20]
+    digest = hashlib.sha256(canonical_mutation_identity(vault_or_cell).encode("utf-8")).hexdigest()[
+        :20
+    ]
     return Path(state_dir) / "commit-generations" / f"{digest}.txt"
+
+
+def _reserved_identity_generation_path(
+    state_dir: Path, vault_or_cell: os.PathLike[str] | str
+) -> Path:
+    digest = hashlib.sha256(canonical_mutation_identity(vault_or_cell).encode("utf-8")).hexdigest()[
+        :20
+    ]
+    return Path(state_dir) / "reserved-identity-generations" / f"{digest}.txt"
+
+
+def _read_reserved_identity_generation(
+    state_dir: Path, vault_or_cell: os.PathLike[str] | str
+) -> str:
+    """Read the cross-process private-identity seqlock token.
+
+    The caller holds the identity gate. Missing means no owner has entered yet;
+    malformed or unreadable state fails closed instead of blessing a stale
+    catalogue.
+    """
+
+    path = _reserved_identity_generation_path(state_dir, vault_or_cell)
+    try:
+        value = path.read_text(encoding="ascii").strip()
+    except FileNotFoundError:
+        return "0" * 32
+    except (OSError, UnicodeError) as error:
+        raise RuntimeError("reserved identity generation is unreadable") from error
+    if re.fullmatch(r"[0-9a-f]{32}", value) is None:
+        raise RuntimeError("reserved identity generation is malformed")
+    return value
+
+
+def _bump_reserved_identity_generation(
+    state_dir: Path, vault_or_cell: os.PathLike[str] | str
+) -> str:
+    """Advance the token before an exact owner may change private identities."""
+
+    path = _reserved_identity_generation_path(state_dir, vault_or_cell)
+    token = secrets.token_hex(16)
+    temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary.write_text(token, encoding="ascii")
+        os.replace(temporary, path)
+    except OSError as error:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise RuntimeError("reserved identity generation could not advance") from error
+    return token
 
 
 def read_commit_generation(vault_or_cell: os.PathLike[str] | str) -> int | None:
@@ -3572,9 +4090,7 @@ def read_commit_generation(vault_or_cell: os.PathLike[str] | str) -> int | None:
     fail closed: an unreadable counter must disable reuse, never admit it.
     """
     try:
-        path = _commit_generation_path(
-            active_manager().config.state_dir, vault_or_cell
-        )
+        path = _commit_generation_path(active_manager().config.state_dir, vault_or_cell)
     except Exception:  # noqa: BLE001 - unresolvable identity disables reuse
         return None
     try:
@@ -3585,9 +4101,7 @@ def read_commit_generation(vault_or_cell: os.PathLike[str] | str) -> int | None:
         return None
 
 
-def _bump_commit_generation(
-    state_dir: Path, vault_or_cell: os.PathLike[str] | str
-) -> None:
+def _bump_commit_generation(state_dir: Path, vault_or_cell: os.PathLike[str] | str) -> None:
     """Advance the counter; called while the mutation boundary is held."""
     try:
         path = _commit_generation_path(state_dir, vault_or_cell)
@@ -3613,9 +4127,18 @@ def active_mutation_request_id() -> str | None:
     return trace[0] if trace is not None else None
 
 
-def active_direct_mutation_guard(
-    vault_root: os.PathLike[str] | str, *, state_root: Path
-) -> bool:
+def active_mutation_committed() -> bool:
+    """Whether this invocation's canonical writer already crossed its commit boundary.
+
+    The read side of `mark_active_mutation_committed`, and the one honest signal
+    for "this invocation will have a committed terminal to carry an advisory on".
+    False outside an invocation, on a verified replay (which writes nothing), and
+    on any pass that found nothing to commit.
+    """
+    return _ACTIVE_MUTATION_COMMITTED.get()
+
+
+def active_direct_mutation_guard(vault_root: os.PathLike[str] | str, *, state_root: Path) -> bool:
     """Return whether this thread owns this manager-root boundary directly."""
     boundary = _direct_mutation_boundary(vault_root, state_root)
     return boundary in _ACTIVE_DIRECT_MUTATION_GUARDS.get()
@@ -3653,10 +4176,17 @@ def _fixed_projected_command_completion(
             getattr(command, "name", None) not in {"ask_memory", "find"}
             or not injected
             or not isinstance(injected[0], (str, os.PathLike))
-            or not projection_runtime.has_preactivated_projection_runtime(
-                Path(injected[0])
-            )
         ):
+            return invoke()
+        started_at = time.perf_counter()
+        vault_root = Path(injected[0])
+        preactivated = projection_runtime.has_preactivated_projection_runtime(vault_root)
+        completion_required = (
+            preactivated
+            or projection_runtime.requires_fixed_projected_completion(vault_root)
+            or projection_runtime.classify_projected_completion_boundary(vault_root)
+        )
+        if not completion_required:
             return invoke()
         request_class = projection_timing.request_class_for_command(
             command,
@@ -3665,7 +4195,15 @@ def _fixed_projected_command_completion(
         )
         if request_class is None:
             return invoke()
-        with projection_timing.fixed_public_completion(request_class):
+        completion = (
+            projection_timing.fixed_public_completion(request_class)
+            if preactivated
+            else projection_timing.fixed_public_completion(
+                request_class,
+                started_at=started_at,
+            )
+        )
+        with completion:
             return invoke()
 
     return wrapped
@@ -3719,6 +4257,22 @@ def invoke_command(
         # future read representation.
         selector_error = error
         read_only = False
+
+    active_surface = capabilities_module.current_active_surface()
+    if (
+        command.name == "maintain_memory"
+        and kwargs.get("mode") != "structured-files"
+        and not read_only
+        and selector_error is None
+        and active_surface is not None
+        and active_surface.surface in _REQUEST_BOUND_REMOTE_SURFACES
+    ):
+        raise OpError(
+            "MAINTENANCE_REQUIRES_CLI",
+            REMOTE_MAINTENANCE_MESSAGE,
+            REMOTE_MAINTENANCE_REMEDIATION,
+            details={"status": "terminal", "committed": False},
+        )
 
     if reserved_hit is not None:
         if read_only:
@@ -3778,9 +4332,7 @@ def invoke_command(
         try:
             return postfilter(command.name, _invoke(), injected[0])
         except BaseException as error:
-            postfilter_error(
-                command.name, error, injected[0], request_kwargs=kwargs
-            )
+            postfilter_error(command.name, error, injected[0], request_kwargs=kwargs)
             raise
     # The try lives INSIDE the boundary so `collector` is still bound when the
     # filter runs: `disclosure_boundary`'s `finally` resets the contextvar on
@@ -3791,9 +4343,7 @@ def invoke_command(
         try:
             result = postfilter(command.name, _invoke(), injected[0])
         except BaseException as error:
-            postfilter_error(
-                command.name, error, injected[0], request_kwargs=kwargs
-            )
+            postfilter_error(command.name, error, injected[0], request_kwargs=kwargs)
             emit_boundary_receipt(collector)
             raise
         emit_boundary_receipt(collector)

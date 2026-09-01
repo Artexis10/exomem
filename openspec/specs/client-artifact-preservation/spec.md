@@ -21,7 +21,7 @@ The system SHALL expose a client-neutral `preserve_artifacts` mutation command a
 
 ### Requirement: Safe bounded server-side retrieval
 
-The system SHALL treat every `download_url` as hostile input. It MUST accept HTTPS only; reject userinfo, fragments, and any initial or redirected destination that resolves to a non-global IPv4 or IPv6 address; connect only to a validated resolved address while preserving the original hostname for TLS verification; send no Exomem credentials, cookies, or caller headers; and keep full URLs and query strings out of logs and results. It SHALL enforce bounded redirects, timeouts, item count, per-file bytes, and aggregate bytes while streaming to private temporary storage, with the streaming byte count authoritative over response headers.
+The system SHALL treat every `download_url` as hostile input. It MUST accept HTTPS only; reject userinfo, fragments, and any initial or redirected destination that resolves to a non-global IPv4 or IPv6 address; connect only to a validated resolved address while preserving the original hostname for TLS verification; send no Exomem credentials, cookies, or caller headers; and keep full URLs and query strings out of logs and results. It SHALL enforce bounded redirects, timeouts, item count, per-file bytes, and aggregate bytes while streaming to private temporary storage, with the streaming byte count authoritative over response headers. Retrieval SHALL complete before the canonical vault mutation boundary is acquired, for every command that stages client file handles and not only for the Evidence lane, so that no remote latency is served while the vault mutation lock is held.
 
 #### Scenario: Public HTTPS attachment is staged
 
@@ -38,6 +38,18 @@ The system SHALL treat every `download_url` as hostile input. It MUST accept HTT
 
 - **WHEN** the response header declares an oversized body or the streamed bytes exceed a per-file or aggregate cap
 - **THEN** retrieval stops, temporary bytes are removed, the file reports a stable too-large failure, and no partial final artifact is published
+
+#### Scenario: Source-lane retrieval runs outside the mutation lock
+
+- **WHEN** a caller invokes `capture_source` with file handles rather than text
+- **THEN** every handle is staged before the vault mutation boundary is acquired
+- **AND** each staged file is committed under its own acquisition of that boundary
+- **AND** a `capture_source` invocation carrying text instead of handles still runs under the boundary held across its whole leaf
+
+#### Scenario: The wide-boundary kill switch still applies
+
+- **WHEN** `EXOMEM_WIDE_MUTATION_BOUNDARY` is set and a caller stages file handles through either lane
+- **THEN** the vault mutation boundary is acquired before retrieval begins
 
 ### Requirement: Governed append-only persistence and truthful outcomes
 
@@ -62,16 +74,23 @@ Each successfully staged file SHALL be committed through the existing `preserve_
 
 ### Requirement: Capability-driven fallback remains available
 
-The system SHALL retain `transfer_artifact(operation="upload")` and `/upload` for clients that cannot expose attachment handles. Bootstrap, tool descriptions, and scaffold guidance SHALL route capable clients to `preserve_artifacts` and other clients to the existing out-of-band upload path. Guidance MUST NOT claim token minting proves byte transfer and MUST name `operation`, not the nonexistent `mode` parameter.
+The system SHALL retain `transfer_artifact(operation="upload")` and `/upload` for clients that cannot expose attachment handles. Bootstrap, tool descriptions, and scaffold guidance SHALL select the destination lane before the transport: raw material to the Sources capture command and proof-bearing material to the Evidence preservation commands. Having selected the lane, guidance SHALL route capable clients to the file-handle path for that lane and other clients to the existing out-of-band upload path, which SHALL carry the selected lane on the minted capability. Guidance MUST NOT claim token minting proves byte transfer and MUST name `operation`, not the nonexistent `mode` parameter.
 
 #### Scenario: Claude lacks a direct file handle
 
-- **WHEN** a Claude runtime can access an attachment locally but cannot populate `preserve_artifacts.files`
-- **THEN** guidance directs it to mint an upload capability with `transfer_artifact(operation="upload")` and POST the bytes to `/upload`
+- **WHEN** a Claude runtime can access an attachment locally but cannot populate the file-handle parameter of the command for the selected lane
+- **THEN** guidance directs it to mint an upload capability with `transfer_artifact(operation="upload")` naming that lane, and POST the bytes to `/upload`
 - **AND** preservation is considered successful only after the response includes stored path, size, and digest
 
 #### Scenario: ChatGPT sandbox lacks egress
 
 - **WHEN** ChatGPT can populate file parameters but Code Interpreter cannot resolve the Exomem host
-- **THEN** guidance directs ChatGPT to call `preserve_artifacts` directly
+- **THEN** guidance directs ChatGPT to call the file-handle command for the selected lane directly
 - **AND** no client-side `curl` step is attempted
+
+#### Scenario: An attachment is raw material rather than proof
+
+- **WHEN** an attached transcript, article, or screenshot is being kept as material for later compilation
+- **THEN** guidance selects the Sources lane before considering which transport the client supports
+- **AND** the artifact is not routed to Evidence merely because the file-handle path was convenient
+

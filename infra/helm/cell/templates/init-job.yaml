@@ -41,6 +41,15 @@ spec:
           env:
             - name: EXOMEM_LOG_DIR
               value: /dev
+            # Fresh initialization publishes the empty complete state manifest;
+            # state-root-v1 moves legacy members. Both are explicit offline Job
+            # work after binding initialization. The provisioner has removed
+            # the runtime StatefulSet, and execute_hosted_init_v2 holds the
+            # hosted lifetime lock while the state migrator holds its own lock.
+            {{- if or (eq .Values.workloadMode "initialize") (eq .Values.migrationMode "state-root-v1") }}
+            - name: EXOMEM_HOSTED_OFFLINE_STATE_MIGRATION
+              value: "1"
+            {{- end }}
           resources:
             requests:
               cpu: 100m

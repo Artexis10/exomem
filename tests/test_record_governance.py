@@ -975,7 +975,8 @@ def test_inspection_guard_reload_does_not_read_withheld_item_or_expose_its_path(
     monkeypatch.setattr(
         record_governance,
         "_authorize",
-        lambda root, path, *, receipt: path != hidden_rel and authorize(root, path, receipt=receipt),
+        lambda root, path, *, receipt, policy=None: path != hidden_rel
+        and authorize(root, path, receipt=receipt, policy=policy),
     )
 
     inspection = record_governance.inspect_collection(tmp_path, manifest)
@@ -1000,7 +1001,8 @@ def test_withheld_template_omits_inspection_lifecycle_guards(tmp_path: Path, mon
     monkeypatch.setattr(
         record_governance,
         "_authorize",
-        lambda root, path, *, receipt: path != template_rel and authorize(root, path, receipt=receipt),
+        lambda root, path, *, receipt, policy=None: path != template_rel
+        and authorize(root, path, receipt=receipt, policy=policy),
     )
 
     inspection = record_governance.inspect_collection(tmp_path, manifest)
@@ -1508,9 +1510,9 @@ def test_schema_link_projection_supports_exact_paths_and_caches_normalized_targe
     calls: list[tuple[str, bool]] = []
     original = record_governance._authorize
 
-    def watched(root: Path, relative: str, *, receipt: bool = False) -> bool:
+    def watched(root: Path, relative: str, *, receipt: bool = False, policy: object | None = None) -> bool:
         calls.append((relative, receipt))
-        return original(root, relative, receipt=receipt)
+        return original(root, relative, receipt=receipt, policy=policy)
 
     monkeypatch.setattr(record_governance, "_authorize", watched)
     with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
@@ -1654,9 +1656,9 @@ def test_schema_link_projection_records_authorized_target_disclosure(
     calls: list[tuple[str, bool]] = []
     original = record_governance._authorize
 
-    def watched(root: Path, relative: str, *, receipt: bool = False) -> bool:
+    def watched(root: Path, relative: str, *, receipt: bool = False, policy: object | None = None) -> bool:
         calls.append((relative, receipt))
-        return original(root, relative, receipt=receipt)
+        return original(root, relative, receipt=receipt, policy=policy)
 
     monkeypatch.setattr(record_governance, "_authorize", watched)
     with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
@@ -2436,3 +2438,243 @@ def test_describe_documents_the_plan_link_join() -> None:
     assert join["maximum_pairs"] == 4
     assert "declared" in join["record_side"]
     assert "not resolve" in contract["plan_links"]["resolution"]
+
+
+# --- Observed free-string vocabulary on inspection ---------------------------
+#
+# A manifest declaring `provider: {type: string}` gives an appending agent no
+# way to discover the vocabulary the collection already uses. Declared `enum`
+# fields already carry their own vocabulary, so only free strings need this.
+
+
+def _write_event(fixture: Path, *, record_id: str, occurred_on: str, provider: str) -> Path:
+    path = fixture / "Events" / "released" / f"{occurred_on}-{record_id[:8]}.md"
+    path.write_text(
+        "---\n"
+        "type: record\n"
+        "collection_id: 49622075-9ff4-4660-9ab7-414854b5bca2\n"
+        f"record_id: {record_id}\n"
+        "schema_version: 1\n"
+        f"occurred_on: {occurred_on}\n"
+        'asset: "[[Assets/Vehicle]]"\n'
+        f'provider: "{provider}"\n'
+        "currency: GBP\n"
+        "status: completed\n"
+        "---\n\nObserved event.\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _event_id(index: int) -> str:
+    return f"7c9a{index:04d}-0000-4000-8000-000000000000"
+
+
+def test_inspection_surfaces_observed_free_string_vocabulary_with_counts(tmp_path: Path) -> None:
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    _write_event(fixture, record_id=_event_id(1), occurred_on="2026-06-03", provider="Harbour Auto")
+    _write_event(
+        fixture, record_id=_event_id(2), occurred_on="2026-06-04", provider="Eastside Motors"
+    )
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+
+    inspection = record_governance.inspect_collection(tmp_path, manifest)
+
+    assert inspection["observed_values"]["provider"] == {
+        "values": [
+            {"value": "Northside Garage", "count": 2, "value_truncated": False},
+            {"value": "Eastside Motors", "count": 1, "value_truncated": False},
+            {"value": "Harbour Auto", "count": 1, "value_truncated": False},
+            {"value": "Inspection Centre", "count": 1, "value_truncated": False},
+        ],
+        "truncated": False,
+    }
+
+
+def test_observed_vocabulary_caps_distinct_values_and_flags_truncation(tmp_path: Path) -> None:
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    for index in range(25):
+        _write_event(
+            fixture,
+            record_id=_event_id(100 + index),
+            occurred_on="2026-07-01",
+            provider=f"Provider {index:02d}",
+        )
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+
+    inspection = record_governance.inspect_collection(tmp_path, manifest)
+
+    summary = inspection["observed_values"]["provider"]
+    assert len(summary["values"]) == 20
+    assert summary["truncated"] is True
+    assert all(entry["count"] >= 1 for entry in summary["values"])
+    assert all(set(entry) == {"value", "count", "value_truncated"} for entry in summary["values"])
+
+
+def test_enum_declared_field_is_not_summarized_as_observed_vocabulary(tmp_path: Path) -> None:
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+
+    inspection = record_governance.inspect_collection(tmp_path, manifest)
+
+    observed = inspection["observed_values"]
+    assert "provider" in observed
+    assert "currency" not in observed
+    assert "status" not in observed
+
+
+def test_observed_vocabulary_omits_values_seen_only_on_withheld_items(tmp_path: Path) -> None:
+    """Observed values are item-derived, so they need the same serve-time filter."""
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    _write_l6_rule(tmp_path, ceiling=6, paths="Records/**")
+    _write_l0_rule(tmp_path, name="blocked", paths="Records/vehicle-maintenance/Events/withheld/**")
+
+    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+        inspection = record_governance.inspect_collection(tmp_path, manifest)
+
+    values = [entry["value"] for entry in inspection["observed_values"]["provider"]["values"]]
+    assert "Northside Garage" in values
+    assert "Inspection Centre" not in values
+    assert "Inspection Centre" not in json.dumps(inspection)
+
+
+def test_observed_vocabulary_keeps_the_most_frequent_values_when_the_cap_binds(
+    tmp_path: Path,
+) -> None:
+    """The cap must drop the rarest terms, not the ones the walk happened to meet last."""
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    for index in range(25):
+        for repeat in range(3 if index >= 20 else 1):
+            _write_event(
+                fixture,
+                record_id=_event_id(200 + index * 4 + repeat),
+                occurred_on="2026-08-01",
+                provider=f"Provider {index:02d}",
+            )
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+
+    inspection = record_governance.inspect_collection(tmp_path, manifest)
+
+    summary = inspection["observed_values"]["provider"]
+    values = [entry["value"] for entry in summary["values"]]
+    assert values[:6] == [
+        "Provider 20",
+        "Provider 21",
+        "Provider 22",
+        "Provider 23",
+        "Provider 24",
+        "Northside Garage",
+    ]
+    assert "Provider 19" not in values
+    assert summary["truncated"] is True
+
+
+def test_long_observed_values_stay_distinct_and_are_flagged_truncated(tmp_path: Path) -> None:
+    """Two terms sharing a long prefix are two terms, not one term counted twice."""
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    # Both values share the full 120-char display window, so a counter keyed on the
+    # CUT value would merge them into one entry with count 2.
+    prefix = "A" * 120
+    _write_event(
+        fixture, record_id=_event_id(301), occurred_on="2026-09-01", provider=f"{prefix}one"
+    )
+    _write_event(
+        fixture, record_id=_event_id(302), occurred_on="2026-09-02", provider=f"{prefix}two"
+    )
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+
+    inspection = record_governance.inspect_collection(tmp_path, manifest)
+
+    summary = inspection["observed_values"]["provider"]
+    long_entries = [entry for entry in summary["values"] if entry["value"].startswith("A")]
+    assert len(long_entries) == 2
+    assert [entry["count"] for entry in long_entries] == [1, 1]
+    assert all(entry["value_truncated"] is True for entry in long_entries)
+    assert all(len(entry["value"]) == 120 for entry in long_entries)
+    short = next(entry for entry in summary["values"] if entry["value"] == "Northside Garage")
+    assert short["value_truncated"] is False
+
+
+def test_observed_vocabulary_counts_exclude_withheld_items(tmp_path: Path) -> None:
+    """The count is item-derived too, so a withheld item must not raise it."""
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    hidden = fixture / "Events" / "withheld" / "2026-06-01-inspection.md"
+    hidden.write_bytes(
+        hidden.read_bytes().replace(b"provider: Inspection Centre", b"provider: Northside Garage")
+    )
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    _write_l6_rule(tmp_path, ceiling=6, paths="Records/**")
+    _write_l0_rule(tmp_path, name="blocked", paths="Records/vehicle-maintenance/Events/withheld/**")
+
+    with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
+        inspection = record_governance.inspect_collection(tmp_path, manifest)
+
+    assert inspection["observed_values"]["provider"] == {
+        "values": [{"value": "Northside Garage", "count": 2, "value_truncated": False}],
+        "truncated": False,
+    }
+
+
+def test_unreadable_collection_reports_no_observed_vocabulary(tmp_path: Path) -> None:
+    """An absent summary says no item pass ran; an empty one would claim a clean sweep."""
+    fixture = copy_vehicle_maintenance_fixture(tmp_path)
+    broken = fixture / "Events" / "released" / "2026-06-05-broken.md"
+    broken.write_text(
+        "---\n"
+        "type: record\n"
+        "collection_id: 49622075-9ff4-4660-9ab7-414854b5bca2\n"
+        "record_id: 7c9a0999-0000-4000-8000-000000000000\n"
+        "schema_version: 2\n"
+        "occurred_on: 2026-06-05\n"
+        'asset: "[[Assets/Vehicle]]"\n'
+        "---\n\nFuture schema version.\n",
+        encoding="utf-8",
+    )
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+
+    inspection = record_governance.inspect_collection(tmp_path, manifest)
+
+    assert inspection["diagnostics"] == [
+        {"code": "UNSUPPORTED_ITEM_SCHEMA_VERSION", "reason": "item schema version differs"}
+    ]
+    assert "observed_values" not in inspection
+
+
+def test_record_inspection_egress_refuses_observed_vocabulary_on_a_legacy_tracker() -> None:
+    """A manifest-less tracker parses no items, so it can carry no observed vocabulary."""
+    payload = {
+        "kind": "legacy_tracker",
+        "report_only": True,
+        "contract": None,
+        "legacy": {
+            "collection_id": "legacy-49622075-9ff4-4660-9ab7-414854b5bca2",
+            "path": "Knowledge Base/Records/legacy-tracker.md",
+            "inspect_only": True,
+        },
+        "snapshot": None,
+        "source_versions": [],
+        "diagnostics": [],
+        "audit": {"status": "not_applicable", "gaps": []},
+        "saved_views": [],
+    }
+
+    smuggled = egress.project(
+        record_governance._RecordEnvelope(
+            {
+                **payload,
+                "observed_values": {
+                    "provider": {
+                        "values": [
+                            {"value": "Northside Garage", "count": 1, "value_truncated": False}
+                        ],
+                        "truncated": False,
+                    }
+                },
+            }
+        ),
+        egress.LEVEL_FULL,
+        kind="record_inspection",
+    )
+
+    assert smuggled == {"withheld": True, "reason": "invalid_projector_payload"}

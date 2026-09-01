@@ -198,11 +198,31 @@ def _page_content_hash(page: Any) -> str:
         return ""
 
 
+#: How far past the display budget candidate generation reaches, so that
+#: classification has something to discard.
+#:
+#: `suggest_relations` truncates at the limit it is given, and the queue only
+#: then drops the already-authored, placeholder-target and already-decided
+#: candidates — so those drops used to come out of the display budget. A page
+#: whose first `limit_per_page` candidates were all authored produced an empty
+#: group, and the genuinely open candidates behind them never surfaced on any
+#: read, however many times the queue was rebuilt.
+#:
+#: Bounded rather than unlimited because generation includes embedding
+#: proximity, which is the expensive generator; the ceiling stops an adversarial
+#: page from turning one queue read into a full-corpus scoring pass.
+_CLASSIFICATION_HEADROOM = 4
+_MAX_GENERATED_PER_PAGE = 64
+
+
 def _page_candidates(
     vault_root: Path, page: Any, *, limit_per_page: int
 ) -> list[dict[str, Any]]:
+    budget = max(0, int(limit_per_page))
     proposal = epistemic_graph_module.suggest_relations(
-        vault_root, path=page.rel_path, limit=limit_per_page
+        vault_root,
+        path=page.rel_path,
+        limit=min(_MAX_GENERATED_PER_PAGE, budget * _CLASSIFICATION_HEADROOM),
     )
     return list(proposal.get("candidates") or [])
 
@@ -345,6 +365,11 @@ def build_queue(
                 filtered[reason] += 1
                 continue
             items.append(enriched)
+            # The display budget bounds what is SHOWN, now that generation
+            # reaches past it. Stopping here also keeps the over-fetch from
+            # costing classification work nobody will see.
+            if len(items) >= max(0, int(limit_per_page)):
+                break
         if items:
             groups.append(
                 {

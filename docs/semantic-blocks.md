@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Semantic blocks
 
 Semantic blocks are optional Markdown sections that make Exomem notes easier to

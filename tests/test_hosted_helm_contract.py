@@ -94,6 +94,23 @@ def _find(documents: list[dict], kind: str, name: str) -> dict:
     raise AssertionError(f"missing {kind}/{name}")
 
 
+def test_storage_init_env_contract_allows_only_the_two_exact_operator_forms() -> None:
+    """Keep the offline migration exception narrower than the serving env contract."""
+    text = (PLATFORM / "templates" / "tenant-admission.yaml").read_text(encoding="utf-8")
+
+    # One normal init environment entry, or the ordered two-entry offline migration
+    # form.  The value/valueFrom checks make a secret/config-map based lookalike
+    # and an extra/misordered environment entry fail the CEL expression.
+    assert "size(object.spec.containers[0].env) == 1" in text
+    assert "size(object.spec.containers[0].env) == 2" in text
+    assert "object.spec.containers[0].env[0].name == 'EXOMEM_LOG_DIR'" in text
+    assert "object.spec.containers[0].env[0].value == '/dev'" in text
+    assert "!has(object.spec.containers[0].env[0].valueFrom)" in text
+    assert "object.spec.containers[0].env[1].name == 'EXOMEM_HOSTED_OFFLINE_STATE_MIGRATION'" in text
+    assert "object.spec.containers[0].env[1].value == '1'" in text
+    assert "!has(object.spec.containers[0].env[1].valueFrom)" in text
+
+
 def test_platform_dependencies_and_first_party_images_are_immutable() -> None:
     chart = yaml.safe_load((PLATFORM / "Chart.yaml").read_text(encoding="utf-8"))
     dependencies = {item["name"]: item for item in chart["dependencies"]}
@@ -624,6 +641,54 @@ def test_platform_renders_real_provisioner_composition() -> None:
     assert rule["services"] == [{"name": "exomem-provisioner", "port": 8080}]
 
 
+def test_platform_limits_provisioner_authorization_secret_access_to_required_lifecycle() -> None:
+    documents = _render(PLATFORM, PLATFORM / "values.validation.yaml", namespace="exomem-platform")
+
+    provisioner_role = _find(documents, "ClusterRole", "exomem-cell-provisioner")
+    secret_rules = {
+        tuple(rule.get("resourceNames", [])): set(rule["verbs"])
+        for rule in provisioner_role["rules"]
+        if rule.get("apiGroups") == [""] and rule.get("resources") == ["secrets"]
+    }
+    assert secret_rules[()] == {"create"}
+    assert secret_rules[("exomem-cell-credentials",)] == {
+        "delete",
+        "get",
+        "patch",
+        "update",
+    }
+    assert secret_rules.get(("exomem-authorization-session",)) == {
+        "get",
+        "patch",
+        "update",
+    }
+
+    provisioner_scope = _find(
+        documents,
+        "ValidatingAdmissionPolicy",
+        "exomem-provisioner-scope",
+    )
+    validations = {
+        validation["message"]: " ".join(validation["expression"].split())
+        for validation in provisioner_scope["spec"]["validations"]
+    }
+    namespace_scope = validations[
+        "The hosted provisioner may mutate only fixed resources in opaque exo-* tenant namespaces."
+    ]
+    assert "oldObject.metadata.name == 'exomem-cell-credentials'" in namespace_scope
+    assert (
+        "object.metadata.namein['exomem-cell-credentials','exomem-authorization-session']"
+    ) in namespace_scope.replace(" ", "")
+
+    fixed_names = validations[
+        "The hosted provisioner may mutate only exact fixed names derived from the tenant namespace."
+    ]
+    assert (
+        "request.operation=='DELETE'?variables.name=='exomem-cell-credentials':"
+        "variables.namein['exomem-cell-credentials','exomem-authorization-session']"
+    ) in fixed_names.replace(" ", "")
+
+
 def test_platform_uses_the_selected_v3_rollback_runtime_everywhere(tmp_path: Path) -> None:
     values = yaml.safe_load((PLATFORM / "values.validation.yaml").read_text(encoding="utf-8"))
     lock = _v3_lock(json.loads(values["provisioner"]["deploymentLockJson"]))
@@ -751,6 +816,7 @@ def test_platform_renders_a_read_only_recovery_operator_identity() -> None:
         ("", "persistentvolumeclaims"),
         ("", "persistentvolumes"),
         ("", "configmaps"),
+        ("", "pods"),
         ("apps", "statefulsets"),
         ("batch", "jobs"),
         ("traefik.io", "ingressroutes"),
@@ -767,6 +833,7 @@ def test_platform_renders_a_read_only_recovery_operator_identity() -> None:
     )
     runbook = (ROOT / "docs/runbooks/hosted/cell.md").read_text(encoding="utf-8")
     assert "exomem-init-retry-recovery" in runbook
+    assert "ConfigMaps, Pods, StatefulSets" in runbook
     assert (
         "spec:\n  enableServiceLinks: false\n  serviceAccountName: exomem-init-retry-recovery"
         in runbook
@@ -1168,6 +1235,9 @@ def test_platform_renders_disjoint_durability_workloads() -> None:
         "/run/secrets/exomem/database-backup/.pgpass"
     )
     assert database_env["EXOMEM_DATABASE_BACKUP_PG_DUMP"] == "/usr/bin/pg_dump"
+    assert database_env["EXOMEM_DURABILITY_SCRATCH_ROOT"] == (
+        "/var/lib/exomem-scratch/database-backup"
+    )
     assert database_env["EXOMEM_DATABASE_BACKUP_PROOF_TENANT_ID"] == "tenant-owner-proof"
     assert database_env["EXOMEM_DATABASE_BACKUP_PROOF_CELL_ID"] == "cell-owner-proof"
 
@@ -1980,8 +2050,8 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
         "object.spec.containers[0].args == ['hosted', 'init', '--contract-version', '1', "
         "'--request-file', '/run/exomem/operator-requests/init.json']"
     ) in admission_text
-    assert "size(object.spec.volumes) == 2" in admission_text
-    assert "size(object.spec.containers[0].volumeMounts) == 4" in admission_text
+    assert "size(object.spec.volumes) == 4" in admission_text
+    assert "size(object.spec.containers[0].volumeMounts) == 5" in admission_text
     assert "seccompProfile.type == 'RuntimeDefault'" in admission_text
     assert "securityContext.seccompProfile" in admission_text
     assert "terminationMessagePath == '/dev/termination-log'" in admission_text
@@ -1991,7 +2061,7 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
         in admission_text
     )
     assert "batch.kubernetes.io/job-tracking" in admission_text
-    assert "size(object.spec.containers[0].env) == 24" in admission_text
+    assert "size(object.spec.containers[0].env) == 28" in admission_text
     normalized_admission = " ".join(
         "\n".join(
             validation["expression"] for validation in tenant_admission["spec"]["validations"]
@@ -2010,6 +2080,14 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
     assert "exomem.io/records-reader-version" in admission_text
     assert "EXOMEM_HOSTED_LIFECYCLE_ACTIONS_ENABLED" in admission_text
     assert "exomem.io/lifecycle-actions-enabled" in admission_text
+    assert "EXOMEM_AUTH_SESSION_REPLICA_ID" in admission_text
+    assert "exomem.io/authorization-session-secret-name" in admission_text
+    assert "/run/exomem/authorization-session/private/keyring.json" in admission_text
+    assert "/run/exomem/authorization-session/private/control.json" in admission_text
+    assert "/run/exomem/authorization-session/private/serving-membership.json" in admission_text
+    assert "!has(object.spec.securityContext.fsGroup)" in admission_text
+    assert "!has(object.spec.securityContext.fsGroupChangePolicy)" in admission_text
+    assert "volume.secret.defaultMode == 288" not in admission_text
     assert "exact approved serving command and environment" in admission_text
     assert "exact approved serving ports, probes, and interactive surface" in admission_text
     for forbidden_surface in (
@@ -2058,6 +2136,7 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
         "exomem.io/approved-image",
         "exomem.io/pvc-name",
         "exomem.io/credentials-secret-name",
+        "exomem.io/authorization-session-secret-name",
         "exomem.io/init-request-configmap-name",
         "exomem.io/tenant-cell",
         "exomem.io/cell-resource",
@@ -2398,6 +2477,7 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
         "exomem.io/resource-name": "cell-alpha",
         "exomem.io/pvc-name": "cell-alpha-data",
         "exomem.io/credentials-secret-name": "exomem-cell-credentials",
+        "exomem.io/authorization-session-secret-name": "exomem-authorization-session",
         "exomem.io/init-request-configmap-name": "cell-alpha-init-request",
         "exomem.io/provision-mode": "serve",
         "exomem.io/vault-id": "vault-alpha-original",
@@ -2426,13 +2506,28 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
             "--request-file",
             "/run/exomem/operator-requests/init.json",
         ]
-        assert container["env"] == [{"name": "EXOMEM_LOG_DIR", "value": "/dev"}]
+        assert container["env"] == [
+            {"name": "EXOMEM_LOG_DIR", "value": "/dev"},
+            {"name": "EXOMEM_HOSTED_OFFLINE_STATE_MIGRATION", "value": "1"},
+        ]
     else:
+        assert workload["spec"]["template"]["metadata"]["annotations"] == {
+            "exomem.io/authorization-session-revision": "a" * 64
+        }
         pod = workload["spec"]["template"]["spec"]
         assert pod["restartPolicy"] == "Always"
         assert "runtimeClassName" not in pod
-        assert "fsGroup" not in pod.get("securityContext", {})
-        assert len(pod.get("initContainers", [])) == 0
+        assert "fsGroup" not in pod["securityContext"]
+        assert "fsGroupChangePolicy" not in pod["securityContext"]
+        assert len(pod.get("initContainers", [])) == 1
+        custody_init = pod["initContainers"][0]
+        assert custody_init["name"] == "authorization-session-custody"
+        assert custody_init["args"] == [
+            "-m",
+            "exomem.governance.authorization_hosted_mount",
+        ]
+        assert custody_init["securityContext"]["runAsUser"] == 10001
+        assert custody_init["resources"]["requests"]["ephemeral-storage"] == "16Mi"
         container = pod["containers"][0]
         security = container["securityContext"]
         assert "seccompProfile" not in security
@@ -2451,6 +2546,21 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
         assert env["EXOMEM_HOSTED_TRANSFER_BROWSER_ORIGIN"] == "https://substratesystems.io"
         assert env["EXOMEM_HOSTED_RECORDS_READER_VERSION"] == "2"
         assert env["EXOMEM_HOSTED_LIFECYCLE_ACTIONS_ENABLED"] == "false"
+        assert env["EXOMEM_AUTH_SESSION_KEYRING_FILE"] == (
+            "/run/exomem/authorization-session/private/keyring.json"
+        )
+        assert env["EXOMEM_AUTH_SESSION_CONTROL_FILE"] == (
+            "/run/exomem/authorization-session/private/control.json"
+        )
+        assert env["EXOMEM_AUTH_SESSION_MEMBERSHIP_FILE"] == (
+            "/run/exomem/authorization-session/private/serving-membership.json"
+        )
+        replica = next(
+            item
+            for item in container["env"]
+            if item["name"] == "EXOMEM_AUTH_SESSION_REPLICA_ID"
+        )
+        assert replica["valueFrom"] == {"fieldRef": {"fieldPath": "metadata.name"}}
         assert "EXOMEM_HOSTED_BROWSER_ORIGIN" not in env
         assert env["EXOMEM_HOSTED_STORAGE_LIMIT_BYTES"] == "5368709120"
         assert env["EXOMEM_HOSTED_UPLOAD_LIMIT_BYTES"] == "94371840"
@@ -2473,12 +2583,18 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
         assert container["resources"]["limits"]["memory"] == "1536Mi"
         assert container["resources"]["requests"]["memory"] == "1Gi"
         assert env["TMPDIR"] == "/var/lib/exomem/state/tmp/runtime"
-        assert {volume["name"] for volume in pod["volumes"]} == {"data", "credentials"}
+        assert {volume["name"] for volume in pod["volumes"]} == {
+            "authorization-session-custody",
+            "authorization-session-source",
+            "data",
+            "credentials",
+        }
         assert {mount["mountPath"] for mount in container["volumeMounts"]} == {
             "/var/lib/exomem/vault",
             "/var/lib/exomem/state",
             "/var/lib/exomem/logs",
             "/run/exomem/credentials",
+            "/run/exomem/authorization-session",
         }
         assert container["resources"]["limits"]["ephemeral-storage"] == "512Mi"
 
@@ -2533,6 +2649,12 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
         credentials = next(volume for volume in pod["volumes"] if volume["name"] == "credentials")
         assert credentials["secret"]["defaultMode"] == 0o444
         assert credentials["secret"]["secretName"] == "exomem-cell-credentials"
+        authorization_source = next(
+            volume
+            for volume in pod["volumes"]
+            if volume["name"] == "authorization-session-source"
+        )
+        assert authorization_source["secret"]["defaultMode"] == 0o444
         assert "EXOMEM_HOSTED_SERVICE_CREDENTIAL" not in env
         assert not any("secretKeyRef" in item.get("valueFrom", {}) for item in container["env"])
 
@@ -2574,6 +2696,12 @@ def test_cell_schema_rejects_mutable_image_and_non_fixed_limits() -> None:
         "migrate",
         "restore",
         "serve",
+    ]
+    assert "migrationMode" in schema["required"]
+    assert schema["properties"]["migrationMode"]["enum"] == [
+        "none",
+        "binding-v1-to-v2",
+        "state-root-v1",
     ]
     assert schema["properties"]["provisionMode"]["enum"] == ["serve", "restore-candidate"]
     assert '"transferHostname"' not in json.dumps(schema["properties"]["routes"])
@@ -2641,7 +2769,53 @@ def test_cell_chart_migrate_mode_renders_only_the_bounded_init_job() -> None:
         "DAC_OVERRIDE",
         "FOWNER",
     ]
+    assert "EXOMEM_HOSTED_OFFLINE_STATE_MIGRATION" not in {
+        item["name"] for item in container["env"]
+    }
     assert not any(document.get("kind") == "Service" for document in documents)
+
+
+def test_fresh_initialize_always_enables_empty_state_manifest_creation() -> None:
+    documents = _render(
+        CELL,
+        CELL / "values.initialize.yaml",
+        namespace="cell-alpha-test",
+        extra_args=(
+            "--set",
+            "workloadMode=initialize",
+            "--set",
+            "migrationMode=none",
+        ),
+    )
+
+    job = _find(documents, "Job", "cell-alpha-init")
+    env = {
+        item["name"]: item.get("value")
+        for item in job["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+    assert env["EXOMEM_HOSTED_OFFLINE_STATE_MIGRATION"] == "1"
+
+
+def test_cell_state_root_migration_mode_enables_only_the_offline_state_migrator() -> None:
+    documents = _render(
+        CELL,
+        CELL / "values.initialize.yaml",
+        namespace="cell-alpha-test",
+        extra_args=(
+            "--set",
+            "workloadMode=migrate",
+            "--set",
+            "migrationMode=state-root-v1",
+        ),
+    )
+
+    job = _find(documents, "Job", "cell-alpha-init")
+    env = {
+        item["name"]: item.get("value")
+        for item in job["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+    assert env["EXOMEM_HOSTED_OFFLINE_STATE_MIGRATION"] == "1"
+    assert not any(document.get("kind") == "StatefulSet" for document in documents)
 
 
 def test_cell_chart_rejects_mismatched_runtime_and_provider_cell_ids(tmp_path: Path) -> None:

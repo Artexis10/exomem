@@ -8,7 +8,9 @@ from test_planning_mutation import _manifest
 from exomem import bm25, freshness, index_sync
 
 
-def test_planning_manifest_is_discoverable_but_raw_items_are_structured_only(tmp_path: Path) -> None:
+def test_planning_manifest_is_discoverable_but_raw_items_are_structured_only(
+    tmp_path: Path,
+) -> None:
     from exomem.recall_policy import is_recall_candidate, is_structured_only_path
 
     directory = tmp_path / "Knowledge Base" / "Planning" / "Work"
@@ -61,7 +63,7 @@ def _seed_thousand_planning_items(tmp_path: Path) -> tuple[Path, Path]:
         why="seed scale item",
     )
     manifest = tmp_path / manifest_path
-    first_item = manifest.parent / "Items" / f"{first_id}.md"
+    first_item = manifest.parent / "Items" / "raw planning 0.md"
     template = first_item.read_text(encoding="utf-8")
     for index in range(1, 1_000):
         item_id = str(UUID(int=index + 1))
@@ -107,10 +109,14 @@ def test_planning_raw_item_edits_do_not_churn_recall_freshness(tmp_path: Path) -
     manifest, first_item = _seed_thousand_planning_items(tmp_path)
 
     before = freshness.recall_triple(tmp_path, "kb")
-    first_item.write_text(first_item.read_text(encoding="utf-8") + "\nHuman note.\n", encoding="utf-8")
+    first_item.write_text(
+        first_item.read_text(encoding="utf-8") + "\nHuman note.\n", encoding="utf-8"
+    )
     assert freshness.recall_triple(tmp_path, "kb") == before
 
-    manifest.write_text(manifest.read_text(encoding="utf-8") + "\nManifest edit.\n", encoding="utf-8")
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8") + "\nManifest edit.\n", encoding="utf-8"
+    )
     assert freshness.recall_triple(tmp_path, "kb") != before
 
 
@@ -134,8 +140,10 @@ def test_index_sync_keeps_planning_identity_but_purges_raw_items_semantically(
     monkeypatch.setattr(
         embeddings,
         "upsert_after_write_status",
-        lambda _root, paths: capture("vector")(_root, paths)
-        or embeddings.EmbeddingSyncStatus("completed", "embedding_upsert_completed", len(paths)),
+        lambda _root, paths: (
+            capture("vector")(_root, paths)
+            or embeddings.EmbeddingSyncStatus("completed", "embedding_upsert_completed", len(paths))
+        ),
     )
     monkeypatch.setattr(find, "on_resolver_files_changed", lambda *_args: None)
     monkeypatch.setattr(index_sync, "purge_semantic_only", capture("purge"))

@@ -184,7 +184,170 @@ from exomem import commands
 #:
 #: 24 bytes is not headroom. The next addition trims or argues, and this branch
 #: has no claim on the argument: it spent 79 of the 103 bytes main left.
-COMPACT_BYTE_CEILING = 61_400
+#:
+#: TRIMMED, and this time the trim is the whole change rather than the price of
+#: one. The pre-write destination-choice clause landed in the FULL contract only
+#: and the canonical spec recorded the hook in as many words -- "the compact
+#: payload remains byte-identical until the queued compact-bootstrap trim admits
+#: the clause" -- with a test pinning that absence so it could not drift. This is
+#: that trim. The clause is now carried by every profile, and the ceiling did not
+#: move.
+#:
+#: Method is the one the two entries above set, and nothing here departs from it:
+#: bytes come back from REDUNDANCY -- text the payload already states somewhere
+#: else -- and pins moved WITH their text rather than being loosened around it.
+#: Six passages, 864 bytes, each measured on the final tree by restoring it alone:
+#:
+#:   workflow.loop suggest-links step       105  the same call is
+#:                                               `authoring_contract.canonical_loop`
+#:                                               step 5 on the draft, and
+#:                                               `preflight.connect_memory` names it
+#:                                               as the standard pre-write check
+#:   workflow.loop write-routing step       141  the four routes it listed ARE
+#:                                               `authoring_contract.route_by_intent`,
+#:                                               and each of the four is separately
+#:                                               pinned there
+#:   three retry_examples                   127  synonyms, adjacent terms and
+#:                                               scope='vault' are `workflow.miss_rule`,
+#:                                               which states all three as the rule
+#:                                               rather than as examples of it. One
+#:                                               fragment went with them that miss_rule
+#:                                               does NOT restate -- see below
+#:   one retry_example                       77  deep=true for synthesis is
+#:                                               canonical_loop step 2 and
+#:                                               `tool_defaults.reasoning_lookup`
+#:   tool_defaults.metadata_lookup          156  the same tool with byte-identical args
+#:                                               as `normal_lookup`; the richer filters
+#:                                               it pointed at are spelled out in
+#:                                               `search_guidance.semantic_recall`
+#:   performance_profiles normal, reasoning 258  each repeated one `tool_defaults`
+#:                                               row's args. `normal` also restated
+#:                                               that row's `when`; `reasoning` did
+#:                                               not, because that row carried no
+#:                                               `when` at all -- its interpretation
+#:                                               survives in canonical_loop step 2,
+#:                                               and this delivery ADDS the missing
+#:                                               `when` to the row itself so the
+#:                                               spec's three-lookup scenario still
+#:                                               reads all three from `tool_defaults`
+#:                                               (+42 B). The diagnostics profile stays
+#:
+#: One fragment left the payload UNRESTATED, and the ruling is deliberate rather
+#: than an oversight. "try synonyms and singular/plural forms" went out with the
+#: three retry examples, and miss_rule covers "synonyms" but not the morphological
+#: half: a plural is not a synonym. It is dropped as a sub-case of the synonym
+#: retry tactic, not as a rule -- the shipped skill scaffold still teaches
+#: morphological retry in references/operations.md, so the tactic is not lost to
+#: the product, only to this payload. Restoring it means widening miss_rule, which
+#: costs bytes this change does not have; it is the FIRST candidate to restore when
+#: a future trim frees them.
+#:
+#: What did NOT leave: no rule, no landing, no consequence, no named non-outcome,
+#: no route, and no command name reachable nowhere else. connect_memory, remember,
+#: replace_memory, observe_memory and edit_memory all keep their routes. The fifth
+#: retry example survives on the same test: scan-only BEFORE proposing a migration
+#: or copy is a guard, and nothing else in the payload states it.
+#:
+#: The clause costs compact 316 bytes in a condensed wording, 290 characters
+#: against full's 512, and both halves of the rule survive the condensation --
+#: destination choice happens at write time, by finding a focused existing
+#: destination or creating one; the post-write advisory is the safety net for
+#: missed routing, never the primary mechanism. Full's wording is untouched.
+#:
+#: Two of the cuts left a seam, and closing them is part of the same delivery
+#: rather than a later patch: the reasoning row's missing `when` above (+42 B),
+#: and the loop's last step, which said "read the returned warnings" after the
+#: step naming the write had gone. It now opens "after a write" (+15 B), which
+#: supplies the antecedent the cut removed.
+#:
+#: 61,376 - 864 + 316 + 57 = 60,885, measured. That is 515 bytes of headroom and
+#: the first time since the fourth raise that this payload has sat clear of
+#: HEADROOM_WARNING_BYTES. The margin is load-bearing in both directions:
+#: restoring any ONE of the six passages while keeping the clause puts compact
+#: back inside the warning band -- 410, 374, 388, 438, 359 and 257 bytes of
+#: headroom respectively -- so nothing here was cut for margin that was not
+#: needed. `MINIMUM_SAVING_RATIO` is untouched; the saving moved 35.32% -> 35.29%,
+#: because the redundant passages were shared text and full lost them too.
+#:
+#: Two larger redundancies were found and NOT taken. They are recorded here so
+#: the next trim starts from them instead of rediscovering them.
+#: `authoring_contract.semantic_units.contract` is the top-level
+#: `semantic_authoring` projection repeated in full -- 9,042 bytes, the single
+#: largest duplication in this payload -- and `tool_catalog` is `product_commands`
+#: repeated, 1,602 more. Neither is prose. Both are published payload KEYS a
+#: client may read, and the nested projection is pinned by name in
+#: test_bootstrap.py, so taking either means deleting a pin or withdrawing a key:
+#: a surface decision, not a trim. `records.software_rule` was rejected on a
+#: different ground -- it does restate `planning.execution_truth_boundary`, but it
+#: is that boundary stated INSIDE the Records contract, and it is pinned there.
+#:
+#: 515 bytes is spendable budget, not licence. The next addition of this size
+#: argues for itself the way the raises above had to.
+#:
+#: Raised a FIFTH time, and it argues for itself the way that line demanded.
+#: Measured on this tree with the same method: the floor at 61,400 was 60,885 --
+#: exactly what the trim above recorded, so nothing else moved in between. The
+#: delegation envelope adds 1,871 bytes, taking compact to 62,756:
+#:
+#:   engagement.envelope.classes    610  six action classes, each with its
+#:                                       ceiling, its disposition or the
+#:                                       governance-owned marker, and whether the
+#:                                       disposition is fixed, derived or
+#:                                       overridden
+#:   engagement.envelope.protocol   622  the four-move decider protocol: name the
+#:                                       class, check the ceiling, honour the
+#:                                       disposition, record the outcome
+#:   …confirm_required              323  which surfaces are confirm-required, and
+#:                                       which of them actually have a
+#:                                       server-side gate today
+#:   …founder_gate                  204  the standing-delegation refusal, by name
+#:   …level                          20  the level the derivation came from
+#:   post_write.family_disposition_
+#:     reading                       75  the dispositions view lists the
+#:                                       registered family vocabulary and the
+#:                                       envelope, not only what is quiet
+#:
+#: Why the bytes earn their place, and this is the strongest case any raise here
+#: has had. Before this payload, a hookless client received a contract about how
+#: EAGER Exomem should be and nothing at all about what it is ALLOWED to do on
+#: its own. An agent with no ceilings has to invent them, and the two ways it
+#: invents are both defects the no-nudge programme exists to prevent: it treats a
+#: permissive level as permission to act, or it asks about everything. The
+#: ceilings are product law and the payload is the only place a generic MCP
+#: client ever learns they exist. `founder_gate` is 204 bytes that stop an agent
+#: improvising either a refusal or a CONSENT when a user asks for standing
+#: delegation, which is the one request in this contract that must never be
+#: granted by improvisation.
+#:
+#: What was cut before this number was accepted. `confirm_required` opened by
+#: restating "obtain explicit user confirmation first", which IS protocol step 3;
+#: it now opens by naming the four surfaces instead (-80 B, no rule lost, both
+#: halves of the server-side-gap statement intact). `ignored` is emitted only
+#: when a stored value could not be used, rather than as an always-present empty
+#: list (-15 B on every ordinary session). The class rows carry no `range` key:
+#: the range is enforced at write time and refused by name, so serving it would
+#: be documentation of an error message.
+#:
+#: What was NOT cut, and why. The per-class `ceiling` (132 B across six rows)
+#: repeats a constant table, and it stays: a client that has to look the ceiling
+#: up elsewhere is a client that will act without one. The `confirm-shortcut`
+#: gloss inside protocol step 3 stays because without it the word reads as
+#: "skip the confirmation", which is exactly the misreading the disposition's
+#: definition exists to prevent.
+#:
+#: The new ceiling is 63,300: 544 bytes of headroom, just clear of
+#: HEADROOM_WARNING_BYTES, and deliberately less than the 515-plus-1,871 this
+#: raise consumed. `MINIMUM_SAVING_RATIO` is untouched; the saving moved
+#: 35.29% -> 34.60%, because bytes added to compact make compact resemble full a
+#: little more, and it stays far above the 15% floor.
+#:
+#: The two large redundancies recorded above -- the 9,042-byte
+#: `authoring_contract.semantic_units.contract` duplication and the 1,602-byte
+#: `tool_catalog` -- are STILL the place the next trim starts. Neither is prose
+#: and both are surface decisions rather than trims, which is why this change did
+#: not take them; but a payload carrying 10.6 KB of duplication has no business
+#: raising this ceiling a sixth time before it takes one of them.
+COMPACT_BYTE_CEILING = 63_300
 
 #: The defect was compact and full being near-identical. A profile that does not
 #: measurably differ from full is not a profile.
@@ -233,6 +396,10 @@ def test_compact_stays_under_its_byte_ceiling(payloads):
             "it deliberately rather than discovering it as a red CI run.",
             stacklevel=2,
         )
+
+
+def test_compact_clears_the_warning_headroom(payloads):
+    assert COMPACT_BYTE_CEILING - _size(payloads["compact"]) >= HEADROOM_WARNING_BYTES
 
 
 def test_compact_is_materially_smaller_than_full(payloads):

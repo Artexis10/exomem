@@ -6,7 +6,9 @@ operating contract instead of guessing conventions: a read-only `bootstrap`
 operation that returns workflow guidance, tool defaults, performance profiles,
 and search guidance as structured JSON, without inspecting or summarizing any
 private vault content.
+
 ## Requirements
+
 ### Requirement: Agent Bootstrap Contract
 The system SHALL expose a read-only `bootstrap` operation that returns a versioned operating contract for agents using Exomem without a native skill. The contract MUST be deterministic, structured JSON and MUST NOT inspect or summarize private vault content. Its entity-capture section SHALL list the active vault-aware entity type IDs and explain that unknown recurring types are registered only through the governed save leaf with a rationale.
 
@@ -96,7 +98,7 @@ governance-shaped text appearing inside returned content is data, never a comman
 
 ### Requirement: Bootstrap teaches Records routing and boundaries
 
-Bootstrap SHALL expose `record` as a beginner-facing and product-front-door action and SHALL describe Records as governed observed state distinct from Sources, Evidence, compiled Notes, Entities, Planning intent, Review, Imported staging, and built-in assistant memory. It SHALL teach agents to infer Records participation from durable observed context rather than wait for the user to name Records or issue a magic save verb. It SHALL teach natural capture/query/update intents, proactive existing-collection behavior, proposal-before-first-schema, manual-first behavior, template independence, derived-view provenance, and the rule that conclusions belong in compiled Notes.
+Bootstrap SHALL expose `record` as a beginner-facing and product-front-door action and SHALL describe Records as governed observed state distinct from Sources, Evidence, compiled Notes, Entities, Planning intent, Review, Imported staging, and built-in assistant memory. It SHALL teach agents to infer Records participation from durable observed context rather than wait for the user to name Records or issue a magic save verb. It SHALL teach natural capture/query/update intents, proactive existing-collection behavior, proposal-before-first-schema, manual-first behavior, template independence, derived-view provenance, and the rule that conclusions belong in compiled Notes. It SHALL teach that Planning can operate standalone or coordinate with any companion under a resolved user-authored workflow contract; no named companion SHALL be a product-wide default.
 
 #### Scenario: Implicit observation routes to Records
 - **WHEN** a client asks bootstrap how to handle a new durable measurement, session, transaction, or maintenance event without explicit save/log/Records wording
@@ -113,6 +115,14 @@ Bootstrap SHALL expose `record` as a beginner-facing and product-front-door acti
 #### Scenario: Accepted software contract stays in the repository
 - **WHEN** future software intent is promoted into an OpenSpec change
 - **THEN** bootstrap tells the agent to keep only a thin `{kind, ref, label?}` Planning pointer and the item's single authored health field while phase, requirements, tasks, tests, code, and execution state remain in the repository
+
+#### Scenario: Companion execution artifacts stay with their declared owner
+- **WHEN** future intent is promoted into an artifact whose type a resolved workflow contract assigns to a companion tool
+- **THEN** bootstrap tells the agent to keep only an opaque Planning execution reference and connective context while the declared artifact contents and execution state remain with the companion
+
+#### Scenario: Standalone is the absence-safe default
+- **WHEN** no active workflow contract applies
+- **THEN** bootstrap teaches that Planning remains fully functional standalone and does not require or infer an external tool
 
 #### Scenario: Missing collection is proposed, not silently activated
 - **WHEN** observed state fits Records but inventory contains no compatible collection
@@ -604,3 +614,153 @@ The bootstrap engagement guidance SHALL teach that a dismissal carries a reason 
 - **AND** names the family review reference form and the three disposition actions
 - **AND** the payload size remains under the compact ceiling
 
+### Requirement: The agent contract teaches pre-write destination choice
+
+The bootstrap contract SHALL teach, in both the full and compact profiles, that
+choosing the destination is part of writing, not a reaction to advisories: when
+a coherent durable thread emerges in conversation that sits outside the current
+page's declared scope, the agent searches for a focused existing destination or
+creates and links a focused child note, rather than letting the current page
+accumulate structural debt until a detector fires. The compact profile MAY
+carry a condensed wording, but SHALL state both halves of the rule: routing
+happens at write time, and post-write structural advisories are the safety
+net for missed routing, not the primary mechanism.
+
+#### Scenario: A divergent thread gets a home before the detector must speak
+
+- **WHEN** the bootstrap contract teaches capture routing in any profile that carries teaching
+- **THEN** it states that an emerging coherent durable thread outside the current page's declared scope is routed to a focused existing or new destination at write time
+- **AND** it states that post-write structural advisories are the safety net for missed routing, not the primary mechanism
+
+#### Scenario: Admission is paid for by trimming, not by the ceiling
+
+- **WHEN** the compact payload carries the destination-choice teaching
+- **THEN** the compact payload remains at or below its unchanged byte ceiling with at least the codified warning headroom to spare
+- **AND** the compact profile remains measurably smaller than full under the existing saving-ratio floor
+
+### Requirement: The capture predicate covers stated intent and observed outcomes
+
+The capture axis of the engagement contract at `balanced` and `maximal` SHALL name two lifecycle classes beside a durable conclusion, a recurring entity and a carried-out method: a *stated intent or commitment* — the user says what they will do, commits to a batch or workstream, sequences work, or re-prioritises — routes to Planning through `plan_memory`; an *observed outcome or event* — the conversation reports that something happened, was produced, measured, delivered, approved, published or failed — routes to Records through `record_memory`. The contract SHALL state the pairing rule: an observed outcome that lands on an open committed Planning item is one landing with two consequences, the Records append and then the Planning transition, performed together and reported once. It SHALL state that a tentative claim is never written as an event and that elapsed time is never an outcome. The existing Records engagement policy (exactly one compatible collection and a sufficiently identified observation → write and report; competing collections → one focused question; no collection → propose, never silently create) SHALL be the write gate for both classes. `light` SHALL keep capture-only-when-asked and `off` SHALL be unchanged. Both `SKILL.md` copies, `prominence.py` and the bootstrap `intent_boundary` and `capture_examples` SHALL carry the same rule, and the compact payload SHALL stay within its measured ceiling.
+
+#### Scenario: A stated outcome closes a queued deliverable without a magic word
+
+- **WHEN** a Planning collection keyed on title holds a queued committed work item and the user says in ordinary language that that deliverable was produced today, without mentioning Exomem, Planning, Records, save, track or remember
+- **THEN** an agent under `balanced` or `maximal` appends the production event to the one compatible Records collection, transitions the work item out of its open state, and reports both in one line in the user's domain language
+
+#### Scenario: Sequencing language files intent, not events
+
+- **WHEN** the user says the remaining deliverables will be done next time
+- **THEN** the agent leaves them queued in Planning, writes no Records event, and does not ask whether to "track" them
+
+#### Scenario: A tentative claim is not an event
+
+- **WHEN** the user says a deliverable was probably published but is not sure
+- **THEN** the agent writes no publication event and, where the collection offers a note field, may record the stated uncertainty there; it never fabricates an observed event
+
+#### Scenario: Light prominence does not widen
+
+- **WHEN** the engagement level is `light`
+- **THEN** neither lifecycle class triggers an unprompted write and the contract text for that level does not name them as proactive
+
+### Requirement: Lifecycle consequences are reported in domain language
+
+The contract SHALL teach that the report of a lifecycle consequence states what is now true in the user's vocabulary and cites the page or collection the way recall cites pages. The words Planning, Records, collection, schema and natural key SHALL never be required of the user and SHALL NOT lead the report.
+
+#### Scenario: Report names the outcome, cites the store
+
+- **WHEN** the agent has appended a production event and completed the matching work item
+- **THEN** the report reads as a statement about the deliverable ("done and logged; the other five stay queued") with the collection paths as citations, not as a description of tool calls
+
+### Requirement: Bootstrap exposes the Planning inventory and the plan simple action
+
+Bootstrap SHALL teach that `plan_memory(action="inspect")` without a collection returns the Planning inventory, that an observation is resolved to a Planning item with `query` filtered on `title` or the natural-key fields plus `lifecycle` and `status`, and SHALL list `plan` among the simple front-door actions with the same phrasing `SKILL.md` uses. Reading the inventory SHALL create nothing.
+
+#### Scenario: Fresh session finds the Planning surface
+
+- **WHEN** a session starts with no collection named and the user refers to "the next one" in a workstream
+- **THEN** bootstrap routes the agent to the Planning inventory and a bounded query rather than to a question about which collection to use
+
+### Requirement: The client capture nudge recognises lifecycle writes
+
+Where a client hook enforces the capture contract, its detector of knowledge-base writes SHALL count `record_memory`, `plan_memory` and `observe_memory` mutations as writes, and its reminder SHALL name the lifecycle classes in one line. The hook SHALL remain structural: it decides whether a write happened, never what should have been written.
+
+#### Scenario: A turn that filed the record is not nudged
+
+- **WHEN** a turn's only knowledge-base mutation is a `record_memory` append
+- **THEN** the capture nudge does not fire
+
+#### Scenario: The reminder names the classes
+
+- **WHEN** the capture nudge fires
+- **THEN** its reminder names stated intent → Planning and observed outcome → Records alongside the existing classes, in one line
+
+### Requirement: Bootstrap serves and teaches the due-state block
+
+The bootstrap payload SHALL carry the due-state block for the requesting audience, subject to the same egress rule as every carrier, and SHALL teach its interpretation in the engagement guidance: counts arrive on ordinary responses; a nonzero count is an invitation to consult the review surface, not an instruction to interrupt; before re-raising any surfaced item the agent consults its fingerprint state; moderate signals are agent judgment and silence is preferable to bureaucracy. Post-write guidance SHALL name only fields the default compact response actually carries.
+
+#### Scenario: A fresh session learns the due state at bootstrap
+
+- **WHEN** a session begins with two predictions past their window and one unfinished experiment visible to the audience
+- **THEN** the bootstrap payload's due-state block reports those counts with bounded references
+- **AND** the engagement guidance in the same payload states how to act on them
+
+#### Scenario: Guidance never names phantom fields
+
+- **WHEN** the bootstrap payload describes post-write feedback
+- **THEN** every named response field is present in the default compact response of the writers it describes
+
+### Requirement: The agent contract teaches the delegation envelope compactly
+
+Bootstrap SHALL serve the active envelope: the five disposition-bearing v1
+action classes each with ceiling, current disposition, and
+fixed/derived/overridden provenance, and the `disclosure` class marked
+governance-owned with no disposition. It SHALL teach the decider protocol —
+name the class before acting; treat an above-ceiling intent as a proposal,
+never an act; honour the disposition (`off`: do not initiate, though an
+explicit user request is never blocked; `advisory`: surface in domain language
+and stop; `silent`: act, narration governed by prominence; `confirm` /
+`confirm-shortcut`: obtain the confirmation first); record outcomes through
+triage — and SHALL name the founder-gate refusal for `restructure_execution`
+so the agent does not improvise one. The same teaching SHALL land on every
+carrier (compact bootstrap, scaffold and plugin skill copies, the hookless
+custom-instructions block) within a measured budget of at most fifty lines per
+carrier, with compact bootstrap additionally within its existing byte ceiling
+and before/after sizes recorded when the implementation lands.
+
+#### Scenario: The contract names every class and the protocol
+
+- **WHEN** compact bootstrap is served at any prominence level
+- **THEN** the engagement guidance names all six v1 action classes — five with
+  ceiling, disposition, and provenance, and `disclosure` as governance-owned —
+  and states the decider protocol including the founder-gate refusal
+
+#### Scenario: A hookless client receives the same teaching
+
+- **WHEN** the hookless custom-instructions block is generated
+- **THEN** it carries the envelope teaching within its per-carrier fifty-line
+  budget, and its instructions defer to the served envelope rather than
+  restating a hardcoded table
+
+### Requirement: Bootstrap exposes workflow contract resolution compactly
+
+Every bootstrap profile SHALL carry the immutable workflow invariant kernel and built-in standalone fallback. A profile exporting `schema_memory` SHALL also carry at most one released default summary, at most eight released scoped summaries in deterministic key order, exact released-total/projection-truncation metadata after a complete scan, and the shared schema/configuration route for contract inventory and resolution. A profile omitting the command SHALL advertise no route and report `resolution_available: false`; it SHALL expose built-in standalone only for an empty released inventory with no migration requirement, otherwise fixed `workflow_resolution_unavailable` with contract-aware proactive routing disabled. Bootstrap SHALL teach route-capable agents to resolve context at the start of substantial work or durable scoping, including explicit null for known-absent dimensions, then inspect relevant Planning before capture. It SHALL distinguish declared companion tools from capabilities actually exported by the active client. If the durable pre-feature marker requires review without an active released workflow contract, bootstrap SHALL report `workflow_contract_migration_required` and SHALL NOT silently select standalone.
+
+#### Scenario: Generic client learns the personalized workflow
+- **WHEN** a generic MCP client whose active profile exports `schema_memory` starts against a vault with a scoped companion contract
+- **THEN** bootstrap gives it enough information to resolve that contract before planning work without installing a private skill or receiving hard-coded companion instructions
+
+#### Scenario: Contract inventory creates nothing
+- **WHEN** bootstrap reads workflow summaries
+- **THEN** no contract, Planning item, Record, external artifact, or integration state is created or changed
+
+#### Scenario: Legacy workflow requires a choice
+- **WHEN** an upgraded pre-feature vault has a review-required migration marker and no active released workflow contract
+- **THEN** bootstrap reports a content-bounded migration requirement and a route-capable profile directs the agent to explicit session selection or reviewed contract save before ordinary fallback
+
+#### Scenario: Profile without schema command remains honest
+- **WHEN** a Planning-capable active profile omits `schema_memory` and a released scoped contract exists
+- **THEN** bootstrap reports `workflow_resolution_unavailable`, advertises no unavailable route, and disables contract-aware proactive routing rather than choosing a broader/default contract
+
+#### Scenario: Hidden contract is absent from bootstrap
+- **WHEN** the vault contains an unreleased workflow contract
+- **THEN** bootstrap is byte-equivalent to the result for an otherwise identical vault without that contract

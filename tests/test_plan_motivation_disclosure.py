@@ -213,6 +213,17 @@ def _add_plan(root: Path, title: str, motivation: list[str], plan_id: str) -> No
     )
 
 
+def _plan_item_path(root: Path, plan_id: str) -> Path:
+    marker = f"\nplan_id: {plan_id}\n"
+    matches = [
+        path
+        for path in sorted((root / ITEMS_DIR).glob("*.md"))
+        if marker in f"\n{path.read_text(encoding='utf-8')}"
+    ]
+    assert len(matches) == 1
+    return matches[0]
+
+
 def _external() -> Any:
     from exomem.governance.principal import RequestPrincipal
 
@@ -437,7 +448,7 @@ def test_a_malformed_stored_reference_refuses_the_collection_without_disclosure(
         tmp_path, "Knowledge Base/Notes/Open/Live Belief.md", _page(LIVE_ID, "Live Belief")
     )
     _add_plan(tmp_path, "Malformed", [LIVE_REF], PLAN_IDS["absent"])
-    item_path = tmp_path / ITEMS_DIR / f"{PLAN_IDS['absent']}.md"
+    item_path = _plan_item_path(tmp_path, PLAN_IDS["absent"])
     item_path.write_text(
         item_path.read_text(encoding="utf-8").replace(LIVE_REF, "exomem://memory/not-a-uuid"),
         encoding="utf-8",

@@ -10,7 +10,16 @@ from pathlib import Path
 
 import pytest
 
-from exomem import audit, epistemic_graph, freshness, graph_sync, index_sync, reconcile, semantic_index
+from exomem import (
+    audit,
+    deferred_index,
+    epistemic_graph,
+    freshness,
+    graph_sync,
+    index_sync,
+    reconcile,
+    semantic_index,
+)
 from exomem import find as find_module
 from exomem import vault as vault_module
 from exomem.cli_ops import OpError
@@ -184,13 +193,25 @@ def test_graph_dispatch_wrappers_propagate_structured_lock_errors(
         epistemic_graph.delete_after_remove(tmp_path, [A])
 
 
-@pytest.mark.parametrize("operation", ["refresh", "delete"])
+@pytest.mark.parametrize(
+    ("operation", "rel_path"),
+    [
+        ("refresh", A),
+        ("refresh", "Sources/raw.md"),
+        ("delete", A),
+    ],
+)
 def test_spawned_mutator_commits_while_full_rebuild_is_running(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    rel_path: str,
 ) -> None:
     context = multiprocessing.get_context("spawn")
     vault = tmp_path / "vault"
     _seed(vault)
+    if not rel_path.startswith("Knowledge Base/"):
+        _write(vault, rel_path, "# Raw\n\nVault-wide recall material.\n")
     index = epistemic_graph.EpistemicGraphIndex(vault)
     index.rebuild_all()
     real_index_path = index._index_path
@@ -220,7 +241,7 @@ def test_spawned_mutator_commits_while_full_rebuild_is_running(
     completed = context.Event()
     child = context.Process(
         target=_spawn_graph_mutation,
-        args=(str(vault), operation, A, attempting, completed),
+        args=(str(vault), operation, rel_path, attempting, completed),
     )
 
     rebuild_thread.start()
@@ -235,6 +256,14 @@ def test_spawned_mutator_commits_while_full_rebuild_is_running(
         # 8.0s at which the held rebuild gives up -- and 0.5s was measuring
         # commit latency instead, which a loaded shared runner exceeds.
         assert completed.wait(_OBSERVE_SECONDS)
+        if operation == "refresh":
+            if rel_path.startswith("Knowledge Base/"):
+                assert (
+                    rel_path in deferred_index.list_graph_paths(vault)
+                    or deferred_index.graph_full_rebuild_pending(vault) is not None
+                )
+            else:
+                assert deferred_index.graph_full_rebuild_pending(vault) is not None
     finally:
         release_rebuild.set()
         rebuild_thread.join(timeout=_HOLD_SECONDS)

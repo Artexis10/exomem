@@ -345,6 +345,15 @@ def _related_section(
     candidates: list[str] = []
     for reason in item.reasons:
         candidates.extend(str(path) for path in reason.get("related_paths", []))
+        # A finding whose evidence is a GROUP of pages, but whose group must stay
+        # out of the fingerprint-bearing `related_paths`, carries it in `meta`
+        # instead (`entity_recurrence`: the mentioning pages grow as the corpus
+        # links a name again, and folding that into the item identity would
+        # reopen settled decisions). Those pages are still the evidence a reader
+        # opening the item needs to see.
+        candidates.extend(
+            str(path) for path in (reason.get("meta") or {}).get("pages", []) or []
+        )
     candidates.extend(
         str(node.get("path"))
         for node in graph.get("nodes", [])

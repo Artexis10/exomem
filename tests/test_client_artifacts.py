@@ -14,6 +14,7 @@ from contextlib import nullcontext
 from pathlib import Path, PurePosixPath
 
 import pytest
+from conftest import initialize_vault_state_offline
 
 from exomem import commands
 
@@ -74,6 +75,7 @@ def test_preserve_artifacts_has_openai_file_parameter_contract(
     assert {param.name for param in command.params} == {"scope", "category", "files", "response_detail"}
     vault_root = tmp_path / "vault"
     shutil.copytree(Path(__file__).resolve().parent / "fixtures", vault_root)
+    initialize_vault_state_offline(vault_root, source="client artifact MCP fixture")
     monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault_root))
     monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "lease"))
     monkeypatch.setenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", "1")

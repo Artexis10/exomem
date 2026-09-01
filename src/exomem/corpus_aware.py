@@ -51,9 +51,7 @@ RELATED_OVERFETCH = 3  # fetch limit * this from find(), then re-rank + trim
 # Lead-body word budget for the synthesized "what is this about" query.
 _QUERY_LEAD_WORDS = 400
 _WRITE_ADVISORY_NAMESPACE = "write-advisory"
-_WRITE_ADVISORY_KINDS = frozenset(
-    {"near-duplicate", "contradiction-band", "overlap"}
-)
+_WRITE_ADVISORY_KINDS = frozenset({"near-duplicate", "overlap"})
 _WRITE_ADVISORY_REF_PREFIX = f"exomem://review/{_WRITE_ADVISORY_NAMESPACE}/"
 # Coupled to mutation_terminal._MAX_WARNING_CHARS: identity must survive compact
 # projection, whose generic projector truncates warning strings from the right.
@@ -121,19 +119,9 @@ class DupCandidate:
     path: str
     title: str
     cosine: float
-    # Claim-level polarity (EXOMEM_CLAIM_LEVEL only). None on the baseline path —
-    # left None, `as_dict`/`overlap_warning` are byte-identical to pre-feature.
-    polarity: str | None = None          # contradict | refine | duplicate | unrelated
-    polarity_score: float | None = None
-    polarity_method: str | None = None   # heuristic | nli
 
     def as_dict(self) -> dict:
-        d = {"path": self.path, "title": self.title, "cosine": self.cosine}
-        if self.polarity is not None:
-            d["polarity"] = self.polarity
-            d["polarity_score"] = self.polarity_score
-            d["polarity_method"] = self.polarity_method
-        return d
+        return {"path": self.path, "title": self.title, "cosine": self.cosine}
 
 
 @dataclass(frozen=True)
@@ -244,13 +232,21 @@ def _render_identified_write_advisory(
     kind: str,
     candidate: DupCandidate,
     identity: WriteAdvisoryIdentity,
+    quiet_offer: dict | None = None,
 ) -> str:
     suffix = f" [review: {identity.ref}; fingerprint: {identity.fingerprint}]"
     prose = _render_write_advisory(kind, candidate)
+    offer_clause = ""
+    if quiet_offer:
+        offer_clause = (
+            " [quiet offer: ref="
+            f"{quiet_offer['ref']}; action=quiet; reason required]"
+        )
     budget = _WRITE_ADVISORY_WARNING_CHARS - len(suffix)
-    if len(prose) > budget:
-        prose = prose[: max(0, budget - 1)].rstrip() + "…"
-    return prose + suffix
+    prose_budget = budget - len(offer_clause)
+    if len(prose) > prose_budget:
+        prose = prose[: max(0, prose_budget - 1)].rstrip() + "…"
+    return prose + offer_clause + suffix
 
 
 def emit_write_advisories(
@@ -330,8 +326,8 @@ def emit_write_advisory_groups(
         store = review_state.ReviewStateStore(root)
         payload = store.load()
         excluded_kinds = _excluded_advisory_kinds(payload)
-        emitted: list[str] = []
-        surfaced: list[tuple[str, str]] = []
+        emitted: list[tuple[str, DupCandidate, WriteAdvisoryIdentity]] = []
+        surfaced: list[tuple[str, str, str]] = []
         for kind, candidate, candidate_rel in eligible:
             if kind in excluded_kinds:
                 # The user said this KIND of advisory is noise in this vault.
@@ -353,10 +349,17 @@ def emit_write_advisory_groups(
             )
             if state in {"dismissed", "snoozed"}:
                 continue
-            emitted.append(_render_identified_write_advisory(kind, candidate, identity))
-            surfaced.append((identity.review_id, identity.fingerprint))
-        warnings.extend(emitted)
-        _record_surfaced_advisories(root, surfaced, known=payload)
+            emitted.append((kind, candidate, identity))
+            surfaced.append((identity.review_id, identity.fingerprint, kind))
+        ledgered = _record_surfaced_advisories(root, surfaced, known=payload)
+        for kind, candidate, identity in emitted:
+            offer = None
+            if ledgered:
+                try:
+                    offer = store.arm_quiet_offer(kind, known=payload)
+                except Exception as error:  # noqa: BLE001 — optional state fails open
+                    log.debug("write advisory quiet offer failed open: %s", error)
+            warnings.append(_render_identified_write_advisory(kind, candidate, identity, offer))
     except Exception as error:  # noqa: BLE001 — advisory state must fail open
         log.debug("write advisory suppression failed open: %s", error)
         warnings.extend(
@@ -384,8 +387,8 @@ def _excluded_advisory_kinds(payload: dict) -> frozenset[str]:
 
 
 def _record_surfaced_advisories(
-    vault_root: Path, entries: list[tuple[str, str]], *, known: dict | None = None
-) -> None:
+    vault_root: Path, entries: list[tuple[str, str, str]], *, known: dict | None = None
+) -> bool:
     """Stamp the first surfacing of advisories that were actually emitted.
 
     Not the suppressed ones and not the disposition-excluded ones: the ledger
@@ -393,26 +396,31 @@ def _record_surfaced_advisories(
     reached nobody.
     """
     if not entries:
-        return
+        return False
     from . import review_state
 
     try:
-        review_state.record_surfaced(
-            vault_root, entries, surface="write", known=known
+        _stamps, persisted = review_state.record_surfaced(
+            vault_root, entries, surface="write", known=known, return_success=True
         )
+        return persisted
     except Exception as error:  # noqa: BLE001 — advisory state must fail open
         log.debug("first-surfaced ledger not recorded for advisories: %s", error)
+        return False
 
 
 def detected_overlap_advisory_groups(
     candidates: list[DupCandidate],
 ) -> list[tuple[str, list[DupCandidate]]]:
-    """Split proximity candidates by their detected warning signal class."""
-    contradiction_band = [
-        candidate for candidate in candidates if candidate.polarity == "contradict"
-    ]
-    overlap = [candidate for candidate in candidates if candidate.polarity != "contradict"]
-    return [("overlap", overlap), ("contradiction-band", contradiction_band)]
+    """Group proximity candidates into their one warning signal class.
+
+    A single branch, deliberately: the partition that used to split a
+    `contradiction-band` group off needed a stance judgment, and the write path
+    no longer makes one. The band is a PROXIMITY measurement, so every candidate
+    in it is the overlap kind. Kept as a named seam because the callers pass
+    groups, not kinds.
+    """
+    return [("overlap", list(candidates))]
 
 
 def triage_write_advisory(
@@ -444,6 +452,7 @@ def triage_write_advisory(
         )
     review_id = parse_write_advisory_ref(ref)
     store = review_state.ReviewStateStore(vault_root)
+    payload = store.load()
     if normalized == "reopen":
         # Reopen clears every historical fingerprint for the stable pair identity.
         result = store.apply(
@@ -465,6 +474,7 @@ def triage_write_advisory(
             action=normalized,
             until=until,
             why=why,
+            family=review_state.surfaced_family(payload, review_id, expected_fingerprint),
         )
     result["ref"] = write_advisory_ref(review_id)
     return result
@@ -792,10 +802,7 @@ def detect_contradictions(
         out.append(DupCandidate(path=fp, title=page.title, cosine=round(float(score), 4)))
         if len(out) >= top_n:
             break
-    # Sharpen PROXIMITY → POLARITY on the flagged pairs (opt-in; no-op when the
-    # EXOMEM_CLAIM_LEVEL gate is off, so `out` and every downstream warning are
-    # byte-identical to baseline).
-    return _refine_contradictions(vault_root, title=title, body=body, candidates=out)
+    return out
 
 
 def dup_warning(candidate: DupCandidate) -> str:
@@ -806,16 +813,6 @@ def dup_warning(candidate: DupCandidate) -> str:
     )
 
 
-# How a claim-level polarity verdict sharpens the (otherwise proximity-only)
-# overlap warning. Only rendered when EXOMEM_CLAIM_LEVEL produced a `polarity`.
-_POLARITY_CLAUSE = {
-    "contradict": "claim-level check: LIKELY CONTRADICTS — read both and supersede the stale one if they conflict",
-    "refine": "claim-level check: likely a REFINEMENT (same topic, differing detail) — consider merging/linking",
-    "duplicate": "claim-level check: likely a near-RESTATEMENT — consider edit/replace instead of a new page",
-    "unrelated": "claim-level check: claims look UNRELATED — the proximity may be a false positive",
-}
-
-
 def overlap_warning(candidate: DupCandidate) -> str:
     """Render a band-overlap as a single honest warning for a write result.
 
@@ -824,71 +821,12 @@ def overlap_warning(candidate: DupCandidate) -> str:
     possibility and hands the call to the reader (measure-don't-judge), pointing
     at supersession as the resolution if it IS a conflict.
 
-    When `EXOMEM_CLAIM_LEVEL` attached a claim-level polarity verdict
-    (`candidate.polarity`), a second clause SHARPENS the proximity flag into a
-    stance hint. With no polarity (the default, gate-off path) the string is
-    byte-identical to the pre-feature warning.
+    There is no polarity clause and no claim-level variant: write-time warning
+    generation invokes no polarity classification at all, so this string is the
+    same one on every path including the claim-level gate.
     """
-    base = (
+    return (
         f"overlaps active note [[{candidate.path}]] (cosine {candidate.cosine}) "
         "— review: does this restate, refine, or contradict it? supersede the "
         "stale one if they conflict"
     )
-    if candidate.polarity is None:
-        return base
-    clause = _POLARITY_CLAUSE.get(candidate.polarity)
-    if not clause:
-        return base
-    return f"{base}. [{clause}; via {candidate.polarity_method}]"
-
-
-def _refine_contradictions(
-    vault_root: Path,
-    *,
-    title: str,
-    body: str,
-    candidates: list[DupCandidate],
-) -> list[DupCandidate]:
-    """Attach a claim-level polarity verdict to each proximity-flagged candidate.
-
-    Gated by `EXOMEM_CLAIM_LEVEL` (via `claims.claim_level_enabled`): off → the
-    candidates are returned untouched (polarity None), so the caller's warnings
-    stay byte-identical to baseline. On → the draft's claim is extracted from
-    `title`/`body` and compared, pairwise, against each candidate page's stored
-    (or live-extracted) claim through `claims.classify_polarity`. Bounded like the
-    rerank lane (`_max_polarity_pairs`): candidates past the cap flow through
-    unrefined rather than being dropped. Best-effort — any failure leaves the
-    candidate unrefined (never raises into a write).
-    """
-    from . import claims as claims_module
-
-    if not candidates or not claims_module.claim_level_enabled():
-        return candidates
-    try:
-        draft_claim = claims_module.extract_claim_text(title, body)
-    except Exception as e:  # noqa: BLE001
-        log.debug("claim extraction failed for draft (%s)", e)
-        return candidates
-    if not draft_claim:
-        return candidates
-
-    max_pairs = claims_module._max_polarity_pairs()
-    index = claims_module.get_claim_index(vault_root)
-    for i, cand in enumerate(candidates):
-        if i >= max_pairs:
-            break  # bounded lane — leave the tail unrefined
-        try:
-            cand_claim = claims_module.claim_text_for_page(
-                vault_root, cand.path, index=index
-            )
-            if not cand_claim:
-                continue
-            res = claims_module.classify_polarity(
-                draft_claim, cand_claim, cosine=cand.cosine
-            )
-            cand.polarity = res.label
-            cand.polarity_score = res.score
-            cand.polarity_method = res.method
-        except Exception as e:  # noqa: BLE001 — a polarity miss never breaks a write
-            log.debug("polarity check failed for %s (%s)", cand.path, e)
-    return candidates

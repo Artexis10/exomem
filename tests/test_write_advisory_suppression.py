@@ -33,21 +33,29 @@ def _seed_page(vault: Path, name: str, body: str) -> str:
     return path
 
 
-def _candidate(
-    vault: Path,
-    name: str = "counterpart",
-    *,
-    polarity: str | None = None,
-) -> corpus_aware.DupCandidate:
+def _candidate(vault: Path, name: str = "counterpart") -> corpus_aware.DupCandidate:
     path = _seed_page(vault, name, f"Counterpart signal for {name}.")
-    return corpus_aware.DupCandidate(
-        path=path,
-        title=f"Existing {name}",
-        cosine=0.86,
-        polarity=polarity,
-        polarity_score=0.95 if polarity else None,
-        polarity_method="heuristic" if polarity else None,
-    )
+    return corpus_aware.DupCandidate(path=path, title=f"Existing {name}", cosine=0.86)
+
+
+def _retired_band_identity(
+    vault: Path, self_path: str, candidate: corpus_aware.DupCandidate
+) -> corpus_aware.WriteAdvisoryIdentity:
+    """The identity the RETIRED `contradiction-band` kind would have minted.
+
+    Reconstructed through the live formula with the kind briefly re-admitted,
+    rather than restated here, so it is exactly what a pre-retirement dismissal
+    record is keyed by.
+    """
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(
+            corpus_aware,
+            "_WRITE_ADVISORY_KINDS",
+            frozenset({*corpus_aware._WRITE_ADVISORY_KINDS, "contradiction-band"}),
+        )
+        return corpus_aware.write_advisory_identity(
+            vault, kind="contradiction-band", self_path=self_path, candidate=candidate
+        )
 
 
 def _target(vault: Path) -> str:
@@ -263,7 +271,8 @@ def test_triage_write_advisory_isolated_from_other_namespaces_and_note(
     assert result["ref"] == advisory.ref
     assert advisory.review_id not in {attention_id, activation_id}
     assert all(key.startswith(f"{advisory.review_id}:") for key in payload["records"])
-    assert changed == {"Knowledge Base/.review-state.json"}
+    assert changed == set()
+    assert review_state.state_path(vault).is_file()
     assert (vault / path).read_bytes() == target_before
 
 
@@ -499,29 +508,64 @@ def test_triage_reason_and_until_rules_match_write_advisory_contract(vault: Path
     assert reopened["state"] == "open"
 
 
-def test_contradiction_band_advisory_is_suppressed_end_to_end(
+def test_contradiction_band_kind_is_retired(vault: Path) -> None:
+    """Its only producer was the write-path polarity call, which is gone."""
+    candidate = _candidate(vault)
+    assert corpus_aware._WRITE_ADVISORY_KINDS == frozenset({"near-duplicate", "overlap"})
+    assert "contradiction-band" not in review_state.registered_families()
+    with pytest.raises(ValueError, match="unknown write advisory kind"):
+        corpus_aware.write_advisory_identity(
+            vault,
+            kind="contradiction-band",
+            self_path=_target(vault),
+            candidate=candidate,
+        )
+    assert corpus_aware.detected_overlap_advisory_groups([candidate]) == [
+        ("overlap", [candidate])
+    ]
+
+
+def test_dismissed_contradiction_band_identity_does_not_suppress_the_overlap_advisory(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    path = _target(vault)
-    candidate = _candidate(vault, polarity="contradict")
-    _wire_edit_candidate(monkeypatch, candidate)
+    """The stated one-time cost of retiring the kind.
 
-    first = _edit(vault, path, "first")
-    ref, fingerprint = _identity(first.warnings[0])
+    A dismissal recorded against the retired identity does not transfer, so the
+    pair resurfaces exactly once under the overlap identity — and is then
+    suppressible there like any other advisory.
+    """
+    path = _target(vault)
+    candidate = _candidate(vault)
+    retired = _retired_band_identity(vault, path, candidate)
+    commands.op_triage_memory(
+        vault,
+        ref=retired.ref,
+        action="dismiss",
+        expected_fingerprint=retired.fingerprint,
+        why="Reviewed the contradiction band before the kind was retired.",
+    )
+
+    _wire_edit_candidate(monkeypatch, candidate)
+    resurfaced = _edit(vault, path, "after-retirement")
+
+    overlap = corpus_aware.write_advisory_identity(
+        vault, kind="overlap", self_path=path, candidate=candidate
+    )
+    assert retired.ref != overlap.ref
+    ref, fingerprint = _identity(resurfaced.warnings[0])
+    assert ref == overlap.ref
+    assert "claim-level check" not in resurfaced.warnings[0]
+
+    # And the resurfaced advisory is suppressible under its own identity.
     commands.op_triage_memory(
         vault,
         ref=ref,
         action="dismiss",
         expected_fingerprint=fingerprint,
-        why="Reviewed contradiction band.",
+        why="Reviewed the overlap.",
     )
-    second = _edit(vault, path, "second")
-
-    expected = corpus_aware.write_advisory_identity(
-        vault, kind="contradiction-band", self_path=path, candidate=candidate
-    )
-    assert ref == expected.ref
-    assert not any("LIKELY CONTRADICTS" in warning for warning in second.warnings)
+    quiet = _edit(vault, path, "after-dismissal")
+    assert not any(overlap.ref in warning for warning in quiet.warnings)
 
 
 def test_cited_but_unconnected_write_feedback_matches_relation_debt_audit(

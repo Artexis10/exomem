@@ -158,6 +158,7 @@ RetrievalHit: TypeAlias = PageHit | SemanticUnitHit
 
 class FindEnvelope(TypedDict):
     hits: list[RetrievalHit]
+    continuation: NotRequired[str]
     pack: NotRequired[dict[str, Any]]
     timings: NotRequired[dict[str, Any]]
     warming: NotRequired[dict[str, Any]]

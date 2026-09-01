@@ -10,6 +10,7 @@ missed event, or falling back when not live / kill-switched.
 from __future__ import annotations
 
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -87,6 +88,39 @@ def test_registry_seeded_from_walk_equals_walk_triple_both_scopes(vault: Path) -
         ((str(p), freshness.stat_signature(p)) for p in vault_module.walk_vault_md(vault)),
     )
     assert freshness.triple(vault, "vault") == vault_ground_truth
+
+
+def test_invalidate_cancels_inflight_seed_publication(vault: Path) -> None:
+    """A timed-out seed may finish later, but it must not regain authority."""
+    target = next(find_module._walk_md(vault / "Knowledge Base"))
+    enumerated = threading.Event()
+    release_seed = threading.Event()
+    errors: list[BaseException] = []
+
+    def stalled_entries():
+        yield str(target), freshness.stat_signature(target)
+        enumerated.set()
+        assert release_seed.wait(timeout=2.0)
+
+    def run_seed() -> None:
+        try:
+            freshness.seed(vault, "kb", stalled_entries())
+        except BaseException as error:  # noqa: BLE001 - surface worker failures below
+            errors.append(error)
+
+    seed_thread = threading.Thread(target=run_seed, daemon=True)
+    seed_thread.start()
+    try:
+        assert enumerated.wait(timeout=2.0)
+        freshness.invalidate(vault)
+    finally:
+        release_seed.set()
+        seed_thread.join(timeout=2.0)
+
+    assert not seed_thread.is_alive()
+    assert errors == []
+    assert freshness.recall_is_live(vault, "kb") is False
+    assert freshness.triple(vault, "kb") is None
 
 
 # ---------------- FreshnessSnapshot: live vs fallback ----------------
@@ -241,6 +275,7 @@ def test_scope_boundary_schema_dir_updates_neither(vault: Path) -> None:
 def test_reconcile_detects_and_heals_a_missed_event(vault: Path) -> None:
     _seed_both_scopes(vault)
     stale_triple = freshness.triple(vault, "kb")
+    recall_before = freshness.recall_checkpoint(vault, "kb")
 
     target = next(find_module._walk_md(vault / "Knowledge Base"))
     future = time.time() + 10_000
@@ -260,6 +295,59 @@ def test_reconcile_detects_and_heals_a_missed_event(vault: Path) -> None:
     assert delta.changed == [str(target)]
     assert delta.deleted == []
     assert freshness.triple(vault, "kb") == fresh_truth
+    recall_delta = freshness.recall_delta_since(vault, "kb", recall_before)
+    assert recall_delta.complete is True
+    assert recall_delta.changed == frozenset({str(target)})
+    assert recall_delta.deleted == frozenset()
+    assert recall_delta.requires_source_proof is True
+
+
+def test_policy_identity_change_clears_reconcile_bridge(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A policy/access identity change is a hard proof boundary: even a
+    bridgeable tainted reconcile delta recorded before it can never resume
+    through the new projection (checkpoints read as incomplete, exposing no
+    partial suffix)."""
+    from exomem import recall_policy
+
+    state = {"fingerprint": "fingerprint-before"}
+    real_identity = recall_policy.recall_policy_identity
+    monkeypatch.setattr(
+        recall_policy,
+        "recall_policy_identity",
+        lambda root: (real_identity(root)[0], state["fingerprint"]),
+    )
+    _seed_both_scopes(vault)
+    before = freshness.recall_checkpoint(vault, "kb")
+
+    target = next(find_module._walk_md(vault / "Knowledge Base"))
+    future = time.time() + 10_000
+    os.utime(target, (future, future))
+    # No on_files_changed call here — simulates a missed watchdog event.
+    kb_dir = vault / "Knowledge Base"
+    drift = freshness.reconcile(
+        vault,
+        "kb",
+        ((str(p), freshness.stat_signature(p)) for p in find_module._walk_md(kb_dir)),
+    )
+    assert drift.changed == [str(target)]
+    tainted = freshness.recall_delta_since(vault, "kb", before)
+    assert tainted.complete is True
+    assert tainted.requires_source_proof is True
+
+    state["fingerprint"] = "fingerprint-after"
+    freshness.reconcile(
+        vault,
+        "kb",
+        ((str(p), freshness.stat_signature(p)) for p in find_module._walk_md(kb_dir)),
+    )
+
+    for checkpoint in (before, tainted.to):
+        bridged = freshness.recall_delta_since(vault, "kb", checkpoint)
+        assert bridged.complete is False
+        assert bridged.changed == frozenset()
+        assert bridged.deleted == frozenset()
 
 
 def test_reconcile_with_no_drift_returns_false(vault: Path) -> None:

@@ -232,12 +232,19 @@ def test_backfill_upgrades_legacy_video_to_scene_frames(
     monkeypatch.setenv("EXOMEM_VIDEO_SCENE_FRAMES", "1")
     p, rel = _legacy_video(vault)
     calls = {"scenes": 0}
+    published_samples = []
+    real_write_scene_frames = scene_frames.write_scene_frames
 
     def _fake_scenes(path):
         calls["scenes"] += 1
         return _two_scenes()
 
+    def _record_scene_frames(*args, **kwargs):
+        published_samples.extend(kwargs["parent_clip_samples"])
+        return real_write_scene_frames(*args, **kwargs)
+
     monkeypatch.setattr(embeddings, "embed_video_scenes", _fake_scenes)
+    monkeypatch.setattr(scene_frames, "write_scene_frames", _record_scene_frames)
     monkeypatch.setattr(
         extract, "extract_text",
         lambda f, media_type=None: extract.ExtractResult(
@@ -247,6 +254,7 @@ def test_backfill_upgrades_legacy_video_to_scene_frames(
     stats = backfill.backfill_media(vault, log_fn=lambda *a: None)
     assert stats.scene_frames_written == 2
     assert calls["scenes"] == 1
+    assert [sample.frame_timestamp_ms for sample in published_samples] == [5_000, 15_000]
     # Legacy 3 uniform rows replaced by 2 scene-aware rows (delete-then-insert).
     idx = embeddings.ClipIndex(vault)
     paths, _, _ = idx.all_vectors()

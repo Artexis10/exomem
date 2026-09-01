@@ -4,12 +4,13 @@ import multiprocessing
 import os
 import stat
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from exomem import graph_sync
+from exomem import epistemic_graph, graph_sync
 from exomem.cli_ops import OpError
 from exomem.writer_lease import LeaseConfig, LeaseManager
 
@@ -187,7 +188,7 @@ def test_explicit_temp_sweep_uses_the_bound_runtime_root(
     manager_root = tmp_path / "manager-state"
     monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(ambient_root))
     vault_root = tmp_path / "vault"
-    live = vault_root / "Knowledge Base/.graph.sqlite"
+    live = epistemic_graph.sidecar_path(vault_root)
     live.parent.mkdir(parents=True)
     temporary = graph_sync.temporary_sidecar_path(live, _checkpoint())
     temporary.write_bytes(b"private")
@@ -231,7 +232,7 @@ def test_overlapping_custom_manager_registrations_do_not_cross_coalesce(tmp_path
     assert observed == [("a", 1), ("b", 2)]
 
 
-def test_joined_builder_requires_reader_valid_sidecar_before_claiming_success(
+def test_joined_builder_reports_verified_live_owner_without_waiting_or_false_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from exomem import epistemic_graph
@@ -256,18 +257,100 @@ def test_joined_builder_requires_reader_valid_sidecar_before_claiming_success(
         connection.commit()
     assert graph_sync.status(vault_root)["state"] == "current"
     assert index.available() is False
-    original_wait = graph_sync.wait_for_current
     monkeypatch.setattr(graph_sync, "claim_rebuild_owner", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(
         graph_sync,
         "wait_for_current",
-        lambda root, required, **kwargs: original_wait(
-            root, required, timeout_seconds=0.01, **kwargs
+        lambda *_args, **_kwargs: pytest.fail(
+            "verified live owner contention must not enter the 30 second join loop"
         ),
     )
 
-    with pytest.raises(RuntimeError, match="did not publish a current sidecar"):
+    started = time.monotonic()
+    with pytest.raises(graph_sync.GraphRebuildInProgress) as raised:
         index._rebuild_all_off_boundary()
+    assert time.monotonic() - started < 1.0
+    assert raised.value.code == "GRAPH_SYNC_REBUILD_IN_PROGRESS"
+
+
+def test_legacy_builder_contention_also_returns_without_the_legacy_wait(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import epistemic_graph
+
+    vault_root = tmp_path / "vault"
+    (vault_root / "Knowledge Base").mkdir(parents=True)
+    index = epistemic_graph.EpistemicGraphIndex(vault_root)
+    monkeypatch.setattr(graph_sync, "claim_rebuild_owner", lambda *_args, **_kwargs: False)
+
+    started = time.monotonic()
+    with pytest.raises(graph_sync.GraphRebuildInProgress):
+        index._rebuild_all_off_boundary()
+    assert time.monotonic() - started < 1.0
+
+
+def test_background_rebuild_treats_verified_external_owner_as_coalescing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import epistemic_graph
+
+    vault_root = tmp_path / "vault"
+    finished = threading.Event()
+
+    def report_external_owner(_self) -> None:  # noqa: ANN001
+        finished.set()
+        raise graph_sync.GraphRebuildInProgress()
+
+    monkeypatch.setattr(
+        epistemic_graph.EpistemicGraphIndex,
+        "rebuild_all",
+        report_external_owner,
+    )
+    monkeypatch.setattr(
+        epistemic_graph,
+        "_handle_graph_dispatch_failure",
+        lambda *_args, **_kwargs: pytest.fail(
+            "a live external rebuild owner is not a publication failure"
+        ),
+    )
+
+    assert epistemic_graph.schedule_background_rebuild(
+        vault_root,
+        mutation_coordinator=SimpleNamespace(state_root=tmp_path / "state"),
+    )
+    assert finished.wait(_OBSERVE_SECONDS)
+    deadline = time.monotonic() + 2
+    while epistemic_graph._REBUILDING and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert not epistemic_graph._REBUILDING
+
+
+def test_registered_external_owner_is_warming_and_the_next_registration_retries(
+    tmp_path: Path,
+) -> None:
+    coordinator = graph_sync.GraphRebuildCoordinator(tmp_path)
+    required = _checkpoint()
+    calls: list[str] = []
+
+    def externally_owned(
+        _checkpoint: graph_sync.GraphSyncCheckpoint,
+    ) -> graph_sync.GraphBuildOutcome:
+        calls.append("external")
+        raise graph_sync.GraphRebuildInProgress()
+
+    coordinator.ensure_started(required, externally_owned)
+    with pytest.raises(graph_sync.GraphRebuildInProgress):
+        coordinator.join(required).wait(_REGISTERED_REBUILD_WAIT_SECONDS)
+
+    def completed(
+        checkpoint: graph_sync.GraphSyncCheckpoint,
+    ) -> graph_sync.GraphBuildOutcome:
+        calls.append("completed")
+        return graph_sync.GraphBuildOutcome.covering(checkpoint)
+
+    coordinator.ensure_started(required, completed)
+    assert coordinator.join(required).wait(_REGISTERED_REBUILD_WAIT_SECONDS).covers(required)
+    assert calls == ["external", "completed"]
 
 
 def test_joined_builder_accepts_a_reader_valid_higher_generation_sidecar(tmp_path: Path) -> None:
@@ -373,7 +456,7 @@ def test_full_rebuild_constructor_failure_releases_owned_resources(
 
 
 def test_temp_sweep_never_removes_an_in_process_registered_temp(tmp_path: Path) -> None:
-    live = tmp_path / "Knowledge Base/.graph.sqlite"
+    live = epistemic_graph.sidecar_path(tmp_path)
     live.parent.mkdir(parents=True)
     temporary = graph_sync.temporary_sidecar_path(live, _checkpoint())
     temporary.write_bytes(b"private")

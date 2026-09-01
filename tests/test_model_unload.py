@@ -8,6 +8,7 @@ gpu_mem) are exercised with a fake torch module. Proves the concurrency-safety c
 from __future__ import annotations
 
 import sys
+import threading
 import time
 import types
 
@@ -16,16 +17,25 @@ import pytest
 from exomem import accel, embeddings, model_reaper, readiness
 
 
+def _stop_test_reaper() -> None:
+    model_reaper.stop()
+    thread = model_reaper._thread
+    if thread is not None:
+        thread.join(timeout=5.0)
+        assert not thread.is_alive(), "prior reaper thread did not stop"
+    model_reaper._thread = None
+
+
 @pytest.fixture(autouse=True)
 def _reset() -> None:
+    _stop_test_reaper()
     embeddings._MODEL = embeddings._RERANKER = embeddings._CLIP_MODEL = None
     for g in (embeddings.BGE_GUARD, embeddings.RERANKER_GUARD, embeddings.CLIP_GUARD):
         g._inflight = 0
         g._last_activity = 0.0
     readiness.reset()
     yield
-    model_reaper.stop()
-    model_reaper._thread = None
+    _stop_test_reaper()
     embeddings._MODEL = embeddings._RERANKER = embeddings._CLIP_MODEL = None
     readiness.reset()
 
@@ -277,11 +287,25 @@ def test_default_cache_slots_reap_only_when_cpu_caches_are_evictable(
 
 def test_reaper_start_fires_then_stops() -> None:
     slot, un = _slot(inflight=0, last=0.0)  # always stale; is_loaded flips False after unload
-    model_reaper.start(threshold=0.0, tick=0.01, slots=[slot])
-    time.sleep(0.08)
-    model_reaper.stop()
-    time.sleep(0.05)
+    fired = threading.Event()
+    original_unload = slot.unload
+
+    def unload() -> bool:
+        result = original_unload()
+        fired.set()
+        return result
+
+    slot.unload = unload
+
+    thread = model_reaper.start(threshold=0.0, tick=0.01, slots=[slot])
+    try:
+        assert fired.wait(timeout=5.0), "reaper thread never reached the stale slot"
+    finally:
+        model_reaper.stop()
+        thread.join(timeout=5.0)
+
     assert un == [1]  # unloaded exactly once (is_loaded False afterwards)
+    assert not thread.is_alive()
     assert not model_reaper.is_running()
 
 

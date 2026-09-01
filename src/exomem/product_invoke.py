@@ -129,6 +129,13 @@ def invoke_prepared(
         )
 
     root = resolve_vault_for(cmd.name, kwargs, vault_root)
+    # Machine-local state placement admission (memoized per process+vault):
+    # ordinary invocation is read-only and refuses legacy or ambiguous
+    # placement until an explicit offline migration has completed.
+    from . import state_migration
+
+    if not allows_uninitialized_vault(cmd.name, kwargs):
+        state_migration.require_vault_state_ready(root)
     if cmd.needs_schema:
         injected = (root, schema_module.load_source_schema(root))
     else:

@@ -16,6 +16,7 @@ from exomem.governance import (
     projection_measurement_store,
     projection_runtime,
     projection_store,
+    projection_timing,
     projections,
     schema_v4,
 )
@@ -166,7 +167,7 @@ def _runtime(
                 extractor_version=_CLIP_EXTRACTOR,
                 model_version=embeddings.CLIP_MODEL_NAME,
                 measurement_count=len(clips),
-                vector_dimension=len(clips[0].vector),
+                vector_dimension=len(clips[0].samples[0].vector),
             )
         )
     if graphs:
@@ -218,6 +219,24 @@ def _clip(variant, value):
             model_version=embeddings.CLIP_MODEL_NAME,
         ),
         value,
+    )
+
+
+def _video_clip(variant, *samples):
+    return projected_retrieval.ProjectionClipMeasurement(
+        projections.MeasurementKey(
+            projection_variant_id=variant.projection_variant_id,
+            lane="clip",
+            extractor_version=_CLIP_EXTRACTOR,
+            model_version=embeddings.CLIP_MODEL_NAME,
+        ),
+        samples=tuple(
+            projected_retrieval.ProjectionClipSample(
+                frame_timestamp_ms=timestamp_ms,
+                vector=vector,
+            )
+            for timestamp_ms, vector in samples
+        ),
     )
 
 
@@ -307,6 +326,45 @@ def test_hybrid_runtime_fuses_complete_projected_lanes_and_graph(monkeypatch, tm
     assert result.hits[2].graph_in_degree == 2
     assert result.hits[2].graph_hop is False
     assert result.warming_components == ()
+
+
+def test_projected_video_clip_result_exposes_the_best_frame_timestamp(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    video = _variant(
+        "Knowledge Base/video.md",
+        "4" * 64,
+        "video",
+        fields={"media_type": "video"},
+    )
+    runtime = _runtime(
+        (_item(video),),
+        clips=(
+            _video_clip(
+                video,
+                (1_000, (0.0, 1.0)),
+                (8_500, (1.0, 0.0)),
+            ),
+        ),
+    )
+    monkeypatch.setattr(embeddings, "embed_clip_text", lambda query: [1.0, 0.0])
+
+    result = projection_runtime.find_projected_hits(
+        tmp_path,
+        runtime,
+        query="scene",
+        limit=1,
+        mode="hybrid",
+        graph=False,
+        rerank=False,
+        principal=principal.owner_principal(surface="library"),
+        purpose=None,
+    )
+
+    assert len(result.hits) == 1
+    assert result.hits[0].clip_frame_ts == 8.5
+    assert result.hits[0].as_dict()["clip_match_at"] == "0:08"
 
 
 def test_graph_lane_prefers_typed_edges_and_preserves_provenance(tmp_path):
@@ -414,6 +472,104 @@ def test_graph_promotes_a_target_below_the_complete_vector_candidate_prefix(
         target.item_identity,
     ]
     assert result.hits[1].graph_hop is True
+
+
+def test_continuation_keeps_the_first_page_graph_candidate_boundary(
+    monkeypatch,
+    tmp_path,
+):
+    seed = _variant("Knowledge Base/seed.md", "1" * 64, "seed")
+    filler = _variant("Knowledge Base/filler.md", "2" * 64, "filler")
+    target = _variant("Knowledge Base/target.md", "3" * 64, "target")
+    runtime = _runtime(
+        tuple(_item(variant) for variant in (seed, filler, target)),
+        vectors=(
+            _vector(seed, (1.0, 0.0)),
+            _vector(filler, (0.5, 0.5)),
+            _vector(target, (-1.0, 0.0)),
+        ),
+        graphs=(
+            _graph(seed, target.item_identity),
+            _graph(filler),
+            _graph(target),
+        ),
+    )
+    monkeypatch.setattr(
+        embeddings,
+        "embed_texts",
+        lambda texts, *, is_query: [[1.0, 0.0]],
+    )
+    rank_config = projection_runtime.ranking_config.RankingConfig(
+        candidate_multiplier=1,
+        candidate_floor=2,
+        graph_seed_cap=1,
+    )
+    call = {
+        "query": "seed",
+        "limit": 1,
+        "mode": "hybrid",
+        "graph": True,
+        "rerank": False,
+        "rank_config": rank_config,
+        "principal": principal.owner_principal(surface="library"),
+        "purpose": None,
+    }
+    projection_runtime._clear_projected_continuations_for_tests()
+
+    first = projection_runtime.find_projected_hits(tmp_path, runtime, **call)
+    assert [hit.path for hit in first.hits] == [seed.item_identity]
+    assert first.continuation is not None
+    second = projection_runtime.find_projected_hits(
+        tmp_path,
+        runtime,
+        continuation=first.continuation,
+        **call,
+    )
+    assert [hit.path for hit in second.hits] == [target.item_identity]
+    assert second.hits[0].graph_hop is True
+    assert second.continuation is not None
+    third = projection_runtime.find_projected_hits(
+        tmp_path,
+        runtime,
+        continuation=second.continuation,
+        **call,
+    )
+    assert [hit.path for hit in third.hits] == [filler.item_identity]
+    assert third.continuation is None
+
+
+def test_default_scope_retains_outside_target_beyond_the_lane_candidate_floor(
+    tmp_path,
+):
+    variants = (
+        _variant("Knowledge Base/a.md", "1" * 64, "needle"),
+        _variant("Knowledge Base/b.md", "2" * 64, "needle"),
+        _variant("Knowledge Base/c.md", "3" * 64, "needle"),
+        _variant("Sources/target.md", "4" * 64, "needle"),
+    )
+    runtime = _runtime(tuple(_item(variant) for variant in variants))
+
+    result = projection_runtime.find_projected_hits(
+        tmp_path,
+        runtime,
+        query="needle",
+        limit=2,
+        scope="kb",
+        mode="keyword",
+        graph=False,
+        rerank=False,
+        rank_config=projection_runtime.ranking_config.RankingConfig(
+            candidate_multiplier=1,
+            candidate_floor=2,
+        ),
+        principal=principal.owner_principal(surface="library"),
+        purpose=None,
+    )
+
+    assert [hit.path for hit in result.hits] == [
+        "Knowledge Base/a.md",
+        "Sources/target.md",
+    ]
 
 
 def test_graph_does_not_reintroduce_a_rejected_raw_bm25_candidate(tmp_path):
@@ -655,9 +811,13 @@ def test_projected_models_respect_hard_off_and_readiness(
     )
     def model_called(*_args, **_kwargs):
         raise AssertionError("disabled or warming model must not run")
+    clip_enabled = embeddings.clip_enabled
+    ranking_enabled = embeddings.ranking_enabled
     monkeypatch.setattr(embeddings, "embed_texts", model_called)
     monkeypatch.setattr(embeddings, "embed_clip_text", model_called)
     monkeypatch.setattr(embeddings, "rerank_pairs", model_called)
+    monkeypatch.setattr(embeddings, "clip_enabled", model_called)
+    monkeypatch.setattr(embeddings, "ranking_enabled", model_called)
     monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
     monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
     monkeypatch.setenv("EXOMEM_DISABLE_RANKING", "1")
@@ -675,6 +835,8 @@ def test_projected_models_respect_hard_off_and_readiness(
     )
     assert disabled.warming_components == ()
 
+    monkeypatch.setattr(embeddings, "clip_enabled", clip_enabled)
+    monkeypatch.setattr(embeddings, "ranking_enabled", ranking_enabled)
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS")
     monkeypatch.delenv("EXOMEM_DISABLE_CLIP")
     monkeypatch.delenv("EXOMEM_DISABLE_RANKING")
@@ -767,6 +929,63 @@ def test_vector_runtime_does_not_invent_a_lexical_rank(monkeypatch, tmp_path):
     assert result.hits[0].vector_rank == 1
     assert result.hits[0].bm25_rank is None
     assert result.hits[0].keyword_rank is None
+
+
+def test_vector_model_receives_the_fixed_bounded_query_projection(
+    monkeypatch,
+    tmp_path,
+):
+    alpha = _variant("Knowledge Base/alpha.md", "b" * 64, "semantic only")
+    runtime = _runtime(
+        (_item(alpha),),
+        vectors=(_vector(alpha, (1.0, 0.0)),),
+    )
+    observed: list[str] = []
+
+    def embed_texts(texts, *, is_query):
+        assert is_query is True
+        observed.extend(texts)
+        return [[1.0, 0.0]]
+
+    monkeypatch.setattr(embeddings, "embed_texts", embed_texts)
+    query = ("semantic    projection\n" * 80).strip()
+    normalized = " ".join(query.split())
+    expected = normalized[:600]
+    if len(normalized) > 600 and " " in expected:
+        expected = expected.rsplit(" ", 1)[0]
+
+    projection_runtime.find_projected_hits(
+        tmp_path,
+        runtime,
+        query=query,
+        limit=1,
+        mode="vector",
+        graph=False,
+        rerank=False,
+        principal=principal.owner_principal(surface="library"),
+        purpose=None,
+    )
+
+    assert observed == [expected]
+    assert len(observed[0]) <= 600
+
+
+def test_vector_release_profile_requires_the_exact_measurement_family():
+    alpha = _variant("Knowledge Base/alpha.md", "b" * 64, "semantic only")
+    without_vectors = _runtime((_item(alpha),))
+    with_vectors = _runtime(
+        (_item(alpha),),
+        vectors=(_vector(alpha, (1.0, 0.0)),),
+    )
+
+    assert not projection_runtime._runtime_supports_release_profile(
+        without_vectors,
+        projection_timing.VECTOR_CPU_MODEL_RUNTIME_PROFILE,
+    )
+    assert projection_runtime._runtime_supports_release_profile(
+        with_vectors,
+        projection_timing.VECTOR_CPU_MODEL_RUNTIME_PROFILE,
+    )
 
 
 def test_keyword_runtime_does_not_admit_bm25_only_candidates(tmp_path):

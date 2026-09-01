@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from conftest import initialize_vault_state_offline
 
-from exomem import media_processing, server_runtime
+from exomem import media_processing, readiness, server_runtime
 from exomem.governance import projection_runtime
 
 
@@ -15,6 +18,7 @@ def test_initialize_runtime_loads_dotenv_from_service_working_directory(
     monkeypatch.chdir(tmp_path)
     vault = tmp_path / "vault"
     vault.mkdir()
+    initialize_vault_state_offline(vault, source="server runtime dotenv fixture")
     calls: list[tuple[object, bool]] = []
 
     def load_dotenv(*, dotenv_path, override):
@@ -37,11 +41,12 @@ def test_initialize_runtime_loads_dotenv_from_service_working_directory(
     assert runtime.vault_root == vault
 
 
-def test_initialize_runtime_preactivates_governed_projection_before_workers(
+def test_initialize_runtime_does_not_start_workers_before_transport(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     vault = tmp_path / "vault"
     vault.mkdir()
+    initialize_vault_state_offline(vault, source="server runtime transport fixture")
     events: list[str] = []
 
     monkeypatch.setattr(server_runtime, "resolve_vault", lambda: vault)
@@ -72,16 +77,438 @@ def test_initialize_runtime_preactivates_governed_projection_before_workers(
         "_start_file_watcher",
         lambda root: events.append(f"watcher:{root}"),
     )
-    monkeypatch.setattr(server_runtime, "_start_graph_drain", lambda _root: None)
+    monkeypatch.setattr(
+        server_runtime,
+        "_start_graph_drain",
+        lambda root: events.append(f"graph:{root}"),
+    )
+
+    server_runtime.initialize_runtime(load_dotenv_func=lambda **_kwargs: None)
+
+    assert events == [f"projection:{vault}"]
+
+
+def test_initialize_runtime_requires_ready_state_before_any_state_consumer(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import state_migration
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    events: list[str] = []
+    monkeypatch.setattr(server_runtime, "resolve_vault", lambda: vault)
+    monkeypatch.setattr(
+        state_migration,
+        "require_vault_state_ready",
+        lambda root: events.append(f"ready:{root}"),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        server_runtime.schema,
+        "load_source_schema",
+        lambda root: (
+            events.append(f"schema:{root}"),
+            SimpleNamespace(source_types=("session",)),
+        )[1],
+    )
+    monkeypatch.setattr(
+        server_runtime.project_keys,
+        "keys_hint",
+        lambda root: (events.append(f"keys:{root}"), "")[1],
+    )
+    monkeypatch.setattr(
+        projection_runtime,
+        "preactivate_projection_runtime",
+        lambda root: events.append(f"projection:{root}"),
+    )
+    monkeypatch.setattr(server_runtime, "_start_metrics_persistence", lambda: None)
 
     server_runtime.initialize_runtime(load_dotenv_func=lambda **_kwargs: None)
 
     assert events == [
+        f"ready:{vault}",
+        f"schema:{vault}",
+        f"keys:{vault}",
         f"projection:{vault}",
-        f"compute:{vault}",
-        f"media:{vault}",
-        f"watcher:{vault}",
     ]
+
+
+def test_local_runtime_activation_waits_for_liveness_and_starts_once(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("EXOMEM_DISABLE_WARMUP", raising=False)
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    calls: list[str] = []
+    compute_started = threading.Event()
+    seed_started = threading.Event()
+    release_seed = threading.Event()
+    activated = threading.Event()
+
+    class Watcher:
+        def wait_until_seeded(self, timeout=None) -> bool:
+            calls.append("watcher-seed:wait")
+            seed_started.set()
+            assert release_seed.wait(timeout=timeout or 1.0)
+            calls.append("watcher-seed:ready")
+            return True
+
+        def finish_startup_recovery(self) -> None:
+            calls.append("watcher-recovery")
+
+    def start_compute(root) -> None:
+        calls.append(f"compute:{root}")
+        readiness.begin_warm()
+        compute_started.set()
+
+    monkeypatch.setattr(
+        server_runtime,
+        "_start_compute_runtime",
+        start_compute,
+    )
+    monkeypatch.setattr(
+        server_runtime,
+        "_start_file_watcher",
+        lambda root: (calls.append(f"watcher:{root}"), Watcher())[1],
+    )
+    monkeypatch.setattr(
+        server_runtime,
+        "_start_graph_drain",
+        lambda root: calls.append(f"graph:{root}"),
+    )
+    monkeypatch.setattr(
+        server_runtime,
+        "_start_media_worker",
+        lambda root: (calls.append(f"media:{root}"), activated.set())[0],
+    )
+
+    activation = server_runtime.LocalRuntimeActivation(vault, fallback_seconds=60.0)
+
+    async def exercise() -> None:
+        assert calls == []
+        async with activation.lifespan()(SimpleNamespace()):
+            assert calls == []
+            activation.start()
+            assert seed_started.wait(timeout=1.0)
+            assert not compute_started.wait(timeout=0.05)
+            assert calls == [f"watcher:{vault}", "watcher-seed:wait"]
+            release_seed.set()
+            assert compute_started.wait(timeout=1.0)
+            assert not activated.wait(timeout=0.05)
+            assert calls == [
+                f"watcher:{vault}",
+                "watcher-seed:wait",
+                "watcher-seed:ready",
+                f"compute:{vault}",
+            ]
+            readiness.mark_ready("retrieval_catalog")
+            assert not activated.wait(timeout=0.05)
+            assert calls[-1] == f"compute:{vault}"
+            readiness.mark_ready("semantic_corpus")
+            assert activated.wait(timeout=1.0)
+            assert calls == [
+                f"watcher:{vault}",
+                "watcher-seed:wait",
+                "watcher-seed:ready",
+                f"compute:{vault}",
+                "watcher-recovery",
+                f"graph:{vault}",
+                f"media:{vault}",
+            ]
+            activation.start()
+            assert len(calls) == 7
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        readiness.reset()
+
+
+def test_local_runtime_activation_bounds_failed_seed_wait_before_compute(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("EXOMEM_DISABLE_WARMUP", raising=False)
+    calls: list[str] = []
+    observed_timeouts: list[float | None] = []
+    managed_at_compute: list[bool] = []
+
+    class Watcher:
+        def wait_until_seeded(self, timeout=None) -> bool:
+            calls.append("watcher-seed:wait")
+            observed_timeouts.append(timeout)
+            return False
+
+        def finish_startup_recovery(self) -> None:
+            calls.append("watcher-recovery")
+
+        def stop(self) -> None:
+            calls.append("watcher-stop")
+
+    monkeypatch.setattr(
+        server_runtime,
+        "_start_file_watcher",
+        lambda _root: (calls.append("watcher"), Watcher())[1],
+    )
+    monkeypatch.setattr(
+        server_runtime,
+        "_start_compute_runtime",
+        lambda _root: (
+            calls.append("compute"),
+            managed_at_compute.append(readiness.runtime_managed()),
+        ),
+    )
+    monkeypatch.setattr(
+        server_runtime,
+        "_start_graph_drain",
+        lambda _root: calls.append("graph"),
+    )
+    monkeypatch.setattr(
+        server_runtime,
+        "_start_media_worker",
+        lambda _root: calls.append("media"),
+    )
+
+    activation = server_runtime.LocalRuntimeActivation(Path("unused-vault"))
+    try:
+        activation._activate()
+    finally:
+        readiness.reset()
+
+    assert observed_timeouts == [server_runtime.RECALL_SEED_WAIT_SECONDS]
+    assert 0 < server_runtime.RECALL_SEED_WAIT_SECONDS <= 180
+    assert managed_at_compute == [False]
+    assert calls == [
+        "watcher",
+        "watcher-seed:wait",
+        "watcher-stop",
+        "compute",
+        "graph",
+        "media",
+    ]
+
+
+def test_local_runtime_activation_downgrades_when_watcher_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("EXOMEM_DISABLE_WARMUP", raising=False)
+    managed_at_compute: list[bool] = []
+    monkeypatch.setattr(server_runtime, "_start_file_watcher", lambda _root: None)
+    monkeypatch.setattr(
+        server_runtime,
+        "_start_compute_runtime",
+        lambda _root: managed_at_compute.append(readiness.runtime_managed()),
+    )
+    monkeypatch.setattr(server_runtime, "_start_graph_drain", lambda _root: None)
+    monkeypatch.setattr(server_runtime, "_start_media_worker", lambda _root: None)
+
+    activation = server_runtime.LocalRuntimeActivation(Path("unused-vault"))
+    try:
+        assert readiness.runtime_managed() is True
+        activation._activate()
+        assert managed_at_compute == [False]
+        assert readiness.runtime_managed() is False
+    finally:
+        readiness.reset()
+
+
+def test_local_runtime_activation_waits_for_terminal_warm_after_catalog_failure(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("EXOMEM_DISABLE_WARMUP", raising=False)
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    compute_started = threading.Event()
+    watcher_started = threading.Event()
+    downstream_activated = threading.Event()
+
+    def start_compute(_root) -> None:
+        readiness.begin_warm()
+        compute_started.set()
+
+    monkeypatch.setattr(server_runtime, "_start_compute_runtime", start_compute)
+    monkeypatch.setattr(
+        server_runtime,
+        "_start_file_watcher",
+        lambda _root: watcher_started.set(),
+    )
+    monkeypatch.setattr(
+        server_runtime,
+        "_start_graph_drain",
+        lambda _root: downstream_activated.set(),
+    )
+    monkeypatch.setattr(server_runtime, "_start_media_worker", lambda _root: None)
+    activation = server_runtime.LocalRuntimeActivation(vault, fallback_seconds=60.0)
+
+    async def exercise() -> None:
+        async with activation.lifespan()(SimpleNamespace()):
+            activation.start()
+            assert watcher_started.wait(timeout=1.0)
+            assert compute_started.wait(timeout=1.0)
+            readiness.mark_ready("semantic_corpus")
+            assert not downstream_activated.wait(timeout=0.05)
+            readiness.finish_warm()
+            assert not downstream_activated.wait(timeout=0.05)
+            readiness.mark_ready("retrieval_catalog")
+            assert downstream_activated.wait(timeout=1.0)
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        readiness.reset()
+
+
+def test_disable_warmup_preserves_unverified_lazy_runtime_admission(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_DISABLE_WARMUP", "1")
+    vault = tmp_path / "vault"
+    vault.mkdir()
+
+    server_runtime.LocalRuntimeActivation(vault, fallback_seconds=60.0)
+
+    try:
+        assert readiness.retrieval_admission(vault) == {
+            "state": "unverified",
+            "admitted": False,
+        }
+    finally:
+        readiness.reset()
+
+
+def test_terminal_semantic_warm_failure_does_not_strand_startup_recovery(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("EXOMEM_DISABLE_WARMUP", raising=False)
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    activation = server_runtime.LocalRuntimeActivation(vault, fallback_seconds=60.0)
+    readiness.begin_warm()
+    readiness.mark_ready("retrieval_catalog")
+    returned = threading.Event()
+
+    thread = threading.Thread(
+        target=lambda: (activation._wait_for_required_admission(), returned.set()),
+        daemon=True,
+    )
+    thread.start()
+    try:
+        assert not returned.wait(timeout=0.05)
+        readiness.finish_warm()
+        assert returned.wait(timeout=1.0)
+    finally:
+        readiness.reset()
+        thread.join(timeout=1.0)
+
+
+def test_local_runtime_activation_falls_back_without_liveness_probe(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    activated = threading.Event()
+    monkeypatch.setattr(
+        server_runtime,
+        "_start_compute_runtime",
+        lambda root: activated.set() if root == vault else None,
+    )
+    monkeypatch.setattr(server_runtime, "_start_file_watcher", lambda _root: None)
+    monkeypatch.setattr(server_runtime, "_start_graph_drain", lambda _root: None)
+    monkeypatch.setattr(server_runtime, "_start_media_worker", lambda _root: None)
+    activation = server_runtime.LocalRuntimeActivation(vault, fallback_seconds=0.01)
+
+    async def exercise() -> None:
+        async with activation.lifespan()(SimpleNamespace()):
+            assert await asyncio.to_thread(activated.wait, 1.0)
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        readiness.reset()
+
+
+def test_local_runtime_lifespan_waits_for_inflight_activation_before_teardown(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_DISABLE_WARMUP", "1")
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def start_compute(_root: Path) -> None:
+        entered.set()
+        assert release.wait(timeout=2.0)
+        finished.set()
+
+    monkeypatch.setattr(server_runtime, "_start_file_watcher", lambda _root: None)
+    monkeypatch.setattr(server_runtime, "_start_compute_runtime", start_compute)
+    monkeypatch.setattr(server_runtime, "_start_graph_drain", lambda _root: None)
+    monkeypatch.setattr(server_runtime, "_start_media_worker", lambda _root: None)
+    activation = server_runtime.LocalRuntimeActivation(vault, fallback_seconds=60.0)
+
+    async def exercise() -> None:
+        lifetime = activation.lifespan()(SimpleNamespace())
+        await lifetime.__aenter__()
+        activation.start()
+        assert await asyncio.to_thread(entered.wait, 1.0)
+        exiting = asyncio.create_task(lifetime.__aexit__(None, None, None))
+        await asyncio.sleep(0.05)
+        assert not exiting.done()
+        release.set()
+        await asyncio.wait_for(exiting, timeout=1.0)
+        assert finished.is_set()
+        assert activation._thread is not None
+        assert not activation._thread.is_alive()
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        release.set()
+        thread = activation._thread
+        if thread is not None:
+            thread.join(timeout=1.0)
+        readiness.reset()
+
+
+def test_local_runtime_lifespan_interrupts_a_stuck_admission_wait(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("EXOMEM_DISABLE_WARMUP", raising=False)
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    compute_started = threading.Event()
+    exited = threading.Event()
+
+    def start_compute(_root: Path) -> None:
+        readiness.begin_warm()
+        compute_started.set()
+
+    monkeypatch.setattr(server_runtime, "_start_file_watcher", lambda _root: None)
+    monkeypatch.setattr(server_runtime, "_start_compute_runtime", start_compute)
+    monkeypatch.setattr(server_runtime, "_start_graph_drain", lambda _root: None)
+    monkeypatch.setattr(server_runtime, "_start_media_worker", lambda _root: None)
+    activation = server_runtime.LocalRuntimeActivation(vault, fallback_seconds=60.0)
+
+    async def exercise() -> None:
+        async with activation.lifespan()(SimpleNamespace()):
+            activation.start()
+            assert await asyncio.to_thread(compute_started.wait, 1.0)
+        exited.set()
+
+    runner = threading.Thread(target=lambda: asyncio.run(exercise()), daemon=True)
+    runner.start()
+    try:
+        assert compute_started.wait(timeout=1.0)
+        assert exited.wait(timeout=0.5)
+        assert activation._thread is not None
+        assert not activation._thread.is_alive()
+    finally:
+        readiness.mark_ready("retrieval_catalog")
+        readiness.mark_ready("semantic_corpus")
+        readiness.finish_warm()
+        runner.join(timeout=1.0)
+        readiness.reset()
 
 
 def test_media_worker_startup_reconciles_media_missed_while_service_was_stopped(

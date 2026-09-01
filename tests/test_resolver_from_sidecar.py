@@ -7,9 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from exomem import freshness, lexstore
 from exomem import find as find_module
-from exomem import recall_policy
+from exomem import freshness, lexstore, recall_policy
 from exomem.vault import walk_vault_md
 
 
@@ -84,7 +83,9 @@ def test_sidecar_entries_match_walk_and_preserve_exact_title_bytes(tmp_path: Pat
     _seed_sidecar(root)
 
     store = lexstore.get_store(root)
-    entries = store.recall_resolver_entries("vault", freshness.triple(root, "vault"))
+    entries = store.recall_resolver_entries(
+        "vault", freshness.recall_checkpoint(root, "vault")
+    )
 
     assert entries is not None
     assert set(entries) == _expected_entries(root)
@@ -128,7 +129,9 @@ def test_sidecar_title_null_round_trips_and_exact_title_survives(tmp_path: Path)
     store = lexstore.get_store(root)
     rel = page.relative_to(root).as_posix()
 
-    assert store.recall_resolver_entries("vault", freshness.triple(root, "vault")) == [
+    assert store.recall_resolver_entries(
+        "vault", freshness.recall_checkpoint(root, "vault")
+    ) == [
         (rel, "MiXeD -- café / 東京")
     ]
     conn = sqlite3.connect(store.path)
@@ -138,7 +141,9 @@ def test_sidecar_title_null_round_trips_and_exact_title_survives(tmp_path: Path)
     finally:
         conn.close()
 
-    assert store.recall_resolver_entries("vault", freshness.triple(root, "vault")) == [
+    assert store.recall_resolver_entries(
+        "vault", freshness.recall_checkpoint(root, "vault")
+    ) == [
         (rel, None)
     ]
 

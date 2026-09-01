@@ -1,6 +1,6 @@
 [project]
 name = "exomem"
-version = "0.58.0" # x-release-please-version
+version = "0.68.2" # x-release-please-version
 description = "Local knowledge substrate for owned markdown/Obsidian vaults, exposed through MCP, REST, and CLI with multimodal OCR/ASR/CLIP search"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -85,16 +85,28 @@ embeddings-onnx = [
     "huggingface-hub>=0.24",  # resolves the published ONNX export from the hub cache
     "sqlite-vec>=0.1.6",
 ]
+# The frozen stance verifier's cross-encoder (claims.VERIFIER_PINS). Optional and
+# default-off twice over: it is in no profile's extra set, so no install path pulls
+# it in, and it still does nothing until EXOMEM_CLAIM_POLARITY_NLI is set AND a
+# repository pin's digest matches the resident weights. Absent, the verifier tier
+# refuses to ABSENCE — review-queue entries carry no model polarity label, and every
+# other surface is byte-identical to a build with no verifier tier at all. Install
+# with `uv sync --extra nli`.
+nli = [
+    "sentence-transformers>=3.0",
+    "torch>=2.12",
+]
 # Server-side media extraction (transduction, not a brain): ASR for audio/video,
 # OCR for images, text for PDFs, MarkItDown for office/html docs. Optional so a lean box
 # runs without it — the code
 # soft-falls back (server extraction skipped; the model-driven /upload `text` path
 # still works). Full install: `uv sync --extra embeddings --extra media`.
 # System deps NOT pip-installable: Tesseract (image OCR) — `winget install UB-Mannheim.TesseractOCR`.
-# faster-whisper bundles its CUDA runtime via ctranslate2; PyAV (pulled by faster-whisper)
-# bundles ffmpeg for audio/video decode. See README for the Blackwell sm_120 note.
+# The media extra owns CTranslate2's CUDA 12 wheel runtime; PyAV (pulled by
+# faster-whisper) bundles ffmpeg for audio/video decode. See README for sm_120.
 media = [
     "faster-whisper>=1.0",
+    "ctranslate2>=4.6.3,<5",
     "pytesseract>=0.3.10",
     "pillow>=10.0",  # pytesseract opens images via PIL for OCR
     "pymupdf>=1.24",
@@ -102,14 +114,12 @@ media = [
     # pull the office libs (mammoth/openpyxl/python-pptx); runs fully local. PDF stays on
     # PyMuPDF (markitdown's PDF path is its weakest). txt/eml/ics use stdlib, no dep.
     "markitdown[docx,xlsx,pptx]>=0.1.1",
-    # CUDA-12 runtime for faster-whisper/ctranslate2 on Windows. torch+cu132 ships
-    # cuBLAS *13* (different major), so ctranslate2's CUDA-12 cuBLAS + cudart must be
-    # supplied separately and their bin dirs put on PATH before load — see
-    # extract._ensure_cuda_dll_path(). Verified on an RTX 5080 (sm_120). On Linux,
-    # ctranslate2 resolves CUDA via the wheels' RPATH; see README if a GPU box needs them.
-    "nvidia-cublas-cu12; sys_platform == 'win32'",
-    "nvidia-cudnn-cu12; sys_platform == 'win32'",
-    "nvidia-cuda-runtime-cu12; sys_platform == 'win32'",
+    # CUDA-12 runtime owned by CTranslate2 on Linux and Windows. torch's cuBLAS
+    # major is independent; the media parent discovers these wheel directories
+    # and prepends them before the disposable child interpreter starts.
+    "nvidia-cublas-cu12>=12.8.4.1,<13; sys_platform == 'linux' or sys_platform == 'win32'",
+    "nvidia-cudnn-cu12>=9.5.0.50,<10; sys_platform == 'linux' or sys_platform == 'win32'",
+    "nvidia-cuda-runtime-cu12>=12.8.90,<13; sys_platform == 'linux' or sys_platform == 'win32'",
 ]
 # Apple-Silicon (Metal) ASR backend: mlx-whisper runs Whisper on the Mac GPU via MLX,
 # which faster-whisper/CTranslate2 cannot (no Metal). extract.get_transcriber() auto-selects
@@ -219,6 +229,8 @@ markers = [
     # and the HF model cache). Excluded from the lean matrix; run in the dedicated
     # `retrieval-eval` CI job via `pytest -m embeddings`.
     "embeddings: loads live vector models; run only in the retrieval-eval job",
+    "nli: loads the exact frozen stance-verifier model; run only in its dedicated job",
+    "governance_timing_release: exact-capacity actual-wire governance timing characterization",
 ]
 
 # Blackwell (RTX 50-series, sm_120 / compute capability 12.0) needs CUDA wheels.

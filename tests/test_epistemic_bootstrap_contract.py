@@ -186,21 +186,22 @@ def test_intent_boundary_routes_the_two_lifecycle_classes(vault: Path) -> None:
     assert "record_memory" in boundary["observed_outcome"]
 
     pairing = boundary["pairing_rule"].lower()
-    assert "one landing" in pairing
-    assert "two consequences" in pairing
-    # Order is load-bearing: the observation is canonical, the transition follows.
+    # The observation is canonical; it is never an automatic transition trigger.
     assert pairing.index("record") < pairing.index("transition")
-    assert "once" in pairing
+    assert "user may" in pairing
+    assert "propose" in pairing
+    assert "automatically" not in pairing
     assert "tentative" in pairing
     assert "elapsed time" in pairing
 
 
-def test_capture_examples_carry_one_paired_landing(vault: Path) -> None:
-    """The two consequences have to appear together in an example, not only a rule."""
+def test_capture_examples_require_explicit_intent_for_a_planning_transition(vault: Path) -> None:
+    """Records capture may propose a transition but cannot perform one by itself."""
     examples = commands.op_bootstrap(vault)["records"]["capture_examples"].lower()
 
     assert "plan" in examples
-    assert "once" in examples
+    assert "never closes planning automatically" in examples
+    assert "explicit user intent" in examples
 
 
 def test_plan_is_a_simple_front_door_action(vault: Path) -> None:
@@ -415,3 +416,68 @@ def test_levels_that_never_self_capture_are_untouched(vault: Path) -> None:
         capture = prominence.CONTRACTS[level].capture.lower()
         assert "method" not in capture
         assert "ask" in capture, level
+
+
+# ------------------------------------------------- pre-write destination choice
+
+
+def _post_write(vault: Path, profile: str) -> dict:
+    return commands.op_bootstrap(vault, profile=profile)["authoring_contract"]["post_write"]
+
+
+def test_full_contract_teaches_pre_write_destination_choice(vault: Path) -> None:
+    """Routing a divergent thread is a write-time act, not a reply to a detector.
+
+    The semantic scope-divergence sensor is a safety net for routing that was
+    missed. An agent taught only the net will let a page accumulate structural
+    debt until something fires, which is the 2026-08-29 shape the sensor exists to
+    catch and this clause exists to prevent.
+    """
+    clause = _post_write(vault, "full")["destination_choice"]
+
+    assert "at write time" in clause
+    assert "declared scope" in clause
+    # The routing act itself: find an existing home or make one.
+    assert "existing destination" in clause and "create one" in clause
+    # And the ordering against the detector, explicitly.
+    assert "safety net" in clause
+    assert "never the primary mechanism" in clause
+
+
+def test_destination_choice_names_no_tool(vault: Path) -> None:
+    """`_filter_bootstrap_payload` deletes strings naming an unavailable command.
+
+    A hookless surface is exactly where this clause matters most, so it must not
+    be the kind of string that silently vanishes there.
+    """
+    clause = _post_write(vault, "full")["destination_choice"]
+    assert "(" not in clause and "_memory" not in clause
+
+
+def test_compact_payload_carries_the_destination_choice_clause(vault: Path) -> None:
+    """Named replacement for `test_compact_payload_stays_byte_identical_without_the_clause`.
+
+    That pin held the clause out of compact and named its own successor: compact
+    sat 24 bytes under a ceiling whose docstring pre-commits the next addition to
+    TRIMMING compact rather than raising it, so carriage "belongs to the queued
+    compact-bootstrap trim". This is that delivery. The clause is now paid for out
+    of trimmed redundancy rather than deferred, so the pin flips from absence to
+    carriage rather than being deleted: compact carries the teaching, condensed
+    wording allowed, and both halves of the rule must survive the condensation.
+    """
+    clause = _post_write(vault, "compact")["destination_choice"]
+
+    # Half one -- the routing act, at write time, against the declared scope.
+    assert "at write time" in clause
+    assert "declared scope" in clause
+    assert "existing destination" in clause and "create one" in clause
+    # Half two -- the detector is the net, never the mechanism.
+    assert "safety net" in clause
+    assert "never the primary mechanism" in clause
+    # Compact is the payload a hookless surface receives, which is exactly where
+    # `_filter_bootstrap_payload` deletes a string naming an unavailable command.
+    assert "(" not in clause and "_memory" not in clause
+
+    # Admission is not a move: full and diagnostics still carry it too.
+    for profile in ("full", "diagnostics"):
+        assert "destination_choice" in _post_write(vault, profile)

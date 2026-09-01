@@ -1,0 +1,49 @@
+# ONCE-RED fixture: a sequence-3 family whose amendment receipt was pending
+# until the founder acknowledgment landed on 2026-08-30.
+#
+# f27 IS in the §1 family table — registration was never the thing refused.
+# While the receipt was pending, `epistemic.amendments` withheld the family at
+# the loader's choke point and this fixture proved the refusal. It now loads by
+# itself — exactly the transition sequence 1 went through — and the test over it
+# pins that release.
+scenario_id: once-red-sequence3-withheld-family
+family_id: f27
+kind: operational
+public_coverage: none
+phases:
+  - phase_id: hookless
+    ops:
+      - op: configure
+        ref: hookless-maximal
+        detail: "no plugin; prominence maximal"
+      - op: snapshot
+        ref: s-hookless-seed
+      - op: agent_turn
+        ref: t01-take-on-two
+        detail: "This week I'm taking on the Batch layout draft."
+      - op: snapshot
+        ref: s-hookless
+    expect:
+      - assert: lifecycle_consequence_landed_unprompted
+        subject: f27-lifecycle-replay-v1
+fairness:
+  why_neutral: >-
+    The refusal under test is a loader rule, and a scenario without a complete
+    fairness packet refuses for a different reason — which would mask it.
+  public_coverage_subtraction: none
+  mechanisms:
+    - provider_role: subject
+      mechanism: projected structured collections
+      verdict: unknown
+      evidence: benchmarks/epistemic/PREREGISTRATION.md:52
+  privileged_endpoint_matrix:
+    - driver_surface_id: state.read
+      provider: fixture
+      variant: native
+      disposition: equivalent
+      audit_scope: read-only projected state
+      evidence: benchmarks/epistemic/PREREGISTRATION.md:32
+      reason: The fixture projects only documented neutral state.
+      competitor_surface: documented list/read endpoint
+  acceptance_predicate: >-
+    PREREGISTRATION.md section 4, lifecycle_consequence_landed_unprompted.

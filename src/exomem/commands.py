@@ -35,7 +35,7 @@ from typing import Annotated, Any, Literal, NotRequired
 from fastmcp.tools import ToolResult
 from fastmcp.utilities.types import Image as FastMCPImage
 from mcp.types import TextContent
-from pydantic import Field, StrictInt, StringConstraints
+from pydantic import Field, StrictInt, StringConstraints, WithJsonSchema
 from typing_extensions import TypedDict
 
 from . import add as add_module
@@ -59,6 +59,7 @@ from . import edit as edit_module
 from . import edit_operations as edit_operations_module
 from . import entity_candidates as entity_candidates_module
 from . import entity_types as entity_types_module
+from . import envelope as envelope_module
 from . import epistemic_graph as epistemic_graph_module
 from . import evolution as evolution_module
 from . import find as find_module
@@ -100,7 +101,9 @@ from . import semantic_unit_read as semantic_unit_read_module
 from . import semantic_units as semantic_units_module
 from . import set_frontmatter_field as set_frontmatter_field_module
 from . import set_take as set_take_module
+from . import structured_files as structured_files_module
 from . import traversal_profiles as traversal_profiles_module
+from . import workflow_contracts as workflow_contracts_module
 from . import workflow_skills as workflow_skills_module
 from .command_surface import (
     DESTRUCTIVE_OPS,  # noqa: F401 - re-exported for server.py
@@ -156,6 +159,25 @@ _RerankCandidateLimit = Annotated[
         ),
     ),
 ]
+_WorkflowContextArgument = Annotated[
+    dict[str, Any] | None,
+    WithJsonSchema(
+        {
+            "anyOf": [
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "project": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                        "domain": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                        "activity": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                    },
+                },
+                {"type": "null"},
+            ]
+        }
+    ),
+]
 # Keep commands.py as the public command-surface facade for server, CLI, docs,
 # and tests while the implementation lives in command_surface.py.
 _COMMAND_SURFACE_EXPORTS = (
@@ -177,7 +199,6 @@ def _video_frames_module():
     from . import video_frames as video_frames_module
 
     return video_frames_module
-
 
 
 FindHit = retrieval_models.PageHit
@@ -315,9 +336,7 @@ def _source_taxonomy_projection(vault_root: Path, *, profile: str) -> dict:
         ),
     }
     if profile != "compact":
-        projection["recall"] = (
-            "ask_memory(source_kinds=, domains=, projects=), alone or combined."
-        )
+        projection["recall"] = "ask_memory(source_kinds=, domains=, projects=), alone or combined."
         projection["source_kinds_known"] = sorted(taxonomy.kinds)
         projection["domains_known"] = sorted(taxonomy.domains)
         projection["exhaustive"] = False
@@ -331,9 +350,7 @@ def _source_taxonomy_projection(vault_root: Path, *, profile: str) -> dict:
             "provenance references stay valid; classification applies to new captures."
         )
         projection["registry"] = (
-            source_taxonomy_module.registry_path(vault_root)
-            .relative_to(vault_root)
-            .as_posix()
+            source_taxonomy_module.registry_path(vault_root).relative_to(vault_root).as_posix()
         )
         projection["source_kinds"] = [
             taxonomy.kinds[key].as_dict() for key in sorted(taxonomy.kinds)
@@ -374,8 +391,7 @@ def op_bootstrap(
     """
     if profile not in ("compact", "full", "diagnostics"):
         raise ValueError(
-            "bootstrap: profile must be 'compact', 'full', or 'diagnostics', "
-            f"got {profile!r}"
+            f"bootstrap: profile must be 'compact', 'full', or 'diagnostics', got {profile!r}"
         )
 
     try:
@@ -383,21 +399,127 @@ def op_bootstrap(
     except PackageNotFoundError:
         package_version = "0+unknown"
 
+    from . import envelope as envelope_module
     from . import mode as mode_module
     from . import prominence as prominence_module
     from . import tool_surface as tool_surface_module
 
     compute_policy = mode_module.resolved()
     engagement_policy = prominence_module.resolved()
+    # The delegation envelope rides INSIDE the engagement block rather than beside
+    # it: prominence sets its defaults, so a client reading one without the other
+    # would learn how eager Exomem is without learning what it is allowed to do on
+    # its own. Every string here is deliberately command-free, exactly like the
+    # epistemic commitments — `_filter_bootstrap_payload` deletes any value naming
+    # a command the active surface cannot call, and a ceiling that vanished on a
+    # reduced surface would be a ceiling nobody was told about.
+    engagement_policy["envelope"] = envelope_module.resolved(
+        level=engagement_policy["level"]
+    )
     active_descriptor = _active_bootstrap_descriptor()
     active_product_names = frozenset(active_descriptor.product_commands)
     requested_workflow = workflow.strip() if workflow and workflow.strip() else "general"
     selected_packs = knowledge_packs_module.selected_pack_state(vault_root)
+    workflow_inventory = workflow_contracts_module.inventory_contracts(vault_root)
+    workflow_summaries = workflow_inventory.get("summaries", [])
+    workflow_defaults = [item for item in workflow_summaries if not any(item["scope"].values())]
+    workflow_scoped = [item for item in workflow_summaries if any(item["scope"].values())]
+    workflow_portable = workflow_contracts_module.portable_projection()
+    workflow_portable_identity = {
+        key: workflow_portable[key] for key in ("family", "schema_version", "digest")
+    }
+    workflow_complete = "total" in workflow_inventory
+    workflow_status = workflow_inventory.get("status")
+    workflow_failure_code = workflow_inventory.get("code")
+    workflow_findings = workflow_inventory.get("findings", [])
+    workflow_unavailable = (
+        not workflow_complete
+        or workflow_status is not None
+        or workflow_failure_code is not None
+        or bool(workflow_findings)
+    )
+    workflow_route = {
+        "tool": "schema_memory",
+        "subject": "workflow-contracts",
+        "operation": "resolve",
+    }
+    workflow_callable = "schema_memory" in active_product_names
+    if workflow_callable:
+        if workflow_status is not None:
+            workflow_public_status = workflow_status
+        elif workflow_unavailable:
+            workflow_public_status = "workflow_resolution_unavailable"
+        else:
+            workflow_public_status = None
+    else:
+        workflow_public_status = (
+            "builtin_standalone"
+            if workflow_complete and not workflow_unavailable and not workflow_summaries
+            else "workflow_resolution_unavailable"
+        )
+    workflow_projection_base = {
+        "invariants": workflow_portable["invariants"],
+        "builtin_fallback": workflow_portable["builtin_fallback"],
+        "resolution_available": workflow_callable,
+        "proactive_routing_available": bool(workflow_callable and not workflow_unavailable),
+    }
+    workflow_compact_protocol = {
+        "version": workflow_portable["agent_protocol"]["version"],
+        "outcomes": {
+            "planning_reference": workflow_portable["agent_protocol"]["outcomes"][
+                "planning_reference"
+            ],
+            "transition": workflow_portable["agent_protocol"]["outcomes"]["transition"],
+        },
+    }
+    workflow_resolution_required = workflow_unavailable or bool(workflow_summaries)
+    if workflow_complete:
+        workflow_projection_base.update(
+            {
+                "default": workflow_defaults[:1],
+                "scoped": workflow_scoped[:8],
+                "total": workflow_inventory["total"],
+                "truncated": bool(
+                    workflow_inventory["truncated"]
+                    or len(workflow_defaults) > 1
+                    or len(workflow_scoped) > 8
+                ),
+            }
+        )
+    if profile == "compact":
+        workflow_contract_projection = {
+            **workflow_projection_base,
+            "portable": workflow_portable_identity,
+            "agent_protocol": workflow_compact_protocol,
+            **({"resolution_required": True} if workflow_resolution_required else {}),
+            **({"route": workflow_route} if workflow_callable else {}),
+            **({"status": workflow_public_status} if workflow_public_status is not None else {}),
+            **({"findings": workflow_findings} if workflow_findings else {}),
+        }
+        selected_packs = {
+            key: value for key, value in selected_packs.items() if key != "workflow_contract"
+        }
+    elif workflow_callable:
+        workflow_contract_projection = {
+            **workflow_projection_base,
+            "portable": workflow_portable,
+            "agent_protocol": workflow_portable["agent_protocol"],
+            "resolution_required": workflow_resolution_required,
+            "route": workflow_route,
+            **({"status": workflow_public_status} if workflow_public_status is not None else {}),
+            "findings": workflow_findings,
+        }
+    else:
+        workflow_contract_projection = {
+            **workflow_projection_base,
+            "portable": workflow_portable,
+            "agent_protocol": workflow_portable["agent_protocol"],
+            "resolution_required": workflow_resolution_required,
+            "status": workflow_public_status,
+        }
     entity_type_registry = entity_types_module.load_entity_types(vault_root)
     source_taxonomy_projection = _source_taxonomy_projection(vault_root, profile=profile)
-    simple_actions = simple_action_catalog(
-        selected_packs, available_tools=active_product_names
-    )
+    simple_actions = simple_action_catalog(selected_packs, available_tools=active_product_names)
     front_door_actions = product_front_door_catalog(
         selected_packs, available_tools=active_product_names
     )
@@ -478,17 +600,17 @@ def op_bootstrap(
                 # goes, because the evidence for them exists only in the
                 # conversation and a hookless client reads nothing else.
                 "stated_intent": (
-                    "work the user commits to, sequences or reorders; "
-                    "route: plan_memory"
+                    "work the user commits to, sequences or reorders; route: plan_memory"
                 ),
                 "observed_outcome": (
                     "reported as happened: produced, delivered, approved, "
                     "published, failed; route: record_memory"
                 ),
                 "pairing_rule": (
-                    "an outcome on an open committed Planning item is one landing, "
-                    "two consequences: record then transition, once. A tentative "
-                    "claim is not an event, elapsed time not an outcome"
+                    "an outcome on an open Planning item is recorded once. A user may "
+                    "then request a guarded Planning transition; otherwise review may "
+                    "propose one. A tentative claim is not an event, and elapsed time "
+                    "is not an outcome"
                 ),
             },
             "capture_examples": (
@@ -496,7 +618,8 @@ def op_bootstrap(
                 "events, and current state here without waiting for a magic save or log verb. "
                 "Resolve one compatible collection before append or update; if none fits, "
                 "describe and propose a concise collection before validate and explicit create. "
-                "Paired: one append then one plan triage, once."
+                "A recorded outcome never closes Planning automatically; propose or perform "
+                "a guarded transition only with explicit user intent."
             ),
             "review_rule": (
                 "Review may compare planned intent with recorded reality; it must not make "
@@ -515,8 +638,9 @@ def op_bootstrap(
                 "templates, migrations, or canonical data."
             ),
             "software_rule": (
-                "Exomem Planning owns durable intent and prioritisation; OpenSpec, git, tests, "
-                "and code own accepted software contracts and execution truth."
+                "Exomem Planning owns durable intent and prioritisation; a resolved workflow "
+                "contract may declare companion-owned execution artifacts without asserting "
+                "their availability or state."
             ),
         }
     else:
@@ -565,8 +689,8 @@ def op_bootstrap(
             "neither resolves, evaluates, or updates Planning automatically."
         ),
         "execution_truth_boundary": (
-            "Planning owns durable intent and prioritisation. OpenSpec defines accepted product "
-            "contracts; repositories, git, tests, and code own software execution truth."
+            "Planning owns durable intent and prioritisation. A resolved workflow contract "
+            "may declare companion ownership, while external execution truth remains opaque."
         ),
     }
     # The doctrine every client tier has to receive. The shipped skill scaffold
@@ -624,9 +748,7 @@ def op_bootstrap(
         },
         "vocabulary": {
             "outcomes": list(semantic_units_module.EPISTEMIC_OUTCOMES),
-            "governed_unit_metadata": list(
-                semantic_units_module.GOVERNED_UNIT_METADATA_KEYS
-            ),
+            "governed_unit_metadata": list(semantic_units_module.GOVERNED_UNIT_METADATA_KEYS),
             "verdict": (
                 "The judgment: exactly one outcome word, shared with an experiment "
                 "page's outcome. A number, percentage, or hedge is rejected outright."
@@ -711,6 +833,7 @@ def op_bootstrap(
         "records": records_contract,
         "semantic_authoring": semantic_authoring_projection,
         "planning": planning_contract,
+        "workflow_contracts": workflow_contract_projection,
         "epistemic_contract": epistemic_contract,
         "memory_model": {
             "built_in_ai_memory": (
@@ -767,7 +890,7 @@ def op_bootstrap(
                 "bootstrap",
                 "adopt_vault or browse_memory when first seeing an existing vault",
                 "ask_memory for cheap product recall",
-                "read_memory or ask_memory(deep=true) when more context is needed",
+                "read_memory or reasoning_lookup for more context",
                 (
                     "show the note title by default in normal user-facing prose and do not "
                     "expose the raw canonical ref by default; add the current vault-relative "
@@ -780,11 +903,9 @@ def op_bootstrap(
                     "title-first citation"
                 ),
                 "reason in the agent",
-                "use connect_memory(operation='suggest-links' or 'suggest-relations') before important compiled writes",
-                "remember or replace_memory for page-level conclusions; observe_memory for one semantic unit; edit_memory for other small page corrections",
                 (
-                    "read the returned warnings and follow up on unresolved links "
-                    "or duplicate warnings; write_feedback needs "
+                    "after a write, read the returned warnings and follow up on "
+                    "unresolved links or duplicate warnings; write_feedback needs "
                     "response_detail='full', and suggestions additionally need "
                     "remember(suggestions=true)"
                 ),
@@ -852,7 +973,31 @@ def op_bootstrap(
                 "due_state_authority": "advisory only; the counts measure authored state, and the runtime never judges, resolves, closes, archives, or writes on their behalf, and never changes retrieval ordering",
                 "review_reason": "every review decision records WHY as a closed code: lead the `why` with intentional:, false_positive:, handled:, deferred:, or too_frequent: followed by the free text. Anything else records unspecified",
                 "family_disposition": "when the user asks to stop hearing about a KIND of signal, quiet that family rather than lowering prominence, which silences everything: triage_memory(ref='exomem://review/family/<family>', action='quiet'|'off'|'normal', why='<code>: ...'). quiet drops it from the default review union and every carrier; off also drops it from explicit category review; normal restores it",
-                "family_disposition_reading": "a quiet family is silent, not clean. It stays reviewable on request, review_memory(mode='dispositions') lists what is quiet and why, and the audit still measures it — so a due-state block that omits a family is never evidence that family has nothing due",
+                "family_disposition_reading": "a quiet family is silent, not clean. It stays reviewable on request, review_memory(mode='dispositions') lists the registered family vocabulary, what is quiet and why, and the delegation envelope beside it, and the audit still measures it — so a due-state block that omits a family is never evidence that family has nothing due",
+                # Carried by EVERY profile. It was full-only while compact sat 24
+                # bytes under its ceiling; the queued compact-bootstrap trim has
+                # since paid for it out of redundancy elsewhere in the payload, and
+                # compact is the payload a hookless client receives, which is the
+                # surface with no detector-aware skill behind it. Compact states
+                # the same rule in fewer words -- both halves, the write-time
+                # routing act and the advisory as the net rather than the
+                # mechanism; full keeps its own wording unchanged.
+                "destination_choice": (
+                    "choose the destination at write time: when a coherent durable thread "
+                    "emerges outside the current page's declared scope, search for a focused "
+                    "existing destination, or create one, and link it. Post-write structural "
+                    "advisories are the safety net for missed routing, never the primary "
+                    "mechanism"
+                    if profile == "compact"
+                    else "choosing the destination is part of writing, not a reaction to an "
+                    "advisory. When a coherent durable thread emerges in conversation that "
+                    "sits outside the current page's declared scope, search for a focused "
+                    "existing destination and link it, or create one, at write time. "
+                    "Post-write structural advisories are the safety net for routing that "
+                    "was missed, never the primary mechanism: a page left to accumulate "
+                    "structural debt until a detector speaks has already cost the reader "
+                    "what the routing would have given them."
+                ),
             },
             "note_type_recipes": {
                 "research-note": "Project-scoped finding with Question, Findings, and typed Relations.",
@@ -877,18 +1022,12 @@ def op_bootstrap(
             },
             "semantic_units": {
                 "contract": semantic_authoring_projection,
-                "compact_syntax": semantic_authoring_module.AUTHORING_CONTRACT.compact[
-                    "syntax"
-                ],
-                "compact_kind": semantic_authoring_module.AUTHORING_CONTRACT.compact[
-                    "kind"
-                ],
+                "compact_syntax": semantic_authoring_module.AUTHORING_CONTRACT.compact["syntax"],
+                "compact_kind": semantic_authoring_module.AUTHORING_CONTRACT.compact["kind"],
                 "category_rule": semantic_authoring_module.AUTHORING_CONTRACT.semantic_roles[
                     "category"
                 ],
-                "rich_form": semantic_authoring_module.AUTHORING_CONTRACT.rich[
-                    "heading_syntax"
-                ],
+                "rich_form": semantic_authoring_module.AUTHORING_CONTRACT.rich["heading_syntax"],
                 "rich_relation_rule": semantic_authoring_module.AUTHORING_CONTRACT.rich[
                     "relation_rule"
                 ],
@@ -911,7 +1050,7 @@ def op_bootstrap(
                 ),
                 "reviewed_none": (
                     "when validation requires it, commit the unchanged draft with "
-                    "relation_disposition=\"reviewed_none\", the returned "
+                    'relation_disposition="reviewed_none", the returned '
                     "relation_review_hash, and an explicit bounded relation_review_reason; "
                     "never fabricate a none decision or infer review from missing relations"
                 ),
@@ -946,9 +1085,7 @@ def op_bootstrap(
                             "transition_token": "<returned transition_token>",
                             "relation_disposition": "reviewed_none",
                             "relation_review_hash": "<returned relation_review_hash>",
-                            "relation_review_reason": (
-                                "No honest typed relation applies."
-                            ),
+                            "relation_review_reason": ("No honest typed relation applies."),
                         },
                     },
                 },
@@ -965,14 +1102,10 @@ def op_bootstrap(
                 "args": {"detail": "compact", "rerank": False},
                 "when": "normal cheap product recall",
             },
-            "metadata_lookup": {
-                "tool": "ask_memory",
-                "args": {"detail": "compact", "rerank": False},
-                "when": "caller needs the richer find filters or compact stubs",
-            },
             "reasoning_lookup": {
                 "tool": "ask_memory",
                 "args": {"deep": True},
+                "when": "synthesis over bounded context",
             },
             "adopt_existing_vault": {
                 "tool": "adopt_vault",
@@ -1014,16 +1147,7 @@ def op_bootstrap(
             },
         },
         "performance_profiles": {
-            "normal": {
-                "ask_memory_args": {"detail": "compact", "rerank": False},
-                "interpretation": "cheap product recall; follow with read_memory if needed",
-            },
-            "reasoning": {
-                "ask_memory_args": {"deep": True},
-                "interpretation": "bounded context assembly for synthesis",
-            },
             "diagnostics": {
-                "ask_memory_args": {"include_timings": True, "rerank": True},
                 "interpretation": (
                     "timings measure retrieval stages; unset rerank is mode-aware "
                     "and CPU steady-state modes keep auto-rerank off; compute_policy "
@@ -1069,18 +1193,20 @@ def op_bootstrap(
                 },
             },
             "retry_examples": [
-                "try synonyms and singular/plural forms",
-                "try adjacent domain terms",
-                "try scope='vault' if Knowledge Base recall is sparse",
                 "use adopt_vault(mode='scan-only') before proposing migration/copy actions",
-                "try ask_memory(deep=true) for synthesis instead of many read_memory calls",
             ],
         },
         "product_commands": product_tool_catalog(
             active_product_names, callable_tools=active_descriptor.callable_commands
         ),
-        "tool_catalog": product_tool_catalog(
-            active_product_names, callable_tools=active_descriptor.callable_commands
+        **(
+            {
+                "tool_catalog": product_tool_catalog(
+                    active_product_names, callable_tools=active_descriptor.callable_commands
+                )
+            }
+            if profile != "compact"
+            else {}
         ),
         "common_tools": [
             "adopt_vault",
@@ -1210,6 +1336,7 @@ def _require_supported_projected_find_request(
 ) -> None:
     """Refuse v4 features that do not yet have a projected implementation."""
 
+    del include_timings
     collections = (
         types,
         projects,
@@ -1232,14 +1359,13 @@ def _require_supported_projected_find_request(
         or not query
         or mode not in {"keyword", "hybrid", "vector"}
         or (graph and mode == "keyword")
-        or scope != "vault"
+        or scope not in {"kb", "vault"}
         or rerank_max_candidates is not None
         or not prefer_compiled
         or not prefer_active
         or prefer_used
         or pack
         or graph_enrich
-        or include_timings
         or explain
     ):
         raise projection_runtime_module.ProjectionRuntimeUnavailable(
@@ -1266,6 +1392,7 @@ def op_find(
     filters: dict[str, Any] | None = None,
     result_level: str = "auto",
     limit: int = 15,
+    continuation: str | None = None,
     scope: str = "kb",
     mode: str = "hybrid",
     graph: bool = True,
@@ -1321,6 +1448,9 @@ def op_find(
         result_level: auto, page, unit, or mixed. Auto preserves page recall
             unless semantic-unit filters request independently ranked units.
         limit: Max hits to return. Default 15, hard cap 100.
+        continuation: Opaque governed-projection continuation returned by a prior page.
+            It is bound to the same principal, authorization session, purpose, request,
+            and retained projected snapshot. Omit for the first page.
         scope: "kb" (default) searches Knowledge Base/ first and
             AUTO-WIDENS to the whole vault when the KB doesn't fill
             `limit` — so content in sibling folders (Tracking/,
@@ -1464,17 +1594,18 @@ def op_find(
         Right after a server start, while models are still warming in the
         background, semantic lanes are skipped rather than blocked on — the
         result is then the envelope {"hits": [...], "warming": {"components":
-        [...], "since_s": N}} and the hits are lexical-only ranking. If
+        [...]}} and the hits are lexical-only ranking. Legacy retrieval also
+        includes process age, while governed projection suppresses it. If
         recall quality matters for the query, retry once "warming" stops
         appearing (typically well under a minute).
     """
     if detail not in ("full", "compact"):
-        raise ValueError(
-            f"find: detail must be 'full' or 'compact', got {detail!r}"
+        raise ValueError(f"find: detail must be 'full' or 'compact', got {detail!r}")
+    projection_runtime = projection_runtime_module.load_active_projection_runtime(vault_root)
+    if continuation is not None and projection_runtime is None:
+        raise projection_runtime_module.ProjectedContinuationUnavailable(
+            "INVALID_CONTINUATION: continuation is invalid or expired"
         )
-    projection_runtime = projection_runtime_module.load_active_projection_runtime(
-        vault_root
-    )
     if projection_runtime is not None:
         _require_supported_projected_find_request(
             query=query,
@@ -1534,7 +1665,14 @@ def op_find(
         if explain
         else None
     )
-    timings = find_module.FindTimings() if include_timings else None
+    timings = find_module.FindTimings() if include_timings and projection_runtime is None else None
+    timings_suppressed = (
+        {"status": "governed_projection"} if projection_runtime is not None else None
+    )
+    # Deliberately not declared in retrieval_models.FindEnvelope: its schema
+    # permits additive properties, while declaring this optional marker would
+    # rewrite the byte-frozen Hosted v1/v2 contracts. This is the same
+    # compatibility boundary used by the advisory due-state carrier below.
     if timings is not None:
         from . import mode as mode_module
 
@@ -1558,6 +1696,7 @@ def op_find(
         )
     degraded: list[str] = []
     failed: list[str] = []
+    projected_continuation: str | None = None
     if projection_runtime is not None:
         who = principal_module.effective_principal()
         projected = projection_runtime_module.find_projected_hits(
@@ -1565,6 +1704,7 @@ def op_find(
             projection_runtime,
             query=query,
             limit=limit,
+            scope=scope,
             mode=mode,
             graph=graph,
             rerank=rerank,
@@ -1574,7 +1714,9 @@ def op_find(
             rank_config=find_module._active_ranking(),
             principal=who,
             purpose=purpose,
+            continuation=continuation,
         )
+        projected_continuation = projected.continuation
         projected_hits = list(projected.hits)
         degraded.extend(projected.warming_components)
         release = egress_module.annotate_projected_hits(
@@ -1592,9 +1734,8 @@ def op_find(
         # an ungoverned vault, so the empty-policy fast path keeps `limit` exactly
         # as the caller asked and the latency profile is unchanged.
         _release_policy, _release_active = egress_module.gate_state(vault_root)
-        retrieval_limit = (
-            egress_module.pool_limit(limit) if _release_active else limit
-        )
+        retrieval_limit = egress_module.pool_limit(limit) if _release_active else limit
+        catalog_proof: dict[str, Any] = {}
         hits = find_module.find(
             vault_root,
             query=query,
@@ -1629,6 +1770,7 @@ def op_find(
             degraded_out=degraded,
             failed_out=failed,
             retrieval_trace=retrieval_trace,
+            catalog_proof_out=catalog_proof,
         )
         # Release gate, part 2 of 2 (design D2): decisions are computed HERE —
         # strictly after `find()` has returned and deep-copied its candidates into
@@ -1636,9 +1778,7 @@ def op_find(
         # Nothing principal-dependent may run any earlier than this line, or one
         # principal's decisions would be cached for the next.
         with find_module._span(timings, "release_gate"):
-            release = egress_module.annotate_hits(
-                vault_root, hits, limit=limit, purpose=purpose
-            )
+            release = egress_module.annotate_hits(vault_root, hits, limit=limit, purpose=purpose)
             hits = release.hits
     referents: dict[str, Any] | None = None
     if projection_runtime is None:
@@ -1661,8 +1801,9 @@ def op_find(
                         release=release,
                         purpose=purpose,
                         cue=referent_cue,
+                        expected_recall_checkpoints=catalog_proof or None,
                     )
-                except Exception:
+                except Exception:  # noqa: BLE001 - optional enrichment soft-fails
                     referents = None
     pack_obj: dict | None = None
     if pack:
@@ -1684,9 +1825,7 @@ def op_find(
         )
         if projection_runtime is None:
             ref_index = memory_refs_module.ReferenceIndex(vault_root)
-            refs = ref_index.refs_for_paths(
-                [str(hit.get("path") or "") for hit in hit_dicts]
-            )
+            refs = ref_index.refs_for_paths([str(hit.get("path") or "") for hit in hit_dicts])
             for hit in hit_dicts:
                 ref = refs.get(str(hit.get("path") or ""))
                 if ref:
@@ -1700,11 +1839,18 @@ def op_find(
     # Best-effort; never affects the returned result.
     if projection_runtime is None:
         query_log.log_find_call(
-            query=query, mode=mode, scope=scope,
-            types=types, projects=projects, tags=tags,
-            limit=limit, rerank=rerank, prefer_compiled=prefer_compiled,
+            query=query,
+            mode=mode,
+            scope=scope,
+            types=types,
+            projects=projects,
+            tags=tags,
+            limit=limit,
+            rerank=rerank,
+            prefer_compiled=prefer_compiled,
             prefer_used=prefer_used,
-            graph=graph, hits=hits,
+            graph=graph,
+            hits=hits,
             timing_summary=_timing_log_summary(timings_dict),
         )
     # Warming marker: the server just started and the background warm-up is
@@ -1713,11 +1859,10 @@ def op_find(
     # (~30s per process start; minutes on a first-ever model download).
     warming: dict | None = None
     if degraded:
-        info = readiness_module.warming_info() or {}
-        warming = {
-            "components": sorted(set(degraded)),
-            "since_s": info.get("since_s", 0.0),
-        }
+        warming = {"components": sorted(set(degraded))}
+        if projection_runtime is None:
+            info = readiness_module.warming_info() or {}
+            warming["since_s"] = info.get("since_s", 0.0)
     # Degraded marker: a semantic lane FAILED post-warm (not merely deferred) so
     # the hits are a silently weaker ranking — vector→BM25, or every-lane-empty→
     # keyword. Distinct from `warming`: warming is the transient, expected boot
@@ -1726,9 +1871,11 @@ def op_find(
     degraded_marker: list[str] | None = sorted(set(failed)) if failed else None
     if (
         timings_dict is None
+        and timings_suppressed is None
         and warming is None
         and degraded_marker is None
         and retrieval_trace is None
+        and projected_continuation is None
     ):
         if not pack and referents is None:
             return hit_dicts
@@ -1743,6 +1890,10 @@ def op_find(
         out["pack"] = pack_obj
     if timings_dict is not None:
         out["timings"] = timings_dict
+    if timings_suppressed is not None:
+        out["timings_suppressed"] = timings_suppressed
+    if projected_continuation is not None:
+        out["continuation"] = projected_continuation
     if warming is not None:
         out["warming"] = warming
     if degraded_marker is not None:
@@ -1752,10 +1903,6 @@ def op_find(
     if referents is not None:
         out["referents"] = referents
     return out
-
-
-
-
 
 
 def _citation_url(_path: str) -> str:
@@ -1769,7 +1916,7 @@ def _citation_url(_path: str) -> str:
 
 def _resolve_memory_identifier(vault_root: Path, value: str) -> str:
     try:
-        resolved = memory_refs_module.resolve_identifier(vault_root, value)
+        resolved = egress_module.resolve_visible_identifier(vault_root, value)
     except memory_refs_module.ReferenceError as exc:
         raise ValueError(f"{exc.code}: {exc.reason}") from exc
     if reserved_paths_module.classify_logical(resolved).blocked:
@@ -1777,9 +1924,7 @@ def _resolve_memory_identifier(vault_root: Path, value: str) -> str:
     return resolved
 
 
-def _snapshot_memory_ref(
-    vault_root: Path, path: str, frontmatter: Mapping[str, Any]
-) -> str | None:
+def _snapshot_memory_ref(vault_root: Path, path: str, frontmatter: Mapping[str, Any]) -> str | None:
     """A canonical ref only when the index agrees with this exact snapshot."""
     normalized = memory_refs_module.normalize_id(frontmatter.get("exomem_id"))
     if normalized is None:
@@ -2023,6 +2168,8 @@ def op_fetch(
         "metadata": metadata,
     }
     return _attach_memory_ref(vault_root, out, page.path, snapshot_ref=snapshot_ref)
+
+
 def _timing_log_summary(timings_dict: dict | None) -> dict | None:
     """Query-log-safe slice of a timings envelope: totals + per-stage ms only
     (never content; stage entries drop skip/error detail to stay compact)."""
@@ -2094,21 +2241,27 @@ def op_suggest_links(
         page = find_module._CACHE.get(vault_root / gp.path, vault_root)
         if page is None:
             raise ValueError(f"UNREADABLE: could not parse {gp.path}")
-        existing_links = set(
-            find_module._outbound_wikilink_paths(page, vault_root)
-        )
+        existing_links = set(find_module._outbound_wikilink_paths(page, vault_root))
         suggestions = corpus_aware_module.suggest_related(
-            vault_root, title=page.title, body=page.body,
-            self_path=page.rel_path, existing_links=existing_links,
-            limit=limit, scope=scope,
+            vault_root,
+            title=page.title,
+            body=page.body,
+            self_path=page.rel_path,
+            existing_links=existing_links,
+            limit=limit,
+            scope=scope,
         )
     elif draft_title or draft_body:
         body = draft_body or ""
         existing_links = set(link_summary_module.outbound_link_targets(body))
         suggestions = corpus_aware_module.suggest_related(
-            vault_root, title=draft_title or "", body=body,
-            self_path=None, existing_links=existing_links,
-            limit=limit, scope=scope,
+            vault_root,
+            title=draft_title or "",
+            body=body,
+            self_path=None,
+            existing_links=existing_links,
+            limit=limit,
+            scope=scope,
         )
     else:
         raise ValueError(
@@ -2232,9 +2385,8 @@ def op_suggest_relations(
         limit=limit,
     )
 
-def _resolve_source_kind_argument(
-    source_type: str | None, source_kind: str | None
-) -> str:
+
+def _resolve_source_kind_argument(source_type: str | None, source_kind: str | None) -> str:
     """Collapse the two names for the source-kind axis into one value.
 
     `source_kind` is the preferred name and `source_type` the original; they are
@@ -2329,9 +2481,7 @@ def op_add(
         )
     except add_module.AddError as e:
         # FastMCP serializes raised exceptions; we want a structured shape.
-        raise ValueError(
-            f"{e.code}: {e.reason} (missing: {e.missing})"
-        ) from e
+        raise ValueError(f"{e.code}: {e.reason} (missing: {e.missing})") from e
     query_log.log_write_call(tool="add", written_path=result.path, cited_sources=[])
     return result.as_dict()
 
@@ -2355,6 +2505,9 @@ def op_audit(
     - `orphan_entity`: `Entities/...` file with no inbound wikilinks
     - `unprocessed_source`: source with empty `ingested_into:` (no notes
       have compiled from it yet)
+    - `unresolved_source_citation`: a compiled page explicitly cites material
+      that is not an authorized governed Source or Evidence page. Capture the
+      original or remove the unsupported citation; audit never reconstructs it.
     - `index_drift`: top-level `index.md` Counts disagree with on-disk counts
     - `tag_inconsistency`: case/separator variants of the same tag
       (`warning_letter_incident` vs `warning-letter-incident` vs
@@ -2518,8 +2671,7 @@ _versions` describe the whole chain.
     )
 
 
-def op_audit_fix(
-    vault_root: Path,dry_run: bool = False, rebuild_embeddings: bool = False) -> dict:
+def op_audit_fix(vault_root: Path, dry_run: bool = False, rebuild_embeddings: bool = False) -> dict:
     """Run audit + auto-apply safe fixes; propose-only for risky categories.
 
     Closes the lint-finds-but-doesn't-fix loop. Safe categories get
@@ -2555,8 +2707,8 @@ def op_audit_fix(
         dry_run: If true, compute what would change without writing.
             Default false.
         rebuild_embeddings: If true, wipe and rebuild the vector sidecar
-            at `<vault>/Knowledge Base/.embeddings.sqlite` after the fix
-            sweep. Use on first run, after a machine swap, or when the
+            (`.embeddings.sqlite` in the machine-local state root) after
+            the fix sweep. Use on first run, after a machine swap, or when the
             sidecar has drifted from disk. Ignored when `dry_run=true`.
 
     Returns:
@@ -2575,9 +2727,7 @@ def op_audit_fix(
     return report.as_dict()
 
 
-def op_reconcile(
-    vault_root: Path, dry_run: bool = False, rebuild_graph: bool = False
-) -> dict:
+def op_reconcile(vault_root: Path, dry_run: bool = False, rebuild_graph: bool = False) -> dict:
     """Heal vault drift from out-of-band edits in one pass.
 
     The writers keep the embedding sidecar, index.md count rows, and log.md
@@ -2619,15 +2769,15 @@ def op_reconcile(
         active_mutation_request_id,
     )
 
-    if rebuild_graph and active_mutation_request_id() is None and active_direct_mutation_guard(
-        vault_root, state_root=active_manager().config.state_dir
+    if (
+        rebuild_graph
+        and active_mutation_request_id() is None
+        and active_direct_mutation_guard(vault_root, state_root=active_manager().config.state_dir)
     ):
         raise ValueError(
             "MUTATION_BOUNDARY_ACTIVE: rebuild_graph must run outside a direct mutation boundary"
         )
-    report = reconcile_module.reconcile(
-        vault_root, dry_run=dry_run, rebuild_graph=rebuild_graph
-    )
+    report = reconcile_module.reconcile(vault_root, dry_run=dry_run, rebuild_graph=rebuild_graph)
     result = report.as_dict()
     # The due-state projection is drift-prone in exactly the way this command
     # exists to heal: a page edited in Obsidian or on the filesystem never fires
@@ -2838,9 +2988,7 @@ def op_get(
         missing_path=prepared.missing_path,
     )
     try:
-        result = get_page_module.get_page(
-            vault_root, path=path, _prepared=prepared
-        )
+        result = get_page_module.get_page(vault_root, path=path, _prepared=prepared)
     except get_page_module.GetError as e:
         raise ValueError(f"{e.code}: {e.reason}") from e
     if frontmatter_only:
@@ -2861,9 +3009,7 @@ def op_get(
     if include_history:
         out["history"] = vault.read_log_entries(vault_root, out["path"])
     if links:
-        out["links"] = _link_summary(
-            vault_root, out.get("path", ""), out.get("body", "")
-        )
+        out["links"] = _link_summary(vault_root, out.get("path", ""), out.get("body", ""))
     # Release gate for direct reads: render at the page's decision level, and
     # answer byte-identically to a missing path when it is below notice — a
     # withheld page must be indistinguishable from one that never existed.
@@ -2887,8 +3033,7 @@ def op_get(
         # withheld. Existence AND location, from the branch whose entire purpose
         # is to be indistinguishable from absence.
         raise ValueError(
-            "NOT_FOUND: file does not exist: "
-            f"{get_page_module.missing_path_for(path)}"
+            f"NOT_FOUND: file does not exist: {get_page_module.missing_path_for(path)}"
         )
     out = released
     if "path" not in out:
@@ -2907,9 +3052,7 @@ def op_get(
         else:
             out["body_truncated"] = bool(out.get("body_truncated", False))
         out["body_chars"] = len(str(out.get("body", "")))
-    return _attach_memory_ref(
-        vault_root, out, str(out["path"]), snapshot_ref=snapshot_ref
-    )
+    return _attach_memory_ref(vault_root, out, str(out["path"]), snapshot_ref=snapshot_ref)
 
 
 def op_edit(
@@ -3054,21 +3197,27 @@ def op_edit(
         FRONTMATTER_REQUIRED (a metadata operation targeted ordinary Markdown);
         UNREADABLE.
     """
-    active = [n for n, on in (
+    active = [
+        n
+        for n, on in (
         ("edits", edits is not None),
         ("row_key", row_key is not None),
         ("field", field is not None),
-    ) if on]
-    if len(active) > 1:
-        raise ValueError(
-            f"INVALID_EDIT: one edit mode at a time; got {', '.join(active)}"
         )
+        if on
+    ]
+    if len(active) > 1:
+        raise ValueError(f"INVALID_EDIT: one edit mode at a time; got {', '.join(active)}")
     path = _resolve_memory_identifier(vault_root, path)
     try:
         if edits is not None:
             result = multi_edit_module.multi_edit(
-                vault_root, path=path, why=why, edits=edits,
-                expected_hash=expected_hash, validate_only=validate_only,
+                vault_root,
+                path=path,
+                why=why,
+                edits=edits,
+                expected_hash=expected_hash,
+                validate_only=validate_only,
                 semantic_transition_token=transition_token,
                 relation_disposition=relation_disposition,
                 relation_review_hash=relation_review_hash,
@@ -3078,8 +3227,13 @@ def op_edit(
             if take is None:
                 raise ValueError("INVALID_EDIT: row_key mode requires `take`")
             result = set_take_module.set_take(
-                vault_root, path=path, row_key=row_key, take=take,
-                why=why, overwrite=overwrite, expected_hash=expected_hash,
+                vault_root,
+                path=path,
+                row_key=row_key,
+                take=take,
+                why=why,
+                overwrite=overwrite,
+                expected_hash=expected_hash,
                 validate_only=validate_only,
                 semantic_transition_token=transition_token,
                 relation_disposition=relation_disposition,
@@ -3088,9 +3242,14 @@ def op_edit(
             )
         elif field is not None:
             result = set_frontmatter_field_module.set_frontmatter_field(
-                vault_root, path=path, field=field, value=value,
-                why=why, allow_curated=allow_curated,
-                expected_hash=expected_hash, validate_only=validate_only,
+                vault_root,
+                path=path,
+                field=field,
+                value=value,
+                why=why,
+                allow_curated=allow_curated,
+                expected_hash=expected_hash,
+                validate_only=validate_only,
                 semantic_transition_token=transition_token,
                 relation_disposition=relation_disposition,
                 relation_review_hash=relation_review_hash,
@@ -3098,11 +3257,18 @@ def op_edit(
             )
         else:
             result = edit_module.edit(
-                vault_root, path=path, why=why, new_body=new_body,
-                tags=tags, old_string=old_string, new_string=new_string,
-                replace_all=replace_all, heading=heading,
+                vault_root,
+                path=path,
+                why=why,
+                new_body=new_body,
+                tags=tags,
+                old_string=old_string,
+                new_string=new_string,
+                replace_all=replace_all,
+                heading=heading,
                 section_position=section_position,
-                expected_hash=expected_hash, validate_only=validate_only,
+                expected_hash=expected_hash,
+                validate_only=validate_only,
                 semantic_transition_token=transition_token,
                 relation_disposition=relation_disposition,
                 relation_review_hash=relation_review_hash,
@@ -3304,18 +3470,12 @@ def op_replace(
             relation_review_hash=effective_relation_review_hash,
         )
     except replace_module.ReplaceError as e:
-        raise ValueError(
-            f"{e.code}: {e.reason} (missing: {e.missing})"
-        ) from e
+        raise ValueError(f"{e.code}: {e.reason} (missing: {e.missing})") from e
     except note_module.NoteError as e:
         # New-page validation failed before the supersession could land.
-        raise ValueError(
-            f"{e.code}: {e.reason} (missing: {e.missing})"
-        ) from e
+        raise ValueError(f"{e.code}: {e.reason} (missing: {e.missing})") from e
     if written_path := getattr(result, "new_path", None):
-        query_log.log_write_call(
-            tool="replace", written_path=written_path, cited_sources=sources
-        )
+        query_log.log_write_call(tool="replace", written_path=written_path, cited_sources=sources)
     return result.as_dict()
 
 
@@ -3323,7 +3483,9 @@ def _replacement_predecessor_hash(vault_root: Path, old_path: str) -> str:
     try:
         return hashlib.sha256((Path(vault_root) / old_path).read_bytes()).hexdigest()
     except OSError as error:
-        raise ValueError(f"OLD_NOT_FOUND: replacement predecessor is unavailable: {old_path}") from error
+        raise ValueError(
+            f"OLD_NOT_FOUND: replacement predecessor is unavailable: {old_path}"
+        ) from error
 
 
 def _replacement_review_hash(
@@ -3484,9 +3646,7 @@ def op_preserve(
             description=description,
         )
     except preserve_module.PreserveError as e:
-        raise ValueError(
-            f"{e.code}: {e.reason} (missing: {e.missing})"
-        ) from e
+        raise ValueError(f"{e.code}: {e.reason} (missing: {e.missing})") from e
     return result.as_dict()
 
 
@@ -3585,7 +3745,12 @@ def op_note(
         sources: Vault-relative wikilinks to existing pages this note draws
             from, e.g. `["Knowledge Base/Sources/Articles/2026-05-18-foo"]`
             or `["[[Knowledge Base/Sources/Articles/2026-05-18-foo]]"]`.
-            Brackets and the leading `Knowledge Base/` are tolerated.
+                Brackets and the leading `Knowledge Base/` are tolerated. Every
+                non-empty entry must already resolve to authorized captured Source
+                or Evidence material. A URL, connector ID, remote file ID, working
+                script, or derivative summary is not a substitute: capture the
+                original first, then retry with the governed path or stable ref.
+                Use an honest empty list when no external source is asserted.
         tags: Lowercase dash-separated; the server normalizes case/spacing.
         status: Defaults to `active` for most types, `planned` for
             production-log. Valid set varies by type.
@@ -3678,13 +3843,9 @@ def op_note(
             relation_review_reason=relation_review_reason,
         )
     except note_module.NoteError as e:
-        raise ValueError(
-            f"{e.code}: {e.reason} (missing: {e.missing})"
-        ) from e
+        raise ValueError(f"{e.code}: {e.reason} (missing: {e.missing})") from e
     if written_path := getattr(result, "path", None):
-        query_log.log_write_call(
-            tool="note", written_path=written_path, cited_sources=sources
-        )
+        query_log.log_write_call(tool="note", written_path=written_path, cited_sources=sources)
     return result.as_dict()
 
 
@@ -3772,8 +3933,10 @@ def op_query_data(
         )
     except query_data_module.QueryDataError as e:
         raise ValueError(f"{e.code}: {e.reason}") from e
-    representation = "profile" if aggregate and aggregate.strip() == "profile" else (
-        "aggregate" if aggregate else "rows"
+    representation = (
+        "profile"
+        if aggregate and aggregate.strip() == "profile"
+        else ("aggregate" if aggregate else "rows")
     )
     released = egress_module.annotate_dataset(
         vault_root, result.as_dict(), representation=representation
@@ -3859,9 +4022,7 @@ def op_create_file(
                 relation_review_reason,
             )
         ):
-            raise ValueError(
-                "INVALID_CREATE: creation review fields apply only to kind='file'"
-            )
+            raise ValueError("INVALID_CREATE: creation review fields apply only to kind='file'")
         try:
             result = create_directory_module.create_directory(
                 vault_root,
@@ -4000,6 +4161,7 @@ def op_adopt(
     except adopt_module.AdoptError as e:
         raise ValueError(f"adopt: {e.code}: {e.reason}") from e
 
+
 def op_list_directory(
     vault_root: Path,
     path: str = "",
@@ -4046,9 +4208,7 @@ def op_list_directory(
     entries = payload.get("entries")
     if isinstance(entries, list):
         payload["entries"] = [
-            entry
-            for entry in entries
-            if not is_governance_path(str((entry or {}).get("path", "")))
+            entry for entry in entries if not is_governance_path(str((entry or {}).get("path", "")))
         ]
     return payload
 
@@ -4246,8 +4406,7 @@ def op_append_to_file(
     return result.as_dict()
 
 
-def op_list_trash(
-    vault_root: Path,date: str | None = None) -> dict:
+def op_list_trash(vault_root: Path, date: str | None = None) -> dict:
     """Tier 2: enumerate recoverable trash entries. Read-only.
 
     Walks Knowledge Base/_trash/YYYY-MM-DD/ and parses each .meta.json
@@ -4329,9 +4488,7 @@ def op_list_inbound_links(vault_root: Path, target: str) -> dict:
     requested = str(target)
     target = _resolve_memory_identifier(vault_root, target)
     try:
-        result = list_inbound_links_module.list_inbound_links(
-            vault_root, target=target
-        )
+        result = list_inbound_links_module.list_inbound_links(vault_root, target=target)
     except list_inbound_links_module.ListInboundLinksError as e:
         raise ValueError(f"{e.code}: {e.reason}") from e
     payload = result.as_dict()
@@ -4385,7 +4542,7 @@ def _release_permits_link_target(vault_root: Path, target: object) -> bool:
 
     clean = target.strip().replace("\\", "/").strip("/")
     if "/" in clean:
-        for candidate in ({clean, f"{clean}.md"} if not clean.lower().endswith(".md") else {clean}):
+        for candidate in {clean, f"{clean}.md"} if not clean.lower().endswith(".md") else {clean}:
             if (Path(vault_root) / candidate).is_file():
                 return _permits(candidate)
         return True
@@ -4393,15 +4550,10 @@ def _release_permits_link_target(vault_root: Path, target: object) -> bool:
     # the vault. Ambiguity fails closed; a name that matches nothing is simply
     # not a vault item.
     stem = clean[: -len(".md")] if clean.lower().endswith(".md") else clean
-    matches = [
-        p for p in Path(vault_root).rglob(f"{stem}.md") if p.is_file()
-    ]
+    matches = [p for p in Path(vault_root).rglob(f"{stem}.md") if p.is_file()]
     if not matches:
         return True
-    return all(
-        _permits(str(p.relative_to(Path(vault_root))).replace("\\", "/"))
-        for p in matches
-    )
+    return all(_permits(str(p.relative_to(Path(vault_root))).replace("\\", "/")) for p in matches)
 
 
 def op_get_video_frames(
@@ -4472,8 +4624,7 @@ def op_get_video_frames(
         "end_sec": end_sec,
         "frame_count": len(result.frames),
         "frames": [
-            {"index": i, "timestamp_sec": f.timestamp_sec}
-            for i, f in enumerate(result.frames)
+            {"index": i, "timestamp_sec": f.timestamp_sec} for i, f in enumerate(result.frames)
         ],
         "candidates": result.candidates,
         "dedup_dropped": result.dedup_dropped,
@@ -4481,16 +4632,13 @@ def op_get_video_frames(
     }
     return ToolResult(
         content=[TextContent(type="text", text=json.dumps(meta, ensure_ascii=False))]
-        + [
-            FastMCPImage(data=f.jpeg, format="jpeg").to_image_content()
-            for f in result.frames
-        ],
+        + [FastMCPImage(data=f.jpeg, format="jpeg").to_image_content() for f in result.frames],
         structured_content=meta,
     )
 
 
-
 # ----- product command wrappers: public surface over canonical leaves -----
+
 
 def op_ask_memory(
     vault_root: Path,
@@ -4511,6 +4659,7 @@ def op_ask_memory(
     filters: dict[str, Any] | None = None,
     result_level: str = "auto",
     limit: int = 15,
+    continuation: str | None = None,
     scope: str = "kb",
     mode: str = "hybrid",
     detail: str = "compact",
@@ -4559,6 +4708,7 @@ def op_ask_memory(
         filters: Structured page/unit metadata filters.
         result_level: auto, page, unit, or mixed.
         limit: Max hits. Default 15.
+        continuation: Opaque continuation returned by a prior governed recall page.
         scope: kb, vault, or kb-only.
         mode: hybrid, keyword, or vector.
         detail: compact or full hit detail.
@@ -4598,6 +4748,7 @@ def op_ask_memory(
         filters=filters,
         result_level=result_level,
         limit=limit,
+        continuation=continuation,
         scope=scope,
         mode=mode,
         graph=graph,
@@ -4835,6 +4986,14 @@ def op_remember(
     source's `ingested_into:` frontmatter, maintaining the source-to-note graph
     and taking the source out of the unprocessed backlog.
 
+    Every non-empty source must already resolve to authorized governed Source
+    or Evidence material. A URL, connector ID, remote file ID, working script,
+    or derivative summary is not the original: capture the original first, then
+    cite its governed path or stable ref. Use an honest empty list when no
+    external source is asserted. Citation and supported back-references commit
+    atomically; unresolved citations return `UNRESOLVED_SOURCE_CITATION` without
+    writing anything.
+
     Args:
         content: Full markdown body to write after frontmatter.
         title: Unicode display title stored in frontmatter and the H1.
@@ -4940,6 +5099,12 @@ def op_edit_memory(
     Whole-body, surgical string, batch-string, and section edits preserve
     ordinary Markdown without synthesizing YAML. Tags, frontmatter patch, and
     take-row operations still require frontmatter.
+
+    A source-changing edit validates the complete final `sources` list against
+    authorized governed Source or Evidence material and updates supported
+    back-references atomically. An unrelated edit may leave a legacy unresolved
+    citation unchanged; use `review_memory(mode="audit",
+    categories=["unresolved_source_citation"])` to find that debt.
 
     When `RELATION_DISPOSITION_STALE` or `RELATION_DISPOSITION_MISSING` blocks
     an edit, first call the identical operation with `validate_only=true`.
@@ -5049,29 +5214,28 @@ def op_observe_memory(
         `expected_hash`.
     """
     raw_path = str(path or "").strip()
-    if raw_path.startswith(("/", "\\")) or Path(raw_path).is_absolute() or (
+    if (
+        raw_path.startswith(("/", "\\"))
+        or Path(raw_path).is_absolute()
+        or (
         len(raw_path) >= 3
         and raw_path[0].isalpha()
         and raw_path[1] == ":"
         and raw_path[2] in {"/", "\\"}
+        )
     ):
         raise ValueError(
-            "INVALID_PATH: observe_memory requires a governed KB-relative "
-            "path or reference"
+            "INVALID_PATH: observe_memory requires a governed KB-relative path or reference"
         )
     try:
-        resolved_path = memory_refs_module.resolve_identifier_read_only(
-            vault_root, path
-        )
+        resolved_path = memory_refs_module.resolve_identifier_read_only(vault_root, path)
     except memory_refs_module.ReferenceError as error:
         raise ValueError(f"{error.code}: {error.reason}") from error
     if raw_path.lower().startswith(("exomem://vault/", "exomem://source/")) and not (
-        resolved_path == kb_dirname()
-        or resolved_path.startswith(f"{kb_dirname()}/")
+        resolved_path == kb_dirname() or resolved_path.startswith(f"{kb_dirname()}/")
     ):
         raise ValueError(
-            "INVALID_PATH: observe_memory parent reference resolves outside "
-            f"{kb_dirname()}/"
+            f"INVALID_PATH: observe_memory parent reference resolves outside {kb_dirname()}/"
         )
     try:
         result = observe_memory_module.observe_memory(
@@ -5151,6 +5315,12 @@ def op_replace_memory(
 
     The old page remains readable and points to the new page. Use this for
     meaningful changes in conclusion, not small edits.
+
+    Replacement is a new source claim: every non-empty `sources` entry must
+    resolve to authorized governed Source or Evidence material, even when the
+    old page carried an unresolved citation. Capture the original first or use
+    an honest empty list. Exomem never promotes a derivative into the missing
+    original.
 
     Args:
         old_path: Existing page to supersede.
@@ -5406,9 +5576,15 @@ def op_preserve_artifacts(
     # One invocation preserves N artifacts. The batch scope is what keeps that
     # one counters block rather than N: see `due_state.batch_scope`.
     with due_state_module.batch_scope(vault_root):
-        return client_artifacts.preserve_artifacts(
+        result = client_artifacts.preserve_artifacts(
             vault_root, scope=scope, category=category, files=files
         )
+    # No batch deltas: Evidence blobs author no predictions, questions,
+    # experiments or supersession pointers, so this leaf's own writes never move
+    # a projected category (design D3). The carriage value is the session
+    # channel — a first qualifying response, and change-only deltas from
+    # elsewhere in the conversation.
+    return _carrying_due_state(vault_root, result)
 
 
 def op_transfer_artifact(
@@ -5472,7 +5648,11 @@ def op_process_media(
     # Bounded all-media work writes one transcript per artifact, so the no-path
     # form is a batch and must not deliver one counters block per artifact.
     with due_state_module.batch_scope(vault_root):
-        return _process_media(vault_root, path=path, operation=operation)
+        result = _process_media(vault_root, path=path, operation=operation)
+    # `retry` re-enqueues in the machine-local job store and commits nothing, so
+    # the commit gate inside the carrier keeps it silent — that is the contract,
+    # not an omission.
+    return _carrying_due_state(vault_root, result)
 
 
 def _process_media(
@@ -5504,9 +5684,7 @@ def _process_media(
             limit=media_jobs.STATUS_JOB_LIMIT,
             paths=selected,
         )
-        remaining = index_sync.deferred_work_status(vault_root)["full_upserts"][
-            "count"
-        ]
+        remaining = index_sync.deferred_work_status(vault_root)["full_upserts"]["count"]
         # Measure the queue the neighbouring field measures. The drain's return
         # counts what it processed across *every* queue it serves, and the
         # graph dirty-path queue joined them (converge-graph-incrementally), so
@@ -5662,6 +5840,11 @@ def op_review_memory(
     Default mode is read-only attention review. Write-capable repairs are in
     `maintain_memory`, not here.
 
+    `mode="audit", categories=["unresolved_source_citation"]` finds compiled
+    pages whose explicit sources do not resolve to authorized governed Source
+    or Evidence material. The audit is read-only and never reconstructs a
+    missing original from a derivative.
+
     Args:
         mode: attention, activation, item, audit, dispositions, provenance,
             evolution, compilation, stale, contradiction, unprocessed-sources,
@@ -5739,9 +5922,7 @@ def op_review_memory(
             legacy_sample_limit=legacy_sample_limit,
         )
     if mode == "stale":
-        return op_attention(
-            vault_root, categories=["stale_review"], limit=limit, state=state
-        )
+        return op_attention(vault_root, categories=["stale_review"], limit=limit, state=state)
     if mode == "contradiction":
         return op_attention(
             vault_root,
@@ -5757,9 +5938,7 @@ def op_review_memory(
             state=state,
         )
     if mode == "relation-debt":
-        return op_attention(
-            vault_root, categories=["relation_debt"], limit=limit, state=state
-        )
+        return op_attention(vault_root, categories=["relation_debt"], limit=limit, state=state)
     if mode == "relation-queue":
         return relation_queue_module.build_queue(vault_root, limit_pages=limit)
     if mode == "adoption":
@@ -5895,6 +6074,22 @@ def _adopted_paths(result: Any) -> list[str]:
     return list(dict.fromkeys(out))
 
 
+def _audit_fix_paths(result: Any) -> list[str]:
+    """The pages a `fix` pass actually rewrote, in first-seen order.
+
+    Read off `fixed` rather than `files_rewritten`, which is a count. A dry-run
+    preview reports the same rows without having written them, so it is excluded
+    here as well as by the carrier's commit gate.
+    """
+    if not isinstance(result, dict) or result.get("dry_run"):
+        return []
+    out: list[str] = []
+    for row in result.get("fixed") or []:
+        if isinstance(row, dict) and isinstance(row.get("path"), str):
+            out.append(row["path"])
+    return list(dict.fromkeys(out))
+
+
 def _apply_batch_deltas(vault_root: Path, rel_paths: list[str]) -> None:
     """Bring the due-state projection up to date for a batch's governed writes.
 
@@ -5914,6 +6109,49 @@ def _apply_batch_deltas(vault_root: Path, rel_paths: list[str]) -> None:
             due_state_module.apply_write_delta(vault_root, rel_path)
         except Exception:  # noqa: BLE001 — a projection delta never breaks a write
             log.debug("due-state delta failed for %s", rel_path, exc_info=True)
+
+
+def _carrying_due_state(vault_root: Path, result: Any) -> Any:
+    """Attach the post-batch advisory due-state block for the terminal to decide on.
+
+    The operation leaves are batch carriers: one invocation commits many governed
+    writes, so the block belongs at the end of the batch rather than once per
+    write. The batch scope each leaf already opens keeps the governor quiet
+    throughout; this runs after the batch's deltas have been applied, so the
+    number served is the projection AFTER the batch and not a stale read.
+
+    Produces only, exactly like `semantic_writes._due_state_block` and
+    `records._due_state_block`: emission is decided at the mutation terminal,
+    which is the only place that knows whether the response will actually carry
+    the block. The vault rides along under the same server-internal `_vault` key
+    the terminal reads for the emission key and never puts on the wire.
+
+    Gated on an actual commit (design D1). Carriage rides the committed terminal,
+    which exists only when `mark_active_mutation_committed` fired: a clean-vault
+    repair pass, already-valid media, a `retry` re-enqueue and a verified replay
+    all commit nothing, have no terminal to carry a block on, and would otherwise
+    leak an ungoverned advisory — plus `_vault` — straight into a raw leaf result.
+    The gate is also what keeps `structured-files`' closed receipt shape valid on
+    the replay path that validates it.
+
+    A failure here costs the caller an advisory and never the operation.
+    """
+    from .writer_lease import active_mutation_committed
+
+    if not isinstance(result, dict) or "due_state" in result:
+        return result
+    if not active_mutation_committed():
+        return result
+    try:
+        from . import due_state as due_state_module
+
+        block = due_state_module.block_for_batch(vault_root)
+    except Exception:  # noqa: BLE001 — an advisory never breaks a committed batch
+        log.debug("due-state batch block failed (non-fatal)", exc_info=True)
+        return result
+    if not block:
+        return result
+    return {**result, "due_state": {**block, "_vault": str(vault_root)}}
 
 
 def _set_family_disposition(
@@ -5939,8 +6177,7 @@ def _set_family_disposition(
         )
     if until:
         raise ValueError(
-            "INVALID_REVIEW_ACTION: `until` is valid only for snooze, which is an "
-            "item action"
+            "INVALID_REVIEW_ACTION: `until` is valid only for snooze, which is an item action"
         )
     store = review_state_module.ReviewStateStore(vault_root)
     recorded = store.set_disposition(family, action, why=why)
@@ -5964,6 +6201,13 @@ def _dispositions_view(vault_root: Path) -> dict:
         record = dispositions[family]
         if not isinstance(record, dict):
             continue
+        if str(record.get("disposition") or "") not in {"quiet", "off"}:
+            # A slate-only row: the family carries a durable `quiet_offered_at`
+            # while its disposition is still `normal`. It is not a decision and
+            # must not be listed as one -- this view answers "what have I
+            # quieted", and a row saying `normal` would be an answer to a
+            # different question.
+            continue
         rows.append(
             {
                 "family": family,
@@ -5976,6 +6220,8 @@ def _dispositions_view(vault_root: Path) -> dict:
                 "manual_dismissals": counts.get(family, 0),
             }
         )
+    from . import envelope as envelope_module
+
     return {
         "dispositions": rows,
         "registered_families": sorted(review_state_module.registered_families()),
@@ -5985,6 +6231,21 @@ def _dispositions_view(vault_root: Path) -> dict:
             "still reviewable by naming its category. It is not evidence the family "
             "is clean."
         ),
+        # A structurally SEPARATE block, never rows mixed into the one above.
+        # The two vocabularies share the word `off` and mean different things by
+        # it, and a reader looking at one list has no way to tell which is which:
+        # a family `off` is a review-state decision about one KIND of signal, an
+        # envelope `off` is "the agent does not initiate this CLASS of action".
+        "envelope": {
+            **envelope_module.resolved(),
+            "note": (
+                "Action classes, not signal families. An envelope `off` means the "
+                "agent does not initiate that class on its own; it never blocks an "
+                "explicit request. A family `off` is the review-state decision "
+                "listed above. A ceiling is product law: no level, override or "
+                "adaptation authorizes behaviour above it."
+            ),
+        },
     }
 
 
@@ -6077,6 +6338,26 @@ def op_triage_memory(
             the write and asks the caller to refresh.
     """
     normalized_action = str(action or "").strip().lower()
+    if envelope_module.is_envelope_ref(ref):
+        if until is not None:
+            raise ValueError("INVALID_REVIEW_ACTION: envelope triage does not accept `until`")
+        if expected_fingerprint is not None:
+            raise ValueError(
+                "INVALID_REVIEW_ACTION: envelope triage does not accept `expected_fingerprint`"
+            )
+        action_class = envelope_module.parse_envelope_ref(ref)
+        if normalized_action == "reset":
+            envelope_module.reset_disposition(action_class)
+        else:
+            envelope_module.set_disposition(action_class, normalized_action)
+        served = envelope_module.resolved()["classes"][action_class]
+        return {
+            "class": action_class,
+            "ceiling": served["ceiling"],
+            "disposition": served["disposition"],
+            "provenance": served["provenance"],
+            "ref": envelope_module.envelope_ref(action_class),
+        }
     if review_state_module.is_family_ref(ref):
         # BEFORE every other namespace: a family reference names a KIND of
         # signal, so none of the item-shaped branches below can resolve it, and
@@ -6134,9 +6415,7 @@ def op_triage_memory(
         # suppresses the write-time warning. Its own pair ref (returned by the stance
         # write, and echoed on every annotated reason) addresses it directly.
         if normalized == "reopen":
-            orphan = contradiction_stance_module.clear_orphan_stance(
-                vault_root, ref=ref
-            )
+            orphan = contradiction_stance_module.clear_orphan_stance(vault_root, ref=ref)
             if orphan is not None:
                 return orphan
         raise
@@ -6190,9 +6469,7 @@ def op_triage_memory(
         }
     )
     state_resolved_only = [
-        category
-        for category in item.categories
-        if category == "entity_type_unregistered"
+        category for category in item.categories if category == "entity_type_unregistered"
     ]
     if state_resolved_only:
         result["state_resolved_only_categories"] = state_resolved_only
@@ -6310,9 +6587,7 @@ def op_connect_memory(
             note doesn't fail HEADING_NOT_FOUND. create_missing stays server-side
             only — it is not exposed on the edit_memory MCP tool."""
             try:
-                result = edit_module.edit(
-                    vault_root, create_missing_section=True, **kw
-                )
+                result = edit_module.edit(vault_root, create_missing_section=True, **kw)
             except edit_module.EditError as e:
                 msg = f"{e.code}: {e.reason}"
                 if getattr(e, "missing", None):
@@ -6469,7 +6744,7 @@ def op_adopt_vault(
             semantic_example_limit=semantic_example_limit,
         )
         _apply_batch_deltas(vault_root, _adopted_paths(result))
-    return result
+    return _carrying_due_state(vault_root, result)
 
 
 _ADOPTION_STUDIO_ACTIONS = (
@@ -6614,7 +6889,7 @@ def op_adoption_studio(
                     only_paths=only_paths,
                 )
                 _apply_batch_deltas(vault_root, _adoption_run_paths(applied))
-            return applied
+            return _carrying_due_state(vault_root, applied)
         if action == "cancel":
             return adoption_run_module.cancel(vault_root, run_id=run_id, why=why)
         if action == "finish":
@@ -6632,14 +6907,21 @@ def op_adoption_studio(
             )
         if action == "propose":
             return proposals_module.propose(vault_root, run_id=run_id, proposals=proposals or [])
-        # apply-proposal
-        return proposals_module.apply_proposal(
-            vault_root,
-            ref=ref,
-            expected_fingerprint=expected_fingerprint,
-            why=why,
-            expected_hash=expected_hash,
-        )
+        # apply-proposal. The other six registry actions are run bookkeeping or
+        # previews and deliberately do NOT carry: letting a `plan` preview
+        # deliver would burn the session's single change-only emission before
+        # the apply the caller is actually waiting on (design D2).
+        from . import due_state as due_state_module
+
+        with due_state_module.batch_scope(vault_root):
+            applied_proposal = proposals_module.apply_proposal(
+                vault_root,
+                ref=ref,
+                expected_fingerprint=expected_fingerprint,
+                why=why,
+                expected_hash=expected_hash,
+            )
+        return _carrying_due_state(vault_root, applied_proposal)
     except adoption_run_module.AdoptionRunError as exc:
         raise ValueError(f"{exc.code}: {exc.reason}") from exc
     except Exception as exc:  # structured proposal errors carry code/reason
@@ -6659,6 +6941,11 @@ def op_maintain_memory(
     rebuild_graph: bool = False,
     detail: Literal["actionable", "full"] = "actionable",
     legacy_sample_limit: _AuditSampleLimit = audit_module.DEFAULT_LEGACY_SAMPLE_LIMIT,
+    collection: str | None = None,
+    apply: bool | None = None,
+    plan_id: str | None = None,
+    source_snapshot: str | None = None,
+    why: str | None = None,
 ) -> dict:
     """Maintain vault health with explicit write-capable modes.
 
@@ -6668,6 +6955,17 @@ def op_maintain_memory(
     and sidecar drift from out-of-band edits — the same canonical default as
     `op_reconcile` itself (idempotent, non-destructive) — so it defaults to
     writing; pass `dry_run=true` to preview instead.
+
+    MCP, REST, and hosted callers may audit or preview with `dry_run=true`, but
+    write-mode maintenance is operator-only: run `exomem maintain --fix` or
+    `exomem maintain --reconcile` on the host. Remote write attempts return
+    `MAINTENANCE_REQUIRES_CLI` before acquiring the mutation boundary.
+
+    `mode="structured-files"` is the exception: it previews one Planning or
+    Records collection's manifest-declared human filenames and managed readable
+    bodies, including governed inbound-link rewrites. Preview is read-only;
+    apply requires its exact plan and source snapshot and commits atomically.
+    Durable identity and mutable state stay in frontmatter, not filenames.
 
     `mode="fix"` also collapses media sidecars that accumulated nested copies of
     themselves (audit category `duplicated_sidecar`, reportable on its own via
@@ -6679,7 +6977,7 @@ def op_maintain_memory(
     recovered text is only the fallback.
 
     Args:
-        mode: audit, fix, reconcile, or backfill-ids.
+        mode: audit, fix, reconcile, backfill-ids, or structured-files.
         categories: Optional audit category filter.
         dry_run: Report without writing when true. Defaults to true for
             fix/backfill-ids (safety net) and false for reconcile (matches
@@ -6689,9 +6987,50 @@ def op_maintain_memory(
             lineage and rebuild it from canonical Markdown. Default false.
         detail: Audit output detail: actionable (default) or full.
         legacy_sample_limit: Audit legacy-backlog sample count, from 0 to 50.
+        collection: One Planning or Records collection for structured-files.
+        apply: Omit for preview; true applies the exact reviewed plan.
+        plan_id: Exact structured-files preview identity required for apply.
+        source_snapshot: Exact structured-files preview snapshot required for apply.
+        why: Bounded audit reason required for structured-files apply.
     """
     if rebuild_graph and mode != "reconcile":
         raise ValueError("INVALID_MODE: rebuild_graph is valid only for reconcile")
+    if mode == "structured-files":
+        if (
+            not isinstance(collection, str)
+            or not collection.strip()
+            or categories is not None
+            or dry_run is not None
+            or rebuild_embeddings
+            or rebuild_graph
+            or detail != "actionable"
+            or legacy_sample_limit != audit_module.DEFAULT_LEGACY_SAMPLE_LIMIT
+        ):
+            raise ValueError("INVALID_ARGUMENTS: structured-files requires exactly one collection")
+        if apply is None:
+            if plan_id is not None or source_snapshot is not None or why is not None:
+                raise ValueError(
+                    "INVALID_ARGUMENTS: structured-files preview does not accept apply guards"
+                )
+            return structured_files_module.preview(vault_root, collection)
+        if apply is not True or plan_id is None or source_snapshot is None or why is None:
+            raise ValueError(
+                "INVALID_ARGUMENTS: structured-files apply requires true and exact preview guards"
+            )
+        from . import due_state as due_state_module
+
+        with due_state_module.batch_scope(vault_root):
+            migrated = structured_files_module.apply(
+                vault_root,
+                collection,
+                plan_id=plan_id,
+                source_snapshot=source_snapshot,
+                why=why,
+            )
+        # Renames and rendered bodies, not authored obligations, so no batch
+        # deltas. A verified replay commits nothing and the carrier's commit
+        # gate keeps its closed receipt shape untouched.
+        return _carrying_due_state(vault_root, migrated)
     if mode == "audit":
         return op_audit(
             vault_root,
@@ -6706,25 +7045,38 @@ def op_maintain_memory(
         # the whole projection: both are batches, and neither should be able to
         # deliver one counters block per file it touched.
         with due_state_module.batch_scope(vault_root):
-            return op_audit_fix(
+            report = op_audit_fix(
                 vault_root,
                 dry_run=True if dry_run is None else dry_run,
                 rebuild_embeddings=rebuild_embeddings,
             )
+            # `fix` has no full recompute of its own — unlike `reconcile`, which
+            # heals the whole projection — so without these deltas the block it
+            # carries would describe the vault as it was BEFORE the pass that
+            # just rewrote it (design D3, task 1.5).
+            _apply_batch_deltas(vault_root, _audit_fix_paths(report))
+        return _carrying_due_state(vault_root, report)
     if mode == "reconcile":
         with due_state_module.batch_scope(vault_root):
-            return op_reconcile(
+            # No batch deltas here on purpose: `op_reconcile` already runs
+            # `due_state.reconcile`, a full recompute, which is a strictly
+            # stronger settlement than a per-path delta (design D3, task 1.5).
+            report = op_reconcile(
                 vault_root,
                 dry_run=False if dry_run is None else dry_run,
                 rebuild_graph=rebuild_graph,
             )
+        return _carrying_due_state(vault_root, report)
     if mode == "backfill-ids":
         with due_state_module.batch_scope(vault_root):
-            return memory_refs_module.backfill_ids(
+            report = memory_refs_module.backfill_ids(
                 vault_root, dry_run=True if dry_run is None else dry_run
             )
+            _apply_batch_deltas(vault_root, list(report.get("updated") or []))
+        return _carrying_due_state(vault_root, report)
     raise ValueError(
-        "INVALID_MODE: maintain_memory mode must be audit, fix, reconcile, or backfill-ids"
+        "INVALID_MODE: maintain_memory mode must be audit, fix, reconcile, "
+        "backfill-ids, or structured-files"
     )
 
 
@@ -6742,8 +7094,9 @@ def op_schema_memory(
     proposal: dict | None = None,
     why: str | None = None,
     include_model_suggestions: bool = False,
+    context: _WorkflowContextArgument = None,
 ) -> dict:
-    """Infer, validate, diff, or save governed memory schemas.
+    """Infer, validate, diff, or save governed memory schemas and workflow contracts.
 
     Contracts describe recurring frontmatter fields, semantic blocks, and typed
     relations without changing ordinary write validation. Inference is read-only
@@ -6751,29 +7104,56 @@ def op_schema_memory(
     current content hash.
 
     Args:
-        operation: infer, validate, diff, or save-entity-types.
-        name: Lowercase contract slug; required only for `subject="contract"`.
-        subject: `contract`, `categories`, `relations`, or `traversal-profiles`.
+        operation: For `workflow-contracts`, exactly one of: inventory (no workflow
+            fields); inspect (name); validate (exactly one of name or proposal);
+            resolve (context plus at most one of name or proposal); preview (proposal,
+            optional name); save (proposal and why, optional name plus expected_hash
+            for updates); or refresh (name, expected_hash, and why). Other subjects
+            retain their existing operations.
+        name: A saved workflow key for inspect/refresh, validate as an alternative to
+            proposal, resolve (or `@standalone`), and optional preview/save update.
+        subject: `contract`, `categories`, `relations`, `traversal-profiles`, or
+            `workflow-contracts`. Workflow contracts support inventory, inspect,
+            validate, resolve, preview, save, and refresh with their exact argument matrix.
         project: Optional project scope for inference.
         page_type: Optional page-type scope for inference.
-        save: Persist an inferred proposal. Default false.
-        expected_hash: Required current hash when overwriting a saved contract.
+        save: Legacy inference flag. Ignored when false for workflow contracts and
+            refused when true; workflow writes use operation=`save`.
+        expected_hash: Required for workflow save updates and refresh; rejected by
+            every other workflow operation.
         strict: In validate mode, signal a failing CLI/CI outcome on findings.
         compare_to: In diff mode, compare to this saved contract instead of corpus reality.
-        proposal: Reviewed semantic-language, relation, or traversal-profile proposal.
-        why: Required audit reason for save-entity-types.
+        proposal: Required for workflow preview/save; validate and resolve accept it
+            as the exact alternative to `name`.
+        why: Required audit reason for workflow save/refresh and entity-type saves.
         include_model_suggestions: Request response-only optional relation suggestions.
+        context: Exact optional workflow resolve mapping. Its only keys are project,
+            domain, and activity; omit a key for unknown or set it null for known absent.
 
     Returns:
-        A structured profile/proposal, validation report, or contract diff.
+        A structured profile/proposal, validation report, contract diff, or workflow result.
     """
     operation = operation.strip().lower()
     subject = subject.strip().lower()
+    if subject == "workflow-contracts":
+        return _workflow_contract_schema_operation(
+            vault_root,
+            operation=operation,
+            name=name,
+            proposal=proposal,
+            expected_hash=expected_hash,
+            why=why,
+            context=context,
+            save=save,
+            project=project,
+            page_type=page_type,
+            strict=strict,
+            compare_to=compare_to,
+            include_model_suggestions=include_model_suggestions,
+        )
     if operation == "save-entity-types":
         if proposal is None or not isinstance(proposal, dict):
-            raise ValueError(
-                "INCOMPLETE_ENTITY_TYPE_PROPOSAL: save requires a reviewed proposal"
-            )
+            raise ValueError("INCOMPLETE_ENTITY_TYPE_PROPOSAL: save requires a reviewed proposal")
         if not why or not why.strip():
             raise ValueError("WHY_REQUIRED: save-entity-types requires why")
         findings = entity_types_module.validate_proposal(proposal)
@@ -6805,18 +7185,21 @@ def op_schema_memory(
                 page_type=page_type,
             )
             if save:
-                if proposal is None or not isinstance(proposal, dict) or not {
+                if (
+                    proposal is None
+                    or not isinstance(proposal, dict)
+                    or not {
                     "categories",
                     "kinds",
-                } <= set(proposal):
+                    }
+                    <= set(proposal)
+                ):
                     raise ValueError(
                         "INCOMPLETE_SEMANTIC_LANGUAGE_PROPOSAL: "
                         "save requires one reviewed categories-and-kinds document"
                     )
                 current = semantic_language_registry_module.load_registry(vault_root)
-                candidate = semantic_language_registry_module.load_registry(
-                    proposal=proposal
-                )
+                candidate = semantic_language_registry_module.load_registry(proposal=proposal)
                 registry_file_exists = semantic_language_registry_module.registry_path(
                     vault_root
                 ).exists()
@@ -6837,9 +7220,7 @@ def op_schema_memory(
                 )
             return result
         if save:
-            raise ValueError(
-                "INVALID_SCHEMA_OPERATION: save is supported only for infer"
-            )
+            raise ValueError("INVALID_SCHEMA_OPERATION: save is supported only for infer")
         if operation == "validate":
             return memory_schema_module.validate_category_registry(
                 vault_root,
@@ -6868,15 +7249,11 @@ def op_schema_memory(
                 {
                     "content_hash": before.content_hash,
                     "comparison": comparison,
-                    "registry_findings": [
-                        item.as_dict() for item in after.findings
-                    ],
+                    "registry_findings": [item.as_dict() for item in after.findings],
                 }
             )
             return result
-        raise ValueError(
-            "INVALID_SCHEMA_OPERATION: operation must be infer, validate, or diff"
-        )
+        raise ValueError("INVALID_SCHEMA_OPERATION: operation must be infer, validate, or diff")
     if subject == "relations":
         if operation == "infer":
             result = memory_schema_module.infer_relation_registry(
@@ -6887,7 +7264,9 @@ def op_schema_memory(
             )
             if save:
                 if proposal is None:
-                    raise ValueError("INCOMPLETE_RELATION_PROPOSAL: save requires a reviewed proposal")
+                    raise ValueError(
+                        "INCOMPLETE_RELATION_PROPOSAL: save requires a reviewed proposal"
+                    )
                 observed = {
                     item["raw_relation"]
                     for item in memory_schema_module.relation_observations(vault_root)
@@ -6931,7 +7310,9 @@ def op_schema_memory(
             result = memory_schema_module.infer_traversal_profiles(vault_root)
             if save:
                 if proposal is None:
-                    raise ValueError("INCOMPLETE_PROFILE_PROPOSAL: save requires a reviewed proposal")
+                    raise ValueError(
+                        "INCOMPLETE_PROFILE_PROPOSAL: save requires a reviewed proposal"
+                    )
                 result["saved"] = traversal_profiles_module.save_profiles(
                     vault_root, proposal, expected_hash=expected_hash
                 )
@@ -6964,7 +7345,9 @@ def op_schema_memory(
                 "changes": {
                     "added": sorted(set(after) - set(before)),
                     "removed": sorted(set(before) - set(after)),
-                    "modified": sorted(key for key in set(before) & set(after) if before[key] != after[key]),
+                    "modified": sorted(
+                        key for key in set(before) & set(after) if before[key] != after[key]
+                    ),
                 },
             }
         raise ValueError("INVALID_SCHEMA_OPERATION: operation must be infer, validate, or diff")
@@ -6990,9 +7373,7 @@ def op_schema_memory(
         raise ValueError("INVALID_SCHEMA_OPERATION: save is supported only for infer")
     contract, content_hash, path = memory_schema_module.load_contract(vault_root, name)
     if operation == "validate":
-        result = memory_schema_module.validate_contract(
-            vault_root, contract, strict=strict
-        )
+        result = memory_schema_module.validate_contract(vault_root, contract, strict=strict)
         result.update({"path": path, "content_hash": content_hash})
         return result
     if operation == "diff":
@@ -7020,6 +7401,186 @@ def op_schema_memory(
         )
         return result
     raise ValueError("INVALID_SCHEMA_OPERATION: operation must be infer, validate, or diff")
+
+
+def _workflow_contract_schema_operation(
+    vault_root: Path,
+    *,
+    operation: str,
+    name: str | None,
+    proposal: dict | None,
+    expected_hash: str | None,
+    why: str | None,
+    context: Mapping[str, str | None] | None,
+    save: bool,
+    project: str | None,
+    page_type: str | None,
+    strict: bool,
+    compare_to: str | None,
+    include_model_suggestions: bool,
+) -> dict:
+    """Route the workflow subject through its one code-owned family implementation."""
+    family = workflow_contracts_module.registered_families()[workflow_contracts_module.FAMILY]
+    if (
+        save
+        or project is not None
+        or page_type is not None
+        or strict
+        or compare_to is not None
+        or include_model_suggestions
+    ):
+        return {"resolved": False, "code": "WORKFLOW_CONTRACT_INVALID_ARGUMENTS"}
+    invalid = {"resolved": False, "code": "WORKFLOW_CONTRACT_INVALID_ARGUMENTS"}
+
+    def saved_name(value: object) -> bool:
+        return workflow_contracts_module.is_saved_contract_key(value)
+
+    try:
+        if operation == "inventory":
+            if (
+                name is not None
+                or proposal is not None
+                or expected_hash is not None
+                or why is not None
+                or context is not None
+            ):
+                return invalid
+            return {
+                "subject": "workflow-contracts",
+                **workflow_contracts_module.inventory_contracts(vault_root),
+            }
+        if operation == "inspect":
+            if (
+                not saved_name(name)
+                or proposal is not None
+                or expected_hash is not None
+                or why is not None
+                or context is not None
+            ):
+                return invalid
+            return {
+                "subject": "workflow-contracts",
+                **workflow_contracts_module.inspect_contract(vault_root, name),
+            }
+        if operation == "validate":
+            has_name = name is not None
+            has_proposal = proposal is not None
+            if (
+                expected_hash is not None
+                or why is not None
+                or context is not None
+                or has_name == has_proposal
+                or (name is not None and not saved_name(name))
+            ):
+                return invalid
+            if has_name:
+                return {
+                    "subject": "workflow-contracts",
+                    **workflow_contracts_module.validate_saved_contract(vault_root, name),
+                }
+            try:
+                contract = family.parser(proposal or {})
+            except workflow_contracts_module.WorkflowContractError as error:
+                return {
+                    "subject": "workflow-contracts",
+                    "valid": False,
+                    "findings": [{"code": error.code}],
+                }
+            return {
+                "subject": "workflow-contracts",
+                "valid": True,
+                "findings": [],
+                "proposal": contract.as_dict(),
+                "fingerprint": contract.fingerprint,
+            }
+        if operation == "resolve":
+            if (
+                context is None
+                or expected_hash is not None
+                or why is not None
+                or (name is not None and name != "@standalone" and not saved_name(name))
+            ):
+                return invalid
+            result = {
+                "subject": "workflow-contracts",
+                **family.resolver(
+                    vault_root, context, name=name, proposal=proposal
+                ),
+            }
+            if result.get("resolved"):
+                from . import prominence as prominence_module
+
+                active_prominence = prominence_module.resolve()
+                result["active_prominence"] = active_prominence
+                result["effective_capture"] = prominence_module.effective_capture(
+                    result["decision"]["capture"], active_prominence
+                )
+            return result
+        if operation == "preview":
+            if (
+                proposal is None
+                or expected_hash is not None
+                or why is not None
+                or context is not None
+                or (name is not None and not saved_name(name))
+            ):
+                return invalid
+            contract = family.parser(proposal)
+            path, content, _guard, current_hash = workflow_contracts_module.prepare_contract_save(
+                vault_root, contract, name=name, require_expected_hash=False
+            )
+            return {
+                "subject": "workflow-contracts",
+                "content": content,
+                "current_hash": current_hash,
+                "fingerprint": contract.fingerprint,
+                "path": path.relative_to(vault_root).as_posix(),
+            }
+        if operation == "save":
+            if (
+                proposal is None
+                or not why
+                or context is not None
+                or (name is not None and expected_hash is None)
+                or (name is None and expected_hash is not None)
+                or (name is not None and not saved_name(name))
+            ):
+                return invalid
+            contract = family.parser(proposal)
+            result = {
+                "subject": "workflow-contracts",
+                "saved": workflow_contracts_module.save_contract(
+                    vault_root, contract, why=why, name=name, expected_hash=expected_hash
+                ),
+            }
+            from .writer_lease import mark_active_mutation_committed
+
+            mark_active_mutation_committed()
+            return result
+        if operation == "refresh":
+            if (
+                not saved_name(name)
+                or proposal is not None
+                or not expected_hash
+                or not why
+                or context is not None
+            ):
+                return invalid
+            inspected = workflow_contracts_module.inspect_contract(vault_root, name)
+            contract = family.parser(inspected["contract"])
+            result = {
+                "subject": "workflow-contracts",
+                "saved": workflow_contracts_module.save_contract(
+                    vault_root, contract, why=why, name=name, expected_hash=expected_hash
+                ),
+            }
+            from .writer_lease import mark_active_mutation_committed
+
+            mark_active_mutation_committed()
+            return result
+    except workflow_contracts_module.WorkflowContractError as error:
+        return {"resolved": False, "code": error.code}
+    return invalid
 
 
 def op_reclassify_source(
@@ -7198,9 +7759,7 @@ def op_manage_memory_file(
         )
     )
     if operation not in {"create", "append"} and (
-        creation_review_requested
-        or append_review_requested
-        or shared_review_requested
+        creation_review_requested or append_review_requested or shared_review_requested
     ):
         raise ValueError(
             "INVALID_FILE_OPERATION: validation and review fields require "
@@ -7212,11 +7771,12 @@ def op_manage_memory_file(
         )
     if operation != "append" and append_review_requested:
         raise ValueError(
-            "INVALID_FILE_OPERATION: semantic_transition_token requires "
-            "operation='append'"
+            "INVALID_FILE_OPERATION: semantic_transition_token requires operation='append'"
         )
     if operation == "list":
-        return op_list_directory(vault_root, path=path, recursive=recursive, include_hidden=include_hidden)
+        return op_list_directory(
+            vault_root, path=path, recursive=recursive, include_hidden=include_hidden
+        )
     if operation == "create":
         return op_create_file(
             vault_root,
@@ -7272,9 +7832,7 @@ def op_manage_memory_file(
     if operation in {"reclassify", "propose-reclassification"}:
         target = path or old_path
         if not target:
-            raise ValueError(
-                "INVALID_PATH: reclassify requires `path` naming the captured source"
-            )
+            raise ValueError("INVALID_PATH: reclassify requires `path` naming the captured source")
         if operation == "propose-reclassification":
             return op_propose_reclassification(
                 vault_root, path=target, source_kind=source_kind, domain=domain
@@ -7307,7 +7865,15 @@ def op_manage_memory_file(
 def op_record_memory(
     vault_root: Path,
     action: Literal[
-        "describe", "validate", "inspect", "query", "create", "append", "update", "revise", "rebaseline"
+        "describe",
+        "validate",
+        "inspect",
+        "query",
+        "create",
+        "append",
+        "update",
+        "revise",
+        "rebaseline",
     ],
     collection: str | None = None,
     manifest_path: str | None = None,
@@ -7463,6 +8029,7 @@ def op_query_dataset(
         date_column=date_column,
     )
 
+
 def remember_description(project_keys_hint: str) -> str:
     """The `remember` MCP description with the live project-key hint substituted."""
     return (op_remember.__doc__ or "").replace("__PROJECT_KEYS_HINT__", project_keys_hint)
@@ -7594,6 +8161,7 @@ def op_govern_memory(
         **{name: value for name, value in values.items() if value is not None},
     )
 
+
 def note_description(project_keys_hint: str) -> str:
     """The `note` MCP description with the live project-key hint substituted in.
 
@@ -7609,6 +8177,8 @@ def note_description(project_keys_hint: str) -> str:
 # --------------------------------------------------------------------------- #
 # (name, leaf, tier, cli_writes, needs_schema, cli_positional, surfaces)
 _MISSING_SELECTOR_DEFAULT = object()
+
+
 def validate_process_media_operation(operation: Any) -> None:
     """Raise the product command's existing public selector error."""
     if operation not in {"process", "status", "retry"}:
@@ -7620,9 +8190,7 @@ def validate_process_media_operation(operation: Any) -> None:
         )
 
 
-def _resolved_invocation_selector(
-    command: Command, kwargs: dict[str, Any], selector: str
-) -> Any:
+def _resolved_invocation_selector(command: Command, kwargs: dict[str, Any], selector: str) -> Any:
     if selector in kwargs:
         return kwargs[selector]
     try:
@@ -7672,6 +8240,8 @@ def invocation_is_read_only(command: Command, kwargs: dict[str, Any]) -> bool:
             return kwargs.get("dry_run") is not False
         if adapter == "dry-run-opt-in":
             return kwargs.get("dry_run") is True
+        if adapter == "apply-conditional":
+            return kwargs.get("apply") is not True
         return adapter != "mutation"
     if command.name == "edit_memory":
         if kwargs.get("validate_only") is True:
@@ -7691,7 +8261,14 @@ def invocation_is_read_only(command: Command, kwargs: dict[str, Any]) -> bool:
 
 
 _PRODUCT_ACTIONS: tuple[str, ...] = (
-    "save", "adopt", "ask", "prove", "review", "update", "connect", "record"
+    "save",
+    "adopt",
+    "ask",
+    "prove",
+    "review",
+    "update",
+    "connect",
+    "record",
 )
 _SIMPLE_ACTIONS: tuple[str, ...] = (
     "ask",
@@ -7779,7 +8356,10 @@ _SIMPLE_ACTION_DEFS: dict[str, dict] = {
         "intent": "Check vault health and repair drift only when explicitly requested.",
         "route": {"tool": "maintain_memory", "args": {"mode": "audit"}},
         "fix_route": {"tool": "maintain_memory", "args": {"mode": "fix", "dry_run": False}},
-        "reconcile_route": {"tool": "maintain_memory", "args": {"mode": "reconcile", "dry_run": False}},
+        "reconcile_route": {
+            "tool": "maintain_memory",
+            "args": {"mode": "reconcile", "dry_run": False},
+        },
         "safety": "read-only by default; write-capable fixes require explicit flags",
         "advanced": [
             "doctor",
@@ -7825,9 +8405,21 @@ _PRODUCT_METADATA: dict[str, dict] = {
     "link": {"surface": "primary", "actions": ("connect", "save"), "first_run_safe": False},
     "suggest_links": {"surface": "primary", "actions": ("connect", "ask"), "first_run_safe": True},
     "graph_context": {"surface": "primary", "actions": ("ask", "connect"), "first_run_safe": True},
-    "suggest_relations": {"surface": "primary", "actions": ("connect", "ask"), "first_run_safe": True},
-    "propose_compilation": {"surface": "primary", "actions": ("review", "save"), "first_run_safe": True},
-    "provenance_report": {"surface": "advanced", "actions": ("ask", "prove"), "first_run_safe": True},
+    "suggest_relations": {
+        "surface": "primary",
+        "actions": ("connect", "ask"),
+        "first_run_safe": True,
+    },
+    "propose_compilation": {
+        "surface": "primary",
+        "actions": ("review", "save"),
+        "first_run_safe": True,
+    },
+    "provenance_report": {
+        "surface": "advanced",
+        "actions": ("ask", "prove"),
+        "first_run_safe": True,
+    },
     "evolution": {"surface": "advanced", "actions": ("ask", "review"), "first_run_safe": True},
     "reconcile": {"surface": "advanced", "actions": ("update",), "first_run_safe": False},
     "audit_fix": {"surface": "advanced", "actions": ("review", "update"), "first_run_safe": False},
@@ -7901,7 +8493,9 @@ def _build_commands() -> tuple[Command, ...]:
         if name == "note":
             # Keep the registry description (OpenAPI/help) free of the MCP-only
             # placeholder; the live-hint substitution happens at MCP registration.
-            desc = desc.replace("__PROJECT_KEYS_HINT__", "(any slug; unknown keys auto-register on first use)")
+            desc = desc.replace(
+                "__PROJECT_KEYS_HINT__", "(any slug; unknown keys auto-register on first use)"
+            )
         cmds.append(
             Command(
                 name=name,
@@ -8290,9 +8884,7 @@ def _build_product_commands() -> tuple[Command, ...]:
         skip = 2 if needs_schema else 1
         desc = leaf.__doc__ or ""
         params = _derive_params(leaf, skip=skip, positional=positional)
-        response_detail = (
-            "full" if name == "govern_memory" else "compact" if writes else None
-        )
+        response_detail = "full" if name == "govern_memory" else "compact" if writes else None
         if name == "edit_memory":
             params = tuple(
                 Param(
@@ -8644,17 +9236,13 @@ PRODUCT_SURFACE_PROFILES = MappingProxyType(
 
 def commands_for(surface: str, *, expose_tier2: bool = True) -> tuple[Command, ...]:
     """Canonical implementation commands exposed by the old primitive registry."""
-    return tuple(
-        c for c in COMMANDS if surface in c.surfaces and (expose_tier2 or c.tier == 1)
-    )
+    return tuple(c for c in COMMANDS if surface in c.surfaces and (expose_tier2 or c.tier == 1))
 
 
 def product_commands_for(surface: str, *, expose_tier2: bool = True) -> tuple[Command, ...]:
     """Product commands exposed on a public surface, honoring tier-2 opt-out."""
     return tuple(
-        c
-        for c in PRODUCT_COMMANDS
-        if surface in c.surfaces and (expose_tier2 or c.tier == 1)
+        c for c in PRODUCT_COMMANDS if surface in c.surfaces and (expose_tier2 or c.tier == 1)
     )
 
 
@@ -8676,9 +9264,7 @@ def product_commands_for_profile(
             raise RuntimeError(
                 f"product surface profile {profile!r} references missing command {name!r}"
             )
-        if (command.tier != 1 and not definition.expose_tier2) or (
-            surface not in command.surfaces
-        ):
+        if (command.tier != 1 and not definition.expose_tier2) or (surface not in command.surfaces):
             raise RuntimeError(
                 f"product surface profile {profile!r} cannot expose {name!r} on {surface!r}"
             )
@@ -8695,9 +9281,7 @@ def validate_product_registry() -> dict:
         raise RuntimeError(f"product command route(s) reference unknown leaves: {sorted(unknown)}")
 
     covered = route_refs & canonical
-    public_canonical = {
-        c.name for c in COMMANDS if c.surfaces & _MCRC
-    }
+    public_canonical = {c.name for c in COMMANDS if c.surfaces & _MCRC}
     missing = public_canonical - covered
     if missing:
         raise RuntimeError(f"canonical capability missing product route: {sorted(missing)}")
@@ -8733,8 +9317,7 @@ def _active_bootstrap_descriptor() -> capabilities_module.ActiveSurfaceDescripto
         profile="canonical-full-product",
         tier2_enabled=True,
         product_commands=tuple(
-            command.name
-            for command in product_commands_for("mcp", expose_tier2=True)
+            command.name for command in product_commands_for("mcp", expose_tier2=True)
         ),
     )
 
@@ -8758,9 +9341,7 @@ def product_tool_catalog(
         "first_run_safe": [c.name for c in selected if c.first_run_safe],
         "routes": {
             c.name: [
-                route
-                for route in c.routes
-                if callable_tools is None or route in callable_tools
+                route for route in c.routes if callable_tools is None or route in callable_tools
             ]
             for c in selected
         },
@@ -8781,9 +9362,7 @@ def _bootstrap_known_callable_names() -> frozenset[str]:
     )
 
 
-def _mentions_unavailable_callable(
-    value: str, unavailable: frozenset[str]
-) -> bool:
+def _mentions_unavailable_callable(value: str, unavailable: frozenset[str]) -> bool:
     for name in unavailable:
         escaped = re.escape(name)
         if "_" in name or name in PRODUCT_PUBLIC_NAMES:
@@ -8824,17 +9403,13 @@ def _filter_bootstrap_payload(
     """Remove recommendations that the trusted active surface cannot execute."""
 
     unavailable = _bootstrap_known_callable_names() - descriptor.callable_commands
-    unavailable_products = frozenset(PRODUCT_PUBLIC_NAMES) - frozenset(
-        descriptor.product_commands
-    )
+    unavailable_products = frozenset(PRODUCT_PUBLIC_NAMES) - frozenset(descriptor.product_commands)
     if not unavailable and not unavailable_products:
         return payload
 
     def filter_value(value: object) -> object:
         if isinstance(value, str):
-            if value in unavailable_products or _mentions_unavailable_callable(
-                value, unavailable
-            ):
+            if value in unavailable_products or _mentions_unavailable_callable(value, unavailable):
                 return _DROP_BOOTSTRAP_VALUE
             return value
         if isinstance(value, (list, tuple)):
@@ -8849,9 +9424,7 @@ def _filter_bootstrap_payload(
             if isinstance(advertised_tool, str) and advertised_tool in unavailable:
                 return _DROP_BOOTSTRAP_VALUE
             call = value.get("call")
-            if isinstance(call, str) and _mentions_unavailable_callable(
-                call, unavailable
-            ):
+            if isinstance(call, str) and _mentions_unavailable_callable(call, unavailable):
                 return _DROP_BOOTSTRAP_VALUE
             route = value.get("route")
             if isinstance(route, str) and route in unavailable:
@@ -8924,9 +9497,7 @@ def simple_action_catalog(
         definition = _SIMPLE_ACTION_DEFS[action]
         missing = sorted(_catalog_route_tools(definition) - known_commands)
         if missing:
-            raise RuntimeError(
-                f"simple action {action!r} references unknown route(s): {missing}"
-            )
+            raise RuntimeError(f"simple action {action!r} references unknown route(s): {missing}")
         out[action] = {
             "intent": definition["intent"],
             "safety": definition["safety"],
@@ -8941,9 +9512,7 @@ def simple_action_catalog(
             out[action]["route"] = primary_route
         else:
             out[action]["available"] = False
-            out[action]["unavailable_reason"] = _unavailable_route_reason(
-                primary_route["tool"]
-            )
+            out[action]["unavailable_reason"] = _unavailable_route_reason(primary_route["tool"])
             out[action]["unavailable_command"] = primary_route["tool"]
         for key in (
             "deep_route",
@@ -8954,8 +9523,7 @@ def simple_action_catalog(
             "reconcile_route",
         ):
             if key in definition and (
-                available_tools is None
-                or definition[key]["tool"] in available_tools
+                available_tools is None or definition[key]["tool"] in available_tools
             ):
                 out[action][key] = definition[key]
 
@@ -8986,10 +9554,7 @@ def product_front_door_catalog(
     available_tools: frozenset[str] | set[str] | None = None,
 ) -> dict:
     """Map simple product verbs to the typed tools that enforce governance."""
-    out = {
-        action: {"primary_tools": [], "advanced_tools": []}
-        for action in _PRODUCT_ACTIONS
-    }
+    out = {action: {"primary_tools": [], "advanced_tools": []} for action in _PRODUCT_ACTIONS}
     for command in PRODUCT_COMMANDS:
         if available_tools is not None and command.name not in available_tools:
             continue
@@ -8997,11 +9562,21 @@ def product_front_door_catalog(
         for action in command.product_actions:
             if action in out:
                 out[action][bucket].append(command.name)
-    out["adopt"]["contract"] = "scan-only by default; write modes preserve originals and stay under Knowledge Base/"
-    out["ask"]["contract"] = "retrieve with citations; prefer compiled notes, then sources/evidence for provenance"
-    out["prove"]["contract"] = "use Evidence/proof for cases, claims, disputes, warranties, records, or other proof contexts"
-    out["review"]["contract"] = "surface review queues and lint findings; do not auto-change conclusions"
-    out["save"]["contract"] = "raw material becomes Sources; durable conclusions become governed notes/entities"
+    out["adopt"]["contract"] = (
+        "scan-only by default; write modes preserve originals and stay under Knowledge Base/"
+    )
+    out["ask"]["contract"] = (
+        "retrieve with citations; prefer compiled notes, then sources/evidence for provenance"
+    )
+    out["prove"]["contract"] = (
+        "use Evidence/proof for cases, claims, disputes, warranties, records, or other proof contexts"
+    )
+    out["review"]["contract"] = (
+        "surface review queues and lint findings; do not auto-change conclusions"
+    )
+    out["save"]["contract"] = (
+        "raw material becomes Sources; durable conclusions become governed notes/entities"
+    )
     out["update"]["contract"] = "edit or supersede with an explicit reason; keep history"
     out["connect"]["contract"] = "link entities and related notes so the graph compounds"
 

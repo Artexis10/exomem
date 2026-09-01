@@ -15,13 +15,17 @@ name: cross-platform
 # with WinError 32 -- a failure mode Linux does not have. Four such defects were
 # found manually against this suite before this lane existed.
 #
-# Promote to a required gate once it is green across a few merges. An advisory
-# lane that stays advisory forever is just noise.
+# It is intentionally a diagnostic lane: nightly and manual only. Ordinary and
+# release PRs already exercise the focused native-NTFS contract in the required
+# workflow, while release PRs additionally run the full Linux confidence lanes.
+# Repeating eight advisory shards there spends the repository runner allowance
+# and lets a platform-wide diagnostic failure block an otherwise proven patch.
 
 on:
-  push:
-    branches: [main]
   pull_request:
+  schedule:
+    - cron: "41 2 * * *"
+  workflow_dispatch:
 
 concurrency:
   group: cross-platform-${{ github.event.pull_request.number || github.ref }}
@@ -29,49 +33,18 @@ concurrency:
 
 jobs:
   suite:
-    name: tests (${{ matrix.os }}, py3.13, shard ${{ matrix.shard }}/4)
-    # Not for the release bot's version-bump PR. Its diff is a version string
-    # and a changelog; it carries no code this lane could say anything about,
-    # and `main` runs the lane on push immediately after it merges. The bot
-    # force-pushes that branch on every merge to main -- twenty times in one
-    # release cycle here -- and each force-push relaunched the whole matrix
-    # into a queue that real PRs were waiting in. macOS runners cap at five
-    # concurrent jobs for a public repo on the free tier, so those launches
-    # were not free capacity; they were the queue.
+    name: tests (${{ matrix.os }}, py3.13, shard ${{ matrix.shard }}/6)
+    # Pull requests retain one visible, cheap skipped check; only scheduled and
+    # explicit manual runs spend the eight-runner diagnostic matrix.
     if: >-
-      github.event_name != 'pull_request'
-      || !startsWith(github.head_ref, 'release-please--branches--')
+      github.event_name == 'schedule'
+      || github.event_name == 'workflow_dispatch'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        # macOS on merge; Windows on everything.
-        #
-        # These two runners are not equally scarce and do not buy equally much.
-        # A public repo on the free tier may run 20 jobs at once but only FIVE
-        # on macOS, so a four-shard macOS matrix cannot fit twice: two open PRs
-        # want eight macOS jobs, the second run's shards sit queued, and because
-        # a run's jobs are scheduled together the whole second run stalls behind
-        # the first. Going to four shards halved one run's wall clock and
-        # serialised the runs against each other -- with three PRs in flight the
-        # queue got longer, not shorter. Measured here: 16 runs queued behind 2
-        # in progress, both of them this lane.
-        #
-        # What macOS buys before a merge is also the smaller half. Everything
-        # this lane's header describes -- CPython opening files without
-        # FILE_SHARE_DELETE, WinError 32 refusing os.replace, backslash
-        # separators reaching a dict key -- is Windows behaviour, and Windows is
-        # where every defect this lane has actually caught has been. macOS
-        # shares POSIX file semantics and path separators with the ubuntu lane
-        # in ci.yml that already runs on every PR, so its marginal coverage
-        # pre-merge is thin. Paying the scarcest runner for the thinnest
-        # coverage is backwards.
-        #
-        # So PRs get Windows, where the defects are and where the cap is not,
-        # and pushes to main get both. No commit stops reaching macOS; it
-        # reaches it one merge later, on a lane that is advisory by design.
-        os: ${{ github.event_name == 'pull_request' && fromJSON('["windows-latest"]') || fromJSON('["windows-latest", "macos-latest"]') }}
+        os: [windows-latest, macos-latest]
         # Four shards, matching the Linux lane. This lane still exists to
         # expose platform behaviour rather than to be the fastest path to a
         # result -- but two shards made it the SLOWEST path by a wide margin: a
@@ -80,7 +53,7 @@ jobs:
         # neutral cost. It is the feedback delay on every change to this repo,
         # and it is paid on platforms whose defects are the hardest to
         # reproduce locally, which is exactly where a slow loop hurts most.
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -135,16 +108,20 @@ jobs:
       # same modules again in this Windows matrix pushed a shard past its 45m
       # session cap; macOS still gets them here, and Linux keeps its ordinary
       # CI coverage.
-      # `--session-timeout` is 55 min inside a 60 min job -- the same five-minute
-      # margin ci.yml leaves (1500s session in a 30 min job). At 2700s the cap sat
-      # below normal Windows runtime rather than above it: shards on main measured
-      # 38:40, 38:57, 42:58 and 45:44 against a 45:00 cap, so whichever crossed it
-      # reported `2929 passed, 226 skipped, 0 failed in 45:02` and then exit 1.
-      # Those were a clock, not a defect, and they read as a red main for two days.
-      # The cap stays below the job budget on purpose: it still catches a genuine
-      # hang, and pytest prints a summary where a killed job prints nothing.
-      # Every flag below lives inside a folded `>-` scalar, so a `#` there is part
-      # of the command and comments out the rest of it. Explanations go here.
+      # Six shards, not four, and the reason is the durations file: it records
+      # Linux times, and this is the lane that does not run on Linux. The
+      # predicted busiest four-way shard is 1385s, while Windows sessions here
+      # measured 2481s, 2449s and 2595s -- a platform factor of 1.81. So a
+      # four-way split needs 3763s to hold ci.yml's 1.5x headroom rule, which
+      # does not fit a 60 minute job at all; the cap was not too low so much as
+      # the split was too coarse. At six the predicted Windows shard is ~1672s
+      # and the existing 2700s cap already carries 1.61x, so the timeout stays
+      # where it is. This lane is nightly and manual only (#787), so the two
+      # extra runners per platform are spent once a night rather than per PR.
+      #
+      # Every flag below lives inside a folded `>-` scalar, so a `#` there is
+      # part of the command and comments out the rest of it. Explanations go
+      # here.
       - name: Run tests (lean — BM25/keyword, server media extraction off)
         env:
           KB_MCP_DISABLE_EMBEDDINGS: "1"
@@ -161,11 +138,11 @@ jobs:
           --deselect
           tests/test_governance_overhead.py::test_scrubber_throughput_under_budget
           ${{ startsWith(matrix.os, 'windows') && '--ignore=tests/test_held_fs_contract.py --ignore=tests/test_held_fs_windows.py --ignore=tests/test_reserved_admin_paths.py --ignore=tests/test_mutation_concurrency.py --ignore=tests/test_windows_path_alias_guard.py' || '' }}
-          --splits=4
+          --splits=6
           --group=${{ matrix.shard }}
           --splitting-algorithm=least_duration
           --durations-path=.test_durations.json
-          --session-timeout=3300
+          --session-timeout=2700
           --durations=50
           --durations-min=1
           --junitxml=test-results/junit-${{ matrix.os }}-shard-${{ matrix.shard }}.xml

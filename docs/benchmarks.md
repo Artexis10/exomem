@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Measured retrieval quality
 
 exomem ships a golden-set eval harness, so retrieval quality is a number you can

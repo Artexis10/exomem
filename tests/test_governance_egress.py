@@ -61,7 +61,7 @@ def write_scope(
     target = _gov_dir(vault) / "scopes" / "patterns.yaml"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(
-        f"governance_version: 1\nid: {SCOPE_ID}\nname: {name}\npaths: [\"{paths}\"]\n"
+        f'governance_version: 1\nid: {SCOPE_ID}\nname: {name}\npaths: ["{paths}"]\n'
         + ("default_deny: true\n" if default_deny else ""),
         encoding="utf-8",
     )
@@ -77,7 +77,7 @@ def write_rule(
     target = _gov_dir(vault) / "rules" / "patterns-external.yaml"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(
-        f"governance_version: 1\nid: {RULE_ID}\nscope_ids: [\"{SCOPE_ID}\"]\n"
+        f'governance_version: 1\nid: {RULE_ID}\nscope_ids: ["{SCOPE_ID}"]\n'
         f"audience: {audience}\nceiling: {ceiling}\n{extra}",
         encoding="utf-8",
     )
@@ -90,7 +90,7 @@ def write_broken_policy(vault: Path) -> None:
     target = _gov_dir(vault) / "rules" / "patterns-external.yaml"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(
-        f"governance_version: 1\nid: {RULE_ID}\nscope_ids: [\"{SCOPE_ID}\"]\n"
+        f'governance_version: 1\nid: {RULE_ID}\nscope_ids: ["{SCOPE_ID}"]\n'
         f"audience: {EXTERNAL}\nceiling: 9\n",
         encoding="utf-8",
     )
@@ -420,9 +420,7 @@ def _read_alias_surface(vault: Path, *, path: str, surface: str) -> object:
         ("leading_slash", f"/{RESTRICTED_PATH}"),
     ],
 )
-def test_a_withheld_path_is_recognised_in_every_reference_form(
-    form: str, value: str
-) -> None:
+def test_a_withheld_path_is_recognised_in_every_reference_form(form: str, value: str) -> None:
     """M14: `_names_withheld` compared raw strings, so a withheld page
     referenced with an anchor, as a wikilink, or in `exomem://` citation form
     survived in a released payload — leaving a permitted page as an existence
@@ -692,9 +690,7 @@ def test_op_find_never_leaks_a_withheld_path_in_graph_provenance(vault: Path) ->
 # --------------------------------------------------------------------------
 
 
-def test_find_hot_cache_stays_principal_free(
-    vault: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_find_hot_cache_stays_principal_free(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Two audiences, second call served from the hot cache: decisions are
     recomputed per request and NO cached candidate copy carries a prior
     audience's decision."""
@@ -721,9 +717,7 @@ def test_find_hot_cache_stays_principal_free(
     assert RESTRICTED_PATH in [h["path"] for h in second_hits]
 
     # Every Hit sitting in the shared hot cache is principal-free.
-    cached_hits = [
-        hit for cached in find_module._FIND_CACHE.values() for hit in cached
-    ]
+    cached_hits = [hit for cached in find_module._FIND_CACHE.values() for hit in cached]
     assert cached_hits, "expected the hot cache to be populated"
     assert all(getattr(hit, "decision", None) is None for hit in cached_hits)
     assert all("referents" not in hit.as_dict() for hit in cached_hits)
@@ -845,9 +839,7 @@ def test_referents_drop_tombstoned_entities_and_evidence_even_when_policy_is_emp
 
     assert guarded is not None
     assert guarded["resolved"] == []
-    assert guarded["candidates"][0]["evidence"] == [
-        {"kind": "attribute", "matched": ["friend"]}
-    ]
+    assert guarded["candidates"][0]["evidence"] == [{"kind": "attribute", "matched": ["friend"]}]
     assert tombstoned_entity not in str(guarded)
     assert tombstoned_anchor not in str(guarded)
 
@@ -859,9 +851,7 @@ def test_referents_release_decisions_are_receipted(vault: Path) -> None:
     block = {
         "status": "resolved",
         "entity_type": "person",
-        "resolved": [
-            {"path": RESTRICTED_PATH, "title": "Hidden", "evidence": []}
-        ],
+        "resolved": [{"path": RESTRICTED_PATH, "title": "Hidden", "evidence": []}],
         "candidates": [{"path": OPEN_PATH, "title": "Open", "evidence": []}],
         "reasons": {},
     }
@@ -1193,10 +1183,7 @@ def test_verified_session_grant_cannot_cross_into_an_overlapping_scope(
     write_scope(vault)
     write_rule(vault, ceiling=egress.LEVEL_NONE)
     (_gov_dir(vault) / "scopes" / "overlap.yaml").write_text(
-        "governance_version: 1\n"
-        f"id: {second_scope}\n"
-        "name: Overlap\n"
-        f'paths: ["{PATTERNS_GLOB}"]\n',
+        f'governance_version: 1\nid: {second_scope}\nname: Overlap\npaths: ["{PATTERNS_GLOB}"]\n',
         encoding="utf-8",
     )
     (_gov_dir(vault) / "rules" / "overlap-external.yaml").write_text(
@@ -1266,6 +1253,204 @@ def test_verified_session_grant_cannot_cross_into_an_overlapping_scope(
 
     assert result.hits == []
     assert result.notices == []
+
+
+def test_personal_and_delegated_overlap_meets_across_every_product_family(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One dual-member fixture cannot borrow the more permissive compartment."""
+    from record_fixtures import copy_vehicle_maintenance_fixture
+
+    from exomem.cli_ops import OpError
+    from exomem.writer_lease import invoke_command
+
+    delegated_scope = "01ARZ3NDEKTSV4RRFFQ69G5FC0"
+    root = _gov_dir(vault)
+    (root / "scopes").mkdir(parents=True, exist_ok=True)
+    (root / "grants").mkdir(parents=True, exist_ok=True)
+    shared_paths = 'paths: ["Notes/Patterns/**", "Records/**"]\n'
+    (root / "scopes" / "personal.yaml").write_text(
+        "governance_version: 1\n"
+        f"id: {SCOPE_ID}\n"
+        "name: Personal compartment\n"
+        "default_deny: true\n"
+        "constraint: Personal review is required.\n"
+        + shared_paths,
+        encoding="utf-8",
+    )
+    (root / "scopes" / "delegated.yaml").write_text(
+        "governance_version: 1\n"
+        f"id: {delegated_scope}\n"
+        "name: Delegated compartment\n"
+        "default_deny: true\n"
+        "constraint: Delegated review is required.\n"
+        + shared_paths,
+        encoding="utf-8",
+    )
+    (root / "grants" / "personal.yaml").write_text(
+        "governance_version: 1\n"
+        f"id: {GRANT_ID}\n"
+        "kind: standing\n"
+        f'scope_ids: ["{SCOPE_ID}"]\n'
+        f"audience: {EXTERNAL}\n"
+        "ceiling: 6\n",
+        encoding="utf-8",
+    )
+
+    note = vault / RESTRICTED_PATH
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text(
+        "---\ntype: pattern\ntitle: Dual member\n---\n"
+        "dual-member-private-sentinel\n",
+        encoding="utf-8",
+    )
+    dataset_path = "Knowledge Base/Notes/Patterns/dual-member.csv"
+    (vault / dataset_path).write_text(
+        "name,value\ndual-member-private-sentinel,7\n",
+        encoding="utf-8",
+    )
+    media_path = "Knowledge Base/Notes/Patterns/dual-member.mp4"
+    (vault / media_path).write_bytes(b"\x00\x00\x00\x18ftypmp42private-sentinel")
+    records_root = copy_vehicle_maintenance_fixture(vault)
+    collection = (records_root / "_collection.md").relative_to(vault).as_posix()
+
+    principal, context = _verified_external_session()
+
+    class Connection:
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        egress.store,
+        "open_authorization_session_connection",
+        lambda _vault: Connection(),
+    )
+
+    session_grant_paths: list[str] = []
+
+    def active_session_grants(**kwargs: object):
+        path = str(kwargs["path"])
+        fingerprint = str(kwargs["fingerprint"])
+        scope_ids = tuple(kwargs["scope_ids"])
+        assert scope_ids == tuple(sorted((SCOPE_ID, delegated_scope)))
+        session_grant_paths.append(path)
+        return (
+            (
+                authorization_session_authority.SessionGrant(
+                    grant_id="8" * 64,
+                    authorization_session_id=context.session_id,
+                    principal_id=EXTERNAL,
+                    issuer_family="mcp-oauth",
+                    audience=EXTERNAL,
+                    purpose="support",
+                    ceiling=egress.LEVEL_FULL,
+                    paths=(path,),
+                    fingerprints=(fingerprint,),
+                    scope_ids=(delegated_scope,),
+                    membership=(
+                        authorization_session_authority.SessionMembership(
+                            path=path,
+                            fingerprint=fingerprint,
+                            scope_ids=scope_ids,
+                        ),
+                    ),
+                    policy_fingerprint=str(kwargs["policy_fingerprint"]),
+                    token_jti="token-overlap",
+                    created_at=1_800_000_000,
+                    expires_at=1_900_000_000,
+                ),
+            ),
+            "session-grants-overlap",
+        )
+
+    monkeypatch.setattr(
+        authorization_session_authority,
+        "active_session_grants",
+        active_session_grants,
+    )
+    _reset_caches()
+
+    def public_command(name: str):
+        return next(
+            command
+            for command in (*commands.PRODUCT_COMMANDS, *commands.COMMANDS)
+            if command.name == name
+        )
+
+    governance_command = public_command("govern_memory")
+    with request_scope(principal):
+        direct = invoke_command(public_command("get"), vault, path=RESTRICTED_PATH)
+        recall = invoke_command(
+            public_command("find"),
+            vault,
+            query="dual member private sentinel",
+            mode="keyword",
+            graph=False,
+            limit=10,
+        )
+        graph = invoke_command(
+            public_command("graph_context"), vault, path=RESTRICTED_PATH
+        )
+        with pytest.raises(ValueError, match="^NOT_FOUND:"):
+            invoke_command(public_command("query_dataset"), vault, path=dataset_path)
+        with pytest.raises(ValueError, match="^NOT_FOUND:"):
+            invoke_command(public_command("read_media"), vault, path=media_path)
+        with pytest.raises(OpError, match="^COLLECTION_NOT_FOUND:"):
+            invoke_command(
+                public_command("record_memory"),
+                vault,
+                action="inspect",
+                collection=collection,
+            )
+        external_explained = invoke_command(
+            governance_command,
+            vault,
+            operation="explain",
+            audience=EXTERNAL,
+            path=RESTRICTED_PATH,
+        )
+
+    serialized = json.dumps(
+        {"get": direct, "recall": recall, "graph": graph},
+        sort_keys=True,
+        default=str,
+    )
+    assert direct["level"] == egress.LEVEL_NOTICE
+    assert direct["withheld"] is True
+    assert RESTRICTED_PATH not in serialized
+    assert "dual-member-private-sentinel" not in serialized
+    assert graph["seeds"] == []
+    assert graph["nodes"] == []
+    assert external_explained["effective_ceiling"] == egress.LEVEL_NOTICE
+    assert "scope_contributions" not in external_explained
+    assert {
+        RESTRICTED_PATH,
+        dataset_path,
+        media_path,
+        collection,
+    } <= set(session_grant_paths)
+
+    with request_scope(owner_principal()):
+        explained = invoke_command(
+            governance_command,
+            vault,
+            operation="explain",
+            audience=EXTERNAL,
+            path=RESTRICTED_PATH,
+        )
+    assert explained["effective_ceiling"] == egress.LEVEL_NONE
+    personal, delegated = explained["scope_contributions"]
+    assert personal["scope_id"] == SCOPE_ID
+    assert personal["grant_ids"] == [GRANT_ID]
+    assert personal["final_ceiling"] == egress.LEVEL_FULL
+    assert personal["option_values"] == {
+        "constraint": "Personal review is required.",
+    }
+    assert delegated["scope_id"] == delegated_scope
+    assert delegated["default_deny_supplied_floor"] is True
+    assert delegated["grant_ids"] == []
+    assert delegated["final_ceiling"] == egress.LEVEL_NONE
 
 
 def test_verified_session_notice_mints_token_from_internal_context(
@@ -1388,7 +1573,9 @@ def test_get_respects_decision_levels(vault: Path) -> None:
     assert len(excerpt["body"]) < len(full_body)
     assert excerpt.get("release_level") == egress.LEVEL_EXCERPT
 
-    write_rule(vault, ceiling=egress.LEVEL_ABSTRACT, extra="options:\n  abstract: a safety pattern\n")
+    write_rule(
+        vault, ceiling=egress.LEVEL_ABSTRACT, extra="options:\n  abstract: a safety pattern\n"
+    )
     with request_scope(_external()):
         abstract = commands.op_get(vault, path=RESTRICTED_PATH)
     assert abstract.get("abstract") == "a safety pattern"
@@ -1452,10 +1639,7 @@ def test_get_fails_closed_when_page_swaps_before_release_annotation(
 
     def _page(*, restricted: bool, marker: str, page_id: str) -> str:
         tags = "tags: [restricted]\n" if restricted else "tags: [public]\n"
-        return (
-            "---\ntype: insight\n"
-            f"exomem_id: {page_id}\n{tags}---\n\n{marker}\n"
-        )
+        return f"---\ntype: insight\nexomem_id: {page_id}\n{tags}---\n\n{marker}\n"
 
     initial = _page(
         restricted=initially_restricted,
@@ -1471,8 +1655,7 @@ def test_get_fails_closed_when_page_swaps_before_release_annotation(
     scope = _gov_dir(vault) / "scopes" / "patterns.yaml"
     scope.parent.mkdir(parents=True, exist_ok=True)
     scope.write_text(
-        f"governance_version: 1\nid: {SCOPE_ID}\nname: Restricted\n"
-        "tags: [restricted]\n",
+        f"governance_version: 1\nid: {SCOPE_ID}\nname: Restricted\ntags: [restricted]\n",
         encoding="utf-8",
     )
     write_rule(vault, ceiling=egress.LEVEL_NONE)
@@ -1549,9 +1732,7 @@ def test_annotate_page_empty_policy_is_untouched(vault: Path) -> None:
 
 def test_annotate_page_blocked_policy_returns_none(vault: Path) -> None:
     write_broken_policy(vault)
-    out = egress.annotate_page(
-        vault, {"path": OPEN_PATH, "body": "hello"}, principal=_external()
-    )
+    out = egress.annotate_page(vault, {"path": OPEN_PATH, "body": "hello"}, principal=_external())
     assert out is None
 
 
@@ -1581,9 +1762,7 @@ def test_annotate_page_strips_provenance_naming_a_withheld_item(vault: Path) -> 
 
 SOURCE_SCOPE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FC0"
 SOURCE_RULE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FC1"
-INGESTED_SOURCE_PATH = (
-    "Knowledge Base/Sources/Articles/2026-06-02-postgres-autovacuum-tuning.md"
-)
+INGESTED_SOURCE_PATH = "Knowledge Base/Sources/Articles/2026-06-02-postgres-autovacuum-tuning.md"
 RESTRICTED_TITLE = "Kill switch for risky releases"
 
 
@@ -1593,8 +1772,7 @@ def _write_sources_scope_and_rule(vault: Path, *, ceiling: int) -> None:
     scopes = _gov_dir(vault) / "scopes"
     scopes.mkdir(parents=True, exist_ok=True)
     (scopes / "sources.yaml").write_text(
-        f"governance_version: 1\nid: {SOURCE_SCOPE_ID}\nname: Sources\n"
-        'paths: ["Sources/**"]\n',
+        f'governance_version: 1\nid: {SOURCE_SCOPE_ID}\nname: Sources\npaths: ["Sources/**"]\n',
         encoding="utf-8",
     )
     rules = _gov_dir(vault) / "rules"
@@ -1643,9 +1821,9 @@ def test_released_source_does_not_enumerate_the_notes_that_ingested_it(
 
     assert out is not None, "the source itself is released; only its back-ref is not"
     blob = json.dumps(out, default=str)
-    assert "ingested_into" not in json.dumps(
-        out.get("frontmatter") or {}, default=str
-    ), f"reverse citation survived release for form {entry!r}"
+    assert "ingested_into" not in json.dumps(out.get("frontmatter") or {}, default=str), (
+        f"reverse citation survived release for form {entry!r}"
+    )
     for form in (
         RESTRICTED_PATH,
         RESTRICTED_KB_RELATIVE,
@@ -1806,9 +1984,7 @@ def test_pack_header_carries_governance_context(vault: Path) -> None:
     write_scope(vault)
     write_rule(vault, ceiling=egress.LEVEL_NOTICE)
     with request_scope(_external()):
-        result = commands.op_find(
-            vault, query="kill switch risky releases", limit=2, pack=True
-        )
+        result = commands.op_find(vault, query="kill switch risky releases", limit=2, pack=True)
     pack = result["pack"]
     # The block appears because something WAS withheld; the fingerprint is
     # owner-only (see `test_pack_never_shows_the_policy_fingerprint_to_a_non_owner`).
@@ -1821,9 +1997,7 @@ def test_pack_excludes_withheld_neighborhood(vault: Path) -> None:
     write_scope(vault)
     write_rule(vault, ceiling=egress.LEVEL_NONE)
     with request_scope(_external()):
-        result = commands.op_find(
-            vault, query="kill switch risky releases", limit=5, pack=True
-        )
+        result = commands.op_find(vault, query="kill switch risky releases", limit=5, pack=True)
     pack = result["pack"]
     for section in ("packed_paths", "claims", "neighborhood", "contradictions"):
         assert RESTRICTED_PATH not in str(pack.get(section, []))
@@ -1922,9 +2096,7 @@ def test_declared_purpose_cannot_lift_an_outside_restriction(vault: Path) -> Non
     holds no matter what the client claims.
     """
     write_scope(vault)
-    write_rule(
-        vault, ceiling=0, extra="purpose: audit\npurpose_condition: outside\n"
-    )
+    write_rule(vault, ceiling=0, extra="purpose: audit\npurpose_condition: outside\n")
     undeclared = egress.annotate_hits(
         vault, [_hit(RESTRICTED_PATH)], principal=_external(), limit=5
     )
@@ -1932,9 +2104,7 @@ def test_declared_purpose_cannot_lift_an_outside_restriction(vault: Path) -> Non
     declared = egress.annotate_hits(
         vault, [_hit(RESTRICTED_PATH)], principal=_external(), purpose="audit", limit=5
     )
-    assert declared.hits == [], (
-        "a client-declared purpose lifted an `outside` restriction"
-    )
+    assert declared.hits == [], "a client-declared purpose lifted an `outside` restriction"
 
 
 def test_declared_purpose_cannot_widen_even_for_the_owner(vault: Path) -> None:
@@ -1948,30 +2118,32 @@ def test_declared_purpose_cannot_widen_even_for_the_owner(vault: Path) -> None:
         extra="purpose: audit\npurpose_condition: outside\n",
     )
     owner = RequestPrincipal(audience_id="owner", surface="cli")
-    assert egress.annotate_hits(
-        vault, [_hit(RESTRICTED_PATH)], principal=owner, limit=5
-    ).hits == []
-    assert egress.annotate_hits(
+    assert egress.annotate_hits(vault, [_hit(RESTRICTED_PATH)], principal=owner, limit=5).hits == []
+    assert (
+        egress.annotate_hits(
         vault, [_hit(RESTRICTED_PATH)], principal=owner, purpose="audit", limit=5
-    ).hits == []
+        ).hits
+        == []
+    )
 
 
 def test_declared_purpose_still_narrows(vault: Path) -> None:
     """The direction that remains: a purpose-conditioned rule that LOWERS the
     ceiling still applies when that purpose is declared."""
     write_scope(vault)
-    write_rule(
-        vault, ceiling=0, extra="purpose: marketing\npurpose_condition: matches\n"
-    )
+    write_rule(vault, ceiling=0, extra="purpose: marketing\npurpose_condition: matches\n")
     assert [
         h.path
         for h in egress.annotate_hits(
             vault, [_hit(RESTRICTED_PATH)], principal=_external(), limit=5
         ).hits
     ] == [RESTRICTED_PATH]
-    assert egress.annotate_hits(
+    assert (
+        egress.annotate_hits(
         vault, [_hit(RESTRICTED_PATH)], principal=_external(), purpose="marketing", limit=5
-    ).hits == []
+        ).hits
+        == []
+    )
 
 
 def test_purpose_is_safe_on_the_wire(vault: Path) -> None:
@@ -1980,9 +2152,7 @@ def test_purpose_is_safe_on_the_wire(vault: Path) -> None:
     import json
     from pathlib import Path as _P
 
-    schemas = json.loads(
-        _P("tests/fixtures/mcp_tool_schemas.json").read_text(encoding="utf-8")
-    )
+    schemas = json.loads(_P("tests/fixtures/mcp_tool_schemas.json").read_text(encoding="utf-8"))
     advertised = [
         name
         for name, entry in schemas.items()
@@ -2001,7 +2171,7 @@ def test_revocation_takes_effect_within_the_process(vault: Path) -> None:
     scope = _gov_dir(vault) / "scopes" / "tagged.yaml"
     scope.parent.mkdir(parents=True, exist_ok=True)
     scope.write_text(
-        f"governance_version: 1\nid: {SCOPE_ID}\nname: Secret\ntags: [\"secret\"]\n",
+        f'governance_version: 1\nid: {SCOPE_ID}\nname: Secret\ntags: ["secret"]\n',
         encoding="utf-8",
     )
     write_rule(vault, ceiling=egress.LEVEL_NONE)
@@ -2028,9 +2198,7 @@ def test_revocation_takes_effect_within_the_process(vault: Path) -> None:
     assert second.hits == [], "revocation never took effect: stale memo entry served"
 
 
-def test_two_vaults_sharing_a_policy_do_not_share_decisions(
-    vault: Path, tmp_path: Path
-) -> None:
+def test_two_vaults_sharing_a_policy_do_not_share_decisions(vault: Path, tmp_path: Path) -> None:
     """H5: `policy._content_fingerprint` hashes only relative path + bytes, so
     two vaults with identical `_Governance/` trees get identical fingerprints.
     Without `vault_root` in the memo key, vault A's restricted decision is
@@ -2040,7 +2208,7 @@ def test_two_vaults_sharing_a_policy_do_not_share_decisions(
     scope = _gov_dir(vault) / "scopes" / "patterns.yaml"
     scope.parent.mkdir(parents=True, exist_ok=True)
     scope.write_text(
-        f"governance_version: 1\nid: {SCOPE_ID}\nname: Secret\ntags: [\"secret\"]\n",
+        f'governance_version: 1\nid: {SCOPE_ID}\nname: Secret\ntags: ["secret"]\n',
         encoding="utf-8",
     )
     write_rule(vault, ceiling=egress.LEVEL_NONE)
@@ -2088,9 +2256,7 @@ def test_decision_memo_fails_closed_when_the_page_cannot_be_stat_ed(
         return real_stat(self, *a, **kw)
 
     monkeypatch.setattr(Path, "stat", _boom)
-    result = egress.annotate_hits(
-        vault, [_hit(RESTRICTED_PATH)], principal=_external(), limit=5
-    )
+    result = egress.annotate_hits(vault, [_hit(RESTRICTED_PATH)], principal=_external(), limit=5)
     assert result.hits == []
 
 
@@ -2141,9 +2307,12 @@ def test_structure_filter_gates_governed_csv_and_resource_entries(vault: Path) -
 
 def test_filter_withheld_entries_empty_policy_is_identity(vault: Path) -> None:
     payload = {"entries": [{"path": RESTRICTED_PATH}, {"path": OPEN_PATH}]}
-    assert egress.filter_withheld_entries(
+    assert (
+        egress.filter_withheld_entries(
         vault, {"entries": list(payload["entries"])}, principal=_external()
-    ) == payload
+        )
+        == payload
+    )
 
 
 def test_filter_withheld_entries_blocked_policy_drops_everything(vault: Path) -> None:
@@ -2187,9 +2356,7 @@ def test_browse_memory_does_not_leak_a_withheld_path(vault: Path) -> None:
     `postfilter`."""
     _restricted_vault(vault)
     with request_scope(_external()):
-        raw = commands.op_browse_memory(
-            vault, path="Knowledge Base/Notes/Patterns", mode="list"
-        )
+        raw = commands.op_browse_memory(vault, path="Knowledge Base/Notes/Patterns", mode="list")
         out = egress.postfilter("browse_memory", raw, vault)
     assert "kill-switch-for-risky-releases" not in str(out)
 
@@ -2197,9 +2364,7 @@ def test_browse_memory_does_not_leak_a_withheld_path(vault: Path) -> None:
 def test_list_directory_does_not_leak_a_withheld_path(vault: Path) -> None:
     _restricted_vault(vault)
     with request_scope(_external()):
-        out = _through_dispatcher(
-            vault, "list_directory", path="Knowledge Base/Notes/Patterns"
-        )
+        out = _through_dispatcher(vault, "list_directory", path="Knowledge Base/Notes/Patterns")
     assert "kill-switch-for-risky-releases" not in str(out)
 
 
@@ -2333,9 +2498,7 @@ def test_credential_block_does_not_suppress_the_disclosure_receipt(vault: Path) 
             egress.postfilter("find", {"value": secret}, vault)
             egress.emit_boundary_receipt(collector)
     records = _receipt_records(vault)
-    assert [record["event_type"] for record in records] == [
-        "credential_block", "disclosure"
-    ]
+    assert [record["event_type"] for record in records] == ["credential_block", "disclosure"]
     assert records[0]["command"] == "find"
     assert records[0]["principal"] == records[0]["audience"] == EXTERNAL
     assert records[0]["purpose"] == "credential-review"
@@ -2404,15 +2567,20 @@ def test_large_reduction_receipt_uses_truthful_bounded_aggregates(vault: Path) -
 
 def test_bounded_outcomes_keep_different_levels_and_scopes_distinct() -> None:
     outcomes = [
-        egress.DisclosureOutcome({"decision": "released", "level": 5, "scope_ids": ["a"], "content_hash": "a" * 64})
+        egress.DisclosureOutcome(
+            {"decision": "released", "level": 5, "scope_ids": ["a"], "content_hash": "a" * 64}
+        )
         for _ in range(70)
     ] + [
-        egress.DisclosureOutcome({"decision": "released", "level": 6, "scope_ids": ["b"], "content_hash": "b" * 64})
+        egress.DisclosureOutcome(
+            {"decision": "released", "level": 6, "scope_ids": ["b"], "content_hash": "b" * 64}
+        )
         for _ in range(70)
     ]
     reduced = egress._bounded_outcomes(outcomes)
     assert {(item["level"], tuple(item["scope_ids"]), item["count"]) for item in reduced} == {
-        (5, ("a",), 70), (6, ("b",), 70)
+        (5, ("a",), 70),
+        (6, ("b",), 70),
     }
     assert all("membership_digest" in item for item in reduced)
 
@@ -2467,9 +2635,7 @@ def test_bounded_outcomes_summarize_129_distinct_typed_identities(vault: Path) -
 
 
 @pytest.mark.parametrize("outcome_count", [64, 140])
-def test_bounded_outcomes_also_fit_the_receipt_byte_cap(
-    vault: Path, outcome_count: int
-) -> None:
+def test_bounded_outcomes_also_fit_the_receipt_byte_cap(vault: Path, outcome_count: int) -> None:
     scope_ids = [f"scope-{index}-" + "x" * 220 for index in range(128)]
     scope_digests = [f"{index:064x}" for index in range(128)]
     outcomes = [
@@ -2529,7 +2695,9 @@ def test_query_data_csv_is_a_registered_receipt_representation() -> None:
 
 
 def test_adoption_selector_requires_an_explicit_egress_adapter() -> None:
-    command = next(command for command in commands.PRODUCT_COMMANDS if command.name == "adoption_studio")
+    command = next(
+        command for command in commands.PRODUCT_COMMANDS if command.name == "adoption_studio"
+    )
     with pytest.raises(RuntimeError, match="RECEIPT_OUTCOME_MISSING"):
         commands.invocation_is_read_only(command, {"action": "future-read"})
 
@@ -2580,6 +2748,7 @@ def test_every_mixed_selector_uses_one_complete_receipt_registry() -> None:
             "fix": True,
             "reconcile": False,
             "backfill-ids": True,
+            "structured-files": True,
         },
     }
     product = {command.name: command for command in commands.PRODUCT_COMMANDS}
@@ -2591,13 +2760,12 @@ def test_every_mixed_selector_uses_one_complete_receipt_registry() -> None:
             adapter = egress.assert_selector_covered(command_name, selector, value)
             if adapter in {"structure", "mutation"}:
                 assert (adapter != "mutation") is read_only
-            assert commands.invocation_is_read_only(
-                product[command_name], {selector: value}
-            ) is read_only
-        with pytest.raises(RuntimeError, match="RECEIPT_OUTCOME_MISSING"):
-            commands.invocation_is_read_only(
-                product[command_name], {selector: "future-selector"}
+            assert (
+                commands.invocation_is_read_only(product[command_name], {selector: value})
+                is read_only
             )
+        with pytest.raises(RuntimeError, match="RECEIPT_OUTCOME_MISSING"):
+            commands.invocation_is_read_only(product[command_name], {selector: "future-selector"})
 
 
 def test_conditional_mixed_selectors_are_in_the_same_registry() -> None:
@@ -2617,13 +2785,9 @@ def test_conditional_mixed_selectors_are_in_the_same_registry() -> None:
     manage = product["manage_memory_file"]
     assert commands.invocation_is_read_only(manage, {"operation": "list"})
     assert commands.invocation_is_read_only(manage, {"operation": "trash-list"})
-    assert commands.invocation_is_read_only(
-        manage, {"operation": "propose-reclassification"}
-    )
+    assert commands.invocation_is_read_only(manage, {"operation": "propose-reclassification"})
     assert not commands.invocation_is_read_only(manage, {"operation": "reclassify"})
-    assert commands.invocation_is_read_only(
-        manage, {"operation": "create", "validate_only": True}
-    )
+    assert commands.invocation_is_read_only(manage, {"operation": "create", "validate_only": True})
     assert not commands.invocation_is_read_only(
         manage, {"operation": "create", "validate_only": False}
     )
@@ -2632,25 +2796,33 @@ def test_conditional_mixed_selectors_are_in_the_same_registry() -> None:
         "infer": "save-conditional",
         "validate": "structure",
         "diff": "structure",
+        "inventory": "structure",
+        "inspect": "structure",
+        "resolve": "structure",
+        "preview": "structure",
+        "save": "mutation",
+        "refresh": "mutation",
+        "save-entity-types": "mutation",
     }
     schema = product["schema_memory"]
     assert commands.invocation_is_read_only(schema, {"operation": "infer"})
-    assert not commands.invocation_is_read_only(
-        schema, {"operation": "infer", "save": True}
-    )
+    assert not commands.invocation_is_read_only(schema, {"operation": "infer", "save": True})
     assert commands.invocation_is_read_only(schema, {"operation": "validate"})
+    assert commands.invocation_is_read_only(
+        schema, {"operation": "resolve", "subject": "workflow-contracts"}
+    )
+    assert not commands.invocation_is_read_only(
+        schema, {"operation": "save", "subject": "workflow-contracts"}
+    )
+    assert not commands.invocation_is_read_only(schema, {"operation": "save-entity-types"})
     with pytest.raises(RuntimeError, match="RECEIPT_OUTCOME_MISSING"):
         commands.invocation_is_read_only(schema, {"operation": "future-schema-mode"})
 
     maintain = product["maintain_memory"]
     assert commands.invocation_is_read_only(maintain, {"mode": "fix"})
-    assert not commands.invocation_is_read_only(
-        maintain, {"mode": "fix", "dry_run": False}
-    )
+    assert not commands.invocation_is_read_only(maintain, {"mode": "fix", "dry_run": False})
     assert not commands.invocation_is_read_only(maintain, {"mode": "reconcile"})
-    assert commands.invocation_is_read_only(
-        maintain, {"mode": "reconcile", "dry_run": True}
-    )
+    assert commands.invocation_is_read_only(maintain, {"mode": "reconcile", "dry_run": True})
     assert commands.invocation_is_read_only(maintain, {"mode": "backfill-ids"})
 
 
@@ -2698,8 +2870,7 @@ def test_unresolved_dataset_is_missing_before_rows_are_loaded(
     scope = _gov_dir(vault) / "scopes" / "patterns.yaml"
     scope.parent.mkdir(parents=True, exist_ok=True)
     scope.write_text(
-        f"governance_version: 1\nid: {SCOPE_ID}\nname: Confidential\n"
-        'tags: ["confidential"]\n',
+        f'governance_version: 1\nid: {SCOPE_ID}\nname: Confidential\ntags: ["confidential"]\n',
         encoding="utf-8",
     )
     write_rule(vault, ceiling=egress.LEVEL_FULL)
@@ -2770,13 +2941,9 @@ def test_notice_token_is_bound_to_the_items_own_ceiling(vault: Path) -> None:
 
     write_scope(vault)
     write_rule(vault, ceiling=egress.LEVEL_NOTICE)
-    result = egress.annotate_hits(
-        vault, [_hit(RESTRICTED_PATH)], principal=_external(), limit=1
-    )
+    result = egress.annotate_hits(vault, [_hit(RESTRICTED_PATH)], principal=_external(), limit=1)
     assert len(result.notices) == 1
-    claim = tokens.verify(
-        vault, result.notices[0]["escalation_token"], audience=EXTERNAL
-    )
+    claim = tokens.verify(vault, result.notices[0]["escalation_token"], audience=EXTERNAL)
     assert claim.max_level == egress.LEVEL_NOTICE
     assert claim.max_level < egress.RELEASE_FLOOR
 
@@ -2819,9 +2986,7 @@ def test_pack_never_shows_the_policy_fingerprint_to_a_non_owner(vault: Path) -> 
     write_scope(vault)
     write_rule(vault, ceiling=egress.LEVEL_NOTICE)
     with request_scope(_external()):
-        result = commands.op_find(
-            vault, query="kill switch risky releases", limit=1, pack=True
-        )
+        result = commands.op_find(vault, query="kill switch risky releases", limit=1, pack=True)
     governance = result["pack"].get("governance")
     if governance is not None:
         assert "fingerprint" not in governance
@@ -2840,9 +3005,7 @@ def test_pack_shows_the_fingerprint_to_the_owner(vault: Path) -> None:
     write_scope(vault)
     write_rule(vault, ceiling=egress.LEVEL_NOTICE, audience="owner")
     with request_scope(RequestPrincipal(audience_id="owner", surface="cli")):
-        result = commands.op_find(
-            vault, query="kill switch risky releases", limit=10, pack=True
-        )
+        result = commands.op_find(vault, query="kill switch risky releases", limit=10, pack=True)
     governance = result["pack"].get("governance")
     assert governance is not None, "a returned notice must carry the block"
     assert governance["notices"]
@@ -2858,9 +3021,7 @@ def test_pack_block_is_suppressed_when_backfill_hid_the_withholding(
     write_scope(vault)
     write_rule(vault, ceiling=egress.LEVEL_NOTICE, audience="owner")
     with request_scope(RequestPrincipal(audience_id="owner", surface="cli")):
-        result = commands.op_find(
-            vault, query="kill switch risky releases", limit=1, pack=True
-        )
+        result = commands.op_find(vault, query="kill switch risky releases", limit=1, pack=True)
     pack = result.get("pack") or {}
     if not (pack.get("governance") or {}).get("notices"):
         assert "governance" not in pack
@@ -2873,7 +3034,8 @@ def test_sub_floor_notice_carries_no_path(vault: Path) -> None:
     write_scope(vault)
     write_rule(vault, ceiling=egress.LEVEL_NOTICE)
     notice = egress.annotate_page(
-        vault, {"path": RESTRICTED_PATH, "body": "x", "frontmatter": {}},
+        vault,
+        {"path": RESTRICTED_PATH, "body": "x", "frontmatter": {}},
         principal=_external(),
     )
     assert notice is not None
@@ -2946,9 +3108,7 @@ def test_withheld_path_as_a_dict_KEY_is_dropped(vault: Path) -> None:
         "logical_source_path",
     ],
 )
-def test_every_enumerated_path_field_is_filtered_in_a_list_entry(
-    vault: Path, field: str
-) -> None:
+def test_every_enumerated_path_field_is_filtered_in_a_list_entry(vault: Path, field: str) -> None:
     """The path-field set drove only `path`/`rel_path`/`file`/`target`/
     `parent_path`/`id`, so a mutation result reporting where a page moved to
     named a withheld page in the clear."""
@@ -3104,9 +3264,7 @@ def test_tuple_shape_is_preserved_for_permitted_content(vault: Path) -> None:
         "../outside-the-vault/notes.md",
     ],
 )
-def test_non_vault_md_shaped_values_do_not_delete_an_entry(
-    vault: Path, value: str
-) -> None:
+def test_non_vault_md_shaped_values_do_not_delete_an_entry(vault: Path, value: str) -> None:
     """`.md`-shaped strings that resolve to nothing under the vault were being
     treated as UNDECIDABLE and therefore withheld, so an external URL or a
     citation deleted an otherwise-permitted entry outright."""
@@ -3299,9 +3457,7 @@ def _link_to_restricted(vault: Path) -> None:
         "kill-switch-for-risky-releases",
     ],
 )
-def test_inbound_links_to_a_withheld_target_reads_as_no_links(
-    vault: Path, target: str
-) -> None:
+def test_inbound_links_to_a_withheld_target_reads_as_no_links(vault: Path, target: str) -> None:
     """N2: the entry survived because its own `path` is the PERMITTED source
     note, so the dispatcher filter had no reason to drop it — while
     `raw_target` carried the withheld stem and `context` carried the full
@@ -3350,9 +3506,7 @@ def test_inbound_links_still_answer_the_owner(vault: Path) -> None:
     write_scope(vault)
     write_rule(vault, ceiling=egress.LEVEL_NONE)
     _reset_caches()
-    result = _inbound(
-        vault, RESTRICTED_PATH, RequestPrincipal(audience_id="owner", surface="cli")
-    )
+    result = _inbound(vault, RESTRICTED_PATH, RequestPrincipal(audience_id="owner", surface="cli"))
     assert result["count"] >= 1
 
 
@@ -3615,9 +3769,7 @@ def test_genuinely_external_md_references_still_survive(vault: Path) -> None:
         "../outside-the-vault/notes.md",
         "Knowledge Base/Notes/Patterns/does-not-exist-at-all.md",
     ):
-        out = _filter_as_external(
-            vault, {"entries": [{"path": OPEN_PATH, "target_path": value}]}
-        )
+        out = _filter_as_external(vault, {"entries": [{"path": OPEN_PATH, "target_path": value}]})
         assert len(out["entries"]) == 1, f"{value!r} deleted a permitted entry"
 
 
@@ -3662,15 +3814,11 @@ def _browse_list(vault: Path, *, path: str, principal, recursive: bool = True):
     from exomem.governance.principal import request_scope
 
     with request_scope(principal):
-        return commands.op_browse_memory(
-            vault, path=path, mode="list", recursive=recursive
-        )
+        return commands.op_browse_memory(vault, path=path, mode="list", recursive=recursive)
 
 
 @pytest.mark.parametrize("audience", ["owner", "external"])
-def test_scoped_overview_probe_into_governance_is_refused(
-    vault: Path, audience: str
-) -> None:
+def test_scoped_overview_probe_into_governance_is_refused(vault: Path, audience: str) -> None:
     """BLOCKER 1(a): `_SKIP_ALWAYS` prunes `_Governance` only as a CHILD
     dirname during the walk, so pointing the scan root AT it walks it — the
     directory is never a child of itself. Returned `['r.yaml','s.yaml']`,
@@ -3679,9 +3827,7 @@ def test_scoped_overview_probe_into_governance_is_refused(
     write_rule(vault, ceiling=egress.LEVEL_NONE)
     _reset_caches()
     who = (
-        RequestPrincipal(audience_id="owner", surface="cli")
-        if audience == "owner"
-        else _external()
+        RequestPrincipal(audience_id="owner", surface="cli") if audience == "owner" else _external()
     )
     with pytest.raises(ValueError, match="NOT_FOUND"):
         _browse_overview(vault, path=GOV_DIR, principal=who)
@@ -3716,9 +3862,7 @@ def test_list_mode_never_shows_the_governance_dir(vault: Path, audience: str) ->
     write_rule(vault, ceiling=egress.LEVEL_NONE)
     _reset_caches()
     who = (
-        RequestPrincipal(audience_id="owner", surface="cli")
-        if audience == "owner"
-        else _external()
+        RequestPrincipal(audience_id="owner", surface="cli") if audience == "owner" else _external()
     )
     result = _browse_list(vault, path="Knowledge Base", principal=who)
     assert "_Governance" not in json.dumps(result, default=str)
@@ -3729,9 +3873,7 @@ def test_list_mode_hides_governance_on_an_ungoverned_vault(vault: Path) -> None:
     gov.mkdir(parents=True, exist_ok=True)
     (gov / "stray.yaml").write_text("governance_version: 1\n", encoding="utf-8")
     _reset_caches()
-    result = commands.op_browse_memory(
-        vault, path="Knowledge Base", mode="list", recursive=True
-    )
+    result = commands.op_browse_memory(vault, path="Knowledge Base", mode="list", recursive=True)
     assert "_Governance" not in json.dumps(result, default=str)
 
 
@@ -3750,16 +3892,23 @@ def test_list_mode_scan_root_inside_governance_is_refused(vault: Path) -> None:
 @pytest.mark.parametrize(
     ("label", "value"),
     [
-        ("dotdot_inside", "Knowledge Base/Notes/Insights/../Patterns/kill-switch-for-risky-releases.md"),
-        ("dotdot_twice", "Knowledge Base/Notes/Insights/sub/../../Patterns/kill-switch-for-risky-releases.md"),
-        ("percent_encoded_slash", "Knowledge%20Base%2FNotes%2FPatterns%2Fkill-switch-for-risky-releases.md"),
+        (
+            "dotdot_inside",
+            "Knowledge Base/Notes/Insights/../Patterns/kill-switch-for-risky-releases.md",
+        ),
+        (
+            "dotdot_twice",
+            "Knowledge Base/Notes/Insights/sub/../../Patterns/kill-switch-for-risky-releases.md",
+        ),
+        (
+            "percent_encoded_slash",
+            "Knowledge%20Base%2FNotes%2FPatterns%2Fkill-switch-for-risky-releases.md",
+        ),
         ("double_encoded", "Knowledge%2520Base/Notes/Patterns/kill-switch-for-risky-releases.md"),
         ("trailing_dot", "Knowledge Base/Notes/Patterns/kill-switch-for-risky-releases.md."),
     ],
 )
-def test_traversal_and_encoding_variants_still_resolve(
-    vault: Path, label: str, value: str
-) -> None:
+def test_traversal_and_encoding_variants_still_resolve(vault: Path, label: str, value: str) -> None:
     """BLOCKER 2: rejecting any `..` outright means `None`, and under the
     skip-not-deny contract `None` means KEEP — so a relative link that lands
     squarely inside the vault now survives, where `.resolve()` used to drop
@@ -3781,15 +3930,11 @@ def test_traversal_and_encoding_variants_still_resolve(
         "../outside-the-vault/notes.md",
     ],
 )
-def test_traversal_that_escapes_the_root_is_still_rejected(
-    vault: Path, value: str
-) -> None:
+def test_traversal_that_escapes_the_root_is_still_rejected(vault: Path, value: str) -> None:
     """The fold must not become a bypass: a `..` chain that leaves the vault
     resolves to nothing here and stays out of the release plane's business."""
     _governed_shut(vault)
-    out = _filter_as_external(
-        vault, {"entries": [{"path": OPEN_PATH, "target_path": value}]}
-    )
+    out = _filter_as_external(vault, {"entries": [{"path": OPEN_PATH, "target_path": value}]})
     assert len(out["entries"]) == 1, f"{value!r} deleted a permitted entry"
 
 
@@ -3820,9 +3965,7 @@ def test_outbound_links_do_not_name_a_withheld_page_by_stem(vault: Path) -> None
     # Scoped to the STRUCTURED links field. The rendered body still quotes the
     # wikilink, and body-text scanning of a released page is explicitly out of
     # scope for this change — a released page's prose is its own content.
-    assert "kill-switch-for-risky-releases" not in json.dumps(
-        page.get("links"), default=str
-    )
+    assert "kill-switch-for-risky-releases" not in json.dumps(page.get("links"), default=str)
 
 
 def test_outbound_links_keep_permitted_stems(vault: Path) -> None:
@@ -3862,9 +4005,7 @@ def test_a_bare_stem_shared_by_two_pages_fails_closed(vault: Path) -> None:
     withheld_twin.write_text("---\ntype: pattern\n---\ntwin\n", encoding="utf-8")
 
     source = vault / "Knowledge Base" / "Notes" / "Insights" / "cites-twin.md"
-    source.write_text(
-        "---\ntype: insight\n---\nSee [[shared-name]].\n", encoding="utf-8"
-    )
+    source.write_text("---\ntype: insight\n---\nSee [[shared-name]].\n", encoding="utf-8")
     write_scope(vault)
     write_rule(vault, ceiling=egress.LEVEL_NONE)
     _reset_caches()
@@ -3897,9 +4038,7 @@ def _plant_gov_markdown(vault: Path) -> str:
 
 @pytest.mark.parametrize("audience", ["owner", "external"])
 @pytest.mark.parametrize("target", [GOV_RULE, GOV_SCOPE])
-def test_get_refuses_to_read_the_policy_tree(
-    vault: Path, audience: str, target: str
-) -> None:
+def test_get_refuses_to_read_the_policy_tree(vault: Path, audience: str, target: str) -> None:
     """The constrained party could read the exact rules constraining them.
 
     `annotate_page` cannot catch this: the policy tree is in no scope, so it
@@ -3910,9 +4049,7 @@ def test_get_refuses_to_read_the_policy_tree(
     write_rule(vault, ceiling=egress.LEVEL_NONE)
     _reset_caches()
     who = (
-        RequestPrincipal(audience_id="owner", surface="cli")
-        if audience == "owner"
-        else _external()
+        RequestPrincipal(audience_id="owner", surface="cli") if audience == "owner" else _external()
     )
     from exomem.governance.principal import request_scope
 
@@ -3926,9 +4063,7 @@ def test_fetch_refuses_to_read_the_policy_tree(vault: Path, audience: str) -> No
     write_rule(vault, ceiling=egress.LEVEL_NONE)
     _reset_caches()
     who = (
-        RequestPrincipal(audience_id="owner", surface="cli")
-        if audience == "owner"
-        else _external()
+        RequestPrincipal(audience_id="owner", surface="cli") if audience == "owner" else _external()
     )
     from exomem.governance.principal import request_scope
 
@@ -3948,9 +4083,7 @@ def test_get_refuses_markdown_planted_inside_the_policy_tree(vault: Path) -> Non
 
 
 @pytest.mark.parametrize("leaf", ["get", "fetch"])
-def test_policy_tree_read_refusal_matches_the_ungoverned_vault(
-    vault: Path, leaf: str
-) -> None:
+def test_policy_tree_read_refusal_matches_the_ungoverned_vault(vault: Path, leaf: str) -> None:
     """Ungoverned parity — this is what keeps the refusal from BEING the
     oracle. If a governed vault refused and an ungoverned one served, the
     refusal itself would announce that governance is active."""
@@ -4047,9 +4180,7 @@ def _symlink_policy_markdown(vault: Path, rel: str) -> Path:
 def test_direct_reads_refuse_kb_shortcuts_to_policy_symlinks(
     vault: Path, leaf: str, alias: str
 ) -> None:
-    link = _symlink_policy_markdown(
-        vault, "Knowledge Base/Notes/review-link.md"
-    )
+    link = _symlink_policy_markdown(vault, "Knowledge Base/Notes/review-link.md")
     call = (
         (lambda: commands.op_get(vault, path=alias))
         if leaf == "get"
@@ -4067,9 +4198,7 @@ def test_direct_reads_refuse_kb_shortcuts_to_policy_symlinks(
 
 
 @pytest.mark.parametrize("leaf", ["get", "fetch"])
-def test_extensionless_policy_refusal_matches_missing_file(
-    vault: Path, leaf: str
-) -> None:
+def test_extensionless_policy_refusal_matches_missing_file(vault: Path, leaf: str) -> None:
     rel = "Knowledge Base/Notes/extensionless-link"
     link = _symlink_policy_markdown(vault, f"{rel}.md")
     call = (
@@ -4238,9 +4367,7 @@ def test_direct_read_refuses_an_ordinary_alias_to_an_excluded_target(
     secret = vault / "Knowledge Base/Private/secret.md"
     secret.parent.mkdir(parents=True, exist_ok=True)
     secret.write_text("---\ntype: source\n---\nsecret body\n", encoding="utf-8")
-    (vault / "Knowledge Base/_access.yaml").write_text(
-        "excluded:\n  - Private\n", encoding="utf-8"
-    )
+    (vault / "Knowledge Base/_access.yaml").write_text("excluded:\n  - Private\n", encoding="utf-8")
     rel = "Knowledge Base/Notes/private-alias.md"
     alias = vault / rel
     alias.parent.mkdir(parents=True, exist_ok=True)
@@ -4457,9 +4584,9 @@ def test_spec_names_the_known_preexisting_relevance_ranking_channel() -> None:
         Path(__file__).resolve().parents[1]
         / "openspec/changes/archive/2026-08-13-add-default-deny-scope-cap/specs/governance-kernel/spec.md"
     ).read_text(encoding="utf-8")
-    scenario = spec.split(
-        "#### Scenario: an audience no rule names receives nothing", 1
-    )[1].split("#### Scenario:", 1)[0]
+    scenario = spec.split("#### Scenario: an audience no rule names receives nothing", 1)[1].split(
+        "#### Scenario:", 1
+    )[0]
 
     assert all(signal in scenario for signal in _RANK_DERIVED_SIGNALS)
     assert "known pre-existing channel" in scenario
@@ -4496,9 +4623,7 @@ def _probe_surfaces_present_then_absent(
         "get": lambda: commands.op_get(vault, path=RESTRICTED_PATH),
         "fetch": lambda: commands.op_fetch(vault, id=RESTRICTED_PATH),
         "read_media": lambda: commands.op_get_video_frames(vault, path=DECLARED_VIDEO),
-        "recall": lambda: commands.op_find(
-            vault, query="kill switch risky releases", limit=10
-        ),
+        "recall": lambda: commands.op_find(vault, query="kill switch risky releases", limit=10),
         "graph": lambda: commands.op_graph_context(vault, path=RESTRICTED_PATH),
     }
 
@@ -4539,9 +4664,7 @@ def test_a_default_denied_item_matches_missing_except_known_ranking_signals(
     present, absent = _probe_surfaces_present_then_absent(vault)
 
     divergent = {
-        name: (present[name], absent[name])
-        for name in present
-        if present[name] != absent[name]
+        name: (present[name], absent[name]) for name in present if present[name] != absent[name]
     }
     assert not divergent, (
         "EXISTENCE ORACLE: a default-denied item answers differently from a "
@@ -4763,7 +4886,5 @@ def test_owner_explain_labels_purpose_branches_before_conservative_meet(
         3,
         3,
     ]
-    assert result["scope_contributions"][0]["option_values"] == {
-        "abstract": "declared abstract"
-    }
+    assert result["scope_contributions"][0]["option_values"] == {"abstract": "declared abstract"}
     assert result["scope_contributions"][1]["option_values"] == {}

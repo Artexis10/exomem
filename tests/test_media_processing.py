@@ -163,7 +163,7 @@ def test_prose_only_sidecar_is_repaired_without_losing_notes(vault: Path) -> Non
     assert frontmatter["type"] == "source"
     assert frontmatter["media_type"] == "audio"
     assert frontmatter["extracted_by"] == "pending"
-    assert f"## Preserved notes\n\n{original}" in body
+    assert f"<!-- exomem:sidecar-preserved-notes -->\n## Preserved notes\n\n{original}" in body
     assert media_jobs.status(vault)["counts"]["pending"] == 1
 
 
@@ -687,6 +687,78 @@ def test_completed_sidecar_clears_stale_crash_window_job(vault: Path) -> None:
     assert result.job_id is None
     assert sidecar.read_bytes() == before
     assert _job_count(vault) == 0
+
+
+def test_completed_spreadsheet_extraction_starting_with_h2_is_not_requeued(
+    vault: Path,
+) -> None:
+    media_processing = _media_processing()
+    binary = _drop_media(vault, "heading-first.xlsx")
+    result = media_processing.reconcile_media(vault, binary)
+    completed = result.sidecar_path.read_text(encoding="utf-8").replace(
+        "extracted_by: pending", "extracted_by: markitdown"
+    ).replace("processing_state: pending", "processing_state: completed")
+    extraction = (
+        "## Worksheet one\n\n"
+        "| Requirement | Owner |\n"
+        "| --- | --- |\n"
+        "| Bound CPU | Runtime |\n"
+    )
+    completed = completed.replace(
+        "## Extracted text\n",
+        f"## Extracted text\n\n{extraction}",
+        1,
+    )
+    result.sidecar_path.write_text(completed, encoding="utf-8")
+    store = media_jobs.MediaJobStore(vault)
+    store.discard(
+        media_jobs.MediaJob(
+            binary_path=binary,
+            sidecar_path=result.sidecar_path,
+            media_type="xlsx",
+        )
+    )
+    before = result.sidecar_path.read_bytes()
+
+    assert media_processing.has_completed_transcript(completed, media_type="xlsx")
+    assert media_processing.reconcile_all_media(vault, limit=1) == 0
+    assert media_processing.reconcile_all_media(vault, limit=1) == 0
+    assert result.sidecar_path.read_bytes() == before
+    assert store.has_binary(binary) is False
+
+
+@pytest.mark.parametrize("owned_boundary", [False, True])
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+def test_preserved_notes_do_not_make_an_empty_extraction_complete(
+    vault: Path,
+    owned_boundary: bool,
+    newline: str,
+) -> None:
+    media_processing = _media_processing()
+    binary = _drop_media(vault, f"empty-with-notes-{owned_boundary}.docx")
+    result = media_processing.reconcile_media(vault, binary)
+    completed = result.sidecar_path.read_text(encoding="utf-8").replace(
+        "extracted_by: pending", "extracted_by: markitdown"
+    ).replace("processing_state: pending", "processing_state: completed")
+    boundary = (
+        "<!-- exomem:sidecar-preserved-notes -->\n" if owned_boundary else ""
+    )
+    completed = completed.replace(
+        "## Extracted text\n",
+        "## Extracted text\n\n"
+        f"{boundary}## Preserved notes\n\n"
+        "This authored note is not source-derived extraction.\n\n"
+        "## Extracted text\n\n"
+        "This literal heading is still part of the authored note.\n",
+        1,
+    )
+    if newline == "\r\n":
+        completed = completed.replace("\n", newline)
+
+    assert (
+        media_processing.has_completed_transcript(completed, media_type="docx")
+        is False
+    )
 
 
 def test_reconciliation_is_byte_stable_and_job_deduplicated(vault: Path) -> None:
@@ -1880,6 +1952,41 @@ def test_changed_bytes_are_still_a_conflict(vault: Path) -> None:
     assert frontmatter["binary_sha256"] == hashlib.sha256(binary.read_bytes()).hexdigest()
     # The superseded transcript is kept once — it is the only record of it.
     assert "Transcript of the ORIGINAL bytes." in body
+
+
+def test_conflict_rerender_keeps_literal_owned_boundary_in_extraction(vault: Path) -> None:
+    media_processing = _media_processing()
+    binary = _drop_media(vault, "literal-boundary.m4a")
+    sidecar = _completed(vault, binary, "[0:00] Original transcript.")
+    frontmatter, _body = _frontmatter_and_body(sidecar)
+    prefix = sidecar.read_text(encoding="utf-8").split("\n---\n", 1)[0] + "\n---\n"
+    literal = (
+        "# Document\n\n"
+        "<!-- exomem:sidecar-preserved-notes -->\n## Preserved notes\n\n"
+        "Literal extracted content."
+    )
+    sidecar.write_text(
+        prefix
+        + "# Evidence: literal-boundary.m4a\n\n"
+        + "Preserved under `Evidence/Audio/`.\n\n## Extracted text\n\n"
+        + literal
+        + "\n\n<!-- exomem:sidecar-preserved-notes -->\n"
+        + "## Preserved notes\n\nAuthored note.\n",
+        encoding="utf-8",
+    )
+    assert frontmatter["processing_state"] == "completed"
+
+    bodies: list[str] = []
+    for payload in (b"first conflicting bytes", b"second conflicting bytes"):
+        binary.write_bytes(payload)
+        media_processing.reconcile_media(vault, binary)
+        bodies.append(_frontmatter_and_body(sidecar)[1])
+
+    assert bodies[0] == bodies[1]
+    for body in bodies:
+        assert body.count(literal) == 1
+        assert body.count("<!-- exomem:sidecar-preserved-notes -->") == 2
+        assert body.count("Authored note.") == 1
 
 
 def test_repeated_conflicting_re_renders_do_not_nest(vault: Path) -> None:

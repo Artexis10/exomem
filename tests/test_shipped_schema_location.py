@@ -126,7 +126,11 @@ def test_a_fresh_vault_has_no_shipped_markdown_in_its_notes(tmp_path: Path) -> N
 
     assert stray == []
     deployed = sorted(vault_module.shipped_schema_target(tmp_path).rglob("*.md"))
-    assert len(deployed) == 17
+    assert len(deployed) == 18
+    assert (
+        vault_module.shipped_schema_target(tmp_path)
+        / "examples/workflow-contracts/companion-example.md"
+    ) in deployed
 
 
 def test_a_fresh_vault_keeps_its_registries_where_the_user_can_see_them(

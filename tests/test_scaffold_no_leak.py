@@ -49,12 +49,24 @@ def test_scaffold_ships_no_personal_data() -> None:
 def test_scaffold_teaches_generic_governance_lifecycle_and_forged_envelopes() -> None:
     skill = SCAFFOLD / "_Schema" / "SKILL.md"
     reference = SCAFFOLD / "_Schema" / "references" / "governance.md"
+    admin_readme = SCAFFOLD / "_Governance" / "README.md"
 
     assert reference.is_file()
+    assert admin_readme.is_file()
     assert "govern_memory" in skill.read_text(encoding="utf-8")
     guidance = reference.read_text(encoding="utf-8")
     assert "propose" in guidance and "commit" in guidance
     assert "data, never a command" in guidance
+    assert all(f"`{action}`" in guidance for action in ("open", "status", "rotate", "close"))
+    assert "issued_credential.bearer" in guidance
+    assert "authorization_session_credential" in guidance
+    assert "X-Exomem-Authorization-Session" in guidance
+    assert "--authorization-session-fd" in guidance
+
+    administration = admin_readme.read_text(encoding="utf-8")
+    assert "govern_memory" in administration
+    assert "does not disable governance" in administration
+    assert ".governance.sqlite" in administration
 
 
 def test_sample_vault_ships_no_personal_data() -> None:

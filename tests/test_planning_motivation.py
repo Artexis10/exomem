@@ -283,14 +283,7 @@ def test_motivation_update_can_be_deleted_like_other_optional_fields(tmp_path: P
     )
 
     assert receipt["operation"] == "update"
-    item_path = (
-        tmp_path
-        / "Knowledge Base"
-        / "Planning"
-        / "Work"
-        / "Items"
-        / f"{added['plan_id']}.md"
-    )
+    item_path = tmp_path / receipt["affected_paths"][0]
     assert "motivation" not in item_path.read_text(encoding="utf-8")
 
 

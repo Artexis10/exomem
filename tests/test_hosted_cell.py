@@ -3,6 +3,7 @@ from __future__ import annotations
 import dataclasses
 import os
 import shutil
+import subprocess
 import threading
 import time
 from collections.abc import Iterator
@@ -12,6 +13,9 @@ from pathlib import Path
 import pytest
 
 from exomem import get_page, hosted_runtime, list_directory, server_runtime, vault
+from exomem.governance.authorization_serving_membership import (
+    ServingMembershipReadiness,
+)
 from exomem.hosted_runtime import (
     HostedCellConfig,
     HostedCellLifecycle,
@@ -35,6 +39,7 @@ _HOSTED_PROCESS_ENV_KEYS = (
     "EXOMEM_CF_ACCESS_TEAM_DOMAIN",
     "EXOMEM_GITHUB_USERNAME",
     "EXOMEM_HOSTED_STATE_ROOT",
+    "EXOMEM_STATE_ROOT",
     "EXOMEM_LARGE_UPLOAD_BASE_URL",
     "EXOMEM_LOG_DIR",
     "EXOMEM_REST_API_KEY",
@@ -135,7 +140,7 @@ def test_hosted_mode_is_explicit_and_local_mode_remains_ordinary(
     assert dotenv_calls == [
         {"dotenv_path": Path.cwd() / ".env", "override": True}
     ]
-    assert calls == ["compute", "media", "watcher"]
+    assert calls == []
     assert runtime.vault_root == tmp_path
     assert runtime.hosted_config is None
     assert runtime.hosted_lifecycle is None
@@ -218,6 +223,61 @@ def test_hosted_config_rejects_symlinked_roots(tmp_path: Path) -> None:
     assert error.value.code == "HOSTED_ROOT_SYMLINK"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="requires POSIX symlink semantics")
+def test_hosted_state_anchor_refuses_a_symlink_escape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import state_paths
+
+    hosted_root = tmp_path / "hosted-state"
+    outside = tmp_path / "outside"
+    hosted_root.mkdir()
+    outside.mkdir()
+    (hosted_root / "vault-state").symlink_to(outside, target_is_directory=True)
+    monkeypatch.setenv("EXOMEM_HOSTED_STATE_ROOT", str(hosted_root))
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(hosted_root / "vault-state"))
+
+    with pytest.raises(OSError, match="hosted state anchor"):
+        state_paths.ensure_vault_state_dir(tmp_path / "vault")
+
+    assert list(outside.iterdir()) == []
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires live Windows junction semantics")
+def test_hosted_state_anchor_refuses_a_junction_escape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import state_paths
+
+    hosted_root = tmp_path / "hosted-state"
+    outside = tmp_path / "outside"
+    hosted_root.mkdir()
+    outside.mkdir()
+    completed = subprocess.run(
+        [
+            "cmd",
+            "/d",
+            "/c",
+            "mklink",
+            "/J",
+            str(hosted_root / "vault-state"),
+            str(outside),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        pytest.skip(f"junction creation unavailable: {completed.stderr or completed.stdout}")
+    monkeypatch.setenv("EXOMEM_HOSTED_STATE_ROOT", str(hosted_root))
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(hosted_root / "vault-state"))
+
+    with pytest.raises(OSError, match="hosted state anchor"):
+        state_paths.ensure_vault_state_dir(tmp_path / "vault")
+
+    assert list(outside.iterdir()) == []
+
+
 def test_hosted_runtime_requires_existing_owned_roots(tmp_path: Path) -> None:
     values = _env(tmp_path)
     with pytest.raises(HostedConfigError) as error:
@@ -283,6 +343,10 @@ def test_feature_grants_limits_and_privacy_defaults_are_deterministic(
         "GITHUB_CLIENT_SECRET": "github-client-secret-sentinel",
     }
     applied = config.apply_process_environment(process_env)
+    assert process_env["EXOMEM_STATE_ROOT"] == str(config.state_root / "vault-state")
+    assert process_env["EXOMEM_WRITER_LEASE_STATE_DIR"] == str(config.state_root)
+    assert Path(process_env["EXOMEM_STATE_ROOT"]).parent == config.state_root
+    assert Path(process_env["EXOMEM_STATE_ROOT"]) != config.vault_root
     assert process_env["EXOMEM_DISABLE_QUERY_LOG"] == "1"
     assert process_env["EXOMEM_DISABLE_USAGE_BOOST"] == "1"
     assert process_env["EXOMEM_DISABLE_FILE_WATCHER"] == "1"
@@ -369,6 +433,13 @@ def test_hosted_initialize_skips_dotenv_and_starts_no_ungranted_workers(
     ):
         monkeypatch.delenv(key, raising=False)
 
+    core_runtime: list[str] = []
+    monkeypatch.setattr(
+        server_runtime,
+        "_start_retrieval_runtime",
+        lambda _vault: core_runtime.append("retrieval"),
+        raising=False,
+    )
     monkeypatch.setattr(
         server_runtime,
         "_start_compute_runtime",
@@ -398,6 +469,7 @@ def test_hosted_initialize_skips_dotenv_and_starts_no_ungranted_workers(
     assert readiness["reason_code"] == "HOSTED_READY"
     assert runtime.media_worker is None
     assert runtime.file_watcher is None
+    assert core_runtime == ["retrieval"]
     assert SECRET not in repr(runtime)
     assert "EXOMEM_DISABLE_QUERY_LOG" in hosted_runtime.os.environ
 
@@ -438,6 +510,15 @@ def test_hosted_initialize_preactivates_projection_before_readiness(
         monkeypatch.setenv(key, value)
     events: list[str] = []
 
+    from exomem import state_migration
+
+    monkeypatch.setattr(
+        state_migration,
+        "require_vault_state_ready",
+        lambda root: events.append(f"ready:{root}"),
+        raising=False,
+    )
+
     monkeypatch.setattr(
         server_runtime.projection_runtime,
         "preactivate_projection_runtime",
@@ -453,7 +534,11 @@ def test_hosted_initialize_preactivates_projection_before_readiness(
         load_dotenv_func=lambda **_kwargs: pytest.fail("hosted startup loaded dotenv")
     )
 
-    assert events[:2] == [f"projection:{config.vault_root}", "mutation-probe"]
+    assert events[:3] == [
+        f"ready:{config.vault_root}",
+        f"projection:{config.vault_root}",
+        "mutation-probe",
+    ]
     assert runtime.hosted_lifecycle is not None
 
 
@@ -651,6 +736,105 @@ def test_lifecycle_reports_content_free_readiness_and_degradation(
     assert readiness.reason_code == "HOSTED_MUTATION_LOCK_UNAVAILABLE"
 
 
+def test_control_plane_readiness_rechecks_content_free_session_membership(
+    tmp_path: Path,
+) -> None:
+    _values, config = _provisioned(tmp_path)
+    states = [
+        ServingMembershipReadiness(
+            ready=True,
+            code="AUTHORIZATION_MEMBERSHIP_READY",
+            epoch=17,
+            serving_replicas=2,
+            draining_replicas=0,
+        ),
+        ServingMembershipReadiness(
+            ready=False,
+            code="AUTHORIZATION_MEMBERSHIP_UNAVAILABLE",
+            epoch=17,
+            serving_replicas=2,
+            draining_replicas=0,
+        ),
+    ]
+    lifecycle = HostedCellLifecycle(
+        config,
+        authorization_session_readiness_provider=lambda: states.pop(0),
+    )
+    lifecycle.complete_startup(
+        vault_ready=True,
+        mutation_authority_ready=True,
+        service_auth_ready=True,
+    )
+
+    first = lifecycle.control_plane_readiness()["authorizationSession"]
+    second = lifecycle.control_plane_readiness()["authorizationSession"]
+
+    assert first == {
+        "ready": True,
+        "code": "AUTHORIZATION_MEMBERSHIP_READY",
+        "servingMembershipEpoch": 17,
+        "servingReplicaCount": 2,
+        "drainingReplicaCount": 0,
+    }
+    assert second == {**first, "ready": False, "code": "AUTHORIZATION_MEMBERSHIP_UNAVAILABLE"}
+    assert "replica-a" not in repr(first)
+    assert "auth-key" not in repr(first)
+    assert "digest" not in repr(first).lower()
+
+
+def test_hosted_readiness_provider_uses_the_bound_control_plane_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    values = _env(tmp_path)
+    values.pop("EXOMEM_HOSTED_SERVICE_CREDENTIAL")
+    values.update(
+        {
+            "EXOMEM_HOSTED_VAULT_ID": "vault-alpha",
+            "EXOMEM_HOSTED_RUNTIME_UID": str(os.geteuid()),
+            "EXOMEM_HOSTED_RUNTIME_GID": str(os.getegid()),
+            "EXOMEM_HOSTED_WORKER_POLICY_DIGEST": "a" * 64,
+            "EXOMEM_AUTH_SESSION_REPLICA_ID": "cell-alpha-0",
+        }
+    )
+    config = HostedCellConfig.from_env(values)
+    expected = ServingMembershipReadiness(
+        ready=True,
+        code="AUTHORIZATION_MEMBERSHIP_READY",
+        epoch=9,
+        serving_replicas=1,
+        draining_replicas=0,
+    )
+    calls: list[dict[str, object]] = []
+
+    def hosted_provider(vault_root: Path, **kwargs: object) -> ServingMembershipReadiness:
+        calls.append({"vault_root": vault_root, **kwargs})
+        return expected
+
+    monkeypatch.setattr(
+        server_runtime.authorization_session_lifecycle,
+        "hosted_serving_membership_readiness",
+        hosted_provider,
+    )
+    monkeypatch.setattr(
+        server_runtime.authorization_session_lifecycle,
+        "serving_membership_readiness",
+        lambda *_args, **_kwargs: pytest.fail("Hosted used the standalone registry"),
+    )
+
+    provider = server_runtime._hosted_authorization_session_readiness_provider(config)
+
+    assert provider() == expected
+    assert calls == [
+        {
+            "vault_root": config.vault_root,
+            "expected_cell_id": "cell-alpha",
+            "expected_logical_vault_id": "vault-alpha",
+            "expected_replica_id": "cell-alpha-0",
+        }
+    ]
+
+
 def test_quiesce_and_deletion_sealing_wait_for_an_admitted_download(tmp_path: Path) -> None:
     _values, config = _provisioned(tmp_path)
     lifecycle = HostedCellLifecycle(config)
@@ -779,6 +963,32 @@ def test_quiesce_drains_and_rejects_new_mutations_then_resume_is_idempotent(
     assert lifecycle.readiness().ready is True
 
 
+def test_runtime_membership_attestation_requires_admitted_active_state(
+    tmp_path: Path,
+) -> None:
+    _values, config = _provisioned(tmp_path)
+    lifecycle = HostedCellLifecycle(config)
+    lifecycle.complete_startup(
+        vault_ready=True,
+        mutation_authority_ready=True,
+        service_auth_ready=True,
+    )
+    observed: list[str] = []
+
+    assert lifecycle.attest_authorization_membership(
+        lambda snapshot: observed.append(snapshot.phase) or b"signed"
+    ) == b"signed"
+    lifecycle.set_mutation_authority(False)
+
+    with pytest.raises(HostedLifecycleError) as raised:
+        lifecycle.attest_authorization_membership(
+            lambda _snapshot: b"must-not-sign"
+        )
+
+    assert raised.value.code == "AUTHORIZATION_SESSION_UNAVAILABLE"
+    assert observed == ["active"]
+
+
 def test_deletion_seal_is_idempotent_and_rejects_reads_and_writes(
     tmp_path: Path,
 ) -> None:
@@ -888,6 +1098,23 @@ def test_provisioning_is_idempotent_machine_readable_and_non_destructive(
     assert sentinel.read_text(encoding="utf-8") == "owned data"
     assert not conflict.state_root.exists()
     assert not conflict.log_root.exists()
+
+
+def test_provisioning_publishes_bound_external_state_before_return(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A provisioned cell may be started without another state-creation path."""
+    from exomem import state_migration
+
+    values = _env(tmp_path)
+    config = HostedCellConfig.from_env(values, require_provisioned=False)
+    monkeypatch.setenv("EXOMEM_HOSTED_STATE_ROOT", str(config.state_root))
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(config.state_root / "vault-state"))
+
+    provision_hosted_cell(config)
+
+    resolution = state_migration.require_vault_state_ready(config.vault_root)
+    assert resolution.state_dir.parent == config.state_root / "vault-state"
 
 
 def test_provisioning_converges_after_interrupted_staged_publication(

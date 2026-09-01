@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Node resize or replacement
 
 ## Preconditions

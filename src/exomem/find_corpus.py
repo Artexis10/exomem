@@ -219,6 +219,7 @@ def parse_page(
     text = text.replace("\r\n", "\n").replace("\r", "\n")
 
     fm_match = FRONTMATTER_PATTERN.match(text)
+    frontmatter_valid = True
     if fm_match:
         try:
             # Hot path: every page-cache miss parses here (warm-up walks the
@@ -228,12 +229,14 @@ def parse_page(
             frontmatter = yaml_safe_load(fm_match.group(1)) or {}
             if not isinstance(frontmatter, dict):
                 frontmatter = {}
+                frontmatter_valid = False
         except yaml.YAMLError as e:
             if privacy_log.content_private_logging_enabled():
                 log.warning("hosted content parse failed code=HOSTED_CONTENT_PARSE_FAILED")
             else:
                 log.warning("YAML parse error in %s: %s", path, e)
             frontmatter = {}
+            frontmatter_valid = False
         body = fm_match.group(2)
         # The FRONTMATTER_PATTERN consumes the closing `\n---\n` but not the
         # blank line that conventionally follows. Strip a single leading `\n`
@@ -244,6 +247,10 @@ def parse_page(
     else:
         frontmatter = {}
         body = text
+        if text.startswith("---\n"):
+            # An opening fence without the complete frontmatter grammar is
+            # ambiguous metadata, not proof that the page has no metadata.
+            frontmatter_valid = False
 
     from .vault import resolve_display_title
 
@@ -265,6 +272,7 @@ def parse_page(
         title=title,
         mtime=mtime,
         snapshot_hash=hashlib.sha256(content).hexdigest(),
+        frontmatter_valid=frontmatter_valid,
     )
 
 

@@ -7,8 +7,13 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from exomem.governance import authorization_custody, authorization_serving_membership
 from pydantic import ValidationError
 
+from exomem_provisioner.authorization_membership import (
+    build_initial_hosted_authorization_bundle,
+    inspect_hosted_authorization_bundle,
+)
 from exomem_provisioner.capacity import CapacityConflict
 from exomem_provisioner.config import (
     ProviderWorkerSettings,
@@ -143,6 +148,47 @@ def _capacity_contract(path: Path) -> Path:
 
 def _metadata() -> OpaqueProviderMetadata:
     return OpaqueProviderMetadata("tenant-alpha", "cell-alpha", "operation-alpha", 7)
+
+
+def _signed_runtime_attestation(
+    files: dict[str, bytes],
+    *,
+    cell_id: str,
+    replica_id: str,
+    software_version: str,
+    epoch: int,
+    now: int,
+    ttl_seconds: int,
+    state: str = "DRAINING",
+) -> bytes:
+    keyring = authorization_custody.parse_keyring(files["keyring.json"])
+    control = authorization_custody.parse_control_record(
+        files["control.json"],
+        keyring=keyring,
+        now=now,
+    )
+    attestation = authorization_serving_membership.ReplicaReadinessAttestation(
+        version=1,
+        epoch=epoch,
+        replica_id=replica_id,
+        state=state,
+        software_version=software_version,
+        schema_version=4,
+        cell_id=cell_id,
+        active_key_id=keyring.active_key_id,
+        accepted_key_ids=tuple(item.key_id for item in keyring.accepted_keys),
+        control_digest=authorization_custody.control_attestation_digest(control),
+        keyring_digest=authorization_custody.keyring_attestation_digest(keyring),
+        attested_at=now,
+        expires_at=now + ttl_seconds,
+        issuance_stopped=state == "DRAINING",
+        no_in_flight=state == "DRAINING",
+        signing_key_id=keyring.active_key_id,
+    )
+    return authorization_serving_membership.encode_replica_readiness_attestation(
+        attestation,
+        verifier_keys={item.key_id: item.key for item in keyring.accepted_keys},
+    )
 
 
 def _settings(**overrides: object) -> ProviderWorkerSettings:
@@ -400,6 +446,12 @@ async def test_live_plane_namespace_carries_the_fixed_helm_contract_annotations(
         def list_namespaced_config_map(self, namespace, *, label_selector):
             return SimpleNamespace(items=[])
 
+        def list_namespaced_pod(self, namespace, *, label_selector):
+            assert namespace == metadata.resource_name
+            assert "!exomem.io/storage-init" in label_selector
+            assert "!exomem.io/vault-fingerprint" in label_selector
+            return SimpleNamespace(items=[])
+
     class Missing:
         def __getattr__(self, name):
             def missing(*args, **kwargs):
@@ -436,6 +488,7 @@ async def test_live_plane_namespace_carries_the_fixed_helm_contract_annotations(
             transfer_hostname="transfer.example.invalid",
             protocol_version="1",
             release_version="0.22.0",
+            migration_mode="none",
         ),  # type: ignore[arg-type]
     )
     key = plane._key(metadata)
@@ -458,6 +511,7 @@ async def test_live_plane_namespace_carries_the_fixed_helm_contract_annotations(
         "exomem.io/lifecycle-actions-enabled": "false",
         "exomem.io/browser-origin": "https://substratesystems.io",
         "exomem.io/transfer-hostname": "transfer.example.invalid",
+        "exomem.io/authorization-session-secret-name": "exomem-authorization-session",
     }
     annotations = core.namespace_body["metadata"]["annotations"]
     assert {key: annotations.get(key) for key in expected} == expected
@@ -536,7 +590,15 @@ async def test_live_rollforward_uses_target_fingerprint_and_original_helm_author
             "releaseVersion": "0.54.1",
             "protocolVersion": "legacy-protocol",
         },
-        "_providerRecoveryEnvelopes": {"initJob": "original-init-envelope"},
+        "_providerRecoveryEnvelopes": cell_provider_recovery_envelopes(
+            IDENTITY_CODEC,
+            tenant_id=owner.tenant_id,
+            cell_id=owner.subject_id,
+            operation_id=owner.operation_id,
+            fence_generation=owner.fence_generation,
+            resource_name=owner.resource_name,
+            operation_resource_name=provider_operation_resource_name(owner.operation_id),
+        ),
     }
     request = {
         "serviceCredential": "credential-current",
@@ -573,11 +635,79 @@ async def test_live_rollforward_uses_target_fingerprint_and_original_helm_author
             assert credential == "credential-current"
             assert operation_id == "rollforward-alpha"
             quiesced_protocols.append(protocol_version)
+            return {
+                "phase": "quiesced",
+                "active_reads": 0,
+                "active_mutations": 0,
+                "active_transfers": 0,
+                "reason_code": "HOSTED_QUIESCED",
+            }
+
+        async def attest_authorization_session_membership(
+            self,
+            metadata,
+            *,
+            credential,
+            protocol_version,
+            target_epoch,
+            previous_epoch_digest,
+            ttl_seconds,
+        ):
+            assert metadata == owner
+            assert credential == "credential-current"
+            assert protocol_version == "legacy-protocol"
+            inspected = inspect_hosted_authorization_bundle(
+                Cell.files,
+                expected_cell_id=owner.subject_id,
+                expected_logical_vault_id=owner.tenant_id,
+                expected_replica_id=owner.resource_name + "-0",
+                expected_software_version=None,
+                expected_schema_version=4,
+                expected_recovery_envelope=original_request["_providerRecoveryEnvelopes"][
+                    "authorizationSessionSecret"
+                ],
+                now=1_900_000_030,
+                _require_fresh=False,
+            )
+            assert target_epoch == inspected.epoch + 1
+            assert previous_epoch_digest == inspected.membership_digest
+            return _signed_runtime_attestation(
+                Cell.files,
+                cell_id=owner.subject_id,
+                replica_id=owner.resource_name + "-0",
+                software_version=inspected.software_version,
+                epoch=target_epoch,
+                now=1_900_000_030,
+                ttl_seconds=ttl_seconds,
+            )
+
+    class Cell:
+        files = build_initial_hosted_authorization_bundle(
+            cell_id=owner.subject_id,
+            logical_vault_id=owner.tenant_id,
+            replica_id=owner.resource_name + "-0",
+            software_version="0.54.1",
+            schema_version=4,
+            recovery_envelope=original_request["_providerRecoveryEnvelopes"][
+                "authorizationSessionSecret"
+            ],
+            now=1_900_000_000,
+            entropy=lambda length: bytes(range(length)),
+        ).files
+
+        async def read_authorization_session_bundle(self, _owner):
+            return self.files
+
+        async def write_authorization_session_bundle(self, _owner, files, **_kwargs):
+            self.files = files
+
+        async def stage_authorization_session_revision(self, _owner, _revision):
+            return None
 
     plane = LiveLifecyclePlane(
         repository=SimpleNamespace(),  # type: ignore[arg-type]
         registry=Registry(),  # type: ignore[arg-type]
-        cell=SimpleNamespace(),  # type: ignore[arg-type]
+        cell=Cell(),  # type: ignore[arg-type]
         helm=Helm(),  # type: ignore[arg-type]
         runtime=Runtime(),  # type: ignore[arg-type]
         routes=SimpleNamespace(),  # type: ignore[arg-type]
@@ -586,6 +716,7 @@ async def test_live_rollforward_uses_target_fingerprint_and_original_helm_author
         identity_verifier=IDENTITY_CODEC.verifier(),
         config=config,
         fingerprint=Fingerprint(),  # type: ignore[arg-type]
+        now=lambda: 1_900_000_030,
     )
     key = plane._key(current)
     plane._owned[key] = owner
@@ -603,6 +734,20 @@ async def test_live_rollforward_uses_target_fingerprint_and_original_helm_author
     await plane.upgrade_runtime(current, request, config, "rollforward-alpha")
     await plane.rollback_runtime(current, "rollforward-alpha")
 
+    rolled_back = inspect_hosted_authorization_bundle(
+        plane._cell.files,
+        expected_cell_id=owner.subject_id,
+        expected_logical_vault_id=owner.tenant_id,
+        expected_replica_id=owner.resource_name + "-0",
+        expected_software_version="0.54.1",
+        expected_schema_version=4,
+        expected_recovery_envelope=original_request["_providerRecoveryEnvelopes"][
+            "authorizationSessionSecret"
+        ],
+        now=1_900_000_030,
+    )
+    assert (rolled_back.epoch, rolled_back.replica_state) == (4, "SERVING")
+
     assert fingerprints == [(current, "rollforward-alpha", "before")]
     assert quiesced_protocols == ["legacy-protocol"]
     assert [values["workloadMode"] for _owner, values, _operation in transitions] == [
@@ -613,10 +758,186 @@ async def test_live_rollforward_uses_target_fingerprint_and_original_helm_author
         assert transition_owner == owner
         assert operation == "rollforward-alpha"
         assert values["image"] == config.image
-        assert values["providerRecoveryEnvelopes"] == {"initJob": "original-init-envelope"}
+        assert values["providerRecoveryEnvelopes"] == original_request["_providerRecoveryEnvelopes"]
         assert values["routes"]["enabled"] is False
     assert transitions[0][1]["initOperationId"] == "rollforward-alpha"
     assert rollbacks == [(owner, "rollforward-alpha")]
+
+
+@pytest.mark.asyncio
+async def test_membership_drain_requires_zero_runtime_snapshot_and_rejoin_precedes_scale() -> None:
+    metadata = _metadata()
+    now = 1_900_000_000
+    envelopes = cell_provider_recovery_envelopes(
+        IDENTITY_CODEC,
+        tenant_id=metadata.tenant_id,
+        cell_id=metadata.subject_id,
+        operation_id=metadata.operation_id,
+        fence_generation=metadata.fence_generation,
+        resource_name=metadata.resource_name,
+        operation_resource_name=provider_operation_resource_name(metadata.operation_id),
+    )
+    request = {
+        "serviceCredential": "credential-current",
+        "runtimeTarget": {
+            "releaseVersion": "0.48.0",
+            "protocolVersion": "1",
+            "agentProfile": "hosted-alpha-agent-v1",
+            "gatewayContractDigest": "a" * 64,
+            "commandFingerprint": "b" * 64,
+            "schemaDigest": "c" * 64,
+        },
+        "_providerRecoveryEnvelopes": envelopes,
+    }
+    initial = build_initial_hosted_authorization_bundle(
+        cell_id=metadata.subject_id,
+        logical_vault_id=metadata.tenant_id,
+        replica_id=metadata.resource_name + "-0",
+        software_version="0.48.0",
+        schema_version=4,
+        recovery_envelope=envelopes["authorizationSessionSecret"],
+        now=now,
+        entropy=lambda length: bytes(range(length)),
+    )
+    events: list[tuple[object, ...]] = []
+
+    class Runtime:
+        active_reads = 1
+
+        async def quiesce(self, *_args, **_kwargs):
+            return {
+                "phase": "quiesced",
+                "active_reads": self.active_reads,
+                "active_mutations": 0,
+                "active_transfers": 0,
+                "reason_code": "HOSTED_QUIESCED",
+            }
+
+        async def attest_authorization_session_membership(
+            self,
+            _metadata,
+            *,
+            credential,
+            protocol_version,
+            target_epoch,
+            previous_epoch_digest,
+            ttl_seconds,
+        ):
+            assert credential == "credential-current"
+            assert protocol_version == "1"
+            keyring = authorization_custody.parse_keyring(cell.files["keyring.json"])
+            control = authorization_custody.parse_control_record(
+                cell.files["control.json"],
+                keyring=keyring,
+                now=now + 30,
+            )
+            attestation = authorization_serving_membership.ReplicaReadinessAttestation(
+                version=1,
+                epoch=target_epoch,
+                replica_id=metadata.resource_name + "-0",
+                state="DRAINING",
+                software_version="0.48.0",
+                schema_version=4,
+                cell_id=metadata.subject_id,
+                active_key_id=keyring.active_key_id,
+                accepted_key_ids=tuple(item.key_id for item in keyring.accepted_keys),
+                control_digest=authorization_custody.control_attestation_digest(control),
+                keyring_digest=authorization_custody.keyring_attestation_digest(keyring),
+                attested_at=now + 30,
+                expires_at=now + 30 + ttl_seconds,
+                issuance_stopped=True,
+                no_in_flight=True,
+                signing_key_id=keyring.active_key_id,
+            )
+            raw = authorization_serving_membership.encode_replica_readiness_attestation(
+                attestation,
+                verifier_keys={item.key_id: item.key for item in keyring.accepted_keys},
+            )
+            events.append(("attest", target_epoch, previous_epoch_digest))
+            return raw
+
+    class Cell:
+        files = initial.files
+
+        async def read_authorization_session_bundle(self, _owner):
+            return self.files
+
+        async def write_authorization_session_bundle(
+            self, _owner, files, *, expected_revision, **_kwargs
+        ):
+            events.append(("write", expected_revision))
+            self.files = files
+
+        async def stage_authorization_session_revision(self, _owner, revision):
+            events.append(("stage", revision))
+
+        async def scale(self, _owner, replicas):
+            events.append(("scale", replicas))
+
+    runtime = Runtime()
+    cell = Cell()
+    plane = LiveLifecyclePlane(
+        repository=SimpleNamespace(),  # type: ignore[arg-type]
+        registry=SimpleNamespace(),  # type: ignore[arg-type]
+        cell=cell,  # type: ignore[arg-type]
+        helm=SimpleNamespace(),  # type: ignore[arg-type]
+        runtime=runtime,  # type: ignore[arg-type]
+        routes=SimpleNamespace(),  # type: ignore[arg-type]
+        maintenance=SimpleNamespace(),  # type: ignore[arg-type]
+        capacity=SimpleNamespace(),  # type: ignore[arg-type]
+        identity_verifier=IDENTITY_CODEC.verifier(),
+        config=SimpleNamespace(
+            runtime_target_for=lambda _request, **_kwargs: request["runtimeTarget"]
+        ),  # type: ignore[arg-type]
+        now=lambda: now + 30,
+    )
+    plane._owned[plane._key(metadata)] = metadata
+    plane._helm_requests[plane._key(metadata)] = request
+
+    with pytest.raises(MetadataConflict, match="complete authorization drain"):
+        await plane.quiesce(metadata, request, "quiesce-alpha")
+    assert events == []
+    assert cell.files == initial.files
+
+    runtime.active_reads = 0
+    await plane.quiesce(metadata, request, "quiesce-alpha")
+    drained = inspect_hosted_authorization_bundle(
+        cell.files,
+        expected_cell_id=metadata.subject_id,
+        expected_logical_vault_id=metadata.tenant_id,
+        expected_replica_id=metadata.resource_name + "-0",
+        expected_software_version="0.48.0",
+        expected_schema_version=4,
+        expected_recovery_envelope=envelopes["authorizationSessionSecret"],
+        now=now + 30,
+    )
+    assert (drained.epoch, drained.replica_state, drained.no_in_flight) == (
+        2,
+        "DRAINING",
+        True,
+    )
+
+    await plane.scale(metadata, 1)
+    serving = inspect_hosted_authorization_bundle(
+        cell.files,
+        expected_cell_id=metadata.subject_id,
+        expected_logical_vault_id=metadata.tenant_id,
+        expected_replica_id=metadata.resource_name + "-0",
+        expected_software_version="0.48.0",
+        expected_schema_version=4,
+        expected_recovery_envelope=envelopes["authorizationSessionSecret"],
+        now=now + 30,
+    )
+    assert (serving.epoch, serving.replica_state) == (3, "SERVING")
+    assert [event[0] for event in events] == [
+        "attest",
+        "write",
+        "write",
+        "stage",
+        "scale",
+    ]
+    assert events[0][1:] == (2, initial.membership_digest)
+    assert events[-2][1] == serving.revision
 
 
 @pytest.mark.asyncio
@@ -645,16 +966,40 @@ async def test_live_route_enable_reconciles_the_original_authenticated_helm_rele
         transfer_hostname="transfer.example.invalid",
         protocol_version="1",
         release_version="0.22.0",
+        migration_mode="none",
+        runtime_target_for=lambda _request, *, v2: {
+            "releaseVersion": "0.22.0",
+            "protocolVersion": "1",
+        },
+    )
+    envelopes = cell_provider_recovery_envelopes(
+        IDENTITY_CODEC,
+        tenant_id=metadata.tenant_id,
+        cell_id=metadata.subject_id,
+        operation_id=metadata.operation_id,
+        fence_generation=metadata.fence_generation,
+        resource_name=metadata.resource_name,
+        operation_resource_name=provider_operation_resource_name(metadata.operation_id),
     )
     request = {
         "provisionMode": "serve",
         "workerPolicy": {"workerCount": 2, "semantic": True, "media": False},
-        "_providerRecoveryEnvelopes": {"controlRoute": "signed-control"},
+        "_providerRecoveryEnvelopes": envelopes,
     }
+
+    class Cell:
+        files = None
+
+        async def read_authorization_session_bundle(self, _owner):
+            return self.files
+
+        async def write_authorization_session_bundle(self, _owner, files, **_kwargs):
+            self.files = files
+
     plane = LiveLifecyclePlane(
         repository=SimpleNamespace(),  # type: ignore[arg-type]
         registry=Registry(),  # type: ignore[arg-type]
-        cell=SimpleNamespace(),  # type: ignore[arg-type]
+        cell=Cell(),  # type: ignore[arg-type]
         helm=Helm(),  # type: ignore[arg-type]
         runtime=SimpleNamespace(),  # type: ignore[arg-type]
         routes=Routes(),  # type: ignore[arg-type]
@@ -673,7 +1018,7 @@ async def test_live_route_enable_reconciles_the_original_authenticated_helm_rele
         "controlHostname": "control.example.invalid",
         "enabled": True,
     }
-    assert calls[0]["providerRecoveryEnvelopes"] == {"controlRoute": "signed-control"}
+    assert calls[0]["providerRecoveryEnvelopes"] == envelopes
 
 
 @pytest.mark.asyncio
@@ -898,6 +1243,12 @@ async def test_registry_requires_deployed_helm_record_in_addition_to_pvc() -> No
             assert label_selector == (f"owner=helm,name={metadata.resource_name},status=deployed")
             return SimpleNamespace(items=self.releases)
 
+        def list_namespaced_pod(self, namespace, *, label_selector):
+            assert namespace == metadata.resource_name
+            assert "!exomem.io/storage-init" in label_selector
+            assert "!exomem.io/vault-fingerprint" in label_selector
+            return SimpleNamespace(items=[])
+
     class Missing:
         def __getattr__(self, name):
             def missing(*args, **kwargs):
@@ -997,6 +1348,10 @@ async def test_registry_distinguishes_absent_running_complete_and_failed_init_jo
         def list_namespaced_config_map(self, namespace, *, label_selector):
             return SimpleNamespace(items=[object()])
 
+        def list_namespaced_pod(self, namespace, *, label_selector):
+            assert namespace == metadata.resource_name
+            return SimpleNamespace(items=[])
+
     class Batch:
         def read_namespaced_job(self, name, namespace):
             if job is None:
@@ -1023,6 +1378,85 @@ async def test_registry_distinguishes_absent_running_complete_and_failed_init_jo
     assert snapshot.init_job_present is present
     assert snapshot.init_complete is complete
     assert snapshot.init_failed is failed
+
+
+@pytest.mark.asyncio
+async def test_registry_counts_desired_and_terminating_runtime_pods_for_stop_proof() -> None:
+    metadata = _metadata()
+    envelopes = cell_provider_recovery_envelopes(
+        IDENTITY_CODEC,
+        tenant_id=metadata.tenant_id,
+        cell_id=metadata.subject_id,
+        operation_id=metadata.operation_id,
+        fence_generation=metadata.fence_generation,
+        resource_name=metadata.resource_name,
+        operation_resource_name=provider_operation_resource_name(metadata.operation_id),
+    )
+
+    class Core:
+        selector = ""
+
+        def read_namespace(self, name):
+            return SimpleNamespace(
+                metadata=SimpleNamespace(
+                    annotations={
+                        **metadata.kubernetes_annotations,
+                        "exomem.io/recovery-envelope": envelopes["namespace"],
+                    }
+                )
+            )
+
+        def read_namespaced_persistent_volume_claim(self, name, namespace):
+            return SimpleNamespace(
+                metadata=SimpleNamespace(
+                    annotations={
+                        **metadata.kubernetes_annotations,
+                        "exomem.io/recovery-envelope": envelopes["vaultPvc"],
+                    }
+                )
+            )
+
+        def list_namespaced_config_map(self, namespace, *, label_selector):
+            return SimpleNamespace(items=[object()])
+
+        def list_namespaced_pod(self, namespace, *, label_selector):
+            self.selector = label_selector
+            return SimpleNamespace(
+                items=[SimpleNamespace(metadata=SimpleNamespace(deletion_timestamp="now"))]
+            )
+
+    class Apps:
+        def read_namespaced_stateful_set(self, name, namespace):
+            return SimpleNamespace(
+                metadata=SimpleNamespace(deletion_timestamp=None),
+                spec=SimpleNamespace(replicas=0),
+            )
+
+    class Missing:
+        def __getattr__(self, name):
+            def missing(*args, **kwargs):
+                raise _NotFound()
+
+            return missing
+
+    core = Core()
+    registry = KubernetesProviderRegistry(
+        core_v1=core,
+        apps_v1=Apps(),
+        batch_v1=Missing(),
+        custom_objects=Missing(),
+        identity_verifier=IDENTITY_CODEC.verifier(),
+    )
+
+    snapshot = await registry.inspect(metadata, metadata)
+
+    assert snapshot.runtime_desired_replicas == 0
+    assert snapshot.runtime_pods == 1
+    assert core.selector == (
+        "app.kubernetes.io/name=exomem-cell,"
+        f"exomem.io/cell={metadata.resource_name},"
+        "!exomem.io/storage-init,!exomem.io/vault-fingerprint"
+    )
 
 
 @pytest.mark.asyncio
@@ -1151,6 +1585,11 @@ def _init_recovery_config() -> SimpleNamespace:
         transfer_hostname="transfer.example.invalid",
         protocol_version="1",
         release_version="0.22.0",
+        migration_mode="none",
+        runtime_target_for=lambda _request, *, v2: {
+            "releaseVersion": "0.22.0",
+            "protocolVersion": "1",
+        },
     )
 
 
@@ -1187,10 +1626,19 @@ def _init_recovery_plane(snapshots: list[SimpleNamespace]):
         async def ensure_release(self, owner, values):
             helm_calls.append((owner, values))
 
+    class Cell:
+        files = None
+
+        async def read_authorization_session_bundle(self, _owner):
+            return self.files
+
+        async def write_authorization_session_bundle(self, _owner, files, **_kwargs):
+            self.files = files
+
     plane = LiveLifecyclePlane(
         repository=SimpleNamespace(),  # type: ignore[arg-type]
         registry=Registry(),  # type: ignore[arg-type]
-        cell=SimpleNamespace(),  # type: ignore[arg-type]
+        cell=Cell(),  # type: ignore[arg-type]
         helm=Helm(),  # type: ignore[arg-type]
         runtime=SimpleNamespace(),  # type: ignore[arg-type]
         routes=SimpleNamespace(),  # type: ignore[arg-type]
@@ -1201,7 +1649,17 @@ def _init_recovery_plane(snapshots: list[SimpleNamespace]):
     )
     key = plane._key(metadata)
     plane._owned[key] = original_owner
-    plane._helm_requests[key] = _init_recovery_request(envelope="original-init-envelope")
+    original_request = _init_recovery_request(envelope="original-init-envelope")
+    original_request["_providerRecoveryEnvelopes"] = cell_provider_recovery_envelopes(
+        IDENTITY_CODEC,
+        tenant_id=original_owner.tenant_id,
+        cell_id=original_owner.subject_id,
+        operation_id=original_owner.operation_id,
+        fence_generation=original_owner.fence_generation,
+        resource_name=original_owner.resource_name,
+        operation_resource_name=provider_operation_resource_name(original_owner.operation_id),
+    )
+    plane._helm_requests[key] = original_request
     return plane, metadata, original_owner, helm_calls
 
 
@@ -1225,8 +1683,10 @@ async def test_initialize_replays_absent_init_job_with_original_authenticated_re
     assert [owner for owner, _values in helm_calls] == [original_owner, original_owner]
     assert [values["workloadMode"] for _owner, values in helm_calls] == ["initialize", "serve"]
     assert helm_calls[0][1]["workerPolicyDigest"] == helm_calls[1][1]["workerPolicyDigest"]
-    assert helm_calls[0][1]["providerRecoveryEnvelopes"] == {"initJob": "original-init-envelope"}
-    assert helm_calls[1][1]["providerRecoveryEnvelopes"] == {"initJob": "original-init-envelope"}
+    assert (
+        helm_calls[0][1]["providerRecoveryEnvelopes"]["initJob"]
+        == helm_calls[1][1]["providerRecoveryEnvelopes"]["initJob"]
+    )
 
 
 @pytest.mark.asyncio
@@ -1316,9 +1776,17 @@ async def test_initializing_checkpoint_recovers_deleted_init_job_without_looping
             return original_request
 
     class Cell:
+        files = None
+
         async def volume_claim_bound(self, owner):
             assert owner == original_owner
             return True
+
+        async def read_authorization_session_bundle(self, _owner):
+            return self.files
+
+        async def write_authorization_session_bundle(self, _owner, files, **_kwargs):
+            self.files = files
 
     plane._repository = Repository()  # type: ignore[assignment]
     plane._cell = Cell()  # type: ignore[assignment]
@@ -1394,6 +1862,7 @@ async def test_live_plane_requires_exact_reservation_before_namespace_or_release
             transfer_hostname="transfer.example.invalid",
             protocol_version="1",
             release_version="0.22.0",
+            migration_mode="none",
         ),  # type: ignore[arg-type]
     )
     key = plane._key(metadata)
@@ -1430,3 +1899,102 @@ async def test_live_plane_requires_exact_reservation_before_namespace_or_release
     capacity.reject = True
     with pytest.raises(MetadataConflict, match="exact active capacity reservation"):
         await plane.install_release(metadata, {"provisionMode": "serve"}, {})
+
+
+@pytest.mark.asyncio
+async def test_live_plane_publishes_authorization_custody_before_helm_and_reuses_it() -> None:
+    metadata = _metadata()
+    envelopes = cell_provider_recovery_envelopes(
+        IDENTITY_CODEC,
+        tenant_id=metadata.tenant_id,
+        cell_id=metadata.subject_id,
+        operation_id=metadata.operation_id,
+        fence_generation=metadata.fence_generation,
+        resource_name=metadata.resource_name,
+        operation_resource_name=provider_operation_resource_name(metadata.operation_id),
+    )
+    calls: list[str] = []
+
+    class Capacity:
+        async def require_active(self, **_identity):
+            return None
+
+    class Registry:
+        async def inspect(self, _current, _owner):
+            return SimpleNamespace(
+                namespace=True,
+                release=True,
+                init_complete=True,
+                init_failed=False,
+                serving=True,
+                runtime_admitted=False,
+                routes=(False, False),
+            )
+
+    class Cell:
+        files = None
+
+        async def read_authorization_session_bundle(self, _owner):
+            calls.append("authorization-read")
+            return self.files
+
+        async def write_authorization_session_bundle(self, _owner, files, **kwargs):
+            calls.append("authorization-write")
+            assert kwargs["recovery_envelope"] == envelopes["authorizationSessionSecret"]
+            self.files = files
+
+        async def write_credential_bundle(self, _owner, _credentials, **_kwargs):
+            calls.append("credential-write")
+
+    class Helm:
+        revisions: list[str] = []
+
+        async def ensure_release(self, _owner, values):
+            calls.append("helm")
+            self.revisions.append(values["authorizationSessionRevision"])
+
+    request = {
+        "provisionMode": "serve",
+        "serviceCredential": base64.urlsafe_b64encode(bytes(range(32))).rstrip(b"=").decode(),
+        "workerPolicy": {"workerCount": 2, "semantic": True, "media": False},
+        "runtimeTarget": {
+            "releaseVersion": "0.48.0",
+            "protocolVersion": "1",
+            "gatewayContractDigest": "a" * 64,
+        },
+        "_providerRecoveryEnvelopes": envelopes,
+    }
+    cell = Cell()
+    helm = Helm()
+    plane = LiveLifecyclePlane(
+        repository=SimpleNamespace(),  # type: ignore[arg-type]
+        registry=Registry(),  # type: ignore[arg-type]
+        cell=cell,  # type: ignore[arg-type]
+        helm=helm,  # type: ignore[arg-type]
+        runtime=SimpleNamespace(),  # type: ignore[arg-type]
+        routes=SimpleNamespace(),  # type: ignore[arg-type]
+        maintenance=SimpleNamespace(),  # type: ignore[arg-type]
+        capacity=Capacity(),  # type: ignore[arg-type]
+        identity_verifier=IDENTITY_CODEC.verifier(),
+        config=SimpleNamespace(runtime_target_for=lambda value, *, v2: value["runtimeTarget"]),  # type: ignore[arg-type]
+        now=lambda: 1_900_000_000,
+    )
+    key = plane._key(metadata)
+    plane._operation_ids[key] = "internal-operation-alpha"
+    plane._owned[key] = metadata
+    plane._helm_requests[key] = request
+    plane._recovery_envelopes[key] = envelopes
+
+    await plane.install_release(metadata, request, {"workloadMode": "initialize"})
+    await plane.install_release(metadata, request, {"workloadMode": "initialize"})
+
+    assert calls == [
+        "authorization-read",
+        "authorization-write",
+        "credential-write",
+        "helm",
+        "authorization-read",
+        "credential-write",
+        "helm",
+    ]
+    assert len(set(helm.revisions)) == 1

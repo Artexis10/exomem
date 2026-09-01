@@ -1,4 +1,11 @@
+<!-- authority:non-specification -->
+
+<!-- authority:implementation-reference -->
+
 # Memory-proof benchmark — full continuation handoff (2026-08-07)
+
+Historical execution context only. OpenSpec is the durable specification
+authority; this handoff records implementation state and evidence from that run.
 
 Audience: any successor session — Claude (Fable/Opus orchestrator) or a
 GPT-5.6 Sol/Terra implementation lane. This file is self-contained: state,

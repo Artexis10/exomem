@@ -49,8 +49,9 @@ introduces stays **registered but withheld** until the founder acknowledges the
 receipt — the scenario loader refuses to load it, so an unratified family cannot
 reach a score by accident.
 
-**f27 `lifecycle_routing_replay`** is the family added by the pending
-`amendment-2026-08-lifecycle-replay.v1.json` (sequence 3). It replays an
+**f27 `lifecycle_routing_replay`** is the family added by
+`amendment-2026-08-lifecycle-replay.v1.json` (sequence 3, acknowledged
+2026-08-30). It replays an
 authored ten-turn episode of ordinary working language — every store-bearing
 utterance removed by a gate that refuses one at corpus construction and again at
 scenario load — through the installed agent CLI, and diffs the durable state
@@ -84,9 +85,10 @@ One consequence is stated rather than hidden: the operator's real
 `~/.claude/projects/<cwd>/` gains a transcript directory for each arm's working
 directory. The manifest records this alongside the run.
 
-While sequence 3 is unacknowledged, a run is evidence about the harness and the
-current runtime, recorded as the family's finding; the manifest it writes says
-so, and it is not a comparative claim.
+Sequence 3 was acknowledged on 2026-08-30, so a run may back a comparative
+claim; the family is declared expected-partial on the current runtime — the
+next slice's falsification target. Runs recorded while the receipt was pending
+remain evidence about the harness and that runtime, as their manifests say.
 
 ## Degradation modes (recorded, never silent)
 

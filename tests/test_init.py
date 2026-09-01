@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from exomem import activation_manifest
+from exomem import activation_manifest, state_migration
 from exomem import init as init_module
 from exomem import vault as vault_module
 
@@ -55,6 +55,32 @@ def test_init_scaffolds_a_fresh_vault(tmp_path: Path) -> None:
     later = kb / "Notes/Insights/first-later-page.md"
     later.write_text("---\ntype: insight\nstatus: active\n---\n\n# Later\n", encoding="utf-8")
     assert not activation_manifest.is_grandfathered(tmp_path, later, manifest=manifest)
+    resolution = state_migration.require_vault_state_ready(tmp_path)
+    assert resolution.migrated is True
+    assert resolution.dual_state is False
+
+
+def test_force_overlay_of_existing_vault_does_not_assert_fresh_state_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kb = tmp_path / "Knowledge Base"
+    kb.mkdir(parents=True)
+    called = False
+
+    def unexpected(*_args: object, **_kwargs: object) -> None:
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(
+        state_migration,
+        "migrate_vault_state_offline",
+        unexpected,
+    )
+
+    init_module.init_vault(tmp_path, force=True)
+
+    assert called is False
 
 
 def test_force_init_snapshots_existing_compiled_pages_once_without_editing_them(
@@ -268,3 +294,20 @@ def test_refresh_on_a_vault_without_a_knowledge_base_is_inert(tmp_path: Path) ->
     vault.mkdir()
 
     assert init_module.refresh_shipped_schema(vault) == []
+
+
+def test_refresh_refuses_a_symlinked_shipped_schema_ancestor(tmp_path: Path) -> None:
+    from exomem import init as init_module
+    from exomem.workflow_contracts import WorkflowContractError
+
+    vault = tmp_path / "vault"
+    outside = tmp_path / "outside"
+    vault.mkdir()
+    outside.mkdir()
+    (vault / "Knowledge Base").mkdir()
+    (vault / ".exomem").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(WorkflowContractError, match="WORKFLOW_CONTRACT_MIGRATION_INDETERMINATE"):
+        init_module.refresh_shipped_schema(vault)
+
+    assert list(outside.iterdir()) == []

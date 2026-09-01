@@ -97,17 +97,235 @@ def test_v4_find_never_acquires_from_the_raw_corpus(monkeypatch, tmp_path) -> No
             rerank=False,
         )
 
-    assert response == [
-        {
-            "path": "Knowledge Base/visible.md",
-            "type": "note",
-            "scope": "kb",
-            "title": "Visible",
-            "updated": "",
-            "excerpt": "projection-only term",
-            "signals": {"bm25_rank": 1},
-        }
-    ]
+    assert response == {
+        "hits": [
+            {
+                "path": "Knowledge Base/visible.md",
+                "type": "note",
+                "scope": "kb",
+                "title": "Visible",
+                "updated": "",
+                "excerpt": "projection-only term",
+                "signals": {"bm25_rank": 1},
+            }
+        ],
+        "timings_suppressed": {"status": "governed_projection"},
+    }
+
+
+def test_projected_find_suppresses_application_timings_with_one_stable_shape(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    runtime = SimpleNamespace(
+        snapshot=SimpleNamespace(policy=Policy(fingerprint="f" * 64, scopes={}))
+    )
+    monkeypatch.setattr(
+        commands.projection_runtime_module,
+        "load_active_projection_runtime",
+        lambda _root: runtime,
+    )
+    monkeypatch.setattr(
+        commands.projection_runtime_module,
+        "find_projected_hits",
+        lambda *_args, **_kwargs: projection_runtime.ProjectedFindResult(
+            hits=(),
+            withheld_paths=frozenset(),
+        ),
+    )
+    monkeypatch.setattr(
+        commands.find_module,
+        "FindTimings",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("governed projected requests must not collect public timings")
+        ),
+    )
+
+    with principal.request_scope(principal.owner_principal(surface="library")):
+        response = commands.op_find(
+            tmp_path,
+            query="projection-only term",
+            scope="vault",
+            mode="keyword",
+            graph=False,
+            rerank=False,
+            include_timings=True,
+        )
+
+    assert response == {
+        "hits": [],
+        "timings_suppressed": {"status": "governed_projection"},
+    }
+
+
+def test_projected_find_accepts_the_public_default_kb_scope(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    runtime = SimpleNamespace(
+        snapshot=SimpleNamespace(policy=Policy(fingerprint="f" * 64, scopes={}))
+    )
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        commands.projection_runtime_module,
+        "load_active_projection_runtime",
+        lambda _root: runtime,
+    )
+
+    def projected(*_args, **kwargs):
+        calls.append(kwargs)
+        return projection_runtime.ProjectedFindResult(
+            hits=(),
+            withheld_paths=frozenset(),
+        )
+
+    monkeypatch.setattr(
+        commands.projection_runtime_module,
+        "find_projected_hits",
+        projected,
+    )
+
+    with principal.request_scope(principal.owner_principal(surface="library")):
+        response = commands.op_find(
+            tmp_path,
+            query="projection-only term",
+            mode="keyword",
+            graph=False,
+            rerank=False,
+        )
+
+    assert response == {
+        "hits": [],
+        "timings_suppressed": {"status": "governed_projection"},
+    }
+    assert len(calls) == 1
+    assert calls[0]["scope"] == "kb"
+
+
+def test_projected_find_threads_and_returns_the_governed_continuation(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    token = "pc1." + "a" * 64
+    runtime = SimpleNamespace(
+        snapshot=SimpleNamespace(policy=Policy(fingerprint="f" * 64, scopes={}))
+    )
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        commands.projection_runtime_module,
+        "load_active_projection_runtime",
+        lambda _root: runtime,
+    )
+
+    def projected(*_args, **kwargs):
+        calls.append(kwargs)
+        return projection_runtime.ProjectedFindResult(
+            hits=(),
+            withheld_paths=frozenset(),
+            continuation=token,
+        )
+
+    monkeypatch.setattr(
+        commands.projection_runtime_module,
+        "find_projected_hits",
+        projected,
+    )
+
+    with principal.request_scope(principal.owner_principal(surface="library")):
+        response = commands.op_find(
+            tmp_path,
+            query="projection-only term",
+            scope="vault",
+            mode="keyword",
+            graph=False,
+            rerank=False,
+            continuation=token,
+        )
+
+    assert calls[0]["continuation"] == token
+    assert response == {
+        "hits": [],
+        "timings_suppressed": {"status": "governed_projection"},
+        "continuation": token,
+    }
+
+
+def test_continuation_without_governed_runtime_uses_one_content_free_refusal(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setattr(
+        commands.projection_runtime_module,
+        "load_active_projection_runtime",
+        lambda _root: None,
+    )
+    monkeypatch.setattr(
+        commands.find_module,
+        "find",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("invalid continuation reached the raw corpus")
+        ),
+    )
+
+    with pytest.raises(
+        projection_runtime.ProjectedContinuationUnavailable,
+        match="^INVALID_CONTINUATION: continuation is invalid or expired$",
+    ):
+        commands.op_find(
+            tmp_path,
+            query="term",
+            continuation="pc1." + "a" * 64,
+            scope="vault",
+            mode="keyword",
+            graph=False,
+            rerank=False,
+        )
+
+
+def test_projected_warming_marker_omits_process_age(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    runtime = SimpleNamespace(
+        snapshot=SimpleNamespace(policy=Policy(fingerprint="f" * 64, scopes={}))
+    )
+    monkeypatch.setattr(
+        commands.projection_runtime_module,
+        "load_active_projection_runtime",
+        lambda _root: runtime,
+    )
+    monkeypatch.setattr(
+        commands.projection_runtime_module,
+        "find_projected_hits",
+        lambda *_args, **_kwargs: projection_runtime.ProjectedFindResult(
+            hits=(),
+            withheld_paths=frozenset(),
+            warming_components=("vector",),
+        ),
+    )
+    monkeypatch.setattr(
+        commands.readiness_module,
+        "warming_info",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("projected warming must not sample process age")
+        ),
+    )
+
+    with principal.request_scope(principal.owner_principal(surface="library")):
+        response = commands.op_find(
+            tmp_path,
+            query="projection-only term",
+            scope="vault",
+            mode="hybrid",
+            graph=False,
+            rerank=False,
+        )
+
+    assert response == {
+        "hits": [],
+        "timings_suppressed": {"status": "governed_projection"},
+        "warming": {"components": ["vector"]},
+    }
 
 
 def test_low_projection_never_enters_path_bearing_query_log(monkeypatch, tmp_path) -> None:
@@ -181,14 +399,17 @@ def test_low_projection_never_enters_path_bearing_query_log(monkeypatch, tmp_pat
             rerank=False,
         )
 
-    assert response == [
-        {
-            "withheld": True,
-            "level": 2,
-            "scope_label": "closed",
-            "constraint": "Approved readers only",
-        }
-    ]
+    assert response == {
+        "hits": [
+            {
+                "withheld": True,
+                "level": 2,
+                "scope_label": "closed",
+                "constraint": "Approved readers only",
+            }
+        ],
+        "timings_suppressed": {"status": "governed_projection"},
+    }
     assert logged == []
 
 
@@ -365,7 +586,13 @@ def test_projected_find_uses_only_bound_variant_text(monkeypatch, tmp_path) -> N
         (visible.id,),
         "projection term",
     )
-    namespace = verified_namespace(key, (hidden, shown))
+    outside = item(
+        "Sources/outside.md",
+        "3" * 64,
+        (visible.id,),
+        "projection term projection term",
+    )
+    namespace = verified_namespace(key, (hidden, shown, outside))
     snapshot = schema_v4.ActivePolicySnapshot(
         active=schema_v4.VerifiedActiveGovernanceState(
             logical_vault_id="fixture-vault",
@@ -381,7 +608,7 @@ def test_projected_find_uses_only_bound_variant_text(monkeypatch, tmp_path) -> N
         policy=policy,
         source_documents=(),
         catalog_descriptor=projection_store.catalog_descriptor_bytes(
-            key, (hidden, shown)
+            key, (hidden, shown, outside)
         ),
         projection_namespace_evidence=b"fixture",
     )
@@ -398,7 +625,8 @@ def test_projected_find_uses_only_bound_variant_text(monkeypatch, tmp_path) -> N
         tmp_path,
         runtime,
         query="projection term",
-        limit=1,
+        limit=2,
+        scope="kb",
         mode="keyword",
         graph=False,
         rerank=False,
@@ -409,7 +637,10 @@ def test_projected_find_uses_only_bound_variant_text(monkeypatch, tmp_path) -> N
         purpose=None,
     )
 
-    assert [hit.path for hit in result.hits] == ["Knowledge Base/shown.md"]
+    assert [hit.path for hit in result.hits] == [
+        "Knowledge Base/shown.md",
+        "Sources/outside.md",
+    ]
     assert result.withheld_paths == frozenset({"Knowledge Base/hidden.md"})
 
 
@@ -439,6 +670,39 @@ def test_projected_wire_hit_never_emits_the_full_search_body() -> None:
     )
 
     assert wire.excerpt == "prefix bounded snippet"
+
+
+def test_projected_default_scope_reserves_outside_kb_slots() -> None:
+    ordered = (
+        "Knowledge Base/a.md",
+        "Knowledge Base/b.md",
+        "Knowledge Base/c.md",
+        "Knowledge Base/d.md",
+        "Knowledge Base/e.md",
+        "Sources/target.md",
+        "Sources/second.md",
+    )
+
+    assert projection_runtime._order_projected_scope(
+        ordered,
+        scope="kb",
+        page_size=5,
+        knowledge_base_name="Knowledge Base",
+    ) == (
+        "Knowledge Base/a.md",
+        "Knowledge Base/b.md",
+        "Knowledge Base/c.md",
+        "Knowledge Base/d.md",
+        "Sources/target.md",
+        "Knowledge Base/e.md",
+        "Sources/second.md",
+    )
+    assert projection_runtime._order_projected_scope(
+        ordered,
+        scope="vault",
+        page_size=5,
+        knowledge_base_name="Knowledge Base",
+    ) == ordered
 
 
 @pytest.mark.parametrize(
@@ -513,7 +777,13 @@ def test_product_recall_does_not_reopen_due_state_on_projected_boundary(
     tmp_path,
 ) -> None:
     result = [{"path": "Knowledge Base/visible.md"}]
-    monkeypatch.setattr(commands, "op_find", lambda *_args, **_kwargs: result)
+    calls: list[dict[str, object]] = []
+
+    def find(*_args, **kwargs):
+        calls.append(kwargs)
+        return result
+
+    monkeypatch.setattr(commands, "op_find", find)
     monkeypatch.setattr(
         commands.projection_runtime_module,
         "requires_projected_read_boundary",
@@ -521,7 +791,13 @@ def test_product_recall_does_not_reopen_due_state_on_projected_boundary(
         raising=False,
     )
 
-    assert commands.op_ask_memory(tmp_path, query="term") is result
+    token = "pc1." + "a" * 64
+    assert (
+        commands.op_ask_memory(tmp_path, query="term", continuation=token)
+        is result
+    )
+    assert len(calls) == 1
+    assert calls[0]["continuation"] == token
 
 
 def test_exact_v4_public_loader_never_builds_namespace_on_request(

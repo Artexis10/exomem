@@ -20,7 +20,8 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from exomem import commands, recall_policy
+from exomem import commands, embeddings, readiness, recall_policy
+from exomem import find as find_module
 from exomem.find_types import FindTimings
 
 
@@ -122,6 +123,60 @@ def test_the_query_log_projection_carries_the_unattributed_term() -> None:
 
 def test_the_query_log_projection_tolerates_no_timings() -> None:
     assert commands._timing_log_summary(None) is None
+
+
+def test_real_find_attributes_graph_materialization_and_reranking(
+    vault: Path, monkeypatch
+) -> None:
+    """A live find call must not report its major stages as unattributed."""
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    monkeypatch.setattr(embeddings, "ranking_enabled", lambda: True)
+    monkeypatch.setattr(readiness, "should_defer", lambda _component: False)
+
+    real_outbound_wikilinks = find_module._outbound_wikilink_paths
+
+    def slow_outbound_wikilinks(*args, **kwargs):
+        time.sleep(0.04)
+        return real_outbound_wikilinks(*args, **kwargs)
+
+    real_passes_filters = find_module._passes_filters
+
+    def slow_passes_filters(*args, **kwargs):
+        time.sleep(0.04)
+        return real_passes_filters(*args, **kwargs)
+
+    def slow_rerank(_query, passages):
+        time.sleep(0.04)
+        return [float(index) for index, _ in enumerate(passages)]
+
+    monkeypatch.setattr(find_module, "_outbound_wikilink_paths", slow_outbound_wikilinks)
+    monkeypatch.setattr(find_module, "_passes_filters", slow_passes_filters)
+    monkeypatch.setattr(
+        embeddings,
+        "rerank_pairs",
+        slow_rerank,
+    )
+
+    result = commands.op_find(
+        vault,
+        query="metabolism",
+        mode="hybrid",
+        graph=True,
+        rerank=True,
+        include_timings=True,
+    )
+
+    timings = result["timings"]
+    assert {"graph", "filter_hits", "rerank"} <= set(timings["stages"])
+    assert timings["unattributed_ms"] <= 0.15 * timings["total_ms"]
+
+    top_level_ms = sum(
+        stage["ms"]
+        for name, stage in timings["stages"].items()
+        if "." not in name and "ms" in stage
+    )
+    covered_ms = timings["total_ms"] - timings["unattributed_ms"]
+    assert abs(top_level_ms - covered_ms) <= 0.15 * timings["total_ms"]
 
 
 def _kb_page(vault: Path, name: str) -> Path:

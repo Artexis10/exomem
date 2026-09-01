@@ -458,7 +458,11 @@
     services across the whole staged run, default one to match the already
     sequential provider.  Admission is serialized across stage processes.  A
     new container evicts the least-recently-used live service first and proves
-    its owned process group and secure descriptor absent before spawning.
+    its derived graph current with a reconcile barrier, then proves its owned
+    process group and secure descriptor absent before spawning.  The exact
+    transient `GRAPH_SYNC_STABILIZATION_EXHAUSTED` result may be retried with
+    fresh mutation identities, bounded to three total attempts; every other
+    non-current result fails closed without retirement.
     Residency eviction preserves the container's owned vault and work root so
     the later indexing or search process can restart against the same corpus;
     terminal container cleanup still proves process, descriptor, guest-process,

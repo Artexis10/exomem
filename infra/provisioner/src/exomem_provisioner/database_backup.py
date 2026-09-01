@@ -28,7 +28,7 @@ from .durability_repository import (
     RunKind,
     RunSnapshot,
 )
-from .durability_store import ProviderObjectHead
+from .durability_store import ProviderObjectHead, provider_retention_covers
 from .provider_recovery import ProviderIdentitySigner, ProviderReference
 
 _OPAQUE_DATABASE_IDENTITY = re.compile(r"^[A-Za-z0-9_.:-]{1,256}$")
@@ -770,15 +770,11 @@ class DatabaseBackupWorkflow:
         metadata: dict[str, str],
         lock_until: datetime,
     ) -> None:
-        retained_until = head.retain_until
-        if retained_until is not None and retained_until.tzinfo is None:
-            retained_until = retained_until.replace(tzinfo=UTC)
         if (
             head.key != key
             or head.size != expected_size
             or head.metadata != metadata
-            or retained_until is None
-            or retained_until < lock_until
+            or not provider_retention_covers(head.retain_until, lock_until)
         ):
             raise DatabaseRecoveryVerificationError("remote database backup proof differs")
 
@@ -845,17 +841,14 @@ class DatabaseRestoreWorkflow:
                 )
             selected = max(envelopes, key=lambda value: value.created_at)
             head = await self._restore_store.head(selected.object_key)
-            retained_until = (
-                head.retain_until if head is not None and head.retain_until is not None else None
-            )
-            if retained_until is not None and retained_until.tzinfo is None:
-                retained_until = retained_until.replace(tzinfo=UTC)
             if (
                 head is None
                 or head.size != selected.ciphertext_size
                 or head.version_id != selected.object_version_id
-                or retained_until is None
-                or retained_until < selected.object_lock_until
+                or not provider_retention_covers(
+                    head.retain_until,
+                    selected.object_lock_until,
+                )
             ):
                 raise DatabaseRecoveryVerificationError("database recovery object is unavailable")
             metadata_sha256 = hashlib.sha256(

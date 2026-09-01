@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Knowledge packs
 
 Knowledge packs are product-level guidance for Exomem. They let a fresh user pick
@@ -116,7 +118,7 @@ Packs do not bypass governance. They help agents choose product commands:
 | `review` | `review_memory` |
 | `connect` | `connect_memory` |
 | `adopt` | `adopt_vault(mode="scan-only")` before copy/compile modes |
-| `maintain` | `maintain_memory(mode="audit")`; explicit `fix` or `reconcile` modes for repairs |
+| `maintain` | Remote `maintain_memory` audit/dry-run; host-operator `exomem maintain --fix` / `--reconcile` for repairs |
 | `record` observed state | `record_memory`: `inspect`, `create`, `query`, `append`, or `update` |
 
 Agents should speak in product language. The user can say "save this warranty

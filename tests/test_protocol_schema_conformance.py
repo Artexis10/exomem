@@ -192,7 +192,7 @@ def _memorybench_payloads() -> dict[str, dict]:
     dataset = {
         "id": "longmemeval",
         "variant": "cleaned",
-        "source": "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned",
+        "source": "xiaowu0162/longmemeval-cleaned",
         "revision": "fixture-pin",
         "sha256": "4" * 64,
         "case_count": 1,
@@ -672,6 +672,19 @@ def test_private_gold_preserves_original_order_for_unique_answer_session_ids() -
     payload["answer_session_ids"] = ["session-z", "session-a"]
     payload["missing_fields"] = []
     _accepts_both("MemoryBenchPrivateGold", payload)
+
+
+def test_private_gold_preserves_canonical_numeric_ground_truth() -> None:
+    payload = _memorybench_payloads()["MemoryBenchPrivateGold"]
+    payload["ground_truth"] = 2026
+    _accepts_both("MemoryBenchPrivateGold", payload)
+
+
+@pytest.mark.parametrize("invalid", [None, True, 1.5, ["answer"]])
+def test_private_gold_rejects_noncanonical_ground_truth_types(invalid: object) -> None:
+    payload = _memorybench_payloads()["MemoryBenchPrivateGold"]
+    payload["ground_truth"] = invalid
+    _rejects_both("MemoryBenchPrivateGold", payload)
 
 
 def test_output_artifact_reference_rejects_an_empty_path_in_model_and_schema() -> None:

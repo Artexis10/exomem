@@ -25,7 +25,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, BinaryIO, Literal
+from typing import IO, TYPE_CHECKING, Any, BinaryIO, Literal
 
 import yaml
 from slugify import slugify as _slugify
@@ -1261,6 +1261,10 @@ def _descriptor_hash(descriptor: int, expected: PathIdentity) -> str:
 def _write_all(descriptor: int, content: bytes) -> None:
     os.lseek(descriptor, 0, os.SEEK_SET)
     os.ftruncate(descriptor, 0)
+    _append_all(descriptor, content)
+
+
+def _append_all(descriptor: int, content: bytes) -> None:
     view = memoryview(content)
     written = 0
     while written < len(view):
@@ -1957,6 +1961,118 @@ class _BatchWorkspace:
                     os.close(descriptor)
             raise
 
+    def create_stream_artifact(
+        self,
+        name: str,
+        stream: IO[bytes],
+        *,
+        expected_size: int,
+        expected_hash: str,
+    ) -> _WorkspaceArtifact:
+        """Copy a reviewed seekable stream into one held private stage."""
+
+        if (
+            not isinstance(expected_size, int)
+            or isinstance(expected_size, bool)
+            or expected_size < 0
+            or not isinstance(expected_hash, str)
+            or len(expected_hash) != 64
+            or any(character not in "0123456789abcdef" for character in expected_hash)
+        ):
+            raise PathGuardError(
+                "PATH_GUARD_INVALID", "binary batch identity is invalid"
+            )
+        try:
+            stream.seek(0)
+        except (AttributeError, OSError, ValueError) as error:
+            raise PathGuardError(
+                "PATH_GUARD_INVALID", "binary batch stream is not seekable"
+            ) from error
+
+        self.recheck()
+        held_file: held_fs.HeldFile | None = None
+        if self.held_filesystem is not None and self.held_directory is not None:
+            opened = self.held_filesystem.file(
+                self.held_directory,
+                name,
+                access="write",
+                create=True,
+                exclusive=True,
+            )
+            if not opened.ok:
+                raise PathGuardError(
+                    "PATH_GUARD_UNSAFE", "batch stage create was refused"
+                )
+            held_file = opened.require()
+            descriptor = getattr(held_file, "descriptor", None)
+            if not isinstance(descriptor, int):
+                held_file.close()
+                raise PathGuardError(
+                    "PATH_GUARD_UNSAFE", "batch stage is unavailable"
+                )
+        else:
+            flags = (
+                os.O_RDWR
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_BINARY", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+            )
+            if os.open in getattr(os, "supports_dir_fd", set()):
+                descriptor = os.open(name, flags, 0o600, dir_fd=self.descriptor)
+            else:  # pragma: no cover - legacy rootless Windows route
+                descriptor = os.open(self.path / name, flags, 0o600)
+        artifact: _WorkspaceArtifact | None = None
+        try:
+            self.recheck_identity()
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode) or _is_reparse(info):
+                raise PathGuardError("PATH_GUARD_UNSAFE", "batch stage is unsafe")
+            identity = _identity(name, info)
+            artifact = _WorkspaceArtifact(
+                self,
+                name,
+                descriptor,
+                identity,
+                expected_hash,
+                held_file=held_file,
+            )
+            self.artifacts[name] = artifact
+            digest = hashlib.sha256()
+            written = 0
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            os.ftruncate(descriptor, 0)
+            while True:
+                chunk = stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                if not isinstance(chunk, bytes):
+                    raise PathGuardError(
+                        "PATH_GUARD_INVALID", "binary batch stream returned non-bytes"
+                    )
+                written += len(chunk)
+                if written > expected_size:
+                    raise PathGuardError(
+                        "PATH_GUARD_CONTENT", "binary batch size changed"
+                    )
+                digest.update(chunk)
+                _append_all(descriptor, chunk)
+            if written != expected_size or digest.hexdigest() != expected_hash:
+                raise PathGuardError(
+                    "PATH_GUARD_CONTENT", "binary batch content changed"
+                )
+            artifact.recheck()
+            artifact.content_bound = True
+            self.recheck()
+            return artifact
+        except Exception:
+            if artifact is None:
+                if held_file is not None:
+                    held_file.close()
+                else:
+                    os.close(descriptor)
+            raise
+
     def _replace_once(self, artifact: _WorkspaceArtifact, final: Path) -> None:
         if os.replace in getattr(os, "supports_dir_fd", set()):
             os.replace(
@@ -1990,6 +2106,13 @@ class _BatchWorkspace:
         if vault_root is not None:
             root = Path(os.path.abspath(vault_root))
             absolute_final = Path(os.path.abspath(final))
+            if _batch_state_target(root, absolute_final):
+                # Machine-local epoch artifacts flip inside the external state
+                # root; the held anchor moves with them, and the identity
+                # compare-and-swap below is anchor-agnostic.
+                from . import state_paths
+
+                root = Path(os.path.abspath(state_paths.vault_state_dir(vault_root)))
             try:
                 relative = absolute_final.relative_to(root)
             except ValueError as error:
@@ -3628,11 +3751,20 @@ def read_guarded_text(vault_root: Path, path: Path) -> tuple[str, PathGuard]:
 
 
 @dataclass
+class PreparedBinaryContent:
+    """One seekable binary payload with its exact precomputed identity."""
+
+    stream: IO[bytes]
+    size: int
+    sha256: str
+
+
+@dataclass
 class PlannedWrite:
     """One target file in a batch write, with an optional commit-time CAS guard."""
 
     path: Path
-    content: str
+    content: str | PreparedBinaryContent
     create_only: bool = False
     guard: PathGuard | None = None
     expected_hash: str | None = None
@@ -4254,6 +4386,10 @@ def _enqueue_graph_debt(vault_root: Path, checkpoint_write: PlannedWrite) -> Non
     """
     from . import deferred_index, graph_sync
 
+    if not isinstance(checkpoint_write.content, str):
+        raise PathGuardError(
+            "PATH_GUARD_INVALID", "graph checkpoint content is not textual"
+        )
     checkpoint = graph_sync.GraphSyncCheckpoint.parse(checkpoint_write.content)
     if checkpoint is None:  # pragma: no cover - graph_sync renders its own token
         return
@@ -4268,6 +4404,7 @@ def batch_atomic_write(
     *,
     vault_root: Path | None = None,
     required_guards: Iterable[PathGuard | DirectoryCensusGuard] = (),
+    completion_guards: Iterable[PathGuard] = (),
     index_reports: list[Any] | None = None,
     semantic_states: Mapping[str, Any] | None = None,
     post_commit_fanout: bool = True,
@@ -4279,7 +4416,9 @@ def batch_atomic_write(
     A process-shared lock closes the gap between validating any ``expected_hash``
     guards and replacing destinations. The locked implementation uses private
     descriptor-owned staging, exact rollback snapshots, and one post-commit
-    index fan-out.
+    index fan-out. ``completion_guards`` bind large read-only inputs once before
+    publication and once at the rollback-capable completion point, avoiding a
+    full content rehash before every destination flip.
     """
     with _BATCH_COMMIT_LOCK:
         if defer_graph_completion and (post_commit_fanout or vault_root is None):
@@ -4290,6 +4429,7 @@ def batch_atomic_write(
             writes,
             vault_root=vault_root,
             required_guards=required_guards,
+            completion_guards=completion_guards,
             index_reports=index_reports,
             semantic_states=semantic_states,
             post_commit_fanout=post_commit_fanout,
@@ -4303,6 +4443,7 @@ def _batch_atomic_write_locked(
     *,
     vault_root: Path | None = None,
     required_guards: Iterable[PathGuard | DirectoryCensusGuard] = (),
+    completion_guards: Iterable[PathGuard] = (),
     index_reports: list[Any] | None = None,
     semantic_states: Mapping[str, Any] | None = None,
     post_commit_fanout: bool = True,
@@ -4319,9 +4460,9 @@ def _batch_atomic_write_locked(
     batch for exact higher-level retry. This does not claim cross-file power-loss
     atomicity.
 
-    When `vault_root` is supplied, the embedding sidecar at
-    `<vault>/Knowledge Base/.embeddings.sqlite` is refreshed for every
-    embeddable file in the batch after the markdown writes succeed. Failures
+    When `vault_root` is supplied, the embedding sidecar in that vault's
+    external machine-local state directory is refreshed for every embeddable
+    file in the batch after the markdown writes succeed. Failures
     in the embedding pass are logged and swallowed — keyword-mode find()
     still works, and `audit_fix(rebuild_embeddings=True)` recovers drift.  An
     opt-in ``index_reports`` collector receives the report from that same
@@ -4349,7 +4490,13 @@ def _batch_atomic_write_locked(
         if epoch_writes is not None:
             floor_write, checkpoint_write = epoch_writes
             if defer_graph_completion:
-                deferred_checkpoint = graph_sync.GraphSyncCheckpoint.parse(checkpoint_write.content)
+                if not isinstance(checkpoint_write.content, str):
+                    raise PathGuardError(
+                        "PATH_GUARD_INVALID", "graph checkpoint content is not textual"
+                    )
+                deferred_checkpoint = graph_sync.GraphSyncCheckpoint.parse(
+                    checkpoint_write.content
+                )
                 if deferred_checkpoint is None:  # pragma: no cover - graph_sync renders its own token
                     raise ValueError("deferred graph completion checkpoint is invalid")
                 writes = [floor_write, *writes]
@@ -4374,6 +4521,15 @@ def _batch_atomic_write_locked(
         absolute_parts = Path(os.path.abspath(write.path)).parts
         if any(part.startswith(_BATCH_RESIDUE_PREFIX) for part in absolute_parts):
             raise _batch_residue_error("BATCH_RESIDUE_UNSAFE")
+        if isinstance(write.content, PreparedBinaryContent):
+            if not write.create_only or write.expected_hash != MISSING_CONTENT_HASH:
+                raise PathGuardError(
+                    "PATH_GUARD_INVALID",
+                    "binary batch content requires an exact missing destination",
+                )
+            if os.path.lexists(write.path):
+                raise CreateOnlyConflict(_safe_write_target(write.path, vault_root))
+            continue
         if write.expected_hash is not None:
             try:
                 current = write.path.read_text(encoding="utf-8")
@@ -4396,6 +4552,14 @@ def _batch_atomic_write_locked(
     directory_guards = tuple(
         guard for guard in all_required_guards if isinstance(guard, DirectoryCensusGuard)
     )
+    all_completion_guards = tuple(completion_guards)
+    if any(
+        not isinstance(guard, PathGuard) or guard.leaf_policy != "content"
+        for guard in all_completion_guards
+    ):
+        raise PathGuardError(
+            "PATH_GUARD_INVALID", "completion guards must bind exact content"
+        )
     # Access-tier backstop: check before staging and again immediately before
     # every destination replace so a live `_access.yaml` change cannot race a
     # long staging interval.
@@ -4403,7 +4567,10 @@ def _batch_atomic_write_locked(
         _validate_batch_write_access(Path(vault_root), writes)
     target_summary = _summarize_batch_targets(writes, vault_root)
     if (
-        read_only_guards or directory_guards or any(write.guard is not None for write in writes)
+        read_only_guards
+        or directory_guards
+        or all_completion_guards
+        or any(write.guard is not None for write in writes)
     ) and vault_root is None:
         raise PathGuardError("PATH_GUARD_ROOT", "guarded writes require vault_root")
     created_dirs: list[Path | _CreatedDirectory] = []
@@ -4435,6 +4602,7 @@ def _batch_atomic_write_locked(
             for guard in (
                 *read_only_guards,
                 *(item for item in bound_guards if item is not None),
+                *all_completion_guards,
             ):
                 guard.recheck(root)
             for guard in directory_guards:
@@ -4473,12 +4641,23 @@ def _batch_atomic_write_locked(
     source_guards: list[_BatchArtifactGuard | None] = []
     try:
         for write in writes:
+            state_target = vault_root is not None and _batch_state_target(
+                Path(vault_root), write.path
+            )
+            if state_target:
+                # A machine-local epoch write stages beside its destination in
+                # the external state root (same volume, atomic replace); the
+                # held vault anchor cannot retain a parent outside the vault,
+                # and the seam applies the private-state posture at creation.
+                from . import state_paths
+
+                state_paths.ensure_vault_state_dir(Path(vault_root))
             for directory in write.ensure_directories:
-                if vault_root is None:
+                if vault_root is None or state_target:
                     _create_parent_dirs(directory, created_dirs)
                 else:
                     _create_parent_dirs_held(Path(vault_root), directory, created_dirs)
-            if vault_root is None:
+            if vault_root is None or state_target:
                 _create_parent_dirs(write.path.parent, created_dirs)
             else:
                 _create_parent_dirs_held(
@@ -4488,22 +4667,59 @@ def _batch_atomic_write_locked(
             if parent not in workspace_by_parent:
                 workspace_by_parent[parent] = _BatchWorkspace.create(
                     parent,
-                    vault_root=Path(vault_root) if vault_root is not None else None,
+                    vault_root=(
+                        Path(vault_root)
+                        if vault_root is not None and not state_target
+                        else None
+                    ),
                 )
         for index, write in enumerate(writes):
             workspace = workspace_by_parent[Path(os.path.abspath(write.path.parent))]
-            artifact = workspace.create_artifact(
-                f"stage-{index}.tmp", write.content.encode("utf-8")
-            )
+            if isinstance(write.content, str):
+                artifact = workspace.create_artifact(
+                    f"stage-{index}.tmp", write.content.encode("utf-8")
+                )
+            elif isinstance(write.content, PreparedBinaryContent):
+                if not write.create_only or write.expected_hash != MISSING_CONTENT_HASH:
+                    raise PathGuardError(
+                        "PATH_GUARD_INVALID",
+                        "binary batch content requires an exact missing destination",
+                    )
+                artifact = workspace.create_stream_artifact(
+                    f"stage-{index}.tmp",
+                    write.content.stream,
+                    expected_size=write.content.size,
+                    expected_hash=write.content.sha256,
+                )
+            else:  # pragma: no cover - the public union is closed
+                raise PathGuardError(
+                    "PATH_GUARD_INVALID", "batch content type is unsupported"
+                )
             staged.append((write.path, workspace, artifact))
-        for final, _workspace, _artifact in staged:
+        for write, (final, _workspace, _artifact) in zip(writes, staged, strict=True):
             if not os.path.lexists(final):
                 snapshots.append(None)
                 source_guards.append(None)
+                if (
+                    write.expected_hash is not None
+                    and write.expected_hash != MISSING_CONTENT_HASH
+                ):
+                    raise ContentHashMismatchError(final, write.expected_hash, None)
                 continue
             snapshot, source_guard = _capture_batch_snapshot(final)
             snapshots.append(snapshot)
             source_guards.append(source_guard)
+            if not (
+                write.create_only and write.expected_hash == MISSING_CONTENT_HASH
+            ) and write.expected_hash is not None:
+                actual_hash = content_hash(
+                    snapshot.content.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+                )
+                if (
+                    write.expected_hash == MISSING_CONTENT_HASH
+                    or actual_hash != write.expected_hash
+                ):
+                    raise ContentHashMismatchError(final, write.expected_hash, actual_hash)
     except BaseException as stage_error:
         if not isinstance(stage_error, Exception):
             _cleanup_batch_workspaces(workspace_by_parent.values())
@@ -4619,6 +4835,8 @@ def _batch_atomic_write_locked(
             _after_batch_destination_published(final)
             workspace.recheck()
         for guard in read_only_guards:
+            guard.recheck(Path(vault_root))
+        for guard in all_completion_guards:
             guard.recheck(Path(vault_root))
         for workspace in workspace_by_parent.values():
             workspace.recheck()
@@ -4742,6 +4960,29 @@ def _batch_atomic_write_locked(
     return [write.path for write in caller_writes]
 
 
+def _batch_state_target(vault_root: Path, target: Path) -> bool:
+    """Whether one batch target is a machine-local state file in the external root.
+
+    The graph epoch floor/checkpoint ride inside the content batch for their
+    ordering guarantees, and they live under the per-vault state root now.
+    Only a target that is BOTH under this vault's state directory AND a
+    registered machine-local family passes; anything else outside the vault
+    keeps failing closed.
+    """
+    from . import reserved_paths, state_paths
+
+    state_dir = Path(state_paths.vault_state_dir(vault_root))
+    try:
+        Path(os.path.abspath(target)).relative_to(Path(os.path.abspath(state_dir)))
+    except ValueError:
+        return False
+    descriptor_id = reserved_paths.state_target_descriptor_id(vault_root, target)
+    return any(
+        descriptor.id == descriptor_id
+        for descriptor in reserved_paths.external_state_descriptors()
+    )
+
+
 def _validate_batch_write_access(
     vault_root: Path,
     writes: Iterable[PlannedWrite],
@@ -4752,6 +4993,10 @@ def _validate_batch_write_access(
     vault_resolved = vault_root.resolve()
     for write in writes:
         for target in (write.path, *write.ensure_directories):
+            if _batch_state_target(vault_root, target):
+                # Machine-local state is not access-tiered vault content; its
+                # placement authority is the state seam, not `_access.yaml`.
+                continue
             try:
                 rel = target.resolve().relative_to(vault_resolved).as_posix()
             except (ValueError, OSError) as error:
@@ -6513,20 +6758,12 @@ def write_log_entry(
     Returns None on success; a warning string if log.md was missing (so the
     op can include it in its warnings list). Atomic via `replace`.
     """
-    operation_token = hashlib.sha256(
-        json.dumps(
-            [date_iso, op, rel_path_no_ext, body],
-            ensure_ascii=False,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
-    plan = plan_log_writes(
+    plan = plan_log_entry(
         vault_root,
         date_iso=date_iso,
         op=op,
         rel_path_no_ext=rel_path_no_ext,
         body=body,
-        operation_token="standalone-entry:" + operation_token,
     )
     if plan.warning is not None:
         return plan.warning
@@ -6536,6 +6773,33 @@ def write_log_entry(
     except Exception as error:  # noqa: BLE001 — standalone logging is best-effort
         log.warning("log write skipped (%s)", error)
         return f"log entry skipped: {error}"
+
+
+def plan_log_entry(
+    vault_root: Path,
+    *,
+    date_iso: str,
+    op: str,
+    rel_path_no_ext: str,
+    body: str,
+) -> LogWritePlan:
+    """Plan the exact writes used by :func:`write_log_entry`."""
+
+    operation_token = hashlib.sha256(
+        json.dumps(
+            [date_iso, op, rel_path_no_ext, body],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return plan_log_writes(
+        vault_root,
+        date_iso=date_iso,
+        op=op,
+        rel_path_no_ext=rel_path_no_ext,
+        body=body,
+        operation_token="standalone-entry:" + operation_token,
+    )
 
 
 # Matches a single log.md entry header, at either recorded precision:

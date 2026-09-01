@@ -1,6 +1,6 @@
 import { createHmac, createHash } from "node:crypto"
 import { constants as fsConstants } from "node:fs"
-import { chmod, lstat, mkdir, open, readFile, readdir, rename, stat, writeFile } from "node:fs/promises"
+import { chmod, lstat, mkdir, open, readFile, readdir, rename, rmdir, stat, writeFile } from "node:fs/promises"
 import { dirname, join, relative, resolve } from "node:path"
 import BasicMemoryProvider from "./providers/basic-memory/index"
 import ExomemProvider from "./providers/exomem/index"
@@ -180,7 +180,7 @@ const FAILURE_CODES = new Set<CleanupFailureCode>([
   "cleanup_proof_write_failed",
 ])
 const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/
-const PUBLIC_SOURCE = /^(?:https:\/\/[^\\\s]+|[A-Za-z0-9][A-Za-z0-9._+-]*(?::[A-Za-z0-9][A-Za-z0-9._/@+-]*)?)$/
+const PUBLIC_SOURCE = /^(?:https:\/\/[^\\\s]+|[A-Za-z0-9][A-Za-z0-9._+-]*(?:(?::|\/)[A-Za-z0-9][A-Za-z0-9._@+-]*)*)$/
 const HARNESS = {
   repository: "https://github.com/supermemoryai/memorybench",
   commit: "118209a746d97d0d85e5a7234267f0b6962857e9",
@@ -349,6 +349,8 @@ function validateRunPlan(raw: Record<string, unknown>): RunPlan {
   exactKeys(dataset, ["id", "variant", "source", "revision", "sha256", "case_count"])
   if ([dataset.id, dataset.variant, dataset.revision].some((value) => typeof value !== "string") ||
       typeof dataset.source !== "string" || !PUBLIC_SOURCE.test(dataset.source) ||
+      dataset.source.startsWith("/") || dataset.source.startsWith("file:") ||
+      dataset.source.includes("\\") ||
       dataset.source.split("/").some((part) => part === "." || part === "..") ||
       !isHex64(dataset.sha256) || !Number.isSafeInteger(dataset.case_count) ||
       Number(dataset.case_count) < 0) throw new Error("run plan dataset identity is invalid")
@@ -584,8 +586,9 @@ async function defaultTargetAbsence(
   const workMissing = await pathAbsent(work)
   const descriptorMissing = await pathAbsent(join(work, "service.v1.json"))
   const processMissing = await exactProcessAbsent(service)
+  const namespaceMissing = exomem && workMissing && descriptorMissing && processMissing
   const absence: TargetAbsence = exomem ? {
-    namespace: clearSucceeded,
+    namespace: clearSucceeded || namespaceMissing,
     corpus: null,
     config: null,
     descriptor: descriptorMissing,
@@ -600,6 +603,17 @@ async function defaultTargetAbsence(
     work_root: null,
   }
   return { ...absence, artifacts: [] }
+}
+
+async function retireEmptyProviderRoot(runPlan: RunPlan): Promise<void> {
+  const serviceRoot = join(runPlan.guest_work_root, "services", runPlan.provider)
+  try {
+    await rmdir(serviceRoot)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return
+    // A non-empty, unreadable, or otherwise retained root is evidence for the
+    // final absence probe, which converts it into a stable cleanup failure.
+  }
 }
 
 async function defaultFinalAbsence(
@@ -806,6 +820,7 @@ export async function executeCleanup(
 
   let finalAbsence: FinalAbsence
   try {
+    if (!dependencies.finalAbsence) await retireEmptyProviderRoot(runPlan)
     finalAbsence = dependencies.finalAbsence
       ? await dependencies.finalAbsence()
       : await defaultFinalAbsence(runPlan, retainedServices)

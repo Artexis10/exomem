@@ -1,0 +1,864 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import sqlite3
+import time
+from collections.abc import Iterator
+from dataclasses import replace
+from pathlib import Path
+
+import pytest
+
+from exomem import (
+    mutation_lock,
+    sidecar_store,
+    state_migration,
+    state_paths,
+    writer_lease,
+)
+from exomem.__main__ import main as exomem_main
+from exomem.governance import (
+    authorization_custody,
+    legacy_v3_placement,
+    policy,
+    schema_downmigration,
+    schema_v4,
+    store,
+)
+
+ACTIVE_DOCUMENTS = (
+    (
+        "scopes/first.yaml",
+        b"governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\npaths:\n  - Notes/**\n",
+    ),
+    (
+        "scopes/second.yaml",
+        b"governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAW\npaths:\n  - Sources/**\n",
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    "relative",
+    (
+        "",
+        "/README.md",
+        "C:" + "/README.md",
+        "README\\.md",
+        "README\x00.md",
+        "./README.md",
+        "../README.md",
+        "folder//README.md",
+        "events/README.md",
+        "README (conflicted copy 2026-08-29).md",
+    ),
+)
+def test_persisted_source_documents_refuse_unsafe_companion_paths(relative: str) -> None:
+    with pytest.raises(schema_downmigration.DownmigrationUnavailable):
+        schema_downmigration._documents_from_value(  # noqa: SLF001 - decoder fence
+            [{"path": relative, "bytes": "eA=="}]
+        )
+
+
+def _persisted_snapshot_value(
+    documents: tuple[str, ...],
+    directories: tuple[str, ...],
+) -> dict[str, object]:
+    document_map = {relative: b"x" for relative in documents}
+    identity = {"device": 1, "inode": 1, "kind": "file", "link_count": 1}
+    directory_identity = {
+        "device": 1,
+        "inode": 2,
+        "kind": "directory",
+        "link_count": 1,
+    }
+    return {
+        "documents": [
+            {"path": relative, "bytes": "eA=="} for relative in documents
+        ],
+        "source_fingerprint": policy._document_fingerprint(document_map),
+        "conflict_set_digest": policy._path_set_digest(
+            b"exomem.governance-conflict-set.v1", ()
+        ),
+        "guard_generation": "",
+        "file_identities": [
+            {
+                "path": relative,
+                "identity": identity,
+                "sha256": hashlib.sha256(b"x").hexdigest(),
+            }
+            for relative in documents
+        ],
+        "directory_identities": [
+            {"path": relative, "identity": directory_identity}
+            for relative in directories
+        ],
+        "governance_root_identity": directory_identity,
+    }
+
+
+@pytest.mark.parametrize(
+    ("documents", "directories"),
+    (
+        (("foo",), ("foo/bar",)),
+        (("foo/bar/baz",), ("foo/bar",)),
+        ((), ("foo/bar",)),
+    ),
+    ids=("file-ancestor", "missing-document-ancestor", "missing-directory-ancestor"),
+)
+def test_persisted_snapshot_refuses_impossible_directory_topology(
+    documents: tuple[str, ...],
+    directories: tuple[str, ...],
+) -> None:
+    with pytest.raises(schema_downmigration.DownmigrationUnavailable):
+        schema_downmigration._snapshot_from_value(  # noqa: SLF001 - decoder fence
+            _persisted_snapshot_value(documents, directories)
+        )
+PENDING_DOCUMENTS = tuple(
+    (relative, content + b"# pending direct edit\n") for relative, content in ACTIVE_DOCUMENTS
+)
+
+
+@pytest.fixture(autouse=True)
+def _custody_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[None]:
+    external = tmp_path / "external"
+    external.mkdir(mode=0o700)
+    lease_state = tmp_path / "lease-state"
+    lease_state.mkdir(mode=0o700)
+    if os.name == "nt":  # pragma: no cover - exercised by Windows CI
+        sid = mutation_lock._windows_current_user_sid()
+        mutation_lock._windows_apply_private_dacl(external, sid)
+        mutation_lock._windows_apply_private_dacl(lease_state, sid)
+    monkeypatch.setenv(
+        authorization_custody.KEYRING_FILE_ENV,
+        str(external / "authorization-keyring.json"),
+    )
+    monkeypatch.setenv(
+        authorization_custody.CONTROL_FILE_ENV,
+        str(external / "authorization-control.json"),
+    )
+    monkeypatch.setenv(
+        authorization_custody.MEMBERSHIP_FILE_ENV,
+        str(external / "authorization-serving-membership.json"),
+    )
+    monkeypatch.setenv(authorization_custody.REPLICA_ID_ENV, "standalone")
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(lease_state))
+    writer_lease.reset_managers_for_tests()
+    yield
+    writer_lease.reset_managers_for_tests()
+
+
+def _vault(tmp_path: Path) -> Path:
+    vault = tmp_path / "vault"
+    governance = vault / "Knowledge Base" / "_Governance"
+    for relative, content in ACTIVE_DOCUMENTS:
+        target = governance / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+    state_migration.migrate_vault_state_offline(
+        vault,
+        authority=state_migration.assert_offline_migration_authority(
+            source="schema downmigration fixture",
+        ),
+    )
+    connection = store.open_connection(vault)
+    try:
+        schema_v4.require_exact_v3_connection(connection)
+    finally:
+        connection.close()
+    return vault
+
+
+def _migrate(vault: Path, *, now: int) -> schema_v4.VerifiedActiveGovernanceState:
+    staged = authorization_custody.stage_standalone_v3_custody(vault, now=now)
+    snapshot = policy.observe_authoring_snapshot(vault)
+    assert snapshot is not None
+    compiled = policy.compile_documents(dict(snapshot.documents))
+    assert not compiled.empty and not compiled.blocked
+    seed = schema_v4.MigrationSeed(
+        activation_store_id="activation-store-downmigration",
+        logical_vault_id=staged.logical_vault_id,
+        activation_epoch=1,
+        policy=schema_v4.PolicyGenerationSeed(
+            generation_id="01ARZ3NDEKTSV4RRFFQ69G5FAX",
+            source_documents=snapshot.documents,
+            source_fingerprint=snapshot.source_fingerprint,
+            conflict_digest=snapshot.conflict_set_digest,
+            compiled_policy=policy.canonical_compiled_bytes(compiled),
+            policy_fingerprint=compiled.fingerprint,
+            compiler_schema_version=1,
+            projector_schema_version=1,
+            predecessor_generation_id=None,
+            authoring_event_id="event-downmigration-policy",
+            receipt_event_id="receipt-downmigration-policy",
+            created_at=now + 1,
+        ),
+        catalog=schema_v4.CatalogGenerationSeed(
+            catalog_generation=1,
+            descriptor=b'{"artifacts":[]}',
+            artifact_count=0,
+            created_at=now + 1,
+        ),
+        namespace=schema_v4.ProjectionNamespaceSeed(
+            namespace_id="projection-namespace-downmigration",
+            evidence=b'{"ready":true}',
+            ready_at=now + 1,
+        ),
+        migrated_at=now + 1,
+    )
+    target = schema_v4.migration_target(seed)
+    source = store.open_readonly_connection(vault)
+    assert source is not None
+    try:
+        source_store_digest = store._v3_snapshot_digest(source)
+    finally:
+        source.close()
+    authorization_custody.enroll_standalone_v3_migration(
+        vault,
+        target=target,
+        now=now,
+    )
+    return store.migrate_enrolled_v3_store(
+        vault,
+        seed=seed,
+        expected_source_store_digest=source_store_digest,
+        now=now + 2,
+    )
+
+
+def _set_pending_workspace(vault: Path) -> None:
+    governance = vault / "Knowledge Base" / "_Governance"
+    for relative, content in PENDING_DOCUMENTS:
+        (governance / relative).write_bytes(content)
+
+
+def _drain_verified_membership(monkeypatch: pytest.MonkeyPatch) -> None:
+    original = authorization_custody.load_authorization_custody
+
+    def load(vault_root: Path, *, now: int) -> authorization_custody.AuthorizationCustody:
+        custody = original(vault_root, now=now)
+        membership = custody.serving_membership
+        assert membership is not None
+        replicas = tuple(
+            replace(
+                item,
+                state="DRAINING",
+                issuance_stopped=True,
+                no_in_flight=True,
+            )
+            for item in membership.replicas
+        )
+        return replace(custody, serving_membership=replace(membership, replicas=replicas))
+
+    monkeypatch.setattr(authorization_custody, "load_authorization_custody", load)
+
+
+def _schema_version(vault: Path) -> int:
+    connection = sqlite3.connect(store.sidecar_path(vault))
+    try:
+        return int(connection.execute("PRAGMA user_version").fetchone()[0])
+    finally:
+        connection.close()
+
+
+def _receipt_records(vault: Path) -> list[dict[str, object]]:
+    root = vault / "Knowledge Base" / "_Governance" / "events"
+    return [
+        json.loads(line)
+        for path in sorted(root.rglob("*.jsonl"))
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line
+    ]
+
+
+def _rollback_marker(vault: Path) -> dict[str, object]:
+    manifest = json.loads(
+        (state_paths.vault_state_dir(vault) / state_migration.MANIFEST_NAME).read_text(
+            encoding="utf-8"
+        )
+    )
+    marker = manifest["governance_rollback"]
+    assert isinstance(marker, dict)
+    return marker
+
+
+def test_offline_downmigration_mirrors_active_source_and_commits_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _vault(tmp_path)
+    now = int(time.time())
+    active = _migrate(vault, now=now)
+    _set_pending_workspace(vault)
+    _drain_verified_membership(monkeypatch)
+
+    result = schema_downmigration.downmigrate_enrolled_v4_store(
+        vault,
+        now=now + 3,
+    )
+
+    assert result.schema_version == 3
+    assert result.replayed is False
+    assert result.active == active
+    assert _schema_version(vault) == 3
+    snapshot = policy.observe_authoring_snapshot(vault)
+    assert snapshot is not None and snapshot.documents == ACTIVE_DOCUMENTS
+    records = _receipt_records(vault)
+    assert [(item["phase"], item.get("causation_id")) for item in records[-2:]] == [
+        ("intent", None),
+        ("committed", result.recovery_event_id),
+    ]
+    custody = authorization_custody.load_authorization_custody(vault, now=now + 3)
+    assert custody.control.governance_enrolled is True
+    assert custody.control.activation_state_digest == active.activation_state_digest
+    legacy = legacy_v3_placement.legacy_v3_path(vault)
+    assert legacy.is_file()
+    external = store.open_readonly_connection(vault)
+    assert external is not None
+    try:
+        with sqlite3.connect(legacy) as connection:
+            assert int(connection.execute("PRAGMA user_version").fetchone()[0]) == 3
+            assert store._v3_snapshot_digest(connection) == store._v3_snapshot_digest(external)  # noqa: SLF001
+    finally:
+        external.close()
+
+
+def test_downmigration_refuses_a_different_preexisting_legacy_v3_destination(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _vault(tmp_path)
+    now = int(time.time())
+    _migrate(vault, now=now)
+    _drain_verified_membership(monkeypatch)
+    legacy = legacy_v3_placement.legacy_v3_path(vault)
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(legacy) as connection:
+        connection.execute("CREATE TABLE different_state (value TEXT)")
+        connection.execute("PRAGMA user_version=3")
+
+    with pytest.raises(schema_downmigration.DownmigrationUnavailable):
+        schema_downmigration.downmigrate_enrolled_v4_store(vault, now=now + 3)
+
+    assert legacy.is_file()
+
+
+def test_ops_cli_executes_the_real_digest_bound_offline_downmigration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    vault = _vault(tmp_path)
+    now = int(time.time()) - 10
+    active = _migrate(vault, now=now)
+    _set_pending_workspace(vault)
+    _drain_verified_membership(monkeypatch)
+
+    code = exomem_main(
+        [
+            "governance-schema",
+            "downmigrate",
+            "--vault",
+            str(vault),
+            "--expected-activation-state-digest",
+            active.activation_state_digest,
+            "--yes",
+            "--json",
+        ]
+    )
+
+    assert code == 0
+    terminal = json.loads(capsys.readouterr().out)
+    assert terminal["downmigrated"] is True
+    assert terminal["schema_version"] == 3
+    assert terminal["activation_state_digest"] == active.activation_state_digest
+    assert terminal["replayed"] is False
+    assert _schema_version(vault) == 3
+
+
+def test_offline_downmigration_refuses_until_every_replica_is_drained(
+    tmp_path: Path,
+) -> None:
+    vault = _vault(tmp_path)
+    now = int(time.time())
+    _migrate(vault, now=now)
+    before = store.sidecar_path(vault).read_bytes()
+
+    with pytest.raises(schema_downmigration.DownmigrationUnavailable):
+        schema_downmigration.downmigrate_enrolled_v4_store(vault, now=now + 3)
+
+    assert _schema_version(vault) == 4
+    assert store.sidecar_path(vault).read_bytes() == before
+    assert not (vault / "Knowledge Base" / "_Governance" / "events").exists()
+
+
+def test_offline_downmigration_replays_receipt_after_post_commit_crash(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _vault(tmp_path)
+    now = int(time.time())
+    _migrate(vault, now=now)
+    _set_pending_workspace(vault)
+    _drain_verified_membership(monkeypatch)
+
+    def crash(point: str) -> None:
+        if point == "after_store_commit":
+            raise RuntimeError("injected post-commit crash")
+
+    monkeypatch.setattr(schema_downmigration, "_downmigration_barrier", crash)
+    with pytest.raises(RuntimeError, match="post-commit"):
+        schema_downmigration.downmigrate_enrolled_v4_store(vault, now=now + 3)
+
+    assert _schema_version(vault) == 3
+    assert [item["phase"] for item in _receipt_records(vault)[-1:]] == ["intent"]
+
+    monkeypatch.setattr(schema_downmigration, "_downmigration_barrier", lambda _point: None)
+    replay = schema_downmigration.downmigrate_enrolled_v4_store(vault, now=now + 4)
+
+    assert replay.replayed is True
+    assert [item["phase"] for item in _receipt_records(vault)[-2:]] == [
+        "intent",
+        "committed",
+    ]
+
+
+def test_precommit_marker_binds_d0_and_reuses_its_timestamp(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _vault(tmp_path)
+    now = int(time.time())
+    _migrate(vault, now=now)
+    _drain_verified_membership(monkeypatch)
+
+    def crash(point: str) -> None:
+        if point == "after_marker_prepare":
+            raise RuntimeError("injected prepared-marker crash")
+
+    monkeypatch.setattr(schema_downmigration, "_downmigration_barrier", crash)
+    with pytest.raises(RuntimeError, match="prepared-marker"):
+        schema_downmigration.downmigrate_enrolled_v4_store(vault, now=now + 3)
+
+    marker = _rollback_marker(vault)
+    assert marker["phase"] == "prepared"
+    assert marker["timestamp"] == now + 3
+    assert isinstance(marker["d0"], str) and len(marker["d0"]) == 64
+    assert _schema_version(vault) == 4
+
+    monkeypatch.setattr(schema_downmigration, "_downmigration_barrier", lambda _point: None)
+    result = schema_downmigration.downmigrate_enrolled_v4_store(vault, now=now + 30)
+
+    assert result.replayed is False
+    assert _rollback_marker(vault)["phase"] == "complete"
+    connection = sqlite3.connect(store.sidecar_path(vault))
+    try:
+        terminal = connection.execute(
+            "SELECT value_json FROM governance_operation_components "
+            "WHERE event_id=? AND phase='final'",
+            (result.recovery_event_id,),
+        ).fetchone()
+        assert terminal is not None
+        assert json.loads(terminal[0])["downmigrated_at"] == now + 3
+    finally:
+        connection.close()
+
+
+def test_downmigration_admits_v3_only_after_the_v3_store_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _vault(tmp_path)
+    now = int(time.time())
+    _migrate(vault, now=now)
+    _set_pending_workspace(vault)
+    _drain_verified_membership(monkeypatch)
+    state_holder = [writer_lease.SchemaFenceState(True, 4, 11)]
+    transitions: list[tuple[int, int, int]] = []
+
+    class Client:
+        def schema_fence(self) -> writer_lease.SchemaFenceState:
+            return state_holder[0]
+
+        def transition_schema_fence(
+            self, *, expected_generation: int, schema_version: int
+        ) -> writer_lease.SchemaFenceState:
+            transitions.append((expected_generation, schema_version, _schema_version(vault)))
+            state_holder[0] = writer_lease.SchemaFenceState(
+                True, schema_version, expected_generation + 1
+            )
+            return state_holder[0]
+
+    monkeypatch.setattr(
+        writer_lease,
+        "configured_schema_fence_operator_client",
+        lambda: Client(),
+    )
+
+    def crash(point: str) -> None:
+        if point == "after_store_commit":
+            raise RuntimeError("injected post-v3-commit crash")
+
+    monkeypatch.setattr(schema_downmigration, "_downmigration_barrier", crash)
+    with pytest.raises(RuntimeError, match="post-v3-commit"):
+        schema_downmigration.downmigrate_enrolled_v4_store(vault, now=now + 3)
+
+    assert _schema_version(vault) == 3
+    assert state_holder == [writer_lease.SchemaFenceState(True, 4, 11)]
+    assert transitions == []
+
+    def crash_after_fence(point: str) -> None:
+        if point == "after_schema_fence":
+            raise RuntimeError("injected fence-ack crash")
+
+    monkeypatch.setattr(schema_downmigration, "_downmigration_barrier", crash_after_fence)
+    with pytest.raises(RuntimeError, match="fence-ack"):
+        schema_downmigration.downmigrate_enrolled_v4_store(vault, now=now + 4)
+
+    assert state_holder == [writer_lease.SchemaFenceState(True, 3, 12)]
+    assert transitions == [(11, 3, 3)]
+    assert [item["phase"] for item in _receipt_records(vault)[-2:]] == [
+        "intent",
+        "committed",
+    ]
+    assert _rollback_marker(vault)["phase"] == "legacy-aligned"
+
+    monkeypatch.setattr(schema_downmigration, "_downmigration_barrier", lambda _point: None)
+    replay = schema_downmigration.downmigrate_enrolled_v4_store(vault, now=now + 5)
+
+    assert replay.replayed is True
+    assert transitions == [(11, 3, 3)]
+    assert [item["phase"] for item in _receipt_records(vault)[-2:]] == [
+        "intent",
+        "committed",
+    ]
+    assert _rollback_marker(vault)["phase"] == "complete"
+
+
+def test_post_fence_replay_refuses_external_d1_mutation_without_reopening_legacy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _vault(tmp_path)
+    now = int(time.time())
+    _migrate(vault, now=now)
+    _drain_verified_membership(monkeypatch)
+    state_holder = [writer_lease.SchemaFenceState(True, 4, 31)]
+
+    class Client:
+        def schema_fence(self) -> writer_lease.SchemaFenceState:
+            return state_holder[0]
+
+        def transition_schema_fence(
+            self, *, expected_generation: int, schema_version: int
+        ) -> writer_lease.SchemaFenceState:
+            state_holder[0] = writer_lease.SchemaFenceState(
+                True, schema_version, expected_generation + 1
+            )
+            return state_holder[0]
+
+    monkeypatch.setattr(
+        writer_lease,
+        "configured_schema_fence_operator_client",
+        lambda: Client(),
+    )
+
+    def crash(point: str) -> None:
+        if point == "after_schema_fence":
+            raise RuntimeError("injected post-fence crash")
+
+    monkeypatch.setattr(schema_downmigration, "_downmigration_barrier", crash)
+    with pytest.raises(RuntimeError, match="post-fence"):
+        schema_downmigration.downmigrate_enrolled_v4_store(vault, now=now + 3)
+
+    legacy = legacy_v3_placement.legacy_v3_path(vault)
+    legacy_before = legacy.read_bytes()
+    with sqlite3.connect(store.sidecar_path(vault)) as connection:
+        connection.execute(
+            "UPDATE receipts_head SET observed_seq=observed_seq + 1 "
+            "WHERE instance_id=(SELECT instance_id FROM receipt_instance WHERE singleton=1)"
+        )
+    assert _rollback_marker(vault)["phase"] == "legacy-aligned"
+
+    monkeypatch.setattr(schema_downmigration, "_downmigration_barrier", lambda _point: None)
+    with pytest.raises(schema_downmigration.DownmigrationUnavailable):
+        schema_downmigration.downmigrate_enrolled_v4_store(vault, now=now + 30)
+
+    assert legacy.read_bytes() == legacy_before
+    assert _rollback_marker(vault)["phase"] == "legacy-aligned"
+
+
+def test_post_fence_replay_does_not_reopen_a_changed_legacy_head(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _vault(tmp_path)
+    now = int(time.time())
+    _migrate(vault, now=now)
+    _drain_verified_membership(monkeypatch)
+    state_holder = [writer_lease.SchemaFenceState(True, 4, 41)]
+
+    class Client:
+        def schema_fence(self) -> writer_lease.SchemaFenceState:
+            return state_holder[0]
+
+        def transition_schema_fence(
+            self, *, expected_generation: int, schema_version: int
+        ) -> writer_lease.SchemaFenceState:
+            state_holder[0] = writer_lease.SchemaFenceState(
+                True, schema_version, expected_generation + 1
+            )
+            return state_holder[0]
+
+    monkeypatch.setattr(
+        writer_lease,
+        "configured_schema_fence_operator_client",
+        lambda: Client(),
+    )
+    monkeypatch.setattr(
+        schema_downmigration,
+        "_downmigration_barrier",
+        lambda point: (
+            (_ for _ in ()).throw(RuntimeError("post-fence"))
+            if point == "after_schema_fence"
+            else None
+        ),
+    )
+    with pytest.raises(RuntimeError, match="post-fence"):
+        schema_downmigration.downmigrate_enrolled_v4_store(vault, now=now + 3)
+
+    legacy = legacy_v3_placement.legacy_v3_path(vault)
+    with sqlite3.connect(legacy) as connection:
+        connection.execute(
+            "UPDATE receipts_head SET observed_seq=observed_seq + 1 "
+            "WHERE instance_id=(SELECT instance_id FROM receipt_instance WHERE singleton=1)"
+        )
+    monkeypatch.setattr(schema_downmigration, "_downmigration_barrier", lambda _point: None)
+
+    replay = schema_downmigration.downmigrate_enrolled_v4_store(vault, now=now + 30)
+
+    assert replay.replayed is True
+    assert _rollback_marker(vault)["phase"] == "complete"
+
+
+def test_downmigration_refuses_external_fence_generation_drift_before_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _vault(tmp_path)
+    now = int(time.time())
+    _migrate(vault, now=now)
+    _set_pending_workspace(vault)
+    _drain_verified_membership(monkeypatch)
+    state_holder = [writer_lease.SchemaFenceState(True, 4, 21)]
+
+    class Client:
+        def schema_fence(self) -> writer_lease.SchemaFenceState:
+            return state_holder[0]
+
+        def transition_schema_fence(
+            self, *, expected_generation: int, schema_version: int
+        ) -> writer_lease.SchemaFenceState:
+            raise AssertionError((expected_generation, schema_version))
+
+    monkeypatch.setattr(
+        writer_lease,
+        "configured_schema_fence_operator_client",
+        lambda: Client(),
+    )
+
+    def drift(point: str) -> None:
+        if point == "after_workspace_mirror":
+            state_holder[0] = writer_lease.SchemaFenceState(True, 4, 23)
+
+    monkeypatch.setattr(schema_downmigration, "_downmigration_barrier", drift)
+    with pytest.raises(schema_downmigration.DownmigrationUnavailable):
+        schema_downmigration.downmigrate_enrolled_v4_store(vault, now=now + 3)
+
+    assert _schema_version(vault) == 4
+    assert [item["phase"] for item in _receipt_records(vault)[-1:]] == ["intent"]
+
+
+def test_offline_downmigration_reuses_intent_after_prepared_plan_was_not_written(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _vault(tmp_path)
+    now = int(time.time())
+    _migrate(vault, now=now)
+    _set_pending_workspace(vault)
+    _drain_verified_membership(monkeypatch)
+
+    def crash(point: str) -> None:
+        if point == "after_receipt_intent":
+            raise RuntimeError("injected intent-only crash")
+
+    monkeypatch.setattr(schema_downmigration, "_downmigration_barrier", crash)
+    with pytest.raises(RuntimeError, match="intent-only"):
+        schema_downmigration.downmigrate_enrolled_v4_store(vault, now=now + 3)
+
+    first = _receipt_records(vault)
+    assert [item["phase"] for item in first[-1:]] == ["intent"]
+
+    monkeypatch.setattr(schema_downmigration, "_downmigration_barrier", lambda _point: None)
+    result = schema_downmigration.downmigrate_enrolled_v4_store(vault, now=now + 4)
+
+    assert result.replayed is False
+    records = _receipt_records(vault)
+    assert [item["phase"] for item in records[-2:]] == ["intent", "committed"]
+    assert records[-2]["event_id"] == result.recovery_event_id
+
+
+def test_offline_downmigration_resumes_a_prepared_plan_with_an_unchanged_companion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _vault(tmp_path)
+    readme = vault / "Knowledge Base" / "_Governance" / "README.md"
+    readme.write_bytes(b"# Governance authoring\n")
+    now = int(time.time())
+    _migrate(vault, now=now)
+    _set_pending_workspace(vault)
+    _drain_verified_membership(monkeypatch)
+
+    def crash(point: str) -> None:
+        if point == "after_plan_prepare":
+            raise RuntimeError("injected prepared-plan crash")
+
+    monkeypatch.setattr(schema_downmigration, "_downmigration_barrier", crash)
+    with pytest.raises(RuntimeError, match="prepared-plan"):
+        schema_downmigration.downmigrate_enrolled_v4_store(vault, now=now + 3)
+
+    assert _schema_version(vault) == 4
+    assert readme.read_bytes() == b"# Governance authoring\n"
+
+    monkeypatch.setattr(schema_downmigration, "_downmigration_barrier", lambda _point: None)
+    result = schema_downmigration.downmigrate_enrolled_v4_store(vault, now=now + 4)
+
+    assert result.replayed is False
+    final = policy.observe_authoring_snapshot(vault)
+    assert final is not None
+    assert final.documents == (
+        ("README.md", b"# Governance authoring\n"),
+        *ACTIVE_DOCUMENTS,
+    )
+
+
+def test_offline_downmigration_resumes_a_partially_mirrored_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _vault(tmp_path)
+    now = int(time.time())
+    _migrate(vault, now=now)
+    _set_pending_workspace(vault)
+    _drain_verified_membership(monkeypatch)
+    writes = 0
+
+    def crash(point: str) -> None:
+        nonlocal writes
+        if point.startswith("mirror:after_write:"):
+            writes += 1
+            if writes == 1:
+                raise RuntimeError("injected partial mirror crash")
+
+    monkeypatch.setattr(schema_downmigration, "_downmigration_barrier", crash)
+    with pytest.raises(RuntimeError, match="partial mirror"):
+        schema_downmigration.downmigrate_enrolled_v4_store(vault, now=now + 3)
+
+    assert _schema_version(vault) == 4
+    current = policy.observe_authoring_snapshot(vault)
+    assert current is not None
+    assert current.documents not in {ACTIVE_DOCUMENTS, PENDING_DOCUMENTS}
+
+    monkeypatch.setattr(schema_downmigration, "_downmigration_barrier", lambda _point: None)
+    result = schema_downmigration.downmigrate_enrolled_v4_store(vault, now=now + 4)
+
+    assert result.replayed is False
+    assert _schema_version(vault) == 3
+    final = policy.observe_authoring_snapshot(vault)
+    assert final is not None and final.documents == ACTIVE_DOCUMENTS
+
+
+def test_v3_replay_never_backfills_a_missing_receipt_intent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _vault(tmp_path)
+    now = int(time.time())
+    _migrate(vault, now=now)
+    _set_pending_workspace(vault)
+    _drain_verified_membership(monkeypatch)
+    custody = schema_downmigration._require_drained_custody(vault, now=now + 3)
+    plan = schema_downmigration._load_or_prepare_plan(
+        vault,
+        custody=custody,
+        now=now + 3,
+    )
+    schema_downmigration._stage_plan(vault, plan)
+    schema_downmigration._mirror_workspace(vault, plan)
+    with schema_downmigration._owned_store_connection(  # noqa: SLF001 - forged old binary state
+        vault,
+        schema_version=schema_v4.SCHEMA_USER_VERSION,
+        writable=True,
+    ) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            schema_v4.downmigrate_v4_connection_in_transaction(
+                connection,
+                expected=plan.active,
+                expected_source_documents=plan.source_documents,
+                expected_catalog_descriptor=plan.catalog_descriptor,
+                verified_workspace_digest=plan.workspace_digest,
+                verified_catalog_digest=plan.catalog_digest,
+                recovery_event_id=plan.event_id,
+                recovery_plan_digest=plan.plan_digest,
+                recovery_target_digest=plan.target_digest,
+                downmigrated_at=plan.created_at,
+            )
+            connection.commit()
+        except BaseException:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+    assert _schema_version(vault) == 3
+    assert not _receipt_records(vault)
+
+    with pytest.raises(schema_downmigration.DownmigrationUnavailable):
+        schema_downmigration.downmigrate_enrolled_v4_store(vault, now=now + 4)
+
+    assert not _receipt_records(vault)
+
+
+def test_canonical_uncommitted_digest_handles_wal_retained_transaction(
+    tmp_path: Path,
+) -> None:
+    connection = sqlite3.connect(tmp_path / "governance.sqlite")
+    try:
+        store._migrate(connection)  # noqa: SLF001 - exact v3 retained transaction
+        sidecar_store.ensure_meta_table(connection, store.DATA_TABLE, "governance")
+        connection.commit()
+        schema_v4.require_exact_v3_connection(connection)
+        assert connection.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",)
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "INSERT INTO compiled_policy (fingerprint, snapshot, compiled_at) VALUES (?, ?, ?)",
+            ("pending-v3-transform", "{}", 1.0),
+        )
+        assert connection.serialize()[18:20] == b"\x02\x02"
+
+        published_digest = store.canonical_uncommitted_v3_digest(connection)
+
+        assert connection.serialize()[18:20] == b"\x02\x02"
+        connection.commit()
+        assert connection.execute("PRAGMA journal_mode").fetchone() == ("wal",)
+        assert published_digest == store._v3_snapshot_digest(connection)  # noqa: SLF001
+    finally:
+        if connection.in_transaction:
+            connection.rollback()
+        connection.close()

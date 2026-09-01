@@ -208,6 +208,7 @@ def test_watcher_raw_record_burst_does_not_consume_semantic_cap(
             {
                 "defer_semantic": False,
                 "publish_corpus_change": False,
+                "watcher_deleted_rel_paths": [],
             },
         )
     ]
@@ -330,7 +331,7 @@ def test_census_rejects_symlinked_sidecar_without_mutating_external_database(
         ]
 
 
-def test_census_rejects_symlinked_kb_parent_without_mutating_external_database(
+def test_census_rejects_symlinked_state_parent_without_mutating_external_database(
     tmp_path: Path,
 ) -> None:
     from exomem import claims
@@ -345,9 +346,11 @@ def test_census_rejects_symlinked_kb_parent_without_mutating_external_database(
     sidecar = claims.sidecar_path(external_root)
     with _sqlite(sidecar) as conn:
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-    kb = tmp_path / "Knowledge Base"
+    external_bytes = sidecar.read_bytes()
+    external_metadata = (sidecar.stat().st_size, sidecar.stat().st_mtime_ns)
+    state_directory = claims.sidecar_path(tmp_path).parent
     try:
-        kb.symlink_to(sidecar.parent, target_is_directory=True)
+        state_directory.symlink_to(sidecar.parent, target_is_directory=True)
     except OSError:
         pytest.skip("symlinks are unavailable")
 
@@ -363,6 +366,8 @@ def test_census_rejects_symlinked_kb_parent_without_mutating_external_database(
         assert conn.execute("SELECT file_path FROM claims").fetchall() == [
             ("../../external.md",)
         ]
+    assert sidecar.read_bytes() == external_bytes
+    assert (sidecar.stat().st_size, sidecar.stat().st_mtime_ns) == external_metadata
 
 
 def test_census_rejects_symlinked_sidecar_companion(tmp_path: Path) -> None:
@@ -391,7 +396,7 @@ def test_census_rejects_symlinked_sidecar_companion(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(os.name != "posix", reason="requires POSIX dirfd walking")
-def test_census_rejects_windows_reparse_kb_parent_seam(
+def test_census_rejects_windows_reparse_state_parent_seam(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from exomem import claims
@@ -402,18 +407,21 @@ def test_census_rejects_windows_reparse_kb_parent_seam(
             "INSERT INTO claims(file_path, claim_text, checksum, vector, file_mtime) "
             "VALUES ('../../external.md', 'private', 'checksum', X'00', 0)"
         )
-    kb = claims.sidecar_path(tmp_path).parent
+    state_directory = claims.sidecar_path(tmp_path).parent
     real_fstat = os.fstat
-    # Recognise the KB directory by the inode the descriptor holds, not by
+    # Recognise the state directory by the inode the descriptor holds, not by
     # `/proc/self/fd/<n>`: that readlink is Linux-only, and on macOS it raised
     # out of the patched `fstat`, so the reparse seam under test was never
     # staged at all and the census reported nothing to assert on. Comparing
     # identity is portable and stricter than comparing a name.
-    kb_identity = (kb.stat().st_dev, kb.stat().st_ino)
+    state_directory_identity = (
+        state_directory.stat().st_dev,
+        state_directory.stat().st_ino,
+    )
 
     def fstat(fd: int):
         info = real_fstat(fd)
-        if (info.st_dev, info.st_ino) == kb_identity:
+        if (info.st_dev, info.st_ino) == state_directory_identity:
             return SimpleNamespace(
                 st_mode=info.st_mode,
                 st_dev=info.st_dev,

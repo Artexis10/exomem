@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Hosted runtime upgrades
 
 Use this controller workflow for every Hosted runtime release. Concrete versions,
@@ -138,6 +140,14 @@ fence on every `advance` command.
 Create the rollout plan before advancing to `rolling`. A fleet with legacy cells
 requires one explicit canary. A dependency-free fleet omits `--canary-cell` and
 records a no-op.
+
+For the state-root transition, the reviewed target must declare the migration
+workload for every cell. Do not accept `runtime-drained` as zero-pod evidence:
+the provider observation must show no tenant runtime pod before the target-image
+Job starts. Once that Job reports state migration complete, **never roll back to the old image after state migration**. Any fingerprint, health, route, or
+readiness failure after that checkpoint keeps the routes closed and recovers
+forward with the target image; the old image no longer has write authority for
+the migrated volume.
 
 ```bash
 rollout_args=()

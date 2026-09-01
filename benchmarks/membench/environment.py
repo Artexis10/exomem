@@ -59,6 +59,7 @@ import subprocess
 import sys
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
+from functools import cache, lru_cache
 from importlib import metadata
 from pathlib import Path
 
@@ -98,15 +99,39 @@ def _git(repo: Path, *args: str) -> str | None:
     return completed.stdout.strip() if completed.returncode == 0 else None
 
 
-def repo_state(repo: Path) -> dict[str, object] | None:
-    repo = Path(repo)
-    if not (repo / ".git").exists():
+@cache
+def _repo_state_snapshot(repo: str) -> tuple[str, bool] | None:
+    """One (head, dirty) capture per checkout path per process lifetime.
+
+    Memoized deliberately, and this is a semantics statement rather than a
+    plain optimization: a capture records the identity of the checkout the
+    process is measuring, and within one process that identity is captured
+    once. Neither `git rev-parse HEAD` nor `git status --porcelain` is
+    immutable in general — but no harness consumer mutates a repository
+    between captures in one process (the runners capture once per run, and
+    the suites drive comparisons on synthetic dicts), so later captures
+    reusing the first observation changes nothing any consumer can see, while
+    removing the two-subprocess floor every capture paid.
+    `tests/test_harness_capture_caching.py` pins both the reuse and the
+    fresh-mapping return below.
+    """
+    path = Path(repo)
+    if not (path / ".git").exists():
         return None
-    head = _git(repo, "rev-parse", "HEAD")
+    head = _git(path, "rev-parse", "HEAD")
     if head is None:
         return None
-    status = _git(repo, "status", "--porcelain") or ""
-    return {"path": str(repo), "head": head, "dirty": bool(status.strip())}
+    status = _git(path, "status", "--porcelain") or ""
+    return (head, bool(status.strip()))
+
+
+def repo_state(repo: Path) -> dict[str, object] | None:
+    repo = Path(repo)
+    snapshot = _repo_state_snapshot(str(repo))
+    if snapshot is None:
+        return None
+    head, dirty = snapshot
+    return {"path": str(repo), "head": head, "dirty": dirty}
 
 
 def normalize_distribution_name(name: str) -> str:
@@ -145,15 +170,18 @@ def _parse_requirement(spec: str) -> _Requirement | None:
     )
 
 
-def installed_distributions() -> dict[str, str]:
-    """Every installed distribution: normalised name → version, sorted.
+@lru_cache(maxsize=1)
+def _installed_distributions_snapshot() -> tuple[tuple[str, str], ...]:
+    """The installed set walked once per process — it cannot change mid-run.
 
-    First-wins on duplicate names: that is the copy an ``import`` resolves
-    to, and ``sys.path`` order is what makes the capture deterministic.
-    Broken metadata is skipped rather than raised — capture must never be the
-    thing that fails a run.
+    Nothing installs or removes distributions inside a measured process, so
+    the ~185-distribution `importlib.metadata` walk is a process-lifetime
+    constant. It was also a measured per-capture cost across every
+    harness-importing test, which is why the walk is memoized here and
+    `installed_distributions` below deals out fresh dicts from the immutable
+    snapshot (callers may annotate their copy without corrupting later
+    captures — pinned by tests/test_harness_capture_caching.py).
     """
-
     found: dict[str, str] = {}
     for dist in metadata.distributions():
         try:
@@ -166,7 +194,19 @@ def installed_distributions() -> dict[str, str]:
         name = normalize_distribution_name(raw_name)
         if name not in found:
             found[name] = version
-    return dict(sorted(found.items()))
+    return tuple(sorted(found.items()))
+
+
+def installed_distributions() -> dict[str, str]:
+    """Every installed distribution: normalised name → version, sorted.
+
+    First-wins on duplicate names: that is the copy an ``import`` resolves
+    to, and ``sys.path`` order is what makes the capture deterministic.
+    Broken metadata is skipped rather than raised — capture must never be the
+    thing that fails a run.
+    """
+
+    return dict(_installed_distributions_snapshot())
 
 
 def runtime_closure(

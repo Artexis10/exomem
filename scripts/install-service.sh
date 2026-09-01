@@ -23,9 +23,12 @@ SERVICE_ROOT=""
 PACKAGE_VERSION=""
 ENV_FILE=""
 LEGACY_MCP_COMPAT=0
+RESUME_STOPPED_TRANSITION=0
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+. "$SCRIPT_DIR/_service-common.sh"
 
 usage() {
     cat <<'EOF'
@@ -45,6 +48,8 @@ Options:
   --bind-host HOST          Service bind host (default: 127.0.0.1)
   --port PORT               Service port (default: 8765)
   --legacy-mcp-compat       Set EXOMEM_MCP_LEGACY_COMPAT=1 in the service
+  --resume-stopped-transition
+                            Continue a prior failed transition proven stopped
   -h, --help                Show this help
 EOF
 }
@@ -106,6 +111,10 @@ while [[ $# -gt 0 ]]; do
             LEGACY_MCP_COMPAT=1
             shift
             ;;
+        --resume-stopped-transition)
+            RESUME_STOPPED_TRANSITION=1
+            shift
+            ;;
         -h|--help)
             usage
             exit 0
@@ -143,6 +152,7 @@ case "$OS" in
         DEFAULT_SERVICE_ROOT="$CONFIG_ROOT/service"
         PLIST_SRC="$SCRIPT_DIR/com.exomem.plist"
         PLIST_DEST="$HOME/Library/LaunchAgents/$LABEL.plist"
+        EXPECTED_SERVICE_ID="$LABEL"
         require_command launchctl
         ;;
     Linux)
@@ -150,6 +160,7 @@ case "$OS" in
         DEFAULT_SERVICE_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/exomem/service"
         UNIT_SRC="$SCRIPT_DIR/exomem.service"
         UNIT_DEST="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/$SERVICE_NAME.service"
+        EXPECTED_SERVICE_ID="$SERVICE_NAME"
         require_command systemctl
         ;;
     *)
@@ -157,6 +168,23 @@ case "$OS" in
         ;;
 esac
 
+SERVICE_DEFINITION="${PLIST_DEST:-${UNIT_DEST:-}}"
+EXISTING_SERVICE=0
+[[ -f "$SERVICE_DEFINITION" ]] && EXISTING_SERVICE=1
+if [[ "$EXISTING_SERVICE" == 1 ]]; then
+    SERVICE_ID="$(exomem_service_id "$SERVICE_DEFINITION")" \
+        || die "could not resolve the service-manager identity from $SERVICE_DEFINITION"
+    [[ "$SERVICE_ID" == "$EXPECTED_SERVICE_ID" ]] \
+        || die "rendered service identity '$SERVICE_ID' does not match supported installer identity '$EXPECTED_SERVICE_ID'"
+else
+    SERVICE_ID="$EXPECTED_SERVICE_ID"
+fi
+if [[ "$MODE" == "release" && -z "$SERVICE_ROOT" && "$EXISTING_SERVICE" == 1 ]]; then
+    EXISTING_PYTHON="$(exomem_service_python "$SERVICE_DEFINITION" || true)"
+    if [[ "$EXISTING_PYTHON" == */.venv/bin/python ]]; then
+        SERVICE_ROOT="$(dirname "$(dirname "$(dirname "$EXISTING_PYTHON")")")"
+    fi
+fi
 SERVICE_ROOT="${SERVICE_ROOT:-$DEFAULT_SERVICE_ROOT}"
 ENV_FILE="${ENV_FILE:-$REPO_ROOT/.env}"
 SERVICE_ENV_FILE="$CONFIG_ROOT/service.env"
@@ -209,8 +237,6 @@ if [[ "$MODE" == "release" ]]; then
     [[ -n "$EXTRAS" ]] && PACKAGE_REQUIREMENT="exomem[$EXTRAS]"
     [[ -n "$PACKAGE_VERSION" ]] && PACKAGE_REQUIREMENT="$PACKAGE_REQUIREMENT==$PACKAGE_VERSION"
 
-    echo "Installing $PACKAGE_REQUIREMENT into the release service venv..."
-    uv pip install --upgrade --python "$VENV_PYTHON" "$PACKAGE_REQUIREMENT"
 else
     VENV_PYTHON="$REPO_ROOT/.venv/bin/python"
     LOG_DIR="$REPO_ROOT/logs"
@@ -223,18 +249,207 @@ fi
 
 [[ -x "$VENV_PYTHON" ]] || die "service python is not executable: $VENV_PYTHON"
 
-PROCESS_ENV_FILE="$(mktemp "$CONFIG_ROOT/installer-env.XXXXXX")"
+OLD_PORT="$(exomem_service_port "$SERVICE_DEFINITION")"
+VAULT="$(exomem_dotenv_file_value "$ENV_FILE" EXOMEM_VAULT_PATH)"
+[[ -n "$VAULT" ]] || die "EXOMEM_VAULT_PATH is required in $ENV_FILE"
+DOTENV_STATE_ROOT="$(exomem_dotenv_file_value "$ENV_FILE" EXOMEM_STATE_ROOT)"
+PREFERRED_STATE_ROOT="${EXOMEM_STATE_ROOT:-${DOTENV_STATE_ROOT:-$(exomem_platform_state_root)}}"
+[[ "$PREFERRED_STATE_ROOT" == /* ]] \
+    || die "managed EXOMEM_STATE_ROOT must be absolute"
+PERSISTED_STATE_ROOT="$(exomem_dotenv_file_value "$SERVICE_ENV_FILE" EXOMEM_STATE_ROOT)"
+if [[ -n "$PERSISTED_STATE_ROOT" ]]; then
+    [[ "$PERSISTED_STATE_ROOT" == /* ]] \
+        || die "managed EXOMEM_STATE_ROOT must be absolute"
+fi
+WORKER_BEFORE=0
+WORKER_AFTER=0
+RESUMING=0
+if [[ "$EXISTING_SERVICE" == 1 ]]; then
+    MANAGED_STATE_ROOT="$(exomem_select_service_state_root \
+        "$SERVICE_DEFINITION" "$VENV_PYTHON" "$PREFERRED_STATE_ROOT")" \
+        || die "could not select the existing service state-root binding"
+    BINDING_PATH="$(exomem_service_binding_path "$SERVICE_DEFINITION" "$VENV_PYTHON")" \
+        || die "could not resolve the selected service binding path"
+    TRANSITION_RECEIPT="$(exomem_transition_receipt_path "$SERVICE_ID")" \
+        || die "could not resolve an outside-vault transition receipt path"
+    WORKER_BEFORE="$(exomem_service_worker_pid "$SERVICE_ID")"
+    if [[ "$WORKER_BEFORE" =~ ^[1-9][0-9]*$ ]]; then
+        LISTENER_PIDS_BEFORE="$(exomem_listener_pids "$OLD_PORT")" \
+            || die "could not capture the full configured listener pid set"
+    elif [[ "$RESUME_STOPPED_TRANSITION" == 1 ]]; then
+        exomem_assert_stopped_resume_authority \
+            "$VENV_PYTHON" "$TRANSITION_RECEIPT" "$SERVICE_ID" "$BINDING_PATH" \
+            "$MANAGED_STATE_ROOT" "$VAULT" "$PORT" \
+            || die "could not prove the stopped transition safe to resume"
+        WORKER_BEFORE="$(exomem_transition_receipt_field \
+            "$VENV_PYTHON" "$TRANSITION_RECEIPT" "$SERVICE_ID" "$BINDING_PATH" \
+            "$MANAGED_STATE_ROOT" "$VAULT" "$PORT" worker_pid)"
+        RESUMING=1
+    else
+        die "existing service must be running with a capturable worker for first entry; use --resume-stopped-transition only after a failed transition"
+    fi
+else
+    MANAGED_STATE_ROOT="${PERSISTED_STATE_ROOT:-$PREFERRED_STATE_ROOT}"
+    exomem_assert_listener_unbound "$PORT" \
+        || die "fresh install cannot prove its listener is unbound"
+fi
+
+durable_publish_service_env() {
+    local source="$1"
+    "$VENV_PYTHON" - "$source" "$SERVICE_ENV_FILE" <<'PY'
+from __future__ import annotations
+
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+source = Path(sys.argv[1])
+destination = Path(sys.argv[2])
+payload = source.read_bytes()
+destination.parent.mkdir(parents=True, exist_ok=True)
+descriptor, temporary_name = tempfile.mkstemp(
+    prefix=f".{destination.name}.", dir=destination.parent
+)
+temporary = Path(temporary_name)
+try:
+    with os.fdopen(descriptor, "wb") as handle:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, destination)
+    directory_fd = os.open(destination.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+except BaseException:
+    temporary.unlink(missing_ok=True)
+    raise
+PY
+}
+
+persist_fresh_state_root_binding() {
+    local staged rendered
+    staged="$(mktemp "$CONFIG_ROOT/installer-state-root.XXXXXX")"
+    rendered="${MANAGED_STATE_ROOT//\\/\\\\}"
+    rendered="${rendered//\"/\\\"}"
+    printf 'EXOMEM_STATE_ROOT="%s"\n' "$rendered" > "$staged"
+    durable_publish_service_env "$staged"
+    rm -f "$staged"
+}
+
+TRANSITION_BEGAN=0
+TRANSITION_SUCCEEDED=0
+PROCESS_ENV_FILE=""
+SERVICE_ENV_STAGING_FILE=""
 cleanup() {
-    rm -f "$PROCESS_ENV_FILE"
+    local status=$?
+    trap - EXIT
+    [[ -z "$PROCESS_ENV_FILE" ]] || rm -f "$PROCESS_ENV_FILE"
+    [[ -z "$SERVICE_ENV_STAGING_FILE" ]] || rm -f "$SERVICE_ENV_STAGING_FILE"
+    if [[ "$TRANSITION_BEGAN" == 1 && "$TRANSITION_SUCCEEDED" == 0 ]]; then
+        local observed proof_ok=1
+        observed="$(exomem_service_worker_pid "$SERVICE_ID")"
+        if [[ "$observed" =~ ^[1-9][0-9]*$ && "$observed" != "$WORKER_BEFORE" ]]; then
+            WORKER_AFTER="$observed"
+        fi
+        if [[ "$EXISTING_SERVICE" == 1 ]]; then
+            exomem_publish_failed_transition_receipt \
+                "$VENV_PYTHON" "$TRANSITION_RECEIPT" "$SERVICE_ID" "$BINDING_PATH" \
+                "$MANAGED_STATE_ROOT" "$VAULT" "$PORT" "$WORKER_AFTER" \
+                >/dev/null 2>&1 || proof_ok=0
+        fi
+        exomem_stop_service "$SERVICE_ID" >/dev/null 2>&1 || proof_ok=0
+        if [[ "$EXISTING_SERVICE" == 1 ]]; then
+            exomem_assert_stopped_resume_authority \
+                "$VENV_PYTHON" "$TRANSITION_RECEIPT" "$SERVICE_ID" "$BINDING_PATH" \
+                "$MANAGED_STATE_ROOT" "$VAULT" "$PORT" || proof_ok=0
+        else
+            if [[ "$WORKER_AFTER" =~ ^[1-9][0-9]*$ ]] && exomem_pid_alive "$WORKER_AFTER"; then
+                echo "captured target worker pid $WORKER_AFTER survived the failed stop." >&2
+                proof_ok=0
+            fi
+            exomem_assert_listener_unbound "$PORT" || proof_ok=0
+        fi
+        [[ "$PORT" == "$OLD_PORT" ]] || exomem_assert_listener_unbound "$PORT" || proof_ok=0
+        if [[ "$proof_ok" == 1 ]]; then
+            echo "error: state-root transition failed; service remains stopped." >&2
+        else
+            echo "error: state-root transition failed and the stopped state could not be proven; any retained receipt blocks resume." >&2
+        fi
+    fi
+    exit "$status"
 }
 trap cleanup EXIT
 
+# --- STATE-ROOT MAIN TRANSITION: stop/prove/install/migrate/doctor/start -------
+if [[ "$EXISTING_SERVICE" == 1 && "$RESUMING" == 0 ]]; then
+    exomem_create_transition_receipt \
+        "$VENV_PYTHON" "$TRANSITION_RECEIPT" "$SERVICE_ID" "$BINDING_PATH" \
+        "$MANAGED_STATE_ROOT" "$VAULT" "$OLD_PORT" "$PORT" "$WORKER_BEFORE" \
+        "$LISTENER_PIDS_BEFORE"
+fi
+TRANSITION_BEGAN=1
+if [[ "$EXISTING_SERVICE" == 1 && "$RESUMING" == 0 ]]; then
+    echo "Stopping $SERVICE_ID and proving worker $WORKER_BEFORE is gone..."
+    exomem_stop_service "$SERVICE_ID"
+    CAPTURED_PIDS="$(exomem_transition_receipt_field \
+        "$VENV_PYTHON" "$TRANSITION_RECEIPT" "$SERVICE_ID" "$BINDING_PATH" \
+        "$MANAGED_STATE_ROOT" "$VAULT" "$PORT" proof_pids)"
+    exomem_assert_service_stopped \
+        "$CAPTURED_PIDS" "$(printf '%s\n%s\n' "$OLD_PORT" "$PORT" | awk '!seen[$0]++')" "$SERVICE_ID"
+elif [[ "$EXISTING_SERVICE" == 1 ]]; then
+    exomem_assert_stopped_resume_authority \
+        "$VENV_PYTHON" "$TRANSITION_RECEIPT" "$SERVICE_ID" "$BINDING_PATH" \
+        "$MANAGED_STATE_ROOT" "$VAULT" "$PORT"
+fi
+[[ "$PORT" == "$OLD_PORT" ]] || exomem_assert_listener_unbound "$PORT"
+if [[ "$EXISTING_SERVICE" == 1 ]]; then
+    exomem_update_transition_receipt \
+        "$VENV_PYTHON" "$TRANSITION_RECEIPT" "$SERVICE_ID" "$BINDING_PATH" \
+        "$MANAGED_STATE_ROOT" "$VAULT" "$PORT" stopped
+fi
+
+# Bind the one state root used by this operator process and the rendered
+# service before replacing any package bytes. An existing managed binding is
+# sticky; changing roots is a separate offline relocation, not an install
+# side effect.
+if [[ "$EXISTING_SERVICE" == 1 ]]; then
+    MANAGED_STATE_ROOT="$(exomem_bind_service_state_root \
+        "$SERVICE_DEFINITION" "$VENV_PYTHON" "$MANAGED_STATE_ROOT")"
+    exomem_update_transition_receipt \
+        "$VENV_PYTHON" "$TRANSITION_RECEIPT" "$SERVICE_ID" "$BINDING_PATH" \
+        "$MANAGED_STATE_ROOT" "$VAULT" "$PORT" bound
+elif [[ -z "$PERSISTED_STATE_ROOT" ]]; then
+    # A first install has no unit to bind yet, so create the durable env-file
+    # binding before replacing package bytes. Later rendering keeps this exact
+    # root while adding the rest of the parsed dotenv environment.
+    persist_fresh_state_root_binding
+fi
+export EXOMEM_STATE_ROOT="$MANAGED_STATE_ROOT"
+
+if [[ "$MODE" == "release" ]]; then
+    echo "Installing $PACKAGE_REQUIREMENT into the release service venv..."
+    uv pip install --upgrade --python "$VENV_PYTHON" "$PACKAGE_REQUIREMENT"
+fi
+if [[ "$EXISTING_SERVICE" == 1 ]]; then
+    exomem_update_transition_receipt \
+        "$VENV_PYTHON" "$TRANSITION_RECEIPT" "$SERVICE_ID" "$BINDING_PATH" \
+        "$MANAGED_STATE_ROOT" "$VAULT" "$PORT" installed
+fi
+
+PROCESS_ENV_FILE="$(mktemp "$CONFIG_ROOT/installer-env.XXXXXX")"
+SERVICE_ENV_STAGING_FILE="$(mktemp "$CONFIG_ROOT/service.env-rendered.XXXXXX")"
+
 # Parse dotenv with the package's own dependency, render systemd/launchd-safe
 # forms, and create a shell-quoted temporary export file for doctor.
+EXOMEM_MANAGED_STATE_ROOT_DEFAULT="${EXOMEM_STATE_ROOT:-$(exomem_platform_state_root)}" \
 EXOMEM_PROFILE_EMBED_BACKEND="$EMBED_BACKEND" \
-"$VENV_PYTHON" - \
+    "$VENV_PYTHON" - \
     "$ENV_FILE" \
-    "$SERVICE_ENV_FILE" \
+    "$SERVICE_ENV_STAGING_FILE" \
     "$PROCESS_ENV_FILE" \
     "$LAUNCHD_ENV_FILE" \
     "$LOG_DIR" \
@@ -255,6 +470,7 @@ env_path, systemd_path, process_path, xml_path, log_dir, legacy = sys.argv[1:]
 # renderer invocations here are told apart by argv length, so a new positional
 # would silently alias this call onto a different renderer.
 embed_backend = os.environ.get("EXOMEM_PROFILE_EMBED_BACKEND", "")
+state_root_default = os.environ.get("EXOMEM_MANAGED_STATE_ROOT_DEFAULT", "").strip()
 values = {
     key: str(value)
     for key, value in dotenv_values(env_path).items()
@@ -268,6 +484,11 @@ for key, value in values.items():
 
 if not values.get("EXOMEM_VAULT_PATH", "").strip():
     raise SystemExit(f"EXOMEM_VAULT_PATH is required in {env_path}")
+if not state_root_default or not Path(state_root_default).is_absolute():
+    raise SystemExit("managed EXOMEM_STATE_ROOT default must be absolute")
+values["EXOMEM_STATE_ROOT"] = state_root_default
+if not Path(values["EXOMEM_STATE_ROOT"]).is_absolute():
+    raise SystemExit("EXOMEM_STATE_ROOT must be absolute")
 values.setdefault("EXOMEM_LOG_DIR", log_dir)
 # setdefault, not assignment: an explicit choice in the dotenv outranks the
 # profile's default, so `--profile onnx` never silently overrides it.
@@ -281,9 +502,10 @@ if legacy == "1":
 def systemd_quote(value: str) -> str:
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
-Path(systemd_path).write_text(
-    "".join(f"{key}={systemd_quote(value)}\n" for key, value in values.items()),
-    encoding="utf-8",
+Path(systemd_path).write_bytes(
+    "".join(f"{key}={systemd_quote(value)}\n" for key, value in values.items()).encode(
+        "utf-8"
+    )
 )
 Path(process_path).write_text(
     "".join(f"export {key}={shlex.quote(value)}\n" for key, value in values.items()),
@@ -300,11 +522,25 @@ for path in (systemd_path, process_path, xml_path):
     os.chmod(path, 0o600)
 PY
 
+durable_publish_service_env "$SERVICE_ENV_STAGING_FILE"
+rm -f "$SERVICE_ENV_STAGING_FILE"
+SERVICE_ENV_STAGING_FILE=""
+
 # This file is generated from parsed values with shlex quoting; it contains no
 # caller-provided shell syntax.
 # shellcheck disable=SC1090
 source "$PROCESS_ENV_FILE"
 rm -f "$PROCESS_ENV_FILE"
+PROCESS_ENV_FILE=""
+
+echo "Offline state migration..."
+"$VENV_PYTHON" -m exomem maintain --vault "$EXOMEM_VAULT_PATH" \
+    --migrate-state --offline --json
+if [[ "$EXISTING_SERVICE" == 1 ]]; then
+    exomem_update_transition_receipt \
+        "$VENV_PYTHON" "$TRANSITION_RECEIPT" "$SERVICE_ID" "$BINDING_PATH" \
+        "$MANAGED_STATE_ROOT" "$VAULT" "$PORT" migrated
+fi
 
 echo "Preflight: exomem doctor --profile $DOCTOR_PROFILE..."
 "$VENV_PYTHON" -m exomem doctor \
@@ -314,6 +550,15 @@ echo "Preflight: exomem doctor --profile remote..."
 "$VENV_PYTHON" -m exomem doctor \
     --profile remote \
     --vault "$EXOMEM_VAULT_PATH"
+if [[ "$EXISTING_SERVICE" == 1 ]]; then
+    exomem_update_transition_receipt \
+        "$VENV_PYTHON" "$TRANSITION_RECEIPT" "$SERVICE_ID" "$BINDING_PATH" \
+        "$MANAGED_STATE_ROOT" "$VAULT" "$PORT" doctor-passed
+fi
+
+INSTALLED_VERSION="$(exomem_installed_version "$VENV_PYTHON" || true)"
+[[ -n "$INSTALLED_VERSION" ]] \
+    || die "target interpreter has no importable Exomem version; service remains stopped"
 
 render_launchd_plist() {
     [[ -f "$PLIST_SRC" ]] || die "launchd template not found: $PLIST_SRC"
@@ -359,6 +604,7 @@ render_systemd_unit() {
         "$SERVICE_ENV_FILE" \
         "$BIND_HOST" \
         "$PORT" <<'PY'
+import os
 from pathlib import Path
 from sys import argv
 
@@ -371,6 +617,12 @@ def scalar_path(value: str) -> str:
 def exec_path(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"')
 
+try:
+    online_cpus = len(os.sched_getaffinity(0))
+except (AttributeError, OSError):
+    online_cpus = os.cpu_count() or 1
+quota = f"{min(400, 50 * max(1, online_cpus))}%"
+
 text = Path(src).read_text(encoding="utf-8")
 replacements = {
     "__VENV_PYTHON__": exec_path(python),
@@ -378,6 +630,7 @@ replacements = {
     "__SERVICE_ENV_FILE__": scalar_path(env_file),
     "__BIND_HOST__": host,
     "__PORT__": port,
+    "__CPU_QUOTA__": quota,
 }
 for marker, value in replacements.items():
     text = text.replace(marker, value)
@@ -385,31 +638,26 @@ Path(dest).write_text(text, encoding="utf-8")
 PY
 }
 
-stop_service() {
-    case "$OS" in
-        Darwin)
-            launchctl bootout "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || true
-            ;;
-        Linux)
-            systemctl --user stop "$SERVICE_NAME" >/dev/null 2>&1 || true
-            ;;
-    esac
-}
-
 case "$OS" in
     Darwin)
         render_launchd_plist
-        launchctl bootout "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || true
-        launchctl bootstrap "gui/$(id -u)" "$PLIST_DEST"
-        launchctl kickstart -k "gui/$(id -u)/$LABEL"
         SERVICE_DEFINITION="$PLIST_DEST"
-        STATUS_COMMAND="launchctl print gui/$(id -u)/$LABEL"
+        RENDERED_SERVICE_ID="$(exomem_service_id "$SERVICE_DEFINITION")" \
+            || die "could not resolve identity from rendered service $SERVICE_DEFINITION"
+        [[ "$RENDERED_SERVICE_ID" == "$SERVICE_ID" ]] \
+            || die "rendered service identity changed from '$SERVICE_ID' to '$RENDERED_SERVICE_ID'"
+        STATUS_COMMAND="launchctl print gui/$(id -u)/$SERVICE_ID"
         LOG_COMMAND="tail -f '$LOG_DIR/service.out.log' '$LOG_DIR/service.err.log' '$LOG_DIR/exomem.log'"
         ;;
     Linux)
         render_systemd_unit
+        SERVICE_DEFINITION="$UNIT_DEST"
+        RENDERED_SERVICE_ID="$(exomem_service_id "$SERVICE_DEFINITION")" \
+            || die "could not resolve identity from rendered service $SERVICE_DEFINITION"
+        [[ "$RENDERED_SERVICE_ID" == "$SERVICE_ID" ]] \
+            || die "rendered service identity changed from '$SERVICE_ID' to '$RENDERED_SERVICE_ID'"
         systemctl --user daemon-reload
-        systemctl --user enable --now "$SERVICE_NAME"
+        systemctl --user enable "$SERVICE_ID"
         if command -v loginctl >/dev/null 2>&1; then
             LINGER="$(loginctl show-user "$CURRENT_USER" -p Linger --value 2>/dev/null || true)"
             if [[ "$LINGER" != "yes" ]]; then
@@ -418,11 +666,26 @@ case "$OS" in
                 fi
             fi
         fi
-        SERVICE_DEFINITION="$UNIT_DEST"
-        STATUS_COMMAND="systemctl --user status $SERVICE_NAME"
-        LOG_COMMAND="journalctl --user -u $SERVICE_NAME -f"
+        STATUS_COMMAND="systemctl --user status $SERVICE_ID"
+        LOG_COMMAND="journalctl --user -u $SERVICE_ID -f"
         ;;
 esac
+
+if [[ "$EXISTING_SERVICE" == 1 ]]; then
+    exomem_update_transition_receipt \
+        "$VENV_PYTHON" "$TRANSITION_RECEIPT" "$SERVICE_ID" "$BINDING_PATH" \
+        "$MANAGED_STATE_ROOT" "$VAULT" "$PORT" starting
+fi
+exomem_start_service "$SERVICE_DEFINITION" "$SERVICE_ID"
+WORKER_AFTER="$(exomem_wait_worker_pid 60 "$SERVICE_ID")" \
+    || die "service started without an observable worker pid"
+if [[ "$EXISTING_SERVICE" == 1 ]]; then
+    exomem_update_transition_receipt \
+        "$VENV_PYTHON" "$TRANSITION_RECEIPT" "$SERVICE_ID" "$BINDING_PATH" \
+        "$MANAGED_STATE_ROOT" "$VAULT" "$PORT" starting "$WORKER_AFTER"
+fi
+exomem_assert_service_restarted "$WORKER_BEFORE" "$WORKER_AFTER"
+exomem_assert_listener_owned_by_worker "$PORT" "$WORKER_AFTER"
 
 VERIFY_HOST="$BIND_HOST"
 case "$VERIFY_HOST" in
@@ -438,7 +701,6 @@ for _attempt in $(seq 1 60); do
             break
             ;;
         200)
-            stop_service
             die "$MCP_URL returned 200; OAuth is not enforced (service stopped)"
             ;;
         *)
@@ -447,17 +709,47 @@ for _attempt in $(seq 1 60); do
     esac
 done
 if [[ "$LAST_STATUS" != "401" ]]; then
-    stop_service
     die "$MCP_URL did not return the expected OAuth 401 (last status: ${LAST_STATUS:-000}; service stopped)"
 fi
 
-echo "Installed and verified '$SERVICE_NAME' on $OS at ${BIND_HOST}:${PORT}."
+HEALTH_URL="http://${VERIFY_HOST}:${PORT}/health"
+SERVED_VERSION=""
+for _attempt in $(seq 1 45); do
+    HEALTH_BODY="$(curl -fsS --max-time 5 "$HEALTH_URL" 2>/dev/null || true)"
+    if [[ -n "$HEALTH_BODY" ]]; then
+        SERVED_VERSION="$(printf '%s' "$HEALTH_BODY" \
+            | sed -n 's|.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*|\1|p')"
+        [[ -n "$SERVED_VERSION" ]] && break
+    fi
+    sleep 2
+done
+[[ -n "$SERVED_VERSION" ]] \
+    || die "$HEALTH_URL never reported a live Exomem version; service stopped"
+[[ "$SERVED_VERSION" == "$INSTALLED_VERSION" ]] \
+    || die "live service version '$SERVED_VERSION' differs from target interpreter '$INSTALLED_VERSION'; service stopped"
+
+if [[ "$EXISTING_SERVICE" == 1 ]]; then
+    exomem_update_transition_receipt \
+        "$VENV_PYTHON" "$TRANSITION_RECEIPT" "$SERVICE_ID" "$BINDING_PATH" \
+        "$MANAGED_STATE_ROOT" "$VAULT" "$PORT" started
+    exomem_update_transition_receipt \
+        "$VENV_PYTHON" "$TRANSITION_RECEIPT" "$SERVICE_ID" "$BINDING_PATH" \
+        "$MANAGED_STATE_ROOT" "$VAULT" "$PORT" accepted
+    exomem_clear_transition_receipt \
+        "$VENV_PYTHON" "$TRANSITION_RECEIPT" "$SERVICE_ID" "$BINDING_PATH" \
+        "$MANAGED_STATE_ROOT" "$VAULT" "$PORT"
+fi
+
+TRANSITION_SUCCEEDED=1
+
+echo "Installed and verified '$SERVICE_ID' on $OS at ${BIND_HOST}:${PORT}."
 echo "  mode:       $MODE"
 echo "  package:    $PACKAGE_REQUIREMENT"
 echo "  python:     $VENV_PYTHON"
 echo "  service:    $SERVICE_DEFINITION"
 echo "  environment: $SERVICE_ENV_FILE"
 echo "  endpoint:   $MCP_URL -> 401 (healthy, OAuth enforced)"
+echo "  version:    $SERVED_VERSION (from $HEALTH_URL)"
 echo "  status:     $STATUS_COMMAND"
 echo "  logs:       $LOG_COMMAND"
 if [[ "$MODE" == "release" ]]; then

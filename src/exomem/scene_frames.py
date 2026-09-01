@@ -9,20 +9,38 @@ need no extra index. Frames ride the existing image OCR path via
 per-scene vectors own visual search (the worker scan and backfill skip
 `parent_media` children at every CLIP-enqueue point).
 
-Everything here soft-fails: a frame that can't be encoded or written is logged
-and skipped; the caller's CLIP vectors are never blocked on frame persistence.
+Encoding and ordinary batch failures soft-fail without blocking the caller's
+CLIP vectors. Exact-v4 catalog refusal/uncertainty reaches the surrounding media
+boundary so governed publication is never reported as an ordinary skipped frame.
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import logging
+import math
+import os
 import re
+import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING, BinaryIO
 
-from . import embeddings, index_sync
+from . import embeddings, index_sync, semantic_contract
+from .governance import projected_retrieval
 from .preserve import _render_sidecar
-from .vault import PlannedWrite, batch_atomic_write
+from .vault import (
+    MISSING_CONTENT_HASH,
+    PathGuard,
+    PlannedWrite,
+    PreparedBinaryContent,
+    batch_atomic_write,
+    content_hash,
+    read_guarded_text,
+)
+
+if TYPE_CHECKING:
+    from .governance import catalog_publication
 
 log = logging.getLogger(__name__)
 
@@ -31,6 +49,8 @@ JPEG_MAX_SIDE = 1280  # downscale bound — keeps slide/terminal text legible fo
 JPEG_QUALITY = 80
 
 _FRAME_NAME_RE = re.compile(r"^scene-(\d{3,})-t(\d+)ms\.jpe?g$", re.IGNORECASE)
+_MAX_FRAME_TIMESTAMP_MS = 4_294_967_295
+_JPEG_SPOOL_MEMORY_BYTES = 4 * 1024 * 1024
 
 
 def scene_frames_enabled() -> bool:
@@ -43,9 +63,40 @@ def frames_dir_for(video_path: Path) -> Path:
     return video_path.with_name(video_path.name + FRAMES_DIR_SUFFIX)
 
 
+def frame_timestamp_ms(ts: float) -> int:
+    """Canonical bounded milliseconds for one binary64 scene timestamp."""
+    if type(ts) not in {int, float} or isinstance(ts, bool):
+        raise ValueError("scene-frame timestamp must be a finite number")
+    seconds = float(ts)
+    milliseconds = seconds * 1000.0
+    if not math.isfinite(seconds) or not math.isfinite(milliseconds) or seconds < 0:
+        raise ValueError("scene-frame timestamp must be finite and nonnegative")
+    value = int(round(milliseconds))
+    if not 0 <= value <= _MAX_FRAME_TIMESTAMP_MS:
+        raise ValueError("scene-frame timestamp is outside the supported range")
+    return value
+
+
+def projection_clip_samples(
+    frames: list[tuple[float, object]],
+) -> tuple[projected_retrieval.ProjectionClipSample, ...]:
+    """Canonicalize one scene embedding result for immutable v4 publication."""
+    return tuple(
+        projected_retrieval.ProjectionClipSample(
+            frame_timestamp_ms(timestamp),
+            tuple(float(value) for value in vector),
+        )
+        for timestamp, vector in frames
+    )
+
+
+def _frame_filename_ms(index: int, milliseconds: int) -> str:
+    return f"scene-{index:03d}-t{milliseconds}ms.jpg"
+
+
 def frame_filename(index: int, ts: float) -> str:
     """`scene-<NNN>-t<ms>ms.jpg` — sorts chronologically, timestamp parseable back out."""
-    return f"scene-{index:03d}-t{int(round(ts * 1000))}ms.jpg"
+    return _frame_filename_ms(index, frame_timestamp_ms(ts))
 
 
 def parse_frame_ts(name: str) -> float | None:
@@ -117,13 +168,29 @@ def list_scene_frame_children(vault_root: Path, video_path: Path) -> list[str]:
     return out
 
 
-def _save_jpeg(img, path: Path) -> None:
+def _save_jpeg(img, target: BinaryIO) -> None:
     """Downscale (longest side ≤ JPEG_MAX_SIDE) and save as JPEG."""
     w, h = img.size
     scale = JPEG_MAX_SIDE / max(w, h)
     if scale < 1.0:
         img = img.resize((max(1, int(w * scale)), max(1, int(h * scale))))
-    img.convert("RGB").save(str(path), format="JPEG", quality=JPEG_QUALITY)
+    converted = img.convert("RGB")
+    try:
+        converted.save(target, format="JPEG", quality=JPEG_QUALITY)
+        return
+    except TypeError:
+        # Pillow accepts a binary file object. A few compatible encoders and
+        # lightweight test doubles accept only a pathname, so give them a
+        # private non-canonical path and copy those reviewed bytes into the
+        # spool. Nothing under the vault is visible before the held batch.
+        target.seek(0)
+        target.truncate()
+    with tempfile.TemporaryDirectory(prefix="exomem-scene-frame-") as directory:
+        stage = Path(directory) / "frame.jpg"
+        converted.save(str(stage), format="JPEG", quality=JPEG_QUALITY)
+        with stage.open("rb") as source:
+            while chunk := source.read(1024 * 1024):
+                target.write(chunk)
 
 
 def _format_mmss(ts: float) -> str:
@@ -131,26 +198,129 @@ def _format_mmss(ts: float) -> str:
     return f"{total // 60:02d}:{total % 60:02d}"
 
 
+def _content_guard(
+    vault_root: Path,
+    relative: str,
+) -> tuple[str, PathGuard, PathGuard]:
+    """Hash one parent and return cheap identity plus completion guards."""
+    stable = PathGuard.capture(vault_root, relative, leaf_policy="stable")
+    digest = hashlib.sha256()
+    size = 0
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(vault_root / relative, flags)
+    try:
+        while chunk := os.read(descriptor, 1024 * 1024):
+            digest.update(chunk)
+            size += len(chunk)
+    finally:
+        os.close(descriptor)
+    stable.recheck(vault_root)
+    value = digest.hexdigest()
+    return (
+        value,
+        stable,
+        PathGuard.capture(
+            vault_root,
+            relative,
+            leaf_policy="content",
+            expected_content_hash=value,
+            expected_content_size=size,
+        ),
+    )
+
+
+def _spooled_jpeg(img) -> tuple[tempfile.SpooledTemporaryFile[bytes], int, str]:
+    stream = tempfile.SpooledTemporaryFile(max_size=_JPEG_SPOOL_MEMORY_BYTES, mode="w+b")
+    try:
+        _save_jpeg(img, stream)
+        size = stream.tell()
+        stream.seek(0)
+        digest = hashlib.sha256()
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+        stream.seek(0)
+        return stream, size, digest.hexdigest()
+    except BaseException:
+        stream.close()
+        raise
+
+
+def _has_owned_scene_frames(video_path: Path) -> bool:
+    directory = frames_dir_for(video_path)
+    try:
+        return directory.is_dir() and any(
+            parse_frame_ts(
+                child.name[:-3] if child.name.casefold().endswith(".md") else child.name
+            )
+            is not None
+            for child in directory.iterdir()
+        )
+    except OSError:
+        return True
+
+
 def write_scene_frames(
     vault_root: Path,
     video_path: Path,
     scenes_with_images: list[tuple[embeddings.Scene, object]],
     *,
+    parent_clip_samples: tuple[projected_retrieval.ProjectionClipSample, ...] | None = None,
     today: dt.date | None = None,
 ) -> list[tuple[Path, Path]]:
     """Persist one JPEG + pending sidecar per scene → `[(jpg_path, sidecar_path)]`.
 
-    Clears previously-owned frames first (delete-then-insert). Soft-fails per
-    frame: an unencodable/unwritable frame is logged and skipped; a sidecar batch
-    failure logs and returns [] (orphan JPEGs are healed by reconcile/backfill).
+    Fresh JPEG bytes and their classified sidecars share one held rollback set.
+    When the caller supplies the scene sampler's canonical parent CLIP samples,
+    exact-v4 binds them to the unchanged parent sidecar in that same successor.
+    Open/schema-v3 vaults retain legacy delete-then-insert reprocessing. Exact-v4
+    refuses an existing frame set before deletion until removal publication has
+    its own atomic successor protocol. Encoding failures remain per-frame soft
+    failures; exact-v4 catalog refusal/uncertainty is surfaced to its caller.
     """
+    root = Path(os.path.abspath(vault_root))
     try:
-        video_rel = video_path.resolve().relative_to(vault_root.resolve()).as_posix()
+        canonical_video = Path(os.path.abspath(video_path))
+        video_rel = canonical_video.relative_to(root).as_posix()
+        parent_sha256, parent_identity_guard, parent_content_guard = _content_guard(
+            root, video_rel
+        )
     except (ValueError, OSError) as e:
         log.warning("scene frames skipped for %s: %s", video_path.name, e)
         return []
-    clear_scene_frames(vault_root, video_path)
-    d = frames_dir_for(video_path)
+    parent_sidecar_guard: PathGuard | None = None
+    clip_replacements: tuple[catalog_publication.ClipMeasurementReplacement, ...]
+    if parent_clip_samples is None:
+        clip_replacements = ()
+    else:
+        from .governance import catalog_publication
+
+        if type(parent_clip_samples) is not tuple or any(
+            not isinstance(sample, projected_retrieval.ProjectionClipSample)
+            for sample in parent_clip_samples
+        ):
+            raise ValueError("parent CLIP samples must be a finite immutable tuple")
+        expected_timestamps = tuple(
+            frame_timestamp_ms(scene.rep_ts) for scene, _image in scenes_with_images
+        )
+        if (
+            tuple(sample.frame_timestamp_ms for sample in parent_clip_samples)
+            != expected_timestamps
+        ):
+            raise ValueError("parent CLIP samples do not match the scene frame set")
+        parent_sidecar_rel = f"{video_rel}.md"
+        parent_source, parent_sidecar_guard = read_guarded_text(
+            root,
+            root / parent_sidecar_rel,
+        )
+        parent_source = parent_source.replace("\r\n", "\n").replace("\r", "\n")
+        clip_replacements = (
+            catalog_publication.ClipMeasurementReplacement(
+                item_identity=parent_sidecar_rel,
+                content_hash=content_hash(parent_source),
+                samples=parent_clip_samples,
+            ),
+        )
+    d = frames_dir_for(canonical_video)
     # Tag context from Knowledge Base/Evidence/<scope>/<category>/… (same derivation
     # as preserve.ensure_media_sidecar).
     parts = video_rel.split("/")
@@ -159,40 +329,123 @@ def write_scene_frames(
     date_iso = (today or dt.date.today()).isoformat()
     writes: list[PlannedWrite] = []
     out: list[tuple[Path, Path]] = []
+    streams: list[tempfile.SpooledTemporaryFile[bytes]] = []
     for i, (scene, img) in enumerate(scenes_with_images):
-        name = frame_filename(i, scene.rep_ts)
-        jpg = d / name
         try:
-            d.mkdir(parents=True, exist_ok=True)
-            _save_jpeg(img, jpg)
+            timestamp_ms = frame_timestamp_ms(scene.rep_ts)
+            name = _frame_filename_ms(i, timestamp_ms)
+            stream, artifact_size, artifact_sha256 = _spooled_jpeg(img)
         except Exception as e:  # noqa: BLE001 — one bad frame must not block the rest
-            log.warning("scene frame write failed for %s: %s", name, e)
+            log.warning("scene frame preparation failed for scene %d: %s", i, e)
             continue
+        jpg = d / name
         sidecar = jpg.with_name(name + ".md")
-        md = _render_sidecar(
-            artifact_name=name,
-            scope=scope,
-            category=category,
-            date_iso=date_iso,
-            description=(
-                f"Scene frame of `{video_path.name}` at {_format_mmss(scene.rep_ts)} "
-                f"(parent: {video_rel})."
-            ),
-            media_type="image",
-            evidence_file=f"{video_rel}{FRAMES_DIR_SUFFIX}/{name}",
-            extracted_by="pending",
-            parent_media=video_rel,
-            frame_ts=scene.rep_ts,
+        artifact_rel = jpg.relative_to(root).as_posix()
+        try:
+            md = _render_sidecar(
+                artifact_name=name,
+                scope=scope,
+                category=category,
+                date_iso=date_iso,
+                description=(
+                    f"Scene frame of `{canonical_video.name}` at "
+                    f"{_format_mmss(timestamp_ms / 1000.0)} "
+                    f"(parent: {video_rel})."
+                ),
+                media_type="image",
+                evidence_file=artifact_rel,
+                extracted_by="pending",
+                parent_media=video_rel,
+                frame_ts=timestamp_ms / 1000.0,
+                binary_sha256=artifact_sha256,
+                binary_size=artifact_size,
+                governance_artifact_path=artifact_rel,
+                governance_artifact_sha256=artifact_sha256,
+                governance_artifact_size=artifact_size,
+                governance_parent_path=video_rel,
+                governance_parent_sha256=parent_sha256,
+                governance_frame_timestamp_ms=timestamp_ms,
+            )
+        except Exception as error:  # noqa: BLE001 - keep per-frame isolation
+            stream.close()
+            log.warning("scene frame companion failed for %s: %s", name, error)
+            continue
+        streams.append(stream)
+        writes.append(
+            PlannedWrite(
+                path=jpg,
+                content=PreparedBinaryContent(stream, artifact_size, artifact_sha256),
+                create_only=True,
+                expected_hash=MISSING_CONTENT_HASH,
+            )
         )
-        writes.append(PlannedWrite(path=sidecar, content=md))
+        writes.append(
+            PlannedWrite(
+                path=sidecar,
+                content=md,
+                create_only=True,
+                expected_hash=MISSING_CONTENT_HASH,
+            )
+        )
         out.append((jpg, sidecar))
     if not writes:
         return []
+    from .governance import catalog_publication, graph_producer
+
+    def graph_replacement_provider():
+        return graph_producer.replacements_for_planned_markdown(
+            root,
+            before_corpus=semantic_contract.build_corpus_context(root),
+            writes=tuple(writes),
+        )
+
     try:
-        batch_atomic_write(writes, vault_root=vault_root)
+        try:
+            prepared_catalog = catalog_publication.prepare_planned_markdown_batch(
+                root,
+                writes=tuple(writes),
+                clip_replacements=clip_replacements,
+                graph_replacement_provider=graph_replacement_provider,
+            )
+        except catalog_publication.CatalogPublicationError as error:
+            raise catalog_publication.CatalogCommitError(
+                "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
+                str(error),
+            ) from error
+        if prepared_catalog is not None and _has_owned_scene_frames(canonical_video):
+            raise catalog_publication.CatalogCommitError(
+                "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
+                "exact-v4 scene-frame replacement requires a removal successor",
+            )
+        if prepared_catalog is None:
+            clear_scene_frames(root, canonical_video)
+        batch_atomic_write(
+            writes,
+            vault_root=root,
+            required_guards=(
+                parent_identity_guard,
+                *((parent_sidecar_guard,) if parent_sidecar_guard is not None else ()),
+            ),
+            completion_guards=(
+                parent_content_guard,
+                *((parent_sidecar_guard,) if parent_sidecar_guard is not None else ()),
+            ),
+        )
+        try:
+            catalog_publication.publish_markdown_batch(prepared_catalog)
+        except catalog_publication.CatalogPublicationError as error:
+            raise catalog_publication.CatalogCommitError(
+                "GOVERNANCE_CATALOG_PUBLICATION_UNCERTAIN",
+                str(error),
+            ) from error
+    except catalog_publication.CatalogCommitError:
+        raise
     except Exception as e:  # noqa: BLE001 — sidecars are the findability layer, not the vectors
-        log.warning("scene frame sidecar write failed for %s: %s", video_path.name, e)
+        log.warning("scene frame batch write failed for %s: %s", canonical_video.name, e)
         return []
+    finally:
+        for stream in streams:
+            stream.close()
     return out
 
 

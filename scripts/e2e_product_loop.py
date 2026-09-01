@@ -49,6 +49,7 @@ def _clean_env(home: Path, vault: Path) -> dict[str, str]:
             "EXOMEM_DISABLE_FILE_WATCHER": "1",
             "EXOMEM_DISABLE_MODE_WATCH": "1",
             "EXOMEM_CONFIG_PATH": str(home / "exomem-config.json"),
+            "EXOMEM_STATE_ROOT": str(home / "state"),
             # Logs are the one piece of process state `resolve_log_dir()` puts
             # somewhere machine-global rather than under HOME (#569), so
             # isolating HOME is not enough: an installed server started here
@@ -362,12 +363,91 @@ def _mutation_diagnostics(result: Any, *, operation: str) -> Any:
     return diagnostics
 
 
+def _single_affected_path(result: Any, *, operation: str) -> str:
+    """Return the one canonical item path committed by a mutation."""
+    paths = result.get("affected_paths") if isinstance(result, dict) else None
+    if (
+        not isinstance(paths, list)
+        or len(paths) != 1
+        or not isinstance(paths[0], str)
+        or not paths[0]
+    ):
+        raise RuntimeError(f"{operation} did not report one affected item path: {result!r}")
+    return paths[0]
+
+
 def _maintenance_diagnostics(result: Any, *, operation: str) -> Any:
     """Unwrap a tracked commit while preserving a raw no-op maintenance report."""
     terminal_fields = {"ok", "status", "mutated", "diagnostics"}
     if isinstance(result, dict) and terminal_fields.intersection(result):
         return _mutation_diagnostics(result, operation=operation)
     return result
+
+
+def _remote_maintenance_refusal(result: Any) -> dict[str, Any]:
+    """Prove write maintenance was refused at the remote operator boundary."""
+    error = result.get("error") if isinstance(result, dict) else None
+    if (
+        not isinstance(error, dict)
+        or result.get("success") is not False
+        or error.get("code") != "MAINTENANCE_REQUIRES_CLI"
+        or error.get("status") != "terminal"
+        or error.get("committed") is not False
+    ):
+        raise RuntimeError(
+            "maintain_memory did not return the operator-only refusal: "
+            f"{result!r}"
+        )
+    return error
+
+
+def _operator_reconcile_data(stdout: str) -> dict[str, Any]:
+    """Require the host reconcile's exact successful derived-repair report."""
+    lines = [line for line in stdout.splitlines() if line.strip()]
+    try:
+        payload = json.loads(lines[-1])
+    except (IndexError, json.JSONDecodeError) as error:
+        raise RuntimeError("operator reconcile returned no valid JSON envelope") from error
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"operator reconcile did not succeed: {payload!r}")
+    data = payload.get("data")
+    if (
+        payload.get("success") is not True
+        or not isinstance(data, dict)
+        or data.get("dry_run") is not False
+        or data.get("graph_sync") != "completed"
+        or data.get("graph_status") != "refreshed"
+        or data.get("graph_refreshed") != 1
+        or data.get("references_status") != "refreshed"
+        or data.get("references_refreshed") != 1
+    ):
+        raise RuntimeError(f"operator reconcile did not succeed: {payload!r}")
+    return data
+
+
+def _run_operator_reconcile(
+    executable: Path,
+    env: dict[str, str],
+    work: Path,
+    *,
+    timeout: float,
+) -> dict[str, Any]:
+    """Run write-capable maintenance through its host-operator CLI surface."""
+    completed = subprocess.run(
+        [str(executable), "maintain", "--reconcile", "--json"],
+        env=env,
+        cwd=work,
+        capture_output=True,
+        text=True,
+        timeout=max(120.0, timeout * 6),
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            "operator reconcile command failed "
+            f"({completed.returncode}): {completed.stderr[-2000:]!r}"
+        )
+    return _operator_reconcile_data(completed.stdout)
 
 
 async def _call_mutation(
@@ -718,7 +798,7 @@ async def _planning_first_session(client, state: dict[str, Any], timeout: float)
         },
         timeout,
     )
-    await _call_mutation(
+    work_item_added = await _call_mutation(
         client,
         "plan_memory",
         {
@@ -841,8 +921,8 @@ async def _planning_first_session(client, state: dict[str, Any], timeout: float)
     if not any(row.get("plan_id") == home_outcome_id for row in home.get("rows", [])):
         raise RuntimeError("installed Planning multi-year view omitted the home outcome")
     software["work_item_id"] = work_item_id
-    software["work_item_path"] = (
-        "Knowledge Base/Planning/Software/Items/" + work_item_id + ".md"
+    software["work_item_path"] = _single_affected_path(
+        work_item_added, operation="plan_memory add"
     )
 
 
@@ -1521,12 +1601,23 @@ async def _stdio_session(
                 )
                 if not evolution:
                     raise RuntimeError("evolution review returned no lifecycle data")
-                reconcile = await _call_maintenance(
+                reconcile_preview = await _call_maintenance(
                     client,
                     "maintain_memory",
-                    {"mode": "reconcile", "dry_run": False},
+                    {"mode": "reconcile", "dry_run": True},
                     timeout,
                 )
+                remote_reconcile = await _call(
+                    client,
+                    "maintain_memory",
+                    {
+                        "mode": "reconcile",
+                        "dry_run": False,
+                        "response_detail": "full",
+                    },
+                    timeout,
+                )
+                _remote_maintenance_refusal(remote_reconcile)
                 await _assert_relation_contexts(
                     client,
                     relation_ref=relation_memory["ref"],
@@ -1539,7 +1630,7 @@ async def _stdio_session(
                         "new_ref": new_ref,
                         "evidence_ref": evidence["ref"],
                         "new_path": replacement["new_path"],
-                        "references_status": reconcile.get("references_status"),
+                        "references_status": reconcile_preview.get("references_status"),
                         "relation_ref": relation_memory["ref"],
                         "relation_path": relation_memory["path"],
                         "registry_hash": registry_result["saved"]["content_hash"],
@@ -1549,12 +1640,9 @@ async def _stdio_session(
                 await _manual_records_session(client, state, timeout)
                 await _planning_first_session(client, state, timeout)
             else:
-                reconcile = await _call_maintenance(
-                    client,
-                    "maintain_memory",
-                    {"mode": "reconcile", "dry_run": False},
-                    timeout,
-                )
+                operator_reconcile = state.get("operator_reconcile")
+                if not isinstance(operator_reconcile, dict):
+                    raise RuntimeError("restart session is missing host operator reconcile proof")
                 active = await _call(
                     client,
                     "read_memory",
@@ -1592,24 +1680,19 @@ async def _stdio_session(
                     await _records_restart_session(client, state, timeout)
                 await _manual_records_session(client, state, timeout)
                 await _planning_restart_session(client, state, timeout)
-                graph_status = reconcile.get("graph_status")
-                if graph_status not in {"current", "refreshed"}:
+                if operator_reconcile.get("graph_sync") == "failed":
                     raise RuntimeError(
-                        "deleted graph sidecar was not rebuilt after restart: "
-                        f"status={graph_status!r}"
+                        "host operator reconcile reported graph synchronization failure: "
+                        f"{operator_reconcile!r}"
                     )
-                # `reconcile` above is captured well before this point, and the
-                # records/manual/planning sessions in between write repeatedly.
+                # The host reconcile ran before this server session, and the
+                # records/manual/planning sessions above write repeatedly.
                 # Availability is vault-global, so every one of those clears it
                 # until the rebuild republishes -- and rebuilds no longer finish
-                # inside the write that caused them. So `reconcile`'s own
-                # availability flag says nothing by the time we read it here: it
-                # describes the graph as of the reconcile, several writes ago.
-                # What reconcile is responsible for is rebuilding the deleted
-                # sidecar, and `graph_status` above proves that unconditionally.
-                # That the *later* writes also converge is a separate claim, and
-                # the only honest way to assert it is to poll the server that is
-                # doing the rebuilding.
+                # inside the write that caused them. The CLI exit and the
+                # sidecar existence checks in `_installed_stdio` prove the
+                # deleted indexes were rebuilt; the only honest proof that the
+                # later writes also converge is to poll the server doing it.
                 await _await_graph_convergence(
                     client,
                     relation_ref=state["relation_ref"],
@@ -1641,9 +1724,11 @@ def _installed_stdio(args: argparse.Namespace) -> int:
             state=state,
         )
     )
-    refs_sidecar = vault / "Knowledge Base" / ".refs.sqlite"
+    from exomem import epistemic_graph, memory_refs
+
+    refs_sidecar = memory_refs.sidecar_path(vault)
     refs_sidecar.unlink(missing_ok=True)
-    graph_sidecar = vault / "Knowledge Base" / ".graph.sqlite"
+    graph_sidecar = epistemic_graph.sidecar_path(vault)
     graph_sidecar.unlink(missing_ok=True)
     record_item = vault / state["records"]["item_path"]
     item_text = record_item.read_text(encoding="utf-8")
@@ -1662,6 +1747,16 @@ def _installed_stdio(args: argparse.Namespace) -> int:
         ),
         encoding="utf-8",
     )
+    state["operator_reconcile"] = _run_operator_reconcile(
+        executable,
+        env,
+        work,
+        timeout=args.request_timeout,
+    )
+    if not refs_sidecar.exists() or not graph_sidecar.exists():
+        raise RuntimeError(
+            "host operator reconcile did not rebuild the deleted reference and graph sidecars"
+        )
     asyncio.run(
         _stdio_session(
             executable,

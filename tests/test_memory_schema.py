@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from conftest import initialize_vault_state_offline
 
 from exomem import (
     audit,
@@ -299,6 +300,7 @@ def test_schema_memory_registry_parity_and_strict_cli_exit(
 ) -> None:
     vault = tmp_path / "vault"
     pages = _seed_pages(vault)
+    initialize_vault_state_offline(vault, source="schema memory CLI fixture")
     commands.op_schema_memory(
         vault,
         operation="infer",

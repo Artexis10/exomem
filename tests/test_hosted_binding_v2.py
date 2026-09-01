@@ -5,6 +5,7 @@ import json
 import os
 import socket
 import stat
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,119 @@ from exomem.hosted_runtime import (
     initialize_hosted_cell_v2,
     validate_hosted_binding_v2,
 )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="hosted migration jobs run on POSIX")
+def test_target_image_init_job_holds_lifetime_then_state_migration_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    from exomem import hosted_restore, state_migration
+
+    binding = _binding(tmp_path)
+    events: list[object] = []
+    authority = object()
+
+    monkeypatch.setattr(
+        hosted_runtime,
+        "initialize_hosted_cell_v2",
+        lambda *_args, **_kwargs: SimpleNamespace(as_operator_data=lambda: {}),
+    )
+
+    @contextmanager
+    def lifetime(root, *, binding):
+        events.append(("lifetime-enter", Path(root), binding.cell_id))
+        try:
+            yield
+        finally:
+            events.append("lifetime-exit")
+
+    monkeypatch.setattr(hosted_restore, "acquire_hosted_lifetime_lock", lifetime)
+    monkeypatch.setattr(
+        state_migration,
+        "assert_offline_migration_authority",
+        lambda *, source: events.append(("authority", source)) or authority,
+    )
+    monkeypatch.setattr(
+        state_migration,
+        "migrate_vault_state_offline",
+        lambda root, *, authority: events.append(
+            ("state-migration-lock", Path(root), authority)
+        ),
+    )
+    monkeypatch.setattr(hosted_runtime.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        hosted_runtime,
+        "_preflight_migration_tree",
+        lambda root, _limits: events.append(("preflight", Path(root))) or {},
+    )
+    monkeypatch.setattr(
+        hosted_runtime,
+        "_converge_tree_ownership",
+        lambda _entries, owner: events.append(("ownership", owner.cell_id)),
+    )
+    monkeypatch.setenv("EXOMEM_HOSTED_OFFLINE_STATE_MIGRATION", "1")
+
+    code, data = hosted_runtime.execute_hosted_init_v2(
+        {
+            "request_id": "123e4567-e89b-42d3-a456-426614174000",
+            "operation_id": "operation-state-migration",
+            "cell_id": binding.cell_id,
+            "vault_id": binding.vault_id,
+            "vault_root": str(binding.vault_root),
+            "state_root": str(binding.state_root),
+            "log_root": str(binding.log_root),
+            "expected_release": __version__,
+            "expected_protocol": HOSTED_PROTOCOL_VERSION,
+            "runtime_uid": binding.runtime_uid,
+            "runtime_gid": binding.runtime_gid,
+            "active_credential_version": "credential-v1",
+        }
+    )
+
+    assert code == "HOSTED_CELL_INITIALIZED"
+    assert data == {}
+    assert events == [
+        ("lifetime-enter", binding.state_root, binding.cell_id),
+        ("authority", "hosted target-image initialization job"),
+        ("state-migration-lock", binding.vault_root, authority),
+        ("preflight", binding.state_root),
+        ("ownership", binding.cell_id),
+        "lifetime-exit",
+    ]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="hosted lifetime locking requires POSIX flock")
+def test_real_hosted_lifetime_holder_excludes_target_image_state_migration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import hosted_restore, state_migration
+    from exomem.hosted_operator import OperatorFailure
+
+    binding = _binding(tmp_path)
+    authority = object()
+    calls: list[tuple[Path, object]] = []
+    monkeypatch.setattr(
+        state_migration,
+        "assert_offline_migration_authority",
+        lambda *, source: authority,
+    )
+    monkeypatch.setattr(
+        state_migration,
+        "migrate_vault_state_offline",
+        lambda vault, *, authority: calls.append((Path(vault), authority)),
+    )
+
+    with hosted_restore.acquire_hosted_lifetime_lock(binding.state_root, binding=binding):
+        with pytest.raises(OperatorFailure) as error:
+            hosted_runtime._migrate_hosted_machine_state_offline(binding)
+        assert error.value.code == "HOSTED_RESTORE_BUSY"
+        assert calls == []
+
+    hosted_runtime._migrate_hosted_machine_state_offline(binding)
+
+    assert calls == [(binding.vault_root, authority)]
 
 
 def _binding(tmp_path: Path, **overrides: object) -> HostedBindingV2:

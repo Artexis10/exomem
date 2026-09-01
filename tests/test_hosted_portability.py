@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import __version__, reserved_paths
+from exomem import __version__, reserved_paths, state_migration, state_paths
 from exomem import hosted_portability as portability
 
 CREATED_AT = "2026-07-12T12:00:00+00:00"
@@ -291,6 +291,71 @@ def test_repeat_export_is_deterministic_complete_and_excludes_runtime_state(
     )
     assert verified.manifest == manifest
     assert verified.archive_sha256 == first.archive_sha256
+
+
+def test_external_portable_state_round_trips_and_relocates_on_target_start(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    _seed_vault(source, "EXTERNAL-PORTABLE-STATE")
+    legacy_review = source / "Knowledge Base/.review-state.json"
+    legacy_review.unlink()
+    state_dir = state_paths.vault_state_dir(source)
+    review_bytes = b'{"records":{"review":"dismissed"},"schema_version":1}'
+    receipt_bytes = b'{"receipt":"portable"}'
+    _write(state_dir / ".review-state.json", review_bytes)
+    _write(
+        state_dir
+        / ".graph-commit-receipts"
+        / "0123456789abcdef01234567.json",
+        receipt_bytes,
+    )
+    assert not legacy_review.exists()
+    assert not (source / "Knowledge Base/.graph-commit-receipts").exists()
+
+    exported = portability.export_quiesced_vault(
+        source,
+        tmp_path / "external-state-artifacts",
+        context=_context(operation_id="external-state-export"),
+    )
+    records = {record["path"]: record for record in exported.manifest["files"]}
+    assert records["Knowledge Base/.review-state.json"]["classification"] == (
+        "portable-derived"
+    )
+    receipt_path = (
+        "Knowledge Base/.graph-commit-receipts/"
+        "0123456789abcdef01234567.json"
+    )
+    assert records[receipt_path]["classification"] == "portable-derived"
+
+    prepared = portability.prepare_restore(
+        exported.archive_path,
+        tmp_path / "external-state-staging",
+        context=_context(
+            operation_id="external-state-restore",
+            lifecycle_state="restore-staging",
+        ),
+    )
+    published = portability.publish_prepared_restore(
+        prepared,
+        tmp_path / "external-state-live",
+    )
+    assert (published.live_root / "Knowledge Base/.review-state.json").read_bytes() == (
+        review_bytes
+    )
+
+    state_migration.reset_state_resolution_cache_for_tests()
+    resolution = state_migration.migrate_vault_state_offline(
+        published.live_root,
+        authority=state_migration.assert_offline_migration_authority(
+            source="hosted portability test setup"
+        ),
+    )
+    assert (resolution.state_dir / ".review-state.json").read_bytes() == review_bytes
+    assert (resolution.state_dir / receipt_path.removeprefix("Knowledge Base/")) \
+        .read_bytes() == receipt_bytes
+    assert not (published.live_root / "Knowledge Base/.review-state.json").exists()
+    assert not (published.live_root / receipt_path).exists()
 
 
 def test_export_holds_the_injected_mutation_guard_through_verification(tmp_path: Path) -> None:

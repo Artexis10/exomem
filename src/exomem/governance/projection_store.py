@@ -17,8 +17,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from .. import reserved_paths
-from ..kbdir import kb_dirname
+from .. import held_fs, reserved_paths, state_paths
 from . import projections, schema_v4
 
 SCHEMA_USER_VERSION = 2
@@ -126,6 +125,7 @@ class VariantStoreManifest:
 
 
 _VERIFIED_NAMESPACE_PROOF = object()
+_PREPARED_NAMESPACE_PROOF = object()
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -152,6 +152,31 @@ class VerifiedProjectionNamespace:
             )
         object.__setattr__(self, "namespace_key", namespace_key)
         object.__setattr__(self, "active_state_digest", active_state_digest)
+        object.__setattr__(self, "manifest", manifest)
+        object.__setattr__(self, "items", items)
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class PreparedProjectionNamespace:
+    """One complete immutable namespace prepared for a future tuple activation."""
+
+    namespace_key: projections.ProjectionNamespaceKey
+    manifest: VariantStoreManifest
+    items: tuple[ProjectionItemVariants, ...]
+
+    def __init__(
+        self,
+        namespace_key: projections.ProjectionNamespaceKey,
+        manifest: VariantStoreManifest,
+        items: tuple[ProjectionItemVariants, ...],
+        *,
+        _proof: object,
+    ) -> None:
+        if _proof is not _PREPARED_NAMESPACE_PROOF:
+            raise ProjectionStoreMismatch(
+                "prepared projection namespace requires verified target rows"
+            )
+        object.__setattr__(self, "namespace_key", namespace_key)
         object.__setattr__(self, "manifest", manifest)
         object.__setattr__(self, "items", items)
 
@@ -330,8 +355,7 @@ def variant_store_path(
             "projection namespace key is invalid"
         )
     return (
-        Path(vault_root)
-        / kb_dirname()
+        state_paths.vault_state_dir(vault_root)
         / ".authorization-projections"
         / key.namespace_id
         / _STORE_FILENAME
@@ -693,6 +717,36 @@ def bind_active_projection_namespace(
     )
 
 
+def prepare_projection_namespace(
+    *,
+    key: projections.ProjectionNamespaceKey,
+    manifest: VariantStoreManifest,
+    items: Iterable[ProjectionItemVariants],
+) -> PreparedProjectionNamespace:
+    """Verify one complete immutable namespace before its tuple activates."""
+
+    if not isinstance(key, projections.ProjectionNamespaceKey):
+        raise ProjectionStoreMismatch("prepared projection key is unavailable")
+    if not isinstance(manifest, VariantStoreManifest):
+        raise ProjectionStoreMismatch("prepared projection manifest is unavailable")
+    material, recomputed = _materialize(key, items)
+    canonical_items = tuple(entry.item for entry in material)
+    if (
+        manifest.namespace_key != key
+        or manifest.namespace_id != key.namespace_id
+        or recomputed != manifest
+    ):
+        raise ProjectionStoreMismatch(
+            "prepared projection namespace does not match its immutable rows"
+        )
+    return PreparedProjectionNamespace(
+        namespace_key=key,
+        manifest=manifest,
+        items=canonical_items,
+        _proof=_PREPARED_NAMESPACE_PROOF,
+    )
+
+
 def _crash_point(_point: str) -> None:
     """Test-only crash barrier hook."""
 
@@ -986,6 +1040,17 @@ def _connect(
         raise
 
 
+def preview_variant_store(
+    *,
+    key: projections.ProjectionNamespaceKey,
+    items: Iterable[ProjectionItemVariants],
+) -> VariantStoreManifest:
+    """Derive the exact immutable store manifest without publishing files."""
+
+    _material, expected = _materialize(key, items)
+    return expected
+
+
 def stage_variant_store(
     vault_root: Path,
     *,
@@ -1073,6 +1138,7 @@ def verify_variant_store(
         with reserved_paths._identity_coordination_scope(
             root,
             descriptor_ids=(_DESCRIPTOR_ID,),
+            identity_may_change=False,
         ):
             with reserved_paths._sqlite_owner_target_scope(
                 root,
@@ -1121,6 +1187,7 @@ def load_projection_catalog(
         with reserved_paths._identity_coordination_scope(
             root,
             descriptor_ids=(_DESCRIPTOR_ID,),
+            identity_may_change=False,
         ):
             with reserved_paths._sqlite_owner_target_scope(
                 root,
@@ -1176,6 +1243,7 @@ def load_projection_variant(
         with reserved_paths._identity_coordination_scope(
             root,
             descriptor_ids=(_DESCRIPTOR_ID,),
+            identity_may_change=False,
         ):
             with reserved_paths._sqlite_owner_target_scope(
                 root,
@@ -1227,7 +1295,215 @@ def load_projection_variant(
                     connection.close()
 
 
+def _namespace_id(value: object) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in _HEX for character in value)
+    ):
+        raise ProjectionStoreMismatch("projection collection set is invalid")
+    return value
+
+
+def _collectable_namespace_path(record: held_fs.SagaRecord) -> bool:
+    """Closed topology for one immutable namespace and its measurement stores."""
+
+    parts = record.relative_path.split("/")
+    sqlite_names = {
+        _STORE_FILENAME,
+        f"{_STORE_FILENAME}-journal",
+        f"{_STORE_FILENAME}-wal",
+        f"{_STORE_FILENAME}-shm",
+    }
+    if record.identity.kind == "file":
+        return record.identity.link_count == 1 and (
+            (len(parts) == 1 and parts[0] in sqlite_names)
+            or (
+                len(parts) == 4
+                and parts[0] == "measurements"
+                and parts[1] in _MEASUREMENT_LANES
+                and len(parts[2]) == 64
+                and all(character in _HEX for character in parts[2])
+                and parts[3] in sqlite_names
+            )
+        )
+    if record.identity.kind != "directory":
+        return False
+    return (
+        parts == ["measurements"]
+        or (
+            len(parts) == 2
+            and parts[0] == "measurements"
+            and parts[1] in _MEASUREMENT_LANES
+        )
+        or (
+            len(parts) == 3
+            and parts[0] == "measurements"
+            and parts[1] in _MEASUREMENT_LANES
+            and len(parts[2]) == 64
+            and all(character in _HEX for character in parts[2])
+        )
+    )
+
+
+def _held_refusal(result: held_fs.HeldResult[object], detail: str) -> None:
+    if not result.ok:
+        raise ProjectionStoreMismatch(detail)
+
+
+def _same_collected_identity(
+    observed: held_fs.StableIdentity,
+    expected: held_fs.StableIdentity,
+) -> bool:
+    return (
+        observed.device == expected.device
+        and observed.inode == expected.inode
+        and observed.kind == expected.kind
+        and (observed.kind != "file" or observed.link_count == expected.link_count)
+    )
+
+
+def _remove_namespace_tree(
+    filesystem: held_fs.HeldFilesystem,
+    namespace_relative: str,
+    namespace_identity: held_fs.StableIdentity,
+    records: tuple[held_fs.SagaRecord, ...],
+) -> None:
+    expected = {record.relative_path: record.identity for record in records}
+    files = sorted(
+        (record for record in records if record.identity.kind == "file"),
+        key=lambda record: (-record.relative_path.count("/"), record.relative_path),
+    )
+    for record in files:
+        relative = f"{namespace_relative}/{record.relative_path}"
+        parent_text, _separator, leaf = relative.rpartition("/")
+        parent_result = filesystem.parent(parent_text, access="flush")
+        _held_refusal(parent_result, "projection collection parent changed")
+        with parent_result.require() as parent:
+            file_result = filesystem.file(parent, leaf, access="mutate")
+            _held_refusal(file_result, "projection collection file changed")
+            with file_result.require() as file:
+                if file.identity != record.identity or file.identity.link_count != 1:
+                    raise ProjectionStoreMismatch(
+                        "projection collection identity changed"
+                    )
+                removed = filesystem.unlink(file)
+                _held_refusal(removed, "projection collection file removal was refused")
+            flushed = filesystem.flush_directory(parent)
+            _held_refusal(flushed, "projection collection durability was refused")
+
+    directories = sorted(
+        (record for record in records if record.identity.kind == "directory"),
+        key=lambda record: (-record.relative_path.count("/"), record.relative_path),
+    )
+    for record in directories:
+        relative = f"{namespace_relative}/{record.relative_path}"
+        directory_result = filesystem.parent(relative, access="mutate")
+        _held_refusal(directory_result, "projection collection directory changed")
+        with directory_result.require() as directory:
+            if not _same_collected_identity(
+                directory.identity,
+                expected[record.relative_path],
+            ):
+                raise ProjectionStoreMismatch(
+                    "projection collection directory identity changed"
+                )
+            removed = filesystem.unlink_directory(directory)
+            _held_refusal(
+                removed,
+                "projection collection directory removal was refused",
+            )
+        parent_text = relative.rpartition("/")[0]
+        parent_result = filesystem.parent(parent_text, access="flush")
+        _held_refusal(parent_result, "projection collection parent changed")
+        with parent_result.require() as parent:
+            flushed = filesystem.flush_directory(parent)
+            _held_refusal(flushed, "projection collection durability was refused")
+
+    namespace_result = filesystem.parent(namespace_relative, access="mutate")
+    _held_refusal(namespace_result, "projection collection namespace changed")
+    with namespace_result.require() as namespace:
+        if not _same_collected_identity(namespace.identity, namespace_identity):
+            raise ProjectionStoreMismatch("projection collection namespace identity changed")
+        removed = filesystem.unlink_directory(namespace)
+        _held_refusal(removed, "projection collection namespace removal was refused")
+    root_relative = namespace_relative.rpartition("/")[0]
+    root_result = filesystem.parent(root_relative, access="flush")
+    _held_refusal(root_result, "projection collection root changed")
+    with root_result.require() as root:
+        flushed = filesystem.flush_directory(root)
+        _held_refusal(flushed, "projection collection durability was refused")
+
+
+def collect_projection_namespaces(
+    vault_root: Path,
+    *,
+    eligible_namespace_ids: Iterable[str],
+) -> tuple[str, ...]:
+    """Remove only registered exact namespaces already proven unpinned."""
+
+    eligible = tuple(sorted({_namespace_id(value) for value in eligible_namespace_ids}))
+    if not eligible:
+        return ()
+    root = Path(vault_root)
+    projection_state_root = state_paths.vault_state_dir(root)
+    projection_root = ".authorization-projections"
+    collected: list[str] = []
+    with reserved_paths._subsystem_authority_scope(_OWNER):
+        with reserved_paths._identity_coordination_scope(
+            root,
+            descriptor_ids=(_DESCRIPTOR_ID,),
+        ):
+            acquired = held_fs.acquire(projection_state_root)
+            _held_refusal(
+                acquired,
+                "projection collection cannot acquire the external state root",
+            )
+            with acquired.require() as filesystem:
+                for namespace_id in eligible:
+                    namespace_relative = f"{projection_root}/{namespace_id}"
+                    namespace_result = filesystem.parent(namespace_relative)
+                    if not namespace_result.ok:
+                        if (
+                            namespace_result.error is not None
+                            and namespace_result.error.code == "MISSING"
+                        ):
+                            continue
+                        raise ProjectionStoreMismatch(
+                            "projection collection namespace is unsafe"
+                        )
+                    with namespace_result.require() as namespace:
+                        namespace_identity = namespace.identity
+                        enumerated = filesystem.enumerate(namespace)
+                        _held_refusal(
+                            enumerated,
+                            "projection collection namespace cannot be enumerated",
+                        )
+                        records = enumerated.require()
+                        if any(
+                            not _collectable_namespace_path(record)
+                            for record in records
+                        ):
+                            raise ProjectionStoreMismatch(
+                                "projection collection namespace shape is unsafe"
+                            )
+                    _remove_namespace_tree(
+                        filesystem,
+                        namespace_relative,
+                        namespace_identity,
+                        records,
+                    )
+                    collected.append(namespace_id)
+            current = reserved_paths._reachable_owner_publications(
+                root,
+                _DESCRIPTOR_ID,
+            )
+            reserved_paths._publish_owner_identities(root, _DESCRIPTOR_ID, current)
+    return tuple(collected)
+
+
 __all__ = [
+    "PreparedProjectionNamespace",
     "ProjectionItemVariants",
     "ProjectionMeasurementRoot",
     "ProjectionNamespaceEvidence",
@@ -1237,11 +1513,13 @@ __all__ = [
     "VerifiedProjectionNamespace",
     "bind_active_projection_namespace",
     "catalog_descriptor_bytes",
+    "collect_projection_namespaces",
     "load_projection_catalog",
     "load_projection_variant",
     "namespace_evidence_from_snapshot",
     "projection_measurement_family_id",
     "projection_namespace_evidence_bytes",
+    "prepare_projection_namespace",
     "manifest_from_namespace_evidence",
     "stage_variant_store",
     "variant_store_path",

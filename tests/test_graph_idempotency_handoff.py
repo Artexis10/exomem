@@ -207,8 +207,8 @@ def test_lease_manager_recovers_terminal_from_exact_receipt_after_canonical_cas_
     import sqlite3
     from types import SimpleNamespace
 
-    from exomem.writer_lease import LeaseConfig, LeaseManager, OpError
     from exomem.vault import PlannedWrite, batch_atomic_write
+    from exomem.writer_lease import LeaseConfig, LeaseManager, OpError
 
     vault = tmp_path / "vault"
     note = vault / "Knowledge Base/Notes/recovered.md"
@@ -254,8 +254,8 @@ def test_canonical_resume_rebuild_keeps_the_invoking_manager_boundary(
     from types import SimpleNamespace
 
     from exomem import epistemic_graph
-    from exomem.writer_lease import LeaseConfig, LeaseManager, OpError
     from exomem.vault import PlannedWrite, batch_atomic_write
+    from exomem.writer_lease import LeaseConfig, LeaseManager, OpError
 
     ambient_state = tmp_path / "ambient-state"
     custom_state = tmp_path / "custom-state"
@@ -303,8 +303,8 @@ def test_receipt_recovery_preserves_public_terminal_schemas_without_leaf_leakage
     import sqlite3
     from types import SimpleNamespace
 
-    from exomem.writer_lease import LeaseConfig, LeaseManager, OpError
     from exomem.vault import PlannedWrite, batch_atomic_write
+    from exomem.writer_lease import LeaseConfig, LeaseManager, OpError
 
     vault = tmp_path / "vault"
     note = vault / "Knowledge Base/Notes/schema-recovery.md"
@@ -393,8 +393,8 @@ def test_receipt_result_digest_commits_non_retained_leaf_summary_without_leaking
     import json
     from types import SimpleNamespace
 
-    from exomem.writer_lease import LeaseConfig, LeaseManager
     from exomem.vault import PlannedWrite, batch_atomic_write
+    from exomem.writer_lease import LeaseConfig, LeaseManager
 
     def receipt_for(result: dict[str, object], name: str) -> tuple[dict[str, object], bytes]:
         vault = tmp_path / name
@@ -415,7 +415,8 @@ def test_receipt_result_digest_commits_non_retained_leaf_summary_without_leaking
             idempotency_key="receipt-result-digest",
             mutation_request_id="11111111-1111-4111-8111-111111111111",
         )
-        raw = next((vault / "Knowledge Base/.graph-commit-receipts").glob("*.json")).read_bytes()
+        receipt_dir = graph_sync.graph_commit_receipt_path(vault, "0" * 24).parent
+        raw = next(receipt_dir.glob("*.json")).read_bytes()
         return json.loads(raw)["terminal_projection"], raw
 
     first, first_bytes = receipt_for(
@@ -484,8 +485,8 @@ def test_lease_manager_receipt_recovery_returns_graph_failure_after_rebuild_erro
     from types import SimpleNamespace
 
     from exomem.epistemic_graph import EpistemicGraphIndex
-    from exomem.writer_lease import LeaseConfig, LeaseManager, OpError
     from exomem.vault import PlannedWrite, batch_atomic_write
+    from exomem.writer_lease import LeaseConfig, LeaseManager, OpError
 
     vault = tmp_path / "vault"
     note = vault / "Knowledge Base/Notes/rebuild-error.md"
@@ -538,8 +539,8 @@ def test_pre_receipt_cut_is_retained_as_a_completed_outcome_unknown_terminal(
     from types import SimpleNamespace
 
     from exomem import graph_sync
-    from exomem.writer_lease import LeaseConfig, LeaseManager, OpError
     from exomem.vault import PlannedWrite, batch_atomic_write
+    from exomem.writer_lease import LeaseConfig, LeaseManager, OpError
 
     vault = tmp_path / "vault"
     note = vault / "Knowledge Base/Notes/unknown.md"
@@ -617,9 +618,9 @@ def test_post_fanout_cleanup_failure_finishes_graph_before_exact_failure_replay(
     from types import SimpleNamespace
 
     from exomem import graph_sync
+    from exomem import vault as vault_module
     from exomem.vault import BatchWriteError, PlannedWrite, batch_atomic_write
     from exomem.writer_lease import LeaseConfig, LeaseManager
-    from exomem import vault as vault_module
 
     vault = tmp_path / "vault"
     note = vault / "Knowledge Base/Notes/cleanup-after-fanout.md"
@@ -711,9 +712,9 @@ def test_cleanup_receipt_before_canonical_cas_never_recovers_as_success(
         manager.invoke(command, (vault,), {}, idempotency_key="cleanup-cas")
     assert replay.value.code == "MUTATION_OUTCOME_UNKNOWN"
     assert calls == 1
-    receipts = list((vault / "Knowledge Base/.graph-commit-receipts").glob("*.json"))
+    receipt_dir = graph_sync.graph_commit_receipt_path(vault, "0" * 24).parent
+    receipts = list(receipt_dir.glob("*.json"))
     assert len(receipts) == 1
-    from exomem import graph_sync
 
     assert graph_sync.GraphCommitReceipt.parse(receipts[0].read_bytes()).canonical_disposition == (
         "committed_failure"
@@ -1334,7 +1335,7 @@ def test_standalone_path_subject_persists_exact_receipt_under_its_vault(tmp_path
         idempotency_key="standalone-receipt",
     )
 
-    receipt_dir = vault / "Knowledge Base/.graph-commit-receipts"
+    receipt_dir = graph_sync.graph_commit_receipt_path(vault, "0" * 24).parent
     receipts = list(receipt_dir.glob("*.json"))
     assert len(receipts) == 1
     assert graph_sync.GraphCommitReceipt.parse(receipts[0].read_bytes()).version == 2
@@ -1361,6 +1362,7 @@ def test_hosted_cell_uses_its_configured_vault_for_exact_receipts(
 
     manager.invoke(command, ("cell:rita",), {}, idempotency_key="hosted-receipt")
 
-    receipts = list((vault / "Knowledge Base/.graph-commit-receipts").glob("*.json"))
+    receipt_dir = graph_sync.graph_commit_receipt_path(vault, "0" * 24).parent
+    receipts = list(receipt_dir.glob("*.json"))
     assert len(receipts) == 1
     assert graph_sync.GraphCommitReceipt.parse(receipts[0].read_bytes()).version == 2

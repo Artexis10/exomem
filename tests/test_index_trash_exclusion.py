@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import deferred_index, find_corpus, index_sync
+from exomem import deferred_index, find_corpus, index_paths, index_sync
 from exomem.vault import in_excluded_scan_dir, walk_vault_md
 
 
@@ -277,7 +277,8 @@ def test_bulk_defer_skips_only_proven_current_without_clearing_existing_receipt(
     stale = root / "stale.md"
     for path in (current, current_with_receipt, stale):
         path.write_text("# note\n", encoding="utf-8")
-    sidecar = vault / "Knowledge Base" / ".embeddings.sqlite"
+    sidecar = index_paths.sidecar_path(vault)
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(sidecar)
     try:
         conn.execute(

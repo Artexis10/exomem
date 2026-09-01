@@ -59,6 +59,21 @@ def _materialize_vault(override: Path | None) -> tuple[Path, bool]:
     return tmp, True
 
 
+def _retained_demo_state_root(vault: Path) -> Path | None:
+    """Return the exact state root retained beside a product-created sample."""
+    from exomem import state_migration, state_paths
+
+    state_root = vault.with_name(f"{vault.name}-state")
+    state_dir = state_root / state_paths.vault_state_key(vault)
+    try:
+        manifest = state_migration._load_manifest(state_dir, vault_root=vault)  # noqa: SLF001
+    except state_migration.StateMigrationManifestError:
+        return None
+    if manifest is None or manifest.get("state") != "complete":
+        return None
+    return state_root
+
+
 def _excerpt(body: str) -> str:
     lines = [line.strip() for line in body.splitlines()]
     for index, line in enumerate(lines):
@@ -80,8 +95,12 @@ def run_demo(
     echo=print,
 ) -> int:
     """Run the four timed proof steps. Returns the process exit code."""
-    saved = {k: os.environ.get(k) for k in (*LEAN_ENV, "EXOMEM_VAULT_PATH", "EXOMEM_KB_DIRNAME")}
+    saved = {
+        k: os.environ.get(k)
+        for k in (*LEAN_ENV, "EXOMEM_VAULT_PATH", "EXOMEM_KB_DIRNAME", "EXOMEM_STATE_ROOT")
+    }
     target: Path | None = None
+    state_root: Path | None = None
     is_temp = False
     steps: list[StepResult] = []
     lines: list[str] = []
@@ -94,6 +113,18 @@ def run_demo(
         # so pin the governed-folder name for the demo regardless of any
         # EXOMEM_KB_DIRNAME the caller has set (restored in `finally`).
         os.environ["EXOMEM_KB_DIRNAME"] = "Knowledge Base"
+        if is_temp:
+            state_root = target.with_name(f"{target.name}-state")
+            os.environ["EXOMEM_STATE_ROOT"] = str(state_root)
+            from exomem import state_migration
+
+            authority = state_migration.assert_offline_migration_authority(
+                source="product-created demo vault"
+            )
+            state_migration.migrate_vault_state_offline(target, authority=authority)
+        elif (retained_state_root := _retained_demo_state_root(target)) is not None:
+            state_root = retained_state_root
+            os.environ["EXOMEM_STATE_ROOT"] = str(state_root)
         from exomem import audit, doctor, find, get_page
 
         def _timed(name: str, fn) -> StepResult:
@@ -186,6 +217,8 @@ def run_demo(
                 os.environ[key] = value
         if is_temp and not keep and target is not None:
             shutil.rmtree(target, ignore_errors=True)
+        if is_temp and not keep and state_root is not None:
+            shutil.rmtree(state_root, ignore_errors=True)
 
 
 def main(argv: list[str]) -> int:
