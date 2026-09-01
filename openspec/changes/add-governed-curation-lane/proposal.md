@@ -25,9 +25,11 @@ recovery, and compensation rather than a false multi-file atomicity promise.
   terminal receipt for every step and explicit `partial`, `failed`,
   `interrupted`, and `compensated` states instead of claiming cross-step
   atomicity.
-- Make exact-plan replay idempotent. A replay verifies committed step receipts
-  and live state, resumes only uncommitted work, and refuses changed plan bytes,
-  stale bindings, or an uncertain outcome it cannot prove.
+- Make exact-plan replay idempotent. A replay verifies committed step receipts,
+  exact content witnesses, or ordered relocation candidate/authorization
+  evidence plus live state; resumes only provably uncommitted work or a bound
+  post-rename suffix; and refuses changed plan bytes, stale bindings, unprovable
+  rename history, or an uncertain outcome.
 - Model reversal as a separately reviewed compensation plan: recover governed
   trash for move/delete effects and use a new superseding correction for
   authored-content effects. Compensation never erases the original plan,

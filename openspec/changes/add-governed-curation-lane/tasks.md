@@ -2,8 +2,8 @@
 
 - [ ] 1.1 Add red pure-logic tests for canonical plan JSON, plan/run ids, strict step schemas, binding manifests, fingerprints, size caps, collisions, and unknown-field refusal.
 - [ ] 1.2 Implement the curation plan dataclasses/validators and closed v1 step vocabulary without any leaf dispatch.
-- [ ] 1.3 Add red store tests for create-only forward/compensation plans, state reconstruction from receipts, protected no-follow paths, and corrupt or competing artifacts.
-- [ ] 1.4 Implement the governed `_Governance/curation/runs` store for immutable plans, mutable projection state, create-only receipts, and evidence lookup.
+- [ ] 1.3 Add red store tests for create-only forward/compensation plans, exact-path relocation candidate/authorization records, state reconstruction from governed evidence, protected no-follow paths, and corrupt or competing artifacts.
+- [ ] 1.4 Implement the governed `_Governance/curation/runs` store for immutable plans, exact transition records, mutable projection state, create-only receipts, and evidence lookup.
 - [ ] 1.5 Add path-policy tests and enforcement that refuse Planning, Records, workflow-contract, `_Schema`, `_Governance`, `_Adoption`, trash internals, and other protected targets outside the run store.
 
 ## 2. Deterministic work items and proposals
@@ -14,21 +14,21 @@
 - [ ] 2.4 Implement forward proposal validation by adapting the existing remember/entity/relation/edit/replace/move/delete/recover validation paths without writing knowledge content.
 - [ ] 2.5 Implement read-only preview/status projections with exact actions, binding health, blockers, phase, receipts, and next permitted action.
 
-## 3. Atomic step witnesses
+## 3. Exact step commit evidence
 
-- [ ] 3.1 Add a red shared contract test proving a curation operation witness commits in the same batch as its content effect and never appears on a refused or rolled-back mutation.
+- [ ] 3.1 Add red shared contract tests proving content-write witnesses commit in the same batch as their effects, while move/delete/recover have ordered durable operation-bound candidate and authorization records before rename and reconstructible final evidence at every cut.
 - [ ] 3.2 Add the private commit-witness seam to semantic create/edit/replace internals while keeping public command schemas and ordinary results unchanged.
 - [ ] 3.3 Add witness adapters and parity tests for `create-note`, `edit`, and `supersede` against their ordinary governed leaves.
 - [ ] 3.4 Add witness adapters and parity tests for `create-entity` and `accept-relation`, including relation fingerprint/hash revalidation.
-- [ ] 3.5 Add witness adapters and parity tests for governed `move`, `delete`, and `recover`, including canonical delete confirmation and exact trash identity.
-- [ ] 3.6 Reject any enabled step kind whose leaf cannot prove one atomic effect+witness commit.
+- [ ] 3.5 Add prepared-relocation adapters and parity tests for governed `move`, `delete`, and `recover`, including existing-parent refusal, canonical delete confirmation, exact trash identity, source stable identity, complete auxiliary-write manifests, graph/lifecycle identities, durable parent-namespace generation tokens, ordered candidate/authorization file-and-parent durability, exact presealed witness bytes, both-parent flush, and no recovery-issued rename from exact-target placement.
+- [ ] 3.6 Reject any enabled step kind whose effect is neither same-batch witnessed nor exactly reconstructible through the prepared-relocation protocol.
 
 ## 4. Forward execution and recovery
 
 - [ ] 4.1 Add red tests for exact-plan approval, bounded rationale, live revalidation under the mutation boundary, one-step execution, and refusal to resume another plan.
 - [ ] 4.2 Implement apply/resume with durable approval, deterministic operation ids, prepared state, single-step dispatch, terminal receipts, and phase derivation.
-- [ ] 4.3 Add deterministic fault barriers after prepared-state commit, leaf+witness commit, and terminal-receipt commit.
-- [ ] 4.4 Add crash/restart tests at every barrier proving read-only status never repairs, exact resume produces zero-or-one effect and recovered-committed receipts, replay selects the correct next step, and invalid evidence blocks.
+- [ ] 4.3 Add deterministic `BaseException` fault barriers after prepared-state commit; after each retained-parent preflight flush; after candidate-file flush, every newly created governed-run ancestor-entry flush, and candidate containing-parent flush; after authorization-file flush and containing-parent flush; after rename before parent flush, after each distinct parent flush, every auxiliary-write prefix, graph/lifecycle finalisation, final-witness file flush, witness-parent flush, content leaf+witness commit, and terminal-receipt commit.
+- [ ] 4.4 Add crash/restart tests at every barrier proving read-only status never repairs, exact resume produces zero-or-one durable/adopted semantic effect and recovered-committed receipts, each operation has at most one durable/adopted placement even when an exact-prior proof permits a second rename syscall after power loss, exact-target recovery adopts the bound desired placement and issues no rename, generation-history failures return `CURATION_RENAME_HISTORY_UNPROVABLE`, replay selects the correct next step, and invalid or ambiguous evidence blocks.
 - [ ] 4.5 Add red tests and implementation for clean refusal, retryable pre-commit failure, stale-plan failure, partial runs, failed runs, completed replay, and state reconstruction after projection loss.
 - [ ] 4.6 Integrate curation step outcomes with the existing mutation terminal, idempotency, graph settlement, due-state batch carrier, and compact/full response projections.
 
