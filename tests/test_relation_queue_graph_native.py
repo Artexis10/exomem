@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import sqlite3
 import threading
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +16,7 @@ from exomem import (
     graph_sync,
     memory_refs,
     relation_queue,
+    review_state,
     semantic_contract,
     vault,
     writer_lease,
@@ -43,6 +44,14 @@ def _build_current(root: Path) -> epistemic_graph.EpistemicGraphIndex:
     index = epistemic_graph.EpistemicGraphIndex(root)
     index.rebuild_all()
     return index
+
+
+def _warm_reference_authority(root: Path) -> None:
+    """Publish cached resolver maps for the graph's current identity snapshot."""
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.delenv("EXOMEM_DISABLE_CORPUS_CACHE", raising=False)
+        semantic_contract.build_corpus_context(root)
+    assert semantic_contract.current_reference_identity_snapshot(root) is not None
 
 
 def _items(queue: dict[str, Any]) -> list[dict[str, Any]]:
@@ -359,8 +368,184 @@ def test_hinted_decisions_do_not_rebuild_cold_reference_index(
     assert triaged["state"] == "dismissed"
 
 
+def test_no_id_fallback_refreshes_if_identity_authority_appears_during_query(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "vault"
+    source = f"{KB}/source.md"
+    target = f"{KB}/target.md"
+    _write(root, source, f"See [[{target.removesuffix('.md')}]].")
+    target_file = _write(root, target, "A target without identity.")
+    monkeypatch.delenv("EXOMEM_DISABLE_CORPUS_CACHE", raising=False)
+    _build_current(root)
+    item = next(
+        queued
+        for queued in _items(relation_queue.build_queue(root))
+        if queued["from"] == source and queued["to"] == target
+    )
+    semantic_contract.evict_corpus_context(root)
+    assert semantic_contract.current_reference_identity_snapshot(root) is None
+    original_open = epistemic_graph.EpistemicGraphIndex._open_read_snapshot
+    replacement_refs: list[str] = []
+    replaced = False
+
+    class MaterializedRows:
+        def __init__(self, rows: list[tuple[Any, ...]]):
+            self.rows = rows
+
+        def fetchall(self) -> list[tuple[Any, ...]]:
+            return self.rows
+
+    class ReplacingConnection:
+        def __init__(self, connection: Any):
+            self.connection = connection
+
+        def execute(self, sql: str, *args: Any, **kwargs: Any):
+            nonlocal replaced
+            cursor = self.connection.execute(sql, *args, **kwargs)
+            if "SELECT path, exomem_id FROM graph_nodes" not in sql or replaced:
+                return cursor
+            rows = cursor.fetchall()
+            replaced = True
+            target_file.write_text(
+                "---\ntype: insight\nstatus: active\n"
+                "exomem_id: 33333333-3333-4333-8333-333333333333\n"
+                "---\n# target\n\nA target with current identity.\n",
+                encoding="utf-8",
+            )
+            freshness.rebaseline(root)
+            semantic_contract.build_corpus_context(root)
+            snapshot = semantic_contract.current_reference_identity_snapshot(root)
+            assert snapshot is not None
+            replacement = snapshot.canonical_refs_by_path[target]
+            assert replacement is not None
+            replacement_refs.append(replacement)
+            return MaterializedRows(rows)
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self.connection, name)
+
+    def open_replacing(self: Any, *args: Any, **kwargs: Any):
+        connection = original_open(self, *args, **kwargs)
+        return ReplacingConnection(connection) if connection is not None else None
+
+    monkeypatch.setattr(
+        epistemic_graph.EpistemicGraphIndex,
+        "_open_read_snapshot",
+        open_replacing,
+    )
+    monkeypatch.setattr(
+        memory_refs.ReferenceIndex,
+        "rebuild_all",
+        lambda *_args, **_kwargs: pytest.fail("triage rebuilt the refs corpus"),
+    )
+    monkeypatch.setattr(
+        memory_refs,
+        "_scan_pages",
+        lambda *_args, **_kwargs: pytest.fail("triage scanned the refs corpus"),
+    )
+
+    with pytest.raises(ValueError, match="REVIEW_REFRESH_REQUIRED"):
+        relation_queue.triage(
+            root,
+            ref=item["ref"],
+            source_path=item["source_path"],
+            action="dismiss",
+            expected_fingerprint=item["fingerprint"],
+            why="Refuse a dismissal under replaced identity authority.",
+        )
+
+    assert replacement_refs and replacement_refs[0] != item["target_ref"]
+    assert review_state.ReviewStateStore(root).load()["records"] == {}
+
+
+def test_no_id_fallback_refreshes_if_cached_identity_context_is_replaced(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "vault"
+    source = f"{KB}/source.md"
+    target = f"{KB}/target.md"
+    _write(root, source, f"See [[{target.removesuffix('.md')}]].")
+    _write(root, target, "A target without identity.")
+    monkeypatch.delenv("EXOMEM_DISABLE_CORPUS_CACHE", raising=False)
+    _build_current(root)
+    item = next(
+        queued
+        for queued in _items(relation_queue.build_queue(root))
+        if queued["from"] == source and queued["to"] == target
+    )
+    semantic_contract.build_corpus_context(root)
+    original_snapshot = semantic_contract.current_reference_identity_snapshot(root)
+    assert original_snapshot is not None
+    original_open = epistemic_graph.EpistemicGraphIndex._open_read_snapshot
+    replaced = False
+
+    class MaterializedRows:
+        def __init__(self, rows: list[tuple[Any, ...]]):
+            self.rows = rows
+
+        def fetchall(self) -> list[tuple[Any, ...]]:
+            return self.rows
+
+    class ReplacingConnection:
+        def __init__(self, connection: Any):
+            self.connection = connection
+
+        def execute(self, sql: str, *args: Any, **kwargs: Any):
+            nonlocal replaced
+            cursor = self.connection.execute(sql, *args, **kwargs)
+            if "SELECT path, exomem_id FROM graph_nodes" not in sql or replaced:
+                return cursor
+            rows = cursor.fetchall()
+            replaced = True
+            cache_key = semantic_contract._corpus_cache_key(root)
+            with semantic_contract._CORPUS_CONTEXT_UPDATE_LOCK:
+                with semantic_contract._CORPUS_CONTEXT_CACHE_LOCK:
+                    entry = semantic_contract._CORPUS_CONTEXT_CACHE[cache_key]
+                    semantic_contract._CORPUS_CONTEXT_CACHE[cache_key] = (
+                        entry[0],
+                        replace(entry[1]),
+                    )
+            replacement = semantic_contract.current_reference_identity_snapshot(root)
+            assert replacement is not None
+            assert replacement._cache_context_identity is not (
+                original_snapshot._cache_context_identity
+            )
+            return MaterializedRows(rows)
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self.connection, name)
+
+    def open_replacing(self: Any, *args: Any, **kwargs: Any):
+        connection = original_open(self, *args, **kwargs)
+        return ReplacingConnection(connection) if connection is not None else None
+
+    monkeypatch.setattr(
+        epistemic_graph.EpistemicGraphIndex,
+        "_open_read_snapshot",
+        open_replacing,
+    )
+
+    with pytest.raises(ValueError, match="REVIEW_REFRESH_REQUIRED"):
+        relation_queue.triage(
+            root,
+            ref=item["ref"],
+            source_path=item["source_path"],
+            action="dismiss",
+            expected_fingerprint=item["fingerprint"],
+            why="Refuse a dismissal under a replaced cached context.",
+        )
+
+    assert review_state.ReviewStateStore(root).load()["records"] == {}
+
+
 def _current_title_authored_case(
     root: Path,
+    *,
+    title: str = "Readable Target",
+    authored_target: str | None = None,
 ) -> tuple[Path, dict[str, Any]]:
     source = f"{KB}/source.md"
     target = f"{KB}/opaque-target.md"
@@ -368,7 +553,7 @@ def _current_title_authored_case(
     target_file = root / target
     target_file.parent.mkdir(parents=True, exist_ok=True)
     target_file.write_text(
-        "---\ntype: insight\nstatus: active\ntitle: Readable Target\n---\n"
+        f"---\ntype: insight\nstatus: active\ntitle: {title}\n---\n"
         "# Opaque target\n\nA target.\n",
         encoding="utf-8",
     )
@@ -378,9 +563,10 @@ def _current_title_authored_case(
         for queued in _items(relation_queue.build_queue(root))
         if queued["from"] == source and queued["to"] == target
     )
+    _warm_reference_authority(root)
     source_file.write_text(
         source_file.read_text(encoding="utf-8")
-        + "\n## Relations\n\n- links_to [[Readable Target]]\n",
+        + f"\n## Relations\n\n- links_to [[{authored_target or title}]]\n",
         encoding="utf-8",
     )
     current = relation_queue.resolve_candidate(
@@ -389,34 +575,34 @@ def _current_title_authored_case(
     return source_file, {**item, "fingerprint": current.fingerprint}
 
 
-def test_hinted_accept_refreshes_when_authored_title_query_errors(
+def test_hinted_accept_refreshes_when_cached_authored_authority_is_unavailable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = tmp_path / "vault"
     source_file, item = _current_title_authored_case(root)
-    original_open = epistemic_graph.EpistemicGraphIndex._open_read_snapshot
+    original_guard = relation_queue._current_candidate_is_authored
+    original_snapshot = semantic_contract.current_reference_identity_snapshot
+    inside_guard = False
 
-    class ErroringTitleConnection:
-        def __init__(self, connection: Any):
-            self.connection = connection
+    def guarded(*args: Any, **kwargs: Any):
+        nonlocal inside_guard
+        inside_guard = True
+        try:
+            return original_guard(*args, **kwargs)
+        finally:
+            inside_guard = False
 
-        def execute(self, sql: str, *args: Any, **kwargs: Any):
-            if "SELECT title FROM graph_nodes" in sql:
-                raise sqlite3.OperationalError("synthetic title read failure")
-            return self.connection.execute(sql, *args, **kwargs)
+    def unavailable_in_guard(*args: Any, **kwargs: Any):
+        if inside_guard:
+            return None
+        return original_snapshot(*args, **kwargs)
 
-        def __getattr__(self, name: str) -> Any:
-            return getattr(self.connection, name)
-
-    def open_erroring(self: Any, *args: Any, **kwargs: Any):
-        connection = original_open(self, *args, **kwargs)
-        return ErroringTitleConnection(connection) if connection is not None else None
-
+    monkeypatch.setattr(relation_queue, "_current_candidate_is_authored", guarded)
     monkeypatch.setattr(
-        epistemic_graph.EpistemicGraphIndex,
-        "_open_read_snapshot",
-        open_erroring,
+        semantic_contract,
+        "current_reference_identity_snapshot",
+        unavailable_in_guard,
     )
     edits: list[dict[str, Any]] = []
     with pytest.raises(ValueError, match="REVIEW_REFRESH_REQUIRED"):
@@ -433,34 +619,23 @@ def test_hinted_accept_refreshes_when_authored_title_query_errors(
     assert edits == []
 
 
-def test_hinted_accept_refreshes_when_authored_snapshot_is_unavailable(
+def test_hinted_accept_refreshes_when_cached_authority_is_lost_during_resolution(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = tmp_path / "vault"
     source_file, item = _current_title_authored_case(root)
-    original_guard = relation_queue._current_candidate_is_authored
-    original_open = epistemic_graph.EpistemicGraphIndex._open_read_snapshot
-    inside_guard = False
+    original_resolve = semantic_contract._resolve_reference_wikilink_from_context
 
-    def guarded(*args: Any, **kwargs: Any):
-        nonlocal inside_guard
-        inside_guard = True
-        try:
-            return original_guard(*args, **kwargs)
-        finally:
-            inside_guard = False
+    def lose_authority(*args: Any, **kwargs: Any):
+        result = original_resolve(*args, **kwargs)
+        semantic_contract.evict_corpus_context(root)
+        return result
 
-    def unavailable_in_guard(self: Any, *args: Any, **kwargs: Any):
-        if inside_guard:
-            return None
-        return original_open(self, *args, **kwargs)
-
-    monkeypatch.setattr(relation_queue, "_current_candidate_is_authored", guarded)
     monkeypatch.setattr(
-        epistemic_graph.EpistemicGraphIndex,
-        "_open_read_snapshot",
-        unavailable_in_guard,
+        semantic_contract,
+        "_resolve_reference_wikilink_from_context",
+        lose_authority,
     )
     edits: list[dict[str, Any]] = []
     with pytest.raises(ValueError, match="REVIEW_REFRESH_REQUIRED"):
@@ -475,6 +650,80 @@ def test_hinted_accept_refreshes_when_authored_snapshot_is_unavailable(
             or {"mutated": True},
         )
     assert edits == []
+
+
+def test_live_authored_guard_blocks_unicode_title_without_edit(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "vault"
+    source_file, item = _current_title_authored_case(
+        root,
+        title="Älpha Target",
+        authored_target="älpha target",
+    )
+    edits: list[dict[str, Any]] = []
+
+    with pytest.raises(ValueError, match=r"REVIEW_ITEM_CHANGED.*authored_edge"):
+        relation_queue.accept(
+            root,
+            ref=item["ref"],
+            source_path=item["source_path"],
+            expected_hash=vault.content_hash(source_file.read_text(encoding="utf-8")),
+            expected_fingerprint=item["fingerprint"],
+            why="Block a Unicode-case-equivalent authored relation.",
+            edit_memory=lambda *_args, **kwargs: edits.append(kwargs)
+            or {"mutated": True},
+        )
+    assert edits == []
+
+
+def test_live_authored_guard_uses_no_unindexed_graph_title_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "vault"
+    source_file, item = _current_title_authored_case(root)
+    original_open = epistemic_graph.EpistemicGraphIndex._open_read_snapshot
+    statements: list[str] = []
+
+    class ScanRejectingConnection:
+        def __init__(self, connection: Any):
+            self.connection = connection
+
+        def execute(self, sql: str, *args: Any, **kwargs: Any):
+            statements.append(sql)
+            normalized = " ".join(sql.casefold().split())
+            assert "substr(path" not in normalized
+            assert "lower(title)" not in normalized
+            assert "select title from graph_nodes" not in normalized
+            return self.connection.execute(sql, *args, **kwargs)
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self.connection, name)
+
+    def open_rejecting(self: Any, *args: Any, **kwargs: Any):
+        connection = original_open(self, *args, **kwargs)
+        return ScanRejectingConnection(connection) if connection is not None else None
+
+    monkeypatch.setattr(
+        epistemic_graph.EpistemicGraphIndex,
+        "_open_read_snapshot",
+        open_rejecting,
+    )
+
+    with pytest.raises(ValueError, match=r"REVIEW_ITEM_CHANGED.*authored_edge"):
+        relation_queue.accept(
+            root,
+            ref=item["ref"],
+            source_path=item["source_path"],
+            expected_hash=vault.content_hash(source_file.read_text(encoding="utf-8")),
+            expected_fingerprint=item["fingerprint"],
+            why="Reject any old graph title scan or temp-sort path.",
+            edit_memory=lambda *_args, **_kwargs: pytest.fail(
+                "authored candidate reached edit"
+            ),
+        )
+    assert statements
 
 
 def test_live_authored_guard_preserves_ambiguous_same_stem_relation(
@@ -493,6 +742,7 @@ def test_live_authored_guard_preserves_ambiguous_same_stem_relation(
         for queued in _items(relation_queue.build_queue(root))
         if queued["from"] == source and queued["to"] == target_a
     )
+    _warm_reference_authority(root)
     source_file.write_text(
         source_file.read_text(encoding="utf-8")
         + "\n## Relations\n\n- links_to [[same]]\n",
@@ -537,6 +787,7 @@ def test_live_authored_guard_preserves_stem_title_collision(
         for queued in _items(relation_queue.build_queue(root))
         if queued["from"] == source and queued["to"] == target
     )
+    _warm_reference_authority(root)
     source_file.write_text(
         source_file.read_text(encoding="utf-8")
         + "\n## Relations\n\n- links_to [[same]]\n",
@@ -555,6 +806,69 @@ def test_live_authored_guard_preserves_stem_title_collision(
         why="Do not choose between a stem and title collision.",
         edit_memory=lambda *_args, **kwargs: edits.append(kwargs) or {"mutated": True},
     )
+    assert accepted["accepted"] is True
+    assert len(edits) == 1
+
+
+@pytest.mark.parametrize(
+    ("case", "target_title", "other_title", "authored_target"),
+    (
+        ("same-title", "Twin Title", "Twin Title", "Twin Title"),
+        (
+            "unicode-fold-collision",
+            "Älpha Collision",
+            "älpha collision",
+            "ÄLPHA COLLISION",
+        ),
+    ),
+)
+def test_live_authored_guard_preserves_title_ambiguity(
+    tmp_path: Path,
+    case: str,
+    target_title: str,
+    other_title: str,
+    authored_target: str,
+) -> None:
+    root = tmp_path / case
+    source = f"{KB}/source.md"
+    target = f"{KB}/Area-A/target.md"
+    other = f"{KB}/Area-B/other.md"
+    source_file = _write(root, source, f"See [[{target.removesuffix('.md')}]].")
+    for rel_path, title in ((target, target_title), (other, other_title)):
+        path = root / rel_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f"---\ntype: insight\nstatus: active\ntitle: {title}\n---\n"
+            f"# {path.stem}\n\nA target.\n",
+            encoding="utf-8",
+        )
+    _build_current(root)
+    item = next(
+        queued
+        for queued in _items(relation_queue.build_queue(root))
+        if queued["from"] == source and queued["to"] == target
+    )
+    _warm_reference_authority(root)
+    source_file.write_text(
+        source_file.read_text(encoding="utf-8")
+        + f"\n## Relations\n\n- links_to [[{authored_target}]]\n",
+        encoding="utf-8",
+    )
+    current = relation_queue.resolve_candidate(
+        root, item["ref"], source_path=item["source_path"]
+    )
+    edits: list[dict[str, Any]] = []
+
+    accepted = relation_queue.accept(
+        root,
+        ref=item["ref"],
+        source_path=item["source_path"],
+        expected_hash=vault.content_hash(source_file.read_text(encoding="utf-8")),
+        expected_fingerprint=current.fingerprint,
+        why="Do not retarget an ambiguous title relation.",
+        edit_memory=lambda *_args, **kwargs: edits.append(kwargs) or {"mutated": True},
+    )
+
     assert accepted["accepted"] is True
     assert len(edits) == 1
 
@@ -600,6 +914,7 @@ def test_live_authored_guard_blocks_exact_and_unique_targets(
         for queued in _items(relation_queue.build_queue(root))
         if queued["from"] == source and queued["to"] == target
     )
+    _warm_reference_authority(root)
     source_file.write_text(
         source_file.read_text(encoding="utf-8")
         + f"\n## Relations\n\n- links_to [[{authored_target}]]\n",
@@ -871,6 +1186,7 @@ def test_hinted_accept_refuses_newly_authored_and_dismissed_candidates(
     _write(authored_root, target, "A target.")
     _build_current(authored_root)
     authored_item = _items(relation_queue.build_queue(authored_root))[0]
+    _warm_reference_authority(authored_root)
     source_file.write_text(
         source_file.read_text(encoding="utf-8")
         + f"\n## Relations\n\n- links_to [[{target.removesuffix('.md')}]]\n",

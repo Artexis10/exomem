@@ -7,12 +7,14 @@ import pytest
 
 from exomem import (
     activation_manifest,
+    freshness,
     memory_refs,
     memory_schema,
     relation_registry,
     semantic_contract,
     semantic_language_registry,
     semantic_units,
+    vault,
 )
 
 _ID_A = "00000000-0000-0000-0000-000000000001"
@@ -90,6 +92,142 @@ def _identity_census(
             for state in states
         )
     )
+
+
+def _cached_reference_snapshot(
+    root: Path,
+    entries: tuple[tuple[str, str], ...],
+    monkeypatch: pytest.MonkeyPatch,
+) -> semantic_contract.ReferenceIdentitySnapshot:
+    monkeypatch.delenv("EXOMEM_DISABLE_CORPUS_CACHE", raising=False)
+    for rel_path, title in entries:
+        path = root / rel_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_source(title=title), encoding="utf-8")
+    freshness.clear()
+    freshness.rebaseline(root)
+    semantic_contract.build_corpus_context(root)
+    snapshot = semantic_contract.current_reference_identity_snapshot(root)
+    assert snapshot is not None
+    return snapshot
+
+
+def test_reference_snapshot_wikilink_resolution_is_unicode_exact_and_io_free(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "vault"
+    prefix = "Knowledge Base/Notes/Insights"
+    unicode_path = f"{prefix}/unicode-opaque.md"
+    ascii_path = f"{prefix}/ascii-opaque.md"
+    stem_path = f"{prefix}/unique-stem.md"
+    explicit_path = f"{prefix}/Area/explicit.md"
+    snapshot = _cached_reference_snapshot(
+        root,
+        (
+            (unicode_path, "Älpha Target"),
+            (ascii_path, "Readable Target"),
+            (stem_path, "Stem target"),
+            (explicit_path, "Explicit target"),
+            (f"{prefix}/Area-A/ambiguous.md", "Ambiguous A"),
+            (f"{prefix}/Area-B/ambiguous.md", "Ambiguous B"),
+            (f"{prefix}/Area-A/collision.md", "Stem collision"),
+            (f"{prefix}/Area-B/title-collision.md", "collision"),
+            (f"{prefix}/Area-A/twin-a.md", "Twin Title"),
+            (f"{prefix}/Area-B/twin-b.md", "Twin Title"),
+            (f"{prefix}/Area-A/fold-a.md", "Älpha Collision"),
+            (f"{prefix}/Area-B/fold-b.md", "älpha collision"),
+        ),
+        monkeypatch,
+    )
+    monkeypatch.setattr(
+        semantic_contract,
+        "_corpus_census",
+        lambda *_args, **_kwargs: pytest.fail("cached resolver walked the corpus"),
+    )
+    monkeypatch.setattr(
+        semantic_contract,
+        "_build_corpus_context_uncached",
+        lambda *_args, **_kwargs: pytest.fail("cached resolver rebuilt the corpus"),
+    )
+    monkeypatch.setattr(
+        vault.WikilinkResolver,
+        "_build",
+        lambda *_args, **_kwargs: pytest.fail("cached resolver built a resolver"),
+    )
+
+    cases = (
+        ("[[älpha target]]", "resolved", unicode_path),
+        ("[[READABLE TARGET]]", "resolved", ascii_path),
+        ("[[unique-stem]]", "resolved", stem_path),
+        (f"[[{explicit_path.removesuffix('.md')}]]", "resolved", explicit_path),
+        ("[[ambiguous]]", "ambiguous", None),
+        ("[[collision]]", "ambiguous", None),
+        ("[[Twin Title]]", "ambiguous", None),
+        ("[[ÄLPHA COLLISION]]", "ambiguous", None),
+        ("[[missing target]]", "unresolved", None),
+    )
+    for raw_target, status, path in cases:
+        result = semantic_contract.resolve_reference_wikilink(
+            root,
+            snapshot,
+            raw_target,
+        )
+        assert (result.status, result.path) == (status, path)
+
+
+def test_reference_snapshot_wikilink_resolution_fails_closed_when_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "vault"
+    target = "Knowledge Base/Notes/Insights/target.md"
+    snapshot = _cached_reference_snapshot(
+        root,
+        ((target, "Target"),),
+        monkeypatch,
+    )
+    assert semantic_contract.evict_corpus_context(root) is True
+
+    result = semantic_contract.resolve_reference_wikilink(root, snapshot, "[[Target]]")
+
+    assert (result.status, result.path) == ("unavailable", None)
+
+
+def test_reference_snapshot_wikilink_resolution_fences_context_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "vault"
+    target = "Knowledge Base/Notes/Insights/target.md"
+    snapshot = _cached_reference_snapshot(
+        root,
+        ((target, "Target"),),
+        monkeypatch,
+    )
+    original_resolve = semantic_contract._resolve_reference_wikilink_from_context
+
+    def replace_context(*args, **kwargs):
+        result = original_resolve(*args, **kwargs)
+        cache_key = semantic_contract._corpus_cache_key(root)
+        with semantic_contract._CORPUS_CONTEXT_UPDATE_LOCK:
+            with semantic_contract._CORPUS_CONTEXT_CACHE_LOCK:
+                entry = semantic_contract._CORPUS_CONTEXT_CACHE[cache_key]
+                semantic_contract._CORPUS_CONTEXT_CACHE[cache_key] = (
+                    entry[0],
+                    replace(entry[1]),
+                )
+        return result
+
+    monkeypatch.setattr(
+        semantic_contract,
+        "_resolve_reference_wikilink_from_context",
+        replace_context,
+    )
+
+    result = semantic_contract.resolve_reference_wikilink(root, snapshot, "[[Target]]")
+
+    assert (result.status, result.path) == ("unavailable", None)
 
 
 def test_identity_census_precomputes_immutable_reference_index_equivalent_view() -> None:

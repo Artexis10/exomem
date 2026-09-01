@@ -1314,6 +1314,14 @@ class ReferenceIdentitySnapshot:
     _cache_context_identity: object = field(repr=False, compare=False)
 
 
+@dataclass(frozen=True, slots=True)
+class ReferenceWikilinkResolution:
+    """One I/O-free wikilink resolution from an exact cached corpus context."""
+
+    status: str
+    path: str | None = None
+
+
 def _drop_corpus_caption_locked(cache_key: tuple[str, str]) -> None:
     _CORPUS_CONTEXT_EVENT_TOKENS.pop(cache_key, None)
     _CORPUS_CONTEXT_EVENT_CHECKPOINTS.pop(cache_key, None)
@@ -1413,6 +1421,58 @@ def reference_identity_snapshot_is_current(
                 and entry[1].identity_census._canonical_refs_by_path
                 is snapshot.canonical_refs_by_path
             )
+
+
+def _resolve_reference_wikilink_from_context(
+    context: SemanticCorpusContext,
+    raw_target: str,
+) -> ReferenceWikilinkResolution:
+    """Resolve against immutable context maps, preserving union ambiguity."""
+    cleaned = str(raw_target or "").strip()
+    if cleaned.startswith("[[") and cleaned[-2:] == "]]":
+        cleaned = cleaned[2:-2].strip()
+    cleaned = cleaned.split("|", 1)[0].split("#", 1)[0]
+    cleaned = cleaned.removesuffix(".md").strip().strip("/")
+    if not cleaned:
+        return ReferenceWikilinkResolution("unresolved")
+
+    if "/" in cleaned:
+        candidates = (cleaned, f"{vault.kb_prefix()}{cleaned}")
+        for candidate in candidates:
+            if candidate in context.resolver_full_paths:
+                return ReferenceWikilinkResolution("resolved", f"{candidate}.md")
+        if cleaned in context.resolver_kb_stripped:
+            return ReferenceWikilinkResolution(
+                "resolved",
+                f"{vault.kb_prefix()}{cleaned}.md",
+            )
+        return ReferenceWikilinkResolution("unresolved")
+
+    matches = set(context.resolver_stems.get(cleaned, ()))
+    matches.update(context.resolver_titles.get(cleaned.lower(), ()))
+    if len(matches) > 1:
+        return ReferenceWikilinkResolution("ambiguous")
+    if not matches:
+        return ReferenceWikilinkResolution("unresolved")
+    return ReferenceWikilinkResolution("resolved", f"{next(iter(matches))}.md")
+
+
+def resolve_reference_wikilink(
+    vault_root: Path,
+    snapshot: ReferenceIdentitySnapshot | None,
+    raw_target: str,
+) -> ReferenceWikilinkResolution:
+    """Resolve from one exact current cached context without filesystem work."""
+    root = Path(vault_root)
+    if snapshot is None or not reference_identity_snapshot_is_current(root, snapshot):
+        return ReferenceWikilinkResolution("unavailable")
+    context = snapshot._cache_context_identity
+    if not isinstance(context, SemanticCorpusContext):
+        return ReferenceWikilinkResolution("unavailable")
+    result = _resolve_reference_wikilink_from_context(context, raw_target)
+    if not reference_identity_snapshot_is_current(root, snapshot):
+        return ReferenceWikilinkResolution("unavailable")
+    return result
 
 
 def _corpus_cache_key(root: Path) -> tuple[str, str]:

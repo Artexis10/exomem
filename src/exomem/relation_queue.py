@@ -174,77 +174,36 @@ def _current_candidate_is_authored(
     page: Any,
     candidate: dict[str, Any],
 ) -> bool | None:
-    """Check current Markdown using bounded graph title/ambiguity authority.
-
-    ``None`` means the graph authority needed to make the decision was not
-    available.  Accept treats that as refresh-required rather than guessing.
-    """
+    """Check current Markdown using exact cached resolver authority."""
     relation_type = str(candidate.get("relation_type") or "")
     target = epistemic_graph_module._with_md(str(candidate.get("to") or ""))
     if not relation_type or not target:
         return False
-    index = epistemic_graph_module.EpistemicGraphIndex(vault_root)
-    connection = index._open_read_snapshot()
-    if connection is None:
-        return None
-    try:
-        target_row = connection.execute(
-            "SELECT title FROM graph_nodes WHERE kind = 'file' AND path = ?",
-            (target,),
-        ).fetchone()
-        if target_row is None:
-            return None
-        target_title = (
-            str(target_row[0])
-            if target_row[0] is not None and str(target_row[0]).strip()
-            else None
-        )
-        for relation in _relation_document(page, vault_root).canonical_note_relations:
-            if relation.kind != relation_type:
-                continue
-            raw_target = str(relation.target or "").strip()
-            cleaned = raw_target
-            if cleaned.startswith("[[") and cleaned.endswith("]]"):
-                cleaned = cleaned[2:-2].strip()
-            cleaned = cleaned.split("|", 1)[0].split("#", 1)[0]
-            cleaned = cleaned.removesuffix(".md").strip().strip("/")
-            if "/" in cleaned:
-                entries = [(target, target_title)]
-            else:
-                suffix = f"/{cleaned}.md"
-                rows = connection.execute(
-                    "SELECT path, title FROM graph_nodes WHERE kind = 'file' "
-                    "AND (path = ? OR substr(path, -length(?)) = ? "
-                    "OR lower(title) = lower(?)) "
-                    "ORDER BY path LIMIT 3",
-                    (f"{cleaned}.md", suffix, suffix, cleaned),
-                ).fetchall()
-                if len(rows) > 1:
-                    continue
-                entries = [
-                    (str(path), str(title) if title and str(title).strip() else None)
-                    for path, title in rows
-                ]
-            resolver = vault_module.WikilinkResolver.from_entries(
-                vault_root,
-                entries,
-            )
-            try:
-                canonical, warning = vault_module.normalize_wikilink(
-                    relation.target,
-                    vault_root,
-                    resolver=resolver,
-                    strict=False,
-                )
-            except Exception:  # noqa: BLE001 - malformed authored links are ignored
-                continue
-            if not warning and epistemic_graph_module._with_md(canonical) == target:
-                return True
+    matching_relations = tuple(
+        relation
+        for relation in _relation_document(page, vault_root).canonical_note_relations
+        if relation.kind == relation_type
+    )
+    if not matching_relations:
         return False
-    except sqlite3.Error:
+    snapshot = semantic_contract_module.current_reference_identity_snapshot(vault_root)
+    if snapshot is None:
         return None
-    finally:
-        connection.close()
+    for relation in matching_relations:
+        resolution = semantic_contract_module.resolve_reference_wikilink(
+            vault_root,
+            snapshot,
+            str(relation.target or ""),
+        )
+        if resolution.status == "unavailable":
+            return None
+        if resolution.status == "resolved" and resolution.path == target:
+            return True
+    if not semantic_contract_module.reference_identity_snapshot_is_current(
+        vault_root, snapshot
+    ):
+        return None
+    return False
 
 
 def _eligible_pages(vault_root: Path) -> list[Any]:
@@ -526,6 +485,16 @@ def _hinted_candidate_refs(
     identities = {str(path): exomem_id for path, exomem_id in rows}
     if set(identities) != set(paths):
         return None
+    if identity_snapshot is None:
+        if (
+            semantic_contract_module.current_reference_identity_snapshot(vault_root)
+            is not None
+        ):
+            return None
+    elif not semantic_contract_module.reference_identity_snapshot_is_current(
+        vault_root, identity_snapshot
+    ):
+        return None
     if any(exomem_id is not None for exomem_id in identities.values()):
         if identity_snapshot is None or not set(paths).issubset(
             identity_snapshot.reference_paths
@@ -536,10 +505,6 @@ def _hinted_candidate_refs(
             or _fallback_ref(path)
             for path in paths
         }
-        if not semantic_contract_module.reference_identity_snapshot_is_current(
-            vault_root, identity_snapshot
-        ):
-            return None
     else:
         refs = {path: _fallback_ref(path) for path in paths}
     return refs[from_path], refs[to_path]
