@@ -1,20 +1,25 @@
 ## 1. Establish the failing baseline
 
 - [ ] 1.1 Add a regression test that registers a slow corpus-context flight and asserts a
-  second joining caller returns within the interactive bound. It MUST fail against
+  second joining caller returns within the fixed 2.0-second bound. It MUST fail against
   current `main`, where `flight.done.wait()` blocks for the owner's full duration.
 - [ ] 1.2 Add a test asserting an owner build error still raises for the waiter, so the
   bound cannot be implemented by swallowing failures.
 - [ ] 1.3 Record the measured baseline (98% post-commit share, 103.6s median) in the test
   module docstring so a future reader can tell whether the numbers still hold.
+- [ ] 1.4 Add a regression test proving an already-settled flight returns immediately
+  without invoking the timed wait. Record a mutation proof showing the named test fails
+  when the settled fast path is removed or forced through the timed-wait branch.
 
 ## 2. Bound the join
 
-- [ ] 2.1 Introduce the interactive bound as a fixed module-level constant with no
-  configuration surface, justified in a comment against measured percentiles.
-- [ ] 2.2 Replace `flight.done.wait()` at `semantic_contract.py:2353` with a bounded wait
-  that distinguishes "completed" from "expired" by the wait's own return value, not by
-  inspecting flight state afterwards.
+- [ ] 2.1 Introduce the exact 2.0-second interactive bound as a fixed module-level
+  constant with no configuration surface, justified in a comment against the measured
+  103.6-second median and the 15-second connector timeout.
+- [ ] 2.2 Add the already-settled fast path, then replace `flight.done.wait()` at
+  `semantic_contract.py:2475` with `flight.done.wait(timeout=2.0)`. Distinguish
+  "completed" from "expired" by the wait's own return value, not by inspecting flight
+  state afterwards.
 - [ ] 2.3 On expiry, return the typed deferred outcome and release admitted capacity in
   `finally`, on every completion, cancellation, and failure path.
 - [ ] 2.4 Leave the owner's build, registry cleanup, and `flight.done.set()` paths
@@ -30,7 +35,9 @@
 - [ ] 3.3 Add a test asserting a deferred result is not byte-identical to a completed one
   in the default projection.
 - [ ] 3.4 Audit consumers of `build_corpus_context_with_census` for paths that assume a
-  context is always present, and handle the deferred case explicitly at each.
+  context is always present, and handle the deferred case explicitly at each. The audit
+  MUST cover `semantic_contract.py`, `relation_review.py`, and `semantic_writes.py` and
+  record why any call site that cannot receive deferral is exempt.
 
 ## 4. Stop the next unbounded join
 
@@ -52,3 +59,5 @@
   as the evidence.
 - [ ] 5.4 Verify the interactive bound holds while a genuine rebuild is in flight, since
   that is the condition under which the stall was originally observed.
+- [ ] 5.5 Run `openspec validate bound-corpus-context-flight-join --strict` and
+  `openspec validate --all --strict`, recording the passing output with the lane result.
