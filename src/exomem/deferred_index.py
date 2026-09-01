@@ -22,6 +22,7 @@ _SEMANTIC_UPSERTS_GENERATION_KEY = "semantic_upserts_generation"
 _GRAPH_UPSERTS_GENERATION_KEY = "graph_upserts_generation"
 _GRAPH_FULL_REBUILD_KEY = "graph_full_rebuild_generation"
 _GRAPH_FULL_REBUILD_SEQUENCE_KEY = "graph_full_rebuild_sequence"
+_PENDING_VISIBILITY_GENERATION_KEY = "pending_visibility_generation:v1"
 
 #: The queues this store carries, and the tables behind them.  The graph queue
 #: is the newest and the reason the mapping exists: it reuses the semantic
@@ -136,6 +137,9 @@ def _ensure_derived_batch_schema(conn: sqlite3.Connection) -> None:
             result_id TEXT PRIMARY KEY CHECK(length(result_id) BETWEEN 1 AND 64),
             batch_id TEXT NOT NULL,
             component_revision INTEGER NOT NULL CHECK(component_revision >= 1),
+            target_rel_path TEXT CHECK(
+                target_rel_path IS NULL OR length(target_rel_path) BETWEEN 1 AND 1024
+            ),
             target_fingerprint TEXT NOT NULL
                 CHECK(length(target_fingerprint) BETWEEN 1 AND 128),
             counterpart_fingerprint TEXT CHECK(
@@ -166,6 +170,25 @@ def _ensure_derived_batch_schema(conn: sqlite3.Connection) -> None:
         """
     )
     conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS write_advisory_result_candidates (
+            result_id TEXT NOT NULL,
+            ordinal INTEGER NOT NULL CHECK(ordinal BETWEEN 0 AND 7),
+            counterpart_rel_path TEXT NOT NULL
+                CHECK(length(counterpart_rel_path) BETWEEN 1 AND 1024),
+            counterpart_fingerprint TEXT NOT NULL
+                CHECK(length(counterpart_fingerprint) BETWEEN 1 AND 128),
+            warning TEXT NOT NULL CHECK(length(warning) BETWEEN 1 AND 300),
+            advisory_ref TEXT NOT NULL
+                CHECK(length(advisory_ref) BETWEEN 1 AND 256),
+            review_ref TEXT NOT NULL CHECK(length(review_ref) BETWEEN 1 AND 256),
+            triage_fingerprint TEXT NOT NULL CHECK(length(triage_fingerprint) = 24),
+            PRIMARY KEY(result_id, ordinal),
+            FOREIGN KEY(result_id) REFERENCES write_advisory_results(result_id)
+        )
+        """
+    )
+    conn.execute(
         "CREATE INDEX IF NOT EXISTS derived_components_schedule "
         "ON derived_batch_components(state, next_attempt_at, updated_at)"
     )
@@ -181,6 +204,25 @@ def _ensure_derived_batch_schema(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS advisory_result_retention "
         "ON write_advisory_results(retention_deadline, terminal_replay_until)"
     )
+    advisory_columns = {
+        str(row[1]) for row in conn.execute("PRAGMA table_info(write_advisory_results)")
+    }
+    if "target_rel_path" not in advisory_columns:
+        conn.execute(
+            "ALTER TABLE write_advisory_results ADD COLUMN target_rel_path TEXT"
+        )
+    conn.execute(
+        "INSERT OR IGNORE INTO maintenance_state(key, value) VALUES (?, '0')",
+        (_PENDING_VISIBILITY_GENERATION_KEY,),
+    )
+    for event in ("INSERT", "UPDATE", "DELETE"):
+        conn.execute(
+            f"CREATE TRIGGER IF NOT EXISTS pending_visibility_generation_{event.lower()} "
+            f"AFTER {event} ON pending_recall_rows BEGIN "
+            "INSERT INTO maintenance_state(key, value) VALUES "
+            f"('{_PENDING_VISIBILITY_GENERATION_KEY}', '1') "
+            "ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1; END"
+        )
     component_columns = {
         str(row[1])
         for row in conn.execute("PRAGMA table_info(derived_batch_components)")
@@ -201,10 +243,10 @@ def _ensure_derived_batch_schema(conn: sqlite3.Connection) -> None:
         )
         conn.execute("UPDATE pending_recall_rows SET component_revision = 1")
         conn.execute("UPDATE write_advisory_results SET component_revision = 1")
-        # DDL itself is durable without a caller transaction, but the repair
-        # DML is not.  Commit the additive migration before returning a handle
-        # that a read-only compatibility caller may immediately close.
-        conn.commit()
+    # DDL itself is durable without a caller transaction, but the additive
+    # generation initialization and any repair DML are not. Commit schema
+    # migration before returning a handle whose caller may begin immediately.
+    conn.commit()
 
 
 def _sqlite_connect(database: Any, *args: Any, **kwargs: Any) -> sqlite3.Connection:

@@ -7,6 +7,7 @@ import inspect
 import sqlite3
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -60,25 +61,28 @@ def _prepare(
     generation: str = "generation-1",
     paths=(),
     required=(),
+    advisory_target_rel_path: str | None = None,
     advisory_target_fingerprint: str | None = None,
     terminal_replay_until: float | None = None,
     advisory_retention_until: float | None = None,
     now: float = 10.0,
 ):
     protocol = _protocol()
-    return protocol.prepare_batch(
-        vault,
-        batch_id=batch_id,
-        mutation_attempt_digest=hashlib.sha256(batch_id.encode()).hexdigest(),
-        canonical_generation=generation,
-        checkpoint_id=f"checkpoint-{generation}",
-        paths=tuple(paths),
-        required_components=frozenset(required),
-        advisory_target_fingerprint=advisory_target_fingerprint,
-        terminal_replay_until=terminal_replay_until,
-        advisory_retention_until=advisory_retention_until,
-        now=now,
-    )
+    kwargs = {
+        "batch_id": batch_id,
+        "mutation_attempt_digest": hashlib.sha256(batch_id.encode()).hexdigest(),
+        "canonical_generation": generation,
+        "checkpoint_id": f"checkpoint-{generation}",
+        "paths": tuple(paths),
+        "required_components": frozenset(required),
+        "advisory_target_fingerprint": advisory_target_fingerprint,
+        "terminal_replay_until": terminal_replay_until,
+        "advisory_retention_until": advisory_retention_until,
+        "now": now,
+    }
+    if advisory_target_rel_path is not None:
+        kwargs["advisory_target_rel_path"] = advisory_target_rel_path
+    return protocol.prepare_batch(vault, **kwargs)
 
 
 def _prepare_one(
@@ -115,6 +119,11 @@ def _prepare_one(
         generation=generation,
         paths=(_path(protocol, rel, before=before, after=after),),
         required=components,
+        advisory_target_rel_path=(
+            rel
+            if protocol.DerivedComponent.WRITE_ADVISORY in components
+            else None
+        ),
         advisory_target_fingerprint=advisory_target_fingerprint,
         terminal_replay_until=terminal_replay_until,
         now=now,
@@ -278,11 +287,13 @@ def test_derived_batch_records_every_closed_component_explicitly(vault: Path) ->
 
 def test_advisory_result_id_is_stable_for_exact_batch_revision(vault: Path) -> None:
     protocol = _protocol()
+    rel = "Knowledge Base/Notes/advisory-batch.md"
     kwargs = dict(
         batch_id="advisory-batch",
         generation="generation-7",
-        paths=(),
+        paths=(_path(protocol, rel, before=None, after=b"target"),),
         required={protocol.DerivedComponent.WRITE_ADVISORY},
+        advisory_target_rel_path=rel,
         advisory_target_fingerprint=hashlib.sha256(b"target").hexdigest(),
         terminal_replay_until=200.0,
         now=10.0,
@@ -300,11 +311,13 @@ def test_advisory_result_retention_cannot_strand_replayed_terminal_ref(
     vault: Path,
 ) -> None:
     protocol = _protocol()
+    rel = "Knowledge Base/Notes/retained-advisory.md"
     receipt = _prepare(
         vault,
         batch_id="retained-advisory",
-        paths=(),
+        paths=(_path(protocol, rel, before=None, after=b"target"),),
         required={protocol.DerivedComponent.WRITE_ADVISORY},
+        advisory_target_rel_path=rel,
         advisory_target_fingerprint=hashlib.sha256(b"target").hexdigest(),
         terminal_replay_until=200.0,
         advisory_retention_until=20.0,
@@ -320,10 +333,12 @@ def test_advisory_result_retention_cannot_strand_replayed_terminal_ref(
 
 def test_exact_replay_monotonically_extends_advisory_retention(vault: Path) -> None:
     protocol = _protocol()
+    rel = "Knowledge Base/Notes/extended-advisory.md"
     kwargs = dict(
         batch_id="extended-advisory",
-        paths=(),
+        paths=(_path(protocol, rel, before=None, after=b"target"),),
         required={protocol.DerivedComponent.WRITE_ADVISORY},
+        advisory_target_rel_path=rel,
         advisory_target_fingerprint=hashlib.sha256(b"target").hexdigest(),
         now=1.0,
     )
@@ -412,6 +427,7 @@ def test_frozen_protocol_fake_matches_public_typed_shapes() -> None:
             protocol.DerivedComponent.LEXSTORE,
             protocol.DerivedComponent.WRITE_ADVISORY,
         },
+        advisory_target_rel_path=path.rel_path,
         advisory_target_fingerprint=hashlib.sha256(b"target").hexdigest(),
         terminal_replay_until=100.0,
         now=1.0,
@@ -448,6 +464,11 @@ def test_frozen_protocol_fake_matches_public_typed_shapes() -> None:
         "signal_components",
         "component_status",
         "advisory_result_ref",
+        "snapshot_pending_visibility",
+        "pending_visibility_snapshot_is_current",
+        "retire_pending_visibility",
+        "read_advisory_result",
+        "publish_advisory_result",
     ):
         production = inspect.signature(getattr(protocol, seam))
         fake_signature = inspect.signature(getattr(DerivedReceiptProtocolFake, seam))
@@ -1622,3 +1643,928 @@ def test_newer_live_generation_supersedes_old_ready_work_before_dispatch(
         old,
         protocol.DerivedComponent.LEXSTORE,
     ).state == "superseded"
+
+
+def _prepare_advisory_claim(
+    vault: Path,
+    *,
+    batch_id: str,
+    target_fingerprint: str | None = None,
+    now: float = 1.0,
+):
+    protocol = _protocol()
+    fingerprint = target_fingerprint or hashlib.sha256(
+        f"{batch_id}:target".encode()
+    ).hexdigest()
+    receipt, target, _before, after = _prepare_one(
+        vault,
+        batch_id=batch_id,
+        required={protocol.DerivedComponent.WRITE_ADVISORY},
+        advisory_target_fingerprint=fingerprint,
+        terminal_replay_until=100.0,
+        now=now,
+    )
+    _commit_and_prove(vault, receipt, target, after)
+    [claimed] = protocol.claim_ready_components(
+        vault,
+        owner=f"worker-{batch_id}",
+        limit=1,
+        lease_seconds=30.0,
+        now=now + 1.0,
+    )
+    assert claimed.component is protocol.DerivedComponent.WRITE_ADVISORY
+    return receipt, claimed, fingerprint
+
+
+def _advisory_candidate(protocol, *, suffix: str = "a"):
+    identity = hashlib.sha256(f"candidate-{suffix}".encode()).hexdigest()
+    review_id = identity[:24]
+    return protocol.DerivedAdvisoryCandidate(
+        counterpart_rel_path=f"Knowledge Base/Notes/counterpart-{suffix}.md",
+        counterpart_fingerprint=identity,
+        warning=f"Potential overlap with counterpart {suffix}.",
+        advisory_ref=f"advisory:{review_id}",
+        review_ref=f"exomem://review/write-advisory/{review_id}",
+        triage_fingerprint=hashlib.sha256(
+            f"triage-{suffix}".encode()
+        ).hexdigest()[:24],
+    )
+
+
+def test_pending_snapshot_is_complete_empty_and_hydrates_already_live_rows(
+    vault: Path,
+) -> None:
+    protocol = _protocol()
+
+    empty = protocol.snapshot_pending_visibility(vault, limit=8)
+    assert empty.outcome == "complete"
+    assert empty.batches == ()
+    assert protocol.pending_visibility_snapshot_is_current(
+        vault, empty.snapshot_generation
+    )
+
+    receipt, target, _before, after = _prepare_one(
+        vault,
+        batch_id="restart-live",
+    )
+    _commit_and_prove(vault, receipt, target, after)
+
+    reopened = protocol.snapshot_pending_visibility(vault, limit=8)
+    assert reopened.outcome == "complete"
+    assert len(reopened.batches) == 1
+    assert reopened.batches[0].receipt.batch_id == receipt.batch_id
+    assert tuple(row.state for row in reopened.batches[0].rows) == ("live",)
+    assert reopened.batches[0].rows[0].rel_path == receipt.paths[0].rel_path
+    assert protocol.pending_visibility_snapshot_is_current(
+        vault, reopened.snapshot_generation
+    )
+
+
+def test_pending_snapshot_overflow_never_returns_a_complete_prefix(vault: Path) -> None:
+    protocol = _protocol()
+    for index in range(2):
+        _prepare_one(vault, batch_id=f"overflow-{index}")
+
+    snapshot = protocol.snapshot_pending_visibility(vault, limit=1)
+
+    assert snapshot.outcome == "overflow"
+    assert snapshot.batches == ()
+    assert snapshot.failure_code == "pending_visibility_overflow"
+
+
+def test_pending_snapshot_corrupt_or_unsafe_row_is_unprovable(vault: Path) -> None:
+    protocol = _protocol()
+    receipt, _target, _before, _after = _prepare_one(
+        vault,
+        batch_id="unsafe-snapshot",
+    )
+    with sqlite3.connect(deferred_index.store_path(vault)) as connection:
+        connection.execute("PRAGMA ignore_check_constraints = ON")
+        connection.execute(
+            "UPDATE pending_recall_rows SET rel_path = '../escape.md' "
+            "WHERE batch_id = ?",
+            (receipt.batch_id,),
+        )
+
+    snapshot = protocol.snapshot_pending_visibility(vault, limit=8)
+
+    assert snapshot.outcome == "unprovable"
+    assert snapshot.batches == ()
+    assert snapshot.failure_code == "pending_visibility_unprovable"
+
+
+def test_pending_snapshot_generation_fence_detects_concurrent_mutation(
+    vault: Path,
+) -> None:
+    protocol = _protocol()
+    receipt, _target, _before, _after = _prepare_one(
+        vault,
+        batch_id="generation-fence",
+    )
+    snapshot = protocol.snapshot_pending_visibility(vault, limit=8)
+    assert protocol.pending_visibility_snapshot_is_current(
+        vault, snapshot.snapshot_generation
+    )
+
+    with sqlite3.connect(deferred_index.store_path(vault)) as connection:
+        connection.execute(
+            "UPDATE pending_recall_rows SET updated_at = updated_at + 1 "
+            "WHERE batch_id = ?",
+            (receipt.batch_id,),
+        )
+
+    assert not protocol.pending_visibility_snapshot_is_current(
+        vault, snapshot.snapshot_generation
+    )
+
+
+def _snapshot_batch(protocol, vault: Path, batch_id: str):
+    snapshot = protocol.snapshot_pending_visibility(vault, limit=8)
+    assert snapshot.outcome == "complete"
+    return next(
+        batch for batch in snapshot.batches if batch.receipt.batch_id == batch_id
+    )
+
+
+def test_pending_retirement_is_exact_and_older_generation_cannot_retire_newer(
+    vault: Path,
+) -> None:
+    protocol = _protocol()
+    receipt, target, _before, after = _prepare_one(
+        vault,
+        batch_id="exact-retirement",
+    )
+    _commit_and_prove(vault, receipt, target, after)
+    snapshot = protocol.snapshot_pending_visibility(vault, limit=8)
+    [batch] = snapshot.batches
+
+    assert protocol.retire_pending_visibility(vault, batch).outcome == "retired"
+    assert protocol.snapshot_pending_visibility(vault, limit=8).batches == ()
+
+    # Custody that grew after the snapshot is only partly represented by it.
+    # Exact retirement refuses rather than retiring the represented prefix and
+    # declaring the batch converged while a live row still shadows recall.
+    grown, grown_target, _before, grown_after = _prepare_one(
+        vault,
+        batch_id="grown-retirement",
+    )
+    _commit_and_prove(vault, grown, grown_target, grown_after)
+    grown_batch = _snapshot_batch(protocol, vault, grown.batch_id)
+    extra = "Knowledge Base/Notes/grown-extra.md"
+    with sqlite3.connect(deferred_index.store_path(vault)) as connection:
+        connection.execute(
+            "INSERT INTO derived_batch_paths(batch_id, rel_path, before_hash, "
+            "after_hash, stable_memory_ref) VALUES (?, ?, NULL, ?, NULL)",
+            (grown.batch_id, extra, hashlib.sha256(b"grown-extra").hexdigest()),
+        )
+        connection.execute(
+            "INSERT INTO pending_recall_rows(batch_id, rel_path, component_revision, "
+            "canonical_generation, state, created_at, updated_at) "
+            "VALUES (?, ?, 1, ?, 'live', 1, 1)",
+            (grown.batch_id, extra, grown.canonical_generation),
+        )
+
+    assert protocol.retire_pending_visibility(vault, grown_batch).outcome == "stale"
+    with sqlite3.connect(deferred_index.store_path(vault)) as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM pending_recall_rows "
+            "WHERE batch_id = ? AND state = 'retired'",
+            (grown.batch_id,),
+        ).fetchone() == (0,)
+
+    newer, newer_target, _before, newer_after = _prepare_one(
+        vault,
+        batch_id="stale-retirement",
+        generation="generation-old",
+    )
+    _commit_and_prove(vault, newer, newer_target, newer_after)
+    stale_batch = _snapshot_batch(protocol, vault, newer.batch_id)
+    with sqlite3.connect(deferred_index.store_path(vault)) as connection:
+        connection.execute(
+            "UPDATE pending_recall_rows SET canonical_generation = ?, "
+            "component_revision = component_revision + 1 WHERE batch_id = ?",
+            ("generation-new", newer.batch_id),
+        )
+
+    refused = protocol.retire_pending_visibility(vault, stale_batch)
+    assert refused.outcome == "stale"
+    with sqlite3.connect(deferred_index.store_path(vault)) as connection:
+        assert connection.execute(
+            "SELECT state FROM pending_recall_rows WHERE batch_id = ?",
+            (newer.batch_id,),
+        ).fetchone() == ("live",)
+
+
+def test_advisory_prepare_requires_exact_target_path_and_replays_it(vault: Path) -> None:
+    protocol = _protocol()
+    rel_a = "Knowledge Base/Notes/target-a.md"
+    rel_b = "Knowledge Base/Notes/target-b.md"
+    paths = (
+        _path(protocol, rel_a, before=None, after=b"a"),
+        _path(protocol, rel_b, before=None, after=b"b"),
+    )
+    fingerprint = hashlib.sha256(b"target").hexdigest()
+
+    with pytest.raises(ValueError, match="target path"):
+        _prepare(
+            vault,
+            batch_id="missing-target-path",
+            paths=paths,
+            required={protocol.DerivedComponent.WRITE_ADVISORY},
+            advisory_target_fingerprint=fingerprint,
+            terminal_replay_until=100.0,
+        )
+    with pytest.raises(ValueError, match="prepared batch"):
+        _prepare(
+            vault,
+            batch_id="foreign-target-path",
+            paths=paths,
+            required={protocol.DerivedComponent.WRITE_ADVISORY},
+            advisory_target_rel_path="Knowledge Base/Notes/other.md",
+            advisory_target_fingerprint=fingerprint,
+            terminal_replay_until=100.0,
+        )
+
+    receipt = _prepare(
+        vault,
+        batch_id="exact-target-path",
+        paths=paths,
+        required={protocol.DerivedComponent.WRITE_ADVISORY},
+        advisory_target_rel_path=rel_a,
+        advisory_target_fingerprint=fingerprint,
+        terminal_replay_until=100.0,
+    )
+    replay = _prepare(
+        vault,
+        batch_id="exact-target-path",
+        paths=paths,
+        required={protocol.DerivedComponent.WRITE_ADVISORY},
+        advisory_target_rel_path=rel_a,
+        advisory_target_fingerprint=fingerprint,
+        terminal_replay_until=120.0,
+    )
+    assert replay == receipt
+    with pytest.raises(ValueError, match="different custody"):
+        _prepare(
+            vault,
+            batch_id="exact-target-path",
+            paths=paths,
+            required={protocol.DerivedComponent.WRITE_ADVISORY},
+            advisory_target_rel_path=rel_b,
+            advisory_target_fingerprint=fingerprint,
+            terminal_replay_until=120.0,
+        )
+
+
+def test_advisory_ready_round_trip_supports_two_or_zero_candidates(
+    vault: Path,
+) -> None:
+    protocol = _protocol()
+    receipt, claimed, fingerprint = _prepare_advisory_claim(
+        vault,
+        batch_id="ready-two",
+    )
+    candidates = (
+        _advisory_candidate(protocol, suffix="a"),
+        _advisory_candidate(protocol, suffix="b"),
+    )
+
+    publication = protocol.publish_advisory_result(
+        vault,
+        claimed,
+        state="ready",
+        candidates=candidates,
+        observed_target_fingerprint=fingerprint,
+        now=3.0,
+    )
+    result = protocol.read_advisory_result(
+        vault,
+        protocol.advisory_result_ref(vault, receipt),
+        now=3.0,
+    )
+    assert publication.outcome == "published"
+    assert result is not None
+    assert result.state == "ready"
+    assert result.target_rel_path == receipt.paths[0].rel_path
+    assert result.candidates == candidates
+
+    zero_receipt, zero_claimed, zero_fingerprint = _prepare_advisory_claim(
+        vault,
+        batch_id="ready-zero",
+        now=4.0,
+    )
+    assert protocol.publish_advisory_result(
+        vault,
+        zero_claimed,
+        state="ready",
+        observed_target_fingerprint=zero_fingerprint,
+        now=6.0,
+    ).outcome == "published"
+    zero = protocol.read_advisory_result(
+        vault,
+        protocol.advisory_result_ref(vault, zero_receipt),
+        now=6.0,
+    )
+    assert zero is not None and zero.state == "ready" and zero.candidates == ()
+
+
+def test_advisory_failed_result_is_closed_and_content_free(vault: Path) -> None:
+    protocol = _protocol()
+    receipt, claimed, fingerprint = _prepare_advisory_claim(
+        vault,
+        batch_id="failed-result",
+    )
+
+    assert protocol.publish_advisory_result(
+        vault,
+        claimed,
+        state="failed",
+        failure_code="handler_unavailable",
+        observed_target_fingerprint=fingerprint,
+        now=3.0,
+    ).outcome == "published"
+    result = protocol.read_advisory_result(
+        vault,
+        protocol.advisory_result_ref(vault, receipt),
+        now=3.0,
+    )
+    assert result is not None
+    assert result.state == "failed"
+    assert result.failure_code == "handler_unavailable"
+    assert result.candidates == ()
+    with pytest.raises(ValueError, match="closed"):
+        protocol.publish_advisory_result(
+            vault,
+            claimed,
+            state="failed",
+            failure_code="raw exception: secret body",
+            observed_target_fingerprint=fingerprint,
+            now=3.0,
+        )
+
+
+def test_advisory_publication_refuses_wrong_claim_and_supersedes_wrong_target(
+    vault: Path,
+) -> None:
+    protocol = _protocol()
+    receipt, claimed, fingerprint = _prepare_advisory_claim(
+        vault,
+        batch_id="publication-cas",
+    )
+    candidate = _advisory_candidate(protocol)
+
+    for stale in (
+        replace(claimed, revision=claimed.revision + 1),
+        replace(claimed, lease_revision=claimed.lease_revision + 1),
+        replace(claimed, claim_owner="different-worker"),
+        replace(claimed, canonical_generation="different-generation"),
+    ):
+        assert protocol.publish_advisory_result(
+            vault,
+            stale,
+            state="ready",
+            candidates=(candidate,),
+            observed_target_fingerprint=fingerprint,
+            now=3.0,
+        ).outcome == "stale_claim"
+
+    assert protocol.publish_advisory_result(
+        vault,
+        claimed,
+        state="ready",
+        candidates=(candidate,),
+        observed_target_fingerprint=hashlib.sha256(b"new-target").hexdigest(),
+        now=3.0,
+    ).outcome == "superseded"
+    superseded = protocol.read_advisory_result(
+        vault,
+        protocol.advisory_result_ref(vault, receipt),
+        now=3.0,
+    )
+    assert superseded is not None
+    assert superseded.state == "superseded"
+    assert superseded.candidates == ()
+
+
+def test_advisory_publication_is_idempotent_but_conflicting_replay_is_stale(
+    vault: Path,
+) -> None:
+    protocol = _protocol()
+    receipt, claimed, fingerprint = _prepare_advisory_claim(
+        vault,
+        batch_id="publication-replay",
+    )
+    candidate = _advisory_candidate(protocol)
+    kwargs = dict(
+        state="ready",
+        candidates=(candidate,),
+        observed_target_fingerprint=fingerprint,
+        now=3.0,
+    )
+
+    assert protocol.publish_advisory_result(vault, claimed, **kwargs).outcome == (
+        "published"
+    )
+    assert protocol.publish_advisory_result(vault, claimed, **kwargs).outcome == (
+        "already_published"
+    )
+    assert protocol.publish_advisory_result(
+        vault,
+        claimed,
+        state="ready",
+        candidates=(),
+        observed_target_fingerprint=fingerprint,
+        now=3.0,
+    ).outcome == "stale_claim"
+
+    # The durable result is independently reusable after the publishing process dies.
+    result_ref = protocol.advisory_result_ref(vault, receipt)
+    assert protocol.read_advisory_result(vault, result_ref, now=4.0).candidates == (
+        candidate,
+    )
+
+
+def test_advisory_candidate_and_count_bounds_are_enforced(vault: Path) -> None:
+    protocol = _protocol()
+    with pytest.raises(ValueError, match="warning"):
+        replace(_advisory_candidate(protocol), warning="x" * 301)
+    _receipt, claimed, fingerprint = _prepare_advisory_claim(
+        vault,
+        batch_id="candidate-bounds",
+    )
+    with pytest.raises(ValueError, match="eight"):
+        protocol.publish_advisory_result(
+            vault,
+            claimed,
+            state="ready",
+            candidates=tuple(
+                _advisory_candidate(protocol, suffix=str(index))
+                for index in range(9)
+            ),
+            observed_target_fingerprint=fingerprint,
+            now=3.0,
+        )
+
+
+def test_advisory_cleanup_explicitly_removes_candidates_after_both_deadlines(
+    vault: Path,
+) -> None:
+    protocol = _protocol()
+    receipt, claimed, fingerprint = _prepare_advisory_claim(
+        vault,
+        batch_id="candidate-cleanup",
+    )
+    protocol.publish_advisory_result(
+        vault,
+        claimed,
+        state="ready",
+        candidates=(_advisory_candidate(protocol),),
+        observed_target_fingerprint=fingerprint,
+        now=3.0,
+    )
+    with sqlite3.connect(deferred_index.store_path(vault)) as connection:
+        connection.execute(
+            "UPDATE write_advisory_results SET retention_deadline = 5, "
+            "terminal_replay_until = 10 WHERE batch_id = ?",
+            (receipt.batch_id,),
+        )
+
+    assert protocol.cleanup_advisory_results(vault, now=6.0, limit=8) == 0
+    with sqlite3.connect(deferred_index.store_path(vault)) as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM write_advisory_result_candidates"
+        ).fetchone() == (1,)
+    assert protocol.cleanup_advisory_results(vault, now=11.0, limit=8) == 1
+    with sqlite3.connect(deferred_index.store_path(vault)) as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM write_advisory_result_candidates"
+        ).fetchone() == (0,)
+
+
+def test_legacy_and_old_writer_advisory_rows_fail_closed_after_migration(
+    vault: Path,
+) -> None:
+    protocol = _protocol()
+    receipt, _target, _before, _after = _prepare_one(
+        vault,
+        batch_id="legacy-result",
+        required={protocol.DerivedComponent.WRITE_ADVISORY},
+    )
+    result_ref = protocol.advisory_result_ref(vault, receipt)
+    store = deferred_index.store_path(vault)
+
+    with sqlite3.connect(store) as connection:
+        connection.execute(
+            "UPDATE write_advisory_results SET target_rel_path = NULL "
+            "WHERE batch_id = ?",
+            (receipt.batch_id,),
+        )
+    legacy = protocol.read_advisory_result(vault, result_ref, now=20.0)
+    assert legacy is not None
+    assert legacy.state == "failed"
+    assert legacy.failure_code == "legacy_result_unverifiable"
+    assert legacy.candidates == ()
+
+    with sqlite3.connect(store) as connection:
+        connection.execute(
+            "INSERT INTO write_advisory_results(result_id, batch_id, "
+            "component_revision, target_fingerprint, counterpart_fingerprint, "
+            "state, failure_code, advisory_ref, review_ref, retention_deadline, "
+            "terminal_replay_until, publication_revision, published_at, "
+            "created_at, updated_at) VALUES "
+            "('old-writer-result', ?, 1, ?, NULL, 'pending', NULL, NULL, NULL, "
+            "100, 100, 1, NULL, 1, 1)",
+            (receipt.batch_id + "-old-writer", hashlib.sha256(b"old").hexdigest()),
+        )
+    old_writer = protocol.read_advisory_result(
+        vault,
+        "exomem://write-advisory-result/old-writer-result",
+        now=20.0,
+    )
+    assert old_writer is not None
+    assert old_writer.state == "failed"
+    assert old_writer.failure_code == "legacy_result_unverifiable"
+    assert old_writer.candidates == ()
+
+    # A live claim cannot publish onto a row whose target identity is absent:
+    # no observed fingerprint can prove a target path that was never recorded.
+    unverifiable, claimed, fingerprint = _prepare_advisory_claim(
+        vault,
+        batch_id="legacy-publication",
+    )
+    with sqlite3.connect(store) as connection:
+        connection.execute(
+            "UPDATE write_advisory_results SET target_rel_path = NULL "
+            "WHERE batch_id = ?",
+            (unverifiable.batch_id,),
+        )
+    assert protocol.publish_advisory_result(
+        vault,
+        claimed,
+        state="ready",
+        candidates=(_advisory_candidate(protocol),),
+        observed_target_fingerprint=fingerprint,
+        now=3.0,
+    ).outcome == "stale_claim"
+    with sqlite3.connect(store) as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM write_advisory_result_candidates AS c "
+            "JOIN write_advisory_results AS r ON r.result_id = c.result_id "
+            "WHERE r.batch_id = ?",
+            (unverifiable.batch_id,),
+        ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT state, publication_revision FROM write_advisory_results "
+            "WHERE batch_id = ?",
+            (unverifiable.batch_id,),
+        ).fetchone() == ("pending", 1)
+
+
+def _ensure_accepted_parent_derived_schema(connection: sqlite3.Connection) -> None:
+    """Install the exact accepted lifecycle DDL before the additive extension."""
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS derived_batches (
+            schema_version INTEGER NOT NULL CHECK(schema_version = 1),
+            batch_id TEXT PRIMARY KEY CHECK(length(batch_id) BETWEEN 1 AND 128),
+            mutation_attempt_digest TEXT NOT NULL
+                CHECK(length(mutation_attempt_digest) = 64),
+            canonical_generation TEXT NOT NULL
+                CHECK(length(canonical_generation) BETWEEN 1 AND 128),
+            checkpoint_id TEXT NOT NULL
+                CHECK(length(checkpoint_id) BETWEEN 1 AND 128),
+            state TEXT NOT NULL CHECK(state IN (
+                'prepared', 'ready', 'completed', 'aborted', 'superseded',
+                'reconcile_required'
+            )),
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            failure_code TEXT CHECK(
+                failure_code IS NULL OR length(failure_code) BETWEEN 1 AND 64
+            )
+        );
+        CREATE TABLE IF NOT EXISTS derived_batch_paths (
+            batch_id TEXT NOT NULL,
+            rel_path TEXT NOT NULL CHECK(length(rel_path) BETWEEN 1 AND 1024),
+            before_hash TEXT CHECK(before_hash IS NULL OR length(before_hash) = 64),
+            after_hash TEXT CHECK(after_hash IS NULL OR length(after_hash) = 64),
+            stable_memory_ref TEXT CHECK(
+                stable_memory_ref IS NULL OR length(stable_memory_ref) BETWEEN 1 AND 256
+            ),
+            PRIMARY KEY(batch_id, rel_path),
+            FOREIGN KEY(batch_id) REFERENCES derived_batches(batch_id)
+        );
+        CREATE TABLE IF NOT EXISTS derived_batch_components (
+            batch_id TEXT NOT NULL,
+            component TEXT NOT NULL CHECK(component IN (
+                'freshness', 'memory_refs', 'resolver', 'semantic_purge',
+                'lexstore', 'graph', 'embeddings', 'claims', 'write_advisory'
+            )),
+            revision INTEGER NOT NULL CHECK(revision >= 1),
+            state TEXT NOT NULL CHECK(state IN (
+                'prepared', 'ready', 'claimed', 'retryable', 'completed',
+                'not_required', 'aborted', 'superseded', 'reconcile_required',
+                'failed'
+            )),
+            lease_revision INTEGER NOT NULL DEFAULT 0 CHECK(lease_revision >= 0),
+            claim_owner TEXT CHECK(
+                claim_owner IS NULL OR length(claim_owner) BETWEEN 1 AND 128
+            ),
+            claim_expires_at REAL,
+            attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+            next_attempt_at REAL NOT NULL,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            failure_code TEXT CHECK(
+                failure_code IS NULL OR length(failure_code) BETWEEN 1 AND 64
+            ),
+            PRIMARY KEY(batch_id, component),
+            FOREIGN KEY(batch_id) REFERENCES derived_batches(batch_id)
+        );
+        CREATE TABLE IF NOT EXISTS pending_recall_rows (
+            batch_id TEXT NOT NULL,
+            rel_path TEXT NOT NULL CHECK(length(rel_path) BETWEEN 1 AND 1024),
+            component_revision INTEGER NOT NULL CHECK(component_revision >= 1),
+            canonical_generation TEXT NOT NULL
+                CHECK(length(canonical_generation) BETWEEN 1 AND 128),
+            state TEXT NOT NULL CHECK(state IN ('prepared', 'live', 'retired')),
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            PRIMARY KEY(batch_id, rel_path),
+            FOREIGN KEY(batch_id, rel_path)
+                REFERENCES derived_batch_paths(batch_id, rel_path)
+        );
+        CREATE TABLE IF NOT EXISTS write_advisory_results (
+            result_id TEXT PRIMARY KEY CHECK(length(result_id) BETWEEN 1 AND 64),
+            batch_id TEXT NOT NULL,
+            component_revision INTEGER NOT NULL CHECK(component_revision >= 1),
+            target_fingerprint TEXT NOT NULL
+                CHECK(length(target_fingerprint) BETWEEN 1 AND 128),
+            counterpart_fingerprint TEXT CHECK(
+                counterpart_fingerprint IS NULL
+                OR length(counterpart_fingerprint) BETWEEN 1 AND 128
+            ),
+            state TEXT NOT NULL CHECK(state IN (
+                'pending', 'ready', 'failed', 'superseded'
+            )),
+            failure_code TEXT CHECK(
+                failure_code IS NULL OR length(failure_code) BETWEEN 1 AND 64
+            ),
+            advisory_ref TEXT CHECK(
+                advisory_ref IS NULL OR length(advisory_ref) BETWEEN 1 AND 256
+            ),
+            review_ref TEXT CHECK(
+                review_ref IS NULL OR length(review_ref) BETWEEN 1 AND 256
+            ),
+            retention_deadline REAL NOT NULL,
+            terminal_replay_until REAL NOT NULL,
+            publication_revision INTEGER NOT NULL DEFAULT 1
+                CHECK(publication_revision >= 1),
+            published_at REAL,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            UNIQUE(batch_id, component_revision)
+        );
+        CREATE INDEX IF NOT EXISTS derived_components_schedule
+            ON derived_batch_components(state, next_attempt_at, updated_at);
+        CREATE INDEX IF NOT EXISTS derived_paths_lookup
+            ON derived_batch_paths(rel_path, batch_id);
+        CREATE INDEX IF NOT EXISTS pending_recall_visibility
+            ON pending_recall_rows(state, canonical_generation);
+        CREATE INDEX IF NOT EXISTS advisory_result_retention
+            ON write_advisory_results(retention_deadline, terminal_replay_until);
+        """
+    )
+
+
+def test_accepted_parent_schema_migrates_without_losing_any_custody(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    protocol = _protocol()
+    rel = "Knowledge Base/Notes/accepted-parent.md"
+    result_id = "a" * 32
+    digest = hashlib.sha256(b"accepted-parent").hexdigest()
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            deferred_index,
+            "_ensure_derived_batch_schema",
+            _ensure_accepted_parent_derived_schema,
+        )
+        connection = deferred_index._connect(vault, create=True)
+        with connection:
+            for table, queued_path in (
+                ("semantic_upserts", "Knowledge Base/Notes/legacy-semantic.md"),
+                ("graph_upserts", "Knowledge Base/Notes/legacy-graph.md"),
+                ("full_upserts", "Knowledge Base/Notes/legacy-full.md"),
+            ):
+                connection.execute(
+                    f"INSERT INTO {table}(rel_path, created_at, updated_at, revision) "
+                    "VALUES (?, 1, 2, 3)",
+                    (queued_path,),
+                )
+            connection.execute(
+                "INSERT INTO derived_batches VALUES "
+                "(1, 'accepted-parent', ?, 'generation-parent', "
+                "'checkpoint-parent', 'ready', 1, 2, NULL)",
+                (digest,),
+            )
+            connection.execute(
+                "INSERT INTO derived_batch_paths VALUES "
+                "('accepted-parent', ?, NULL, ?, 'exomem://memory/example')",
+                (rel, digest),
+            )
+            connection.executemany(
+                "INSERT INTO derived_batch_components(batch_id, component, revision, "
+                "state, lease_revision, claim_owner, claim_expires_at, attempt_count, "
+                "next_attempt_at, created_at, updated_at, failure_code) VALUES "
+                "('accepted-parent', ?, 1, ?, 7, NULL, NULL, 4, 3, 1, 2, NULL)",
+                (
+                    (
+                        component.value,
+                        (
+                            "ready"
+                            if component is protocol.DerivedComponent.WRITE_ADVISORY
+                            else "not_required"
+                        ),
+                    )
+                    for component in protocol.DerivedComponent
+                ),
+            )
+            connection.execute(
+                "INSERT INTO pending_recall_rows VALUES "
+                "('accepted-parent', ?, 1, 'generation-parent', 'live', 1, 2)",
+                (rel,),
+            )
+            connection.execute(
+                "INSERT INTO write_advisory_results VALUES "
+                "(?, 'accepted-parent', 1, ?, NULL, 'pending', NULL, NULL, NULL, "
+                "80, 90, 5, NULL, 1, 2)",
+                (result_id, digest),
+            )
+        connection.close()
+
+    with sqlite3.connect(deferred_index.store_path(vault)) as connection:
+        assert "target_rel_path" not in {
+            str(row[1])
+            for row in connection.execute("PRAGMA table_info(write_advisory_results)")
+        }
+        assert connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name='write_advisory_result_candidates'"
+        ).fetchone() is None
+
+    snapshot = protocol.snapshot_pending_visibility(vault, limit=8)
+    result = protocol.read_advisory_result(
+        vault,
+        f"exomem://write-advisory-result/{result_id}",
+        now=10.0,
+    )
+
+    assert snapshot.outcome == "complete"
+    assert snapshot.batches[0].rows[0].state == "live"
+    assert result is not None
+    assert result.state == "failed"
+    assert result.failure_code == "legacy_result_unverifiable"
+    with sqlite3.connect(deferred_index.store_path(vault)) as connection:
+        assert connection.execute(
+            "SELECT rel_path, revision FROM semantic_upserts"
+        ).fetchall() == [("Knowledge Base/Notes/legacy-semantic.md", 3)]
+        assert connection.execute(
+            "SELECT rel_path, revision FROM graph_upserts"
+        ).fetchall() == [("Knowledge Base/Notes/legacy-graph.md", 3)]
+        assert connection.execute(
+            "SELECT rel_path, revision FROM full_upserts"
+        ).fetchall() == [("Knowledge Base/Notes/legacy-full.md", 3)]
+        assert connection.execute(
+            "SELECT revision, lease_revision, attempt_count "
+            "FROM derived_batch_components WHERE batch_id='accepted-parent' "
+            "AND component='write_advisory'"
+        ).fetchone() == (1, 7, 4)
+        assert connection.execute(
+            "SELECT component_revision, canonical_generation, state "
+            "FROM pending_recall_rows WHERE batch_id='accepted-parent'"
+        ).fetchone() == (1, "generation-parent", "live")
+        assert connection.execute(
+            "SELECT result_id, retention_deadline, terminal_replay_until, "
+            "publication_revision, target_rel_path FROM write_advisory_results"
+        ).fetchone() == (result_id, 80.0, 90.0, 5, None)
+
+
+def test_frozen_protocol_fake_drives_the_store_consumer_lifecycle() -> None:
+    protocol = _protocol()
+    fake = DerivedReceiptProtocolFake()
+    rel = "Knowledge Base/Notes/fake-consumer.md"
+    path = _path(protocol, rel, before=None, after=b"consumer")
+    fingerprint = hashlib.sha256(b"consumer-target").hexdigest()
+    receipt = fake.prepare_batch(
+        Path("vault"),
+        batch_id="fake-consumer",
+        mutation_attempt_digest=hashlib.sha256(b"fake-consumer").hexdigest(),
+        canonical_generation="generation-fake",
+        checkpoint_id="checkpoint-fake",
+        paths=(path,),
+        required_components={protocol.DerivedComponent.WRITE_ADVISORY},
+        advisory_target_rel_path=rel,
+        advisory_target_fingerprint=fingerprint,
+        terminal_replay_until=100.0,
+        now=1.0,
+    )
+
+    prepared = fake.snapshot_pending_visibility(Path("vault"), limit=8)
+    assert isinstance(prepared, protocol.PendingVisibilitySnapshot)
+    assert prepared.outcome == "complete"
+    assert tuple(row.state for row in prepared.batches[0].rows) == ("prepared",)
+    assert isinstance(prepared.batches[0], protocol.PendingVisibilityBatch)
+    assert isinstance(prepared.batches[0].rows[0], protocol.PendingVisibilityRow)
+
+    assert fake.publish_pending_visibility(
+        Path("vault"),
+        receipt,
+        publisher=lambda _root, _receipt: True,
+    ) is True
+    # Publishing a live overlay invalidates every fence taken before it.
+    assert not fake.pending_visibility_snapshot_is_current(
+        Path("vault"), prepared.snapshot_generation
+    )
+
+    live = fake.snapshot_pending_visibility(Path("vault"), limit=8)
+    assert tuple(row.state for row in live.batches[0].rows) == ("live",)
+    assert fake.pending_visibility_snapshot_is_current(
+        Path("vault"), live.snapshot_generation
+    )
+    with pytest.raises(ValueError, match="positive"):
+        fake.snapshot_pending_visibility(Path("vault"), limit=0)
+
+    result_ref = fake.advisory_result_ref(Path("vault"), receipt)
+    pending = fake.read_advisory_result(Path("vault"), result_ref, now=2.0)
+    assert isinstance(pending, protocol.DerivedAdvisoryResult)
+    assert pending.state == "pending" and pending.target_rel_path == rel
+    claimed = replace(
+        fake.component_status(
+            Path("vault"), receipt, protocol.DerivedComponent.WRITE_ADVISORY
+        ),
+        state="claimed",
+        claim_owner="fake-worker",
+        claim_expires_at=60.0,
+    )
+    candidate = _advisory_candidate(protocol)
+    publication = fake.publish_advisory_result(
+        Path("vault"),
+        claimed,
+        state="ready",
+        candidates=(candidate,),
+        observed_target_fingerprint=fingerprint,
+        now=3.0,
+    )
+    assert isinstance(publication, protocol.DerivedAdvisoryPublication)
+    assert publication.outcome == "published"
+    assert fake.publish_advisory_result(
+        Path("vault"),
+        claimed,
+        state="ready",
+        candidates=(candidate,),
+        observed_target_fingerprint=fingerprint,
+        now=3.0,
+    ).outcome == "already_published"
+    ready = fake.read_advisory_result(Path("vault"), result_ref, now=4.0)
+    assert ready.state == "ready" and ready.candidates == (candidate,)
+
+    retirement = fake.retire_pending_visibility(Path("vault"), live.batches[0])
+    assert isinstance(retirement, protocol.PendingVisibilityRetirement)
+    assert retirement.outcome == "retired"
+    assert fake.snapshot_pending_visibility(Path("vault"), limit=8).batches == ()
+    assert fake.retire_pending_visibility(
+        Path("vault"), live.batches[0]
+    ).outcome == "stale"
+
+    assert fake.call_order == (
+        "prepare_batch",
+        "snapshot_pending_visibility",
+        "publish_pending_visibility",
+        "pending_visibility_snapshot_is_current",
+        "snapshot_pending_visibility",
+        "pending_visibility_snapshot_is_current",
+        "snapshot_pending_visibility",
+        "advisory_result_ref",
+        "read_advisory_result",
+        "component_status",
+        "publish_advisory_result",
+        "publish_advisory_result",
+        "read_advisory_result",
+        "retire_pending_visibility",
+        "snapshot_pending_visibility",
+        "retire_pending_visibility",
+    )
+    fake.inject(
+        "snapshot_pending_visibility",
+        protocol.PendingVisibilitySnapshot(
+            outcome="unprovable",
+            snapshot_generation=0,
+            batches=(),
+            failure_code="pending_visibility_unprovable",
+        ),
+    )
+    assert fake.snapshot_pending_visibility(
+        Path("vault"), limit=8
+    ).outcome == "unprovable"
