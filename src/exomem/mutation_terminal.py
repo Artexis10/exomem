@@ -295,13 +295,57 @@ def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
             "reason": "artifact result was invalid",
         }
 
+    def adoption_receipt(value: Any, item: Mapping[str, Any]) -> dict[str, Any] | None:
+        fields = (
+            "version",
+            "committed",
+            "key_digest",
+            "trigger",
+            "selected_file_id",
+            "lane",
+            "destination",
+            "stored_path",
+            "page_path",
+            "hash_algorithm",
+            "hash",
+            "size",
+            "content_type",
+            "media_id",
+        )
+        if not isinstance(value, Mapping) or set(value) != set(fields):
+            return None
+        if not (
+            value.get("version") == 1
+            and value.get("committed") is True
+            and sha256(value.get("key_digest"))
+            and string(value.get("trigger"), limit=128)
+            and string(value.get("selected_file_id"), limit=256)
+            and value.get("lane") in {"source", "evidence"}
+            and string(value.get("destination"), limit=2048)
+            and string(value.get("stored_path"), limit=2048)
+            and string(value.get("page_path"), limit=2048)
+            and value.get("hash_algorithm") == "sha256"
+            and sha256(value.get("hash"))
+            and nonnegative_int(value.get("size"))
+            and string(value.get("content_type"), limit=255, allow_none=True)
+            and value.get("media_id") == f"sha256:{value.get('hash')}"
+            and value.get("selected_file_id") == item.get("file_id")
+            and value.get("stored_path") == item.get("stored_path")
+            and value.get("hash") == item.get("hash")
+            and value.get("size") == item.get("size")
+            and value.get("content_type") == item.get("content_type")
+            and value.get("media_id") == item.get("media_id")
+        ):
+            return None
+        return {field: value[field] for field in fields}
+
     projected: list[dict[str, Any]] = []
     for index, item in enumerate(files):
         if not isinstance(item, Mapping) or not string(item.get("file_id"), limit=256):
             projected.append(invalid_row(item, index))
             continue
         outcome = item.get("outcome")
-        if outcome == "stored":
+        if outcome in {"stored", "replayed"}:
             if not (
                 string(item.get("stored_path"), limit=2048)
                 and nonnegative_int(item.get("size"))
@@ -330,6 +374,20 @@ def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
                 )
                 if key in item
             }
+            for key in ("path", "page", "ref"):
+                if key in item and string(item[key], limit=2048):
+                    row[key] = item[key]
+            if "adoption" in item:
+                receipt = adoption_receipt(item["adoption"], item)
+                if receipt is None:
+                    projected.append(invalid_row(item, index))
+                    continue
+                row["adoption"] = receipt
+            elif outcome == "replayed":
+                projected.append(invalid_row(item, index))
+                continue
+        elif outcome == "unselected":
+            row = {"file_id": item["file_id"], "outcome": "unselected"}
         elif (
             outcome == "failed"
             and string(item.get("code"), limit=64)
@@ -340,9 +398,34 @@ def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
             projected.append(invalid_row(item, index))
             continue
         projected.append(row)
-    stored = sum(item["outcome"] == "stored" for item in projected)
-    failed = len(projected) - stored
-    return {"files": projected, "summary": {"stored": stored, "failed": failed}}
+    counts = {
+        outcome: sum(item["outcome"] == outcome for item in projected)
+        for outcome in ("stored", "replayed", "failed", "unselected")
+    }
+    adoption_result = any(
+        isinstance(item, Mapping)
+        and (item.get("outcome") in {"replayed", "unselected"} or "adoption" in item)
+        for item in files
+    ) or any(key in summary for key in ("replayed", "unselected"))
+    if not adoption_result:
+        return {
+            "files": projected,
+            "summary": {"stored": counts["stored"], "failed": counts["failed"]},
+        }
+    projected_summary: dict[str, int] = {}
+    for outcome in ("stored", "replayed", "failed", "unselected"):
+        value = summary.get(outcome)
+        if value is None and outcome not in {"stored", "failed"}:
+            continue
+        if not nonnegative_int(value) or value < counts[outcome]:
+            return {}
+        projected_summary[outcome] = value
+    omitted = summary.get("omitted")
+    if omitted is not None:
+        if not nonnegative_int(omitted):
+            return {}
+        projected_summary["omitted"] = omitted
+    return {"files": projected, "summary": projected_summary}
 
 
 #: Bounds on the advisory structural suggestion compact may carry. Same posture as

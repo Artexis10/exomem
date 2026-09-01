@@ -954,6 +954,41 @@
           "maxItems": 8,
           "type": "array"
         },
+        "adoption": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "key": {
+                  "maxLength": 512,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "trigger": {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "selected_file_id": {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "key",
+                "trigger",
+                "selected_file_id"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional explicit adoption identity selecting exactly one\nsupplied handle. This establishes eligibility, not write consent;\nagent-initiated use obeys proactive_capture."
+        },
         "response_detail": {
           "default": "compact",
           "description": "Successful committed mutation detail: compact (default), full diagnostics, or legacy raw leaf result.",
@@ -3805,6 +3840,41 @@
           "minItems": 1,
           "type": "array"
         },
+        "adoption": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "key": {
+                  "maxLength": 512,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "trigger": {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "selected_file_id": {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "key",
+                "trigger",
+                "selected_file_id"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional explicit adoption identity selecting exactly one\nsupplied handle. This establishes eligibility, not write consent;\nagent-initiated use obeys proactive_capture."
+        },
         "response_detail": {
           "default": "compact",
           "description": "Successful committed mutation detail: compact (default), full diagnostics, or legacy raw leaf result.",
@@ -4576,6 +4646,82 @@
           ],
           "default": null,
           "description": "Optional Markdown body for append."
+        },
+        "delivery": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "evidence_page": {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "link_field": {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "reported_remote_ref": {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "reported_remote_field": {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "verified_remote_field": {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "platform_reference_field": {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "platform_proof": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "algorithm": {
+                      "const": "sha256",
+                      "type": "string"
+                    },
+                    "digest": {
+                      "pattern": "^[0-9a-f]{64}$",
+                      "type": "string"
+                    },
+                    "reference": {
+                      "maxLength": 2048,
+                      "minLength": 1,
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "algorithm",
+                    "digest",
+                    "reference"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "evidence_page",
+                "link_field",
+                "reported_remote_ref",
+                "reported_remote_field",
+                "verified_remote_field"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional receipt-gated artifact-delivery validation envelope\nfor append. Field mappings are vault-schema-neutral and never set\nitem values or create/loosen a collection."
         },
         "changes": {
           "anyOf": [

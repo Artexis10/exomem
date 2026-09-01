@@ -72,7 +72,13 @@ def test_preserve_artifacts_has_openai_file_parameter_contract(
 
     assert command.mcp_meta == {"openai/fileParams": ("files",)}
     assert command.cli_writes is True
-    assert {param.name for param in command.params} == {"scope", "category", "files", "response_detail"}
+    assert {param.name for param in command.params} == {
+        "scope",
+        "category",
+        "files",
+        "adoption",
+        "response_detail",
+    }
     vault_root = tmp_path / "vault"
     shutil.copytree(Path(__file__).resolve().parent / "fixtures", vault_root)
     initialize_vault_state_offline(vault_root, source="client artifact MCP fixture")

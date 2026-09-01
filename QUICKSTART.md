@@ -120,6 +120,16 @@ These aliases are thin routes over product commands: `ask` -> `ask_memory`,
 leaves remain underneath for governance and validation, but new users do not need
 to learn them first.
 
+Generated drafts are ephemeral. When you select, approve, send, or publish one
+offered output, a balanced or maximal assistant may use `proactive_capture` to
+preserve that selected handle's exact bytes; unselected siblings remain
+unwritten. The assistant chooses Source or Evidence by the artifact's role,
+never its MIME type. If the client has no usable handle, it reports a
+non-committing upload handoff instead of claiming the artifact was saved.
+Delivery is recorded only after an Evidence adoption receipt and only through
+an existing compatible Records collection; a reported remote reference is not
+proof of remote byte equality.
+
 The numbered steps below are the **manual path** — exactly what `setup` does
 under the hood, kept for troubleshooting and for people who prefer explicit
 steps.

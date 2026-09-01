@@ -539,6 +539,58 @@ cannot be undone.
 - **`preserve`** is text-only; binaries always go via the channels above. Every
   write tool rejects inline byte blobs outright (`BINARY_BLOB_REJECTED`).
 
+### Generated artifact adoption
+
+A generated draft is not durable merely because it exists. Keep drafts,
+rejected variants, and revised-away siblings ephemeral. Once the user selects,
+approves, sends, or publishes one offered output, the exact selected handle is
+eligible for preservation under the existing `proactive_capture` authority; an
+explicit request to save is a requested action. Selection is adoption evidence,
+not write confirmation.
+
+Choose the lane by role before transport. Material retained for later reasoning
+is a Source; an approved deliverable or proof-bearing output is Evidence. MIME
+never chooses. With a direct handle, pass the closed envelope on the normal
+command:
+
+```text
+capture_source(..., files=[...],
+  adoption={"key": "...", "trigger": "selected", "selected_file_id": "..."})
+preserve_artifacts(..., files=[...],
+  adoption={"key": "...", "trigger": "approved", "selected_file_id": "..."})
+```
+
+Only `selected_file_id` may become canonical; unselected siblings must report
+`unselected` and create no artifact. Without a usable direct handle, use the
+ordinary upload handoff and report `handoff_required` or `handoff_prepared` as
+non-committing. A token, description, or reconstructed text is not a saved
+artifact.
+
+Delivery is ordered after local Evidence adoption. If one existing compatible
+Records collection has a declared link field, append the caller-authored item
+with the optional validation envelope:
+
+```text
+record_memory(action="append", collection="...", item={...}, why="...",
+  delivery={
+    "evidence_page": "Knowledge Base/Evidence/.../<artifact>.md",
+    "link_field": "<declared-link-field>",
+    "reported_remote_ref": "<reported-platform-reference>",
+    "reported_remote_field": "<declared-string-field>",
+    "verified_remote_field": "<declared-boolean-field>"
+  })
+```
+
+The envelope validates those mapped item values; it does not set them or create
+schema. A verified remote identity additionally requires
+`platform_reference_field` plus a closed `platform_proof` containing
+`algorithm: "sha256"`, the matching local receipt `digest`, and the platform
+`reference`. Without proof, the mapped verified field must be `false`; never
+infer remote byte equality. A Source receipt cannot authorize delivery. Missing
+collection or fields permits only `structural_suggestions`; collection changes
+need confirmed `restructure_execution`. A separately accepted relation remains
+`link_acceptance`.
+
 ### Procedure
 1. Determine scope and category folder. Create the folder if it doesn't exist yet. Confirm a new scope/category first — don't silently invent.
 2. Generate a filename if renaming: ISO date prefix where temporal anchoring matters + descriptive slug. Preserve the file's extension as-is.

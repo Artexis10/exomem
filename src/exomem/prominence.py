@@ -80,6 +80,14 @@ _SURFACE_ENV = "EXOMEM_SURFACE"
 _HOSTED_CELL_ENV = "EXOMEM_HOSTED_CELL"
 _CONFIG_KEY = "prominence"
 
+_ARTIFACT_ADOPTION_CAPTURE = (
+    " Generated draft stays ephemeral. Selected is not write consent: proactive_capture "
+    "preserves exact bytes as Source/Evidence by role, never MIME. No handle means "
+    "non-committing handoff. Delivery requires Evidence receipt/Record; no remote byte "
+    "inference. Missing schema uses structural_suggestions/restructure_execution; "
+    "relations use link_acceptance."
+)
+
 _CAPTURE_EFFECTIVE_TEMPLATE = MappingProxyType(
     {
         "off": MappingProxyType(
@@ -213,9 +221,8 @@ CONTRACTS: dict[str, ProminenceContract] = {
     "balanced": ProminenceContract(
         level="balanced",
         recall=(
-            "Search memory first when a turn references a project, a domain, a named "
-            "entity, or asks what was concluded, tried, or decided. Skip it for "
-            "chit-chat, control messages, and fresh tasks with no prior context."
+            "Search memory for project, domain, entity, or conclusion context. "
+            "Skip chit-chat, control messages, and context-free fresh tasks."
         ),
         capture=(
             "Capture at a stepping stone: a durable conclusion, recurring entity with "
@@ -232,10 +239,10 @@ CONTRACTS: dict[str, ProminenceContract] = {
             "Planning and observed outcome to Records. "
             "Transition only on explicit user intent; otherwise leave Planning "
             "unchanged or, under the resolved posture, propose a bounded review."
-        ),
+        )
+        + _ARTIFACT_ADOPTION_CAPTURE,
         narration=(
-            "Stay quiet. Mention memory only when a search returned something you "
-            "used, and report one line after a write."
+            "Stay quiet; cite useful recall and report a write in one line."
         ),
         summary="Recall on topic match; capture durable conclusions; quiet.",
     ),
@@ -265,7 +272,8 @@ CONTRACTS: dict[str, ProminenceContract] = {
             "Route stated intent to Planning and observed outcome to Records. "
             "Transition only on explicit user intent; otherwise leave Planning "
             "unchanged or, under the resolved posture, propose a bounded review."
-        ),
+        )
+        + _ARTIFACT_ADOPTION_CAPTURE,
         narration=(
             "Say what you did. Name what you recalled and cite it; state one line "
             "after every write. The user should be able to see memory working "

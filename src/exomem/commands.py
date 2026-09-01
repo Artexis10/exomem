@@ -228,6 +228,95 @@ class ClientArtifactFile(TypedDict):
     file_name: NotRequired[str]
 
 
+_OptionalArtifactAdoption = Annotated[
+    dict[str, Any] | None,
+    WithJsonSchema(
+        {
+            "anyOf": [
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["key", "trigger", "selected_file_id"],
+                    "properties": {
+                        "key": {"type": "string", "minLength": 1, "maxLength": 512},
+                        "trigger": {"type": "string", "minLength": 1, "maxLength": 128},
+                        "selected_file_id": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 256,
+                        },
+                    },
+                },
+                {"type": "null"},
+            ]
+        }
+    ),
+]
+
+_OptionalArtifactDelivery = Annotated[
+    dict[str, Any] | None,
+    WithJsonSchema(
+        {
+            "anyOf": [
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": [
+                        "evidence_page",
+                        "link_field",
+                        "reported_remote_ref",
+                        "reported_remote_field",
+                        "verified_remote_field",
+                    ],
+                    "properties": {
+                        "evidence_page": {"type": "string", "minLength": 1, "maxLength": 2048},
+                        "link_field": {"type": "string", "minLength": 1, "maxLength": 128},
+                        "reported_remote_ref": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 2048,
+                        },
+                        "reported_remote_field": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128,
+                        },
+                        "verified_remote_field": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128,
+                        },
+                        "platform_reference_field": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128,
+                        },
+                        "platform_proof": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["algorithm", "digest", "reference"],
+                            "properties": {
+                                "algorithm": {"const": "sha256", "type": "string"},
+                                "digest": {
+                                    "type": "string",
+                                    "pattern": "^[0-9a-f]{64}$",
+                                },
+                                "reference": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 2048,
+                                },
+                            },
+                        },
+                    },
+                },
+                {"type": "null"},
+            ]
+        }
+    ),
+]
+
+
 _ClientArtifactFiles = Annotated[
     list[ClientArtifactFile],
     Field(
@@ -5431,6 +5520,7 @@ def op_capture_source(
     domain: str | None = None,
     projects: list[str] | None = None,
     files: _OptionalClientArtifactFiles = (),  # noqa: B006 - read-only
+    adoption: _OptionalArtifactAdoption = None,
 ) -> dict:
     """Capture raw source material and optionally return compile guidance.
 
@@ -5471,8 +5561,11 @@ def op_capture_source(
             stored; one source may serve several projects.
         files: Temporary client file handles, captured losslessly as Sources
             instead of `content`. See the parameter schema for the shape.
+        adoption: Optional explicit adoption identity selecting exactly one
+            supplied handle. This establishes eligibility, not write consent;
+            agent-initiated use obeys proactive_capture.
     """
-    if files:
+    if files or adoption is not None:
         from . import client_artifacts
 
         return client_artifacts.capture_source_artifacts(
@@ -5487,6 +5580,7 @@ def op_capture_source(
             why_captured=why_captured,
             domain=domain,
             projects=projects,
+            adoption=adoption,
         )
     source = op_add(
         vault_root,
@@ -5570,6 +5664,7 @@ def op_preserve_artifacts(
     scope: str,
     category: str,
     files: _ClientArtifactFiles,
+    adoption: _OptionalArtifactAdoption = None,
 ) -> dict:
     """Preserve client-provided binary file handles as append-only Evidence.
 
@@ -5584,6 +5679,9 @@ def op_preserve_artifacts(
         category: Evidence category within the scope.
         files: Ordered temporary file handles. Each object requires `download_url`
             and `file_id`; `mime_type` and `file_name` are optional.
+        adoption: Optional explicit adoption identity selecting exactly one
+            supplied handle. This establishes eligibility, not write consent;
+            agent-initiated use obeys proactive_capture.
     """
     from . import client_artifacts
     from . import due_state as due_state_module
@@ -5592,7 +5690,7 @@ def op_preserve_artifacts(
     # one counters block rather than N: see `due_state.batch_scope`.
     with due_state_module.batch_scope(vault_root):
         result = client_artifacts.preserve_artifacts(
-            vault_root, scope=scope, category=category, files=files
+            vault_root, scope=scope, category=category, files=files, adoption=adoption
         )
     # No batch deltas: Evidence blobs author no predictions, questions,
     # experiments or supersession pointers, so this leaf's own writes never move
@@ -5629,13 +5727,16 @@ def op_transfer_artifact(
     secret = os.environ.get("EXOMEM_UPLOAD_TOKEN", "").strip() or None
     base_url = os.environ.get("EXOMEM_BASE_URL", "").strip().rstrip("/")
     large_base_url = os.environ.get("EXOMEM_LARGE_UPLOAD_BASE_URL", "").strip().rstrip("/") or None
-    return upload_tokens.mint_for_endpoint(
+    handoff = upload_tokens.mint_for_endpoint(
         secret,
         base_url,
         scope=operation,
         large_base_url=large_base_url if operation == "upload" else None,
         lane=lane if operation == "upload" else None,
     )
+    if operation == "upload":
+        handoff.update(handoff_status="handoff_prepared", committed=False)
+    return handoff
 
 
 def op_process_media(
@@ -8140,6 +8241,7 @@ def op_record_memory(
     expected_manifest_hash: str | None = None,
     acknowledged_gap_codes: list[str] | None = None,
     body: str | None = None,
+    delivery: _OptionalArtifactDelivery = None,
     changes: dict[str, Any] | None = None,
     expected_item_version: str | None = None,
     refresh_presentation: bool | None = None,
@@ -8179,6 +8281,9 @@ def op_record_memory(
         expected_manifest_hash: Exact current manifest hash for revise or rebaseline.
         acknowledged_gap_codes: Exact inspect-reported gap codes for rebaseline.
         body: Optional Markdown body for append.
+        delivery: Optional receipt-gated artifact-delivery validation envelope
+            for append. Field mappings are vault-schema-neutral and never set
+            item values or create/loosen a collection.
         changes: Targeted values for update.
         expected_item_version: Exact current item version for update.
         refresh_presentation: Guardedly rebuild the managed Markdown presentation during update.
@@ -8212,6 +8317,7 @@ def op_record_memory(
         expected_manifest_hash=expected_manifest_hash,
         acknowledged_gap_codes=acknowledged_gap_codes,
         body=body,
+        delivery=delivery,
         changes=changes,
         expected_item_version=expected_item_version,
         refresh_presentation=refresh_presentation,
@@ -9138,6 +9244,9 @@ def _build_product_commands() -> tuple[Command, ...]:
                     help=param.help,
                     cli_positional=param.cli_positional,
                     choices=param.choices,
+                    schema=param.schema,
+                    schema_description=param.schema_description,
+                    schema_default=param.schema_default,
                 )
                 for param in params
                 if param.name in {"path", "why", "operation", "validate_only"}
@@ -9168,6 +9277,9 @@ def _build_product_commands() -> tuple[Command, ...]:
                     help=param.help,
                     cli_positional=param.cli_positional,
                     choices=param.choices,
+                    schema=param.schema,
+                    schema_description=param.schema_description,
+                    schema_default=param.schema_default,
                 )
                 for param in params
             )

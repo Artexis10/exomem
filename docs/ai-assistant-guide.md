@@ -176,6 +176,32 @@ Agent behavior:
 2. Preserve the original file or text with `preserve_evidence` or `transfer_artifact`.
 3. Report the stored path and any metadata the server returns.
 
+### Adopt a generated artifact
+
+A generated draft is ephemeral. When the user selects, approves, sends, or
+publishes one offered output, the exact selected handle becomes eligible for
+preservation; the event is adoption evidence, not write consent. Under balanced
+or maximal prominence, agent-initiated preservation uses `proactive_capture`.
+An explicit save request remains an ordinary requested action.
+
+Choose Source or Evidence from purpose before transport: reasoning material is
+a Source, while an approved deliverable or proof-bearing final is Evidence.
+MIME never chooses. Pass the closed `adoption` envelope to `capture_source` or
+`preserve_artifacts` and preserve only `selected_file_id`; generated draft
+siblings create no canonical artifact. When no usable handle exists, report a
+non-committing `handoff_required` or `handoff_prepared` state. Do not substitute
+base64, a textual reconstruction, or a claim that the bytes were saved.
+
+A later send or publication is a separate delivery fact. Append it through
+`record_memory(..., delivery={...})` only after a committed local Evidence
+receipt and only into one existing compatible Records collection. The delivery
+envelope maps the caller-authored link, reported-reference, and verification
+fields; it creates no schema and sets no item values. Reported remote identity
+is unverified unless matching platform proof establishes remote byte equality.
+Missing schema may yield a `structural_suggestions` proposal, but creation or
+change remains confirmed `restructure_execution`; a separately accepted
+relation remains `link_acceptance`.
+
 ### Compile evidence
 
 User:

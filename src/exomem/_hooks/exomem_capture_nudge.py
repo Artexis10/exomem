@@ -78,6 +78,11 @@ REMINDER = (
     "observed outcome to Records with record_memory. A concise observation or narrow Entity "
     "facet follows proactive_capture; an affiliation relation requires link_acceptance; Entity "
     "creation or substantial curation requires confirmed restructure_execution. "
+    "Generated draft stays ephemeral. Selected is not write consent: proactive_capture "
+    "preserves exact bytes as Source/Evidence by role, never MIME. No handle means "
+    "non-committing handoff. Delivery requires Evidence receipt/Record; no remote byte "
+    "inference. Missing schema uses structural_suggestions/restructure_execution; "
+    "relations use link_acceptance. "
     "If neither case applies, or no Knowledge Base is configured, do nothing and stop."
 )
 

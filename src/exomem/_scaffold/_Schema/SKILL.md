@@ -167,6 +167,32 @@ landing, not during the flight.
 Do not wait to be asked. "Did you save that?" arriving after a result already
 landed is the failure, not the prompt.
 
+### Generated artifact adoption
+
+Generated drafts stay ephemeral. Generation, preview, filename, MIME type,
+apparent quality, and abandoned or revised-away variants do not make durable
+work. When the user selects, approves, sends, or publishes one offered output,
+that exact offered artifact becomes adoption-eligible; the event is evidence of
+adoption, not write consent. Agent-initiated adoption therefore follows
+`proactive_capture`, while an explicit request to save is an ordinary requested
+action. Preserve only the selected handle's exact bytes and write no siblings.
+
+Choose the semantic lane before transport: reasoning material is a Source;
+an approved deliverable or proof-bearing output is Evidence. MIME never chooses.
+Use `capture_source(..., adoption={key, trigger, selected_file_id})` or
+`preserve_artifacts(..., adoption={...})` when a direct handle exists. With no handle,
+report a non-committing `handoff_required` or
+`handoff_prepared`; a token or description is not a saved artifact.
+
+Delivery is a later fact. Record it only after a committed local Evidence
+receipt, through `record_memory(action="append", delivery={...})` and one
+compatible existing Records collection whose declared link field names the
+Evidence companion. Keep reported remote identity separate and set verified
+identity only from matching platform proof; never infer remote byte equality.
+A missing collection is `structural_suggestions`; creating or changing it is
+confirmed `restructure_execution`. A separately accepted relation remains
+`link_acceptance`. Adoption success never waits on any of those later changes.
+
 ## What Exomem does on its own
 
 Prominence says how much Exomem speaks up. The **delegation envelope** says what
