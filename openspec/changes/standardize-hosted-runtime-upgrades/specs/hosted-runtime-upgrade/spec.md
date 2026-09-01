@@ -207,3 +207,25 @@ Rollback SHALL choose the last safe action from the execution phase. Before any 
 - **WHEN** a cell already recorded at the target fails after the transition completed
 - **THEN** automatic rollback preserves that cell, its volume, vault, binding, and target record
 - **AND** an operator must invoke a separately governed recovery or restore path
+
+### Requirement: Stranded private-alpha provisions may retarget forward in place
+
+An explicitly authorized recovery MAY retarget a never-routed unfinished v1 provision from a
+reviewed legacy runtime to the selected forward runtime only after the signed helper proves the
+existing init-retry receipt, exact request and request hash, tenant fence, operation and provider
+identity, four authenticated durable resources, one unreleased reservation, no result, no route,
+no admitted runtime, two stable live observations, and no unexpired worker claim. The transaction
+SHALL change only the request's release/protocol pair, encrypted request, canonical request hash,
+claim fields, availability timestamp, and append-only content-free retarget receipt while
+preserving every operation, tenant, cell, fence, resource, volume, credential, policy, and caller
+checkpoint identity. Repetition SHALL verify the existing receipt without a second mutation.
+
+#### Scenario: Exact stranded provision advances to the reviewed target
+
+- **WHEN** the operator authorizes a recovered `volume-owned` provision with no route, result, admitted runtime, conflicting operation, or active claim
+- **THEN** one compare-and-swap transaction retargets that same operation to the selected runtime and makes it claimable without replacing its cell or volume
+
+#### Scenario: Retarget mismatch is a no-op
+
+- **WHEN** any request, receipt, claim, fence, resource, reservation, live identity, runtime, route, result, or compare-and-swap invariant differs
+- **THEN** recovery refuses without changing the operation, request, resource, reservation, PVC, PV, or provider volume

@@ -38,10 +38,31 @@ from .models import (
 from .provider_identity import cell_resource_name
 from .repository import canonical_request_sha256
 
-_FIXED_MODES = ("preflight", "reopen", "inspect", "verify-recovery")
+_FIXED_MODES = (
+    "preflight",
+    "reopen",
+    "inspect",
+    "verify-recovery",
+    "retarget-preflight",
+    "retarget",
+    "verify-retarget",
+)
 _RECOVERY_MARKER = "_init_retry_recovery_v1"
+_RETARGET_MARKER = "_runtime_retarget_recovery_v1"
 _RECOVERY_MARKER_KEYS = frozenset(
     {"schema", "preflight_sha256", "helper_source_sha256", "claim_generation", "committed_at"}
+)
+_RETARGET_MARKER_KEYS = frozenset(
+    {
+        "schema",
+        "preflight_sha256",
+        "source_request_sha256",
+        "target_request_sha256",
+        "target_runtime_sha256",
+        "helper_source_sha256",
+        "claim_generation",
+        "committed_at",
+    }
 )
 _OUTPUT_KEYS = frozenset(
     {
@@ -122,6 +143,21 @@ class OperationPreState:
     finalized: bool
 
 
+@dataclass(frozen=True, slots=True)
+class RetargetPreState:
+    action: str
+    state: str
+    checkpoint: str
+    error_code: str | None
+    claim_owner: str | None
+    claim_token: str | None
+    claim_expires_at: datetime | None
+    has_result: bool
+    finalized: bool
+    has_recovery_marker: bool
+    has_retarget_marker: bool
+
+
 class RecoveryLiveObserver(Protocol):
     async def observe(
         self,
@@ -142,6 +178,14 @@ class _RecoverySnapshot:
     resources_sha256: str
     reservation_sha256: str
     tenant_fence_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class _RetargetSnapshot:
+    recovery: _RecoverySnapshot
+    source_request: dict[str, object]
+    target_request: dict[str, object]
+    target_runtime_sha256: str
 
 
 def read_operation_identity(*, stdin: str | None = None) -> str:
@@ -205,6 +249,69 @@ def recovery_transition_values(before: OperationPreState) -> dict[str, object]:
     }
 
 
+def retarget_transition_values(before: RetargetPreState, *, now: datetime) -> dict[str, object]:
+    if before.has_retarget_marker:
+        raise RecoveryRefusal("already retargeted")
+    if (
+        before.action != "provision"
+        or before.checkpoint != "volume-owned"
+        or before.error_code is not None
+        or before.has_result
+        or before.finalized
+        or not before.has_recovery_marker
+    ):
+        raise RecoveryRefusal("retarget preflight failed")
+    if before.state == "pending":
+        if any(
+            value is not None
+            for value in (before.claim_owner, before.claim_token, before.claim_expires_at)
+        ):
+            raise RecoveryRefusal("retarget preflight failed")
+    elif before.state == "claimed":
+        if (
+            not before.claim_owner
+            or not before.claim_token
+            or before.claim_expires_at is None
+            or before.claim_expires_at > now
+        ):
+            raise RecoveryRefusal("active claim prevents retarget")
+    else:
+        raise RecoveryRefusal("already progressed")
+    return {
+        "state": OperationState.PENDING,
+        "checkpoint": "volume-owned",
+        "error_code": None,
+        "claim_owner": None,
+        "claim_token": None,
+        "claim_expires_at": None,
+        "finalized_at": None,
+    }
+
+
+def retarget_legacy_provision_request(
+    request: dict[str, object], *, release_version: str, protocol_version: str
+) -> dict[str, object]:
+    if (
+        request.get("provisionMode") != "serve"
+        or "runtimeTarget" in request
+        or not isinstance(request.get("releaseVersion"), str)
+        or not isinstance(request.get("protocolVersion"), str)
+        or not release_version
+        or not protocol_version
+    ):
+        raise RecoveryRefusal("retarget request is invalid")
+    if (
+        request["releaseVersion"] == release_version
+        and request["protocolVersion"] == protocol_version
+    ):
+        raise RecoveryRefusal("request already targets selected runtime")
+    return {
+        **request,
+        "releaseVersion": release_version,
+        "protocolVersion": protocol_version,
+    }
+
+
 def recovery_marker(
     *,
     preflight_sha256: str,
@@ -243,6 +350,51 @@ def parse_recovery_marker(value: object) -> dict[str, object]:
     return dict(value)
 
 
+def retarget_marker(
+    *,
+    preflight_sha256: str,
+    source_request_sha256: str,
+    target_request_sha256: str,
+    target_runtime_sha256: str,
+    helper_source_sha256: str,
+    claim_generation: int,
+    committed_at: datetime,
+) -> dict[str, object]:
+    marker = {
+        "schema": 1,
+        "preflight_sha256": preflight_sha256,
+        "source_request_sha256": source_request_sha256,
+        "target_request_sha256": target_request_sha256,
+        "target_runtime_sha256": target_runtime_sha256,
+        "helper_source_sha256": helper_source_sha256,
+        "claim_generation": claim_generation,
+        "committed_at": _json_value(committed_at),
+    }
+    return parse_retarget_marker(marker)
+
+
+def parse_retarget_marker(value: object) -> dict[str, object]:
+    if not isinstance(value, dict) or set(value) != _RETARGET_MARKER_KEYS:
+        raise RecoveryRefusal("retarget marker is invalid")
+    if (
+        value.get("schema") != 1
+        or not isinstance(value.get("claim_generation"), int)
+        or value["claim_generation"] < 0
+        or not isinstance(value.get("committed_at"), str)
+        or any(
+            not isinstance(value.get(key), str) or len(value[key]) != 64
+            for key in _RETARGET_MARKER_KEYS
+            if key.endswith("sha256")
+        )
+    ):
+        raise RecoveryRefusal("retarget marker is invalid")
+    try:
+        datetime.fromisoformat(value["committed_at"].replace("Z", "+00:00"))
+    except ValueError as error:
+        raise RecoveryRefusal("retarget marker is invalid") from error
+    return dict(value)
+
+
 def _hash_model(model: object, *, excluded: frozenset[str] = frozenset()) -> str:
     table = model.__table__  # type: ignore[attr-defined]
     return canonical_sha256(
@@ -269,6 +421,8 @@ class RecoveryService:
             "available_at",
             "updated_at",
             "progress",
+            "canonical_request_sha256",
+            "request_ciphertext",
         }
     )
 
@@ -466,6 +620,158 @@ class RecoveryService:
         except Exception as error:
             raise RecoveryRefusal("recovery-verification-failed") from error
 
+    async def retarget_preflight(self, operation_id: str) -> dict[str, object]:
+        try:
+            async with self._sessions.begin() as session:
+                now = await self._database_now(session)
+                snapshot = await self._retarget_preflight(session, operation_id, now=now)
+                observation = await self._observer.observe(
+                    snapshot.recovery.operation, snapshot.recovery.resources
+                )
+                validate_live_observation(observation)
+                return {
+                    "status": "retarget-ready",
+                    "state": snapshot.recovery.operation.state.value,
+                    "checkpoint": snapshot.recovery.operation.checkpoint,
+                    "resource_kind_counts": {
+                        **{
+                            kind.value: 1
+                            for kind in (
+                                ResourceKind.HELM_RELEASE,
+                                ResourceKind.KUBERNETES_NAMESPACE,
+                                ResourceKind.PVC,
+                                ResourceKind.VOLUME,
+                            )
+                        },
+                        ResourceKind.ROUTE.value: 0,
+                        "provider-object": 0,
+                    },
+                    "active_reservation": True,
+                }
+        except RecoveryRefusal:
+            raise
+        except Exception as error:
+            raise RecoveryRefusal("retarget-preflight-failed") from error
+
+    async def retarget(self, operation_id: str) -> dict[str, object]:
+        try:
+            async with self._sessions.begin() as session:
+                await self._require_database_identity(session)
+                current = await session.get(Operation, operation_id, with_for_update=True)
+                if current is None:
+                    raise RecoveryRefusal("operation is unavailable")
+                existing_marker = current.progress.get(_RETARGET_MARKER)
+                if existing_marker is not None:
+                    return self._retarget_result(current, existing_marker, "already-retargeted")
+                now = await self._database_now(session)
+                snapshot = await self._retarget_preflight_locked(session, current, now=now)
+                first = await self._observer.observe(
+                    snapshot.recovery.operation, snapshot.recovery.resources
+                )
+                validate_live_observation(first)
+                second = await self._observer.observe(
+                    snapshot.recovery.operation, snapshot.recovery.resources
+                )
+                validate_live_observation(second)
+                if first != second:
+                    raise RecoveryRefusal("live recovery preflight failed")
+                operation = snapshot.recovery.operation
+                evidence_digest = canonical_sha256(
+                    {
+                        "operation_sha256": snapshot.recovery.operation_sha256,
+                        "preserved_sha256": snapshot.recovery.preserved_sha256,
+                        "source_request_sha256": canonical_request_sha256(snapshot.source_request),
+                        "target_request_sha256": canonical_request_sha256(snapshot.target_request),
+                        "request_ciphertext_sha256": (snapshot.recovery.request_ciphertext_sha256),
+                        "resources_sha256": snapshot.recovery.resources_sha256,
+                        "reservation_sha256": snapshot.recovery.reservation_sha256,
+                        "tenant_fence_sha256": snapshot.recovery.tenant_fence_sha256,
+                        "first_observation_sha256": canonical_sha256(asdict(first)),
+                        "second_observation_sha256": canonical_sha256(asdict(second)),
+                    }
+                )
+                target_sha256 = canonical_request_sha256(snapshot.target_request)
+                marker = retarget_marker(
+                    preflight_sha256=evidence_digest,
+                    source_request_sha256=operation.canonical_request_sha256,
+                    target_request_sha256=target_sha256,
+                    target_runtime_sha256=snapshot.target_runtime_sha256,
+                    helper_source_sha256=self._helper_source_sha256,
+                    claim_generation=operation.claim_generation,
+                    committed_at=now,
+                )
+                progress = {**operation.progress, _RETARGET_MARKER: marker}
+                transition = retarget_transition_values(
+                    self._retarget_pre_state(operation), now=now
+                )
+                purpose = f"operation-request:{operation.action.value}:{operation.idempotency_key}"
+                target_ciphertext = self._codec.encrypt_json(
+                    snapshot.target_request, purpose=purpose
+                )
+                updated = await session.scalar(
+                    update(Operation)
+                    .where(
+                        Operation.id == operation.id,
+                        Operation.action == OperationAction.PROVISION,
+                        Operation.state == operation.state,
+                        Operation.checkpoint == operation.checkpoint,
+                        Operation.error_code.is_(None),
+                        Operation.claim_owner == operation.claim_owner,
+                        Operation.claim_token == operation.claim_token,
+                        Operation.claim_expires_at == operation.claim_expires_at,
+                        Operation.result_ciphertext.is_(None),
+                        cast(Operation.result_redacted, JSONB) == cast({}, JSONB),
+                        Operation.finalized_at.is_(None),
+                        Operation.external_operation_id == operation.provider_operation_id,
+                        Operation.fence_generation == operation.provider_fence_generation,
+                        Operation.canonical_request_sha256 == operation.canonical_request_sha256,
+                        Operation.request_ciphertext == operation.request_ciphertext,
+                        Operation.claim_generation == operation.claim_generation,
+                        Operation.updated_at == operation.updated_at,
+                        cast(Operation.progress, JSONB) == cast(operation.progress, JSONB),
+                        cast(Operation.progress, JSONB).has_key(_RECOVERY_MARKER),
+                        ~cast(Operation.progress, JSONB).has_key(_RETARGET_MARKER),
+                    )
+                    .values(
+                        **transition,
+                        canonical_request_sha256=target_sha256,
+                        request_ciphertext=target_ciphertext,
+                        available_at=now,
+                        updated_at=now,
+                        progress=progress,
+                    )
+                    .returning(Operation)
+                )
+                if updated is None:
+                    reread = await session.get(Operation, operation_id, with_for_update=True)
+                    if reread is not None and _RETARGET_MARKER in reread.progress:
+                        return self._retarget_result(
+                            reread, reread.progress[_RETARGET_MARKER], "already-retargeted"
+                        )
+                    raise RecoveryRefusal("already progressed")
+                await session.flush()
+                return self._retarget_result(updated, marker, "retargeted")
+        except RecoveryRefusal:
+            raise
+        except Exception as error:
+            raise RecoveryRefusal("retarget-failed") from error
+
+    async def verify_retarget(self, operation_id: str) -> dict[str, object]:
+        try:
+            async with self._sessions.begin() as session:
+                await self._require_database_identity(session)
+                operation = await session.get(Operation, operation_id)
+                if operation is None:
+                    raise RecoveryRefusal("operation is unavailable")
+                marker = operation.progress.get(_RETARGET_MARKER)
+                if marker is None:
+                    raise RecoveryRefusal("retarget attribution is unavailable")
+                return self._retarget_result(operation, marker, "retarget-verified")
+        except RecoveryRefusal:
+            raise
+        except Exception as error:
+            raise RecoveryRefusal("retarget-verification-failed") from error
+
     async def _preflight(self, session: AsyncSession, operation_id: str) -> _RecoverySnapshot:
         await self._require_database_identity(session)
         initial = await session.get(Operation, operation_id)
@@ -481,6 +787,108 @@ class RecoveryService:
         ):
             raise RecoveryRefusal("recovery preflight failed")
         return await self._preflight_locked(session, operation, fence)
+
+    async def _retarget_preflight(
+        self, session: AsyncSession, operation_id: str, *, now: datetime
+    ) -> _RetargetSnapshot:
+        await self._require_database_identity(session)
+        initial = await session.get(Operation, operation_id)
+        if initial is None:
+            raise RecoveryRefusal("operation is unavailable")
+        fence = await session.get(TenantFence, initial.tenant_id, with_for_update=True)
+        operation = await session.get(Operation, operation_id, with_for_update=True)
+        if (
+            operation is None
+            or fence is None
+            or fence.tenant_id != operation.tenant_id
+            or fence.fence_generation != operation.fence_generation
+        ):
+            raise RecoveryRefusal("retarget preflight failed")
+        return await self._retarget_preflight_locked(session, operation, now=now, fence=fence)
+
+    async def _retarget_preflight_locked(
+        self,
+        session: AsyncSession,
+        operation: Operation,
+        *,
+        now: datetime,
+        fence: TenantFence | None = None,
+    ) -> _RetargetSnapshot:
+        if fence is None:
+            fence = await session.get(TenantFence, operation.tenant_id, with_for_update=True)
+        if (
+            fence is None
+            or fence.fence_generation != operation.fence_generation
+            or operation.cell_id is None
+            or operation.external_operation_id != operation.provider_operation_id
+            or operation.fence_generation != operation.provider_fence_generation
+        ):
+            raise RecoveryRefusal("retarget preflight failed")
+        parse_recovery_marker(operation.progress.get(_RECOVERY_MARKER))
+        retarget_transition_values(self._retarget_pre_state(operation), now=now)
+        await self._lock_conflicts(
+            session,
+            operation,
+            allow_expired_current=True,
+            now=now,
+        )
+        request = self._codec.decrypt_json(
+            operation.request_ciphertext,
+            purpose=f"operation-request:{operation.action.value}:{operation.idempotency_key}",
+        )
+        if (
+            canonical_request_sha256(request) != operation.canonical_request_sha256
+            or request.get("tenantId") != operation.tenant_id
+            or request.get("cellId") != operation.cell_id
+            or request.get("operationId") != operation.external_operation_id
+            or request.get("fenceGeneration") != operation.fence_generation
+            or request.get("checkpoint") != operation.caller_checkpoint
+            or request.get("provisionMode") != "serve"
+            or operation.wire_protocol.value != "exomem-cell-provisioner.v1"
+            or not self._deployment_lock.matches_runtime_request(
+                request,
+                wire_protocol=operation.wire_protocol.value,
+                selection=self._runtime_selection,
+            )
+        ):
+            raise RecoveryRefusal("retarget preflight failed")
+        selected = self._deployment_lock.selected_runtime(self._runtime_selection)
+        target_runtime = selected.runtimeTarget.model_dump(mode="json")
+        target_request = retarget_legacy_provision_request(
+            request,
+            release_version=selected.runtimeTarget.releaseVersion,
+            protocol_version=selected.runtimeTarget.protocolVersion,
+        )
+        resources = await self._resources(session, operation)
+        reservation = await self._reservation(session, operation)
+        recovery = _RecoverySnapshot(
+            operation=operation,
+            resources=resources,
+            reservation=reservation,
+            operation_sha256=_hash_model(operation),
+            preserved_sha256=_hash_model(operation, excluded=self._CHANGED_COLUMNS),
+            request_sha256=operation.canonical_request_sha256,
+            request_ciphertext_sha256=hashlib.sha256(
+                operation.request_ciphertext.encode()
+            ).hexdigest(),
+            resources_sha256=canonical_sha256(
+                {item.id: _hash_model(item) for item in sorted(resources, key=lambda item: item.id)}
+            ),
+            reservation_sha256=_hash_model(reservation),
+            tenant_fence_sha256=_hash_model(fence),
+        )
+        return _RetargetSnapshot(
+            recovery=recovery,
+            source_request=request,
+            target_request=target_request,
+            target_runtime_sha256=canonical_sha256(target_runtime),
+        )
+
+    async def _database_now(self, session: AsyncSession) -> datetime:
+        now = await session.scalar(select(func.clock_timestamp()))
+        if not isinstance(now, datetime):
+            raise RecoveryRefusal("database clock is unavailable")
+        return now
 
     async def _require_database_identity(self, session: AsyncSession) -> None:
         require_postgresql(session.get_bind().dialect.name)
@@ -573,6 +981,22 @@ class RecoveryService:
         )
 
     @staticmethod
+    def _retarget_pre_state(operation: Operation) -> RetargetPreState:
+        return RetargetPreState(
+            action=operation.action.value,
+            state=operation.state.value,
+            checkpoint=operation.checkpoint,
+            error_code=operation.error_code,
+            claim_owner=operation.claim_owner,
+            claim_token=operation.claim_token,
+            claim_expires_at=operation.claim_expires_at,
+            has_result=(operation.result_ciphertext is not None or operation.result_redacted != {}),
+            finalized=operation.finalized_at is not None,
+            has_recovery_marker=_RECOVERY_MARKER in operation.progress,
+            has_retarget_marker=_RETARGET_MARKER in operation.progress,
+        )
+
+    @staticmethod
     def _preflight_evidence_digest(
         snapshot: _RecoverySnapshot, first: LiveObservation, second: LiveObservation
     ) -> str:
@@ -590,9 +1014,23 @@ class RecoveryService:
             }
         )
 
-    async def _lock_conflicts(self, session: AsyncSession, operation: Operation) -> None:
+    async def _lock_conflicts(
+        self,
+        session: AsyncSession,
+        operation: Operation,
+        *,
+        allow_expired_current: bool = False,
+        now: datetime | None = None,
+    ) -> None:
         lock = await session.get(CellOperationLock, operation.cell_id, with_for_update=True)
-        if lock is not None:
+        if lock is not None and not (
+            allow_expired_current
+            and now is not None
+            and lock.tenant_id == operation.tenant_id
+            and lock.operation_id == operation.external_operation_id
+            and lock.fence_generation == operation.fence_generation
+            and lock.lease_expires_at <= now
+        ):
             raise RecoveryRefusal("recovery preflight failed")
         if await session.get(CapacityLedger, 1, with_for_update=True) is None:
             raise RecoveryRefusal("recovery preflight failed")
@@ -734,6 +1172,27 @@ class RecoveryService:
             OperationState.FINAL,
         }:
             raise RecoveryRefusal("recovery attribution is unavailable")
+        return {
+            "status": status,
+            "state": operation.state.value,
+            "checkpoint": operation.checkpoint,
+            "recovery_digest": canonical_sha256(marker),
+        }
+
+    @staticmethod
+    def _retarget_result(
+        operation: Operation, marker_value: object, status: str
+    ) -> dict[str, object]:
+        marker = parse_retarget_marker(marker_value)
+        if operation.canonical_request_sha256 != marker["target_request_sha256"]:
+            raise RecoveryRefusal("retarget attribution is unavailable")
+        if operation.state not in {
+            OperationState.PENDING,
+            OperationState.CLAIMED,
+            OperationState.ERROR,
+            OperationState.FINAL,
+        }:
+            raise RecoveryRefusal("retarget attribution is unavailable")
         return {
             "status": status,
             "state": operation.state.value,
@@ -919,6 +1378,12 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
                 return await service.inspect(operation_id)
             case "verify-recovery":
                 return await service.verify_recovery(operation_id)
+            case "retarget-preflight":
+                return await service.retarget_preflight(operation_id)
+            case "retarget":
+                return await service.retarget(operation_id)
+            case "verify-retarget":
+                return await service.verify_retarget(operation_id)
         raise RecoveryRefusal("recovery mode is invalid")
     except RecoveryRefusal:
         raise
