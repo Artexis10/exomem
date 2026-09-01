@@ -10,7 +10,7 @@ The active capture predicate names conclusions, recurring entities, executed met
 - Route a baseline according to meaning: update a uniquely resolved Entity for a stable facet or affiliation; otherwise write one concise compiled observation; use Records only for a compatible observed event or measurement.
 - Keep the already-shipped executed-method predicate separate and regression-pinned rather than broadening it into a catch-all.
 - Add synthetic positive/negative agent-behaviour fixtures, carrier-parity tests, and mutants that remove the durability or reusable-comparison discriminator.
-- Co-deliver baseline and generated-artifact adoption doctrine through one shared immutable v5 candidate/profile and one promotion evidence set; never rewrite locked v1-v4 package identities.
+- Co-deliver all pending baseline, generated-artifact adoption, recurring-entity lifecycle, and governed-curation doctrine through one shared immutable v5 candidate/profile and one promotion evidence set; never rewrite locked v1-v4 package identities.
 
 ## Capabilities
 
@@ -22,7 +22,7 @@ The active capture predicate names conclusions, recurring entities, executed met
 
 - `agent-bootstrap-contract`: Bootstrap and prominence payloads explicitly carry the baseline class and its positive/negative boundary.
 - `portable-agent-contract`: Installed scaffold, workflow skill, hooks, and copyable custom instructions carry one coherent capture predicate.
-- `hosted-agent-surface`: This change owns the single shared v5 release candidate that carries both baseline and generated-artifact adoption doctrine after both changes' fixtures are integrated.
+- `hosted-agent-surface`: This change owns the single shared v5 release candidate that carries baseline, generated-artifact adoption, recurring-entity lifecycle, and governed-curation doctrine after all four changes' fixtures are integrated.
 - `delegation-envelope`: Baseline capture, additive Entity facets, affiliation links, and structural Entity changes map explicitly to the existing authority classes.
 
 ## Impact

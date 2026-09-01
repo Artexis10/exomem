@@ -45,6 +45,10 @@ recovery, and compensation rather than a false multi-file atomicity promise.
   the `restructure_execution` confirm-required ceiling. Candidate surfacing may
   be quiet or advisory according to the existing envelope, but applying or
   compensating a plan always requires explicit in-conversation confirmation.
+- Keep Hosted v1-v4 source, generated package, and resolved actual-wire schema
+  identities immutable. Remote discovery and admission of registry-derived
+  curation arguments begins in the single candidate-owned v5 release; the
+  curation lane supplies only a generic contribution input outside that tree.
 - Keep plan validation content-language-neutral: paths, hashes, registries, and
   operation schemas—not English text classification—determine executability, so
   agent-authored plans can curate multilingual Markdown.
@@ -80,7 +84,9 @@ the separate Exomem/OpenSpec workflow contract.
   idempotency store, writer boundary, and trash/supersession mechanisms.
 - Extends `maintain_memory` arguments, selector classification, tool schema,
   generated capability documentation, bootstrap teaching, and the generic
-  Hosted profile/artifacts where required by the current release pipeline.
+  Hosted runtime boundary. Changed Hosted agent doctrine and package fixtures
+  are contributed to the shared v5 composition; historical v1-v4 packages are
+  not regenerated.
 - Adds deterministic crash-injection coverage around phase persistence, leaf
   commit, step-receipt persistence, and compensation progress, plus standalone
   and Hosted parity tests.

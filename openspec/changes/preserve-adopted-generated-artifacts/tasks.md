@@ -22,9 +22,9 @@
 
 ## 4. Hosted v5 candidate
 
-- [ ] 4.1 Coordinate with the single v5 lane owned by `capture-durable-personal-baselines`; do not independently edit, render, lock, archive, promote, or roll back v5 files.
-- [ ] 4.2 Add artifact doctrine and candidate-scoped selection/behavior fixtures to the still-unlocked shared v5 candidate while preserving v4 command order and withholding `transfer_artifact` until a real bridge exists.
-- [ ] 4.3 Prove the shared combined fixture digest changes for artifact behavior and is bound by the owner's compatibility, lock, archive, and promotion gates.
+- [ ] 4.1 Add the generic synthetic artifact contribution input at `tests/fixtures/hosted_v5_contributions/artifact_adoption.json`; do not edit, render, lock, archive, promote, or roll back v5 files from this lane.
+- [ ] 4.2 Require the single v5 owner to validate, canonicalise, and freeze the artifact input into the candidate-owned combined fixture while preserving v4 command order and withholding `transfer_artifact` until a real bridge exists.
+- [ ] 4.3 Prove the shared combined fixture digest includes artifact behavior alongside baseline, recurring-entity, and governed-curation behavior and is bound by the owner's compatibility, package, lock, archive, and promotion gates; fixture drift MUST invalidate package verification.
 - [ ] 4.4 Supply clean supported-client traces for Source and Evidence direct adoption, sibling no-write, no-handle handoff, receipt-linked delivery, and no false remote-byte claim before owner render/promotion.
 - [ ] 4.5 Verify pre-lock rebuild and post-promotion v6-only correction semantics through the owner's shared-v5 rollback tests.
 
@@ -34,3 +34,7 @@
 - [ ] 5.2 Kill mutants that disable request-window replay, skip later re-stage/hash comparison, accept an unverifiable expired handle, lose Source/Evidence receipt parity, record delivery before receipt, or assert remote identity without platform proof.
 - [ ] 5.3 Run focused preservation, Records, carrier, Hosted package/promotion, public-input, scaffold leak, generated-contract, and historical-lock tests.
 - [ ] 5.4 Run `ruff check`, the full non-model pytest suite, and `openspec validate --all --strict` and report exact false-positive and draft-clutter counts.
+
+## 6. OpenSpec closure
+
+- [ ] 6.1 After shared v5 delivery and all merge/review evidence are complete, archive only through the owner-controlled order defined by `capture-durable-personal-baselines`, with strict validation before and after this change's archive.

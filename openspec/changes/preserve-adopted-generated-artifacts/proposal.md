@@ -24,7 +24,7 @@ Exomem already preserves exact client-supplied bytes, but active agents have no 
 - `client-artifact-preservation`: Existing exact-byte receipts become the required transport for adopted generated outputs; textual reconstruction is explicitly insufficient.
 - `attachment-source-ingestion`: The Source handle lane accepts the same adoption identity and writes its receipt atomically into the canonical Source page.
 - `agent-bootstrap-contract`: The active agent receives the adoption trigger and draft-no-write boundary.
-- `hosted-agent-surface`: Hosted adoption doctrine and fixtures participate in the single shared v5 candidate owned by `capture-durable-personal-baselines`; this change does not mint a competing candidate.
+- `hosted-agent-surface`: Hosted adoption doctrine and fixtures participate with recurring-entity and governed-curation behavior in the single shared v5 candidate owned by `capture-durable-personal-baselines`; this change does not mint a competing candidate.
 - `hosted-gateway-contract`: Clients without direct file handles expose an explicit handoff outcome and cannot report preservation before upload commits.
 - `delegation-envelope`: Agent-initiated artifact adoption and delivery observations obey `proactive_capture`; selecting a variant is not itself write confirmation or standing authority.
 

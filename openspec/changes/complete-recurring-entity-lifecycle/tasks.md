@@ -38,6 +38,7 @@
 - [ ] 5.3 Update bootstrap and the generic scaffold directly from the registry-derived contract without a frozen kind enumeration or private term.
 - [ ] 5.4 Add delegation-envelope contract tests for `structural_suggestions`, registry-save and curation `restructure_execution`, standalone `link_acceptance`, and the stricter enclosing curation confirmation.
 - [ ] 5.5 Run scaffold privacy and leak, generated-schema, MCP, REST, CLI fingerprint, bootstrap budget, and entity-capture guidance suites.
+- [ ] 5.6 Add the generic synthetic entity-lifecycle contribution input at `tests/fixtures/hosted_v5_contributions/recurring_entity_lifecycle.json`; do not edit v5 files, and require the owner to canonicalise/freeze the input and prove the complete v1-v4 immutability manifest.
 
 ## 6. Prove f21 and kill shortcuts
 
@@ -53,4 +54,4 @@
 - [ ] 7.2 Run Ruff, targeted type checks, package and import gates, generated-contract gates, and the full lean suite.
 - [ ] 7.3 Run `openspec validate --all --strict`.
 - [ ] 7.4 Reconcile stale fixed-registry and prose-inference claims in `harden-write-and-entity-capture` before implementation delegation.
-- [ ] 7.5 After implementation and governed curation are shipped, synchronize deltas, archive completed changes through `openspec archive`, and run strict validation again.
+- [ ] 7.5 After shared v5 delivery and all merge/review evidence are complete, archive only through the owner-controlled order defined by `capture-durable-personal-baselines`, with strict validation before and after this change's archive.

@@ -11,6 +11,7 @@ Exomem can detect an unresolved wikilink that recurs, but ordinary history can r
 - Add the sibling hydration path for a resolved existing Entity whose durable facets or canonical pages remain disconnected; surface a guarded update/link proposal instead of a duplicate creation candidate.
 - Operationalise optional entity-type parent families for parent-aware filtering and traversal while preserving the singular canonical leaf kind, plural folder projection, and parentless extension compatibility.
 - Reuse the shipped vault-extensible entity-type registry and the governed curation lane. Detection remains read-only; the active agent remains the sole semantic decider; type registration and Entity mutation stay inside existing confirmation/delegation rules.
+- Contribute the type-neutral recurring-identity, ambiguity-stop, and hydrate-before-duplicate doctrine and fixtures to the single candidate-owned Hosted v5 release; never rewrite Hosted v1-v4.
 - Extend the no-nudge benchmark with synthetic positive/negative twins and explicit false-positive measurements. No live-vault names or content enter public artifacts.
 
 ## Capabilities
@@ -30,4 +31,4 @@ Exomem can detect an unresolved wikilink that recurs, but ordinary history can r
 
 ## Impact
 
-Affected areas include entity recurrence collection and audit projection, attention/review delivery, entity resolution and registry snapshots, parent-aware indexes/query filters, bootstrap and portable-agent guidance, delegation mapping, governed curation work items, the f21 no-nudge benchmark family, synthetic corpora, mutation tests, and compatibility tests for existing core and vault-defined types. `add-governed-curation-lane` is an implementation prerequisite for candidate-to-plan integration. No background LLM, same-modal text generator, confidence float, automatic Entity writer, or universal ontology is introduced.
+Affected areas include entity recurrence collection and audit projection, attention/review delivery, entity resolution and registry snapshots, parent-aware indexes/query filters, bootstrap and portable-agent guidance, delegation mapping, governed curation work items, the shared Hosted v5 doctrine/fixture composition, the f21 no-nudge benchmark family, synthetic corpora, mutation tests, and compatibility tests for existing core and vault-defined types. `add-governed-curation-lane` is an implementation prerequisite for candidate-to-plan integration. No background LLM, same-modal text generator, confidence float, automatic Entity writer, or universal ontology is introduced.
