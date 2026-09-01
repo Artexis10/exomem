@@ -318,7 +318,7 @@ def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
             value.get("version") == 1
             and value.get("committed") is True
             and sha256(value.get("key_digest"))
-            and string(value.get("trigger"), limit=128)
+            and string(value.get("trigger"), limit=64)
             and string(value.get("selected_file_id"), limit=256)
             and value.get("lane") in {"source", "evidence"}
             and string(value.get("destination"), limit=2048)
@@ -408,6 +408,20 @@ def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
         for item in files
     ) or any(key in summary for key in ("replayed", "unselected"))
     if not adoption_result:
+        raw_stored = summary.get("stored")
+        raw_failed = summary.get("failed")
+        raw_omitted = summary.get("omitted")
+        if (
+            nonnegative_int(raw_stored)
+            and raw_stored >= counts["stored"]
+            and nonnegative_int(raw_failed)
+            and raw_failed >= counts["failed"]
+            and (raw_omitted is None or nonnegative_int(raw_omitted))
+        ):
+            projected_summary = {"stored": raw_stored, "failed": raw_failed}
+            if raw_omitted is not None:
+                projected_summary["omitted"] = raw_omitted
+            return {"files": projected, "summary": projected_summary}
         return {
             "files": projected,
             "summary": {"stored": counts["stored"], "failed": counts["failed"]},

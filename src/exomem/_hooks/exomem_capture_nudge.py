@@ -45,7 +45,7 @@ from pathlib import Path
 _KB_WRITE = re.compile(
     r"(?:exomem|knowledge[_-]?base).*(?:"
     r"note|add|edit|append|create_file|replace|remember|capture_source|"
-    r"preserve_evidence|manage_memory_file|"
+    r"preserve_evidence|preserve_artifacts|manage_memory_file|"
     r"connect_memory:(?:create-entity|accept-relation)|"
     # Structured-collection lifecycle writes. A turn that filed the record or
     # moved the plan item did exactly what the capture contract asks for, and

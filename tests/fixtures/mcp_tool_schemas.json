@@ -965,7 +965,7 @@
                   "type": "string"
                 },
                 "trigger": {
-                  "maxLength": 128,
+                  "maxLength": 64,
                   "minLength": 1,
                   "type": "string"
                 },
@@ -3851,7 +3851,7 @@
                   "type": "string"
                 },
                 "trigger": {
-                  "maxLength": 128,
+                  "maxLength": 64,
                   "minLength": 1,
                   "type": "string"
                 },

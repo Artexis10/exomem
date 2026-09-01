@@ -239,7 +239,7 @@ _OptionalArtifactAdoption = Annotated[
                     "required": ["key", "trigger", "selected_file_id"],
                     "properties": {
                         "key": {"type": "string", "minLength": 1, "maxLength": 512},
-                        "trigger": {"type": "string", "minLength": 1, "maxLength": 128},
+                        "trigger": {"type": "string", "minLength": 1, "maxLength": 64},
                         "selected_file_id": {
                             "type": "string",
                             "minLength": 1,

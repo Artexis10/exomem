@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 import pytest
+from jsonschema import Draft202012Validator
 from starlette.testclient import TestClient
 
 
@@ -279,6 +280,33 @@ def test_compact_projection_preserves_approved_bounded_adoption_outcomes() -> No
     assert _artifact_receipt_projection(result) == result
 
 
+def test_compact_projection_preserves_logical_counts_when_malformed_rows_are_bounded() -> None:
+    """Detail repair must not rewrite the core's logical overflow summary."""
+    from exomem.mutation_terminal import _artifact_receipt_projection
+
+    result = {
+        "files": [
+            {
+                "file_id": f"invalid-{index}",
+                "outcome": "failed",
+                "code": "INVALID_ADOPTION",
+                "reason": "adoption trigger is invalid",
+            }
+            for index in range(8)
+        ],
+        "summary": {"stored": 0, "failed": 100_003, "omitted": 99_995},
+    }
+
+    projected = _artifact_receipt_projection(result)
+
+    assert len(projected["files"]) == 8
+    assert projected["summary"] == {
+        "stored": 0,
+        "failed": 100_003,
+        "omitted": 99_995,
+    }
+
+
 def test_public_adoption_and_delivery_schemas_are_closed() -> None:
     from exomem import commands
 
@@ -289,6 +317,69 @@ def test_public_adoption_and_delivery_schemas_are_closed() -> None:
     assert source == evidence
     assert source is not inspect.Parameter.empty
     assert delivery is not inspect.Parameter.empty
+
+
+@pytest.mark.parametrize(
+    ("length", "accepted"),
+    ((64, True), (65, False), (128, False), (129, False)),
+)
+def test_public_adoption_trigger_schema_matches_runtime_bound(
+    vault: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    length: int,
+    accepted: bool,
+) -> None:
+    from exomem import client_artifacts, commands, media_processing
+
+    command = next(item for item in commands.PRODUCT_COMMANDS if item.name == "preserve_artifacts")
+    schema = next(item for item in command.params if item.name == "adoption").schema
+    assert schema is not None
+    object_schema = schema["anyOf"][0]
+    adoption = {
+        "key": f"synthetic-boundary-{length}",
+        "trigger": "x" * length,
+        "selected_file_id": "selected-file",
+    }
+    schema_accepts = not list(Draft202012Validator(object_schema).iter_errors(adoption))
+
+    staged = tmp_path / f"selected-{length}.png"
+    staged.write_bytes(b"exact selected bytes")
+    fetches = 0
+
+    def stage(file, _budget, **_kwargs):
+        nonlocal fetches
+        fetches += 1
+        return client_artifacts.StagedArtifact(
+            file_id=str(file["file_id"]),
+            path=staged,
+            size=staged.stat().st_size,
+            sha256=hashlib.sha256(staged.read_bytes()).hexdigest(),
+            content_type="image/png",
+            filename=staged.name,
+        )
+
+    monkeypatch.setattr(client_artifacts, "stage_artifact", stage)
+    monkeypatch.setattr(media_processing, "classify_media", lambda _path: None)
+    result = client_artifacts.preserve_artifacts(
+        vault,
+        scope="synthetic-case",
+        category="outputs",
+        files=[
+            {
+                "download_url": "https://files.example/selected",
+                "file_id": "selected-file",
+                "file_name": staged.name,
+                "mime_type": "image/png",
+            }
+        ],
+        adoption=adoption,
+    )
+    runtime_accepts = result["files"][0]["outcome"] == "stored"
+
+    assert schema_accepts is accepted
+    assert runtime_accepts is accepted
+    assert fetches == int(accepted)
 
 
 def test_registry_mcp_rest_openapi_and_cli_share_closed_adoption_contract(
