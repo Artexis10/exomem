@@ -35,6 +35,7 @@ from exomem import (
 from exomem import commands as commands_module
 from exomem import hosted_gateway as gateway
 from exomem.access_log import AccessLogMiddleware
+from exomem.governance import authorization_session_lifecycle
 from exomem.governance.authorization_transport import AuthorizationCarrierMiddleware
 from exomem.hosted_runtime import (
     HostedCellConfig,
@@ -47,10 +48,16 @@ from exomem.server_hosted import register_hosted_routes
 SENSITIVE_QUERY = "sensitive-query-sentinel-7f3c"
 SENSITIVE_PATH = "Knowledge Base/private-path-sentinel-91d2.md"
 DEFAULT_REQUEST_ID = "11111111-1111-4111-8111-111111111111"
-# Maps whose KEYS are vocabulary rather than tool names. `contract` is the prominence
-# engagement contract, keyed by behavioural axis (recall/capture/narration) — `capture`
-# there names a behaviour, not the `capture` action, and advertises nothing callable.
-_ACTION_VOCABULARY_MAPS = {"front_door_actions", "simple_actions", "contract"}
+# Maps whose KEYS are vocabulary rather than tool names. The engagement contract,
+# workflow fallback, and agent protocol use keys such as `capture` and `review` for
+# behaviour; they do not advertise the same-named actions as callable.
+_ACTION_VOCABULARY_MAPS = {
+    "agent_protocol",
+    "builtin_fallback",
+    "contract",
+    "front_door_actions",
+    "simple_actions",
+}
 
 
 def _principal(label: str) -> str:
@@ -245,6 +252,8 @@ def _cell(
     expose_tier2: bool = True,
     records_reader_version: int = 2,
     lifecycle_actions_enabled: bool = False,
+    production_invoker: bool = False,
+    authorization_session_replica_id: str | None = None,
 ) -> tuple[_ASGIClient, HostedCellConfig, HostedCellLifecycle, IsolatedInvoker]:
     vault_root = tmp_path / cell_id / "vault"
     from exomem.init import init_vault
@@ -261,6 +270,7 @@ def _cell(
         enforce_transfer_v1_compatibility=False,
         records_reader_version=records_reader_version,
         lifecycle_actions_enabled=lifecycle_actions_enabled,
+        authorization_session_replica_id=authorization_session_replica_id,
         resource_limits=HostedResourceLimits(
             storage_bytes=1024 * 1024,
             upload_bytes=4096,
@@ -291,7 +301,7 @@ def _cell(
         config=config,
         lifecycle=lifecycle,
         source_schema=schema.load_source_schema(vault_root),
-        invoke_command_func=isolated,
+        invoke_command_func=None if production_invoker else isolated,
         mutation_guard_factory=mutation_guard,
         private_authenticator=private_authenticator,
         expose_tier2=expose_tier2,
@@ -340,6 +350,13 @@ def test_private_routes_use_the_injected_dynamic_authority_for_every_request(
         "security_revision": 1,
         "service_authenticated": True,
         "mutation_authority": True,
+        "authorization_session": {
+            "ready": False,
+            "code": "AUTHORIZATION_MEMBERSHIP_UNAVAILABLE",
+            "servingMembershipEpoch": None,
+            "servingReplicaCount": 0,
+            "drainingReplicaCount": 0,
+        },
         "admission_phase": "active",
         "read_admission": True,
         "write_admission": True,
@@ -666,13 +683,15 @@ def test_hosted_bootstrap_extractor_distinguishes_tool_keys_from_actions() -> No
         },
         "front_door_actions": {"review": {"intent": "action label"}},
         "knowledge_packs": {"available": [{"actions": ["ask", "review"]}]},
+        "builtin_fallback": {"capture": "propose"},
+        "agent_protocol": {"review": {"mode": "read-only"}},
     }
 
     refs = _hosted_bootstrap_tool_refs(payload)
 
     assert "read_media" in refs
     assert "ask_memory" in refs
-    assert {"ask", "review"}.isdisjoint(refs)
+    assert {"ask", "capture", "review"}.isdisjoint(refs)
 
 
 @pytest.mark.parametrize("tier2_enabled", [True, False])
@@ -1007,6 +1026,7 @@ def test_every_private_custom_route_manually_requires_service_auth(tmp_path: Pat
         ("GET", "/private/exomem/v1/live"),
         ("GET", "/private/exomem/v1/ready"),
         ("POST", "/private/exomem/v1/lifecycle/quiesce"),
+        ("POST", "/private/exomem/v1/authorization-membership/attest"),
         ("POST", "/private/exomem/v1/lifecycle/export"),
         ("POST", "/private/exomem/v1/lifecycle/export/release"),
         ("POST", "/private/exomem/v1/lifecycle/resume"),
@@ -1024,6 +1044,72 @@ def test_every_private_custom_route_manually_requires_service_auth(tmp_path: Pat
         assert config.service_credential not in response.text
 
     assert client.get("/private/exomem/v1/live", headers=valid).status_code == 200
+
+
+def test_private_runtime_attestation_derives_lifecycle_and_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class DynamicAuthority:
+        def authenticate(self, presented: str | None) -> object | None:
+            if presented == "dynamic-attestation-secret":
+                return SimpleNamespace(
+                    credential_version="active-v1",
+                    security_revision=1,
+                    preferred=True,
+                )
+            return None
+
+    client, config, lifecycle, _invoker = _cell(
+        tmp_path,
+        cell_id="cell-attestation",
+        credential="legacy-secret-must-not-work",
+        private_authenticator=DynamicAuthority(),
+        authorization_session_replica_id="cell-attestation-0",
+    )
+    captured: dict[str, object] = {}
+
+    def mint(vault_root: Path, **kwargs: object) -> bytes:
+        captured.update({"vault_root": vault_root, **kwargs})
+        return b'{"signed":"runtime-attestation"}'
+
+    monkeypatch.setattr(
+        authorization_session_lifecycle,
+        "mint_hosted_replica_readiness_attestation",
+        mint,
+    )
+    lifecycle.quiesce(timeout=1)
+
+    response = client.post(
+        "/private/exomem/v1/authorization-membership/attest",
+        headers=_headers(config, credential="dynamic-attestation-secret"),
+        json={
+            "target_epoch": 8,
+            "previous_epoch_digest": "a" * 64,
+            "ttl_seconds": 300,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    raw = b'{"signed":"runtime-attestation"}'
+    assert response.json()["data"] == {
+        "version": 1,
+        "attestation": base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii"),
+        "attestation_sha256": hashlib.sha256(raw).hexdigest(),
+    }
+    assert captured == {
+        "vault_root": config.vault_root,
+        "expected_cell_id": "cell-attestation",
+        "expected_logical_vault_id": "vault-cell-attestation",
+        "expected_replica_id": "cell-attestation-0",
+        "lifecycle_phase": "quiesced",
+        "active_reads": 0,
+        "active_mutations": 0,
+        "active_transfers": 0,
+        "target_epoch": 8,
+        "previous_epoch_digest": "a" * 64,
+        "ttl_seconds": 300,
+    }
 
 
 def test_private_readiness_is_a_complete_control_plane_binding_proof(tmp_path: Path) -> None:
@@ -1055,6 +1141,13 @@ def test_private_readiness_is_a_complete_control_plane_binding_proof(tmp_path: P
         "readAdmission": True,
         "writeAdmission": True,
         "workerPolicy": {"workerCount": 0, "semantic": False, "media": False},
+        "authorizationSession": {
+            "ready": False,
+            "code": "AUTHORIZATION_MEMBERSHIP_UNAVAILABLE",
+            "servingMembershipEpoch": None,
+            "servingReplicaCount": 0,
+            "drainingReplicaCount": 0,
+        },
         "code": "CELL_READY",
     }
 
@@ -1375,6 +1468,102 @@ def test_hosted_warming_error_preserves_retry_contract(tmp_path: Path) -> None:
         "retry_after_ms": 750,
         "request_id": DEFAULT_REQUEST_ID,
         "receipt_id": "0123456789abcdef",
+    }
+
+
+def test_hosted_operator_maintenance_refusal_preserves_terminal_guidance(
+    tmp_path: Path,
+) -> None:
+    client, config, _lifecycle, _invoker = _cell(
+        tmp_path,
+        cell_id="cell-operator-maintenance-refusal",
+        credential="operator-maintenance-service-credential-0001",
+        invoker=MutationErrorInvoker(
+            "MAINTENANCE_REQUIRES_CLI",
+            status="terminal",
+            committed=False,
+        ),
+    )
+
+    response = client.post(
+        "/private/exomem/v1/command/maintain_memory",
+        headers=_headers(config),
+        json={"mode": "reconcile", "dry_run": False},
+    )
+
+    assert response.status_code == 400, response.text
+    assert response.json()["error"] == {
+        "code": "MAINTENANCE_REQUIRES_CLI",
+        "message": "write-mode maintenance is unavailable through request-bound remote commands",
+        "remediation": (
+            "Run `exomem maintain --fix` or `exomem maintain --reconcile` on the host; "
+            "for ID backfill, run `exomem maintain_memory --mode backfill-ids "
+            "--no-dry-run`. Use audit or dry_run=true remotely."
+        ),
+        "status": "terminal",
+        "committed": False,
+        "request_id": DEFAULT_REQUEST_ID,
+        "receipt_id": "0123456789abcdef",
+    }
+    assert "private mutation exception sentinel" not in response.text
+    assert "private-holder-sentinel" not in response.text
+    assert "private-detail-sentinel" not in response.text
+
+
+@pytest.mark.parametrize(
+    ("path", "agent_profile"),
+    [
+        ("/private/exomem/v1/command/maintain_memory", None),
+        (
+            (
+                "/private/exomem/v1/agent/"
+                f"{commands_module.HOSTED_ALPHA_AGENT_V4_PROFILE}/command/maintain_memory"
+            ),
+            commands_module.HOSTED_ALPHA_AGENT_V4_PROFILE,
+        ),
+    ],
+)
+def test_hosted_http_surfaces_refuse_write_maintenance_before_manager_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    agent_profile: str | None,
+) -> None:
+    monkeypatch.setattr(
+        writer_lease,
+        "get_manager",
+        lambda: pytest.fail("hosted write maintenance reached manager dispatch"),
+    )
+    if agent_profile is not None:
+        monkeypatch.setattr(
+            HostedCellConfig,
+            "active_agent_profile",
+            property(lambda _config: agent_profile),
+        )
+    client, config, _lifecycle, _invoker = _cell(
+        tmp_path,
+        cell_id="cell-production-maintenance-refusal",
+        credential="production-maintenance-service-credential-0001",
+        production_invoker=True,
+    )
+
+    response = client.post(
+        path,
+        headers=_headers(config),
+        json={"mode": "reconcile", "dry_run": False},
+    )
+
+    assert response.status_code == 400, response.text
+    assert response.json()["error"] == {
+        "code": "MAINTENANCE_REQUIRES_CLI",
+        "message": "write-mode maintenance is unavailable through request-bound remote commands",
+        "remediation": (
+            "Run `exomem maintain --fix` or `exomem maintain --reconcile` on the host; "
+            "for ID backfill, run `exomem maintain_memory --mode backfill-ids "
+            "--no-dry-run`. Use audit or dry_run=true remotely."
+        ),
+        "status": "terminal",
+        "committed": False,
     }
 
 

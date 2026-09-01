@@ -202,22 +202,9 @@ SEQUENCE_THREE_ASSERTIONS = (
     "lifecycle_consequence_landed_unprompted",
     "no_structured_write_beyond_expectation",
 )
-
-
-@pytest.fixture
-def released(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Run as if the founder had acknowledged sequence 3.
-
-    The gate itself is asserted un-patched below. What this buys is the ability
-    to execute the trajectory now, which is the only way to know whether the
-    family is partial for the reason the amendment claims.
-    """
-
-    from epistemic import runner as runner_module
-    from epistemic import schema as schema_module
-
-    monkeypatch.setattr(schema_module, "require_family_released", lambda *a, **k: None)
-    monkeypatch.setattr(runner_module, "require_family_released", lambda *a, **k: None)
+#: The squash commit on ``main`` carrying the sequence-3 amended document and its
+#: then-pending receipt (#762). The founder pinned this at acknowledgment.
+SEQUENCE_THREE_AMENDED_REVISION = "287b984418ff3a02b26e05aafeb3bcbae255b27b"
 
 
 def test_the_document_registers_f27_and_both_assertions() -> None:
@@ -279,7 +266,7 @@ def test_the_registry_mirrors_the_document_for_f27() -> None:
 
 
 def test_the_sequence_three_receipt_folds_the_working_chain() -> None:
-    """The receipt binds sequence 2's document to the amended one, and is pending."""
+    """The receipt binds sequence 2's document to the amended one, acknowledged."""
 
     from protocol.contracts import (
         validate_working_preregistration,
@@ -289,47 +276,55 @@ def test_the_sequence_three_receipt_folds_the_working_chain() -> None:
     receipts = working_amendment_receipts(ROOT)
     assert [receipt.sequence for receipt in receipts] == [1, 2, 3]
     sequence_three = receipts[2]
-    assert sequence_three.acknowledgment_status == "pending"
-    assert sequence_three.ratifier is None
+    assert sequence_three.acknowledgment_status == "acknowledged"
+    assert sequence_three.ratifier == "Hugo Ander Kivi"
+    assert sequence_three.acknowledged_on == "2026-08-30"
+    assert sequence_three.repository_revision == SEQUENCE_THREE_AMENDED_REVISION
+    # No §3 candidacy among the affected sections, so no catastrophic-set
+    # decision is required or recorded — the amendment added no catastrophic
+    # assertion.
     assert sequence_three.catastrophic_set_decision is None
     assert sequence_three.parent_contract_sha256 == receipts[1].contract_sha256
     assert validate_working_preregistration(ROOT) == sequence_three.contract_sha256
 
 
-def test_the_withhold_gate_refuses_f27_naming_sequence_three() -> None:
+def test_the_withhold_gate_releases_f27_now_sequence_three_is_acknowledged() -> None:
+    """The same call that refused f27 before 2026-08-30 now returns."""
+
     from epistemic import amendments
-    from protocol.contracts import AmendmentAcknowledgmentPendingError
 
     amendments.reset_cache()
-    assert "f27" in amendments.withheld_family_ids(ROOT)
+    assert "f27" not in amendments.withheld_family_ids(ROOT)
     assert amendments.amendment_sequence_for("f27") == 3
-    with pytest.raises(
-        AmendmentAcknowledgmentPendingError,
-        match=r"amendment sequence 3 .*pending.*f27",
-    ):
-        amendments.require_family_released("f27", repo_root=ROOT)
+    amendments.require_family_released("f27", repo_root=ROOT)
 
 
-def test_the_withheld_red_fixture_refuses_at_load() -> None:
-    from epistemic.schema import ScenarioLoadError, load_scenario
+def test_the_once_withheld_red_fixture_loads_after_acknowledgment() -> None:
+    """The fixture's own header promised it goes green the day the receipt does."""
 
-    path = FIXTURES / "red-sequence3-withheld-family.yaml"
-    with pytest.raises(ScenarioLoadError, match=r"sequence 3.*f27"):
-        load_scenario(path)
+    from epistemic.schema import load_scenario
+
+    scenario = load_scenario(FIXTURES / "once-red-sequence3-withheld-family.yaml")
+    assert scenario.family_id == "f27"
+    # The fixture is deliberately minimal — one turn, not a conformant f27
+    # phase — but it must not carry the one dangerous shape: a turn with no
+    # seed snapshot before it, which would be scored against a previous arm's
+    # post-run vault if a sweep ever picked it up.
+    (phase,) = scenario.phases
+    assert [op.op for op in phase.ops[:2]] == ["configure", "snapshot"]
 
 
-def test_the_shipped_f27_scenario_refuses_to_load_while_pending() -> None:
-    from epistemic.schema import ScenarioLoadError, load_scenario
+def test_the_shipped_f27_scenario_loads_now_the_receipt_is_acknowledged() -> None:
+    from epistemic.schema import load_scenario
 
     scenarios = sorted(SEQUENCE3.glob("*.yaml"))
     assert len(scenarios) == 1
     for path in scenarios:
-        with pytest.raises(ScenarioLoadError, match="sequence 3"):
-            load_scenario(path)
+        assert load_scenario(path).family_id == "f27"
 
 
-def test_the_store_bearing_red_fixture_refuses_at_scenario_load(released: None) -> None:
-    """Released, so the refusal under test is the gate and not the receipt."""
+def test_the_store_bearing_red_fixture_refuses_at_scenario_load() -> None:
+    """Sequence 3 is acknowledged, so the refusal under test is the gate, not the receipt."""
 
     from epistemic.schema import ScenarioLoadError, load_scenario
 
@@ -368,7 +363,7 @@ def _fixture_without_the_hooked_seed(tmp_path) -> Path:
     return path
 
 
-def test_the_shipped_scenario_replays_the_corpus_turn_for_turn(released: None) -> None:
+def test_the_shipped_scenario_replays_the_corpus_turn_for_turn() -> None:
     from epistemic.corpora.lifecycle_replay import CORPUS_ID, replay_corpus
     from epistemic.schema import load_scenario
 
@@ -388,8 +383,30 @@ def test_the_shipped_scenario_replays_the_corpus_turn_for_turn(released: None) -
         assert {expectation.subject for expectation in phase.expect} == {CORPUS_ID}
 
 
+def test_the_manifest_amendment_status_follows_the_receipt(monkeypatch) -> None:
+    """Both branches of the derived status, so the pending arm outlives its era.
+
+    Sequence 3 is acknowledged, so the live branch is the released one; the
+    pending branch stays reachable because sequence 2 proves the mechanism is
+    not retired, and a future amendment will need it verbatim.
+    """
+
+    from epistemic.journeys import f27_replay as journey
+
+    released = journey.amendment_status()
+    assert released["amendment_sequence"] == 3
+    assert released["amendment_acknowledged"] is True
+    assert "comparative claim" in released["claim_status"]
+    assert "expected-partial" in released["claim_status"]
+
+    monkeypatch.setattr(journey, "withheld_family_ids", lambda _root: frozenset({"f27"}))
+    pending = journey.amendment_status()
+    assert pending["amendment_acknowledged"] is False
+    assert "not a comparative claim" in pending["claim_status"]
+
+
 def test_the_turn_for_turn_pin_refuses_a_phase_missing_its_seed_op(
-    released: None, tmp_path
+    tmp_path
 ) -> None:
     """F1(ii). The round-1 pin passed on this fixture; run the pin itself on it.
 
@@ -817,7 +834,7 @@ def test_extras_fail_on_a_page_outside_the_allowlist() -> None:
     assert "batch-run-summary" in result.evidence
 
 
-def test_both_assertions_run_through_evaluate_scenario(released: None) -> None:
+def test_both_assertions_run_through_evaluate_scenario() -> None:
     """The pair, bound by the shipped fixture rather than by a hand-made context."""
 
     from epistemic.runner import evaluate_scenario
@@ -1300,7 +1317,7 @@ def test_a_failed_execution_blocks_the_arm_and_is_never_a_product_result(
     assert arm.snapshot is None
 
 
-def test_a_blocked_arm_evaluates_both_assertions_blocked(tmp_path, released: None) -> None:
+def test_a_blocked_arm_evaluates_both_assertions_blocked(tmp_path) -> None:
     from epistemic.journeys import f27_replay as journey
     from epistemic.schema import load_scenario
 
@@ -1321,7 +1338,7 @@ def test_a_blocked_arm_evaluates_both_assertions_blocked(tmp_path, released: Non
         assert "harness fault" in bound.result.evidence
 
 
-def test_the_full_offline_path_runs_for_both_arms(tmp_path, released: None) -> None:
+def test_the_full_offline_path_runs_for_both_arms(tmp_path) -> None:
     """parse -> project -> evaluate -> report, on a FABRICATED transcript."""
 
     from epistemic.corpora.lifecycle_replay import replay_corpus
@@ -1373,6 +1390,12 @@ def test_the_full_offline_path_runs_for_both_arms(tmp_path, released: None) -> N
 
     report = json.loads((out / "report.json").read_text(encoding="utf-8"))
     manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    # The artifact states the receipt's own acknowledgment status, derived —
+    # not remembered. Hardcoding it already lied once (review finding, 2026-08-30).
+    assert manifest["amendment_sequence"] == 3
+    assert manifest["amendment_acknowledged"] is True
+    assert "not a comparative claim" not in manifest["claim_status"]
+    assert "expected-partial" in manifest["claim_status"]
     by_arm = {row["arm"]: row for row in report["arms"]}
     assert by_arm["hookless"]["coverage"]["intent"] == {
         "landed": 4,
@@ -1969,7 +1992,7 @@ def test_declared_cli_options_extract_bracketed_variants() -> None:
 # --- m1: the corpus id is not optional -----------------------------------
 
 
-def test_the_scenario_refuses_an_expectation_without_the_corpus_subject(released: None) -> None:
+def test_the_scenario_refuses_an_expectation_without_the_corpus_subject() -> None:
     """m1. Both assertions read their expectation out of the corpus `subject`."""
 
     from epistemic.registry import REQUIRES_SUBJECT
@@ -2138,7 +2161,7 @@ def test_the_gate_refuses_an_inflected_store_verb() -> None:
 
 
 def test_a_phase_that_forgot_its_seed_snapshot_blocks_rather_than_scoring(
-    released: None, tmp_path
+    tmp_path
 ) -> None:
     """F1. The runner reaches snapshots cumulatively — on purpose, for other families.
 
@@ -2193,7 +2216,7 @@ def test_a_phase_that_forgot_its_seed_snapshot_blocks_rather_than_scoring(
     assert "'hookless'" in hooked.evidence and "'hooked'" in hooked.evidence
 
 
-def test_a_post_run_snapshot_from_the_same_phase_is_not_a_seed(released: None) -> None:
+def test_a_post_run_snapshot_from_the_same_phase_is_not_a_seed() -> None:
     """F1. Same phase is necessary but not sufficient: the baseline is pre-turn.
 
     A phase carrying two post-run snapshots would satisfy a phase-equality check
@@ -2238,7 +2261,7 @@ def test_the_seed_snapshot_is_taken_in_the_arms_own_phase(tmp_path) -> None:
     assert arm.snapshot.phase == "hookless"
 
 
-def test_two_arms_with_no_snapshot_at_all_still_evaluate(released: None, tmp_path) -> None:
+def test_two_arms_with_no_snapshot_at_all_still_evaluate(tmp_path) -> None:
     """LOW. `_fault_snapshot` bound twice by identity is refused by the runner.
 
     An arm that faulted before its vault was seeded has neither snapshot, and

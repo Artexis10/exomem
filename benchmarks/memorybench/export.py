@@ -568,7 +568,12 @@ def _stage_environment(plan: MemoryBenchRunPlan, controlled_path: str = os.defpa
         "HF_HUB_OFFLINE": "1",
         "TRANSFORMERS_OFFLINE": "1",
     }
+    if value := os.environ.get("UV_CACHE_DIR"):
+        values["UV_CACHE_DIR"] = value
     if plan.provider == "exomem":
+        for variable in ("HF_HOME", "HF_HUB_CACHE"):
+            if value := os.environ.get(variable):
+                values[variable] = value
         values.update({
             "EXOMEM_HOME": plan.provider_checkout.root,
             "EXOMEM_COMMIT": plan.provider_checkout.commit,
@@ -916,7 +921,7 @@ def _build_export(
     try:
         checkpoint_bytes = _secure_run_read(plan, "checkpoint.json")
         loaded = _load_json_bytes(checkpoint_bytes, "checkpoint")
-        if not isinstance(loaded, dict) or not isinstance(loaded.get("questions"), list):
+        if not isinstance(loaded, dict) or not isinstance(loaded.get("questions"), dict):
             raise ValueError("checkpoint shape is invalid")
         checkpoint = loaded
         checkpoint_sha = _sha256_bytes(checkpoint_bytes)
@@ -945,14 +950,16 @@ def _build_export(
             elif checkpoint_targets is not None and checkpoint_targets != selected_ids:
                 failures.add("case_set_mismatch")
                 checkpoint_selection_mismatch = True
-            for question in checkpoint["questions"]:
-                if not isinstance(question, dict) or not isinstance(question.get("questionId"), str):
+            for checkpoint_id, question in checkpoint["questions"].items():
+                if (
+                    not isinstance(checkpoint_id, str)
+                    or not isinstance(question, dict)
+                    or question.get("questionId") != checkpoint_id
+                ):
                     failures.add("checkpoint_invalid")
                     checkpoint_by_id = {}
                     break
-                if question["questionId"] in checkpoint_by_id:
-                    failures.add("case_set_mismatch")
-                checkpoint_by_id[question["questionId"]] = question
+                checkpoint_by_id[checkpoint_id] = question
             if checkpoint_selection_mismatch:
                 checkpoint_by_id = {}
 
@@ -1015,7 +1022,9 @@ def _build_export(
             }
             phases, phase_failures = _phase_projection(source.get("phases"))
             case_failures.update(phase_failures)
-            result_file = source.get("resultFile")
+            source_phases = source.get("phases")
+            search_phase = source_phases.get("search") if isinstance(source_phases, dict) else None
+            result_file = search_phase.get("resultFile") if isinstance(search_phase, dict) else None
             if isinstance(result_file, str):
                 candidate = Path(result_file)
                 if candidate.is_absolute() or "\\" in result_file or ".." in candidate.parts:
@@ -1062,7 +1071,8 @@ def _build_export(
                 except ValueError:
                     case_failures.add("hit_invalid")
                     hits = []
-                if source.get("results") != result.get("results"):
+                checkpoint_results = search_phase.get("results") if isinstance(search_phase, dict) else None
+                if checkpoint_results != result.get("results"):
                     case_failures.add("checkpoint_result_mismatch")
 
                 case_failures.update(result_failures)
@@ -1124,6 +1134,13 @@ def _build_export(
         if result_set_rejected:
             result_ref = None
             private_ref = None
+            hits = []
+        if private_ref is None:
+            # MemoryBench source paths are private.  A partial case without the
+            # private mapping must not retain either source reference: the
+            # failure codes and phase projection remain the durable evidence.
+            checkpoint_ref = None
+            result_ref = None
             hits = []
 
         # The Exomem guest already logs a request/response pair per call, so
@@ -1370,12 +1387,16 @@ def _discover_cleanup_targets(plan: MemoryBenchRunPlan) -> list[dict[str, Any]]:
             and checkpoint.get("runId") == plan.upstream_run_id
             and checkpoint.get("provider") == plan.provider
             and checkpoint.get("benchmark") == plan.benchmark
-            and isinstance(checkpoint.get("questions"), list)
+            and isinstance(checkpoint.get("questions"), dict)
         ):
-            for question in checkpoint["questions"]:
-                if not isinstance(question, dict) or not isinstance(question.get("questionId"), str):
+            for checkpoint_id, question in checkpoint["questions"].items():
+                if (
+                    not isinstance(checkpoint_id, str)
+                    or not isinstance(question, dict)
+                    or question.get("questionId") != checkpoint_id
+                ):
                     raise ValueError("checkpoint target discovery is invalid")
-                checkpoint_by_id[question["questionId"]] = question
+                checkpoint_by_id[checkpoint_id] = question
     except Exception:
         checkpoint_by_id = {}
 
@@ -1410,13 +1431,18 @@ def _privacy_forbidden_values(plan: MemoryBenchRunPlan) -> tuple[set[str], set[s
         pass
     try:
         checkpoint = _load_json_bytes(_secure_run_read(plan, "checkpoint.json"), "checkpoint")
-        if isinstance(checkpoint, dict) and isinstance(checkpoint.get("questions"), list):
-            for question in checkpoint["questions"]:
+        if isinstance(checkpoint, dict) and isinstance(checkpoint.get("questions"), dict):
+            for question in checkpoint["questions"].values():
                 if isinstance(question, dict):
-                    for key in ("questionId", "containerTag", "resultFile"):
+                    for key in ("questionId", "containerTag"):
                         value = question.get(key)
                         if isinstance(value, str) and value:
                             opaque.add(value)
+                    phases = question.get("phases")
+                    search = phases.get("search") if isinstance(phases, dict) else None
+                    result_file = search.get("resultFile") if isinstance(search, dict) else None
+                    if isinstance(result_file, str) and result_file:
+                        opaque.add(result_file)
                     ground_truth = question.get("groundTruth")
                     if isinstance(ground_truth, str) and ground_truth:
                         content.add(ground_truth)
@@ -1440,14 +1466,22 @@ def _validate_public_privacy(payload: bytes, plan: MemoryBenchRunPlan) -> None:
     text = payload.decode("utf-8")
     from exomem.public_artifact_privacy import _scan_text
 
-    if _scan_text(text, "memorybench-export.v1.json"):
+    decoded = _load_json_bytes(payload, "public export")
+    serialized_findings = _scan_text(text, "memorybench-export.v1.json")
+    if serialized_findings and any(
+        _scan_text(value, "memorybench-export.v1.json")
+        for value in _json_string_leaves(decoded)
+    ):
+        # Scan the serialized bytes first, then confirm against decoded JSON
+        # strings so one literal relative backslash cannot become a fabricated
+        # UNC path merely because JSON escapes it with a second backslash.
         raise ValueError("public export failed shared privacy validation")
     opaque, content = _privacy_forbidden_values(plan)
     if any(value and value in text for value in opaque):
         raise ValueError("public export contains private runtime material")
     # Answers can be quoted by required public question text and retrieved hit
     # content. Equality still rejects carrying a gold value as a public field.
-    if any(value in content for value in _json_string_leaves(_load_json_bytes(payload, "public export"))):
+    if any(value in content for value in _json_string_leaves(decoded)):
         raise ValueError("public export contains private runtime material")
 
 
@@ -1570,7 +1604,7 @@ def run_export(
     except Exception:
         return ExportResult("BLOCKED", 2)
 
-    output_root.mkdir(mode=0o700)
+    output_root.mkdir(mode=0o700, parents=True)
     manifest_path = output_root / "manifest.json"
     write = (
         (lambda path, payload, *, mode=0o600: _protected_atomic_write(

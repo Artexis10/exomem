@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Records
 
 Records are Exomem's human-owned layer for observed events and current state:
@@ -43,10 +45,10 @@ authorized saved view, default-deny envelope — and takes counts rather than
 rows. A view read as plan evidence is exactly the same neutral view it is when
 read directly.
 
-For software work, Exomem owns durable intent and multi-horizon planning.
-OpenSpec and the repository own accepted software change contracts and execution
-truth; git, specifications, tests, and code remain authoritative. Outcomes and
-reusable lessons can then become governed Notes.
+Planning owns durable intent and multi-horizon planning. A resolved workflow
+contract may declare a companion owner for external execution artifacts; Records
+preserves only observed outcomes and opaque references, never companion state.
+Outcomes and reusable lessons can then become governed Notes.
 
 ## One public action surface
 
@@ -73,7 +75,8 @@ Natural routing stays simple:
 - “Create a health-journal collection.” → `create`
 - “Give me a template for logging these sessions.” → `inspect`, then use the ordinary template directly
 
-Use `maintain_memory(mode="reconcile")` for derived-index repair, never as a
+Use remote `maintain_memory(mode="reconcile", dry_run=true)` to preview derived-index
+repair, then have the host operator run `exomem maintain --reconcile`; never use it as a
 way to rewrite or reinterpret a person's canonical history.
 
 ## Human-owned storage

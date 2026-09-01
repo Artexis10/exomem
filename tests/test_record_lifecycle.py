@@ -101,6 +101,62 @@ def test_revision_and_rebaseline_upgrade_audit_without_rewriting_items(tmp_path:
     assert records.inspect_audit_gap(tmp_path, changed.path)["status"] == "acknowledged_gap"
 
 
+def test_revision_after_rebaseline_preserves_acknowledged_gap(tmp_path: Path) -> None:
+    fixture = copy_x3_fixture(tmp_path)
+    _activity_log(tmp_path)
+    manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
+    snapshot = record_formats.load_adapter(tmp_path, manifest).read()
+    records.append_record(
+        tmp_path,
+        manifest.path,
+        item=_item(),
+        item_key="88888888-8888-4888-8888-888888888888",
+        expected_container_hash=snapshot.source_versions[-1].hash,
+        why="record a session",
+    )
+
+    manifest_path = tmp_path / manifest.path
+    manifest_path.write_text(
+        manifest_path.read_text(encoding="utf-8").replace("title:", "title: Direct", 1),
+        encoding="utf-8",
+    )
+    changed = collections.load_manifest(tmp_path, manifest.path)
+    changed_snapshot = record_formats.load_adapter(tmp_path, changed).read()
+    gap = records.inspect_audit_gap(tmp_path, changed.path)
+    records.rebaseline_collection(
+        tmp_path,
+        changed.path,
+        expected_manifest_hash=changed.manifest_version.hash,
+        expected_container_hash=records.lifecycle_guards(changed, changed_snapshot)[
+            "expected_container_hash"
+        ],
+        acknowledged_gap_codes=tuple(gap["gaps"]),
+        why="acknowledge direct title correction",
+    )
+
+    rebaselined = collections.load_manifest(tmp_path, changed.path)
+    rebaselined_snapshot = record_formats.load_adapter(tmp_path, rebaselined).read()
+    before = records.inspect_audit_gap(tmp_path, rebaselined.path)
+    receipt = records.revise_collection(
+        tmp_path,
+        rebaselined.path,
+        manifest_text=manifest_path.read_text(encoding="utf-8").replace(
+            "title:", "title: User friendly", 1
+        ),
+        expected_manifest_hash=rebaselined.manifest_version.hash,
+        expected_container_hash=records.lifecycle_guards(
+            rebaselined, rebaselined_snapshot
+        )["expected_container_hash"],
+        why="make the collection title user friendly",
+    )
+
+    after = records.inspect_audit_gap(tmp_path, rebaselined.path)
+    assert receipt["operation"] == "revise"
+    assert receipt["outcome"] == "committed"
+    assert after["status"] == "acknowledged_gap"
+    assert after["discontinuities"] == before["discontinuities"]
+
+
 def test_lifecycle_rejects_topology_gaps_and_duplicate_items(tmp_path: Path) -> None:
     fixture = copy_x3_fixture(tmp_path)
     _activity_log(tmp_path)
@@ -515,6 +571,7 @@ def test_lifecycle_log_event_rejects_non_integer_version_fields(field: str, inva
             manifest=SimpleNamespace(
                 collection_id="11111111-1111-4111-8111-111111111111",
                 path="Knowledge Base/Records/Test/_collection.md",
+                semantic_profile="records",
                 storage=SimpleNamespace(source="Knowledge Base/Records/Test/log.md"),
             ),
             before_manifest_hash="a" * 64, after_manifest_hash="b" * 64,

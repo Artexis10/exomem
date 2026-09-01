@@ -6,6 +6,9 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+from conftest import initialize_vault_state_offline
+
 from exomem import resource_status
 
 
@@ -51,6 +54,15 @@ def test_collect_does_not_import_torch_or_probe_cuda(monkeypatch, tmp_path: Path
         "reap_when_idle": True,
     }
     assert status["media"]["worker_active"] is False
+    assert status["asr"] == {
+        "device_request_raw": None,
+        "compute_type_request_raw": None,
+        "device_request": "",
+        "compute_type_request": None,
+        "effective_policy": "bounded CPU int8 (quiet automatic policy)",
+        "mode": "quiet",
+        "runtime": "not probed (allocation-free status)",
+    }
     assert not (tmp_path / "Knowledge Base" / ".media-jobs.sqlite").exists()
 
 
@@ -100,9 +112,61 @@ def test_collect_reports_already_loaded_modules_without_loading_missing_ones(
     assert status["deferred_work"]["semantic_upserts"]["count"] == 1
 
 
+def test_asr_status_discloses_invalid_raw_device_without_probe(monkeypatch) -> None:
+    monkeypatch.setenv("EXOMEM_ASR_DEVICE", "wat")
+    status = resource_status.collect()
+    assert status["asr"]["device_request_raw"] == "wat"
+    assert status["asr"]["device_request"] == "invalid"
+
+
+@pytest.mark.parametrize(
+    ("mode_value", "device", "compute", "expected"),
+    [
+        ("quiet", None, None, "bounded CPU int8"),
+        ("normal", "cpu", None, "CUDA is explicitly disabled"),
+        ("normal", "cuda", None, "CUDA float16 required"),
+        ("performance", None, "float32", "that exact override"),
+        ("normal", "wat", None, "refusal"),
+    ],
+)
+def test_asr_status_resolves_policy_without_runtime_probe(monkeypatch, mode_value, device, compute, expected) -> None:
+    monkeypatch.setenv("EXOMEM_MODE", mode_value)
+    if device is not None:
+        monkeypatch.setenv("EXOMEM_ASR_DEVICE", device)
+    if compute is not None:
+        monkeypatch.setenv("EXOMEM_ASR_COMPUTE_TYPE", compute)
+    assert expected in resource_status.asr_runtime_status()["effective_policy"]
+
+
+@pytest.mark.parametrize(
+    ("mode_value", "device", "compute", "expected"),
+    [
+        ("quiet", None, "float32", "bounded CPU float32 (quiet automatic policy)"),
+        ("normal", "cpu", "float32", "bounded CPU float32; CUDA is explicitly disabled"),
+        (
+            "normal",
+            "cuda",
+            "bfloat16",
+            "CUDA bfloat16 required; no CPU fallback after refusal or runtime failure",
+        ),
+        ("normal", None, None, "automatic CUDA float16 when admitted, otherwise bounded CPU int8"),
+    ],
+)
+def test_asr_status_discloses_effective_override_policy_exactly(
+    monkeypatch, mode_value, device, compute, expected
+) -> None:
+    monkeypatch.setenv("EXOMEM_MODE", mode_value)
+    if device is not None:
+        monkeypatch.setenv("EXOMEM_ASR_DEVICE", device)
+    if compute is not None:
+        monkeypatch.setenv("EXOMEM_ASR_COMPUTE_TYPE", compute)
+    assert resource_status.asr_runtime_status()["effective_policy"] == expected
+
+
 def test_status_cli_json_is_resource_status(monkeypatch, capsys, tmp_path: Path) -> None:
     _forbid_torch_import(monkeypatch)
     monkeypatch.setenv("EXOMEM_MODE", "normal")
+    initialize_vault_state_offline(tmp_path, source="resource status CLI fixture")
 
     from exomem.__main__ import main
 

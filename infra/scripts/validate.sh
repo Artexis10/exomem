@@ -106,7 +106,8 @@ uvx --from "ruff==${RUFF_VERSION}" ruff check \
 uvx --from "mypy==${MYPY_VERSION}" mypy \
   --follow-imports skip --ignore-missing-imports --check-untyped-defs \
   "${infra_dir}"/scripts/*.py
-uv run --project "${infra_dir}/provisioner" --frozen pytest -q \
+uv run --project "${infra_dir}/provisioner" --frozen \
+  --with-editable "${repo_root}" pytest -q \
   --confcutdir="${infra_dir}/provisioner" "${infra_dir}/provisioner/tests"
 uv run --project "${infra_dir}/provisioner" --frozen ruff check \
   "${infra_dir}/provisioner/src" "${infra_dir}/provisioner/tests"

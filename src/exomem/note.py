@@ -47,6 +47,7 @@ from . import (
     relation_review,
     semantic_units,
     semantic_writes,
+    source_closure,
     temporal,
 )
 from . import (
@@ -81,8 +82,12 @@ log = logging.getLogger(__name__)
 
 
 NOTE_TYPES = (
-    "research-note", "insight", "failure", "pattern",
-    "experiment", "production-log",
+    "research-note",
+    "insight",
+    "failure",
+    "pattern",
+    "experiment",
+    "production-log",
 )
 
 
@@ -120,9 +125,7 @@ def _plan_project_registrations(
         for key, folder in folders.items():
             bootstrap_lines.append(f"  {key}:")
             bootstrap_lines.append(f"    folder: {folder}")
-            bootstrap_lines.append(
-                f"    category: {categories.get(key, 'uncategorized')}"
-            )
+            bootstrap_lines.append(f"    category: {categories.get(key, 'uncategorized')}")
         text = "\n".join(bootstrap_lines) + "\n"
         expected_hash = MISSING_CONTENT_HASH
 
@@ -134,13 +137,9 @@ def _plan_project_registrations(
             continue
         if not project_keys_module._SLUG_RE.match(candidate):
             continue
-        close = project_keys_module._closest_existing_key(
-            candidate, list(folders)
-        )
+        close = project_keys_module._closest_existing_key(candidate, list(folders))
         if close is not None:
-            raise project_keys_module.ProjectKeyTypoError(
-                candidate, close[0], close[1]
-            )
+            raise project_keys_module.ProjectKeyTypoError(candidate, close[0], close[1])
         folder = project_keys_module._title_case_slug(candidate)
         if not text.endswith("\n"):
             text += "\n"
@@ -152,9 +151,7 @@ def _plan_project_registrations(
         )
         folders[candidate] = folder
         categories[candidate] = category
-        required_project_dirs.append(
-            kb_root(vault_root) / "Notes" / "Research" / folder
-        )
+        required_project_dirs.append(kb_root(vault_root) / "Notes" / "Research" / folder)
         changed = True
         warnings.append(
             f"Auto-registered project key {candidate!r} (folder: {folder!r}"
@@ -178,10 +175,15 @@ def _plan_project_registrations(
     )
     return planned_registry, planned_write, warnings
 
+
 SEVERITY_VALUES = ("minor", "moderate", "serious", "critical")
 
 PATTERN_TYPE_VALUES = (
-    "architectural", "workflow", "prompting", "governance", "pedagogical",
+    "architectural",
+    "workflow",
+    "prompting",
+    "governance",
+    "pedagogical",
 )
 
 # Lifecycle status enums per type. research-note/insight/failure/pattern share
@@ -201,7 +203,13 @@ STATUS_EXPERIMENT = ("active", "draft", "archived", "concluded")
 # number: this vault stores no confidence score.
 EXPERIMENT_OUTCOME_VALUES = semantic_units.EPISTEMIC_OUTCOMES
 STATUS_PRODUCTION = (
-    "planned", "recorded", "edited", "published", "reflected", "dropped", "archived",
+    "planned",
+    "recorded",
+    "edited",
+    "published",
+    "reflected",
+    "dropped",
+    "archived",
 )
 
 # Types whose frontmatter spec marks `sources:` required. Omitting provenance on
@@ -261,9 +269,13 @@ class NoteError(Exception):
     code: str
     missing: list[str]
     reason: str
+    details: dict = field(default_factory=dict)
 
     def as_dict(self) -> dict:
-        return {"code": self.code, "missing": self.missing, "reason": self.reason}
+        value = {"code": self.code, "missing": self.missing, "reason": self.reason}
+        if self.details:
+            value.update(self.details)
+        return value
 
 
 @dataclass(frozen=True)
@@ -308,9 +320,7 @@ def _build_write_feedback(
     )
     note_relation_lines = {relation.line for relation in registered_note_relations}
     block_relation_lines = {
-        relation.line
-        for unit in document.rich_units
-        for relation in unit.relations
+        relation.line for unit in document.rich_units for relation in unit.relations
     }
     typed_lines = note_relation_lines | block_relation_lines
 
@@ -330,31 +340,19 @@ def _build_write_feedback(
 
     typed_note_relations = len(registered_note_relations)
     typed_block_relations = sum(len(unit.relations) for unit in document.rich_units)
-    relation_kinds = {
-        relation.kind
-        for relation in document.note_relations
-    } | {
-        relation.kind
-        for unit in document.rich_units
-        for relation in unit.relations
+    relation_kinds = {relation.kind for relation in document.note_relations} | {
+        relation.kind for unit in document.rich_units for relation in unit.relations
     }
     unregistered_labels = sorted(
         kind for kind in relation_kinds if registry.resolve(kind).status == "unregistered"
     )
-    relation_debt = (
-        audit_module.relation_debt_eligible(
-            vault_root,
-            page_type=note_type,
-            rel_path=rel_path,
-            status=status,
-            tags=tags,
-        )
-        and not (
-            typed_note_relations
-            or typed_block_relations
-            or generic_targets
-        )
-    )
+    relation_debt = audit_module.relation_debt_eligible(
+        vault_root,
+        page_type=note_type,
+        rel_path=rel_path,
+        status=status,
+        tags=tags,
+    ) and not (typed_note_relations or typed_block_relations or generic_targets)
 
     unresolved = list(source_warnings) + list(body_warnings)
     next_actions: list[str] = []
@@ -432,9 +430,7 @@ def _build_write_feedback(
             "total": len(document.rich_units),
             "by_kind": by_kind,
             "errors": [error.to_dict() for error in document.semantic_block_errors],
-            "warnings": [
-                warning.to_dict() for warning in document.semantic_block_warnings
-            ],
+            "warnings": [warning.to_dict() for warning in document.semantic_block_warnings],
         },
         "sources": {
             "cited": len(sources_norm),
@@ -497,9 +493,7 @@ def _legacy_note(
     `today` is dependency-injectable for tests; defaults to dt.date.today().
     """
     try:
-        filename_slug, slug_warnings = resolve_filename_slug(
-            title, slug, vault_root=vault_root
-        )
+        filename_slug, slug_warnings = resolve_filename_slug(title, slug, vault_root=vault_root)
     except InvalidSlugError as e:
         raise NoteError(code="INVALID_SLUG", missing=["slug"], reason=str(e)) from e
 
@@ -555,10 +549,7 @@ def _legacy_note(
                         category=project_category or "uncategorized",
                     )
                     if was_new:
-                        cat_note = (
-                            f", category: {project_category!r}"
-                            if project_category else ""
-                        )
+                        cat_note = f", category: {project_category!r}" if project_category else ""
                         autoregister_warnings.append(
                             f"Auto-registered project key {cand!r} (folder: "
                             f"{new_folder!r}{cat_note})."
@@ -628,6 +619,7 @@ def _legacy_note(
     # itself resolves cleanly; index_sync re-syncs the entry from disk after
     # the batch write, and the except-path below purges it on failure.
     from . import find as find_module
+
     resolver = find_module.shared_resolver(vault_root)
     resolver.add_pending(rel_note_no_ext, title=title)
 
@@ -638,9 +630,7 @@ def _legacy_note(
     # Normalize wikilinks inside the body to canonical full form, skipping
     # code blocks. Unresolvable links pass through with a warning so forward
     # refs are still permitted.
-    body_clean, body_warnings = normalize_body_wikilinks(
-        content, vault_root, resolver=resolver
-    )
+    body_clean, body_warnings = normalize_body_wikilinks(content, vault_root, resolver=resolver)
 
     # Corpus-aware nudges — best-effort, must NEVER block or roll back the write.
     # Computed PRE-write so the new note isn't in the sidecar yet (no self-match,
@@ -655,12 +645,11 @@ def _legacy_note(
                 inner = m.group(0)[2:-2].split("|", 1)[0].split("#", 1)[0].strip()
                 if inner:
                     existing_links.add(inner)
+
             def _cosines() -> dict[str, float]:
                 # One embedding pass, partitioned into the dup band and the
                 # contradiction band — the draft is encoded once per write.
-                return corpus_aware._best_cosine_per_file(
-                    vault_root, title=title, body=body_clean
-                )
+                return corpus_aware._best_cosine_per_file(vault_root, title=title, body=body_clean)
 
             if suggestions:
                 # The suggestion query (find-class) and the near-dup sweep
@@ -669,11 +658,15 @@ def _legacy_note(
                 # several threads (worker pool, watcher), so this introduces
                 # no new concurrency class.
                 from concurrent.futures import ThreadPoolExecutor
+
                 with ThreadPoolExecutor(max_workers=2) as pool:
                     fut_sugg = pool.submit(
                         corpus_aware.suggest_related,
-                        vault_root, title=title, body=body_clean,
-                        self_path=rel_note_no_ext, existing_links=existing_links,
+                        vault_root,
+                        title=title,
+                        body=body_clean,
+                        self_path=rel_note_no_ext,
+                        existing_links=existing_links,
                         limit=6,
                     )
                     fut_cos = pool.submit(_cosines)
@@ -686,13 +679,19 @@ def _legacy_note(
                 # stays on in every mode.
                 cosines = _cosines()
             duplicate_candidates = corpus_aware.detect_duplicates(
-                vault_root, title=title, body=body_clean,
-                self_path=rel_note_no_ext, types_filter=[note_type],
+                vault_root,
+                title=title,
+                body=body_clean,
+                self_path=rel_note_no_ext,
+                types_filter=[note_type],
                 precomputed=cosines,
             )
             overlap_candidates = corpus_aware.detect_contradictions(
-                vault_root, title=title, body=body_clean,
-                self_path=rel_note_no_ext, precomputed=cosines,
+                vault_root,
+                title=title,
+                body=body_clean,
+                self_path=rel_note_no_ext,
+                precomputed=cosines,
             )
             advisory_warnings = corpus_aware.emit_write_advisory_groups(
                 vault_root,
@@ -767,9 +766,7 @@ def _legacy_note(
     for src in sources_norm:
         src_path = _resolve_source_path(vault_root, src)
         if src_path is None or not src_path.exists():
-            warnings.append(
-                f"source not found, ingested_into back-ref skipped: {src}"
-            )
+            warnings.append(f"source not found, ingested_into back-ref skipped: {src}")
             continue
         original = src_path.read_text(encoding="utf-8")
         updated = _append_to_ingested_into(original, new_note_wikilink)
@@ -777,9 +774,7 @@ def _legacy_note(
             writes.append(PlannedWrite(path=src_path, content=updated))
             backrefs_planned += 1
         else:
-            warnings.append(
-                f"could not locate ingested_into: field in {src}, back-ref skipped"
-            )
+            warnings.append(f"could not locate ingested_into: field in {src}, back-ref skipped")
 
     # Top index.md Recent activity + log.md entry.
     top_index = kb / "index.md"
@@ -836,9 +831,7 @@ def _legacy_note(
         warnings.append(f"{kb_prefix()}index.md missing; skipped Recent activity bump")
 
     if log_file.exists():
-        full_body = log_body + (
-            f"\n\n{trim_note}" if (top_index.exists() and trim_note) else ""
-        )
+        full_body = log_body + (f"\n\n{trim_note}" if (top_index.exists() and trim_note) else "")
         new_log = _prepend_log_entry(
             log_file.read_text(encoding="utf-8"),
             date_iso=stamp_iso,
@@ -860,9 +853,7 @@ def _legacy_note(
             # — the note never landed, and a phantom entry would resolve wikilinks
             # to a nonexistent page until the next full rebuild.
             try:
-                find_module.on_resolver_files_changed(
-                    vault_root, [rel_note_no_ext + ".md"], []
-                )
+                find_module.on_resolver_files_changed(vault_root, [rel_note_no_ext + ".md"], [])
             except Exception:  # noqa: BLE001 — purge is best-effort cleanup
                 log.debug("resolver pending-purge failed", exc_info=True)
             raise
@@ -928,10 +919,7 @@ def _validate(
         return _Err(
             code="INVALID_NOTE",
             missing=["note_type"],
-            reason=(
-                f"note_type {note_type!r} is not supported. "
-                f"Valid: {list(NOTE_TYPES)}."
-            ),
+            reason=(f"note_type {note_type!r} is not supported. Valid: {list(NOTE_TYPES)}."),
         )
     if not content or not content.strip():
         missing.append("content")
@@ -940,11 +928,7 @@ def _validate(
         missing.append("title")
         reasons.append("title is empty")
 
-    bridge_supplied = (
-        bridge_of is not None
-        or bridge_scope is not None
-        or bridge_review is not None
-    )
+    bridge_supplied = bridge_of is not None or bridge_scope is not None or bridge_review is not None
     if bridge_supplied:
         if not bridge_of:
             missing.append("bridge_of")
@@ -984,8 +968,7 @@ def _validate(
                 code="INVALID_NOTE",
                 missing=["status"],
                 reason=(
-                    f"experiment status must be one of {list(STATUS_EXPERIMENT)}, "
-                    f"got {status!r}"
+                    f"experiment status must be one of {list(STATUS_EXPERIMENT)}, got {status!r}"
                 ),
             )
     elif note_type == "production-log":
@@ -1028,8 +1011,7 @@ def _validate(
     elif note_type in ("insight", "failure", "pattern"):
         if project:
             reasons.append(
-                f"{note_type} uses plural `projects`, not `project`; "
-                "the `project` arg was ignored"
+                f"{note_type} uses plural `projects`, not `project`; the `project` arg was ignored"
             )
         if projects:
             invalid = [p for p in projects if p not in valid_keys]
@@ -1047,9 +1029,7 @@ def _validate(
             return _Err(
                 code="INVALID_NOTE",
                 missing=["severity"],
-                reason=(
-                    f"severity {severity!r} not valid. Valid: {list(SEVERITY_VALUES)}"
-                ),
+                reason=(f"severity {severity!r} not valid. Valid: {list(SEVERITY_VALUES)}"),
             )
         if (
             note_type == "pattern"
@@ -1060,8 +1040,7 @@ def _validate(
                 code="INVALID_NOTE",
                 missing=["pattern_type"],
                 reason=(
-                    f"pattern_type {pattern_type!r} not valid. "
-                    f"Valid: {list(PATTERN_TYPE_VALUES)}"
+                    f"pattern_type {pattern_type!r} not valid. Valid: {list(PATTERN_TYPE_VALUES)}"
                 ),
             )
     elif note_type == "experiment":
@@ -1209,26 +1188,26 @@ def _render_note(
     # temporal scaffolding reads naturally before the body content.
     if note_type == "experiment":
         lines.append(f"started: {started}")
-        lines.append(f"duration: \"{duration}\"")
+        lines.append(f'duration: "{duration}"')
         if concluded:
             lines.append(f"concluded: {concluded}")
         lines.append(f"n: {n if n is not None else 1}")
         if hypothesis:
-            lines.append(f"hypothesis: \"{hypothesis}\"")
+            lines.append(f'hypothesis: "{hypothesis}"')
     elif note_type == "production-log":
         if recorded:
             lines.append(f"recorded: {recorded}")
         lines.append(f"published: {published if published else 'null'}")
         if host:
-            lines.append(f"host: \"{host}\"")
+            lines.append(f'host: "{host}"')
         if editor:
-            lines.append(f"editor: \"{editor}\"")
+            lines.append(f'editor: "{editor}"')
 
     # Sources block (shared by all types).
     if sources:
         lines.append("sources:")
         for s in sources:
-            lines.append(f"  - \"[[{s}]]\"")
+            lines.append(f'  - "[[{s}]]"')
     else:
         lines.append("sources: []")
 
@@ -1263,12 +1242,8 @@ def _render_note(
 # ---------------- ingested_into back-ref ----------------
 
 
-_INGESTED_FLOW_PATTERN = re.compile(
-    r"^(ingested_into:\s*)(\[\s*\]|\[[^\]\n]*\])\s*$", re.MULTILINE
-)
-_INGESTED_BLOCK_HEADER_PATTERN = re.compile(
-    r"^(ingested_into:)\s*$", re.MULTILINE
-)
+_INGESTED_FLOW_PATTERN = re.compile(r"^(ingested_into:\s*)(\[\s*\]|\[[^\]\n]*\])\s*$", re.MULTILINE)
+_INGESTED_BLOCK_HEADER_PATTERN = re.compile(r"^(ingested_into:)\s*$", re.MULTILINE)
 
 
 def _append_to_ingested_into(text: str, new_wikilink: str) -> str:
@@ -1296,11 +1271,9 @@ def _append_to_ingested_into(text: str, new_wikilink: str) -> str:
             items = [s.strip().strip('"').strip("'") for s in inner.split(",")]
         items.append(new_wikilink)
         # Convert to block form for readability (and to keep wikilink quoting clean).
-        block_lines = [prefix.rstrip().rstrip(":") + ":"] + [
-            f'  - "{item}"' for item in items
-        ]
+        block_lines = [prefix.rstrip().rstrip(":") + ":"] + [f'  - "{item}"' for item in items]
         replacement = "\n".join(block_lines)
-        return text[: flow_match.start()] + replacement + text[flow_match.end():]
+        return text[: flow_match.start()] + replacement + text[flow_match.end() :]
 
     block_match = _INGESTED_BLOCK_HEADER_PATTERN.search(text)
     if block_match:
@@ -1333,13 +1306,12 @@ def _normalize_sources(
     vault_root: Path,
     resolver: WikilinkResolver,
 ) -> tuple[list[str], list[str]]:
-    """Canonicalize each source wikilink to full vault-rooted form.
+    """Canonicalize captured paths while retaining unresolved caller values.
 
-    Returns (canonical_sources, warnings). Resolvable inputs become
-    `Knowledge Base/<path>` (no `.md`). Unresolvable inputs are kept in the
-    caller-supplied form (with `Knowledge Base/` prepended if missing) and
-    surfaced as a warning — sources are sometimes added before the source
-    file lands (e.g. compile-then-capture order), so we don't refuse.
+    Stable memory references resolve to the source's current human path for
+    Markdown/Obsidian rendering. The shared semantic commit boundary performs
+    the authoritative capture-first check; retaining unresolved values here is
+    what lets its public refusal report only what the caller actually supplied.
     """
     if not sources:
         return [], []
@@ -1350,9 +1322,26 @@ def _normalize_sources(
         s = (s or "").strip()
         if not s:
             continue
-        canonical, warning = normalize_wikilink(
-            s, vault_root, resolver=resolver, strict=False
-        )
+        cleaned = s
+        if cleaned.startswith("[[") and cleaned.endswith("]]"):
+            cleaned = cleaned[2:-2].strip()
+        cleaned = cleaned.split("|", 1)[0].strip()
+        if cleaned.lower().startswith(memory_refs.REF_PREFIX):
+            try:
+                canonical = memory_refs.resolve_identifier_read_only(
+                    vault_root,
+                    cleaned,
+                ).removesuffix(".md")
+                warning = None
+            except memory_refs.ReferenceError:
+                canonical = cleaned
+                warning = "stable source reference is unavailable"
+        else:
+            canonical, warning = normalize_wikilink(
+                cleaned, vault_root, resolver=resolver, strict=False
+            )
+            if warning:
+                canonical = cleaned
         if warning:
             warnings.append(warning)
         if canonical not in seen:
@@ -1465,9 +1454,7 @@ def _resolve_source_path(vault_root: Path, kb_relative: str) -> Path | None:
 # ---------------- log + activity helpers ----------------
 
 
-def _prepend_log_entry(
-    text: str, *, date_iso: str, verb: str, rel_path: str, body: str
-) -> str:
+def _prepend_log_entry(text: str, *, date_iso: str, verb: str, rel_path: str, body: str) -> str:
     """Insert `## [<date>] <verb> | <kb-relative-path>` entry just after the
     log's `---` separator (newest entries at top)."""
     title = rel_path.replace(kb_prefix(), "", 1)
@@ -1512,10 +1499,7 @@ def _activity_summary(
         if status:
             modifier_parts.append(status)
     modifier = (", " + ", ".join(modifier_parts)) if modifier_parts else ""
-    return (
-        f"`{path_part}` ({note_type}{modifier}, mobile via exomem) "
-        f"— \"{title.strip()}\""
-    )
+    return f'`{path_part}` ({note_type}{modifier}, mobile via exomem) — "{title.strip()}"'
 
 
 def _log_entry_body(
@@ -1546,8 +1530,7 @@ def _log_entry_body(
     else:
         scope = "cross-cutting"
     parts.append(
-        f"Mobile compile via exomem. note_type={note_type}. "
-        f"scope={scope}. \"{title.strip()}\"."
+        f'Mobile compile via exomem. note_type={note_type}. scope={scope}. "{title.strip()}".'
     )
     if note_type == "failure" and severity:
         parts.append(f"severity={severity}.")
@@ -1630,9 +1613,7 @@ def note(
     write_started = time.perf_counter()
     root = Path(vault_root)
     try:
-        filename_slug, slug_warnings = resolve_filename_slug(
-            title, slug, vault_root=vault_root
-        )
+        filename_slug, slug_warnings = resolve_filename_slug(title, slug, vault_root=vault_root)
     except InvalidSlugError as error:
         raise NoteError("INVALID_SLUG", ["slug"], str(error)) from error
     if status is None:
@@ -1649,9 +1630,7 @@ def note(
         if token_value.writer != "note" or token_value.operation != _preflight_operation:
             raise NoteError("INVALID_DRAFT_TOKEN", ["draft_token"], "draft token writer mismatch")
         replay = tuple(
-            project_keys_module.ProjectKeyIntroduction(
-                item.key, item.folder, item.category
-            )
+            project_keys_module.ProjectKeyIntroduction(item.key, item.folder, item.category)
             for item in token_value.registrations
         )
     try:
@@ -1698,14 +1677,8 @@ def note(
     # Knowledge time is stamped at commit instead: it records when the write
     # actually happened, not when the draft was prepared.
     now = today or temporal.now()
-    render_date = (
-        token_value.render_date
-        if token_value is not None
-        else temporal.render_date(now)
-    )
-    stamp_iso = (
-        token_value.stamp() if token_value is not None else temporal.stamp(now)
-    )
+    render_date = token_value.render_date if token_value is not None else temporal.render_date(now)
+    stamp_iso = token_value.stamp() if token_value is not None else temporal.stamp(now)
     registrations = tuple(
         semantic_writes.DraftRegistration(item.key, item.category, item.folder)
         for item in key_plan.introductions
@@ -1744,17 +1717,13 @@ def note(
     resolver = find_module.writer_resolver_snapshot(root)
     rel_note_no_ext = destination.removesuffix(".md")
     resolver.add_pending(rel_note_no_ext, title=title)
-    sources_norm, source_warnings = _normalize_sources(
-        sources, vault_root=root, resolver=resolver
-    )
+    sources_norm, source_warnings = _normalize_sources(sources, vault_root=root, resolver=resolver)
     bridge_refs = _normalize_bridge_sources(
         bridge_of,
         vault_root=root,
         resolver=resolver,
     )
-    body_clean, body_warnings = normalize_body_wikilinks(
-        content, root, resolver=resolver
-    )
+    body_clean, body_warnings = normalize_body_wikilinks(content, root, resolver=resolver)
     tags_clean = _clean_tags(tags)
     source = _render_note(
         note_type=note_type,
@@ -1806,7 +1775,12 @@ def note(
             predecessor_content_hash=_predecessor_content_hash,
         )
     except (semantic_writes.SemanticWriteError, relation_review.RelationReviewError) as error:
-        raise NoteError(error.code, [], error.reason) from error
+        raise NoteError(
+            error.code,
+            [],
+            error.reason,
+            dict(getattr(error, "details", None) or {}),
+        ) from error
     preflight_ms = (time.perf_counter() - write_started) * 1000.0
     if draft_hash is not None and preflight.draft_hash != draft_hash:
         raise NoteError("DRAFT_HASH_MISMATCH", ["draft_hash"], "draft requires fresh validation")
@@ -1821,22 +1795,10 @@ def note(
             f"category: {item.category!r})."
         )
     auxiliary: list[PlannedWrite] = list(key_plan.writes)
-    new_note_wikilink = f"[[{render_wikilink_target(rel_note_no_ext, root)}]]"
-    backrefs_planned = 0
-    for source_path in sorted(sources_norm):
-        resolved = _resolve_source_path(root, source_path)
-        if resolved is None or not resolved.is_file():
-            warnings.append(f"source not found, ingested_into back-ref skipped: {source_path}")
-            continue
-        original, source_guard = read_guarded_text(root, resolved)
-        updated = _append_to_ingested_into(original, new_note_wikilink)
-        if updated == original and new_note_wikilink not in original:
-            warnings.append(
-                f"could not locate ingested_into: field in {source_path}, back-ref skipped"
-            )
-        else:
-            backrefs_planned += 1
-        auxiliary.append(PlannedWrite(resolved, updated, guard=source_guard))
+    # Source closure and the guarded source→note back-reference writes live in
+    # the shared semantic commit boundary. Keeping that plan here would give
+    # this facade a second resolver and let Tier-2 writers behave differently.
+    backrefs_planned = len(sources_norm)
 
     kb = kb_root(root)
     activity_summary = _activity_summary(
@@ -1865,9 +1827,7 @@ def note(
             pending_paths=[rel_note_no_ext],
             include_unchanged=True,
         )
-        auxiliary.append(
-            PlannedWrite(top_index, counted_top or new_top, guard=top_guard)
-        )
+        auxiliary.append(PlannedWrite(top_index, counted_top or new_top, guard=top_guard))
         auxiliary.extend(sub_writes)
     else:
         warnings.append(f"{kb_prefix()}index.md missing; skipped Recent activity bump")
@@ -1904,6 +1864,14 @@ def note(
     if log_plan.rotation_note is not None:
         warnings.append(log_plan.rotation_note)
     if validate_only:
+        closure = source_closure.inspect_source_closure(root, preflight.source)
+        if not closure.closed:
+            raise NoteError(
+                source_closure.UNRESOLVED_CODE,
+                [],
+                source_closure.UNRESOLVED_MESSAGE,
+                closure.public_details(),
+            )
         log.info(
             "note write timings mode=validate note_type=%s preflight_ms=%.1f",
             note_type,
@@ -1931,7 +1899,12 @@ def note(
             operation="create",
         )
     except (semantic_writes.SemanticWriteError, relation_review.RelationReviewError) as error:
-        raise NoteError(error.code, [], error.reason) from error
+        raise NoteError(
+            error.code,
+            [],
+            error.reason,
+            dict(getattr(error, "details", None) or {}),
+        ) from error
     commit_ms = (time.perf_counter() - commit_started) * 1000.0
 
     advisory_started = time.perf_counter()

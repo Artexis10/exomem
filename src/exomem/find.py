@@ -16,7 +16,7 @@ import os
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from collections.abc import Set as AbstractSet
 from datetime import date
 from pathlib import Path
@@ -31,6 +31,7 @@ from . import (
     find_types,
     freshness,
     recall_policy,
+    runtime_resources,
     structured_filters,
 )
 from . import ranking_config as _ranking_config
@@ -84,6 +85,13 @@ _collapse = find_results.collapse
 # on FastMCP/REST worker + file-watcher threads concurrently.
 _DEGRADATION_LOCK = threading.Lock()
 _DEGRADATION_COUNTS: dict[str, int] = {}
+
+# Bounded-staleness disclosure. A request answered from the catalog's last
+# published recall projection — rather than one proven exactly current — rides
+# the existing `warming.components` envelope under this name, so a caller can
+# tell "these hits may not include the newest writes" from a fully current
+# answer without a new envelope field.
+_RECALL_PROJECTION_STALE_COMPONENT = "recall_projection"
 
 
 def _record_degradation(lane: str) -> None:
@@ -226,7 +234,7 @@ def _set_rerank_timing_profile(
 
 def _set_catalog_timing_profile(
     timings: FindTimings | None,
-    readiness: object | None = None,
+    readiness: Any | None = None,
     *,
     cache_hit: bool = False,
 ) -> None:
@@ -235,6 +243,14 @@ def _set_catalog_timing_profile(
     from . import lexstore
 
     timings.profile["catalog"] = lexstore.catalog_timing_profile(readiness, cache_hit=cache_hit)
+
+
+def _set_recall_projection_timing_outcome(
+    timings: FindTimings | None,
+    outcome: str,
+) -> None:
+    if timings is not None:
+        timings.profile.setdefault("recall_projection", {})["outcome"] = outcome
 
 
 def _record_filter_eligibility_cache_hit(timings: FindTimings | None) -> None:
@@ -412,12 +428,35 @@ class FreshnessSnapshot:
     scope (sub-ms, syscall-free); otherwise falls back to a full stat-walk that
     yields a byte-identical triple."""
 
-    def __init__(self, vault_root: Path) -> None:
+    def __init__(
+        self,
+        vault_root: Path,
+        *,
+        require_live_recall: bool = False,
+        timings: FindTimings | None = None,
+        expected_recall_checkpoints: dict[
+            str, freshness.RecallFreshnessCheckpoint
+        ]
+        | None = None,
+        stale_recall_scopes: frozenset[str] = frozenset(),
+    ) -> None:
         self._root = vault_root
+        self._require_live_recall = require_live_recall
+        self._timings = timings
+        self._expected_recall_checkpoints = expected_recall_checkpoints or {}
+        # Scopes admitted at the catalog's published projection rather than an
+        # exactly-current live one. For those the live registry has no
+        # checkpoint to require, so liveness is not a precondition and the
+        # published projection is the answer.
+        self._stale_recall_scopes = stale_recall_scopes
         self._kb: tuple[int, int, str] | None = None
         self._vault: tuple[int, int, str] | None = None
         self._recall: dict[str, freshness.RecallFreshnessCheckpoint] = {}
         self._recall_paths: dict[str, frozenset[str]] = {}
+
+    @property
+    def requires_live_recall(self) -> bool:
+        return self._require_live_recall
 
     def kb(self) -> tuple[int, int, str]:
         if self._kb is None:
@@ -481,34 +520,109 @@ class FreshnessSnapshot:
     def _load_recall_projection(self, scope: str) -> None:
         if scope in self._recall and scope in self._recall_paths:
             return
-        root = self._root.absolute()
-        cache_key = (root, scope)
-        checkpoint = freshness.recall_checkpoint(self._root, scope)
-        with _RECALL_PATH_CACHE_LOCK:
-            cached = _RECALL_PATH_CACHE.get(cache_key)
-            if cached is not None and cached[0] == checkpoint:
-                _RECALL_PATH_CACHE.move_to_end(cache_key)
-                self._recall[scope] = checkpoint
-                self._recall_paths[scope] = cached[1]
-                return
-
-        checkpoint, entries = freshness.recall_projection_snapshot(self._root, scope)
-        paths: set[str] = set()
-        for raw_path in entries:
+        with _span(self._timings, "recall_projection"):
             try:
-                paths.add(Path(raw_path).absolute().relative_to(root).as_posix())
-            except (OSError, ValueError):
-                # Registry identities outside the literal vault spelling are
-                # never valid semantic-search parents; fail closed.
-                continue
-        projected = frozenset(paths)
-        self._recall[scope] = checkpoint
-        self._recall_paths[scope] = projected
-        with _RECALL_PATH_CACHE_LOCK:
-            _RECALL_PATH_CACHE[cache_key] = (checkpoint, projected)
-            _RECALL_PATH_CACHE.move_to_end(cache_key)
-            while len(_RECALL_PATH_CACHE) > _RECALL_PATH_CACHE_SIZE:
-                _RECALL_PATH_CACHE.popitem(last=False)
+                root = self._root.absolute()
+                cache_key = (root, scope)
+                # A scope admitted as stale is answered from the published
+                # projection the admission already identity-checked, so it does
+                # not additionally require a live registry.
+                stale = scope in self._stale_recall_scopes
+                require_live = self._require_live_recall and not stale
+                projection_live = freshness.recall_is_live(self._root, scope)
+                checkpoint = (
+                    freshness.live_recall_checkpoint(self._root, scope)
+                    if require_live
+                    else freshness.recall_checkpoint(self._root, scope)
+                    if projection_live
+                    else None
+                )
+                if checkpoint is None and require_live:
+                    raise freshness.RecallProjectionUnavailable(
+                        f"maintained recall projection is not live for scope={scope!r}"
+                    )
+                expected = self._expected_recall_checkpoints.get(scope)
+                if (
+                    not stale
+                    and checkpoint is not None
+                    and expected is not None
+                    and checkpoint != expected
+                ):
+                    raise freshness.RecallProjectionUnavailable(
+                        f"maintained recall projection advanced for scope={scope!r}"
+                    )
+                if checkpoint is not None:
+                    with _RECALL_PATH_CACHE_LOCK:
+                        cached = _RECALL_PATH_CACHE.get(cache_key)
+                        if cached is not None and cached[0] == checkpoint:
+                            _RECALL_PATH_CACHE.move_to_end(cache_key)
+                            self._recall[scope] = checkpoint
+                            self._recall_paths[scope] = cached[1]
+                            _set_recall_projection_timing_outcome(
+                                self._timings,
+                                # `require_live`, not the request-wide flag: a
+                                # stale-admitted scope is served from the
+                                # published projection, so labelling its cache
+                                # hit `live_cache` would misreport it as an
+                                # exactly-current answer.
+                                "live_cache" if require_live else "cache",
+                            )
+                            return
+
+                if require_live:
+                    checkpoint, entries = freshness.recall_projection_snapshot(
+                        self._root,
+                        scope,
+                        allow_fallback=False,
+                    )
+                elif projection_live and freshness.recall_is_live(self._root, scope):
+                    checkpoint, entries = freshness.recall_projection_snapshot(
+                        self._root,
+                        scope,
+                    )
+                else:
+                    checkpoint, entries, scope_triple = (
+                        freshness.recall_projection_scope_snapshot(self._root, scope)
+                    )
+                    if scope == "vault":
+                        self._vault = scope_triple
+                    else:
+                        self._kb = scope_triple
+                if not stale and expected is not None and checkpoint != expected:
+                    raise freshness.RecallProjectionUnavailable(
+                        f"maintained recall projection advanced for scope={scope!r}"
+                    )
+                paths: set[str] = set()
+                for raw_path in entries:
+                    try:
+                        paths.add(Path(raw_path).absolute().relative_to(root).as_posix())
+                    except (OSError, ValueError):
+                        # Registry identities outside the literal vault spelling are
+                        # never valid semantic-search parents; fail closed.
+                        continue
+                projected = frozenset(paths)
+                self._recall[scope] = checkpoint
+                self._recall_paths[scope] = projected
+                with _RECALL_PATH_CACHE_LOCK:
+                    _RECALL_PATH_CACHE[cache_key] = (checkpoint, projected)
+                    _RECALL_PATH_CACHE.move_to_end(cache_key)
+                    while len(_RECALL_PATH_CACHE) > _RECALL_PATH_CACHE_SIZE:
+                        _RECALL_PATH_CACHE.popitem(last=False)
+                _set_recall_projection_timing_outcome(
+                    self._timings,
+                    (
+                        "live"
+                        if self._require_live_recall
+                        or freshness.recall_is_live(self._root, scope)
+                        else "offline_fallback"
+                    ),
+                )
+            except freshness.RecallProjectionUnavailable as exc:
+                _set_recall_projection_timing_outcome(self._timings, "unavailable")
+                raise RetrievalIndexWarming(
+                    site="projection_unavailable",
+                    status="temporarily_unavailable",
+                ) from exc
 
 
 def _freshness_key(
@@ -648,6 +762,7 @@ def find(
     degraded_out: list[str] | None = None,
     failed_out: list[str] | None = None,
     retrieval_trace: Any | None = None,
+    catalog_proof_out: dict[str, freshness.RecallFreshnessCheckpoint] | None = None,
 ) -> list[Hit] | list[SemanticUnitHit] | list[Hit | SemanticUnitHit]:
     """Search the vault. Returns up to `limit` hits.
 
@@ -748,6 +863,8 @@ def find(
     and `signals.usage_boost`. Strict no-op on cold start, absent logs, or
     `EXOMEM_DISABLE_USAGE_BOOST`. Bypasses the hot find cache.
     """
+    if catalog_proof_out is not None:
+        catalog_proof_out.clear()
     if scope not in ("kb", "vault", "kb-only"):
         raise ValueError(f"find: scope must be 'kb', 'vault', or 'kb-only', got {scope!r}")
     if mode not in ("hybrid", "keyword", "vector"):
@@ -791,6 +908,67 @@ def find(
             hard_max=MAX_RERANK_CANDIDATES,
         )
     query_norm = (query or "").lower().strip()
+
+    from . import lexstore, readiness
+
+    managed_runtime = readiness.runtime_managed()
+    admission = readiness.retrieval_admission()
+    if managed_runtime and admission["state"] == "unavailable":
+        # A background repair may have published the exact catalog after its
+        # one promotion callback lost a race.  Re-prove once before scheduling
+        # another whole-corpus rebuild; normal ready requests keep one proof.
+        admission = readiness.retrieval_admission(vault_root)
+    state = str(admission["state"]) if managed_runtime else "unverified"
+    require_live_recall = managed_runtime and freshness.event_indexes_enabled()
+    catalog_proof: dict[str, freshness.RecallFreshnessCheckpoint] | None = None
+    stale_recall_scopes: frozenset[str] = frozenset()
+    with _span(timings, "recall_projection"):
+        if state == "ready" and require_live_recall:
+            # Bounded projection lag is served, not refused. `admission` takes
+            # the strict proof when it binds and otherwise falls back to the
+            # catalog's own published projection under an unchanged identity —
+            # so a cold or reprojection-evicted registry answers from the last
+            # published projection instead of blanking semantic recall.
+            admitted = lexstore.runtime_retrieval_catalog_admission(vault_root)
+            raw_proof = admitted.checkpoints if admitted is not None else None
+            if raw_proof is None:
+                readiness.mark_unready("retrieval_catalog")
+                state = "unavailable"
+            else:
+                catalog_proof = {
+                    scope: checkpoint
+                    for scope, checkpoint in raw_proof.items()
+                    if isinstance(checkpoint, freshness.RecallFreshnessCheckpoint)
+                }
+                if set(catalog_proof) != set(freshness.SCOPES):
+                    readiness.mark_unready("retrieval_catalog")
+                    catalog_proof = None
+                    state = "unavailable"
+                else:
+                    stale_recall_scopes = frozenset(admitted.lagging_scopes)
+                    if stale_recall_scopes and degraded_out is not None:
+                        # Rides the existing warming disclosure: the envelope
+                        # already projects `warming.components`, so a stale
+                        # answer is disclosed without a new envelope field.
+                        degraded_out.append(_RECALL_PROJECTION_STALE_COMPONENT)
+                    if catalog_proof_out is not None:
+                        catalog_proof_out.update(catalog_proof)
+        if state in {"warming", "unavailable"}:
+            if state == "unavailable":
+                lexstore.request_repair(vault_root)
+            _set_recall_projection_timing_outcome(timings, state)
+            raise RetrievalIndexWarming(
+                site="catalog_proof_incomplete",
+                status=(
+                    "temporarily_unavailable"
+                    if state == "unavailable"
+                    else "warming"
+                ),
+            )
+        _set_recall_projection_timing_outcome(
+            timings,
+            "admitted" if require_live_recall else "offline",
+        )
 
     language_registry = None
 
@@ -881,7 +1059,13 @@ def find(
     # One freshness snapshot + one parsed-page memo per request: every
     # consumer below (hot cache, BM25, resolver, auto-widen, boost passes)
     # shares them instead of re-walking / re-stat'ing.
-    snapshot = FreshnessSnapshot(vault_root)
+    snapshot = FreshnessSnapshot(
+        vault_root,
+        require_live_recall=require_live_recall,
+        timings=timings,
+        expected_recall_checkpoints=catalog_proof,
+        stale_recall_scopes=stale_recall_scopes,
+    )
     page_memo: dict[str, ParsedPage | None] = {}
 
     def _page_of(rel: str) -> ParsedPage | None:
@@ -982,6 +1166,17 @@ def find(
                 _trim_find_cache(cache_size)
         return unit_hits
     mixed = effective_result_level == "mixed"
+    query_vector: Any = None
+    query_vector_ready = False
+
+    def _query_vector() -> Any:
+        nonlocal query_vector, query_vector_ready
+        if not query_vector_ready:
+            from . import embeddings
+
+            query_vector = embeddings.embed_texts([query], is_query=True)[0]
+            query_vector_ready = True
+        return query_vector
 
     # ---- Hot cache lookup (freshness-keyed; see _freshness_key above) ----
     # prefer_used bypasses the cache entirely — simplest correct interaction;
@@ -1153,6 +1348,7 @@ def find(
                 degraded_out=degraded,
                 failed_out=failed,
                 retrieval_trace=retrieval_trace,
+                query_vector_provider=_query_vector,
             )
         if retrieval_trace is not None:
             retrieval_trace.snapshot_result_plan("unit")
@@ -1207,38 +1403,40 @@ def find(
                 failed_out=failed,
             )
     else:
-        hits = _find_semantic(
-            vault_root,
-            query=query,
-            query_norm=query_norm,
-            types=types,
-            projects=projects,
-            tags=tags,
-            speakers=speakers,
-            file_types=file_types,
-            exclude_file_types=exclude_file_types,
-            limit=limit,
-            scope=walk_scope,
-            mode=mode,
-            graph=graph,
-            rerank=rerank,
-            rerank_max_candidates=rerank_max_candidates,
-            auto_rerank=auto_rerank,
-            temporal=temporal,
-            intent=intent,
-            prefer_compiled=prefer_compiled,
-            prefer_active=prefer_active,
-            prefer_used=prefer_used,
-            config=resolved_config,
-            timings=timings,
-            snapshot=snapshot,
-            page_memo=page_memo,
-            degraded_out=degraded,
-            failed_out=failed,
-            eligible_paths=eligible_paths,
-            recall_scope="kb" if scope == "kb-only" else "vault",
-            retrieval_trace=retrieval_trace,
-        )
+        with _span(timings, "semantic.search"):
+            hits = _find_semantic(
+                vault_root,
+                query=query,
+                query_norm=query_norm,
+                types=types,
+                projects=projects,
+                tags=tags,
+                speakers=speakers,
+                file_types=file_types,
+                exclude_file_types=exclude_file_types,
+                limit=limit,
+                scope=walk_scope,
+                mode=mode,
+                graph=graph,
+                rerank=rerank,
+                rerank_max_candidates=rerank_max_candidates,
+                auto_rerank=auto_rerank,
+                temporal=temporal,
+                intent=intent,
+                prefer_compiled=prefer_compiled,
+                prefer_active=prefer_active,
+                prefer_used=prefer_used,
+                config=resolved_config,
+                timings=timings,
+                snapshot=snapshot,
+                page_memo=page_memo,
+                degraded_out=degraded,
+                failed_out=failed,
+                eligible_paths=eligible_paths,
+                recall_scope="kb" if scope == "kb-only" else "vault",
+                retrieval_trace=retrieval_trace,
+                query_vector_provider=_query_vector if mixed else None,
+            )
 
     if retrieval_trace is not None and (mode == "keyword" or not query_norm):
         retrieval_trace.record_keyword_hits(hits, filter_only=not query_norm)
@@ -1705,6 +1903,8 @@ def _vector_unit_candidates(
     allowed_parent_paths: set[str],
     degraded_out: list[str] | None,
     failed_out: list[str] | None,
+    timings: FindTimings | None,
+    query_vector_provider: Callable[[], Any] | None = None,
 ) -> tuple[list[Any], dict[str, Any], str]:
     """Return bounded vector candidates without opening every Markdown parent."""
     model_name = "BAAI/bge-base-en-v1.5"
@@ -1725,7 +1925,12 @@ def _vector_unit_candidates(
         from . import embeddings
 
         index = embeddings.get_embedding_index(vault_root)
-        query_vector = embeddings.embed_texts([query], is_query=True)[0]
+        with _span(timings, "vector.unit.embed"):
+            query_vector = (
+                query_vector_provider()
+                if query_vector_provider is not None
+                else embeddings.embed_texts([query], is_query=True)[0]
+            )
         hits = index.search_semantic_units(
             query_vector,
             k=candidate_limit,
@@ -1752,6 +1957,8 @@ def _vector_unit_candidates(
             {"status": "unavailable", "reason": "dependency_unavailable", "model": model_name},
             "kb",
         )
+    except runtime_resources.ModelBusyError:
+        raise
     except Exception as error:  # noqa: BLE001 - vector lane soft-falls back
         log.warning("semantic-unit vector search failed: %s; using lexical ranking", error)
         _record_degradation("vector")
@@ -1775,6 +1982,7 @@ def _find_semantic_units(
     failed_out: list[str] | None,
     retrieval_trace: Any | None = None,
     timings: FindTimings | None = None,
+    query_vector_provider: Callable[[], Any] | None = None,
 ) -> list[SemanticUnitHit]:
     """Rank current, exactly eligible units through lexical and vector lanes."""
     from . import lexstore
@@ -1889,11 +2097,20 @@ def _find_semantic_units(
                 # scheduled the single-flight repair, so raise the typed,
                 # non-cacheable warming outcome (page-level eligibility parity).
                 if algebra.status == "complete":
-                    raise RetrievalIndexWarming()
+                    raise RetrievalIndexWarming(site="semantic_unit_index")
                 if failed_out is not None:
                     failed_out.append("semantic_units_lexical")
                 _record_degradation("semantic_units_lexical")
-                records = {}
+                # Content-only unit recall may use its established Python rung
+                # for a provably small corpus.  A catalog-identity change can
+                # invalidate every stored semantic row even though the text
+                # query remains answerable from current Markdown; do not turn
+                # that bounded fallback into an authoritative empty result.
+                records = (
+                    _eligible_unit_records(vault_root, scope=scope, plan=plan)
+                    if _bounded_lexical_repair_allowed(snapshot.for_scope(scope))
+                    else {}
+                )
             else:
                 records = _eligible_unit_records(vault_root, scope=scope, plan=plan)
         elif dnf_clauses is None:
@@ -1981,6 +2198,8 @@ def _find_semantic_units(
             allowed_parent_paths=snapshot.recall_paths(scope),
             degraded_out=degraded_out,
             failed_out=failed_out,
+            timings=timings,
+            query_vector_provider=query_vector_provider,
         )
         if (
             vector_allowed_refs is not None
@@ -2370,6 +2589,23 @@ def _eligible_filter_paths(
 
 _RETRIEVAL_WARMING_RETRY_MS = 250
 
+#: Closed, content-free vocabulary of retrieval-refusal sites. Each names ONE
+#: gate that can decline a maintained recall, so a live refusal is attributable
+#: from its envelope alone instead of by reading the server source.
+RETRIEVAL_WARMING_SITES = (
+    "projection_unavailable",
+    "catalog_proof_incomplete",
+    "semantic_unit_index",
+    "semantic_unit_seed",
+    "catalog_outcome",
+    "relation_graph",
+    "relation_graph_rebuilding",
+    "resolver_checkpoint_stale",
+    "resolver_checkpoint_absent",
+    "resolver_entries_unavailable",
+    "resolver_build_wait",
+)
+
 
 class RetrievalIndexWarming(cli_ops.OpError):
     """Typed, non-cacheable outcome for a safe exact recall plan the maintained
@@ -2383,24 +2619,46 @@ class RetrievalIndexWarming(cli_ops.OpError):
     def __init__(
         self,
         *,
+        site: str,
         status: str = "warming",
         retry_after_ms: int = _RETRIEVAL_WARMING_RETRY_MS,
+        waited_ms: int | None = None,
         message: str = (
             "the maintained semantic recall index is still warming; retry the exact recall shortly"
         ),
     ) -> None:
+        # The vocabulary is enforced HERE, not by a test reading source shapes.
+        # This envelope reaches REST and MCP verbatim, so a site built from an
+        # f-string could publish a vault path to every client; a single-quoted
+        # literal or a construct-then-raise is invisible to any source scan.
+        # No call shape can evade a constructor.
+        if site not in RETRIEVAL_WARMING_SITES:
+            raise ValueError(f"unknown retrieval refusal site: {site!r}")
         self.complete = False
         self.status = status
         self.retry_after_ms = retry_after_ms
-        super().__init__(
-            "RETRIEVAL_INDEX_WARMING",
-            message,
-            details={
-                "complete": False,
-                "status": status,
-                "retry_after_ms": retry_after_ms,
-            },
+        self.site = site
+        self.waited_ms = waited_ms
+        details: dict[str, object] = {
+            "complete": False,
+            "status": status,
+            "retry_after_ms": retry_after_ms,
+            # WHICH gate refused. Every site produced a byte-identical envelope
+            # before this, so a live refusal could not be attributed without
+            # reading the server's own source alongside its logs.
+            "site": site,
+        }
+        if waited_ms is not None:
+            details["waited_ms"] = waited_ms
+        # Exactly one content-free line per refusal: the decision trail this
+        # path never had. Names the gate, never the query or any path.
+        log.info(
+            "retrieval refusal: site=%s status=%s waited_ms=%s",
+            site,
+            status,
+            "n/a" if waited_ms is None else waited_ms,
         )
+        super().__init__("RETRIEVAL_INDEX_WARMING", message, details=details)
 
 
 def _raise_catalog_outcome(readiness: object) -> None:
@@ -2408,7 +2666,7 @@ def _raise_catalog_outcome(readiness: object) -> None:
     public_status = (
         "temporarily_unavailable" if outcome in {"transient_failure", "unsupported"} else "warming"
     )
-    raise RetrievalIndexWarming(status=public_status)
+    raise RetrievalIndexWarming(site="catalog_outcome", status=public_status)
 
 
 _RELATION_DIRECTIONS = ("any", "outbound", "inbound")
@@ -2504,12 +2762,15 @@ def _resolve_relation_filter(
         canonical, anchor=relation_of, direction=relation_direction
     )
     if result.status == "temporarily_unavailable":
-        raise RetrievalIndexWarming(status="temporarily_unavailable")
+        raise RetrievalIndexWarming(
+            site="relation_graph",
+            status="temporarily_unavailable",
+        )
     if result.status == "warming":
         epistemic_graph.schedule_background_rebuild(
             vault_root, mutation_coordinator=graph_index._canonical_mutation_coordinator()
         )
-        raise RetrievalIndexWarming(status="warming")
+        raise RetrievalIndexWarming(site="relation_graph_rebuilding", status="warming")
     return result.paths, dict(result.provenance), tuple(findings)
 
 
@@ -2551,7 +2812,7 @@ def _resolve_eligible_filter_paths(
         # has already scheduled the single-flight repair, so the honest outcome
         # is a typed, non-cacheable warming signal — not a false empty or a
         # divergent full-scan ranking.
-        raise RetrievalIndexWarming()
+        raise RetrievalIndexWarming(site="semantic_unit_seed")
     return _indexed_eligible_filter_paths(
         vault_root,
         plan=plan,
@@ -2687,6 +2948,7 @@ def _find_keyword(
     failed_out: list[str] | None = None,
 ) -> list[Hit]:
     """Keyword-mode recall, hydrating only maintained-index matches."""
+    lexical_repair = _bounded_lexical_repair_allowed(freshness_key)
     if query_norm:
         candidate_paths = _keyword_match_paths(
             vault_root,
@@ -2694,7 +2956,7 @@ def _find_keyword(
             scope,
             freshness=freshness_key,
             failed_out=failed_out,
-            repair=_bounded_lexical_repair_allowed(freshness_key),
+            repair=lexical_repair,
         )
         if eligible_paths is not None:
             # A finite eligible set (a complete category/kind plan resolved
@@ -2708,6 +2970,26 @@ def _find_keyword(
         # plan resolved through the maintained index) iterates those parents
         # directly rather than walking the scope to rediscover them.
         walk = (vault_root / rel_path for rel_path in eligible_paths)
+    elif not lexical_repair:
+        from . import lexstore
+
+        if lexstore.maintained_content_index_enabled():
+            catalog = lexstore.get_store(vault_root).catalog_readiness(
+                scope,
+                freshness_key,
+            )
+            if not catalog.complete:
+                _raise_catalog_outcome(catalog)
+        if scope == "kb":
+            kb = vault_root / kb_dirname()
+            if not kb.is_dir():
+                log.error("KB directory missing: %s", kb)
+                return []
+            walk = _walk_md(kb)
+        else:
+            from .vault import walk_vault_md
+
+            walk = walk_vault_md(vault_root)
     elif scope == "kb":
         kb = vault_root / kb_dirname()
         if not kb.is_dir():
@@ -2834,6 +3116,7 @@ def _find_semantic(
     eligible_paths: set[str] | None = None,
     recall_scope: str | None = None,
     retrieval_trace: Any | None = None,
+    query_vector_provider: Callable[[], Any] | None = None,
 ) -> list[Hit]:
     """Hybrid (BM25+vector) or vector-only mode.
 
@@ -2844,12 +3127,26 @@ def _find_semantic(
     `degraded_out`'s "the lane was deferred while a model preload is warming".
     """
     # Lazy imports — keep keyword-mode users out of the torch import path.
-    from . import embeddings, readiness, scene_frames
+    from . import embeddings, lexstore, readiness, scene_frames
 
     if snapshot is None:
         snapshot = FreshnessSnapshot(vault_root)
     if page_memo is None:
         page_memo = {}
+
+    lexical_freshness = snapshot.for_scope(scope)
+    lexical_repair = _bounded_lexical_repair_allowed(lexical_freshness)
+    if (
+        mode != "vector"
+        and not lexical_repair
+        and lexstore.maintained_content_index_enabled()
+    ):
+        catalog = lexstore.get_store(vault_root).catalog_readiness(
+            scope,
+            lexical_freshness,
+        )
+        if not catalog.complete:
+            _raise_catalog_outcome(catalog)
 
     def _page_of(rel: str) -> ParsedPage | None:
         if rel not in page_memo:
@@ -2860,33 +3157,43 @@ def _find_semantic(
             )
         return page_memo[rel]
 
-    bundle = find_candidates.collect_candidates(
-        vault_root,
-        query=query,
-        query_norm=query_norm,
-        limit=limit,
-        scope=scope,
-        mode=mode,
-        graph=graph,
-        temporal=temporal,
-        intent=intent,
-        prefer_compiled=prefer_compiled,
-        prefer_active=prefer_active,
-        prefer_used=prefer_used,
-        config=config,
-        timings=timings,
-        snapshot=snapshot,
-        page_of=_page_of,
-        keyword_match_paths=_keyword_match_paths,
-        outbound_wikilink_paths=_outbound_wikilink_paths,
-        get_query_resolver=recall_resolver_snapshot,
-        record_degradation=_record_degradation,
-        degraded_out=degraded_out,
-        failed_out=failed_out,
-        recall_paths=snapshot.recall_paths(recall_scope or scope),
-        eligible_paths=eligible_paths,
-        capture_trace=retrieval_trace is not None,
-    )
+    try:
+        bundle = find_candidates.collect_candidates(
+            vault_root,
+            query=query,
+            query_norm=query_norm,
+            limit=limit,
+            scope=scope,
+            mode=mode,
+            graph=graph,
+            temporal=temporal,
+            intent=intent,
+            prefer_compiled=prefer_compiled,
+            prefer_active=prefer_active,
+            prefer_used=prefer_used,
+            config=config,
+            timings=timings,
+            snapshot=snapshot,
+            page_of=_page_of,
+            keyword_match_paths=_keyword_match_paths,
+            outbound_wikilink_paths=_outbound_wikilink_paths,
+            get_query_resolver=lambda root, freshness=None: recall_resolver_snapshot(
+                root,
+                freshness=freshness,
+                allow_fallback=not snapshot.requires_live_recall,
+                expected_checkpoint=snapshot.recall_checkpoint("vault"),
+            ),
+            record_degradation=_record_degradation,
+            degraded_out=degraded_out,
+            failed_out=failed_out,
+            recall_paths=snapshot.recall_paths(recall_scope or scope),
+            lexical_repair=lexical_repair,
+            eligible_paths=eligible_paths,
+            capture_trace=retrieval_trace is not None,
+            query_vector_provider=query_vector_provider,
+        )
+    except lexstore.CatalogUnavailable as error:
+        _raise_catalog_outcome(error.readiness)
 
     if not bundle.had_rankings:
         # Both rankers failed or produced nothing. Degrade to keyword.
@@ -2996,136 +3303,132 @@ def _find_semantic(
     )
     hits: list[Hit] = []
     seen: set[str] = set()
-    _filter_t0 = time.perf_counter()
-    for rel_path, _score in fused:
-        if rel_path in seen:
-            continue
-        seen.add(rel_path)
-        if rel_path.rsplit("/", 1)[-1].lower() in _NAVIGATION_BASENAMES:
-            continue
-        # Final egress guard: stale/non-projected sidecars can nominate paths,
-        # but they must not cause a raw Record to be hydrated even transiently.
-        if not recall_policy.is_recall_candidate(vault_root, vault_root / rel_path):
-            continue
-        page = _page_of(rel_path)
-        if page is None:
-            continue
-        if eligible_paths is not None and rel_path not in eligible_paths:
-            continue
-        if not _passes_filters(
-            page,
-            vault_root=vault_root,
-            types=types,
-            projects=projects,
-            tags=tags,
-            speakers=speakers,
-            file_types=file_types,
-            exclude_file_types=exclude_file_types,
-        ):
-            continue
-        keyword_excerpt = _make_excerpt(page, query_norm)
-        if (
-            rel_path not in vector_paths
-            and rel_path not in graph_set
-            and rel_path not in keyword_set
-            and rel_path not in clip_set
-            and rel_path not in frame_attribution
-            and keyword_excerpt is None
-        ):
-            # No literal match, not a graph hop, not vector-ranked, not in
-            # the keyword scan. Try stem match before dropping — recovers
-            # morphology ("regulation" matching a "regulator" page). With the
-            # semantic lanes absent (see flag above) the gate relaxes from
-            # all-stems to a strict majority of the query's words anchored by
-            # at least one content word, so BM25's own top-ranked evidence
-            # survives interrogative phrasing without function-word overlap
-            # alone retaining junk.
-            if semantic_lanes_absent:
-                present, total, content_present = _stem_word_coverage(
-                    page, degraded_query_words
-                )
-                stems_ok = 2 * present > total and content_present > 0
-            else:
-                stems_ok = _stem_tokens_present(page, query_norm)
-            if not stems_ok:
+    with _span(timings, "filter_hits"):
+        for rel_path, _score in fused:
+            if rel_path in seen:
                 continue
-            keyword_excerpt = _stem_anchored_excerpt(page, query_norm)
-        elif (
-            rel_path in graph_set or rel_path in clip_set or rel_path in frame_attribution
-        ) and keyword_excerpt is None:
-            # Graph-hop neighbour, CLIP visual match, or frame-collapsed parent:
-            # no all-tokens-present requirement (the reason for surfacing is
-            # connectivity / visual similarity / a child frame's text, not this
-            # page's lexical overlap). Prefer the matched frame's OCR text as the
-            # "why", else the sidecar's leading body.
-            attr = frame_attribution.get(rel_path)
-            if attr is not None:
-                fpage = _CACHE.get(vault_root / (attr[0] + ".md"), vault_root)
-                if fpage is not None:
-                    keyword_excerpt = _make_excerpt(fpage, query_norm)
-            if keyword_excerpt is None:
-                body = page.body.strip()
-                keyword_excerpt = _collapse(body[:EXCERPT_MAX_LEN]) if body else ""
-        chunk = chunk_text_by_path.get(rel_path)
-        excerpt = _semantic_excerpt(page, query_norm, chunk, keyword_excerpt)
-        is_graph_only = (
-            rel_path in graph_set
-            and rel_path not in vector_rank_by_path
-            and rel_path not in bm25_rank_by_path
-        )
-        hit_activation: float | None = None
-        hit_usage_mult: float | None = None
-        if usage_map:
-            from . import usage as usage_module
+            seen.add(rel_path)
+            if rel_path.rsplit("/", 1)[-1].lower() in _NAVIGATION_BASENAMES:
+                continue
+            # Final egress guard: stale/non-projected sidecars can nominate paths,
+            # but they must not cause a raw Record to be hydrated even transiently.
+            if not recall_policy.is_recall_candidate(vault_root, vault_root / rel_path):
+                continue
+            page = _page_of(rel_path)
+            if page is None:
+                continue
+            if eligible_paths is not None and rel_path not in eligible_paths:
+                continue
+            if not _passes_filters(
+                page,
+                vault_root=vault_root,
+                types=types,
+                projects=projects,
+                tags=tags,
+                speakers=speakers,
+                file_types=file_types,
+                exclude_file_types=exclude_file_types,
+            ):
+                continue
+            keyword_excerpt = _make_excerpt(page, query_norm)
+            if (
+                rel_path not in vector_paths
+                and rel_path not in graph_set
+                and rel_path not in keyword_set
+                and rel_path not in clip_set
+                and rel_path not in frame_attribution
+                and keyword_excerpt is None
+            ):
+                # No literal match, not a graph hop, not vector-ranked, not in
+                # the keyword scan. Try stem match before dropping — recovers
+                # morphology ("regulation" matching a "regulator" page). With the
+                # semantic lanes absent (see flag above) the gate relaxes from
+                # all-stems to a strict majority of the query's words anchored by
+                # at least one content word, so BM25's own top-ranked evidence
+                # survives interrogative phrasing without function-word overlap
+                # alone retaining junk.
+                if semantic_lanes_absent:
+                    present, total, content_present = _stem_word_coverage(
+                        page, degraded_query_words
+                    )
+                    stems_ok = 2 * present > total and content_present > 0
+                else:
+                    stems_ok = _stem_tokens_present(page, query_norm)
+                if not stems_ok:
+                    continue
+                keyword_excerpt = _stem_anchored_excerpt(page, query_norm)
+            elif (
+                rel_path in graph_set or rel_path in clip_set or rel_path in frame_attribution
+            ) and keyword_excerpt is None:
+                # Graph-hop neighbour, CLIP visual match, or frame-collapsed parent:
+                # no all-tokens-present requirement (the reason for surfacing is
+                # connectivity / visual similarity / a child frame's text, not this
+                # page's lexical overlap). Prefer the matched frame's OCR text as the
+                # "why", else the sidecar's leading body.
+                attr = frame_attribution.get(rel_path)
+                if attr is not None:
+                    fpage = _CACHE.get(vault_root / (attr[0] + ".md"), vault_root)
+                    if fpage is not None:
+                        keyword_excerpt = _make_excerpt(fpage, query_norm)
+                if keyword_excerpt is None:
+                    body = page.body.strip()
+                    keyword_excerpt = _collapse(body[:EXCERPT_MAX_LEN]) if body else ""
+            chunk = chunk_text_by_path.get(rel_path)
+            excerpt = _semantic_excerpt(page, query_norm, chunk, keyword_excerpt)
+            is_graph_only = (
+                rel_path in graph_set
+                and rel_path not in vector_rank_by_path
+                and rel_path not in bm25_rank_by_path
+            )
+            hit_activation: float | None = None
+            hit_usage_mult: float | None = None
+            if usage_map:
+                from . import usage as usage_module
 
-            hit_activation = usage_map.get(usage_module.canon(rel_path))
-            if hit_activation is not None:
-                hit_usage_mult = usage_module.usage_multiplier(hit_activation, config)
-        attr = frame_attribution.get(rel_path)
-        hit = Hit(
-            path=page.rel_path,
-            type=page.page_type,
-            scope=page.scope,
-            title=page.title,
-            updated=page.updated,
-            excerpt=excerpt or "",
-            media_type=page.media_type,
-            media_file=page.media_file,
-            status=page.status,
-            superseded_by=page.superseded_by,
-            bm25_rank=bm25_rank_by_path.get(rel_path),
-            vector_rank=vector_rank_by_path.get(rel_path),
-            vector_score=vector_score_by_path.get(rel_path),
-            clip_rank=clip_rank_by_path.get(rel_path),
-            clip_score=clip_score_by_path.get(rel_path),
-            clip_frame_ts=clip_frame_ts_by_path.get(rel_path),
-            graph_hop=is_graph_only,
-            graph_in_degree=graph_in_degree_by_path.get(rel_path, 0),
-            graph_provenance=graph_provenance_by_path.get(rel_path),
-            keyword_rank=keyword_rank_by_path.get(rel_path),
-            activation=hit_activation,
-            usage_boost_applied=hit_usage_mult,
-            scene_frame=attr[0] if attr else None,
-            scene_frame_ts=attr[1] if attr else None,
-            snapshot_hash=page.snapshot_hash,
-        )
-        hit.transcript_ts = _transcript_ts_for_hit(page, chunk, query_norm)
-        if hit.scene_frame is None and page.media_type == "video" and page.media_file:
-            # A localized match on a video — CLIP keyframe first (existing), else a
-            # timed-transcript match — attaches the nearest PERSISTED frame so the
-            # moment is viewable, not just timestamped.
-            anchor_ts = hit.clip_frame_ts if hit.clip_frame_ts is not None else hit.transcript_ts
-            if anchor_ts is not None:
-                nf = scene_frames.nearest_frame(vault_root, page.media_file, anchor_ts)
-                if nf is not None:
-                    hit.scene_frame, hit.scene_frame_ts = nf
-        hits.append(hit)
-        if len(hits) >= target_n:
-            break
-    if timings is not None:
-        timings.stages.setdefault("filter_hits", {})["ms"] = round(
-            (time.perf_counter() - _filter_t0) * 1000.0, 3
-        )
+                hit_activation = usage_map.get(usage_module.canon(rel_path))
+                if hit_activation is not None:
+                    hit_usage_mult = usage_module.usage_multiplier(hit_activation, config)
+            attr = frame_attribution.get(rel_path)
+            hit = Hit(
+                path=page.rel_path,
+                type=page.page_type,
+                scope=page.scope,
+                title=page.title,
+                updated=page.updated,
+                excerpt=excerpt or "",
+                media_type=page.media_type,
+                media_file=page.media_file,
+                status=page.status,
+                superseded_by=page.superseded_by,
+                bm25_rank=bm25_rank_by_path.get(rel_path),
+                vector_rank=vector_rank_by_path.get(rel_path),
+                vector_score=vector_score_by_path.get(rel_path),
+                clip_rank=clip_rank_by_path.get(rel_path),
+                clip_score=clip_score_by_path.get(rel_path),
+                clip_frame_ts=clip_frame_ts_by_path.get(rel_path),
+                graph_hop=is_graph_only,
+                graph_in_degree=graph_in_degree_by_path.get(rel_path, 0),
+                graph_provenance=graph_provenance_by_path.get(rel_path),
+                keyword_rank=keyword_rank_by_path.get(rel_path),
+                activation=hit_activation,
+                usage_boost_applied=hit_usage_mult,
+                scene_frame=attr[0] if attr else None,
+                scene_frame_ts=attr[1] if attr else None,
+                snapshot_hash=page.snapshot_hash,
+            )
+            hit.transcript_ts = _transcript_ts_for_hit(page, chunk, query_norm)
+            if hit.scene_frame is None and page.media_type == "video" and page.media_file:
+                # A localized match on a video — CLIP keyframe first (existing), else a
+                # timed-transcript match — attaches the nearest PERSISTED frame so the
+                # moment is viewable, not just timestamped.
+                anchor_ts = hit.clip_frame_ts if hit.clip_frame_ts is not None else hit.transcript_ts
+                if anchor_ts is not None:
+                    nf = scene_frames.nearest_frame(vault_root, page.media_file, anchor_ts)
+                    if nf is not None:
+                        hit.scene_frame, hit.scene_frame_ts = nf
+            hits.append(hit)
+            if len(hits) >= target_n:
+                break
 
     # Resolve the rerank decision. An explicit rerank=True/False always wins;
     # otherwise (rerank is None) auto_rerank consults should_rerank on the built
@@ -3172,113 +3475,110 @@ def _find_semantic(
     scorer_input_count = 0
     unscored_tail_count = max(0, len(hits) - rerank_candidate_limit)
     if do_rerank and hits:
-        _rerank_t0 = time.perf_counter()
-        rerank_prefix = hits[:rerank_candidate_limit]
-        scorer_input_count = len(rerank_prefix)
-        try:
-            from . import embeddings as emb
+        with _span(timings, "rerank"):
+            rerank_prefix = hits[:rerank_candidate_limit]
+            scorer_input_count = len(rerank_prefix)
+            try:
+                from . import embeddings as emb
 
-            # Best passage for each hit: the matched chunk when we have one,
-            # else the leading body slice.
-            passages: list[str] = []
-            for h in rerank_prefix:
-                ctext = chunk_text_by_path.get(h.path)
-                if ctext:
-                    passages.append(ctext)
-                else:
-                    pg = _page_of(h.path)
-                    body = (pg.body if pg else "") or h.excerpt
-                    passages.append(body[:1500])  # CrossEncoder caps at 512 tokens
-            scores = emb.rerank_pairs(query, passages)
-            if len(scores) != len(rerank_prefix):
-                raise ValueError("reranker returned a score count that does not match its inputs")
-            score_updates: list[
-                tuple[
-                    Hit,
-                    int,
-                    float,
-                    float,
-                    list[dict[str, float | str]] | None,
-                ]
-            ] = []
-            for input_rank, (h, s) in enumerate(zip(rerank_prefix, scores, strict=True), start=1):
-                raw_score = float(s)
-                adjusted = raw_score
-                chain: list[dict[str, float | str]] | None = (
-                    [] if retrieval_trace is not None else None
+                # Best passage for each hit: the matched chunk when we have one,
+                # else the leading body slice.
+                passages: list[str] = []
+                for h in rerank_prefix:
+                    ctext = chunk_text_by_path.get(h.path)
+                    if ctext:
+                        passages.append(ctext)
+                    else:
+                        pg = _page_of(h.path)
+                        body = (pg.body if pg else "") or h.excerpt
+                        passages.append(body[:1500])  # CrossEncoder caps at 512 tokens
+                scores = emb.rerank_pairs(query, passages)
+                if len(scores) != len(rerank_prefix):
+                    raise ValueError("reranker returned a score count that does not match its inputs")
+                score_updates: list[
+                    tuple[
+                        Hit,
+                        int,
+                        float,
+                        float,
+                        list[dict[str, float | str]] | None,
+                    ]
+                ] = []
+                for input_rank, (h, s) in enumerate(zip(rerank_prefix, scores, strict=True), start=1):
+                    raw_score = float(s)
+                    adjusted = raw_score
+                    chain: list[dict[str, float | str]] | None = (
+                        [] if retrieval_trace is not None else None
+                    )
+                    if prefer_compiled:
+                        factor = _type_multiplier(h.type, config)
+                        before = adjusted
+                        adjusted *= factor
+                        if chain is not None:
+                            chain.append(
+                                {
+                                    "name": "type",
+                                    "factor": factor,
+                                    "before": before,
+                                    "after": adjusted,
+                                }
+                            )
+                    if prefer_active:
+                        factor = _status_multiplier(h.status, config)
+                        before = adjusted
+                        adjusted *= factor
+                        if chain is not None:
+                            chain.append(
+                                {
+                                    "name": "status",
+                                    "factor": factor,
+                                    "before": before,
+                                    "after": adjusted,
+                                }
+                            )
+                    if usage_map and h.usage_boost_applied:
+                        factor = h.usage_boost_applied
+                        before = adjusted
+                        adjusted *= factor
+                        if chain is not None:
+                            chain.append(
+                                {
+                                    "name": "usage",
+                                    "factor": factor,
+                                    "before": before,
+                                    "after": adjusted,
+                                }
+                            )
+                    score_updates.append((h, input_rank, raw_score, adjusted, chain))
+                # Commit annotations only after every returned score and multiplier
+                # has been validated. A late conversion/application failure must
+                # leave the fused fallback free of partial reranker evidence.
+                for h, input_rank, raw_score, adjusted, chain in score_updates:
+                    h.rerank_input_rank = input_rank
+                    h.rerank_raw_score = raw_score
+                    h.rerank_score = adjusted
+                    if chain is not None:
+                        h.rerank_multiplier_chain = chain
+                hits = _order_reranked_prefix(
+                    hits,
+                    prefix_count=len(rerank_prefix),
                 )
-                if prefer_compiled:
-                    factor = _type_multiplier(h.type, config)
-                    before = adjusted
-                    adjusted *= factor
-                    if chain is not None:
-                        chain.append(
-                            {
-                                "name": "type",
-                                "factor": factor,
-                                "before": before,
-                                "after": adjusted,
-                            }
-                        )
-                if prefer_active:
-                    factor = _status_multiplier(h.status, config)
-                    before = adjusted
-                    adjusted *= factor
-                    if chain is not None:
-                        chain.append(
-                            {
-                                "name": "status",
-                                "factor": factor,
-                                "before": before,
-                                "after": adjusted,
-                            }
-                        )
-                if usage_map and h.usage_boost_applied:
-                    factor = h.usage_boost_applied
-                    before = adjusted
-                    adjusted *= factor
-                    if chain is not None:
-                        chain.append(
-                            {
-                                "name": "usage",
-                                "factor": factor,
-                                "before": before,
-                                "after": adjusted,
-                            }
-                        )
-                score_updates.append((h, input_rank, raw_score, adjusted, chain))
-            # Commit annotations only after every returned score and multiplier
-            # has been validated. A late conversion/application failure must
-            # leave the fused fallback free of partial reranker evidence.
-            for h, input_rank, raw_score, adjusted, chain in score_updates:
-                h.rerank_input_rank = input_rank
-                h.rerank_raw_score = raw_score
-                h.rerank_score = adjusted
-                if chain is not None:
-                    h.rerank_multiplier_chain = chain
-            hits = _order_reranked_prefix(
-                hits,
-                prefix_count=len(rerank_prefix),
-            )
-            rerank_outcome = {"decision": "ran", "reason": "ran"}
-        except ImportError as e:
-            log.warning("rerank requested but reranker unavailable: %s", e)
-            if timings is not None:
-                timings.error("rerank", e)
-            rerank_outcome = {
-                "decision": "unavailable",
-                "reason": "dependency_unavailable",
-            }
-        except Exception as e:  # noqa: BLE001 - optional reranker must soft-fail.
-            log.warning("rerank failed: %s; returning fused order", e)
-            if timings is not None:
-                timings.error("rerank", e)
-            rerank_outcome = {"decision": "failed", "reason": "runtime_failure"}
-        finally:
-            if timings is not None:
-                timings.stages.setdefault("rerank", {})["ms"] = round(
-                    (time.perf_counter() - _rerank_t0) * 1000.0, 3
-                )
+                rerank_outcome = {"decision": "ran", "reason": "ran"}
+            except ImportError as e:
+                log.warning("rerank requested but reranker unavailable: %s", e)
+                if timings is not None:
+                    timings.error("rerank", e)
+                rerank_outcome = {
+                    "decision": "unavailable",
+                    "reason": "dependency_unavailable",
+                }
+            except runtime_resources.ModelBusyError:
+                raise
+            except Exception as e:  # noqa: BLE001 - optional reranker must soft-fail.
+                log.warning("rerank failed: %s; returning fused order", e)
+                if timings is not None:
+                    timings.error("rerank", e)
+                rerank_outcome = {"decision": "failed", "reason": "runtime_failure"}
 
     _set_rerank_timing_profile(
         timings,
@@ -3363,23 +3663,47 @@ def _find_outside_kb(
     score_by_path: dict[str, float] = {}
     lexical_backend = lexstore.cache_token(vault_root)
     try:
-        search_kwargs = {
-            "scope": "vault",
-            "freshness": snapshot.for_scope("vault") if snapshot is not None else None,
-            "allowed_paths": allowed_outside,
-        }
-        search_kwargs["repair"] = _bounded_lexical_repair_allowed(search_kwargs["freshness"])
-        bm25_hits = lexstore.search_bm25(
-            vault_root,
-            query,
-            bm25_k,
-            **search_kwargs,
-        )
+        vault_freshness = snapshot.for_scope("vault") if snapshot is not None else None
+        lexical_repair = _bounded_lexical_repair_allowed(vault_freshness)
+        bm25_hits: list[tuple[str, float]] | None
+        if (
+            not lexical_repair
+            and lexstore.maintained_content_index_enabled()
+        ):
+            catalog_result = lexstore.search_bm25_result(
+                vault_root,
+                query,
+                bm25_k,
+                scope="vault",
+                freshness=vault_freshness,
+                allowed_paths=allowed_outside,
+            )
+            if not catalog_result.readiness.complete:
+                _raise_catalog_outcome(catalog_result.readiness)
+            bm25_hits = list(catalog_result.value or [])
+        else:
+            bm25_hits = lexstore.search_bm25(
+                vault_root,
+                query,
+                bm25_k,
+                scope="vault",
+                freshness=vault_freshness,
+                allowed_paths=allowed_outside,
+                repair=lexical_repair,
+            )
         if bm25_hits is None:
             if lexstore.backend() == "python":
                 # An explicit operator rollback is allowed to use the old
                 # in-process corpus. Automatic sidecar failure is not.
-                bm25_hits = bm25.search(vault_root, query, k=bm25_k, **search_kwargs)
+                bm25_hits = bm25.search(
+                    vault_root,
+                    query,
+                    k=bm25_k,
+                    scope="vault",
+                    freshness=vault_freshness,
+                    allowed_paths=allowed_outside,
+                    repair=lexical_repair,
+                )
                 lexical_backend = "keyword_fallback"
             else:
                 if failed_out is not None:
@@ -3390,6 +3714,8 @@ def _find_outside_kb(
             if not path.startswith(kb_prefix()):
                 candidates.append(path)
                 score_by_path[path] = float(_score)
+    except RetrievalIndexWarming:
+        raise
     except Exception as e:  # noqa: BLE001 — widening must never break find
         log.warning("auto-widen lexical sidecar failed: %s", e)
         if failed_out is not None:
@@ -3639,6 +3965,17 @@ def _keyword_match_paths(
         return []
     from . import lexstore
 
+    if not repair and lexstore.maintained_content_index_enabled():
+        catalog_result = lexstore.search_substring_result(
+            vault_root,
+            query_norm,
+            scope=scope,
+            freshness=freshness,
+            k=k,
+        )
+        if not catalog_result.readiness.complete:
+            _raise_catalog_outcome(catalog_result.readiness)
+        return list(catalog_result.value or [])
     indexed = lexstore.search_substring(
         vault_root,
         query_norm,
@@ -3798,8 +4135,45 @@ _RECALL_REBUILD_LOCK = threading.Lock()
 #: Long enough that a follower waits out a real build on a large vault rather
 #: than duplicating it, short enough that a wedged leader cannot hold a reader
 #: indefinitely -- the follower simply builds its own after this.
+#:
+#: Applies to callers that may FALL BACK to building their own resolver (CLI,
+#: cold, warm-up paths). A managed request cannot use it: see the follower
+#: bound below.
 _RECALL_RESOLVER_BUILD_WAIT_SECONDS = 120.0
+
+#: The bound for a MANAGED request, which cannot fall back.
+#:
+#: The leader's build is a full vault walk plus a parse per admitted page, so
+#: on a 3.3k-file vault it runs for tens of seconds. Letting a request wait the
+#: full 120s above is not an optimisation: it is longer than any client
+#: timeout, and it is how a warm, converged cell produced hybrid refusals at
+#: exactly the 60s client deadline with the server never answering, while
+#: keyword (which needs no projected resolver) served in 2.1s.
+#:
+#: A refusal has to come back fast enough to BE a refusal, so a managed
+#: follower waits briefly, then declines with `retry_after_ms` instead of
+#: either blocking or duplicating the leader's whole-vault walk.
+_RECALL_RESOLVER_FOLLOWER_WAIT_SECONDS = 3.0
 _RECALL_RESOLVER_REBUILDS: set[Path] = set()
+
+
+def _follower_wait_seconds(*, allow_fallback: bool) -> float:
+    """How long this caller may wait on the single-flight resolver leader.
+
+    A managed request cannot fall back to its own whole-vault build, so it gets
+    the short bound and declines afterwards. A caller that MAY fall back keeps
+    the long wait, because for it waiting really is cheaper than duplicating
+    the walk.
+
+    Its own function so the choice is assertable without having to sit through
+    the wait it selects — a guard that can only be tested by hanging is a guard
+    nobody tests.
+    """
+    return (
+        _RECALL_RESOLVER_BUILD_WAIT_SECONDS
+        if allow_fallback
+        else _RECALL_RESOLVER_FOLLOWER_WAIT_SECONDS
+    )
 
 
 def _recall_checkpoint_identity(
@@ -3959,7 +4333,13 @@ def shared_resolver(vault_root: Path):
     return _get_query_resolver(vault_root)
 
 
-def recall_resolver_snapshot(vault_root: Path, freshness: tuple | None = None):
+def recall_resolver_snapshot(
+    vault_root: Path,
+    freshness: tuple | None = None,
+    *,
+    allow_fallback: bool = True,
+    expected_checkpoint: freshness.RecallFreshnessCheckpoint | None = None,
+):
     """Resolver for ordinary recall and graph expansion only.
 
     Unlike the writer resolver, this view is intentionally constructed from
@@ -3976,7 +4356,11 @@ def recall_resolver_snapshot(vault_root: Path, freshness: tuple | None = None):
     # must not pay another broad/event-registry walk just to warm this resolver.
     # The key remains distinct from the broad writer resolver by policy identity.
     freshness_key = (
-        freshness if freshness is not None else FreshnessSnapshot(root).projection_key("vault")
+        freshness
+        if freshness is not None
+        else _recall_checkpoint_identity(expected_checkpoint)
+        if expected_checkpoint is not None
+        else FreshnessSnapshot(root).projection_key("vault")
     )
     policy_version, access_fingerprint = recall_policy.recall_policy_identity(root)
     if (
@@ -3992,10 +4376,26 @@ def recall_resolver_snapshot(vault_root: Path, freshness: tuple | None = None):
     else:
         identity = (freshness_key, policy_version, access_fingerprint)
     checkpoint: freshness_module.RecallFreshnessCheckpoint | None = None
-    if freshness_module.recall_is_live(root, "vault"):
+    candidate = expected_checkpoint
+    if candidate is not None and not allow_fallback:
+        if not freshness_module.recall_checkpoint_is_current(root, "vault", candidate):
+            lexstore.request_repair(root)
+            raise RetrievalIndexWarming(
+                site="resolver_checkpoint_stale",
+                status="temporarily_unavailable",
+            )
+    if candidate is None:
+        candidate = freshness_module.live_recall_checkpoint(root, "vault")
+    if candidate is None and allow_fallback:
         candidate = freshness_module.recall_checkpoint(root, "vault")
-        if identity == _recall_checkpoint_identity(candidate):
-            checkpoint = candidate
+    if candidate is not None and identity == _recall_checkpoint_identity(candidate):
+        checkpoint = candidate
+    if not allow_fallback and checkpoint is None:
+        lexstore.request_repair(root)
+        raise RetrievalIndexWarming(
+            site="resolver_checkpoint_absent",
+            status="temporarily_unavailable",
+        )
     with _RESOLVER_LOCK:
         cached = _RECALL_RESOLVER_CACHE.get(root)
         if cached and cached[0] == identity:
@@ -4012,6 +4412,8 @@ def recall_resolver_snapshot(vault_root: Path, freshness: tuple | None = None):
     # behaviour and it stays correct; the wait is an optimisation, never a
     # dependency.
     leader = False
+    follower_wait = _follower_wait_seconds(allow_fallback=allow_fallback)
+    waited_started = time.monotonic()
     while True:
         with _RECALL_REBUILD_LOCK:
             building = _RECALL_RESOLVER_BUILDS.get(root)
@@ -4021,7 +4423,17 @@ def recall_resolver_snapshot(vault_root: Path, freshness: tuple | None = None):
                 leader = True
         if leader:
             break
-        if not building.wait(_RECALL_RESOLVER_BUILD_WAIT_SECONDS):
+        if not building.wait(follower_wait):
+            if not allow_fallback:
+                # Declining beats both alternatives: blocking past the client's
+                # deadline answers nobody, and building our own here would pay
+                # the same whole-vault walk the leader is already paying.
+                lexstore.request_repair(root)
+                raise RetrievalIndexWarming(
+                    site="resolver_build_wait",
+                    status="temporarily_unavailable",
+                    waited_ms=int((time.monotonic() - waited_started) * 1000),
+                )
             break
         with _RESOLVER_LOCK:
             cached = _RECALL_RESOLVER_CACHE.get(root)
@@ -4036,10 +4448,14 @@ def recall_resolver_snapshot(vault_root: Path, freshness: tuple | None = None):
     # would then elect itself leader and rebuild -- reintroducing the stampede
     # this exists to prevent, just narrowed to a race window.
     try:
-        entries = lexstore.get_store(root).recall_resolver_entries(
-            "vault", checkpoint.triple if checkpoint is not None else None
-        )
+        entries = lexstore.get_store(root).recall_resolver_entries("vault", checkpoint)
         if entries is None:
+            if not allow_fallback:
+                lexstore.request_repair(root)
+                raise RetrievalIndexWarming(
+                    site="resolver_entries_unavailable",
+                    status="temporarily_unavailable",
+                )
             entries = []
             for path in walk_vault_md(root):
                 if not recall_policy.is_recall_candidate(root, path):

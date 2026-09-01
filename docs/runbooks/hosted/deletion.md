@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Ordered tenant deletion
 
 ## Preconditions

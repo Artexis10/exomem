@@ -60,8 +60,36 @@ _MAX_SAVED_VIEW_FILTERS = 128
 _MAX_RECORD_PRESENTATION_FIELDS = 32
 _MAX_RECORD_PRESENTATION_TABLES = 8
 _MAX_RECORD_PRESENTATION_COLUMNS = 16
+_MAX_ITEM_FILENAME_FIELDS = 8
+_MAX_ITEM_PRESENTATION_FIELDS = 16
+_MUTABLE_FILENAME_FIELDS = frozenset(
+    {
+        "status",
+        "lifecycle",
+        "priority",
+        "commitment",
+        "horizon",
+        "health",
+        "window",
+        "window_start",
+        "window_end",
+        "starts_on",
+        "due_on",
+        "completed_on",
+    }
+)
 _PRESENTATION_SYNTHESIZED_FIELDS = frozenset(
-    {"collection_id", "record_id", "plan_id", "item_version", "inferred", "ambiguous", "parent_record_id", "child_field", "child_index"}
+    {
+        "collection_id",
+        "record_id",
+        "plan_id",
+        "item_version",
+        "inferred",
+        "ambiguous",
+        "parent_record_id",
+        "child_field",
+        "child_index",
+    }
 )
 _SAVED_VIEW_QUERY_KEYS = frozenset(
     {
@@ -210,6 +238,8 @@ def manifest_authoring_contract() -> dict[str, Any]:
             "links": {"type": "object"},
             "record_audit": {"type": "object", "readOnly": True},
             "record_presentation": _record_presentation_json_schema(),
+            "item_filename": _item_filename_json_schema(),
+            "item_presentation": _item_presentation_json_schema(),
         },
         "additionalProperties": True,
         "$defs": {"field": field_schema},
@@ -270,6 +300,12 @@ def manifest_authoring_contract() -> dict[str, Any]:
             "sections": ["summary", "tables", "notes", "details"],
             "query": "use expand_child for one declared table; expand_children works only when unambiguous",
             "repair": "direct frontmatter edits are canonical; use guarded update refresh_presentation=true after rebaseline",
+        },
+        "item_representation": {
+            "available_when": "storage.strategy=markdown-items",
+            "filename_version": 1,
+            "presentation_version": 1,
+            "identity": "collection_id plus record_id or plan_id; filename and body are projections",
         },
         "plan_links": {
             "reference": "opaque Planning reference stored under links.plans[].reference",
@@ -566,6 +602,58 @@ def _record_presentation_json_schema() -> dict[str, Any]:
     }
 
 
+def _item_filename_json_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "required": ["version", "fields"],
+        "properties": {
+            "version": {"const": 1},
+            "fields": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": _MAX_ITEM_FILENAME_FIELDS,
+                "uniqueItems": True,
+                "items": {"type": "string", "minLength": 1, "maxLength": 128},
+            },
+        },
+        "additionalProperties": False,
+    }
+
+
+def _item_presentation_json_schema() -> dict[str, Any]:
+    descriptor = {
+        "oneOf": [
+            {"type": "string", "minLength": 1, "maxLength": 128},
+            {
+                "type": "object",
+                "required": ["field"],
+                "properties": {
+                    "field": {"type": "string", "minLength": 1, "maxLength": 128},
+                    "label": {"type": "string", "minLength": 1, "maxLength": 256},
+                },
+                "additionalProperties": False,
+            },
+        ]
+    }
+    descriptors = {
+        "type": "array",
+        "maxItems": _MAX_ITEM_PRESENTATION_FIELDS,
+        "items": descriptor,
+    }
+    return {
+        "type": "object",
+        "required": ["version", "title"],
+        "properties": {
+            "version": {"const": 1},
+            "title": descriptor,
+            "summary": descriptors,
+            "long_text": descriptors,
+            "relationships": descriptors,
+        },
+        "additionalProperties": False,
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class CollectionDiagnostic:
     code: str
@@ -633,6 +721,27 @@ class CollectionLinks:
 
 
 @dataclass(frozen=True, slots=True)
+class ItemFilename:
+    version: int
+    fields: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ItemPresentationField:
+    field: str
+    label: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ItemPresentation:
+    version: int
+    title: ItemPresentationField
+    summary: tuple[ItemPresentationField, ...] = ()
+    long_text: tuple[ItemPresentationField, ...] = ()
+    relationships: tuple[ItemPresentationField, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class RecordPresentationColumn:
     field: str
     type: str
@@ -678,6 +787,8 @@ class CollectionManifest:
     governance: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
     links: CollectionLinks = field(default_factory=CollectionLinks)
     record_presentation: RecordPresentation | None = None
+    item_filename: ItemFilename | None = None
+    item_presentation: ItemPresentation | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1046,6 +1157,74 @@ def derived_item_key(manifest: CollectionManifest, values: Mapping[str, Any]) ->
     return inferred_item_key(manifest.collection_id, serialized)
 
 
+def render_item_path(
+    manifest: CollectionManifest,
+    values: Mapping[str, Any],
+    item_key: str,
+    *,
+    occupied_paths: Iterable[str] = (),
+) -> str:
+    """Render one deterministic human path without changing item identity."""
+    recipe = manifest.item_filename
+    if recipe is None:
+        raise CollectionError("ITEM_FILENAME_NOT_CONFIGURED", "item_filename is not configured")
+    parts: list[str] = []
+    for name in recipe.fields:
+        raw = values.get(name)
+        if raw is None:
+            continue
+        normalized = _natural_key_value(raw, manifest.schema.fields[name].type)
+        if normalized is None:
+            continue
+        if type(normalized) is bool:
+            text = "true" if normalized else "false"
+        else:
+            text = str(normalized).strip()
+        if text:
+            parts.append(text)
+    stem = vault.sanitize_title_filename(unicodedata.normalize("NFKC", " — ".join(parts)))
+    if not stem:
+        raise CollectionError(
+            "UNRENDERABLE_ITEM_FILENAME",
+            "item_filename values do not form a portable human filename",
+        )
+
+    occupied = {_portable_path_key(path) for path in occupied_paths}
+
+    def candidate(candidate_stem: str) -> str:
+        relative = f"{manifest.storage.source.rstrip('/')}/{candidate_stem}.md"
+        if len(relative.encode("utf-8")) > _MAX_PATH_BYTES:
+            raise CollectionError(
+                "UNRENDERABLE_ITEM_FILENAME", "rendered item path exceeds the path byte limit"
+            )
+        return relative
+
+    initial = candidate(stem)
+    if _portable_path_key(initial) not in occupied:
+        return initial
+
+    normalized_id = memory_refs.normalize_id(item_key)
+    identity = (
+        normalized_id.replace("-", "")
+        if normalized_id is not None
+        else hashlib.sha256(item_key.encode("utf-8")).hexdigest()
+    )
+    for length in (8, 12, 16, 24, 32):
+        suffix = identity[:length]
+        bounded = vault.sanitize_title_filename(
+            stem,
+            max_length=max(1, vault.SLUG_MAX_LENGTH - len(suffix) - len(" — ")),
+        )
+        if not bounded:
+            break
+        rendered = candidate(f"{bounded} — {suffix}")
+        if _portable_path_key(rendered) not in occupied:
+            return rendered
+    raise CollectionError(
+        "ITEM_FILENAME_COLLISION", "item_filename cannot be disambiguated portably"
+    )
+
+
 def source_version(path: Path | str) -> SourceVersion:
     file_path = Path(path)
     try:
@@ -1193,7 +1372,18 @@ def _manifest_from_frontmatter(
             "INVALID_COLLECTION_PATH", "storage.source must not alias the collection manifest"
         )
     schema = _parse_schema(schema_version, frontmatter.get("item_schema"))
-    presentation = _parse_record_presentation(frontmatter.get("record_presentation"), profile, storage, schema)
+    presentation = _parse_record_presentation(
+        frontmatter.get("record_presentation"), profile, storage, schema
+    )
+    item_filename = _parse_item_filename(frontmatter.get("item_filename"), profile, storage, schema)
+    item_presentation = _parse_item_presentation(
+        frontmatter.get("item_presentation"), storage, schema
+    )
+    if presentation is not None and item_presentation is not None:
+        raise CollectionError(
+            "INVALID_ITEM_PRESENTATION",
+            "record_presentation and item_presentation cannot both be active",
+        )
     audit_head = _audit_head(frontmatter, "record_audit" if profile == "records" else "plan_audit")
     if profile == "records":
         _require_records_reader_version(frontmatter, records_reader_version)
@@ -1221,6 +1411,8 @@ def _manifest_from_frontmatter(
         governance=_freeze_mapping(frontmatter.get("governance", {}), "governance"),
         links=links,
         record_presentation=presentation,
+        item_filename=item_filename,
+        item_presentation=item_presentation,
     )
 
 
@@ -1242,7 +1434,12 @@ def resolve_saved_view(manifest: CollectionManifest, name: str) -> SavedView:
     assert isinstance(plain_definition, dict)
     normalized_definition = _normalize_saved_view(
         plain_definition,
-        _saved_view_fields(manifest.schema, manifest.storage, manifest.semantic_profile, manifest.record_presentation),
+        _saved_view_fields(
+            manifest.schema,
+            manifest.storage,
+            manifest.semantic_profile,
+            manifest.record_presentation,
+        ),
         _saved_view_child_shapes(manifest.storage, manifest.record_presentation),
     )
     canonical = json.dumps(
@@ -1265,7 +1462,11 @@ def resolve_saved_view(manifest: CollectionManifest, name: str) -> SavedView:
 
 
 def _parse_saved_views(
-    value: object, schema: ItemSchema, storage: StorageSpec, semantic_profile: str, presentation: RecordPresentation | None = None
+    value: object,
+    schema: ItemSchema,
+    storage: StorageSpec,
+    semantic_profile: str,
+    presentation: RecordPresentation | None = None,
 ) -> tuple[Mapping[str, Any], Mapping[str, Any], tuple[CollectionDiagnostic, ...]]:
     views = _mapping(value, "views")
     if len(views) > _MAX_SAVED_VIEWS:
@@ -1278,20 +1479,70 @@ def _parse_saved_views(
     for name, definition in views.items():
         location = f"views.{name}" if type(name) is str else "views"
         try:
-            if type(name) is not str or not name or len(name.encode("utf-8")) > _MAX_SAVED_VIEW_NAME_BYTES:
+            if (
+                type(name) is not str
+                or not name
+                or len(name.encode("utf-8")) > _MAX_SAVED_VIEW_NAME_BYTES
+            ):
                 raise CollectionError("INVALID_SAVED_VIEW", "saved view name is invalid")
             normalized_view = _freeze_mapping(
                 _normalize_saved_view(definition, fields, child_shapes)
             )
+            _validate_saved_view_literals(normalized_view, schema, semantic_profile)
             accepted[name] = definition
             normalized[name] = normalized_view
         except CollectionError as error:
             diagnostics.append(CollectionDiagnostic(error.code, error.reason, location))
-    return _freeze_mapping(accepted, "views"), _freeze_mapping(normalized, "views"), tuple(diagnostics)
+    return (
+        _freeze_mapping(accepted, "views"),
+        _freeze_mapping(normalized, "views"),
+        tuple(diagnostics),
+    )
+
+
+def _validate_saved_view_literals(
+    definition: Mapping[str, Any],
+    schema: ItemSchema,
+    semantic_profile: str,
+) -> None:
+    query = definition.get("query")
+    if not isinstance(query, Mapping):
+        return
+    filters = query.get("filters")
+    if not isinstance(filters, list | tuple):
+        return
+    planning_horizons = frozenset({"inbox", "week", "month", "quarter", "year", "multi-year"})
+    for predicate in filters:
+        if not isinstance(predicate, Mapping):
+            continue
+        field_name = predicate.get("column")
+        operator = predicate.get("op")
+        if type(field_name) is not str or operator not in {"eq", "ne", "in", "nin"}:
+            continue
+        field = schema.fields.get(field_name)
+        allowed = (
+            planning_horizons
+            if semantic_profile == "planning" and field_name == "horizon"
+            else frozenset(field.enum)
+            if field is not None and field.enum
+            else frozenset()
+        )
+        if not allowed:
+            continue
+        raw = predicate.get("value")
+        candidates = raw if operator in {"in", "nin"} and isinstance(raw, list | tuple) else (raw,)
+        if any(candidate not in allowed for candidate in candidates):
+            raise CollectionError(
+                "INVALID_SAVED_VIEW",
+                f"saved view {field_name} literal is outside the profile vocabulary",
+            )
 
 
 def _saved_view_fields(
-    schema: ItemSchema, storage: StorageSpec, semantic_profile: str, presentation: RecordPresentation | None = None
+    schema: ItemSchema,
+    storage: StorageSpec,
+    semantic_profile: str,
+    presentation: RecordPresentation | None = None,
 ) -> set[str]:
     fields = set(schema.fields) | set(_SAVED_VIEW_SHARED_SYSTEM_FIELDS)
     fields.add(profile_for(semantic_profile).item_id_property)
@@ -1350,9 +1601,7 @@ def _saved_view_selected_fields(
         raise CollectionError("INVALID_SAVED_VIEW", "saved view expand_child is invalid")
     all_child_columns = set().union(*child_shapes.values()) if child_shapes else set()
     return (
-        set(fields)
-        - all_child_columns
-        - {selected_child}
+        set(fields) - all_child_columns - {selected_child}
         | set(selected)
         | {"parent_record_id", "child_field", "child_index"}
     )
@@ -1363,8 +1612,10 @@ def _normalize_saved_view(
     fields: set[str],
     child_shapes: Mapping[str, frozenset[str]] = MappingProxyType({}),
 ) -> dict[str, Any]:
-    if not isinstance(value, Mapping) or not value or not _mapping_has_only_keys(
-        value, {"query", "sort", "source_snapshot"}
+    if (
+        not isinstance(value, Mapping)
+        or not value
+        or not _mapping_has_only_keys(value, {"query", "sort", "source_snapshot"})
     ):
         raise CollectionError("INVALID_SAVED_VIEW", "saved view definition is invalid")
     raw_query = value.get("query", {})
@@ -1471,8 +1722,7 @@ def _normalize_saved_view_filters(value: object, fields: set[str]) -> list[dict[
         if not all(type(column) is str for column in value):
             raise CollectionError("INVALID_SAVED_VIEW", "saved view filters are invalid")
         raw_filters = [
-            {"column": column, "op": "eq", "value": item}
-            for column, item in sorted(value.items())
+            {"column": column, "op": "eq", "value": item} for column, item in sorted(value.items())
         ]
     elif isinstance(value, list):
         raw_filters = value
@@ -1533,7 +1783,11 @@ def _require_records_reader_version(frontmatter: Mapping[str, Any], reader_versi
             "RECORDS_READER_VERSION_UNSUPPORTED", "Records reader version is unsupported"
         )
     audit = frontmatter.get("record_audit")
-    if isinstance(audit, Mapping) and type(audit.get("version")) is int and audit["version"] > reader_version:
+    if (
+        isinstance(audit, Mapping)
+        and type(audit.get("version")) is int
+        and audit["version"] > reader_version
+    ):
         raise CollectionError(
             "RECORDS_READER_VERSION_UNSUPPORTED", "Records reader version is unsupported"
         )
@@ -1568,7 +1822,7 @@ def _audit_head(frontmatter: Mapping[str, Any], name: str) -> str | None:
         # far rarer still, and it keeps failing here rather than loading a head
         # that was never written.
         head = str(head).zfill(_AUDIT_HEAD_LENGTH)
-    supported_versions = {1, 2} if name == "record_audit" else {1}
+    supported_versions = {1, 2}
     if (
         type(audit.get("version")) is not int
         or audit["version"] not in supported_versions
@@ -1774,6 +2028,146 @@ def _parse_schema(version: int, value: object) -> ItemSchema:
     return ItemSchema(version, MappingProxyType(fields), natural_key)
 
 
+def _parse_item_filename(
+    value: object,
+    profile: str,
+    storage: StorageSpec,
+    schema: ItemSchema,
+) -> ItemFilename | None:
+    if value is None:
+        return None
+    if storage.strategy != "markdown-items":
+        raise CollectionError(
+            "INVALID_ITEM_FILENAME",
+            "item_filename is available only to markdown-items collections",
+        )
+    raw = _mapping(value, "item_filename")
+    if set(raw) != {"version", "fields"} or raw.get("version") != 1:
+        raise CollectionError("INVALID_ITEM_FILENAME", "item_filename shape is invalid")
+    fields = raw.get("fields")
+    if (
+        not isinstance(fields, list)
+        or not fields
+        or len(fields) > _MAX_ITEM_FILENAME_FIELDS
+        or any(type(name) is not str or not name or name not in schema.fields for name in fields)
+        or len(set(fields)) != len(fields)
+    ):
+        raise CollectionError("INVALID_ITEM_FILENAME", "item_filename fields are invalid")
+    names = tuple(fields)
+    if any(schema.fields[name].type not in _PRESENTATION_SCALAR_TYPES - {"link"} for name in names):
+        raise CollectionError(
+            "INVALID_ITEM_FILENAME", "item_filename fields must be portable scalar values"
+        )
+    if set(names) & _MUTABLE_FILENAME_FIELDS:
+        raise CollectionError(
+            "INVALID_ITEM_FILENAME", "item_filename cannot use mutable workflow fields"
+        )
+    if profile == "planning":
+        if names != ("title",) or "title" not in schema.natural_key:
+            raise CollectionError(
+                "INVALID_ITEM_FILENAME", "Planning item_filename must use only title"
+            )
+    elif any(name not in schema.natural_key for name in names):
+        raise CollectionError(
+            "INVALID_ITEM_FILENAME", "item_filename fields must belong to the natural key"
+        )
+    return ItemFilename(1, names)
+
+
+def _parse_item_presentation(
+    value: object,
+    storage: StorageSpec,
+    schema: ItemSchema,
+) -> ItemPresentation | None:
+    if value is None:
+        return None
+    if storage.strategy != "markdown-items":
+        raise CollectionError(
+            "INVALID_ITEM_PRESENTATION",
+            "item_presentation is available only to markdown-items collections",
+        )
+    raw = _mapping(value, "item_presentation")
+    if set(raw) - {"version", "title", "summary", "long_text", "relationships"}:
+        raise CollectionError("INVALID_ITEM_PRESENTATION", "item_presentation has unknown fields")
+    if raw.get("version") != 1 or "title" not in raw:
+        raise CollectionError("INVALID_ITEM_PRESENTATION", "item_presentation shape is invalid")
+    title = _item_presentation_descriptor(raw.get("title"), schema, "title", {"string"})
+    used = {title.field}
+    summary = _item_presentation_descriptors(
+        raw.get("summary", []), schema, "summary", _PRESENTATION_SCALAR_TYPES, used
+    )
+    long_text = _item_presentation_descriptors(
+        raw.get("long_text", []), schema, "long_text", {"string"}, used
+    )
+    relationships = _item_presentation_descriptors(
+        raw.get("relationships", []), schema, "relationships", {"link"}, used
+    )
+    return ItemPresentation(1, title, summary, long_text, relationships)
+
+
+def _item_presentation_descriptors(
+    value: object,
+    schema: ItemSchema,
+    section: str,
+    allowed_types: Iterable[str],
+    used: set[str],
+) -> tuple[ItemPresentationField, ...]:
+    if not isinstance(value, list) or len(value) > _MAX_ITEM_PRESENTATION_FIELDS:
+        raise CollectionError(
+            "INVALID_ITEM_PRESENTATION", f"item_presentation {section} is invalid"
+        )
+    result: list[ItemPresentationField] = []
+    allowed = set(allowed_types)
+    for raw in value:
+        descriptor = _item_presentation_descriptor(raw, schema, section, allowed)
+        if descriptor.field in used:
+            raise CollectionError(
+                "INVALID_ITEM_PRESENTATION",
+                f"item_presentation field is duplicated: {descriptor.field}",
+            )
+        used.add(descriptor.field)
+        result.append(descriptor)
+    return tuple(result)
+
+
+def _item_presentation_descriptor(
+    value: object,
+    schema: ItemSchema,
+    section: str,
+    allowed_types: Iterable[str],
+) -> ItemPresentationField:
+    if type(value) is str:
+        name, label = value, None
+    else:
+        descriptor = _mapping(value, f"item_presentation {section} descriptor")
+        if set(descriptor) - {"field", "label"}:
+            raise CollectionError(
+                "INVALID_ITEM_PRESENTATION",
+                f"item_presentation {section} has unknown fields",
+            )
+        name = descriptor.get("field")
+        label = _presentation_label_for_item(descriptor.get("label"))
+    if type(name) is not str or not name or name not in schema.fields:
+        raise CollectionError(
+            "INVALID_ITEM_PRESENTATION",
+            f"item_presentation {section} must name a declared field",
+        )
+    if schema.fields[name].type not in set(allowed_types):
+        raise CollectionError(
+            "INVALID_ITEM_PRESENTATION",
+            f"item_presentation {section} field has an incompatible type",
+        )
+    return ItemPresentationField(name, label)
+
+
+def _presentation_label_for_item(value: object) -> str | None:
+    if value is None:
+        return None
+    if type(value) is not str or not value.strip() or len(value.encode("utf-8")) > 256:
+        raise CollectionError("INVALID_ITEM_PRESENTATION", "item_presentation label is invalid")
+    return value
+
+
 def _parse_record_presentation(
     value: object, profile: str, storage: StorageSpec, schema: ItemSchema
 ) -> RecordPresentation | None:
@@ -1787,9 +2181,13 @@ def _parse_record_presentation(
         )
     raw = _mapping(value, "record_presentation")
     if set(raw) - {"version", "summary", "tables", "notes", "details"}:
-        raise CollectionError("INVALID_RECORD_PRESENTATION", "record_presentation has unknown fields")
+        raise CollectionError(
+            "INVALID_RECORD_PRESENTATION", "record_presentation has unknown fields"
+        )
     if raw.get("version") != 1:
-        raise CollectionError("INVALID_RECORD_PRESENTATION", "record_presentation version is unsupported")
+        raise CollectionError(
+            "INVALID_RECORD_PRESENTATION", "record_presentation version is unsupported"
+        )
     summary = _parse_presentation_descriptors(raw.get("summary", []), schema, "summary")
     notes = _parse_presentation_descriptors(raw.get("notes", []), schema, "notes")
     details = _parse_presentation_descriptors(raw.get("details", []), schema, "details")
@@ -1801,40 +2199,73 @@ def _parse_record_presentation(
     for table_raw in tables_raw:
         table = _mapping(table_raw, "presentation table")
         if set(table) - {"field", "label", "columns"}:
-            raise CollectionError("INVALID_RECORD_PRESENTATION", "presentation table has unknown fields")
+            raise CollectionError(
+                "INVALID_RECORD_PRESENTATION", "presentation table has unknown fields"
+            )
         field = _presentation_field(table.get("field"), schema, "table field")
         if field in names:
-            raise CollectionError("INVALID_RECORD_PRESENTATION", "presentation table field is duplicated")
+            raise CollectionError(
+                "INVALID_RECORD_PRESENTATION", "presentation table field is duplicated"
+            )
         names.add(field)
         spec = schema.fields[field]
         if spec.type != "array" or spec.items is None or spec.items.type != "object":
-            raise CollectionError("INVALID_RECORD_PRESENTATION", "presentation table must name an array of objects")
+            raise CollectionError(
+                "INVALID_RECORD_PRESENTATION", "presentation table must name an array of objects"
+            )
         label = _presentation_label(table.get("label"))
         columns_raw = table.get("columns")
-        if not isinstance(columns_raw, list) or not columns_raw or len(columns_raw) > _MAX_RECORD_PRESENTATION_COLUMNS:
-            raise CollectionError("INVALID_RECORD_PRESENTATION", "presentation table columns are invalid")
+        if (
+            not isinstance(columns_raw, list)
+            or not columns_raw
+            or len(columns_raw) > _MAX_RECORD_PRESENTATION_COLUMNS
+        ):
+            raise CollectionError(
+                "INVALID_RECORD_PRESENTATION", "presentation table columns are invalid"
+            )
         columns: list[RecordPresentationColumn] = []
         column_names: set[str] = set()
         for column_raw in columns_raw:
             column = _mapping(column_raw, "presentation column")
             if set(column) - {"field", "label", "type", "link_kind"}:
-                raise CollectionError("INVALID_RECORD_PRESENTATION", "presentation column has unknown fields")
+                raise CollectionError(
+                    "INVALID_RECORD_PRESENTATION", "presentation column has unknown fields"
+                )
             name = _nonempty_string(column.get("field"), "presentation column field")
             if len(name.encode("utf-8")) > 128 or name in column_names:
-                raise CollectionError("INVALID_RECORD_PRESENTATION", "presentation column field is invalid")
+                raise CollectionError(
+                    "INVALID_RECORD_PRESENTATION", "presentation column field is invalid"
+                )
             if name in _PRESENTATION_SYNTHESIZED_FIELDS:
-                raise CollectionError("INVALID_RECORD_PRESENTATION", "presentation column collides with a system field")
+                raise CollectionError(
+                    "INVALID_RECORD_PRESENTATION",
+                    "presentation column collides with a system field",
+                )
             column_names.add(name)
             kind = column.get("type")
             if type(kind) is not str or kind not in _PRESENTATION_SCALAR_TYPES - {"enum"}:
-                raise CollectionError("INVALID_RECORD_PRESENTATION", "presentation column type is invalid")
+                raise CollectionError(
+                    "INVALID_RECORD_PRESENTATION", "presentation column type is invalid"
+                )
             link_kind = column.get("link_kind")
             if kind == "link":
-                if type(link_kind) is not str or not link_kind or len(link_kind.encode("utf-8")) > 128:
-                    raise CollectionError("INVALID_RECORD_PRESENTATION", "presentation link kind is invalid")
+                if (
+                    type(link_kind) is not str
+                    or not link_kind
+                    or len(link_kind.encode("utf-8")) > 128
+                ):
+                    raise CollectionError(
+                        "INVALID_RECORD_PRESENTATION", "presentation link kind is invalid"
+                    )
             elif link_kind is not None:
-                raise CollectionError("INVALID_RECORD_PRESENTATION", "only link columns may declare link_kind")
-            columns.append(RecordPresentationColumn(name, kind, _presentation_label(column.get("label")), link_kind))
+                raise CollectionError(
+                    "INVALID_RECORD_PRESENTATION", "only link columns may declare link_kind"
+                )
+            columns.append(
+                RecordPresentationColumn(
+                    name, kind, _presentation_label(column.get("label")), link_kind
+                )
+            )
         tables.append(RecordPresentationTable(field, label, tuple(columns)))
     if not tables:
         raise CollectionError("INVALID_RECORD_PRESENTATION", "presentation requires a table")
@@ -1844,7 +2275,9 @@ def _parse_record_presentation(
 def _presentation_field(value: object, schema: ItemSchema, name: str) -> str:
     field = _nonempty_string(value, name)
     if field not in schema.fields:
-        raise CollectionError("INVALID_RECORD_PRESENTATION", f"presentation {name} must name an item field")
+        raise CollectionError(
+            "INVALID_RECORD_PRESENTATION", f"presentation {name} must name an item field"
+        )
     return field
 
 
@@ -1869,10 +2302,17 @@ def _parse_presentation_descriptors(
         else:
             descriptor = _mapping(raw, f"presentation {name} descriptor")
             if set(descriptor) - {"field", "label"}:
-                raise CollectionError("INVALID_RECORD_PRESENTATION", f"presentation {name} has unknown fields")
-            field, label = _presentation_field(descriptor.get("field"), schema, name), _presentation_label(descriptor.get("label"))
+                raise CollectionError(
+                    "INVALID_RECORD_PRESENTATION", f"presentation {name} has unknown fields"
+                )
+            field, label = (
+                _presentation_field(descriptor.get("field"), schema, name),
+                _presentation_label(descriptor.get("label")),
+            )
         if field in fields:
-            raise CollectionError("INVALID_RECORD_PRESENTATION", f"presentation {name} field is duplicated")
+            raise CollectionError(
+                "INVALID_RECORD_PRESENTATION", f"presentation {name} field is duplicated"
+            )
         if schema.fields[field].type not in _PRESENTATION_SCALAR_TYPES:
             raise CollectionError(
                 "INVALID_RECORD_PRESENTATION",
@@ -1965,9 +2405,7 @@ def _parse_links(value: object, schema: ItemSchema) -> CollectionLinks:
     return CollectionLinks(tuple(result))
 
 
-def _parse_plan_join(
-    value: object, schema: ItemSchema, index: int
-) -> Mapping[str, str] | None:
+def _parse_plan_join(value: object, schema: ItemSchema, index: int) -> Mapping[str, str] | None:
     """Validate the authored record-field → plan-field pairs, or return `None`.
 
     The record side is checked against this manifest's own schema because a pair
@@ -2157,7 +2595,9 @@ def _genuinely_absent_collection_path(root: Path, raw: str) -> bool:
         except OSError:
             return False
         attributes = getattr(info, "st_file_attributes", 0)
-        if stat.S_ISLNK(info.st_mode) or attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0):
+        if stat.S_ISLNK(info.st_mode) or attributes & getattr(
+            stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0
+        ):
             return False
         if index < len(parts) - 1 and not stat.S_ISDIR(info.st_mode):
             return False
@@ -2233,7 +2673,7 @@ def _require_profile_layer(profile: str, path: str, name: str) -> None:
 
 
 def _portable_path_key(path: str) -> str:
-    return "/".join(unicodedata.normalize("NFC", part).casefold() for part in path.split("/"))
+    return "/".join(unicodedata.normalize("NFKC", part).casefold() for part in path.split("/"))
 
 
 def _is_safe_vault_target(root: Path, target: Path) -> bool:

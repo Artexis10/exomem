@@ -182,7 +182,7 @@ def test_release_publication_jobs_checkout_the_created_tag() -> None:
 V2_OPENAI_APP = "plugins/hosted/generated/candidates/hosted-alpha-agent-v2/openai/.app.json"
 
 
-def _assert_v2_openai_app_id_derivation(flow: str, command: str) -> None:
+def _assert_openai_app_id_derivation(flow: str, command: str) -> None:
     assert "openai_app_id=\"$(python - <<'PY'" in flow
     assert f'Path("{V2_OPENAI_APP}")' in flow
     assert 'print(app["apps"]["exomem"]["id"])' in flow
@@ -196,7 +196,19 @@ def _assert_v2_openai_app_id_derivation(flow: str, command: str) -> None:
     assert "plugin_asdk_app_" not in flow
 
 
-def test_release_workflow_refreshes_and_checks_the_v2_hosted_candidate() -> None:
+def _assert_parity_candidate_derivation(flow: str, command: str) -> None:
+    assert 'parity_candidate="$(uv run --frozen python - <<\'PY\'' in flow
+    assert "from exomem.hosted_plugins import PARITY_CANDIDATE" in flow
+    assert "print(PARITY_CANDIDATE)" in flow
+    assert 'PY\n          )"' in flow
+    assert (
+        f'{command} --candidate "$parity_candidate" --platform all '
+        '--openai-app-id "$openai_app_id"'
+    ) in flow
+    assert "hosted-alpha-agent-v4" not in flow
+
+
+def test_release_workflow_refreshes_and_checks_release_managed_candidates() -> None:
     text = _read(".github/workflows/release-please.yml")
     sync = _workflow_job(text, "sync-hosted-artifacts", "build-artifacts")
     render = sync.split("\n      - name: Regenerate hosted plugin artifacts\n", 1)[1].split(
@@ -206,8 +218,10 @@ def test_release_workflow_refreshes_and_checks_the_v2_hosted_candidate() -> None
         1
     ].split("\n      - name: Commit the resync onto the release PR\n", 1)[0]
 
-    _assert_v2_openai_app_id_derivation(render, "render")
-    _assert_v2_openai_app_id_derivation(check, "check")
+    _assert_openai_app_id_derivation(render, "render")
+    _assert_openai_app_id_derivation(check, "check")
+    _assert_parity_candidate_derivation(render, "render")
+    _assert_parity_candidate_derivation(check, "check")
 
 
 def test_compose_overrides_select_cpu_ml_and_cuda() -> None:
@@ -327,9 +341,14 @@ def test_unix_upgrade_script_exists_and_verifies_the_live_version() -> None:
     assert "doctor --profile" in upgrade
     assert "/health" in upgrade
     assert "version mismatch" in upgrade
-    # Both service managers, since the same repo serves macOS and Linux.
-    assert "launchctl kickstart" in upgrade
-    assert "systemctl --user restart" in upgrade
+    assert 'exomem_stop_service "$SERVICE_ID"' in upgrade
+    assert 'exomem_start_service "$UNIT_FILE" "$SERVICE_ID"' in upgrade
+    assert 'exomem_assert_service_restarted "$WORKER_BEFORE" "$WORKER_AFTER"' in upgrade
+
+    # Both service managers remain behind the selected-identity helper.
+    common = _read("scripts/_service-common.sh")
+    assert 'launchctl kickstart "gui/$(id -u)/$service_id"' in common
+    assert 'systemctl --user start "$service_id"' in common
 
 
 def test_unix_restart_gates_doctor_on_the_service_venv() -> None:

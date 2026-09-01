@@ -12,6 +12,7 @@ import pytest
 import yaml
 
 from exomem import (
+    asr_runtime,
     deferred_index,
     embeddings,
     extract,
@@ -20,6 +21,7 @@ from exomem import (
     media_jobs,
     media_worker,
     preserve,
+    runtime_resources,
     server_runtime,
 )
 from exomem import find as find_module
@@ -186,7 +188,7 @@ def test_processing_failure_sidecar_fans_out_after_commit_guard_release(
     checkpoint_path = graph_sync.checkpoint_path(vault)
     original_add_full = deferred_index.add_full
     original_batch = preserve.batch_atomic_write
-    original_read_artifact = media_worker.read_bounded_guarded_bytes
+    original_read_artifact = graph_sync._read_bounded_bytes
     original_publish_hook = vault_module._after_batch_destination_published
     token = None
     postlude_reads: list[str] = []
@@ -211,8 +213,7 @@ def test_processing_failure_sidecar_fans_out_after_commit_guard_release(
             token = result
         return result
 
-    def read_postlude_artifact(root, target, *args, **kwargs):  # noqa: ANN001
-        path = Path(root) / target
+    def read_postlude_artifact(path, *args, **kwargs):  # noqa: ANN001
         if (
             len(manager.guard_metadata) >= 2
             and not checkpoint_published
@@ -220,7 +221,7 @@ def test_processing_failure_sidecar_fans_out_after_commit_guard_release(
         ):
             assert manager.depth > 0
             postlude_reads.append("floor" if Path(path) == floor_path else "predecessor")
-        return original_read_artifact(root, target, *args, **kwargs)
+        return original_read_artifact(path, *args, **kwargs)
 
     def observe_checkpoint_inside_postlude(destination: Path) -> None:
         nonlocal checkpoint_published, checkpoint_replaced
@@ -243,7 +244,7 @@ def test_processing_failure_sidecar_fans_out_after_commit_guard_release(
         deferred_index, "add_full_receipts", admit_full_receipts, raising=False
     )
     monkeypatch.setattr(preserve, "batch_atomic_write", capture_token)
-    monkeypatch.setattr(media_worker, "read_bounded_guarded_bytes", read_postlude_artifact)
+    monkeypatch.setattr(graph_sync, "_read_bounded_bytes", read_postlude_artifact)
     monkeypatch.setattr(
         vault_module,
         "_after_batch_destination_published",
@@ -336,7 +337,7 @@ def test_media_deferred_postlude_reenters_the_mutation_coordinator(
     manager = _RecordingMutationManager(vault)
     floor = graph_sync.floor_path(vault)
     checkpoint = graph_sync.checkpoint_path(vault)
-    original_read_artifact = media_worker.read_bounded_guarded_bytes
+    original_read_artifact = graph_sync._read_bounded_bytes
     original_publish_hook = vault_module._after_batch_destination_published
     postlude_reads: list[str] = []
     checkpoint_replaced = False
@@ -351,12 +352,11 @@ def test_media_deferred_postlude_reenters_the_mutation_coordinator(
     )
     monkeypatch.setattr(media_worker, "get_manager", lambda: manager)
 
-    def read_artifact_inside_postlude(root, target, *args, **kwargs):  # noqa: ANN001
-        path = Path(root) / target
+    def read_artifact_inside_postlude(path, *args, **kwargs):  # noqa: ANN001
         if len(manager.guard_metadata) >= 2 and Path(path) in {floor, checkpoint}:
             assert manager.depth > 0
             postlude_reads.append("floor" if Path(path) == floor else "predecessor")
-        return original_read_artifact(root, target, *args, **kwargs)
+        return original_read_artifact(path, *args, **kwargs)
 
     def observe_checkpoint_inside_postlude(destination: Path) -> None:
         nonlocal checkpoint_replaced
@@ -371,7 +371,7 @@ def test_media_deferred_postlude_reenters_the_mutation_coordinator(
         return True
 
     monkeypatch.setattr(
-        media_worker, "read_bounded_guarded_bytes", read_artifact_inside_postlude
+        graph_sync, "_read_bounded_bytes", read_artifact_inside_postlude
     )
     monkeypatch.setattr(
         vault_module,
@@ -636,13 +636,30 @@ def test_external_floor_and_checkpoint_swaps_after_media_cas_do_not_pair_stale_t
     floor_path = graph_sync.floor_path(vault)
     checkpoint_path = graph_sync.checkpoint_path(vault)
     original_batch = media_worker.batch_atomic_write
+    original_snapshot = vault_module._capture_batch_snapshot
     fanout_calls: list[object] = []
     swapped = False
+    postlude_active = False
+    postlude_batches = 0
 
-    def replace_after_cas(writes, **kwargs):  # noqa: ANN001
+    def capture_postlude_batch(writes, **kwargs):  # noqa: ANN001
+        nonlocal postlude_active, postlude_batches
+        postlude_batches += 1
+        floor_write, checkpoint_write = writes
+        assert kwargs["vault_root"] == vault
+        assert floor_write.path == floor_path
+        assert floor_write.content == floor_path.read_text(encoding="utf-8")
+        assert floor_write.expected_hash == content_hash(floor_write.content)
+        assert checkpoint_write.path == checkpoint_path
+        postlude_active = True
+        try:
+            return original_batch(writes, **kwargs)
+        finally:
+            postlude_active = False
+
+    def replace_after_hash_check(path: Path):
         nonlocal swapped
-        [write] = writes
-        if write.path == checkpoint_path and not swapped:
+        if postlude_active and Path(path) == floor_path and not swapped:
             swapped = True
             old_floor = graph_sync.read_floor(vault)
             old_checkpoint = graph_sync.read_checkpoint(vault)
@@ -663,9 +680,9 @@ def test_external_floor_and_checkpoint_swaps_after_media_cas_do_not_pair_stale_t
             checkpoint_swap.write_text(replacement_checkpoint.render(), encoding="utf-8")
             os.replace(floor_swap, floor_path)
             os.replace(checkpoint_swap, checkpoint_path)
-            replace_after_cas.floor = replacement_floor
-            replace_after_cas.checkpoint = replacement_checkpoint
-        return original_batch(writes, **kwargs)
+            replace_after_hash_check.floor = replacement_floor
+            replace_after_hash_check.checkpoint = replacement_checkpoint
+        return original_snapshot(path)
 
     monkeypatch.setattr(
         extract,
@@ -674,7 +691,8 @@ def test_external_floor_and_checkpoint_swaps_after_media_cas_do_not_pair_stale_t
             text="external race transcript", media_type="audio", engine="test"
         ),
     )
-    monkeypatch.setattr(media_worker, "batch_atomic_write", replace_after_cas)
+    monkeypatch.setattr(media_worker, "batch_atomic_write", capture_postlude_batch)
+    monkeypatch.setattr(vault_module, "_capture_batch_snapshot", replace_after_hash_check)
     monkeypatch.setattr(
         media_worker,
         "post_commit_batch_fanout",
@@ -690,9 +708,10 @@ def test_external_floor_and_checkpoint_swaps_after_media_cas_do_not_pair_stale_t
     )
 
     assert outcome.state == "complete"
+    assert postlude_batches == 1
     assert swapped
-    assert graph_sync.read_floor(vault) == replace_after_cas.floor
-    assert graph_sync.read_checkpoint(vault) == replace_after_cas.checkpoint
+    assert graph_sync.read_floor(vault) == replace_after_hash_check.floor
+    assert graph_sync.read_checkpoint(vault) == replace_after_hash_check.checkpoint
     assert fanout_calls == []
     assert deferred_index.snapshot_full(vault) == [deferred_index.DeferredReceipt(rel, 1)]
 
@@ -1409,6 +1428,7 @@ def test_scene_artifacts_and_reembed_publish_under_guard(
     worker = media_worker.MediaWorker(vault, execution_mode="inline")
     frames = [(1.0, np.ones(embeddings.CLIP_DIM, dtype=np.float32))]
     pairs = [(object(), object())]
+    published_samples = []
 
     def embed_scenes_outside(_path):
         assert manager.depth == 0
@@ -1422,6 +1442,7 @@ def test_scene_artifacts_and_reembed_publish_under_guard(
     def scene_commit_inside(*_args, **_kwargs):
         assert manager.depth > 0
         manager.events.append("scene-commit")
+        published_samples.extend(_kwargs["parent_clip_samples"])
         return []
 
     def reembed_inside(*_args, **_kwargs):
@@ -1458,6 +1479,9 @@ def test_scene_artifacts_and_reembed_publish_under_guard(
     assert "clip-commit" in manager.events
     assert "scene-commit" in manager.events
     assert "reembed-derived" in manager.events
+    assert len(published_samples) == 1
+    assert published_samples[0].frame_timestamp_ms == 1_000
+    assert published_samples[0].vector == tuple(float(value) for value in frames[0][1])
     assert {
         "operation": "background_media_clip_commit",
         "holder_kind": "background",
@@ -1978,6 +2002,78 @@ def test_child_defers_transient_writer_failure_without_poisoning_job(
     assert status["error"] is None
 
 
+def test_child_defers_model_admission_refusal_without_sidecar_failure(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    result = _preserve_media_stub(vault, filename="model-busy.mp3")
+    sidecar = vault / result.sidecar_path
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(
+        media_jobs.MediaJob(
+            binary_path=vault / result.path,
+            sidecar_path=sidecar,
+            media_type="audio",
+        )
+    )
+
+    monkeypatch.setattr(
+        extract,
+        "extract_text",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            runtime_resources.ModelBusyError("model compute is busy; retry shortly")
+        ),
+    )
+
+    assert (
+        media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1)
+        == media_worker._TRANSIENT_EXIT_CODE
+    )
+    [pending] = media_jobs.status(vault)["jobs"]
+    assert pending["state"] == media_jobs.PENDING
+    assert pending["attempts"] == 0
+    assert pending["error"] is None
+    assert "extracted_by: pending" in sidecar.read_text(encoding="utf-8")
+
+
+def test_clip_model_admission_refusal_reaches_child_defer(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    result = _preserve_media_stub(vault, filename="clip-busy.mp3")
+    sidecar = vault / result.sidecar_path
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(
+        media_jobs.MediaJob(
+            binary_path=vault / result.path,
+            sidecar_path=sidecar,
+            media_type="audio",
+            do_ocr=False,
+            do_clip=True,
+        )
+    )
+    monkeypatch.setattr(
+        media_worker.MediaWorker,
+        "_run_clip",
+        lambda _self, _job: (_ for _ in ()).throw(
+            runtime_resources.ModelBusyError("model compute is busy; retry shortly")
+        ),
+    )
+
+    assert (
+        media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1)
+        == media_worker._TRANSIENT_EXIT_CODE
+    )
+    [pending] = media_jobs.status(vault)["jobs"]
+    assert pending["state"] == media_jobs.PENDING
+    assert pending["attempts"] == 0
+    assert pending["error"] is None
+    assert "extracted_by: pending" in sidecar.read_text(encoding="utf-8")
+
+
 def test_child_requeues_guarded_sidecar_sharing_violation_then_succeeds(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2199,6 +2295,292 @@ def test_child_marks_unavailable_engine_blocked(vault, monkeypatch: pytest.Monke
     assert store.counts()["blocked"] == 1
 
 
+def test_child_marks_cuda_runtime_failure_blocked_with_runtime_remediation(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    result = _preserve_media_stub(vault, filename="cublas-blocked.m4a")
+    monkeypatch.setattr(
+        extract,
+        "extract_text",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            asr_runtime.ASRComputeRuntimeError("ASR CUDA runtime failed: cuBLAS failed")
+        ),
+    )
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(media_jobs.MediaJob(binary_path=vault / result.path, sidecar_path=vault / result.sidecar_path, media_type="audio"))
+
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
+
+    [status] = media_jobs.status(vault)["jobs"]
+    assert status["state"] == media_jobs.BLOCKED
+    assert "runtime" in status["next_action"]
+    assert "replace" not in status["next_action"]
+
+
+def test_child_marks_explicit_cuda_refusal_blocked_with_runtime_remediation(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    result = _preserve_media_stub(vault, filename="refused-cuda.m4a")
+    monkeypatch.setattr(
+        extract,
+        "extract_text",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            asr_runtime.ASRRuntimeRefusal("no CTranslate2 CUDA device")
+        ),
+    )
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(media_jobs.MediaJob(binary_path=vault / result.path, sidecar_path=vault / result.sidecar_path, media_type="audio"))
+
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
+    [status] = media_jobs.status(vault)["jobs"]
+    assert status["state"] == media_jobs.BLOCKED
+    assert "runtime" in status["next_action"]
+
+
+def test_child_blocks_ambiguous_sidecar_boundary_without_writing_it(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    result = _preserve_media_stub(vault, filename="ambiguous-boundary.m4a")
+    sidecar = vault / result.sidecar_path
+    sidecar.write_text(
+        sidecar.read_text(encoding="utf-8")
+        + "# Existing document heading\n\n## Preserved notes\n\nAuthored note.\n",
+        encoding="utf-8",
+    )
+    deferred_index.clear_full_receipts(vault, deferred_index.snapshot_full(vault))
+    assert deferred_index.full_status(vault)["count"] == 0
+    before = sidecar.read_bytes()
+    monkeypatch.setattr(
+        extract,
+        "extract_text",
+        lambda *_args, **_kwargs: extract.ExtractResult(
+            text="[0:00] Fresh transcript.",
+            media_type="audio",
+            engine="faster-whisper:test",
+        ),
+    )
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(
+        media_jobs.MediaJob(
+            binary_path=vault / result.path,
+            sidecar_path=sidecar,
+            media_type="audio",
+        )
+    )
+
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
+
+    [status] = media_jobs.status(vault)["jobs"]
+    assert status["state"] == media_jobs.BLOCKED
+    assert status["retryable"] is True
+    assert status["error"].startswith("AMBIGUOUS_SIDECAR_BOUNDARY:")
+    assert status["next_action"] == "review the sidecar's preserved-notes boundary, then retry"
+    assert sidecar.read_bytes() == before
+    assert deferred_index.full_status(vault)["count"] == 0
+
+
+def test_child_keeps_other_preserve_errors_as_failed_extraction(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    result = _preserve_media_stub(vault, filename="other-preserve-error.m4a")
+    monkeypatch.setattr(
+        extract,
+        "extract_text",
+        lambda *_args, **_kwargs: extract.ExtractResult(
+            text="[0:00] Fresh transcript.",
+            media_type="audio",
+            engine="faster-whisper:test",
+        ),
+    )
+
+    def _other_preserve_error(*_args, **_kwargs):
+        raise preserve.PreserveError("OTHER_PRESERVE_ERROR", [], "unexpected write refusal")
+
+    monkeypatch.setattr(preserve, "update_sidecar_extraction", _other_preserve_error)
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(
+        media_jobs.MediaJob(
+            binary_path=vault / result.path,
+            sidecar_path=vault / result.sidecar_path,
+            media_type="audio",
+        )
+    )
+
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
+
+    [status] = media_jobs.status(vault)["jobs"]
+    assert status["state"] == media_jobs.FAILED
+    assert status["error"].startswith("PreserveError:")
+
+
+def test_child_circuit_breaks_following_asr_jobs_after_cuda_failure(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    first = _preserve_media_stub(vault, filename="first.m4a")
+    second = _preserve_media_stub(vault, filename="second.m4a")
+    calls = 0
+
+    def _broken(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        raise asr_runtime.ASRComputeRuntimeError("ASR CUDA runtime failed: cuBLAS failed")
+
+    monkeypatch.setattr(extract, "extract_text", _broken)
+    store = media_jobs.MediaJobStore(vault)
+    for result in (first, second):
+        store.enqueue(media_jobs.MediaJob(binary_path=vault / result.path, sidecar_path=vault / result.sidecar_path, media_type="audio"))
+
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
+    assert calls == 1
+    assert store.counts()[media_jobs.BLOCKED] == 2
+
+
+def test_compute_ledger_remains_blocked_when_sidecar_publish_faults(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    result = _preserve_media_stub(vault, filename="ledger-first.m4a")
+    source_before = (vault / result.path).read_bytes()
+    monkeypatch.setattr(
+        extract,
+        "extract_text",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            asr_runtime.ASRComputeRuntimeError("ASR CUDA runtime failed: cuBLAS failed")
+        ),
+    )
+    monkeypatch.setattr(
+        media_worker.MediaWorker,
+        "_commit_processing_failure",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("sidecar disk full")),
+    )
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(media_jobs.MediaJob(binary_path=vault / result.path, sidecar_path=vault / result.sidecar_path, media_type="audio"))
+
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
+    assert store.counts()[media_jobs.BLOCKED] == 1
+    assert (vault / result.path).read_bytes() == source_before
+
+
+def test_compute_ledger_remains_blocked_when_sidecar_publish_returns_false(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    result = _preserve_media_stub(vault, filename="ledger-false.m4a")
+    monkeypatch.setattr(extract, "extract_text", lambda *_args, **_kwargs: (_ for _ in ()).throw(asr_runtime.ASRComputeRuntimeError("cuBLAS failed")))
+    monkeypatch.setattr(media_worker.MediaWorker, "_commit_processing_failure", lambda *_a, **_kw: False)
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(media_jobs.MediaJob(binary_path=vault / result.path, sidecar_path=vault / result.sidecar_path, media_type="audio"))
+
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
+    assert store.counts()[media_jobs.BLOCKED] == 1
+
+
+def test_prewarm_compute_failure_arms_child_circuit_breaker(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: True)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    monkeypatch.setattr(
+        extract,
+        "prewarm",
+        lambda: asr_runtime.ASRComputeRuntimeError("ASR CUDA runtime failed: driver mismatch"),
+    )
+    result = _preserve_media_stub(vault, filename="prewarm-failure.m4a")
+    monkeypatch.setattr(extract, "extract_text", lambda *_args, **_kwargs: pytest.fail("ASR must not retry"))
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(media_jobs.MediaJob(binary_path=vault / result.path, sidecar_path=vault / result.sidecar_path, media_type="audio"))
+
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
+    assert store.counts()[media_jobs.BLOCKED] == 1
+
+
+def test_blocked_compute_sidecar_converges_without_asr(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+    result = _preserve_media_stub(vault, filename="recover-cublas.m4a")
+    monkeypatch.setattr(extract, "extract_text", lambda *_args, **_kwargs: pytest.fail("no ASR"))
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(media_jobs.MediaJob(binary_path=vault / result.path, sidecar_path=vault / result.sidecar_path, media_type="audio"))
+    job = store.claim_next()
+    assert job is not None
+    store.mark(job.id, media_jobs.BLOCKED, "RuntimeError: cuBLAS failed")
+    blocked = store.get(job.id)
+    assert blocked is not None
+
+    assert media_worker.MediaWorker(vault, execution_mode="process").converge_compute_runtime_blocked(blocked)
+    frontmatter = _parsed_frontmatter(vault / result.sidecar_path)
+    assert frontmatter["processing_state"] == "blocked"
+
+
+def test_child_converges_stale_blocked_sidecar_after_canonical_limit(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    monkeypatch.setattr(extract, "extract_text", lambda *_args, **_kwargs: pytest.fail("no ASR"))
+    store = media_jobs.MediaJobStore(vault)
+    error = "ASRRuntimeRefusal: no CTranslate2 CUDA device"
+    action = "repair the CUDA/cuBLAS/cuDNN runtime or explicitly select bounded CPU, then retry"
+    canonical = (
+        "---\nprocessing_state: blocked\nprocessing_retryable: true\n"
+        f"processing_error: {vault_module.yaml_scalar(error)}\n"
+        f"processing_next_action: {vault_module.yaml_scalar(action)}\n---\n"
+    )
+    stale_sidecar = None
+    evidence = vault / "Knowledge Base" / "Evidence"
+    evidence.mkdir(parents=True, exist_ok=True)
+    for index in range(101):
+        binary = evidence / f"blocked-limit-{index}.m4a"
+        sidecar = binary.with_name(binary.name + ".md")
+        binary.write_bytes(b"FAKEBYTES")
+        sidecar.write_text("---\nmedia_type: audio\n---\n", encoding="utf-8")
+        job_id = store.enqueue(
+            media_jobs.MediaJob(
+                binary_path=binary,
+                sidecar_path=sidecar,
+                media_type="audio",
+            )
+        )
+        job = store.claim_next()
+        assert job is not None and job.id == job_id
+        store.mark(job.id, media_jobs.BLOCKED, error)
+        if index < 100:
+            sidecar.write_text(canonical, encoding="utf-8")
+        else:
+            stale_sidecar = sidecar
+    assert stale_sidecar is not None
+    assert store.needs_worker() is True
+
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.01) == 0
+    assert _parsed_frontmatter(stale_sidecar)["processing_state"] == "blocked"
+    assert store.needs_worker() is False
+
+
+def test_child_recovers_failed_cuda_only_vault_without_asr(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    result = _preserve_media_stub(vault, filename="failed-only-cublas.m4a")
+    monkeypatch.setattr(extract, "extract_text", lambda *_args, **_kwargs: pytest.fail("no ASR"))
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(media_jobs.MediaJob(binary_path=vault / result.path, sidecar_path=vault / result.sidecar_path, media_type="audio"))
+    job = store.claim_next()
+    assert job is not None
+    store.mark(job.id, media_jobs.FAILED, "RuntimeError: cuBLAS failed")
+
+    assert store.needs_worker() is True
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
+    assert store.counts()[media_jobs.BLOCKED] == 1
+    assert _parsed_frontmatter(vault / result.sidecar_path)["processing_state"] == "blocked"
+
+
 def test_child_retains_actionable_asr_dependency_failure(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2402,6 +2784,52 @@ def test_claimed_job_skips_asr_when_sidecar_completed_before_worker_runs(
     assert "extracted_by: external-asr+timed" in after
     store.complete(claimed)
     assert media_jobs.status(vault)["jobs"] == []
+
+
+def test_claimed_document_job_skips_extraction_for_h2_first_completed_text(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _preserve_media_stub(vault, filename="claim-race.xlsx")
+    binary = vault / result.path
+    sidecar = vault / result.sidecar_path
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(
+        media_jobs.MediaJob(
+            binary_path=binary,
+            sidecar_path=sidecar,
+            media_type="xlsx",
+        )
+    )
+    claimed = store.claim_next()
+    assert claimed is not None
+    completed = sidecar.read_text(encoding="utf-8").replace(
+        "extracted_by: pending", "extracted_by: markitdown"
+    ).replace("processing_state: pending", "processing_state: completed")
+    completed = completed.replace(
+        "## Extracted text\n",
+        "## Extracted text\n\n"
+        "## Requirements\n\n"
+        "| Requirement | Owner |\n"
+        "| --- | --- |\n"
+        "| Bound CPU | Runtime |\n",
+        1,
+    )
+    sidecar.write_text(completed, encoding="utf-8")
+    before = sidecar.read_bytes()
+
+    monkeypatch.setattr(
+        extract,
+        "extract_text",
+        lambda *_a, **_kw: pytest.fail(
+            "document extraction must not rerun for a completed transcript"
+        ),
+    )
+    worker = media_worker.MediaWorker(vault, execution_mode="inline")
+
+    outcome = worker._process(claimed)
+
+    assert outcome.state == "complete"
+    assert sidecar.read_bytes() == before
 
 
 def test_external_completed_transcript_written_during_asr_wins_final_commit_race(
@@ -2710,3 +3138,19 @@ def test_the_boolean_probe_is_derived_from_the_code_probe(monkeypatch) -> None:
 
     monkeypatch.setattr(media_worker, "_probe_writer_authority", lambda: None)
     assert media_worker._writer_authority_available() is True
+
+
+def test_process_child_receives_wheel_owned_cuda_environment(tmp_path, monkeypatch) -> None:
+    worker = media_worker.MediaWorker(tmp_path, execution_mode="process")
+    captured = {}
+
+    monkeypatch.setattr(
+        asr_runtime,
+        "cuda_runtime_child_env",
+        lambda parent: {**parent, "LD_LIBRARY_PATH": "/wheel/cublas:/system"},
+    )
+    monkeypatch.setattr(media_worker.subprocess, "Popen", lambda args, env: captured.update(args=args, env=env))
+
+    worker._launch_child()
+
+    assert captured["env"]["LD_LIBRARY_PATH"].startswith("/wheel/cublas")

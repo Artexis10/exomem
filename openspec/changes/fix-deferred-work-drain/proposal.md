@@ -51,6 +51,9 @@ guards. **No caller passes it.** That queue grows monotonically for the life of 
 - Give the running server a bounded, mode-aware drain pass for both deferred queues, so
   queued work is retried by the system that queued it rather than by a human who happens to
   know `exomem index` exists.
+- Keep a background drain inside the mode's smaller live-publication batch even when the
+  performance reconcile budget is larger, and bound per-receipt isolation after an
+  incomplete batch so one pass cannot expand into hundreds of serial retries.
 - Redefine quiet-mode deferral as a **throttle, not a halt**: a small non-zero admission per
   reconcile pass, on CPU, so a quiet host still converges instead of accumulating forever.
   Quiet trades throughput for latency; it must not trade away correctness.

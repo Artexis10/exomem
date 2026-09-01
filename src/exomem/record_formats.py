@@ -41,11 +41,25 @@ _MAX_RECORDS = 10_000
 _MAX_CHILD_ROWS = 10_000
 _MAX_CHILD_FIELDS = 16
 _MAX_PRESENTATION_BLOCK_BYTES = 256 * 1024
+#: A free-string field carries no declared vocabulary, so inspection reports the
+#: values already in use. Both bounds are payload ceilings, not sampling limits:
+#: every loaded item is counted at full value, and the cap only stops the emitted
+#: distinct-value list from growing with the collection.
+_MAX_OBSERVED_VALUES = 20
+_MAX_OBSERVED_VALUE_CHARS = 120
 _EXPANDED_METADATA_FIELDS = frozenset({"parent_record_id", "child_field", "child_index"})
 _PRESENTATION_OPEN = re.compile(
     r"(?m)^<!-- exomem-record-presentation:v1 digest=sha256:([0-9a-f]{64}) -->\r?$"
 )
 _PRESENTATION_CLOSE = re.compile(r"(?m)^<!-- /exomem-record-presentation -->\r?$")
+_ITEM_PRESENTATION_OPEN = re.compile(
+    r"(?m)^<!-- exomem-item-presentation:v1 "
+    r"recipe=sha256:([0-9a-f]{64}) item=sha256:([0-9a-f]{64}) -->\r?$"
+)
+_ITEM_PRESENTATION_CLOSE = re.compile(r"(?m)^<!-- /exomem-item-presentation:v1 -->\r?$")
+_VAULT_RELATION_KINDS = frozenset(
+    {"memory", "note", "source", "evidence", "entity", "plan", "record", "page"}
+)
 _SYSTEM_FIELDS = frozenset(
     {"collection_id", "record_id", "item_version", "inferred", "ambiguous", "parent_record_id"}
 )
@@ -54,8 +68,24 @@ _SYSTEM_FIELDS = frozenset(
 def _profile_system_fields(manifest: collections.CollectionManifest) -> frozenset[str]:
     profile = profile_for(manifest.semantic_profile)
     return frozenset(
-        {"collection_id", profile.item_id_property, "item_version", "inferred", "ambiguous", "parent_record_id"}
+        {
+            "collection_id",
+            profile.item_id_property,
+            "item_version",
+            "inferred",
+            "ambiguous",
+            "parent_record_id",
+        }
     )
+
+
+def _profile_compatibility_envelope_fields(
+    manifest: collections.CollectionManifest,
+) -> frozenset[str]:
+    """Return legacy frontmatter the adapter owns rather than the item schema."""
+    if manifest.semantic_profile == "planning" and "updated" not in manifest.schema.fields:
+        return frozenset({"updated"})
+    return frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -308,7 +338,9 @@ class MarkdownLogAdapter(_BaseAdapter):
             if grammar.note is not None:
                 note = values[grammar.note.field]
                 if note is not None and type(note) is not str:
-                    raise collections.CollectionError("SCHEMA_FIELD_TYPE", "heading note must be a string")
+                    raise collections.CollectionError(
+                        "SCHEMA_FIELD_TYPE", "heading note must be a string"
+                    )
                 self._validate_values(values, allowed_fields=(grammar.note.field,))
             else:
                 self._validate_values(values)
@@ -473,16 +505,26 @@ class MarkdownItemsAdapter(_BaseAdapter):
             if collection_id != self.manifest.collection_id or item_id is None:
                 raise collections.CollectionError(
                     "INVALID_RECORD_ITEM" if profile.name == "records" else "INVALID_PLAN",
-                    "record item identity is invalid" if profile.name == "records" else "plan item identity is invalid",
+                    "record item identity is invalid"
+                    if profile.name == "records"
+                    else "plan item identity is invalid",
                 )
             if frontmatter.get("schema_version") != self.manifest.schema.version:
                 raise collections.CollectionError(
                     "UNSUPPORTED_ITEM_SCHEMA_VERSION", "item schema version differs"
                 )
+            compatibility_envelope = _profile_compatibility_envelope_fields(self.manifest)
             values = {
                 name: _json_value(value)
                 for name, value in frontmatter.items()
-                if name not in {"type", "collection_id", profile.item_id_property, "schema_version"}
+                if name
+                not in {
+                    "type",
+                    "collection_id",
+                    profile.item_id_property,
+                    "schema_version",
+                    *compatibility_envelope,
+                }
             }
             self._validate_values(values)
             identity = collections.ItemIdentity(collection_id, item_id)
@@ -784,6 +826,8 @@ def render_markdown_item(
     item_key: str,
     body: str = "",
     audit_correlation: str | None = None,
+    *,
+    resolve_relationship: Callable[[str, str], tuple[str, str] | None] | None = None,
 ) -> str:
     """Render a new ordinary record item from bounded structured values."""
     profile = profile_for(manifest.semantic_profile)
@@ -794,13 +838,23 @@ def render_markdown_item(
         "schema_version": manifest.schema.version,
     }
     frontmatter.update(values)
-    audit_line = f"# {profile.item_audit_marker}: {audit_correlation}\n" if audit_correlation else ""
+    audit_line = (
+        f"# {profile.item_audit_marker}: {audit_correlation}\n" if audit_correlation else ""
+    )
     text = "---\n" + vault.serialize_frontmatter(frontmatter) + "\n" + audit_line + "---\n"
     source = text + ("\n" + body if body else "")
-    return splice_record_presentation(source, manifest, values)
+    source = splice_record_presentation(source, manifest, values)
+    return splice_item_presentation(
+        source,
+        manifest,
+        values,
+        resolve_relationship=resolve_relationship,
+    )
 
 
-def _presentation_payload(manifest: collections.CollectionManifest, values: Mapping[str, Any]) -> dict[str, Any]:
+def _presentation_payload(
+    manifest: collections.CollectionManifest, values: Mapping[str, Any]
+) -> dict[str, Any]:
     recipe = manifest.record_presentation
     assert recipe is not None
     selected: dict[str, Any] = {}
@@ -816,14 +870,33 @@ def _presentation_payload(manifest: collections.CollectionManifest, values: Mapp
             ) from error
         selected[field_name] = value
     for table in recipe.tables:
-        rows = values.get(table.field)
-        if not isinstance(rows, list):
-            raise collections.CollectionError("UNRENDERABLE_RECORD_PRESENTATION", "presentation table is not an array")
+        rows = _presentation_table_rows(manifest, values, table)
         projected: list[dict[str, Any]] = []
         for index, row in enumerate(rows):
             projected.append(_presentation_child(row, table, index))
         selected[table.field] = projected
-    return {"version": recipe.version, "recipe": _presentation_recipe_identity(recipe), "values": selected}
+    return {
+        "version": recipe.version,
+        "recipe": _presentation_recipe_identity(recipe),
+        "values": selected,
+    }
+
+
+def _presentation_table_rows(
+    manifest: collections.CollectionManifest,
+    values: Mapping[str, Any],
+    table: collections.RecordPresentationTable,
+) -> list[Any]:
+    rows = values.get(table.field)
+    if rows is None and not manifest.schema.fields[table.field].required:
+        return []
+    if not isinstance(rows, list):
+        raise collections.CollectionError(
+            "UNRENDERABLE_RECORD_PRESENTATION",
+            f"presentation table '{table.field}' must be an array when present",
+            {"field": table.field},
+        )
+    return rows
 
 
 def _presentation_recipe_identity(recipe: collections.RecordPresentation) -> dict[str, Any]:
@@ -835,7 +908,12 @@ def _presentation_recipe_identity(recipe: collections.RecordPresentation) -> dic
                 "field": table.field,
                 "label": table.label,
                 "columns": [
-                    {"field": column.field, "type": column.type, "label": column.label, "link_kind": column.link_kind}
+                    {
+                        "field": column.field,
+                        "type": column.type,
+                        "label": column.label,
+                        "link_kind": column.link_kind,
+                    }
                     for column in table.columns
                 ],
             }
@@ -850,12 +928,16 @@ def _presentation_child(
     row: Any, table: collections.RecordPresentationTable, index: int
 ) -> dict[str, Any]:
     if not isinstance(row, Mapping):
-        raise collections.CollectionError("UNRENDERABLE_RECORD_PRESENTATION", "presentation child is not an object")
+        raise collections.CollectionError(
+            "UNRENDERABLE_RECORD_PRESENTATION", "presentation child is not an object"
+        )
     result: dict[str, Any] = {}
     for column in table.columns:
         value = row.get(column.field)
         try:
-            collections._validate_field_value(column.field, value, collections.FieldSpec(column.type, link_kind=column.link_kind))
+            collections._validate_field_value(
+                column.field, value, collections.FieldSpec(column.type, link_kind=column.link_kind)
+            )
         except collections.CollectionError as error:
             raise collections.CollectionError(
                 "UNRENDERABLE_RECORD_PRESENTATION",
@@ -870,32 +952,55 @@ def _presentation_child(
     return result
 
 
-def _presentation_block(manifest: collections.CollectionManifest, values: Mapping[str, Any], newline: str) -> str:
+def _presentation_block(
+    manifest: collections.CollectionManifest, values: Mapping[str, Any], newline: str
+) -> str:
     payload = _presentation_payload(manifest, values)
-    canonical = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    canonical = json.dumps(
+        payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+    ).encode("utf-8")
     digest = hashlib.sha256(canonical).hexdigest()
     recipe = manifest.record_presentation
     assert recipe is not None
-    lines = [f"<!-- exomem-record-presentation:v1 digest=sha256:{digest} -->", "<!-- generated: canonical frontmatter remains authoritative -->"]
+    lines = [
+        f"<!-- exomem-record-presentation:v1 digest=sha256:{digest} -->",
+        "<!-- generated: canonical frontmatter remains authoritative -->",
+    ]
     for field_name, label in recipe.summary:
-        lines.append(f"- **{html.escape(label or field_name)}:** {_presentation_scalar(values.get(field_name))}")
+        lines.append(
+            f"- **{html.escape(label or field_name)}:** {_presentation_scalar(values.get(field_name))}"
+        )
     for table in recipe.tables:
         lines.extend(["", f"### {html.escape(table.label or table.field)}"])
         labels = [html.escape(column.label or column.field) for column in table.columns]
-        lines.extend(["| " + " | ".join(labels) + " |", "| " + " | ".join("---" for _ in labels) + " |"])
-        for row in _presentation_payload(manifest, values)["values"][table.field]:
-            lines.append("| " + " | ".join(_presentation_cell(row[column.field]) for column in table.columns) + " |")
+        lines.extend(
+            ["| " + " | ".join(labels) + " |", "| " + " | ".join("---" for _ in labels) + " |"]
+        )
+        for row in payload["values"][table.field]:
+            lines.append(
+                "| "
+                + " | ".join(_presentation_cell(row[column.field]) for column in table.columns)
+                + " |"
+            )
     if recipe.notes:
         lines.extend(["", "### Notes"])
-        lines.extend(f"- **{html.escape(label or field)}:** {_presentation_scalar(values.get(field))}" for field, label in recipe.notes)
+        lines.extend(
+            f"- **{html.escape(label or field)}:** {_presentation_scalar(values.get(field))}"
+            for field, label in recipe.notes
+        )
     if recipe.details:
         lines.extend(["", "<details>", "<summary>Details</summary>", ""])
-        lines.extend(f"- **{html.escape(label or field)}:** {_presentation_scalar(values.get(field))}" for field, label in recipe.details)
+        lines.extend(
+            f"- **{html.escape(label or field)}:** {_presentation_scalar(values.get(field))}"
+            for field, label in recipe.details
+        )
         lines.extend(["", "</details>"])
     lines.append("<!-- /exomem-record-presentation -->")
     block = newline.join(lines)
     if len(block.encode("utf-8")) > _MAX_PRESENTATION_BLOCK_BYTES:
-        raise collections.CollectionError("UNRENDERABLE_RECORD_PRESENTATION", "managed presentation block is too large")
+        raise collections.CollectionError(
+            "UNRENDERABLE_RECORD_PRESENTATION", "managed presentation block is too large"
+        )
     return block
 
 
@@ -928,15 +1033,8 @@ def _inert_markdown_text(value: str) -> str:
         "^": "&#94;",
         "$": "&#36;",
     }
-    inert = escaped.translate(
-        str.maketrans(translation)
-    )
-    return (
-        inert
-        .replace("\r\n", "<br>")
-        .replace("\n", "<br>")
-        .replace("\r", "<br>")
-    )
+    inert = escaped.translate(str.maketrans(translation))
+    return inert.replace("\r\n", "<br>").replace("\n", "<br>").replace("\r", "<br>")
 
 
 def _presentation_cell(value: Any) -> str:
@@ -950,10 +1048,14 @@ def _presentation_span(source: str) -> tuple[int, int] | None:
     if not opens and not closes:
         return None
     if len(opens) != 1 or len(closes) != 1 or opens[0].start() >= closes[0].start():
-        raise collections.CollectionError("MALFORMED_RECORD_PRESENTATION", "managed presentation markers are ambiguous")
+        raise collections.CollectionError(
+            "MALFORMED_RECORD_PRESENTATION", "managed presentation markers are ambiguous"
+        )
     start, end = opens[0].start(), closes[0].end()
     if end - start > _MAX_PRESENTATION_BLOCK_BYTES:
-        raise collections.CollectionError("MALFORMED_RECORD_PRESENTATION", "managed presentation block is too large")
+        raise collections.CollectionError(
+            "MALFORMED_RECORD_PRESENTATION", "managed presentation block is too large"
+        )
     return start, end
 
 
@@ -978,6 +1080,286 @@ def splice_record_presentation(
         raise collections.CollectionError("INVALID_RECORD_ITEM", "item frontmatter is invalid")
     close_end = opening.end() + closing.end()
     return bom + text[:close_end] + newline + block + text[close_end:]
+
+
+def remove_record_presentation(source: str) -> str:
+    """Remove one valid legacy managed block and preserve every other byte."""
+    span = _presentation_span(source)
+    if span is None:
+        return source
+    return source[: span[0]] + source[span[1] :]
+
+
+def splice_item_presentation(
+    source: str,
+    manifest: collections.CollectionManifest,
+    values: Mapping[str, Any],
+    *,
+    resolve_relationship: Callable[[str, str], tuple[str, str] | None] | None = None,
+) -> str:
+    """Replace one shared managed block while preserving all unowned source bytes."""
+    if manifest.item_presentation is None:
+        return source
+    newline = "\r\n" if "\r\n" in source else "\n"
+    block = _item_presentation_block(
+        manifest,
+        values,
+        newline,
+        resolve_relationship=resolve_relationship,
+    )
+    span = _item_presentation_span(source)
+    if span is not None:
+        return source[: span[0]] + block + source[span[1] :]
+
+    bom = "\ufeff" if source.startswith("\ufeff") else ""
+    text = source[len(bom) :]
+    opening = re.match(r"\A---\r?\n", text)
+    closing = re.search(r"(?m)^---\r?$", text[opening.end() :] if opening else "")
+    if opening is not None and closing is not None:
+        close_end = opening.end() + closing.end()
+        return bom + text[:close_end] + newline + block + text[close_end:]
+    separator = "" if not source or source.endswith(("\n", "\r")) else newline
+    return source + separator + block
+
+
+def remove_item_presentation(source: str) -> str:
+    """Remove one valid shared managed block and no authored bytes."""
+    span = _item_presentation_span(source)
+    if span is None:
+        return source
+    return source[: span[0]] + source[span[1] :]
+
+
+def _item_presentation_span(source: str) -> tuple[int, int] | None:
+    opens = list(_ITEM_PRESENTATION_OPEN.finditer(source))
+    closes = list(_ITEM_PRESENTATION_CLOSE.finditer(source))
+    if not opens and not closes:
+        return None
+    if len(opens) != 1 or len(closes) != 1 or opens[0].start() >= closes[0].start():
+        raise collections.CollectionError(
+            "MALFORMED_ITEM_PRESENTATION", "managed item presentation markers are ambiguous"
+        )
+    start, end = opens[0].start(), closes[0].end()
+    if end - start > _MAX_PRESENTATION_BLOCK_BYTES:
+        raise collections.CollectionError(
+            "MALFORMED_ITEM_PRESENTATION", "managed item presentation block is too large"
+        )
+    return start, end
+
+
+def _item_presentation_block(
+    manifest: collections.CollectionManifest,
+    values: Mapping[str, Any],
+    newline: str,
+    *,
+    resolve_relationship: Callable[[str, str], tuple[str, str] | None] | None,
+) -> str:
+    recipe = manifest.item_presentation
+    assert recipe is not None
+    recipe_digest, item_digest, selected = _item_presentation_digests(manifest, values)
+    lines = [
+        (
+            "<!-- exomem-item-presentation:v1 "
+            f"recipe=sha256:{recipe_digest} item=sha256:{item_digest} -->"
+        ),
+        f"# {_presentation_scalar(selected[recipe.title.field])}",
+        "",
+        "<!-- generated: canonical frontmatter remains authoritative -->",
+    ]
+    for descriptor in recipe.summary:
+        lines.append(
+            f"- **{_item_presentation_label(descriptor)}:** "
+            f"{_presentation_scalar(selected[descriptor.field])}"
+        )
+    for descriptor in recipe.long_text:
+        value = selected[descriptor.field]
+        if value is None:
+            continue
+        lines.extend(
+            [
+                "",
+                f"### {_item_presentation_label(descriptor)}",
+                "",
+                _presentation_scalar(value),
+            ]
+        )
+    if recipe.relationships:
+        rendered_relationships: list[str] = []
+        for descriptor in recipe.relationships:
+            value = selected[descriptor.field]
+            if value is None:
+                continue
+            spec = manifest.schema.fields[descriptor.field]
+            kind = spec.link_kind or "memory"
+            label = _item_presentation_label(descriptor)
+            if kind not in _VAULT_RELATION_KINDS:
+                rendered_relationships.append(f"- **{label}:** {_presentation_scalar(value)}")
+                continue
+            resolved = resolve_relationship(kind, str(value)) if resolve_relationship else None
+            if resolved is None:
+                raise collections.CollectionError(
+                    "UNRENDERABLE_ITEM_PRESENTATION",
+                    "a selected relationship cannot be rendered",
+                    {"field": descriptor.field, "kind": "relationship"},
+                )
+            path, target_label = resolved
+            if path.endswith(".md"):
+                path = path[:-3]
+            safe_path = path.replace("[", "%5B").replace("]", "%5D").replace("|", "%7C")
+            safe_label = (
+                html.escape(target_label, quote=False)
+                .replace("[", "&#91;")
+                .replace("]", "&#93;")
+                .replace("|", "&#124;")
+            )
+            rendered_relationships.append(f"- **{label}:** [[{safe_path}|{safe_label}]]")
+        if rendered_relationships:
+            lines.extend(["", "### Related", "", *rendered_relationships])
+    lines.append("<!-- /exomem-item-presentation:v1 -->")
+    block = newline.join(lines)
+    if len(block.encode("utf-8")) > _MAX_PRESENTATION_BLOCK_BYTES:
+        raise collections.CollectionError(
+            "UNRENDERABLE_ITEM_PRESENTATION", "managed item presentation block is too large"
+        )
+    return block
+
+
+def _item_presentation_digests(
+    manifest: collections.CollectionManifest,
+    values: Mapping[str, Any],
+) -> tuple[str, str, dict[str, Any]]:
+    recipe = manifest.item_presentation
+    assert recipe is not None
+    recipe_payload = {
+        "version": recipe.version,
+        "title": (recipe.title.field, recipe.title.label),
+        "summary": [(item.field, item.label) for item in recipe.summary],
+        "long_text": [(item.field, item.label) for item in recipe.long_text],
+        "relationships": [(item.field, item.label) for item in recipe.relationships],
+    }
+    selected_fields = (
+        recipe.title,
+        *recipe.summary,
+        *recipe.long_text,
+        *recipe.relationships,
+    )
+    selected: dict[str, Any] = {}
+    for descriptor in selected_fields:
+        value = values.get(descriptor.field)
+        try:
+            collections._validate_field_value(
+                descriptor.field, value, manifest.schema.fields[descriptor.field]
+            )
+        except collections.CollectionError as error:
+            raise collections.CollectionError(
+                "UNRENDERABLE_ITEM_PRESENTATION",
+                "a selected canonical presentation field is invalid",
+            ) from error
+        selected[descriptor.field] = value
+    recipe_digest = hashlib.sha256(
+        json.dumps(
+            recipe_payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    item_digest = hashlib.sha256(
+        json.dumps(
+            selected,
+            default=str,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    return recipe_digest, item_digest, selected
+
+
+def _item_presentation_label(descriptor: collections.ItemPresentationField) -> str:
+    value = descriptor.label or descriptor.field.replace("_", " ").replace("-", " ").title()
+    return html.escape(value, quote=False)
+
+
+def presentation_relationship_resolver(
+    vault_root: Path,
+    manifest: collections.CollectionManifest,
+    snapshot: AdapterSnapshot,
+    *,
+    authorize_path: Callable[[str], bool] | None = None,
+    item_paths: Mapping[str, str] | None = None,
+) -> Callable[[str, str], tuple[str, str] | None] | None:
+    """Resolve selected canonical relationships without disclosing withheld targets."""
+    recipe = manifest.item_presentation
+    if recipe is None or not recipe.relationships:
+        return None
+    root = Path(vault_root)
+    resolved_item_paths = (
+        {
+            record.identity.key: record.source.path
+            for record in snapshot.records
+            if not record.ambiguous
+        }
+        if item_paths is None
+        else dict(item_paths)
+    )
+    wikilinks = vault.WikilinkResolver(root)
+    current_item_paths = {
+        record.identity.key: record.source.path
+        for record in snapshot.records
+        if not record.ambiguous
+    }
+
+    def resolve(kind: str, raw: str) -> tuple[str, str] | None:
+        relative: str | None = None
+        readable_relative: str | None = None
+        parsed = (
+            collections.parse_plan_ref(raw)
+            if kind == "plan"
+            else collections.parse_record_ref(raw)
+            if kind == "record"
+            else None
+        )
+        if parsed is not None and parsed[0] == manifest.collection_id:
+            relative = resolved_item_paths.get(parsed[1])
+            readable_relative = current_item_paths.get(parsed[1])
+        if relative is None:
+            try:
+                target = memory_refs.resolve_identifier_read_only(root, raw)
+                canonical, _warning = vault.normalize_wikilink(
+                    target,
+                    root,
+                    resolver=wikilinks,
+                    strict=True,
+                )
+                relative = canonical.split("#", 1)[0] + ".md"
+            except (memory_refs.ReferenceError, vault.WikilinkError):
+                return None
+        try:
+            _path, source_relative = vault.resolve_under_vault(
+                root,
+                readable_relative or relative,
+                must_exist=True,
+                must_be_file=True,
+            )
+            if authorize_path is not None and not authorize_path(source_relative):
+                return None
+            data, _guard = vault.read_bounded_guarded_bytes(
+                root, source_relative, limit=_MAX_ITEM_BYTES
+            )
+            text = data.decode("utf-8")
+            frontmatter, body, _frontmatter_text = vault.parse_frontmatter(text)
+            label = vault.resolve_display_title(frontmatter, body, source_relative)
+        except (
+            UnicodeDecodeError,
+            vault.FrontmatterError,
+            vault.PathGuardError,
+            vault.VaultPathError,
+        ):
+            return None
+        return relative, label
+
+    return resolve
 
 
 def _span_terminator(yaml_text: str, span: tuple[int, int]) -> str:
@@ -1078,9 +1460,7 @@ def render_markdown_item_update(
             newline
             if span is None
             else (
-                _span_terminator(yaml_text, span)
-                or _line_terminator(yaml_text, span[1])
-                or newline
+                _span_terminator(yaml_text, span) or _line_terminator(yaml_text, span[1]) or newline
             )
         )
         rendered = vault.serialize_frontmatter({name: value}).replace("\n", local)
@@ -1134,9 +1514,7 @@ def render_markdown_item_update(
             "spliced item frontmatter did not preserve the requested field set",
         )
     audit_line = (
-        f"# {profile.item_audit_marker}: {audit_correlation}{trailing}"
-        if audit_correlation
-        else ""
+        f"# {profile.item_audit_marker}: {audit_correlation}{trailing}" if audit_correlation else ""
     )
     close_end = close_start + len(closing.group(0))
     # `^---\r?$` matches *before* the LF, so a CRLF fence leaves its CR inside
@@ -1148,7 +1526,9 @@ def render_markdown_item_update(
     fence_end = text.find("\n", close_end)
     fence_terminator = newline if fence_end == -1 else text[close_end : fence_end + 1]
     suffix = text[close_end:] if body is None else fence_terminator + body
-    rebuilt = text[: opening.end()] + updated_yaml + audit_line + text[close_start:close_end] + suffix
+    rebuilt = (
+        text[: opening.end()] + updated_yaml + audit_line + text[close_start:close_end] + suffix
+    )
     # Post-write self-check: a splice bug that glues a field into whatever
     # follows it must fail loudly here, not persist an unreadable page for a
     # later reader to trip over. Re-parse against the same BOM-free `text`
@@ -1243,8 +1623,7 @@ def render_manifest_audit_head(
             )
     collections._audit_head(parsed, profile.manifest_audit_property)
     if reader_version is not None and (
-        type(reader_version) is not int
-        or reader_version not in ({1, 2} if semantic_profile == "records" else {1})
+        type(reader_version) is not int or reader_version not in {1, 2}
     ):
         raise collections.CollectionError("INVALID_RECORD_AUDIT", "audit reader version is invalid")
     if audit_node is None:
@@ -1270,7 +1649,9 @@ def render_manifest_audit_head(
             (head.start_mark.index, head.end_mark.index, _yaml_head_scalar(transition_id))
         ]
         if reader_version is not None:
-            replacements.append((version.start_mark.index, version.end_mark.index, str(reader_version)))
+            replacements.append(
+                (version.start_mark.index, version.end_mark.index, str(reader_version))
+            )
         for start_index, end_index, replacement in sorted(replacements, reverse=True):
             frontmatter = frontmatter[:start_index] + replacement + frontmatter[end_index:]
     return bom + text[:start] + frontmatter + text[end:]
@@ -1305,6 +1686,9 @@ class CollectionInspection:
     diagnostics: tuple[collections.CollectionDiagnostic, ...]
     record_count: int = 0
     presentation: tuple[dict[str, Any], ...] = ()
+    #: `None` when no item pass ran, so an unreadable collection never reports an
+    #: empty vocabulary as if it had been swept.
+    observed_values: Mapping[str, dict[str, Any]] | None = None
 
 
 def inspect_collection(
@@ -1334,7 +1718,12 @@ def inspect_collection(
             diagnostics=(collections.CollectionDiagnostic(error.code, error.reason),),
         )
     diagnostics = list((*manifest.view_diagnostics, *parsed.diagnostics)[:64])
-    presentation = _inspect_presentation(manifest, parsed)
+    presentation = _inspect_presentation(
+        vault_root,
+        manifest,
+        parsed,
+        authorize_path=authorize_path,
+    )
     for name in manifest.views:
         if len(diagnostics) >= 64:
             break
@@ -1349,7 +1738,8 @@ def inspect_collection(
         if expected is not None and expected != parsed.data_snapshot:
             diagnostics.append(
                 collections.CollectionDiagnostic(
-                    "STALE_SAVED_VIEW", "saved view source snapshot no longer matches canonical data"
+                    "STALE_SAVED_VIEW",
+                    "saved view source snapshot no longer matches canonical data",
                 )
             )
     return CollectionInspection(
@@ -1360,56 +1750,314 @@ def inspect_collection(
         diagnostics=tuple(diagnostics),
         record_count=len(parsed.records),
         presentation=presentation,
+        observed_values=_observed_field_values(manifest, parsed.records),
     )
 
 
+def _observed_field_values(
+    manifest: collections.CollectionManifest,
+    records: Sequence[Record],
+) -> dict[str, dict[str, Any]]:
+    """Summarize the vocabulary free-string fields already carry.
+
+    A declared `enum` IS the vocabulary, so those fields are left alone. The pass
+    reads only the records the adapter already authorized and parsed; a value that
+    reached no released item cannot reach this summary.
+
+    Two decisions are load-bearing and easy to get subtly wrong:
+
+    * The counter is keyed on the FULL surrounding-whitespace-stripped value, never
+      on the display form. Keying on the cut value silently merges two distinct terms
+      that happen to share a 120-character prefix into one entry with a summed count,
+      which is a wrong answer rather than a bounded one. Two distinct values may
+      therefore emit the same display string; `value_truncated` is what says so.
+    * Selection is by frequency, decided AFTER the whole pass, because the payload
+      presents the values in frequency order and a first-seen cap would silently
+      drop the collection's most common term. The intermediate counter holds
+      references into records the adapter already materialized, so it adds no state
+      the read did not already carry.
+    """
+    names = [
+        name
+        for name, spec in manifest.schema.fields.items()
+        if spec.type == "string" and not spec.enum
+    ]
+    counts: dict[str, dict[str, int]] = {name: {} for name in names}
+    for record in records:
+        for name in names:
+            value = record.values.get(name)
+            if type(value) is not str:
+                continue
+            text = value.strip()
+            if not text:
+                continue
+            observed = counts[name]
+            observed[text] = observed.get(text, 0) + 1
+    summary: dict[str, dict[str, Any]] = {}
+    for name in names:
+        ranked = sorted(counts[name].items(), key=lambda entry: (-entry[1], entry[0]))
+        summary[name] = {
+            "values": [
+                {
+                    "value": value[:_MAX_OBSERVED_VALUE_CHARS],
+                    "count": count,
+                    "value_truncated": len(value) > _MAX_OBSERVED_VALUE_CHARS,
+                }
+                for value, count in ranked[:_MAX_OBSERVED_VALUES]
+            ],
+            "truncated": len(ranked) > _MAX_OBSERVED_VALUES,
+        }
+    return summary
+
+
 def _inspect_presentation(
-    manifest: collections.CollectionManifest, parsed: AdapterSnapshot
+    vault_root: Path,
+    manifest: collections.CollectionManifest,
+    parsed: AdapterSnapshot,
+    *,
+    authorize_path: Callable[[str], bool] | None,
 ) -> tuple[dict[str, Any], ...]:
-    """Compare derived bytes without parsing them back or mutating the item."""
-    if manifest.record_presentation is None:
-        return ()
+    """Compare item paths and recognized managed bytes without mutating them."""
     source_bytes = dict(parsed.source_bytes)
     findings: list[dict[str, Any]] = []
+    findings.extend(_inspect_item_filenames(manifest, parsed))
+    resolve_relationship = presentation_relationship_resolver(
+        vault_root,
+        manifest,
+        parsed,
+        authorize_path=authorize_path,
+    )
     for record in parsed.records:
         source = source_bytes.get(record.source.path)
         if source is None:
             continue
-        error_details: Mapping[str, Any] | None = None
+        findings.extend(
+            _inspect_item_managed_bytes(
+                manifest,
+                record,
+                source,
+                resolve_relationship=resolve_relationship,
+            )
+        )
+    return tuple(
+        sorted(
+            findings,
+            key=lambda finding: (str(finding["item_key"]), str(finding["state"])),
+        )
+    )
+
+
+def _inspect_item_filenames(
+    manifest: collections.CollectionManifest,
+    parsed: AdapterSnapshot,
+) -> list[dict[str, Any]]:
+    if manifest.item_filename is None:
+        return []
+    projected: dict[str, list[tuple[Record, str]]] = {}
+    findings: list[dict[str, Any]] = []
+    for record in parsed.records:
         try:
-            text = _decode_item_bytes(source)
+            desired = collections.render_item_path(manifest, record.values, record.identity.key)
+        except collections.CollectionError:
+            findings.append(_representation_finding(record, "unrenderable", "guarded_value_update"))
+            continue
+        projected.setdefault(desired.casefold(), []).append((record, desired))
+    for group in projected.values():
+        desired = group[0][1]
+        exact = [
+            record for record, _path in group if record.source.path.casefold() == desired.casefold()
+        ]
+        if len(group) > 1 and len(exact) != 1:
+            findings.extend(
+                _representation_finding(record, "filename_collision", "structured_files_preview")
+                for record, _path in group
+            )
+        for record, _path in group:
+            if record in exact:
+                continue
+            accepted = desired
+            if len(group) > 1 and len(exact) == 1:
+                try:
+                    accepted = collections.render_item_path(
+                        manifest,
+                        record.values,
+                        record.identity.key,
+                        occupied_paths=(desired,),
+                    )
+                except collections.CollectionError:
+                    pass
+            if record.source.path.casefold() != accepted.casefold():
+                findings.append(
+                    _representation_finding(record, "filename_drift", "structured_files_preview")
+                )
+    return findings
+
+
+def _inspect_item_managed_bytes(
+    manifest: collections.CollectionManifest,
+    record: Record,
+    source: bytes,
+    *,
+    resolve_relationship: Callable[[str, str], tuple[str, str] | None] | None,
+) -> list[dict[str, Any]]:
+    try:
+        text = _decode_item_bytes(source)
+    except collections.CollectionError:
+        return [_representation_finding(record, "malformed", "repair_markers_then_refresh")]
+    findings: list[dict[str, Any]] = []
+
+    shared_present = bool(
+        _ITEM_PRESENTATION_OPEN.search(text) or _ITEM_PRESENTATION_CLOSE.search(text)
+    )
+    legacy_present = bool(_PRESENTATION_OPEN.search(text) or _PRESENTATION_CLOSE.search(text))
+    if manifest.item_presentation is not None:
+        findings.extend(
+            _inspect_shared_item_presentation(
+                manifest,
+                record,
+                text,
+                resolve_relationship=resolve_relationship,
+            )
+        )
+    elif shared_present:
+        try:
+            span = _item_presentation_span(text)
+            state = "orphan_presentation" if span is not None else "malformed"
+        except collections.CollectionError:
+            state = "malformed"
+        findings.append(
+            _representation_finding(
+                record,
+                state,
+                "guarded_manifest_revision"
+                if state == "orphan_presentation"
+                else "repair_markers_then_refresh",
+            )
+        )
+
+    if manifest.record_presentation is not None:
+        findings.extend(_inspect_legacy_record_presentation(manifest, record, text))
+    elif legacy_present:
+        try:
             span = _presentation_span(text)
-            if span is None:
-                state = "missing"
-            else:
-                expected = splice_record_presentation(text, manifest, record.values)
-                state = "current" if expected == text else "stale"
-        except collections.CollectionError as error:
-            state = "unrenderable" if error.code == "UNRENDERABLE_RECORD_PRESENTATION" else "malformed"
-            error_details = error.details if isinstance(error.details, Mapping) else None
-        if state != "current":
-            finding: dict[str, Any] = {
-                "item_key": record.identity.key,
-                "path": record.source.path,
-                "version": record.source.hash,
-                "state": state,
-                "remedy": {
-                    "missing": "guarded_refresh",
-                    "stale": "rebaseline_then_refresh",
-                    "malformed": "repair_markers_then_refresh",
-                    "unrenderable": "guarded_value_update",
-                }[state],
-            }
-            if state == "unrenderable" and error_details is not None:
-                location = {
-                    name: error_details[name]
-                    for name in ("table", "column", "child_index")
-                    if name in error_details
-                }
-                if location:
-                    finding["location"] = location
-            findings.append(finding)
-    return tuple(sorted(findings, key=lambda finding: str(finding["item_key"])))
+            state = "orphan_presentation" if span is not None else "malformed"
+        except collections.CollectionError:
+            state = "malformed"
+        findings.append(
+            _representation_finding(
+                record,
+                state,
+                "guarded_manifest_revision"
+                if state == "orphan_presentation"
+                else "repair_markers_then_refresh",
+            )
+        )
+    return findings
+
+
+def _inspect_shared_item_presentation(
+    manifest: collections.CollectionManifest,
+    record: Record,
+    text: str,
+    *,
+    resolve_relationship: Callable[[str, str], tuple[str, str] | None] | None,
+) -> list[dict[str, Any]]:
+    try:
+        span = _item_presentation_span(text)
+        if span is None:
+            return [_representation_finding(record, "missing", "guarded_refresh")]
+        marker = _ITEM_PRESENTATION_OPEN.search(text, span[0], span[1])
+        if marker is None:
+            raise collections.CollectionError(
+                "MALFORMED_ITEM_PRESENTATION", "managed marker is missing"
+            )
+        recipe_digest, item_digest, _selected = _item_presentation_digests(manifest, record.values)
+        if marker.group(1) != recipe_digest:
+            state = "stale_recipe"
+        elif marker.group(2) != item_digest:
+            state = "stale_item"
+        else:
+            expected = splice_item_presentation(
+                text,
+                manifest,
+                record.values,
+                resolve_relationship=resolve_relationship,
+            )
+            state = "current" if expected == text else "authored_presentation"
+    except collections.CollectionError as error:
+        if error.code == "UNRENDERABLE_ITEM_PRESENTATION":
+            details = error.details if isinstance(error.details, Mapping) else {}
+            state = (
+                "unresolved_relationship"
+                if details.get("kind") == "relationship"
+                else "unrenderable"
+            )
+        else:
+            state = "malformed"
+    if state == "current":
+        return []
+    remedies = {
+        "stale_recipe": "guarded_refresh",
+        "stale_item": "rebaseline_then_refresh",
+        "authored_presentation": "rebaseline_then_refresh",
+        "unresolved_relationship": "guarded_value_update",
+        "unrenderable": "guarded_value_update",
+        "malformed": "repair_markers_then_refresh",
+    }
+    return [_representation_finding(record, state, remedies[state])]
+
+
+def _inspect_legacy_record_presentation(
+    manifest: collections.CollectionManifest,
+    record: Record,
+    text: str,
+) -> list[dict[str, Any]]:
+    error_details: Mapping[str, Any] | None = None
+    try:
+        span = _presentation_span(text)
+        if span is None:
+            state = "missing"
+        else:
+            expected = splice_record_presentation(text, manifest, record.values)
+            state = "current" if expected == text else "stale"
+    except collections.CollectionError as error:
+        state = (
+            "unrenderable"
+            if error.code == "UNRENDERABLE_RECORD_PRESENTATION"
+            else "malformed"
+        )
+        error_details = error.details if isinstance(error.details, Mapping) else None
+    if state == "current":
+        return []
+    finding = _representation_finding(
+        record,
+        state,
+        {
+            "missing": "guarded_refresh",
+            "stale": "rebaseline_then_refresh",
+            "malformed": "repair_markers_then_refresh",
+            "unrenderable": "guarded_value_update",
+        }[state],
+    )
+    if state == "unrenderable" and error_details is not None:
+        location = {
+            name: error_details[name]
+            for name in ("table", "column", "child_index")
+            if name in error_details
+        }
+        if location:
+            finding["location"] = location
+    return [finding]
+
+
+def _representation_finding(record: Record, state: str, remedy: str) -> dict[str, Any]:
+    return {
+        "item_key": record.identity.key,
+        "path": record.source.path,
+        "version": record.source.hash,
+        "state": state,
+        "remedy": remedy,
+    }
 
 
 def _source_versions_for_returned_rows(
@@ -1505,11 +2153,14 @@ def query_collection(
         vault_root, manifest, authorize_path=authorize_path, project_values=project_values
     )
     parsed = adapter.read()
-    _enforce_selected_child_cap(parsed.records, selected_child)
+    _enforce_selected_child_cap(parsed.records, selected_child, manifest)
     parsed = replace(
         parsed,
         records=tuple(
-            replace(record, values=_safe_presentation_values(record.values, manifest, project_child_value))
+            replace(
+                record,
+                values=_safe_presentation_values(record.values, manifest, project_child_value),
+            )
             for record in parsed.records
         ),
     )
@@ -1526,7 +2177,9 @@ def query_collection(
     }
     if manifest.semantic_profile == "records":
         query["expand_child"] = expand_child
-    cursor_query = query if view_provenance is None else {**query, "limit": limit, "view": view_provenance}
+    cursor_query = (
+        query if view_provenance is None else {**query, "limit": limit, "view": view_provenance}
+    )
     offset = 0
     if continuation:
         token = _decode_continuation(continuation)
@@ -2113,16 +2766,18 @@ def _safe_presentation_values(
         return dict(values)
     result = dict(values)
     for table in recipe.tables:
-        rows = values.get(table.field)
-        if not isinstance(rows, list):
-            raise collections.CollectionError("UNRENDERABLE_RECORD_PRESENTATION", "presentation table is not an array")
+        rows = _presentation_table_rows(manifest, values, table)
         safe_rows: list[dict[str, Any]] = []
         for index, row in enumerate(rows):
             child = _presentation_child(row, table, index)
             if project_child_value is not None:
                 for column in table.columns:
                     projected = project_child_value(child[column.field], column)
-                    if column.type == "link" and child[column.field] is not None and projected is None:
+                    if (
+                        column.type == "link"
+                        and child[column.field] is not None
+                        and projected is None
+                    ):
                         child.pop(column.field)
                     else:
                         child[column.field] = projected
@@ -2135,19 +2790,32 @@ def _resolve_child_selector(
     manifest: collections.CollectionManifest, expand_children: bool, expand_child: str | None
 ) -> str | None:
     if expand_children and expand_child is not None:
-        raise collections.CollectionError("INVALID_RECORD_QUERY", "use expand_child or expand_children, not both")
+        raise collections.CollectionError(
+            "INVALID_RECORD_QUERY", "use expand_child or expand_children, not both"
+        )
     if expand_child is not None:
         if type(expand_child) is not str or not expand_child:
-            raise collections.CollectionError("INVALID_RECORD_QUERY", "expand_child must name a declared child field")
+            raise collections.CollectionError(
+                "INVALID_RECORD_QUERY", "expand_child must name a declared child field"
+            )
         if manifest.storage.strategy == "markdown-items":
-            if manifest.record_presentation is None or expand_child not in {table.field for table in manifest.record_presentation.tables}:
-                raise collections.CollectionError("INVALID_RECORD_QUERY", "expand_child is not a declared presentation table")
+            if manifest.record_presentation is None or expand_child not in {
+                table.field for table in manifest.record_presentation.tables
+            }:
+                raise collections.CollectionError(
+                    "INVALID_RECORD_QUERY", "expand_child is not a declared presentation table"
+                )
             return expand_child
         if manifest.storage.strategy == "markdown-log":
             descriptor = manifest.storage.descriptor.get("child_rows")
-            if isinstance(descriptor, Mapping) and descriptor.get("container_field") == expand_child:
+            if (
+                isinstance(descriptor, Mapping)
+                and descriptor.get("container_field") == expand_child
+            ):
                 return expand_child
-        raise collections.CollectionError("INVALID_RECORD_QUERY", "expand_child is not available for this collection")
+        raise collections.CollectionError(
+            "INVALID_RECORD_QUERY", "expand_child is not available for this collection"
+        )
     if not expand_children:
         return None
     if manifest.storage.strategy == "markdown-items":
@@ -2167,7 +2835,9 @@ def _resolve_child_selector(
         descriptor = manifest.storage.descriptor.get("child_rows")
         if isinstance(descriptor, Mapping) and type(descriptor.get("container_field")) is str:
             return descriptor["container_field"]
-    raise collections.CollectionError("INVALID_RECORD_QUERY", "expand_children has no eligible child field")
+    raise collections.CollectionError(
+        "INVALID_RECORD_QUERY", "expand_children has no eligible child field"
+    )
 
 
 def _validate_query_projection_fields(
@@ -2192,9 +2862,7 @@ def _validate_query_projection_fields(
             "ambiguous",
             "parent_record_id",
         },
-        collections._saved_view_child_shapes(
-            manifest.storage, manifest.record_presentation
-        ),
+        collections._saved_view_child_shapes(manifest.storage, manifest.record_presentation),
         selected_child,
     )
 
@@ -2217,21 +2885,46 @@ def _validate_query_projection_fields(
             )
 
 
-def _enforce_selected_child_cap(records: tuple[Record, ...], selected_child: str | None) -> None:
+def _enforce_selected_child_cap(
+    records: tuple[Record, ...],
+    selected_child: str | None,
+    manifest: collections.CollectionManifest,
+) -> None:
     """Count selected arrays only; never project a child before the global cap holds."""
     if selected_child is None:
         return
+    presentation_table = next(
+        (
+            table
+            for table in (
+                ()
+                if manifest.record_presentation is None
+                else manifest.record_presentation.tables
+            )
+            if table.field == selected_child
+        ),
+        None,
+    )
     total = 0
     for record in records:
-        if record.children and selected_child not in record.values:
+        if presentation_table is not None:
+            values = _presentation_table_rows(manifest, record.values, presentation_table)
+            total += len(values)
+        elif record.children and selected_child not in record.values:
             total += len(record.children)
         else:
             values = record.values.get(selected_child)
             if not isinstance(values, list):
-                raise collections.CollectionError("UNRENDERABLE_RECORD_PRESENTATION", "selected child field is not an array")
+                raise collections.CollectionError(
+                    "UNRENDERABLE_RECORD_PRESENTATION",
+                    f"selected child field '{selected_child}' must be an array",
+                    {"field": selected_child},
+                )
             total += len(values)
         if total > _MAX_CHILD_ROWS:
-            raise collections.CollectionError("RECORD_CHILD_LIMIT", "expanded child rows exceed the hard limit")
+            raise collections.CollectionError(
+                "RECORD_CHILD_LIMIT", "expanded child rows exceed the hard limit"
+            )
 
 
 def _query_rows(
@@ -2260,9 +2953,13 @@ def _query_rows(
             else:
                 children = record.values.get(selected_child)
             if not isinstance(children, list):
-                raise collections.CollectionError("UNRENDERABLE_RECORD_PRESENTATION", "selected child field is not an array")
+                raise collections.CollectionError(
+                    "UNRENDERABLE_RECORD_PRESENTATION", "selected child field is not an array"
+                )
             if len(rows) + len(children) > _MAX_CHILD_ROWS:
-                raise collections.CollectionError("RECORD_CHILD_LIMIT", "expanded child rows exceed the hard limit")
+                raise collections.CollectionError(
+                    "RECORD_CHILD_LIMIT", "expanded child rows exceed the hard limit"
+                )
             parent = {name: value for name, value in base.items() if name != selected_child}
             if set(parent) & _EXPANDED_METADATA_FIELDS:
                 raise collections.CollectionError(
@@ -2271,7 +2968,9 @@ def _query_rows(
             for index, child in enumerate(children):
                 child_values = child if isinstance(child, Mapping) else None
                 if child_values is None or set(child_values) & set(parent):
-                    raise collections.CollectionError("INVALID_RECORD_QUERY", "child fields collide with parent fields")
+                    raise collections.CollectionError(
+                        "INVALID_RECORD_QUERY", "child fields collide with parent fields"
+                    )
                 rows.append(
                     {
                         **parent,
@@ -2328,10 +3027,7 @@ def _decode_continuation(value: str) -> dict[str, Any]:
         if not encoded or re.fullmatch(r"[A-Za-z0-9_~-]+", encoded) is None:
             raise ValueError
         if len(chunks) > 1 and (
-            any(
-                not chunk or len(chunk) > _CURSOR_CHUNK_CHARS
-                for chunk in chunks
-            )
+            any(not chunk or len(chunk) > _CURSOR_CHUNK_CHARS for chunk in chunks)
             or any(len(chunk) != _CURSOR_CHUNK_CHARS for chunk in chunks[:-1])
         ):
             raise ValueError
@@ -2357,7 +3053,9 @@ def _decode_continuation(value: str) -> dict[str, Any]:
     return payload
 
 
-def validate_continuation(value: str, *, collection_id: str, snapshot: str, query: Mapping[str, Any]) -> bool:
+def validate_continuation(
+    value: str, *, collection_id: str, snapshot: str, query: Mapping[str, Any]
+) -> bool:
     """Validate a bounded v1 continuation without treating it as trusted output."""
     try:
         payload = _decode_continuation(value)

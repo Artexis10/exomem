@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Reviewed hosted deployment
 
 ## Preconditions
@@ -10,6 +12,42 @@ pair is committed at `infra/contracts/exomem-hosted-deployment-lock-pair-v2.json
 Runtime releases use the governed expand/canary/contract workflow in
 [`runtime-upgrades.md`](runtime-upgrades.md). The deployment sections below are its
 effectors, not a release checklist; do not edit their release values by hand.
+
+## Offline machine-local state transition
+
+The first rollout containing the external state-root contract is not an
+ordinary rolling restart. For each cell, the provisioner must hold maintenance,
+leave both routes closed and drained, quiesce the old runtime, scale it away,
+and obtain a fresh Kubernetes observation proving **zero tenant runtime pods**.
+A successful quiesce response or a desired replica count of zero is not that
+proof; the old pod must be absent before the migration Job is admitted.
+
+The migration Job is rendered from the **target image**, with routes disabled
+and the same PVC mounted. `EXOMEM_HOSTED_OFFLINE_STATE_MIGRATION=1` makes the
+target `hosted init` boundary run the explicit offline state transition. The
+Job first takes the **existing hosted lifetime lock** used by the serving
+runtime and restore path, then `migrate_vault_state_offline` takes the
+**new state-migration lock**. The second lock serializes target migrators; it cannot
+exclude an old image, so route drain and zero-pod proof remain mandatory. A
+busy lifetime lock is evidence that a runtime or restore owner remains and the
+Job must fail without copying or unlinking legacy state.
+
+The per-cell order is fixed:
+
+```text
+maintenance acquired
+-> control and transfer routes rejected externally
+-> old runtime quiesced
+-> StatefulSet scaled/deleted and zero pods observed
+-> target-image migration Job complete
+-> target runtime started and exact identity/readiness proven
+-> routes reopened
+```
+
+Record the zero-pod observation, target digest, migration Job UID and terminal
+condition, and post-start target identity in the rollforward evidence. If any
+step from migration onward fails, keep routes closed and the cell stopped on
+the target image; follow the forward-recovery action in `runtime-upgrades.md`.
 
 ## Records reader-floor rollout
 

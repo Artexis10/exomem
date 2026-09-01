@@ -168,7 +168,8 @@ def _observe(vault: Path, content: str, *, response_detail: str | None = None) -
 
 
 def _prime(vault: Path) -> None:
-    """Build the projection the way a real session does — at bootstrap."""
+    """Build the projection, then start the session that will carry it."""
+    _due_state().reconcile(vault)
     commands.op_bootstrap(vault)
     _fresh_session()
 
@@ -201,6 +202,7 @@ def test_an_overdue_check_by_reaches_no_carrier_today(vault: Path) -> None:
     """
     _overdue_prediction(vault, check_by=_yesterday())
     _scratch_page(vault)
+    _due_state().reconcile(vault)
 
     _fresh_session()
     bootstrap_payload = commands.op_bootstrap(vault)
@@ -375,6 +377,7 @@ def test_recall_on_a_quiet_vault_keeps_its_existing_shape(vault: Path) -> None:
 
 def test_the_bootstrap_payload_carries_the_block(vault: Path) -> None:
     _overdue_prediction(vault, check_by=_yesterday())
+    _due_state().reconcile(vault)
 
     payload = commands.op_bootstrap(vault)
 
@@ -737,7 +740,7 @@ def test_a_recall_after_a_write_is_quiet_when_the_totals_have_not_moved(
 def test_a_recall_after_bootstrap_is_quiet_when_the_totals_have_not_moved(
     vault: Path,
 ) -> None:
-    """Bootstrap attaches unconditionally, so it must also RECORD the delivery.
+    """Bootstrap attaches a ready block unconditionally, so it records delivery.
 
     The contract makes bootstrap's attachment unconditional — a session that starts
     on a reduced surface has no other way to hear about it. That is a delivery, and
@@ -745,12 +748,13 @@ def test_a_recall_after_bootstrap_is_quiet_when_the_totals_have_not_moved(
     repeat the identical block.
     """
     _overdue_prediction(vault, check_by=_yesterday())
+    _due_state().reconcile(vault)
     _fresh_session()
 
     payload = commands.op_bootstrap(vault)
     recall = commands.op_ask_memory(vault, query="autovacuum", limit=5)
 
-    assert "due_state" in payload, "bootstrap always carries it"
+    assert "due_state" in payload, "bootstrap always carries a ready block"
     assert not (isinstance(recall, dict) and "due_state" in recall), (
         "bootstrap DELIVERED this block, so the first recall with the same totals "
         "is a repeat"
@@ -922,6 +926,7 @@ def test_removing_the_bootstrap_carrier_fails_this_module(
 ) -> None:
     """Mechanism-removal for carrier 3."""
     _overdue_prediction(vault, check_by=_yesterday())
+    _due_state().reconcile(vault)
     assert "due_state" in commands.op_bootstrap(vault)
 
     monkeypatch.setattr(_due_state(), "served", lambda *a, **k: None)

@@ -97,6 +97,27 @@ def _measurement(
     )
 
 
+def _video_measurement(
+    variant: projections.ProjectionVariant,
+    *samples: tuple[int, tuple[float, ...]],
+) -> projected_retrieval.ProjectionClipMeasurement:
+    return projected_retrieval.ProjectionClipMeasurement(
+        measurement_key=projections.MeasurementKey(
+            projection_variant_id=variant.projection_variant_id,
+            lane="clip",
+            extractor_version="pixels-v1",
+            model_version="clip-test-v1",
+        ),
+        samples=tuple(
+            projected_retrieval.ProjectionClipSample(
+                frame_timestamp_ms=timestamp_ms,
+                vector=vector,
+            )
+            for timestamp_ms, vector in samples
+        ),
+    )
+
+
 def test_l0_pixel_match_is_equivalent_to_absence_before_clip_cap() -> None:
     visible = _variant("visible", "1" * 64, level=6, text="visible")
     hidden = _variant("hidden", "2" * 64, level=6, text="hidden")
@@ -194,4 +215,158 @@ def test_clip_measurement_lane_and_versions_are_closed_subkeys() -> None:
             (_measurement(full, (1.0, 0.0)),),
             extractor_version="pixels-v1",
             model_version="different-model",
+        )
+
+
+def test_video_scores_every_keyframe_but_returns_the_parent_once() -> None:
+    video = _variant(
+        "video",
+        "7" * 64,
+        level=6,
+        text="full video",
+        media_type="video",
+    )
+    item = _item(video)
+    index = projected_retrieval.ProjectedClipIndex(
+        _namespace(item),
+        (
+            _video_measurement(
+                video,
+                (1_000, (0.0, 1.0)),
+                (8_500, (1.0, 0.0)),
+                (19_000, (2.0, 0.0)),
+            ),
+        ),
+        extractor_version="pixels-v1",
+        model_version="clip-test-v1",
+    )
+
+    hits = index.search_clip(_map((item, video)), (1.0, 0.0), k=5)
+
+    assert len(hits) == 1
+    assert hits[0].item_identity == "video"
+    assert hits[0].clip_frame_timestamp_ms == 8_500
+    assert hits[0].score == pytest.approx(1.0)
+
+
+def test_hidden_video_keyframes_are_absent_before_parent_top_k() -> None:
+    visible = _variant(
+        "visible-video",
+        "c" * 64,
+        level=6,
+        text="visible video",
+        media_type="video",
+    )
+    hidden = _variant(
+        "hidden-video",
+        "d" * 64,
+        level=6,
+        text="hidden video",
+        media_type="video",
+    )
+    visible_item, hidden_item = _item(visible), _item(hidden)
+    visible_measurement = _video_measurement(
+        visible,
+        (1_000, (0.2, 0.8)),
+        (8_500, (0.6, 0.4)),
+    )
+    present = projected_retrieval.ProjectedClipIndex(
+        _namespace(visible_item, hidden_item),
+        (
+            visible_measurement,
+            _video_measurement(hidden, (2_000, (1.0, 0.0))),
+        ),
+        extractor_version="pixels-v1",
+        model_version="clip-test-v1",
+    )
+    absent = projected_retrieval.ProjectedClipIndex(
+        _namespace(visible_item),
+        (visible_measurement,),
+        extractor_version="pixels-v1",
+        model_version="clip-test-v1",
+    )
+
+    present_hits = present.search_clip(
+        _map((visible_item, visible), (hidden_item, None)),
+        (1.0, 0.0),
+        k=1,
+    )
+    absent_hits = absent.search_clip(
+        _map((visible_item, visible)),
+        (1.0, 0.0),
+        k=1,
+    )
+
+    assert present_hits == absent_hits
+    assert present_hits[0].clip_frame_timestamp_ms == 8_500
+
+
+def test_video_keyframes_require_a_strict_canonical_timestamp_order() -> None:
+    video = _variant(
+        "video",
+        "8" * 64,
+        level=6,
+        text="full video",
+        media_type="video",
+    )
+
+    with pytest.raises(
+        projections.ProjectionCanonicalizationError,
+        match="timestamp order",
+    ):
+        _video_measurement(
+            video,
+            (8_500, (1.0, 0.0)),
+            (1_000, (0.0, 1.0)),
+        )
+
+
+def test_projected_clip_keyframe_count_has_a_fixed_non_overridable_cap() -> None:
+    video = _variant(
+        "video",
+        "9" * 64,
+        level=6,
+        text="full video",
+        media_type="video",
+    )
+
+    with pytest.raises(
+        projections.ProjectionCapacityExceeded,
+        match="CLIP samples",
+    ):
+        _video_measurement(
+            video,
+            *((index, (1.0, 0.0)) for index in range(41)),
+        )
+
+
+def test_media_kind_and_clip_sample_shape_must_agree() -> None:
+    image = _variant("image", "a" * 64, level=6, text="image")
+    video = _variant(
+        "video",
+        "b" * 64,
+        level=6,
+        text="video",
+        media_type="video",
+    )
+
+    with pytest.raises(
+        projections.ProjectionCanonicalizationError,
+        match="image.*untimestamped",
+    ):
+        projected_retrieval.ProjectedClipIndex(
+            _namespace(_item(image)),
+            (_video_measurement(image, (1_000, (1.0, 0.0))),),
+            extractor_version="pixels-v1",
+            model_version="clip-test-v1",
+        )
+    with pytest.raises(
+        projections.ProjectionCanonicalizationError,
+        match="video.*timestamps",
+    ):
+        projected_retrieval.ProjectedClipIndex(
+            _namespace(_item(video)),
+            (_measurement(video, (1.0, 0.0)),),
+            extractor_version="pixels-v1",
+            model_version="clip-test-v1",
         )

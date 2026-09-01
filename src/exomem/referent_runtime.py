@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import logging
 import os
+from dataclasses import replace
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from . import epistemic_graph, memory_refs
-from .entity_registry import load_entity_registry
+from . import epistemic_graph, find_corpus, freshness, memory_refs, readiness
+from .entity_registry import load_entity_registry, schedule_entity_registry_warm
 from .entity_types import load_entity_types
 from .find import FreshnessSnapshot
 from .governance import egress
@@ -16,12 +18,14 @@ from .referent_resolution import (
     EdgeFact,
     HitFact,
     ReferentCue,
+    descriptor_tokens_for,
     detect_cue,
     resolve_referents,
 )
 
 _TRUE = frozenset({"1", "true", "yes", "on"})
 log = logging.getLogger(__name__)
+_REFERENT_ANCHOR_CAP = 10
 
 
 def cue_for_find(*, vault_root: Path, query: str, mode: str) -> ReferentCue | None:
@@ -50,12 +54,48 @@ def _hit_facts(hits: list[Any]) -> tuple[HitFact, ...]:
     )
 
 
+@lru_cache(maxsize=4096)
+def _descriptor_tokens_for_snapshot(
+    snapshot_hash: str, title: str, body: str
+) -> tuple[str, ...]:
+    return descriptor_tokens_for(title, body)
+
+
+def _with_anchor_descriptor_tokens(
+    vault_root: Path,
+    hits: tuple[HitFact, ...],
+    *,
+    anchor_cap: int = 10,
+) -> tuple[HitFact, ...]:
+    facts: list[HitFact] = []
+    for index, hit in enumerate(hits):
+        if index >= max(0, anchor_cap):
+            facts.append(hit)
+            continue
+        page = find_corpus.CACHE.get(vault_root / hit.path, vault_root)
+        if page is None:
+            facts.append(hit)
+            continue
+        facts.append(
+            replace(
+                hit,
+                descriptor_tokens=_descriptor_tokens_for_snapshot(
+                    page.snapshot_hash,
+                    page.title,
+                    page.body,
+                ),
+            )
+        )
+    return tuple(facts)
+
+
 def _edge_facts(
     vault_root: Path,
     *,
     anchors: list[str],
     entity_paths: frozenset[str],
     graph: bool,
+    anchor_cap: int,
 ) -> tuple[EdgeFact, ...]:
     if not graph or not anchors:
         return ()
@@ -63,7 +103,7 @@ def _edge_facts(
     if not index.available():
         return ()
     facts: set[EdgeFact] = set()
-    for neighbor in index.neighbors_for(anchors[:10]):
+    for neighbor in index.neighbors_for(anchors[: max(0, anchor_cap)]):
         if neighbor.other_rel in entity_paths:
             facts.add(
                 EdgeFact(
@@ -107,6 +147,7 @@ def resolve_for_find(
     release: Any,
     purpose: str | None,
     cue: ReferentCue | None = None,
+    expected_recall_checkpoints: dict[str, freshness.RecallFreshnessCheckpoint] | None = None,
 ) -> dict[str, Any] | None:
     """Resolve a bounded referent block; every exception soft-fails."""
     try:
@@ -118,24 +159,79 @@ def resolve_for_find(
         cue = cue or detect_cue(query, registry=type_registry)
         if cue is None:
             return None
-        freshness_key = FreshnessSnapshot(vault_root).projection_key("kb")
+        managed_runtime = readiness.runtime_managed()
+        admission = readiness.retrieval_admission()
+        state = str(admission["state"]) if managed_runtime else "unverified"
+        if state in {"warming", "unavailable"}:
+            return None
+        managed_proof = expected_recall_checkpoints
+        require_live_recall = managed_proof is not None
+        if managed_proof is not None:
+            if set(managed_proof) != set(freshness.SCOPES):
+                return None
+        elif state != "unverified" and freshness.event_indexes_enabled():
+            # A managed request without the proof admitted by its primary find
+            # cannot safely enrich from a potentially different generation.
+            return None
+        snapshot = FreshnessSnapshot(
+            vault_root,
+            require_live_recall=require_live_recall,
+            expected_recall_checkpoints=expected_recall_checkpoints,
+        )
+        freshness_key: tuple
+        if managed_proof is not None:
+            for scope in freshness.SCOPES:
+                snapshot.projection_key(scope)
+            if not all(
+                freshness.recall_checkpoint_is_current(
+                    vault_root,
+                    scope,
+                    managed_proof[scope],
+                )
+                for scope in freshness.SCOPES
+            ):
+                return None
+            freshness_key = managed_proof["kb"]
+            expected_registry_checkpoint = managed_proof["kb"]
+        else:
+            freshness_key = snapshot.projection_key("kb")
+            expected_registry_checkpoint = None
         registry = load_entity_registry(
             vault_root,
             freshness_key=freshness_key,
             type_registry=type_registry,
+            allow_build=not require_live_recall,
+            expected_recall_checkpoint=expected_registry_checkpoint,
         )
+        if registry is None:
+            schedule_entity_registry_warm(
+                vault_root,
+                freshness_key=freshness_key,
+                type_registry=type_registry,
+                expected_recall_checkpoint=expected_registry_checkpoint,
+            )
+            return None
+        anchor_cap = _REFERENT_ANCHOR_CAP
         hit_facts = _hit_facts(hits)
+        if cue.qualifiers and graph:
+            hit_facts = _with_anchor_descriptor_tokens(
+                vault_root,
+                hit_facts,
+                anchor_cap=anchor_cap,
+            )
         edges = _edge_facts(
             vault_root,
-            anchors=[item.path for item in hit_facts[:10]],
+            anchors=[item.path for item in hit_facts],
             entity_paths=frozenset(registry),
             graph=graph,
+            anchor_cap=anchor_cap,
         )
         resolution = resolve_referents(
             cue=cue,
             hits=hit_facts,
             entities=tuple(registry.values()),
             edges=edges,
+            anchor_cap=anchor_cap,
         )
         block = resolution.as_dict()
         if not block["resolved"] and not block["candidates"] and cue.expected_count is None:
@@ -165,6 +261,15 @@ def resolve_for_find(
             for item in guarded.get(section, []):
                 if ref := refs.get(str(item.get("path") or "")):
                     item["ref"] = ref
+        if managed_proof is not None and not all(
+            freshness.recall_checkpoint_is_current(
+                vault_root,
+                scope,
+                managed_proof[scope],
+            )
+            for scope in freshness.SCOPES
+        ):
+            return None
         return guarded
     except Exception:  # noqa: BLE001 - the additive stage is contractually fail-open
         log.warning("referent resolution failed; omitting additive block", exc_info=True)

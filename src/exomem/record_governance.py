@@ -47,6 +47,7 @@ _INSPECTION_KEYS = frozenset(
         "saved_views",
         "lifecycle_guards",
         "presentation",
+        "observed_values",
     }
 )
 _INSPECTION_VIEW_QUERY_KEYS = frozenset(
@@ -66,7 +67,21 @@ _INSPECTION_VIEW_QUERY_KEYS = frozenset(
 )
 _INSPECTION_VIEW_FILTER_KEYS = frozenset({"column", "op", "value"})
 _INSPECTION_VIEW_OPS = frozenset(
-    {"eq", "ne", "gt", "gte", "lt", "lte", "contains", "icontains", "startswith", "in", "nin", "exists", "missing"}
+    {
+        "eq",
+        "ne",
+        "gt",
+        "gte",
+        "lt",
+        "lte",
+        "contains",
+        "icontains",
+        "startswith",
+        "in",
+        "nin",
+        "exists",
+        "missing",
+    }
 )
 _INSPECTION_INVALID = object()
 
@@ -143,6 +158,47 @@ def _inspection_field_name(value: Any) -> str | None:
     return _inspection_string(value, maximum=128)
 
 
+def _inspection_observed_values(value: Any) -> dict[str, dict[str, Any]] | None:
+    """Re-validate the free-string vocabulary summary before it reaches egress."""
+    if not isinstance(value, Mapping) or len(value) > collections._MAX_SCHEMA_FIELDS:
+        return None
+    normalized: dict[str, dict[str, Any]] = {}
+    for name, summary in value.items():
+        field = _inspection_field_name(name)
+        if (
+            field is None
+            or not isinstance(summary, Mapping)
+            or set(summary) != {"values", "truncated"}
+            or type(summary.get("truncated")) is not bool
+            or not isinstance(summary.get("values"), list)
+            or len(summary["values"]) > record_formats._MAX_OBSERVED_VALUES
+        ):
+            return None
+        entries: list[dict[str, Any]] = []
+        for entry in summary["values"]:
+            if not isinstance(entry, Mapping) or set(entry) != {
+                "value",
+                "count",
+                "value_truncated",
+            }:
+                return None
+            # Deliberately looser than the producer's 120-CHARACTER cut: this is a
+            # byte ceiling on a string that may be 120 wide characters, so it must
+            # not double as a re-assertion of the cut.
+            observed = _inspection_string(entry.get("value"), maximum=512)
+            count, cut = entry.get("count"), entry.get("value_truncated")
+            if observed is None or type(count) is not int or count < 1 or type(cut) is not bool:
+                return None
+            # Distinctness is NOT asserted here: two distinct values sharing the
+            # display window collapse to the same display string, and both are
+            # flagged. The invariant lives at the producer instead --
+            # _observed_field_values keys its counter on the full stripped
+            # value, so one entry per distinct full value is structural.
+            entries.append({"value": observed, "count": count, "value_truncated": cut})
+        normalized[field] = {"values": entries, "truncated": summary["truncated"]}
+    return normalized
+
+
 def _inspection_legacy_identifier(value: Any) -> str | None:
     if type(value) is not str or not value.startswith("legacy-"):
         return None
@@ -174,7 +230,11 @@ def _inspection_saved_view(value: Any) -> dict[str, Any] | None:
                     return None
                 column = _inspection_field_name(raw.get("column"))
                 operation = raw.get("op")
-                if column is None or type(operation) is not str or operation not in _INSPECTION_VIEW_OPS:
+                if (
+                    column is None
+                    or type(operation) is not str
+                    or operation not in _INSPECTION_VIEW_OPS
+                ):
                     return None
                 if operation not in {"exists", "missing"} and "value" not in raw:
                     return None
@@ -187,11 +247,7 @@ def _inspection_saved_view(value: Any) -> dict[str, Any] | None:
                     filters.append({"column": column, "op": operation})
             normalized_query[key] = filters
         elif key == "columns":
-            if (
-                not isinstance(value_, list)
-                or not value_
-                or len(value_) > 128
-            ):
+            if not isinstance(value_, list) or not value_ or len(value_) > 128:
                 return None
             columns = [_inspection_field_name(column) for column in value_]
             if any(column is None for column in columns) or len(set(columns)) != len(columns):
@@ -220,7 +276,11 @@ def _inspection_saved_view(value: Any) -> dict[str, Any] | None:
             if type(value_) is not int or not 1 <= value_ <= query_data.HARD_ROW_CAP:
                 return None
             normalized_query[key] = value_
-    normalized: dict[str, Any] = {"name": name, "definition": {"query": normalized_query}, "identity": identity}
+    normalized: dict[str, Any] = {
+        "name": name,
+        "definition": {"query": normalized_query},
+        "identity": identity,
+    }
     if "source_snapshot" in definition:
         snapshot = _inspection_hash(definition["source_snapshot"])
         if snapshot is None:
@@ -230,17 +290,27 @@ def _inspection_saved_view(value: Any) -> dict[str, Any] | None:
 
 
 def _inspection_plan_descriptor(value: Any) -> dict[str, Any] | None:
-    if not isinstance(value, Mapping) or not set(value) <= {"reference", "query", "join"} or not {
+    if (
+        not isinstance(value, Mapping)
+        or not set(value) <= {"reference", "query", "join"}
+        or not {
         "reference",
         "query",
-    } <= set(value):
+        }
+        <= set(value)
+    ):
         return None
     join = _inspection_plan_join(value["join"]) if "join" in value else None
     if "join" in value and join is None:
         return None
     reference = _opaque_plan_reference(value.get("reference"))
     query = value.get("query")
-    if reference is None or not isinstance(query, Mapping) or not query or set(query) - {"filters", "limit"}:
+    if (
+        reference is None
+        or not isinstance(query, Mapping)
+        or not query
+        or set(query) - {"filters", "limit"}
+    ):
         return None
     limit = query.get("limit")
     if type(limit) is not int or not 1 <= limit <= query_data.HARD_ROW_CAP:
@@ -285,9 +355,15 @@ def _inspection_plan_join(value: Any) -> dict[str, str] | None:
 def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | None:
     """Reconstruct the report-only inspection union before it reaches egress."""
     kind = payload.get("kind")
-    if set(payload) - _INSPECTION_KEYS or type(kind) is not str or kind not in {"collection", "legacy_tracker"}:
+    if (
+        set(payload) - _INSPECTION_KEYS
+        or type(kind) is not str
+        or kind not in {"collection", "legacy_tracker"}
+    ):
         return None
-    if payload.get("report_only") is not True or not isinstance(payload.get("source_versions"), list):
+    if payload.get("report_only") is not True or not isinstance(
+        payload.get("source_versions"), list
+    ):
         return None
     versions = payload["source_versions"]
     if len(versions) > 2_000:
@@ -309,15 +385,29 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
     for value in diagnostics:
         if not isinstance(value, Mapping) or set(value) != {"code", "reason"}:
             return None
-        code, reason = _inspection_string(value.get("code"), maximum=128), _inspection_string(value.get("reason"), maximum=512)
+        code, reason = (
+            _inspection_string(value.get("code"), maximum=128),
+            _inspection_string(value.get("reason"), maximum=512),
+        )
         if code is None or reason is None or re.fullmatch(r"[A-Z][A-Z0-9_]*", code) is None:
             return None
         normalized_diagnostics.append({"code": code, "reason": reason})
     audit = payload.get("audit")
-    if not isinstance(audit, Mapping) or set(audit) - {"status", "gaps", "discontinuity", "discontinuities"}:
+    if not isinstance(audit, Mapping) or set(audit) - {
+        "status",
+        "gaps",
+        "discontinuity",
+        "discontinuities",
+    }:
         return None
     status, gaps = audit.get("status"), audit.get("gaps")
-    if type(status) is not str or status not in {"baseline", "ok", "gap", "acknowledged_gap", "history_incomplete", "not_applicable"} or not isinstance(gaps, list) or len(gaps) > 32:
+    if (
+        type(status) is not str
+        or status
+        not in {"baseline", "ok", "gap", "acknowledged_gap", "history_incomplete", "not_applicable"}
+        or not isinstance(gaps, list)
+        or len(gaps) > 32
+    ):
         return None
     if status in {"history_incomplete", "not_applicable"} and gaps:
         return None
@@ -338,18 +428,41 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
     if any(view is None for view in normalized_views):
         return None
     presentation = payload.get("presentation")
-    if presentation is not None and (not isinstance(presentation, Mapping) or set(presentation) != {"items", "counts", "truncated"}):
+    if presentation is not None and (
+        not isinstance(presentation, Mapping)
+        or set(presentation) != {"items", "counts", "truncated"}
+    ):
         return None
-    items, counts = (presentation.get("items"), presentation.get("counts")) if isinstance(presentation, Mapping) else ([], {})
-    states = {"missing", "stale", "malformed", "unrenderable"}
-    if not isinstance(items, list) or len(items) > 128 or not isinstance(counts, Mapping) or (presentation is not None and type(presentation.get("truncated")) is not bool):
+    items, counts = (
+        (presentation.get("items"), presentation.get("counts"))
+        if isinstance(presentation, Mapping)
+        else ([], {})
+    )
+    states = {
+        "missing",
+        "stale",
+        "stale_recipe",
+        "stale_item",
+        "authored_presentation",
+        "malformed",
+        "unrenderable",
+        "unresolved_relationship",
+        "filename_drift",
+        "filename_collision",
+        "orphan_presentation",
+    }
+    if (
+        not isinstance(items, list)
+        or len(items) > 128
+        or not isinstance(counts, Mapping)
+        or (presentation is not None and type(presentation.get("truncated")) is not bool)
+    ):
         return None
     normalized_presentation: list[dict[str, Any]] = []
     for item in items:
         if (
             not isinstance(item, Mapping)
-            or set(item)
-            - {"item_key", "path", "version", "state", "remedy", "location"}
+            or set(item) - {"item_key", "path", "version", "state", "remedy", "location"}
             or not {"item_key", "path", "version", "state", "remedy"} <= set(item)
         ):
             return None
@@ -366,6 +479,8 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
             "rebaseline_then_refresh",
             "repair_markers_then_refresh",
             "guarded_value_update",
+            "guarded_manifest_revision",
+            "structured_files_preview",
         }
         remedy = item.get("remedy")
         if remedy not in remedies:
@@ -391,21 +506,44 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
                 return None
             normalized_item["location"] = dict(location)
         normalized_presentation.append(normalized_item)
-    normalized_counts = {state: counts.get(state, 0) for state in states}
+    if presentation is not None and (not counts or not set(counts) <= states):
+        return None
+    normalized_counts = {state: counts[state] for state in counts}
     if any(type(value) is not int or value < 0 for value in normalized_counts.values()):
         return None
     snapshot = payload.get("snapshot")
     if snapshot is not None and _inspection_hash(snapshot) is None:
         return None
+    observed_values = payload.get("observed_values")
+    normalized_observed = (
+        None if observed_values is None else _inspection_observed_values(observed_values)
+    )
+    if observed_values is not None and normalized_observed is None:
+        return None
     contract, legacy = payload.get("contract"), payload.get("legacy")
     if kind == "collection":
         if legacy is not None or not isinstance(contract, Mapping):
             return None
-        if set(contract) != {"collection_id", "path", "title", "semantic_profile", "schema_version", "storage", "plans"}:
+        if set(contract) != {
+            "collection_id",
+            "path",
+            "title",
+            "semantic_profile",
+            "schema_version",
+            "storage",
+            "plans",
+        }:
             return None
         collection_id = _inspection_identifier(contract.get("collection_id"))
-        path, title = _inspection_path(contract.get("path")), _inspection_string(contract.get("title"), maximum=512)
-        profile, version, storage = contract.get("semantic_profile"), contract.get("schema_version"), contract.get("storage")
+        path, title = (
+            _inspection_path(contract.get("path")),
+            _inspection_string(contract.get("title"), maximum=512),
+        )
+        profile, version, storage = (
+            contract.get("semantic_profile"),
+            contract.get("schema_version"),
+            contract.get("storage"),
+        )
         if (
             collection_id is None
             or path is None
@@ -419,8 +557,17 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
             or set(storage) != {"strategy", "source", "format_version"}
         ):
             return None
-        strategy, source, format_version = storage.get("strategy"), _inspection_path(storage.get("source")), storage.get("format_version")
-        if type(strategy) is not str or strategy not in {"markdown-log", "markdown-items", "dataset"} or source is None or format_version != 1:
+        strategy, source, format_version = (
+            storage.get("strategy"),
+            _inspection_path(storage.get("source")),
+            storage.get("format_version"),
+        )
+        if (
+            type(strategy) is not str
+            or strategy not in {"markdown-log", "markdown-items", "dataset"}
+            or source is None
+            or format_version != 1
+        ):
             return None
         plans = contract.get("plans")
         if not isinstance(plans, list) or len(plans) > 32:
@@ -441,10 +588,26 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
         if status == "not_applicable":
             return None
     else:
-        if contract is not None or not isinstance(legacy, Mapping) or set(legacy) != {"collection_id", "path", "inspect_only"}:
+        if (
+            contract is not None
+            or not isinstance(legacy, Mapping)
+            or set(legacy) != {"collection_id", "path", "inspect_only"}
+        ):
             return None
-        collection_id, path = _inspection_legacy_identifier(legacy.get("collection_id")), _inspection_path(legacy.get("path"))
-        if collection_id is None or path is None or legacy.get("inspect_only") is not True or snapshot is not None or normalized_versions or normalized_views or status != "not_applicable":
+        collection_id, path = (
+            _inspection_legacy_identifier(legacy.get("collection_id")),
+            _inspection_path(legacy.get("path")),
+        )
+        if (
+            collection_id is None
+            or path is None
+            or legacy.get("inspect_only") is not True
+            or snapshot is not None
+            or normalized_observed is not None
+            or normalized_versions
+            or normalized_views
+            or status != "not_applicable"
+        ):
             return None
         normalized_contract = None
         normalized_legacy = {"collection_id": collection_id, "path": path, "inspect_only": True}
@@ -463,13 +626,18 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
             "gap_fingerprint",
             "checkpoint_snapshot_hash",
         }
-        if set(discontinuity) != required or discontinuity.get("provenance_continuity") is not False:
+        if (
+            set(discontinuity) != required
+            or discontinuity.get("provenance_continuity") is not False
+        ):
             return None
         normalized_audit["discontinuity"] = dict(discontinuity)
         discontinuities = audit.get("discontinuities", [discontinuity])
         if not isinstance(discontinuities, list) or not 1 <= len(discontinuities) <= 16:
             return None
-        normalized_audit["discontinuities"] = [dict(item) for item in discontinuities if isinstance(item, Mapping)]
+        normalized_audit["discontinuities"] = [
+            dict(item) for item in discontinuities if isinstance(item, Mapping)
+        ]
         if len(normalized_audit["discontinuities"]) != len(discontinuities):
             return None
     elif status == "acknowledged_gap":
@@ -484,8 +652,19 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
         "diagnostics": normalized_diagnostics,
         "audit": normalized_audit,
         "saved_views": [view for view in normalized_views if view is not None],
-        **({"presentation": {"items": normalized_presentation, "counts": normalized_counts, "truncated": presentation["truncated"]}} if presentation is not None else {}),
+        **(
+            {
+                "presentation": {
+                    "items": normalized_presentation,
+                    "counts": normalized_counts,
+                    "truncated": presentation["truncated"],
+                }
+            }
+            if presentation is not None
+            else {}
+        ),
         **({"lifecycle_guards": dict(guards)} if guards is not None else {}),
+        **({"observed_values": normalized_observed} if normalized_observed is not None else {}),
     }
     return result
 
@@ -523,6 +702,7 @@ egress.register_projector(
         "saved_views",
         "lifecycle_guards",
         "presentation",
+        "observed_values",
     ),
     validator=_validate_record_inspection,
 )
@@ -572,14 +752,15 @@ def full_release_filter(vault_root: Path) -> Callable[[str], bool]:
 
     def allowed(relative: str) -> bool:
         return not access.refuse_if_excluded(root, relative) and (
-            egress.release_level_for_path_only(root, relative, policy=policy)
-            == egress.LEVEL_FULL
+            egress.release_level_for_path_only(root, relative, policy=policy) == egress.LEVEL_FULL
         )
 
     return allowed
 
 
-def _authorize(root: Path, relative: str, *, receipt: bool = False) -> bool:
+def _authorize(
+    root: Path, relative: str, *, receipt: bool = False, policy: Any | None = None
+) -> bool:
     if access.refuse_if_excluded(root, relative):
         return False
     return (
@@ -587,6 +768,7 @@ def _authorize(root: Path, relative: str, *, receipt: bool = False) -> bool:
             root,
             relative,
             receipt_decision="release_authorized" if receipt else None,
+            policy=policy,
         )
         == egress.LEVEL_FULL
     )
@@ -601,14 +783,17 @@ class _LinkProjector:
     admitted: Mapping[str, bool]
     candidate_index_complete: bool | None
     verdicts: dict[str, bool]
+    policy: Any | None
 
     @classmethod
-    def create(cls, root: Path, manifest: collections.CollectionManifest) -> _LinkProjector:
+    def create(
+        cls, root: Path, manifest: collections.CollectionManifest, *, policy: Any | None = None
+    ) -> _LinkProjector:
         # Keep the common numeric/event query path independent of vault-wide
         # link lookup. Even link-bearing collections defer that lookup until a
         # bare title or memory identity actually needs it.
         empty = vault.WikilinkResolver.from_entries(root, ())
-        return cls(root, manifest, empty, {}, {}, None, {})
+        return cls(root, manifest, empty, {}, {}, None, {}, policy)
 
     def _candidate_index_available(self) -> bool:
         if self.candidate_index_complete is not None:
@@ -628,14 +813,16 @@ class _LinkProjector:
                 relative = candidate.relative_to(self.root).as_posix()
                 path, relative = cast(
                     tuple[Path, str],
-                    vault.resolve_under_vault(self.root, relative, must_exist=True, must_be_file=True),
+                    vault.resolve_under_vault(
+                        self.root, relative, must_exist=True, must_be_file=True
+                    ),
                 )
             except (ValueError, vault.VaultPathError):
                 continue
             # The resolver's title and identity indexes must not learn from a
             # path that this principal cannot read. Otherwise a hidden name or
             # duplicate identity can change an otherwise public link result.
-            allowed = _authorize(self.root, relative)
+            allowed = _authorize(self.root, relative, policy=self.policy)
             admitted[relative] = allowed
             if not allowed:
                 continue
@@ -695,7 +882,11 @@ class _LinkProjector:
 
     def _project_value(self, value: Any, spec: collections.FieldSpec) -> Any:
         if spec.type == "array" and spec.items is not None and isinstance(value, list | tuple):
-            return [result for item in value if (result := self._project_value(item, spec.items)) is not None]
+            return [
+                result
+                for item in value
+                if (result := self._project_value(item, spec.items)) is not None
+            ]
         if spec.type != "link" or type(value) is not str:
             return value
         return value if self._allowed(value) else None
@@ -724,7 +915,10 @@ class _LinkProjector:
                     return False
                 try:
                     canonical, _warning = vault.normalize_wikilink(
-                        inner.split("|", 1)[0].strip(), self.root, resolver=self.resolver, strict=True
+                        inner.split("|", 1)[0].strip(),
+                        self.root,
+                        resolver=self.resolver,
+                        strict=True,
                     )
                 except vault.UnresolvedWikilinkError:
                     canonical, _warning = vault.normalize_wikilink(
@@ -764,7 +958,9 @@ class _LinkProjector:
             return self.verdicts[relative]
         if relative in self.admitted and not self.admitted[relative]:
             return self._remember(relative, False)
-        return self._remember(relative, _authorize(self.root, relative, receipt=True))
+        return self._remember(
+            relative, _authorize(self.root, relative, receipt=True, policy=self.policy)
+        )
 
     def _remember(self, target: str, allowed: bool) -> bool:
         if target in self.verdicts:
@@ -824,14 +1020,15 @@ def _resolve_released_collection(
     selector: str | Path | collections.CollectionManifest,
     *,
     receipt: bool,
+    policy: Any | None = None,
 ) -> collections.CollectionManifest:
     path = selector.path if isinstance(selector, collections.CollectionManifest) else selector
     manifest = collections.resolve_collection(
         root,
         path,
-        authorize_path=lambda relative: _authorize(root, relative, receipt=receipt),
+        authorize_path=lambda relative: _authorize(root, relative, receipt=receipt, policy=policy),
     )
-    if not _authorize(root, manifest.path, receipt=receipt):
+    if not _authorize(root, manifest.path, receipt=receipt, policy=policy):
         raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
     return manifest
 
@@ -846,7 +1043,8 @@ def query_collection(
     """Query released Records only; authorization happens before adapter parsing."""
     root = Path(vault_root)
     with egress.disclosure_boundary(root, "record_query", join_existing=True) as collector:
-        manifest = _resolve_released_collection(root, collection, receipt=True)
+        policy = egress.policy_module.load(root)
+        manifest = _resolve_released_collection(root, collection, receipt=True, policy=policy)
         if manifest.semantic_profile != semantic_profile:
             error_code = (
                 "RECORDS_PROFILE_REQUIRED"
@@ -857,18 +1055,16 @@ def query_collection(
                 error_code,
                 "collection profile is not available",
             )
-        if not _authorize(
-            root, manifest.storage.source, receipt=True
-        ):
+        if not _authorize(root, manifest.storage.source, receipt=True, policy=policy):
             raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
-        links = _LinkProjector.create(root, manifest)
+        links = _LinkProjector.create(root, manifest, policy=policy)
         view = kwargs.get("view")
         if view is not None:
             _authorize_saved_view(root, manifest, view, links)
         result = record_formats.query_collection(
             root,
             manifest,
-            authorize_path=lambda path: _authorize(root, path, receipt=True),
+            authorize_path=lambda path: _authorize(root, path, receipt=True, policy=policy),
             project_values=links,
             project_child_value=links.project_presentation_value,
             **kwargs,
@@ -893,9 +1089,7 @@ def _authorize_saved_view(
     child_requested = query.get("expand_children") is True or query.get("expand_child") is not None
     selected_child = _saved_view_child_selector(manifest, query)
     if child_requested and selected_child is None:
-        raise collections.CollectionError(
-            "SAVED_VIEW_NOT_AVAILABLE", "saved view is not available"
-        )
+        raise collections.CollectionError("SAVED_VIEW_NOT_AVAILABLE", "saved view is not available")
     allowed_fields = collections._saved_view_selected_fields(
         collections._saved_view_fields(
             manifest.schema,
@@ -903,15 +1097,11 @@ def _authorize_saved_view(
             manifest.semantic_profile,
             manifest.record_presentation,
         ),
-        collections._saved_view_child_shapes(
-            manifest.storage, manifest.record_presentation
-        ),
+        collections._saved_view_child_shapes(manifest.storage, manifest.record_presentation),
         selected_child,
     )
     if any(field not in allowed_fields for field in _saved_view_query_fields(query)):
-        raise collections.CollectionError(
-            "SAVED_VIEW_NOT_AVAILABLE", "saved view is not available"
-        )
+        raise collections.CollectionError("SAVED_VIEW_NOT_AVAILABLE", "saved view is not available")
     filters = query.get("filters", ())
     if not isinstance(filters, list):
         raise collections.CollectionError("INVALID_SAVED_VIEW", "saved view filters are invalid")
@@ -919,11 +1109,7 @@ def _authorize_saved_view(
         if not isinstance(raw, Mapping) or "value" not in raw:
             continue
         column = raw.get("column")
-        spec = (
-            _saved_view_field_spec(manifest, query, column)
-            if type(column) is str
-            else None
-        )
+        spec = _saved_view_field_spec(manifest, query, column) if type(column) is str else None
         if spec is None:
             continue
         if not _saved_view_filter_links_are_authorized(raw["value"], spec, links):
@@ -1064,7 +1250,8 @@ def inspect_collection(
                     authorize_path=lambda path: _authorize(root, path, receipt=True),
                 ).read()
                 if not snapshot.diagnostics and all(
-                    _authorize(root, version.path, receipt=True) for version in snapshot.source_versions
+                    _authorize(root, version.path, receipt=True)
+                    for version in snapshot.source_versions
                 ):
                     guards = records.lifecycle_guards(manifest, snapshot)
             except collections.CollectionError:
@@ -1092,7 +1279,23 @@ def inspect_collection(
                 "audit": _inspection_audit(audit),
                 "saved_views": saved_views,
                 "lifecycle_guards": guards,
-                **({"presentation": _presentation_inspection(inspection.presentation)} if manifest.record_presentation is not None else {}),
+                # Item-derived, so it rides the same authorized item pass the rest
+                # of this payload does; nothing recomputes it from unfiltered bytes.
+                **(
+                    {"observed_values": dict(inspection.observed_values)}
+                    if inspection.observed_values is not None
+                    else {}
+                ),
+                **(
+                    {"presentation": _presentation_inspection(inspection.presentation, manifest)}
+                    if (
+                        manifest.record_presentation is not None
+                        or manifest.item_presentation is not None
+                        or manifest.item_filename is not None
+                        or inspection.presentation
+                    )
+                    else {}
+                ),
             }
         )
         projected = egress.project(payload, egress.LEVEL_FULL, kind="record_inspection") or {}
@@ -1100,8 +1303,26 @@ def inspect_collection(
         return projected
 
 
-def _presentation_inspection(findings: tuple[dict[str, Any], ...]) -> dict[str, Any]:
-    states = ("missing", "stale", "malformed", "unrenderable")
+def _presentation_inspection(
+    findings: tuple[dict[str, Any], ...],
+    manifest: collections.CollectionManifest,
+) -> dict[str, Any]:
+    states = (
+        ("missing", "stale", "malformed", "unrenderable")
+        if manifest.record_presentation is not None
+        else (
+            "missing",
+            "stale_recipe",
+            "stale_item",
+            "authored_presentation",
+            "malformed",
+            "unrenderable",
+            "unresolved_relationship",
+            "filename_drift",
+            "filename_collision",
+            "orphan_presentation",
+        )
+    )
     counts = {state: sum(item.get("state") == state for item in findings) for state in states}
     return {
         "items": list(findings[:_PRESENTATION_FINDING_LIMIT]),
@@ -1119,6 +1340,7 @@ def inventory_collections(vault_root: Path, *, semantic_profile: str = "records"
     """
     root = Path(vault_root)
     with egress.disclosure_boundary(root, "record_inspection", join_existing=True) as collector:
+
         def authorize(path: str) -> bool:
             return _authorize(root, path, receipt=True)
 
@@ -1163,11 +1385,7 @@ def inventory_collections(vault_root: Path, *, semantic_profile: str = "records"
             ),
             "truncated": {
                 "collections": False,
-                **(
-                    {"legacy_trackers": legacy_truncated}
-                    if semantic_profile == "records"
-                    else {}
-                ),
+                **({"legacy_trackers": legacy_truncated} if semantic_profile == "records" else {}),
             },
             "contract_route": {
                 "tool": "record_memory",
@@ -1285,7 +1503,13 @@ def _inspection_audit(audit: Any) -> dict[str, Any]:
         return {"status": "history_incomplete", "gaps": []}
     status = audit.get("status")
     gaps = audit.get("gaps")
-    if status not in {"baseline", "ok", "gap", "acknowledged_gap", "history_incomplete"} or not isinstance(gaps, list):
+    if status not in {
+        "baseline",
+        "ok",
+        "gap",
+        "acknowledged_gap",
+        "history_incomplete",
+    } or not isinstance(gaps, list):
         return {"status": "history_incomplete", "gaps": []}
     result: dict[str, Any] = {
         "status": status,
@@ -1294,7 +1518,9 @@ def _inspection_audit(audit: Any) -> dict[str, Any]:
     if status == "acknowledged_gap" and isinstance(audit.get("discontinuity"), Mapping):
         result["discontinuity"] = dict(audit["discontinuity"])
         if isinstance(audit.get("discontinuities"), list):
-            result["discontinuities"] = [dict(item) for item in audit["discontinuities"] if isinstance(item, Mapping)]
+            result["discontinuities"] = [
+                dict(item) for item in audit["discontinuities"] if isinstance(item, Mapping)
+            ]
     return result
 
 
@@ -1313,10 +1539,33 @@ _QUERY_KEYS = frozenset(
     }
 )
 _SYSTEM_FIELDS = frozenset(
-    {"collection_id", "record_id", "item_version", "inferred", "ambiguous", "parent_record_id", "child_field", "child_index"}
+    {
+        "collection_id",
+        "record_id",
+        "item_version",
+        "inferred",
+        "ambiguous",
+        "parent_record_id",
+        "child_field",
+        "child_index",
+    }
 )
 _QUERY_OPS = frozenset(
-    {"eq", "ne", "gt", "gte", "lt", "lte", "contains", "icontains", "startswith", "in", "nin", "exists", "missing"}
+    {
+        "eq",
+        "ne",
+        "gt",
+        "gte",
+        "lt",
+        "lte",
+        "contains",
+        "icontains",
+        "startswith",
+        "in",
+        "nin",
+        "exists",
+        "missing",
+    }
 )
 _MAX_QUERY_DEPTH = 8
 _MAX_QUERY_NODES = 4_096
@@ -1370,7 +1619,9 @@ def _query_value_fields(manifest: collections.CollectionManifest) -> set[str]:
     return fields
 
 
-def _valid_query_descriptor(query: Mapping[str, Any], manifest: collections.CollectionManifest) -> bool:
+def _valid_query_descriptor(
+    query: Mapping[str, Any], manifest: collections.CollectionManifest
+) -> bool:
     if set(query) not in {_QUERY_KEYS, _QUERY_KEYS - {"expand_child"}}:
         return False
     columns = _query_value_fields(manifest) | _SYSTEM_FIELDS
@@ -1398,9 +1649,13 @@ def _valid_query_descriptor(query: Mapping[str, Any], manifest: collections.Coll
             return False
     if type(query["descending"]) is not bool or type(query["expand_children"]) is not bool:
         return False
-    if query.get("expand_child") is not None and (type(query.get("expand_child")) is not str or query["expand_children"]):
+    if query.get("expand_child") is not None and (
+        type(query.get("expand_child")) is not str or query["expand_children"]
+    ):
         return False
-    if any(query[key] is not None and type(query[key]) is not str for key in ("date_from", "date_to")):
+    if any(
+        query[key] is not None and type(query[key]) is not str for key in ("date_from", "date_to")
+    ):
         return False
     aggregate = query["aggregate"]
     if aggregate is None:
@@ -1413,7 +1668,10 @@ def _valid_query_descriptor(query: Mapping[str, Any], manifest: collections.Coll
     if ":" not in aggregate:
         return False
     function, column = (piece.strip() for piece in aggregate.split(":", 1))
-    return function in {"min", "max", "sum", "avg", "latest", "distinct", "group"} and column in columns
+    return (
+        function in {"min", "max", "sum", "avg", "latest", "distinct", "group"}
+        and column in columns
+    )
 
 
 def _valid_row(
@@ -1448,12 +1706,17 @@ def _valid_row(
     ):
         return None
     if "parent_record_id" in row and (
-        query["expand_children"] is not True and query.get("expand_child") is None
+        query["expand_children"] is not True
+        and query.get("expand_child") is None
         or type(row["parent_record_id"]) is not str
         or row["parent_record_id"] != row["record_id"]
     ):
         return None
-    if "child_field" in row and (type(row["child_field"]) is not str or type(row.get("child_index")) is not int or row["child_index"] < 0):
+    if "child_field" in row and (
+        type(row["child_field"]) is not str
+        or type(row.get("child_index")) is not int
+        or row["child_index"] < 0
+    ):
         return None
     values = {name: value for name, value in row.items() if name in manifest.schema.fields}
     try:
@@ -1485,7 +1748,11 @@ def _valid_aggregate(
         return False
     specification = specification.strip()
     if specification == "count":
-        return set(aggregate) == {"count"} and type(aggregate["count"]) is int and aggregate["count"] == total_matched
+        return (
+            set(aggregate) == {"count"}
+            and type(aggregate["count"]) is int
+            and aggregate["count"] == total_matched
+        )
     if specification == "profile":
         profile = aggregate.get("profile")
         return (
@@ -1538,7 +1805,11 @@ def _valid_aggregate(
         return (
             set(aggregate) == {"latest_by", "row"}
             and aggregate["latest_by"] == expected_column
-            and (latest is None or _valid_row(latest, manifest, query, require_item_version=require_item_version) is not None)
+            and (
+                latest is None
+                or _valid_row(latest, manifest, query, require_item_version=require_item_version)
+                is not None
+            )
         )
     return False
 
@@ -1564,9 +1835,14 @@ def _valid_source_versions(
             if version.hash != manifest.manifest_version.hash:
                 return None
             found_manifest = True
-        elif manifest.storage.strategy != "markdown-items" and version.path != manifest.storage.source:
+        elif (
+            manifest.storage.strategy != "markdown-items"
+            and version.path != manifest.storage.source
+        ):
             return None
-        elif manifest.storage.strategy == "markdown-items" and not version.path.startswith(source_prefix):
+        elif manifest.storage.strategy == "markdown-items" and not version.path.startswith(
+            source_prefix
+        ):
             return None
         seen.add(version.path)
         projected.append(collections.SourceVersion(version.path, version.hash))
@@ -1601,18 +1877,23 @@ def project_query_result(
         or not _valid_saved_view(result.view, manifest)
         or not _valid_agent_history(agent_history)
         or (result.continuation is not None and type(result.continuation) is not str)
-        or (isinstance(result.continuation, str) and not record_formats.validate_continuation(
+        or (
+            isinstance(result.continuation, str)
+            and not record_formats.validate_continuation(
             result.continuation,
             collection_id=result.collection_id,
             snapshot=result.snapshot,
             query=_cursor_query(result, manifest),
-        ))
+            )
+        )
     ):
         return _withheld_query()
     columns = tuple(result.columns)
     allowed_columns = _query_value_fields(manifest) | _SYSTEM_FIELDS
-    if not columns or len(columns) != len(set(columns)) or any(
-        type(column) is not str or column not in allowed_columns for column in columns
+    if (
+        not columns
+        or len(columns) != len(set(columns))
+        or any(type(column) is not str or column not in allowed_columns for column in columns)
     ):
         return _withheld_query()
     require_item_version = manifest.storage.strategy != "dataset"
@@ -1641,7 +1922,9 @@ def project_query_result(
         continuation=result.continuation,
         derived=True,
         rendered="",
-        aggregate=dict(result.aggregate) if isinstance(result.aggregate, Mapping) else result.aggregate,
+        aggregate=dict(result.aggregate)
+        if isinstance(result.aggregate, Mapping)
+        else result.aggregate,
         query=dict(result.query),
         source_versions=source_versions,
         columns=columns,
@@ -1709,7 +1992,14 @@ def _valid_saved_view(value: Any, manifest: collections.CollectionManifest) -> b
 def _valid_agent_history(value: Mapping[str, Any] | None) -> bool:
     if value is None:
         return True
-    if set(value) - {"status", "complete", "truncated", "events", "discontinuity", "discontinuities"}:
+    if set(value) - {
+        "status",
+        "complete",
+        "truncated",
+        "events",
+        "discontinuity",
+        "discontinuities",
+    }:
         return False
     if value["status"] not in ("baseline", "ok", "gap", "acknowledged_gap", "history_incomplete"):
         return False
@@ -1733,12 +2023,14 @@ def _valid_agent_history(value: Mapping[str, Any] | None) -> bool:
         "rationale",
     }
     lifecycle = allowed | {
-        "continuity", "acknowledged_gap_codes", "gap_fingerprint", "checkpoint_snapshot_hash", "minimum_reader_version"
+        "continuity",
+        "acknowledged_gap_codes",
+        "gap_fingerprint",
+        "checkpoint_snapshot_hash",
+        "minimum_reader_version",
     }
     for event in events:
-        if not isinstance(event, Mapping) or (
-            set(event) != allowed and set(event) != lifecycle
-        ):
+        if not isinstance(event, Mapping) or (set(event) != allowed and set(event) != lifecycle):
             return False
         if event["operation"] not in ("create", "append", "update", "revise", "rebaseline"):
             return False
@@ -1775,23 +2067,42 @@ def _valid_agent_history(value: Mapping[str, Any] | None) -> bool:
                 return False
         if type(event["rationale"]) is not str or len(event["rationale"].encode("utf-8")) > 512:
             return False
+
     def valid_discontinuity(item: Any) -> bool:
         return (
             isinstance(item, Mapping)
-            and set(item) == {
-                "provenance_continuity", "prior_head", "acknowledged_gap_codes", "rationale",
-                "checkpoint_transition", "gap_fingerprint", "checkpoint_snapshot_hash",
+            and set(item)
+            == {
+                "provenance_continuity",
+                "prior_head",
+                "acknowledged_gap_codes",
+                "rationale",
+                "checkpoint_transition",
+                "gap_fingerprint",
+                "checkpoint_snapshot_hash",
             }
             and item["provenance_continuity"] is False
             and type(item["prior_head"]) is str
-            and (item["prior_head"] == "baseline" or re.fullmatch(r"[0-9a-f]{24}", item["prior_head"]) is not None)
+            and (
+                item["prior_head"] == "baseline"
+                or re.fullmatch(r"[0-9a-f]{24}", item["prior_head"]) is not None
+            )
             and isinstance(item["acknowledged_gap_codes"], list)
             and item["acknowledged_gap_codes"] == sorted(set(item["acknowledged_gap_codes"]))
-            and all(type(code) is str and 0 < len(code.encode("utf-8")) <= 256 for code in item["acknowledged_gap_codes"])
-            and type(item["rationale"]) is str and 0 < len(item["rationale"].encode("utf-8")) <= 512
-            and type(item["checkpoint_transition"]) is str and re.fullmatch(r"[0-9a-f]{24}", item["checkpoint_transition"]) is not None
-            and all(type(item[name]) is str and re.fullmatch(r"[0-9a-f]{64}", item[name]) is not None for name in ("gap_fingerprint", "checkpoint_snapshot_hash"))
+            and all(
+                type(code) is str and 0 < len(code.encode("utf-8")) <= 256
+                for code in item["acknowledged_gap_codes"]
+            )
+            and type(item["rationale"]) is str
+            and 0 < len(item["rationale"].encode("utf-8")) <= 512
+            and type(item["checkpoint_transition"]) is str
+            and re.fullmatch(r"[0-9a-f]{24}", item["checkpoint_transition"]) is not None
+            and all(
+                type(item[name]) is str and re.fullmatch(r"[0-9a-f]{64}", item[name]) is not None
+                for name in ("gap_fingerprint", "checkpoint_snapshot_hash")
         )
+        )
+
     discontinuity = value.get("discontinuity")
     discontinuities = value.get("discontinuities")
     if discontinuity is not None and not valid_discontinuity(discontinuity):
@@ -1800,7 +2111,10 @@ def _valid_agent_history(value: Mapping[str, Any] | None) -> bool:
         not isinstance(discontinuities, list)
         or len(discontinuities) > 16
         or not all(valid_discontinuity(item) for item in discontinuities)
-        or (discontinuity is not None and (not discontinuities or discontinuity != discontinuities[0]))
+        or (
+            discontinuity is not None
+            and (not discontinuities or discontinuity != discontinuities[0])
+        )
     ):
         return False
     return True
@@ -1862,7 +2176,11 @@ def _normalize_manifest_value(
     if type(value) is float:
         return (True, value) if isfinite(value) else (False, None)
     if type(value) is str:
-        return (True, value) if len(value.encode("utf-8")) <= _MAX_MANIFEST_VALUE_BYTES else (False, None)
+        return (
+            (True, value)
+            if len(value.encode("utf-8")) <= _MAX_MANIFEST_VALUE_BYTES
+            else (False, None)
+        )
     if isinstance(value, Mapping):
         if id(value) in active:
             return False, None
@@ -1933,7 +2251,11 @@ def _project_schema_values(
 
 
 def _project_manifest_query(
-    root: Path, manifest: collections.CollectionManifest, query: Mapping[str, Any], *, links: _LinkProjector | None = None
+    root: Path,
+    manifest: collections.CollectionManifest,
+    query: Mapping[str, Any],
+    *,
+    links: _LinkProjector | None = None,
 ) -> dict[str, Any] | None:
     valid, normalized = _normalize_manifest_value(query)
     if not valid or not isinstance(normalized, dict) or set(normalized) - {"filters", "limit"}:
@@ -1982,7 +2304,11 @@ def _opaque_plan_reference(reference: object) -> str | None:
 
 
 def _project_plan_link(
-    root: Path, manifest: collections.CollectionManifest, plan: collections.PlanLink, *, links: _LinkProjector | None = None
+    root: Path,
+    manifest: collections.CollectionManifest,
+    plan: collections.PlanLink,
+    *,
+    links: _LinkProjector | None = None,
 ) -> dict[str, Any] | None:
     reference = _opaque_plan_reference(plan.reference)
     if reference is None:
@@ -1996,7 +2322,9 @@ def _project_plan_link(
     return projected
 
 
-def _project_views(root: Path, manifest: collections.CollectionManifest, *, links: _LinkProjector | None = None) -> dict[str, Any]:
+def _project_views(
+    root: Path, manifest: collections.CollectionManifest, *, links: _LinkProjector | None = None
+) -> dict[str, Any]:
     projected: dict[str, Any] = {}
     if len(manifest.views) > 32:
         return projected
@@ -2038,7 +2366,9 @@ def _project_governance(value: Mapping[str, Any]) -> dict[str, Any]:
         and set(release) == {"tiers"}
         and isinstance(release["tiers"], list)
         and len(release["tiers"]) <= 16
-        and all(type(tier) is str and 1 <= len(tier.encode("utf-8")) <= 128 for tier in release["tiers"])
+        and all(
+            type(tier) is str and 1 <= len(tier.encode("utf-8")) <= 128 for tier in release["tiers"]
+        )
     ):
         projected["release"] = {"tiers": release["tiers"]}
     return projected
@@ -2078,7 +2408,8 @@ def project_manifest(
                 "plans": [
                     projected
                     for plan in manifest.links.plans
-                    if (projected := _project_plan_link(root, manifest, plan, links=links)) is not None
+                    if (projected := _project_plan_link(root, manifest, plan, links=links))
+                    is not None
                 ],
                 "views": _project_views(root, manifest, links=links),
                 "governance": _project_governance(manifest.governance),
@@ -2187,7 +2518,11 @@ def require_proposed_manifest_visibility(
 ) -> None:
     """Admit every path directly declared by a revised manifest before publication."""
     allowed = full_release_filter(Path(vault_root))
-    paths = [manifest.path, manifest.storage.source, *(template.path for template in manifest.templates)]
+    paths = [
+        manifest.path,
+        manifest.storage.source,
+        *(template.path for template in manifest.templates),
+    ]
     if not all(allowed(path) for path in paths):
         raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
     links = _LinkProjector.create(Path(vault_root), manifest)

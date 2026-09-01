@@ -246,6 +246,88 @@ def test_upsert_report_marks_synchronous_legacy_callbacks_completed(
     assert all(item.code != "accepted_unverified" for item in report.components)
 
 
+def test_watcher_upsert_routes_full_vault_generation_only_to_lexstore(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import lexstore
+
+    target = tmp_path / "Knowledge Base" / "Notes" / "item.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("# Item\n", encoding="utf-8")
+    outside = tmp_path / "Sources" / "item.md"
+    outside.parent.mkdir(parents=True)
+    outside.write_text("# Outside item\n", encoding="utf-8")
+    removed_rel = "Knowledge Base/Notes/removed.md"
+    outside_removed_rel = "Sources/removed.md"
+    calls: list[tuple[list[Path], list[str]]] = []
+    embedding_calls: list[list[Path]] = []
+    monkeypatch.setattr(
+        lexstore,
+        "apply_watcher_batch",
+        lambda _root, paths, rels: calls.append((list(paths), list(rels))) or True,
+    )
+    monkeypatch.setattr(
+        embeddings,
+        "upsert_after_write_status",
+        lambda _root, paths: (
+            embedding_calls.append(list(paths))
+            or embeddings.EmbeddingSyncStatus(
+                "completed",
+                "embedding_upsert_completed",
+                len(paths),
+            )
+        ),
+    )
+
+    report = index_sync.upsert_after_write(
+        tmp_path,
+        [target, outside],
+        publish_corpus_change=False,
+        watcher_deleted_rel_paths=[removed_rel, outside_removed_rel],
+    )
+
+    assert calls == [([target, outside], [removed_rel, outside_removed_rel])]
+    assert embedding_calls == [[target]]
+    assert _outcome(report, "lexstore").outcome == "completed"
+
+
+def test_watcher_outside_delete_only_wakes_lexstore_not_kb_consumers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import lexstore
+
+    calls: list[tuple[list[Path], list[str]]] = []
+    monkeypatch.setattr(
+        lexstore,
+        "apply_watcher_batch",
+        lambda _root, paths, rels: calls.append((list(paths), list(rels))) or True,
+    )
+    monkeypatch.setattr(
+        embeddings,
+        "upsert_after_write_status",
+        lambda *_args, **_kwargs: pytest.fail("delete-only vault batch woke embeddings"),
+    )
+    monkeypatch.setattr(
+        epistemic_graph,
+        "upsert_after_write",
+        lambda *_args, **_kwargs: pytest.fail("delete-only vault batch woke graph"),
+    )
+
+    report = index_sync.upsert_after_write(
+        tmp_path,
+        [],
+        publish_corpus_change=False,
+        watcher_deleted_rel_paths=["Sources/removed.md"],
+    )
+
+    assert calls == [([], ["Sources/removed.md"])]
+    assert _outcome(report, "lexstore").outcome == "completed"
+    assert _outcome(report, "embeddings").code == "no_eligible_paths"
+    assert _outcome(report, "epistemic_graph").code == "no_graph_input"
+
+
 def test_delete_report_marks_known_synchronous_callbacks_completed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -272,6 +354,32 @@ def test_delete_report_marks_known_synchronous_callbacks_completed(
         "code": "clip_disabled",
     }
     assert all(item.code != "accepted_unverified" for item in report.components)
+
+
+def test_watcher_delete_skips_lexstore_after_combined_batch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import lexstore
+
+    monkeypatch.setattr(
+        lexstore,
+        "delete_after_remove",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("lexstore dispatched twice")),
+    )
+
+    report = index_sync.delete_after_remove(
+        tmp_path,
+        ["Knowledge Base/Notes/removed.md"],
+        publish_corpus_change=False,
+        dispatch_lexstore=False,
+    )
+
+    assert _outcome(report, "lexstore").as_dict() == {
+        "component": "lexstore",
+        "outcome": "not_required",
+        "code": "watcher_batch_completed",
+    }
 
 
 def test_legacy_callback_internal_failures_report_incomplete(
@@ -607,3 +715,404 @@ def test_delete_report_continues_after_observable_component_failure(
     assert _outcome(report, "embeddings").outcome == "accepted"
     assert _outcome(report, "embeddings").code == "embeddings_disabled"
     assert report.reconcile_required is True
+
+
+# ---------------------------------------------------------------------------
+# bound-contended-write-index-refresh: warm-up deferral accounting.
+#
+# A batch write during an embedding warm-up window defers with durable,
+# path-exact semantic receipts already recorded.  Declaring that deferral a
+# batch failure is what escalated an O(1) cause into whole-vault work: the
+# minted full-component receipt re-runs the entire fan-out and a graph epoch
+# recovery build on every drain pass.
+# ---------------------------------------------------------------------------
+
+
+def _warm_deferred_note(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A real KB note plus a genuinely warming embedding component."""
+    target = tmp_path / "Knowledge Base" / "Notes" / "warm-accounting.md"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        "# Warm accounting\n\nwarm deferral accounting probe\n", encoding="utf-8"
+    )
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setenv("EXOMEM_MODE", "normal")
+    monkeypatch.setattr(embeddings, "_IMPORT_FAILED", False)
+    readiness.reset()
+    readiness.begin_warm()
+    deferred_index.clear(tmp_path)
+    deferred_index.clear_full(tmp_path)
+    return target
+
+
+def _clean_warm_deferred_note(tmp_path: Path) -> None:
+    readiness.reset()
+    deferred_index.clear(tmp_path)
+    deferred_index.clear_full(tmp_path)
+
+
+def test_warm_covered_deferral_is_batch_success_and_mints_no_full_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Task 1.1: a warm-up deferral that durably covered the batch is success.
+
+    Red-first pin of the measured 2026-08-26 escalation: today the
+    `deferred_warmup` outcome fails `full_upsert_succeeded` and mints a durable
+    full-component receipt for paths whose semantic replay is already durably
+    queued path-by-path.
+    """
+    target = _warm_deferred_note(tmp_path, monkeypatch)
+    rel = "Knowledge Base/Notes/warm-accounting.md"
+    try:
+        report = index_sync.upsert_after_write(tmp_path, [target])
+        outcome = _outcome(report, "embeddings")
+        assert outcome.outcome == "deferred"
+        assert outcome.code == "deferred_warmup"
+        # The deferral durably covered the batch before the report is judged.
+        assert deferred_index.status(tmp_path)["paths"] == [rel]
+        # The covered deferral is batch-report success, not an escalation.
+        assert index_sync.full_upsert_succeeded(tmp_path, [target], report) is True
+        # A batch with no nameable rel paths can never be blessed by coverage:
+        # the empty set is a subset of every queue, so without the guard the
+        # acceptance would be vacuous.
+        assert index_sync.full_upsert_succeeded(tmp_path, [], report) is False
+
+        completed = vault_module.post_commit_batch_fanout(tmp_path, [target], None, None)
+        assert completed is True
+        # No durable full-component refresh receipt is minted for the batch;
+        # the already-queued semantic replay stays the sole durable demand.
+        assert deferred_index.snapshot_full(tmp_path) == []
+        assert deferred_index.status(tmp_path)["paths"] == [rel]
+    finally:
+        _clean_warm_deferred_note(tmp_path)
+
+
+def test_warm_deferral_accounting_telemetry_counts_both_outcomes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Task 2.2: stable content-free counters behind the module's reset seam."""
+    target = _warm_deferred_note(tmp_path, monkeypatch)
+    try:
+        index_sync.reset_deferral_telemetry()
+        report = index_sync.upsert_after_write(tmp_path, [target])
+        assert index_sync.full_upsert_succeeded(tmp_path, [target], report) is True
+        assert index_sync.deferral_telemetry() == {
+            "covered_deferral_accepted": 1,
+            "uncovered_deferral_escalated": 0,
+        }
+        # Judging the same deferred batch against an emptied queue is the
+        # uncovered case: fail closed, and count the escalation.
+        deferred_index.clear(tmp_path)
+        assert index_sync.full_upsert_succeeded(tmp_path, [target], report) is False
+        assert index_sync.deferral_telemetry() == {
+            "covered_deferral_accepted": 1,
+            "uncovered_deferral_escalated": 1,
+        }
+        index_sync.reset_deferral_telemetry()
+        assert all(
+            value == 0 for value in index_sync.deferral_telemetry().values()
+        )
+    finally:
+        _clean_warm_deferred_note(tmp_path)
+
+
+def test_volatile_warm_deferral_still_fails_closed_and_mints_the_demand(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Task 1.2: a warm-up deferral without durable coverage fails closed.
+
+    The durable store refuses both recording seams, so nothing covers the
+    batch: the component itself must name the missing coverage, the report
+    must fail, the full-component demand must still be minted, and the
+    escalation must be counted.
+    """
+    target = _warm_deferred_note(tmp_path, monkeypatch)
+    rel = "Knowledge Base/Notes/warm-accounting.md"
+
+    def refuse(_vault_root, _rels):
+        raise OSError("durable defer store unavailable")
+
+    monkeypatch.setattr(deferred_index, "add_receipts", refuse)
+    monkeypatch.setattr(deferred_index, "add", refuse)
+    try:
+        index_sync.reset_deferral_telemetry()
+        report = index_sync.upsert_after_write(tmp_path, [target])
+        outcome = _outcome(report, "embeddings")
+        assert outcome.outcome == "deferred"
+        # The component names the missing durable coverage itself, so a stale
+        # queue entry for the same path can never bless this deferral.
+        assert outcome.code == "deferred_warmup_volatile"
+        assert deferred_index.snapshot(tmp_path) == []
+        assert index_sync.full_upsert_succeeded(tmp_path, [target], report) is False
+        assert index_sync.deferral_telemetry()["uncovered_deferral_escalated"] == 1
+
+        completed = vault_module.post_commit_batch_fanout(tmp_path, [target], None, None)
+        assert completed is False
+        assert [
+            receipt.rel_path for receipt in deferred_index.snapshot_full(tmp_path)
+        ] == [rel]
+    finally:
+        _clean_warm_deferred_note(tmp_path)
+
+
+def test_stale_receipt_cannot_bless_a_volatile_warm_deferral(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A receipt from an earlier write is not this deferral's coverage.
+
+    The semantic queue retires receipts by per-revision CAS, so only the
+    revision bump THIS deferral performed guarantees a replay of the current
+    bytes; a stale entry for the same path proves nothing.  The component
+    code is therefore the gate: volatile means uncovered, even when the
+    queue happens to hold the rel — the tripwire for a mutant that folds
+    `deferred_warmup_volatile` into the accepted code set.
+    """
+    target = _warm_deferred_note(tmp_path, monkeypatch)
+    rel = "Knowledge Base/Notes/warm-accounting.md"
+    # A durable receipt from an EARLIER write is already queued for the path.
+    [stale] = deferred_index.add_receipts(tmp_path, [rel])
+
+    def refuse(_vault_root, _rels):
+        raise OSError("durable defer store unavailable")
+
+    monkeypatch.setattr(deferred_index, "add_receipts", refuse)
+    monkeypatch.setattr(deferred_index, "add", refuse)
+    try:
+        report = index_sync.upsert_after_write(tmp_path, [target])
+        outcome = _outcome(report, "embeddings")
+        assert outcome.code == "deferred_warmup_volatile"
+        # The stale receipt is still there — and must not bless the batch.
+        assert deferred_index.snapshot(tmp_path) == [stale]
+        assert index_sync.full_upsert_succeeded(tmp_path, [target], report) is False
+    finally:
+        _clean_warm_deferred_note(tmp_path)
+
+
+def test_warm_deferral_code_alone_cannot_bless_an_uncovered_batch(
+    tmp_path: Path,
+) -> None:
+    """The carve-out must verify durable coverage, never trust the code string.
+
+    Green before and after the fix; the tripwire for a mutant that accepts
+    every `deferred_warmup` outcome without proving queue coverage.
+    """
+    target = tmp_path / "Knowledge Base" / "Notes" / "uncovered.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("# Uncovered\n", encoding="utf-8")
+    rel = "Knowledge Base/Notes/uncovered.md"
+    report = index_sync.IndexSyncReport(
+        "upsert",
+        (rel,),
+        (rel,),
+        (
+            index_sync.IndexComponentOutcome(
+                "memory_refs", "completed", "dispatch_completed"
+            ),
+            index_sync.IndexComponentOutcome(
+                "resolver", "completed", "dispatch_completed"
+            ),
+            index_sync.IndexComponentOutcome(
+                "semantic_purge", "completed", "purge_completed"
+            ),
+            index_sync.IndexComponentOutcome(
+                "lexstore", "completed", "dispatch_completed"
+            ),
+            index_sync.IndexComponentOutcome(
+                "epistemic_graph", "completed", "incremental_completed"
+            ),
+            index_sync.IndexComponentOutcome(
+                "embeddings", "deferred", "deferred_warmup"
+            ),
+        ),
+    )
+    assert deferred_index.snapshot(tmp_path) == []
+    assert index_sync.full_upsert_succeeded(tmp_path, [target], report) is False
+
+
+def test_contended_lexical_upsert_stays_swallowed_from_the_batch_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Task 1.3 baseline debt pin — deliberately green before AND after.
+
+    A lexical batch upsert refused under a held publication barrier never
+    reaches the batch report: the module-level wrapper discards the refusal,
+    `full_upsert_succeeded` stays True, the refusal records no durable demand,
+    and recovery is only the process-local deferred registry.  Making the
+    refusal observable is the follow-up debt named in the proposal; this pin
+    measures it so it cannot drift silently.
+    """
+    from exomem import lexstore
+    from exomem.vault import vault_creation_lock
+
+    if not lexstore.fts5_available():
+        pytest.skip("this SQLite build lacks FTS5/trigram")
+    monkeypatch.setenv("EXOMEM_MODE", "normal")
+    page = tmp_path / "Knowledge Base" / "Notes" / "swallowed.md"
+    page.parent.mkdir(parents=True)
+    page.write_text(
+        "---\ntype: insight\ntitle: swallowed\nupdated: 2026-01-01\n---\n"
+        "# swallowed\n\nswallowprobe original\n",
+        encoding="utf-8",
+    )
+    # The first search builds the lexical sidecar whole; without it the module
+    # wrapper no-ops before ever reaching the publication barrier.
+    assert lexstore.search_bm25(tmp_path, "swallowprobe", k=3, scope="kb")
+    page.write_text(
+        "---\ntype: insight\ntitle: swallowed\nupdated: 2026-01-02\n---\n"
+        "# swallowed\n\nswallowprobe revised\n",
+        encoding="utf-8",
+    )
+    scheduled: list[dict] = []
+    monkeypatch.setattr(
+        lexstore,
+        "_schedule_repair",
+        lambda root, **kwargs: scheduled.append({"root": root, **kwargs}),
+    )
+
+    with vault_creation_lock(tmp_path, "lexical-catalog-publication", timeout=5):
+        report = index_sync.upsert_after_write(tmp_path, [page])
+
+    lexical = _outcome(report, "lexstore")
+    assert (lexical.outcome, lexical.code) == ("completed", "dispatch_completed")
+    assert index_sync.full_upsert_succeeded(tmp_path, [page], report) is True
+    assert deferred_index.snapshot_full(tmp_path) == []
+    # The semantic queue holds only the ordinary embeddings-disabled heal
+    # receipt every write records; the lexical refusal contributed nothing.
+    assert [receipt.rel_path for receipt in deferred_index.snapshot(tmp_path)] == [
+        "Knowledge Base/Notes/swallowed.md"
+    ]
+    # The only recovery for the refused rows is the process-local registry.
+    assert scheduled == [{"root": tmp_path, "deferred_paths": [page]}]
+
+
+# --- Graph durable-coverage carve-out (tasks 1.1 / 1.2 / 2.1) ---------------
+#
+# During `recovery_required` the registered checkpoint never equals the live
+# one, so EVERY batch write's graph deferral fails the report and mints a
+# durable full-component receipt -- even when the deferral already recorded
+# per-path graph receipts covering exactly that batch. That funnel is what
+# self-sustains: backlog -> recovery_required -> every write mints -> backlog.
+
+
+_GRAPH_REL = "Knowledge Base/Notes/graph-accounting.md"
+
+
+def _graph_deferral_report(code: str = "graph_repair_queued") -> index_sync.IndexSyncReport:
+    """A batch report whose graph component deferred, everything else done."""
+    return index_sync.IndexSyncReport(
+        operation="upsert",
+        requested_paths=(_GRAPH_REL,),
+        eligible_paths=(_GRAPH_REL,),
+        components=(
+            index_sync.IndexComponentOutcome("memory_refs", "completed", "ok"),
+            index_sync.IndexComponentOutcome("resolver", "completed", "ok"),
+            index_sync.IndexComponentOutcome("semantic_purge", "completed", "ok"),
+            index_sync.IndexComponentOutcome("lexstore", "completed", "ok"),
+            index_sync.IndexComponentOutcome("epistemic_graph", "deferred", code),
+            index_sync.IndexComponentOutcome("embeddings", "completed", "ok"),
+        ),
+    )
+
+
+def test_covered_graph_deferral_during_recovery_is_batch_success(
+    tmp_path: Path,
+) -> None:
+    """Task 1.1: per-path graph receipts covering the batch ARE the demand."""
+    target = tmp_path / _GRAPH_REL
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("# Graph accounting\n", encoding="utf-8")
+    report = _graph_deferral_report()
+
+    # No registered checkpoint equals the live one: this is recovery_required,
+    # the state in which every graph deferral currently escalates.
+    assert graph_sync.registered_checkpoint(tmp_path) is None
+
+    index_sync.reset_deferral_telemetry()
+    # Uncovered first: nothing durably queued, so the report must still fail.
+    assert index_sync.full_upsert_succeeded(tmp_path, [target], report) is False
+    assert index_sync.deferral_telemetry()["uncovered_deferral_escalated"] == 1
+
+    # Now the deferral durably covers the batch's graph-input paths.
+    deferred_index.add_graph(tmp_path, [_GRAPH_REL])
+    assert deferred_index.snapshot_graph(tmp_path) != []
+
+    index_sync.reset_deferral_telemetry()
+    assert index_sync.full_upsert_succeeded(tmp_path, [target], report) is True
+    assert index_sync.deferral_telemetry() == {
+        "covered_deferral_accepted": 1,
+        "uncovered_deferral_escalated": 0,
+    }
+
+
+def test_uncovered_graph_deferral_still_fails_closed(tmp_path: Path) -> None:
+    """Task 1.2: a deferral with no covering receipts still mints the demand."""
+    target = tmp_path / _GRAPH_REL
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("# Graph accounting\n", encoding="utf-8")
+
+    # A queue entry for a DIFFERENT path cannot bless this batch.
+    deferred_index.add_graph(tmp_path, ["Knowledge Base/Notes/unrelated.md"])
+    report = _graph_deferral_report()
+
+    index_sync.reset_deferral_telemetry()
+    assert index_sync.full_upsert_succeeded(tmp_path, [target], report) is False
+    assert index_sync.deferral_telemetry()["uncovered_deferral_escalated"] == 1
+
+
+def test_graph_deferral_without_a_coverage_claiming_code_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """Only a code that means "durably queued" may be blessed by receipts.
+
+    `graph_index_disabled` records nothing, so a stale queue entry naming the
+    same path must not launder it into a success.
+    """
+    target = tmp_path / _GRAPH_REL
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("# Graph accounting\n", encoding="utf-8")
+    deferred_index.add_graph(tmp_path, [_GRAPH_REL])
+
+    report = _graph_deferral_report(code="graph_index_disabled")
+
+    assert index_sync.full_upsert_succeeded(tmp_path, [target], report) is False
+
+
+def test_empty_graph_batch_cannot_be_blessed_by_coverage(tmp_path: Path) -> None:
+    """The empty set is a subset of every queue; acceptance must not be vacuous."""
+    deferred_index.add_graph(tmp_path, [_GRAPH_REL])
+    report = _graph_deferral_report()
+
+    assert index_sync.full_upsert_succeeded(tmp_path, [], report) is False
+
+
+def test_non_graph_input_paths_cannot_bless_a_graph_deferral(tmp_path: Path) -> None:
+    """Coverage is over GRAPH-INPUT paths, not merely over Markdown.
+
+    A note living inside graph_sync's own receipt directory is not a graph
+    input, so a batch made only of such paths has nothing to cover and must
+    fail closed rather than be accepted vacuously.
+    """
+    rel = "Knowledge Base/Notes/.graph-commit-receipts/receipt-note.md"
+    assert graph_sync.is_graph_input_path(rel) is False
+    target = tmp_path / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("# Receipt note\n", encoding="utf-8")
+    deferred_index.add_graph(tmp_path, [rel])
+
+    report = index_sync.IndexSyncReport(
+        operation="upsert",
+        requested_paths=(rel,),
+        eligible_paths=(rel,),
+        components=(
+            index_sync.IndexComponentOutcome("memory_refs", "completed", "ok"),
+            index_sync.IndexComponentOutcome("resolver", "completed", "ok"),
+            index_sync.IndexComponentOutcome("semantic_purge", "completed", "ok"),
+            index_sync.IndexComponentOutcome("lexstore", "completed", "ok"),
+            index_sync.IndexComponentOutcome(
+                "epistemic_graph", "deferred", "graph_repair_queued"
+            ),
+            index_sync.IndexComponentOutcome("embeddings", "completed", "ok"),
+        ),
+    )
+
+    assert index_sync.full_upsert_succeeded(tmp_path, [target], report) is False

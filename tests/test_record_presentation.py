@@ -66,6 +66,44 @@ def _setup(vault: Path) -> collections.CollectionManifest:
     return collections.load_manifest(vault, path)
 
 
+def _setup_optional_laps(vault: Path) -> collections.CollectionManifest:
+    text = _manifest_text().replace(
+        "    measurements:\n",
+        "    laps:\n"
+        "      type: array\n"
+        "      items:\n"
+        "        type: object\n"
+        "    measurements:\n",
+        1,
+    ).replace(
+        "  notes: []\n",
+        "    - field: laps\n"
+        "      label: Laps\n"
+        "      columns:\n"
+        "        - field: lap\n"
+        "          type: integer\n"
+        "        - field: seconds\n"
+        "          type: integer\n"
+        "  notes: []\n",
+        1,
+    )
+    (vault / "Knowledge Base/log.md").parent.mkdir(parents=True, exist_ok=True)
+    (vault / "Knowledge Base/log.md").write_text("# Activity\n", encoding="utf-8")
+    path = vault / "Knowledge Base/Records/Observed/_collection.md"
+    path.parent.mkdir(parents=True)
+    path.write_text(text, encoding="utf-8")
+    (path.parent / "Items").mkdir()
+    return collections.load_manifest(vault, path)
+
+
+def _optional_laps_values() -> dict[str, object]:
+    return {
+        "observed_on": "2026-08-13",
+        "subject": "Panel",
+        "measurements": [{"name": "One", "value": "1", "source": "[[Source]]"}],
+    }
+
+
 def test_records_only_presentation_is_normalized_and_legacy_presentation_is_opaque(
     tmp_path: Path,
 ) -> None:
@@ -110,6 +148,136 @@ def test_markdown_item_presentation_renders_from_canonical_values_and_preserves_
     managed = rendered.split("<!-- exomem-record-presentation:v1", 1)[1]
     assert "hidden" not in managed
     assert rendered.endswith("Authored prose.\r\n")
+
+
+@pytest.mark.parametrize(
+    ("include_laps", "laps", "expected_row"),
+    [
+        (False, None, None),
+        (True, None, None),
+        (True, [], None),
+        (True, [{"lap": 1, "seconds": 46}], "| 1 | 46 |"),
+    ],
+)
+def test_append_accepts_omitted_empty_and_populated_optional_presentation_tables(
+    tmp_path: Path,
+    include_laps: bool,
+    laps: object,
+    expected_row: str | None,
+) -> None:
+    manifest = _setup_optional_laps(tmp_path)
+    item = _optional_laps_values()
+    if include_laps:
+        item["laps"] = laps
+
+    result = records.append_record(
+        tmp_path,
+        manifest,
+        item=item,
+        item_key="11111111-1111-4111-8111-111111111111",
+        why="record optional lap observations",
+    )
+
+    assert result["outcome"] == "committed"
+    rendered = (tmp_path / result["affected_paths"][0]).read_text(encoding="utf-8")
+    assert "### Laps" in rendered
+    if expected_row is None:
+        assert "| 1 | 46 |" not in rendered
+    else:
+        assert expected_row in rendered
+    queried = record_formats.query_collection(
+        tmp_path,
+        collections.load_manifest(tmp_path, manifest.path),
+        limit=10,
+    )
+    assert queried.rows[0]["laps"] == ([] if laps is None else laps)
+    expanded = record_formats.query_collection(
+        tmp_path,
+        collections.load_manifest(tmp_path, manifest.path),
+        expand_child="laps",
+        limit=10,
+    )
+    if expected_row is None:
+        assert expanded.rows == []
+    else:
+        assert len(expanded.rows) == 1
+        assert expanded.rows[0]["lap"] == 1
+        assert expanded.rows[0]["seconds"] == 46
+
+
+@pytest.mark.parametrize("invalid", ["not an array", {"lap": 1}])
+def test_optional_presentation_table_rejects_present_non_array_values(
+    tmp_path: Path,
+    invalid: object,
+) -> None:
+    manifest = _setup_optional_laps(tmp_path)
+    item = _optional_laps_values()
+    item["laps"] = invalid
+
+    with pytest.raises(collections.CollectionError) as invalid_item:
+        records.append_record(
+            tmp_path,
+            manifest,
+            item=item,
+            item_key="11111111-1111-4111-8111-111111111111",
+            why="reject invalid lap observations",
+        )
+
+    assert invalid_item.value.code == "SCHEMA_FIELD_TYPE"
+    assert not list((tmp_path / manifest.storage.source).glob("*.md"))
+
+    with pytest.raises(collections.CollectionError) as unrenderable:
+        record_formats.render_markdown_item(
+            manifest,
+            item,
+            "11111111-1111-4111-8111-111111111111",
+        )
+    assert unrenderable.value.code == "UNRENDERABLE_RECORD_PRESENTATION"
+    assert unrenderable.value.reason == "presentation table 'laps' must be an array when present"
+    assert unrenderable.value.details == {"field": "laps"}
+
+
+def test_expand_optional_presentation_table_names_malformed_stored_field(tmp_path: Path) -> None:
+    manifest = _setup_optional_laps(tmp_path)
+    result = records.append_record(
+        tmp_path,
+        manifest,
+        item={**_optional_laps_values(), "laps": []},
+        item_key="11111111-1111-4111-8111-111111111111",
+        why="seed optional lap observations",
+    )
+    path = tmp_path / result["affected_paths"][0]
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("laps: []", "laps: malformed", 1),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(collections.CollectionError) as invalid:
+        record_formats.query_collection(
+            tmp_path,
+            collections.load_manifest(tmp_path, manifest.path),
+            expand_child="laps",
+            limit=10,
+        )
+
+    assert invalid.value.code == "SCHEMA_FIELD_TYPE"
+    assert "laps" in invalid.value.reason
+
+
+def test_required_presentation_table_omission_remains_a_schema_failure(tmp_path: Path) -> None:
+    manifest = _setup(tmp_path)
+
+    with pytest.raises(collections.CollectionError) as missing:
+        records.append_record(
+            tmp_path,
+            manifest,
+            item={"observed_on": "2026-08-13", "subject": "Panel"},
+            item_key="11111111-1111-4111-8111-111111111111",
+            why="reject incomplete observations",
+        )
+
+    assert missing.value.code == "SCHEMA_REQUIRED_FIELD"
+    assert missing.value.reason == "required field is missing: measurements"
 
 
 def test_record_queries_project_nested_values_and_expand_the_selected_table(

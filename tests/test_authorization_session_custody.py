@@ -10,13 +10,19 @@ from pathlib import Path
 
 import pytest
 
-from exomem.governance import authorization_custody, schema_v4
+from exomem.governance import (
+    authorization_custody,
+    authorization_serving_membership,
+    schema_v4,
+)
 
 
 @pytest.fixture(autouse=True)
 def _clear_custody_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(authorization_custody.KEYRING_FILE_ENV, raising=False)
     monkeypatch.delenv(authorization_custody.CONTROL_FILE_ENV, raising=False)
+    monkeypatch.delenv(authorization_custody.MEMBERSHIP_FILE_ENV, raising=False)
+    monkeypatch.delenv(authorization_custody.REPLICA_ID_ENV, raising=False)
 
 
 def _protected_file(path: Path, data: bytes) -> Path:
@@ -121,6 +127,41 @@ def _control_document(*, signing_key: bytes = b"k" * 32, **changes: object) -> b
     ).digest()
     document["mac"] = base64.urlsafe_b64encode(mac).rstrip(b"=").decode()
     return json.dumps(document, separators=(",", ":")).encode()
+
+
+def _membership_document(*, control_digest: str, keyring_digest: str) -> bytes:
+    attestation = authorization_serving_membership.ReplicaReadinessAttestation(
+        version=1,
+        epoch=11,
+        replica_id="replica-a",
+        state="SERVING",
+        software_version=authorization_custody.runtime_software_version(),
+        schema_version=4,
+        cell_id="cell-7bd27031",
+        active_key_id="auth-key-2026-08",
+        accepted_key_ids=("auth-key-2026-08",),
+        control_digest=control_digest,
+        keyring_digest=keyring_digest,
+        attested_at=1_800_000_099,
+        expires_at=1_800_000_399,
+        issuance_stopped=False,
+        no_in_flight=False,
+        signing_key_id="auth-key-2026-08",
+    )
+    return authorization_serving_membership.encode_serving_membership(
+        authorization_serving_membership.ServingMembershipEpoch(
+            version=1,
+            epoch=11,
+            cell_id="cell-7bd27031",
+            logical_vault_id="vault-a2699d30",
+            previous_epoch_digest="a" * 64,
+            issued_at=1_800_000_099,
+            expires_at=1_800_000_399,
+            replicas=(attestation,),
+            signing_key_id="auth-key-2026-08",
+        ),
+        verifier_keys={"auth-key-2026-08": b"k" * 32},
+    )
 
 
 def test_activation_registry_acknowledgement_is_exact_atomic_and_idempotent(
@@ -611,6 +652,76 @@ def test_authenticated_custody_loader_returns_only_verified_records(
     assert loaded.control.registry_attachment_id == "attachment-5d998951"
     assert (b"k" * 32).hex() not in repr(loaded)
     assert "mac" not in repr(loaded)
+
+
+def test_authenticated_custody_loader_attaches_exact_serving_membership(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = 1_800_000_100
+    keyring_raw = _keyring_document()
+    keyring = authorization_custody.parse_keyring(keyring_raw)
+    basis_control = authorization_custody.parse_control_record(
+        _control_document(), keyring=keyring, now=now
+    )
+    membership_raw = _membership_document(
+        control_digest=authorization_custody.control_attestation_digest(basis_control),
+        keyring_digest=authorization_custody.keyring_attestation_digest(keyring),
+    )
+    control_raw = _control_document(
+        serving_membership_digest=(
+            authorization_serving_membership.serving_membership_digest(membership_raw)
+        )
+    )
+    external = tmp_path / "external"
+    _configure(
+        monkeypatch,
+        external,
+        keyring=keyring_raw,
+        control=control_raw,
+    )
+    membership_path = _protected_file(
+        external / "authorization-serving-membership.json", membership_raw
+    )
+    monkeypatch.setenv(
+        authorization_custody.MEMBERSHIP_FILE_ENV, str(membership_path)
+    )
+    monkeypatch.setenv(authorization_custody.REPLICA_ID_ENV, "replica-a")
+
+    loaded = authorization_custody.load_authorization_custody(
+        tmp_path / "vault", now=now
+    )
+
+    assert loaded.local_replica_id == "replica-a"
+    assert loaded.serving_membership is not None
+    assert loaded.serving_membership.epoch == 11
+    assert loaded.serving_membership.record_digest == loaded.control.serving_membership_digest
+
+
+def test_bad_optional_membership_disables_sessions_without_blocking_standing_custody(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _configure(
+        monkeypatch,
+        tmp_path / "external",
+        keyring=_keyring_document(),
+        control=_control_document(),
+    )
+    membership_path = _protected_file(
+        tmp_path / "external" / "authorization-serving-membership.json",
+        b'{"invalid":true}',
+    )
+    monkeypatch.setenv(
+        authorization_custody.MEMBERSHIP_FILE_ENV, str(membership_path)
+    )
+    monkeypatch.setenv(authorization_custody.REPLICA_ID_ENV, "replica-a")
+
+    loaded = authorization_custody.load_authorization_custody(
+        tmp_path / "vault", now=1_800_000_100
+    )
+
+    assert loaded.serving_membership is None
+    assert loaded.local_replica_id is None
+    assert loaded.control.registry_attachment_id == "attachment-5d998951"
 
 
 def test_authenticated_custody_loader_never_returns_unverified_control(

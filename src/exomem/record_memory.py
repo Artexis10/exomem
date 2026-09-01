@@ -378,24 +378,35 @@ def _validate_arguments(action: object, values: dict[str, Any]) -> None:
     if not isinstance(action, str) or action not in ACTIONS:
         _invalid_arguments()
     supplied = {name for name, value in values.items() if value is not None}
-    if not _REQUIRED_FIELDS[action] <= supplied or not supplied <= _ACTION_FIELDS[action]:
-        _invalid_arguments()
+    missing = _REQUIRED_FIELDS[action] - supplied
+    surplus = supplied - _ACTION_FIELDS[action]
+    if missing or surplus:
+        parts = []
+        if surplus:
+            parts.append(f"unexpected for {action}: " + ", ".join(sorted(surplus)))
+        if missing:
+            parts.append(f"missing for {action}: " + ", ".join(sorted(missing)))
+        _invalid_arguments("; ".join(parts))
     if action == "update" and values["changes"] is None and values["refresh_presentation"] is not True:
-        _invalid_arguments()
+        _invalid_arguments("update requires changes or refresh_presentation=true")
     if action == "update" and values["refresh_presentation"] not in {None, True}:
-        _invalid_arguments()
+        _invalid_arguments("refresh_presentation must be true when supplied")
     if action == "validate" and ((values["collection"] is None) == (values["manifest_path"] is None)):
-        _invalid_arguments()
+        _invalid_arguments("validate requires exactly one of: collection, manifest_path")
     if action == "validate" and values["collection"] is not None and values["scaffold"] is not None:
-        _invalid_arguments()
+        _invalid_arguments("scaffold is not accepted when collection is supplied")
     if action == "query" and values["view"] is not None and supplied & _QUERY_SHAPING_FIELDS:
-        _invalid_arguments()
+        offending = sorted(supplied & _QUERY_SHAPING_FIELDS)
+        _invalid_arguments("view excludes shaping fields: " + ", ".join(offending))
     if action == "query" and values["expand_children"] is True and values["expand_child"] is not None:
-        _invalid_arguments()
+        _invalid_arguments("expand_children and expand_child are mutually exclusive")
 
 
-def _invalid_arguments() -> Never:
-    raise OpError("INVALID_RECORD_ARGUMENTS", "arguments do not match the selected record action")
+def _invalid_arguments(detail: str | None = None) -> Never:
+    message = "arguments do not match the selected record action"
+    if detail:
+        message = f"{message}: {detail}"
+    raise OpError("INVALID_RECORD_ARGUMENTS", message)
 
 
 def _is_direct_legacy_tracker_selector(collection: str) -> bool:

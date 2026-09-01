@@ -7,7 +7,10 @@ import pytest
 
 from exomem import (
     commands,
+    index_paths,
     index_sync,
+    lexstore,
+    memory_refs,
     reconcile,
     semantic_index,
     semantic_language_registry,
@@ -792,6 +795,9 @@ def test_reference_validate_creates_no_reference_or_semantic_sidecars(
     assert page.read_bytes() == before
     assert not (tmp_path / "Knowledge Base" / ".refs.sqlite").exists()
     assert not (tmp_path / "Knowledge Base" / ".lexical.sqlite").exists()
+    assert not memory_refs.sidecar_path(tmp_path).exists()
+    assert not lexstore.lexical_path(tmp_path).exists()
+    assert not index_paths.sidecar_path(tmp_path).exists()
 
 
 def test_add_preserves_unrelated_body_whitespace_and_logs_once(tmp_path: Path) -> None:

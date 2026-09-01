@@ -15,6 +15,7 @@ import re
 import shutil
 import subprocess
 from collections.abc import Callable, Iterable
+from functools import cache
 from pathlib import Path
 from typing import Literal
 
@@ -738,7 +739,130 @@ def derive_identity_from_receipt_bytes(
     )
 
 
+#: Read-only subcommands whose output, for pinned operands and inert flags,
+#: is a function of immutable content-addressed objects — never of refs, the
+#: worktree, or the index. `rev-parse` is deliberately absent: `rev-parse
+#: HEAD` names a moving ref, and the receipt suites commit between
+#: derivations in one process. Per subcommand: the exact flags and the
+#: ``=``-parameterized flag prefixes the call sites use, all verified inert
+#: (they shape output, never source revisions). Anything else — including
+#: every ref-sourcing family (`--all`, `--branches`, `--tags`, `--remotes`,
+#: `--glob`, `--exclude`) — is simply not whitelisted, so an unknown flag
+#: fails closed into an uncached live query instead of depending on a
+#: blacklist naming every ref-sourcing flag git has or grows.
+_PINNED_GIT_FLAGS: dict[str, tuple[frozenset[str], tuple[str, ...]]] = {
+    "show": (frozenset(), ()),
+    "cat-file": (frozenset({"-e"}), ()),
+    "merge-base": (frozenset({"--is-ancestor"}), ()),
+    "rev-list": (frozenset({"--parents", "--no-walk=unsorted"}), ()),
+    "diff": (frozenset({"--quiet", "--no-renames"}), ()),
+    "log": (
+        frozenset(
+            {
+                "--full-history",
+                "--no-renames",
+                "--name-status",
+                "--follow",
+                # Only the two literal formats the call sites use: `%H` (the
+                # immutable commit hash) and the empty format. An open
+                # `--format=` prefix would admit ref-dependent placeholders
+                # (`%d`, `%D`, `%(describe)`) whose output moves when refs
+                # move — exactly what this whitelist exists to refuse.
+                "--format=%H",
+                "--format=",
+            }
+        ),
+        ("--max-count=", "--diff-filter=", "--find-renames="),
+    ),
+    "ls-tree": (frozenset({"-r", "--name-only"}), ()),
+}
+#: `diff` compares against the worktree or index when given fewer than two
+#: objects, and `merge-base --is-ancestor` needs both sides; the rest pin one.
+_PINNED_MIN_OPERANDS = {"diff": 2, "merge-base": 2}
+_PINNED_OBJECT = re.compile(r"[0-9a-f]{40}")
+
+
+def _git_argv_is_pinned(args: tuple[str, ...]) -> bool:
+    """True only when the argv proves its answer is object-immutable.
+
+    Everything after a ``--`` path separator is a path, not a revision. Every
+    flag must be whitelisted inert for its subcommand. Every remaining
+    operand must be a full 40-hex revision, optionally suffixed ``:path``
+    (the `show`/`cat-file` form) — and there must be at least one (two for
+    `diff` and `merge-base`): an argv with no object operand describes refs,
+    the worktree, or the index, and passing it on "found nothing mutable"
+    would be a vacuous truth. History reachable from a fixed commit is
+    immutable for a process lifetime, so a passing argv always reproduces the
+    same result and may be answered from the process-local cache below.
+    Pinned in both directions by tests/test_harness_capture_caching.py.
+    """
+    if not args or args[0] not in _PINNED_GIT_FLAGS:
+        return False
+    exact_flags, flag_prefixes = _PINNED_GIT_FLAGS[args[0]]
+    operands = 0
+    operands_are_paths = False
+    for arg in args[1:]:
+        if arg == "--":
+            operands_are_paths = True
+            continue
+        if operands_are_paths:
+            continue
+        if arg.startswith("-"):
+            if arg not in exact_flags and not arg.startswith(flag_prefixes):
+                return False
+            continue
+        if _PINNED_OBJECT.fullmatch(arg.split(":", 1)[0]) is None:
+            return False
+        operands += 1
+    return operands >= _PINNED_MIN_OPERANDS.get(args[0], 1)
+
+
+class _UnpinnableResult(Exception):
+    """Carrier for a completed query whose result must not enter the cache."""
+
+    def __init__(self, completed: subprocess.CompletedProcess[bytes]) -> None:
+        super().__init__(completed.returncode)
+        self.completed = completed
+
+
+@cache
+def _git_pinned(
+    root: str, args: tuple[str, ...], check: bool
+) -> subprocess.CompletedProcess[bytes]:
+    """Process-lifetime memo for pinned-revision queries.
+
+    Identity derivation replays the same `show`/`merge-base`/`rev-list`/
+    `log` queries against the same pinned revisions for every receipt chain a
+    process validates; each was a fresh subprocess and together they were a
+    measured fixed cost across the whole harness-importing test tier. Results
+    are `CompletedProcess` values the call sites only read; the memo is
+    unbounded but in practice holds only the receipt-chain artifacts a
+    process reads — small documents, a bounded set per validated repository.
+
+    Only returncodes 0 and 1 (the definite yes/no of the pinned query
+    families) enter the cache. A fatal refusal such as 128 "bad object"
+    describes what the repository happened to contain at that moment — an
+    object can appear later via fetch/unshallow — so it is thrown around the
+    memo and stays a live query. A `check=True` failure raises
+    `CalledProcessError` and is likewise never cached (`functools.cache`
+    does not cache exceptions). Pinned by tests/test_harness_capture_caching.py.
+    """
+    completed = _run_git(Path(root), *args, check=check)
+    if completed.returncode not in (0, 1):
+        raise _UnpinnableResult(completed)
+    return completed
+
+
 def _git(root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[bytes]:
+    if _git_argv_is_pinned(args):
+        try:
+            return _git_pinned(str(root), args, check)
+        except _UnpinnableResult as unpinnable:
+            return unpinnable.completed
+    return _run_git(root, *args, check=check)
+
+
+def _run_git(root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[bytes]:
     discovered = shutil.which("git", path=os.defpath)
     if discovered is None:
         raise ContractIdentityError("trusted Git executable is unavailable")

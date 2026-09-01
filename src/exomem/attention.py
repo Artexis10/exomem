@@ -111,12 +111,14 @@ class AttentionItem:
     fingerprint: str | None = None
     state: str | None = None
     state_detail: dict | None = None
-    # Component fingerprints of signals that share this item's identity but are
-    # NOT folded into `categories`/`fingerprint` above, because they come from
-    # registered-but-opt-in queues the default surface does not show. Populated
-    # only by `item_by_ref`, never projected onto the wire (`as_dict`), and used
-    # solely so a triage decision quiets everything the ref actually names.
-    triage_components: list[str] | None = None
+    # `(category, fingerprint)` pairs for signals that share this item's identity
+    # but are NOT folded into `categories`/`fingerprint` above, because they come
+    # from registered-but-opt-in queues the default surface does not show.
+    # Populated only by `item_by_ref`, never projected onto the wire (`as_dict`),
+    # and used solely so a triage decision quiets everything the ref actually
+    # names. The CATEGORY rides along because the decision recorded for each one
+    # carries its family, and a bare fingerprint cannot say which family it is.
+    triage_components: list[tuple[str, str]] | None = None
     # The family disposition that put this item on an EXPLICITLY requested
     # surface it would otherwise have left. Present only where it explains the
     # item's presence, so an absence never has to be read as "normal".
@@ -166,6 +168,11 @@ class AttentionReport:
     all_total: int | None = None
     state_summary: dict[str, int] | None = None
     coverage: dict[str, int] | None = None
+    # At most one per family, ever: three manual dismissals in one family earn
+    # the family's next surfacing a single offer to quiet it. Present only when
+    # an offer was armed on THIS surfacing, so a client never has to read an
+    # empty list as "nothing to say".
+    quiet_offers: list[dict] | None = None
 
     def as_dict(self) -> dict:
         out = {
@@ -182,6 +189,8 @@ class AttentionReport:
             out["state_summary"] = self.state_summary or {}
         if self.coverage is not None:
             out["coverage"] = self.coverage
+        if self.quiet_offers:
+            out["quiet_offers"] = self.quiet_offers
         return out
 
 
@@ -633,13 +642,49 @@ def item_by_ref(
     # shares it. One extra pass on an explicit, infrequent triage call.
     if wider is not None and wider is not found:
         extra = [
-            value
-            for value in review_state_module.component_fingerprints(vault_root, wider)
+            (category, value)
+            for category, value in review_state_module.component_fingerprints(
+                vault_root, wider, with_category=True
+            )
             if value != found.fingerprint
         ]
         if extra:
             found.triage_components = extra
     return found
+
+
+def _quiet_offers(
+    vault_root: Path, items: list[AttentionItem], *, payload: dict | None
+) -> list[dict]:
+    """Arm the once-only quiet offer for any family this surfacing actually shows.
+
+    Only the families of the items being RETURNED, and only when this is a real
+    surfacing (`record_surfacing`) rather than an internal lookup — an offer made
+    to nobody would be spent, and the offer is made once.
+
+    Failure-isolated, exactly like the first-surfaced ledger and for the same
+    reason: a read surface must not fail, slow past its budget, or change its
+    content because an advisory could not be written. An unwritable store simply
+    makes the offer on a later surfacing.
+    """
+    if not items:
+        return []
+    families: list[str] = []
+    for item in items:
+        for category in item.categories:
+            if category not in families:
+                families.append(category)
+    store = review_state_module.ReviewStateStore(vault_root)
+    offers: list[dict] = []
+    for family in families:
+        try:
+            offer = store.arm_quiet_offer(family, known=payload)
+        except (OSError, ValueError) as error:
+            log.debug("quiet offer not armed for %s: %s", family, error)
+            continue
+        if offer:
+            offers.append(offer)
+    return offers
 
 
 def _stamp_first_surfaced(
@@ -821,8 +866,10 @@ def _apply_review_state(
     else:
         eligible = [item for item in report.items if item.state == state]
     shown_items = eligible[:limit] if limit > 0 else eligible
+    offers: list[dict] = []
     if record_surfacing:
         _stamp_first_surfaced(vault_root, shown_items, known=payload)
+        offers = _quiet_offers(vault_root, shown_items, payload=state_payload)
     total = len(eligible)
     truncated = total - len(shown_items)
     note = _build_note(
@@ -842,4 +889,5 @@ def _apply_review_state(
         all_total=len(report.items),
         state_summary=state_summary,
         coverage=report.coverage,
+        quiet_offers=offers or None,
     )

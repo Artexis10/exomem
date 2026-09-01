@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import gc
 import logging
+import threading
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -35,6 +36,9 @@ log = logging.getLogger(__name__)
 
 _REPORT_PATH_LIMIT = 256
 _REPORT_PATH_BYTE_LIMIT = 1024
+# A bounded daemon pass must not turn one failed batch into every receipt
+# replayed serially. Explicit unbounded maintenance retains exhaustive repair.
+_BOUNDED_FAILURE_ISOLATION_LIMIT = 4
 
 _FULL_UPSERT_COMPONENTS = frozenset(
     {
@@ -46,6 +50,50 @@ _FULL_UPSERT_COMPONENTS = frozenset(
         "embeddings",
     }
 )
+
+#: Write-time deferral accounting — stable, content-free counters ONLY (no
+#: vault paths, note names, or content).  ``covered_deferral_accepted`` counts
+#: batch-report judgements where an embeddings deferral was accepted because
+#: durable path-exact receipts already covered the batch;
+#: ``uncovered_deferral_escalated`` counts embeddings deferrals that failed
+#: the report — at the write-time call site that minting judgement is what
+#: records the durable full-component refresh demand — because no such
+#: coverage could be proven.  Drain-time re-judgements of a still-deferred
+#: batch count too: the counters observe report decisions, not receipts.
+_DEFERRAL_TELEMETRY_KEYS = (
+    "covered_deferral_accepted",
+    "uncovered_deferral_escalated",
+)
+_DEFERRAL_TELEMETRY: dict[str, int] = dict.fromkeys(_DEFERRAL_TELEMETRY_KEYS, 0)
+_DEFERRAL_TELEMETRY_LOCK = threading.Lock()
+
+#: Graph deferral codes that CLAIM durable per-path coverage. `graph_repair_queued`
+#: is emitted only on the branch that proved the durable queue holds the affected
+#: paths. The disabled codes record nothing and are deliberately absent, so a
+#: stale queue entry naming the same path can never bless them.
+_GRAPH_COVERAGE_CODES = frozenset({"graph_repair_queued"})
+
+
+def _note_deferral(reason: str) -> None:
+    """Count one stable deferral-accounting outcome (never content).
+
+    Direct indexing on purpose: a typo'd reason raises KeyError instead of
+    silently minting a counter outside the stable key set.
+    """
+    with _DEFERRAL_TELEMETRY_LOCK:
+        _DEFERRAL_TELEMETRY[reason] += 1
+
+
+def deferral_telemetry() -> dict[str, int]:
+    """Snapshot the stable, content-free deferral-accounting counters."""
+    with _DEFERRAL_TELEMETRY_LOCK:
+        return dict(_DEFERRAL_TELEMETRY)
+
+
+def reset_deferral_telemetry() -> None:
+    """Test seam: zero the deferral-accounting counters."""
+    with _DEFERRAL_TELEMETRY_LOCK:
+        _DEFERRAL_TELEMETRY.update(dict.fromkeys(_DEFERRAL_TELEMETRY_KEYS, 0))
 
 
 def _evict_corpus_projection_consumers(vault_root: Path) -> None:
@@ -463,7 +511,12 @@ def _record_deferred_semantic_upserts(
     return len(rels), deferred_index.add(vault_root, rels)
 
 
-def purge_semantic_only(vault_root: Path, rel_paths: list[str]) -> bool:
+def purge_semantic_only(
+    vault_root: Path,
+    rel_paths: list[str],
+    *,
+    include_lexstore: bool = True,
+) -> bool:
     """Drop structured-only paths from semantic sidecars without touching identity.
 
     This is intentionally model-free: cleanup must work while model features are
@@ -497,9 +550,13 @@ def purge_semantic_only(vault_root: Path, rel_paths: list[str]) -> bool:
             return False
 
     succeeded = True
-    if lexstore.lexical_path(vault_root).exists():
+    if include_lexstore and lexstore.lexical_path(vault_root).exists():
         succeeded &= _purge(
-            "lexstore", lambda: lexstore.get_store(vault_root).delete_rel_paths(rels)
+            # Suppression is an exact persisted-row eviction, not a freshness
+            # witness.  It must still remove recall text when the catalog
+            # identity itself is stale and awaiting rebuild.
+            "lexstore",
+            lambda: lexstore.purge_exact_persisted_rows(vault_root, rels),
         )
     if index_paths.sidecar_path(vault_root).exists():
         succeeded &= _purge(
@@ -580,6 +637,7 @@ def full_upsert_succeeded(vault_root: Path, replaced: list[Path], report: object
     ):
         return False
     receipt_rels: set[str] | None = None
+    graph_receipt_rels: set[str] | None = None
     replaced_rels: set[str] = set()
     root = Path(vault_root).resolve()
     for path in replaced:
@@ -608,18 +666,55 @@ def full_upsert_succeeded(vault_root: Path, replaced: list[Path], report: object
                 and graph_sync.registered_checkpoint(vault_root) == checkpoint
             ):
                 continue
-        if (
-            component.component == "embeddings"
-            and component.outcome == "deferred"
-            and component.code == "deferred_durable"
-            and replaced_rels
-        ):
-            if receipt_rels is None:
-                receipt_rels = {
-                    receipt.rel_path for receipt in deferred_index.snapshot(vault_root)
+            if component.outcome == "deferred" and component.code in _GRAPH_COVERAGE_CODES:
+                # Mirror of the embeddings warm-up carve-out above: per-path
+                # graph receipts ARE the exact durable demand for those paths,
+                # so minting a whole-component refresh on top is the same
+                # double-accounting. This matters most precisely where it used
+                # to hurt: during `recovery_required` the registered checkpoint
+                # never equals the live one, so the clause above never fires and
+                # EVERY write minted — backlog feeding the backlog.
+                #
+                # Only a code that means "durably queued" may be blessed;
+                # `graph_index_disabled`/`graph_scheduling_disabled` record
+                # nothing, so a stale queue entry can never launder them.
+                graph_rels = {
+                    rel for rel in replaced_rels if graph_sync.is_graph_input_path(rel)
                 }
-            if replaced_rels <= receipt_rels:
-                continue
+                if graph_rels:
+                    if graph_receipt_rels is None:
+                        graph_receipt_rels = {
+                            receipt.rel_path
+                            for receipt in deferred_index.snapshot_graph(vault_root)
+                        }
+                    if graph_rels <= graph_receipt_rels:
+                        _note_deferral("covered_deferral_accepted")
+                        continue
+                _note_deferral("uncovered_deferral_escalated")
+                return False
+        if component.component == "embeddings" and component.outcome == "deferred":
+            # A deferral that is already durably queued path-by-path is not a
+            # batch failure — declaring it one is what escalated an O(1) cause
+            # into whole-vault work (bound-contended-write-index-refresh).
+            # Only a deferral whose durable recording succeeded names a
+            # coverage-claiming code (`deferred_durable` from the durable-defer
+            # branch, `deferred_warmup` from the warm-up branch); anything
+            # else — `deferred_warmup_volatile` included — carries no claim,
+            # so a stale queue entry can never bless it.
+            if (
+                component.code in {"deferred_durable", "deferred_warmup"}
+                and replaced_rels
+            ):
+                if receipt_rels is None:
+                    receipt_rels = {
+                        receipt.rel_path
+                        for receipt in deferred_index.snapshot(vault_root)
+                    }
+                if replaced_rels <= receipt_rels:
+                    _note_deferral("covered_deferral_accepted")
+                    continue
+            _note_deferral("uncovered_deferral_escalated")
+            return False
         return False
     return True
 
@@ -775,7 +870,7 @@ def _drain_graph_work(
     `epoch_admits_incremental_repair`, which re-reads under the canonical
     boundary rather than condemning a lineage on one sample taken mid-batch.
     """
-    from . import epistemic_graph
+    from . import epistemic_graph, graph_sync
 
     pending_generation = deferred_index.graph_full_rebuild_pending(vault_root)
     receipts = deferred_index.snapshot_graph(
@@ -793,6 +888,9 @@ def _drain_graph_work(
     if pending_generation is not None:
         try:
             index.rebuild_all()
+        except graph_sync.GraphRebuildInProgress:
+            log.info("deferred graph rebuild joined an active external owner")
+            return 0
         except Exception:  # noqa: BLE001 - durable work must survive a failed rebuild
             log.warning("deferred graph rebuild failed; marker remains", exc_info=True)
             return 0
@@ -891,6 +989,10 @@ def drain_deferred_work(
         if full_receipts and semantic_receipts and budget > 1:
             full_budget = budget // 2
             semantic_budget = budget - full_budget
+        elif full_receipts and semantic_receipts and budget == 1:
+            turn = deferred_index.claim_mixed_drain_queue(vault_root)
+            full_budget = int(turn == "full")
+            semantic_budget = int(turn == "semantic")
         elif full_receipts:
             full_budget, semantic_budget = budget, 0
         else:
@@ -918,7 +1020,12 @@ def drain_deferred_work(
                 processed += deferred_index.clear_full_receipts(vault_root, full_receipts)
             else:
                 log.warning("deferred full-index batch incomplete; isolating receipts")
-            for receipt in () if full_batch_completed else full_receipts:
+            isolation_receipts = () if full_batch_completed else full_receipts
+            if limit is not None:
+                isolation_receipts = isolation_receipts[
+                    :_BOUNDED_FAILURE_ISOLATION_LIMIT
+                ]
+            for receipt in isolation_receipts:
                 try:
                     dispatched = upsert_after_write(
                         vault_root, [vault_root / receipt.rel_path]
@@ -975,7 +1082,10 @@ def drain_deferred_work(
     # A single malformed source must not pin every later receipt in the sorted
     # batch. The optimistic batch above is the fast path; only a failed batch
     # falls back to per-receipt replay so successful work can retire by CAS.
-    for receipt in semantic_receipts:
+    isolation_receipts = semantic_receipts
+    if limit is not None:
+        isolation_receipts = isolation_receipts[:_BOUNDED_FAILURE_ISOLATION_LIMIT]
+    for receipt in isolation_receipts:
         try:
             status = replay_deferred_embedding(
                 vault_root, [vault_root / receipt.rel_path], [receipt]
@@ -995,6 +1105,34 @@ def drain_deferred_work(
     return processed
 
 
+def _dispatch_watcher_lexical_only(
+    vault_root: Path,
+    lexical_paths: list[Path],
+    suppressed_rels: list[str],
+    deleted_rels: list[str],
+) -> list[IndexComponentOutcome]:
+    """Consume a vault-only watcher generation without waking KB consumers."""
+    from . import lexstore
+
+    lexical_deletes = list(dict.fromkeys((*suppressed_rels, *deleted_rels)))
+    lexical = _legacy_component(
+        "lexstore",
+        lambda: lexstore.apply_watcher_batch(
+            vault_root,
+            lexical_paths,
+            lexical_deletes,
+        ),
+    )
+    return [
+        IndexComponentOutcome("memory_refs", "not_required", "no_kb_input"),
+        IndexComponentOutcome("resolver", "not_required", "no_kb_input"),
+        IndexComponentOutcome("semantic_purge", "not_required", "no_kb_input"),
+        lexical,
+        IndexComponentOutcome("epistemic_graph", "not_required", "no_graph_input"),
+        IndexComponentOutcome("embeddings", "accepted", "no_eligible_paths"),
+    ]
+
+
 def _dispatch_upsert_components(
     vault_root: Path,
     identity_paths: list[Path],
@@ -1003,6 +1141,9 @@ def _dispatch_upsert_components(
     *,
     defer_semantic: bool,
     created_semantic_paths: list[Path],
+    watcher_deleted_rels: list[str] | None = None,
+    watcher_lexical_paths: list[Path] | None = None,
+    watcher_lexical_suppressed_rels: list[str] | None = None,
 ) -> list[IndexComponentOutcome]:
     from . import epistemic_graph, find, lexstore, memory_refs, mode
 
@@ -1021,7 +1162,12 @@ def _dispatch_upsert_components(
     # Publish all raw-Record removals before any semantic insertion/defer. The
     # identity fan-out above remains intentionally broad and has no recall body
     # egress; a purge failure is isolated and cannot stop other sidecars.
-    purge_succeeded = purge_semantic_only(vault_root, suppressed_rels)
+    watcher_lexical_batch = watcher_deleted_rels is not None
+    purge_succeeded = purge_semantic_only(
+        vault_root,
+        suppressed_rels,
+        include_lexstore=not watcher_lexical_batch,
+    )
     components.append(
         IndexComponentOutcome(
             "semantic_purge",
@@ -1029,11 +1175,29 @@ def _dispatch_upsert_components(
             "purge_completed" if purge_succeeded else "purge_failed",
         )
     )
-    components.append(
-        _legacy_component(
-            "lexstore", lambda: lexstore.upsert_after_write(vault_root, semantic_paths)
+    if not watcher_lexical_batch:
+
+        def lexical_dispatch():
+            return lexstore.upsert_after_write(vault_root, semantic_paths)
+
+    else:
+        lexical_paths = semantic_paths if watcher_lexical_paths is None else watcher_lexical_paths
+        lexical_suppressed = (
+            suppressed_rels
+            if watcher_lexical_suppressed_rels is None
+            else watcher_lexical_suppressed_rels
         )
-    )
+        lexical_deletes = list(dict.fromkeys((*lexical_suppressed, *watcher_deleted_rels)))
+
+        def lexical_dispatch():
+            return lexstore.apply_watcher_batch(
+                vault_root,
+                lexical_paths,
+                lexical_deletes,
+            )
+
+    components.append(_legacy_component("lexstore", lexical_dispatch))
+
     def graph_upsert():
         if created_semantic_paths:
             return epistemic_graph.upsert_after_write(
@@ -1099,6 +1263,7 @@ def upsert_after_write(
     semantic_states: Mapping[str, semantic_index.SemanticParentIndexState] | None = None,
     publish_corpus_change: bool = True,
     created_paths: Iterable[Path] = (),
+    watcher_deleted_rel_paths: Iterable[str] | None = None,
 ) -> IndexSyncReport:
     """Fan a writer's markdown change out to every index sidecar.
 
@@ -1106,9 +1271,29 @@ def upsert_after_write(
     dropped first: every index's FULL rebuild skips them, so the incremental
     path must too (`vault.in_excluded_scan_dir`). The watcher filters its own
     events the same way; this belt covers direct writer calls.
+
+    A watcher supplies ``watcher_deleted_rel_paths`` only after publishing one
+    vault-wide freshness generation. In that mode ``written_paths`` is likewise
+    vault-wide: lexstore consumes the complete admitted/suppressed/deleted union,
+    while every heavier derived component retains its existing KB-only input.
     """
     from .vault import in_excluded_scan_dir
 
+    watcher_mode = watcher_deleted_rel_paths is not None
+    if watcher_mode and publish_corpus_change:
+        raise ValueError("watcher batch requires an already-published corpus generation")
+    watcher_deleted_rels = (
+        None
+        if watcher_deleted_rel_paths is None
+        else list(
+            dict.fromkeys(
+                normalized
+                for item in watcher_deleted_rel_paths
+                if (normalized := _safe_relative_path(str(item))) is not None
+                and normalized.lower().endswith(".md")
+            )
+        )
+    )
     vr = vault_root.resolve()
 
     def _rel(p: Path) -> str | None:
@@ -1131,7 +1316,7 @@ def upsert_after_write(
         eligible_rels.append(rel)
     requested_report, requested_truncated = _bounded_paths(requested_rels)
     eligible_report, eligible_truncated = _bounded_paths(eligible_rels)
-    if not eligible:
+    if not eligible and not watcher_mode:
         return IndexSyncReport(
             "upsert",
             requested_report,
@@ -1142,47 +1327,75 @@ def upsert_after_write(
     from . import recall_policy
 
     batch = recall_policy.partition_markdown_paths(vault_root, eligible)
-    identity_paths = [item.path for item in batch.identity_paths]
-    semantic_paths = [item.path for item in batch.admitted_paths]
-    semantic_rels = [item.rel_path for item in batch.admitted_paths]
-    suppressed_rels = [item.rel_path for item in batch.suppressed_paths]
-    created_rels = {
-        rel
-        for path in created_paths
-        if (rel := _rel(Path(path))) is not None
-    }
-    created_semantic_paths = [
-        item.path for item in batch.admitted_paths if item.rel_path in created_rels
-    ]
+    watcher_lexical_paths: list[Path] | None = None
+    watcher_lexical_suppressed_rels: list[str] | None = None
+    identity_items = list(batch.identity_paths)
+    semantic_items = list(batch.admitted_paths)
+    suppressed_items = list(batch.suppressed_paths)
+    if watcher_mode:
+        from .kbdir import kb_prefix
+
+        # The watcher publishes one vault-wide freshness generation. Lexstore
+        # serves both the KB and vault scopes, so it must consume that complete
+        # generation even though the heavier derived indexes remain KB-only.
+        watcher_lexical_paths = [item.path for item in semantic_items]
+        watcher_lexical_suppressed_rels = [item.rel_path for item in suppressed_items]
+        prefix = kb_prefix()
+        identity_items = [item for item in identity_items if item.rel_path.startswith(prefix)]
+        semantic_items = [item for item in semantic_items if item.rel_path.startswith(prefix)]
+        suppressed_items = [item for item in suppressed_items if item.rel_path.startswith(prefix)]
+    identity_paths = [item.path for item in identity_items]
+    semantic_paths = [item.path for item in semantic_items]
+    semantic_rels = [item.rel_path for item in semantic_items]
+    suppressed_rels = [item.rel_path for item in suppressed_items]
+    created_rels = {rel for path in created_paths if (rel := _rel(Path(path))) is not None}
+    created_semantic_paths = [item.path for item in semantic_items if item.rel_path in created_rels]
+
+    def stale_report() -> IndexSyncReport:
+        if watcher_mode:
+            from . import lexstore
+
+            lexstore.request_repair(vault_root)
+        return _stale_batch_report(
+            vault_root,
+            [item.rel_path for item in identity_items],
+            requested_report,
+            eligible_report,
+            truncated=requested_truncated or eligible_truncated,
+        )
+
+    if watcher_mode and (batch.missing_paths or batch.invalid_paths):
+        return stale_report()
+    if batch.identity_paths and not batch.revalidate(vault_root):
+        return stale_report()
     if not identity_paths:
         # Preserve the observable no-semantic-path fan-out contract for legacy
         # non-Markdown notifications while keeping them out of every identity
         # and semantic collection.
-        components = _dispatch_upsert_components(
-            vault_root,
-            [],
-            [],
-            [],
-            defer_semantic=defer_semantic,
-            created_semantic_paths=[],
-        )
+        if watcher_mode:
+            components = _dispatch_watcher_lexical_only(
+                vault_root,
+                watcher_lexical_paths or [],
+                watcher_lexical_suppressed_rels or [],
+                watcher_deleted_rels or [],
+            )
+        else:
+            components = _dispatch_upsert_components(
+                vault_root,
+                [],
+                [],
+                [],
+                defer_semantic=defer_semantic,
+                created_semantic_paths=[],
+            )
+        if watcher_mode and batch.identity_paths and not batch.revalidate(vault_root):
+            return stale_report()
         return IndexSyncReport(
             "upsert",
             requested_report,
             eligible_report,
             tuple(components),
             requested_truncated or eligible_truncated,
-        )
-    if not batch.revalidate(vault_root):
-        # A changed policy or source cannot be safely split across the identity
-        # and semantic fan-outs. Preserve a generic retry; the next replay takes
-        # a fresh snapshot rather than treating the path as suppression.
-        return _stale_batch_report(
-            vault_root,
-            [item.rel_path for item in batch.identity_paths],
-            requested_report,
-            eligible_report,
-            truncated=requested_truncated or eligible_truncated,
         )
     # Canonical writers publish their exact committed targets before any
     # incremental cache fan-out. This gives consumers a bridgeable freshness
@@ -1220,13 +1433,7 @@ def upsert_after_write(
         except (OSError, UnicodeError, ValueError):
             continue
     if not batch.revalidate(vault_root):
-        return _stale_batch_report(
-            vault_root,
-            [item.rel_path for item in batch.identity_paths],
-            requested_report,
-            eligible_report,
-            truncated=requested_truncated or eligible_truncated,
-        )
+        return stale_report()
     token = semantic_index.set_parent_states(states)
     try:
         components = _dispatch_upsert_components(
@@ -1236,17 +1443,14 @@ def upsert_after_write(
             suppressed_rels,
             defer_semantic=defer_semantic,
             created_semantic_paths=created_semantic_paths,
+            watcher_deleted_rels=watcher_deleted_rels,
+            watcher_lexical_paths=watcher_lexical_paths,
+            watcher_lexical_suppressed_rels=watcher_lexical_suppressed_rels,
         )
     finally:
         semantic_index.reset_parent_states(token)
     if not batch.revalidate(vault_root):
-        return _stale_batch_report(
-            vault_root,
-            [item.rel_path for item in batch.identity_paths],
-            requested_report,
-            eligible_report,
-            truncated=requested_truncated or eligible_truncated,
-        )
+        return stale_report()
     report = IndexSyncReport(
         "upsert",
         requested_report,
@@ -1262,6 +1466,7 @@ def delete_after_remove(
     removed_rel_paths: list[str],
     *,
     publish_corpus_change: bool = True,
+    dispatch_lexstore: bool = True,
 ) -> IndexSyncReport:
     """Fan a removal out to every index sidecar."""
     from . import (
@@ -1275,6 +1480,8 @@ def delete_after_remove(
         scene_frames,
     )
 
+    if not dispatch_lexstore and publish_corpus_change:
+        raise ValueError("lexstore may be skipped only after an already-published watcher batch")
     safe_paths = [
         normalized
         for item in removed_rel_paths
@@ -1296,8 +1503,13 @@ def delete_after_remove(
             requested_report,
             paths_truncated=paths_truncated,
         )
+    lexical_component = (
+        _legacy_component("lexstore", lambda: lexstore.delete_after_remove(vault_root, safe_paths))
+        if dispatch_lexstore
+        else IndexComponentOutcome("lexstore", "not_required", "watcher_batch_completed")
+    )
     components = [
-        _legacy_component("lexstore", lambda: lexstore.delete_after_remove(vault_root, safe_paths)),
+        lexical_component,
         _legacy_component(
             "memory_refs",
             lambda: memory_refs.delete_after_remove(vault_root, safe_paths),

@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from . import held_fs, reserved_paths
-from .kbdir import kb_dirname
+from .asr_runtime import COMPUTE_RUNTIME_MARKERS, is_compute_runtime_failure
 
 PENDING = "pending"
 RUNNING = "running"
@@ -70,6 +70,43 @@ _VALID_BATCH_ROLLBACK_PUBLIC_REMEDIATION = (
 _RECONCILIATION_ACTION = (
     "reconcile this media item's sidecar provenance with the current binary, then use targeted media retry"
 )
+_COMPUTE_RUNTIME_ACTION = (
+    "repair the CUDA/cuBLAS/cuDNN runtime or explicitly select bounded CPU, then retry"
+)
+
+
+def is_compute_runtime_error(error: object) -> bool:
+    """Conservative compatibility recognition for retained CUDA failures."""
+    text = str(error or "")
+    return text.startswith("ASRRuntimeRefusal:") or is_compute_runtime_failure(text)
+
+
+def _blocked_presentation_is_current(content: str, error: object) -> bool:
+    """Sidecar presentation is current only when it exactly mirrors ledger authority."""
+    if not content.startswith("---\n"):
+        return False
+    end = content.find("\n---\n", 4)
+    if end < 0:
+        return False
+    fields: dict[str, str] = {}
+    for line in content[4:end].splitlines():
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        key = key.strip()
+        if key in fields:
+            return False
+        raw = value.strip()
+        try:
+            fields[key] = json.loads(raw) if raw.startswith('"') else raw
+        except json.JSONDecodeError:
+            return False
+    return (
+        fields.get("processing_state") == BLOCKED
+        and fields.get("processing_retryable") == "true"
+        and fields.get("processing_error") == str(error or "")
+        and fields.get("processing_next_action") == _COMPUTE_RUNTIME_ACTION
+    )
 
 
 def _sqlite_connect(database: Any, *args: Any, **kwargs: Any) -> sqlite3.Connection:
@@ -257,11 +294,15 @@ def is_guarded_sidecar_sharing_violation(
 
 
 def job_store_path(vault_root: Path) -> Path:
-    return vault_root / kb_dirname() / ".media-jobs.sqlite"
+    from . import state_paths
+
+    return state_paths.vault_state_dir(vault_root) / ".media-jobs.sqlite"
 
 
 def worker_lock_path(vault_root: Path) -> Path:
-    return vault_root / kb_dirname() / ".media-worker.lock"
+    from . import state_paths
+
+    return state_paths.vault_state_dir(vault_root) / ".media-worker.lock"
 
 
 @dataclass(frozen=True)
@@ -334,6 +375,7 @@ class MediaJobStore:
             with reserved_paths._identity_coordination_scope(
                 self.vault_root,
                 descriptor_ids=("media-jobs-store",),
+                identity_may_change=not readonly,
             ):
                 return self._connect_owned(readonly=readonly)
 
@@ -778,6 +820,35 @@ class MediaJobStore:
         finally:
             conn.close()
 
+    def recover_compute_runtime_failures(self, *, limit: int = 100) -> int:
+        """Boundedly promote unmistakable historical CUDA failures to blocked."""
+        conn = self._connect()
+        try:
+            clauses = " OR ".join("lower(last_error) LIKE ?" for _ in COMPUTE_RUNTIME_MARKERS)
+            rows = conn.execute(
+                f"SELECT id, last_error FROM jobs WHERE state = 'failed' AND ({clauses}) "
+                "ORDER BY id",
+                tuple(f"%{marker}%" for marker in COMPUTE_RUNTIME_MARKERS),
+            )
+            ids: list[int] = []
+            for row in rows:
+                if not is_compute_runtime_error(row["last_error"]):
+                    continue
+                ids.append(int(row["id"]))
+                if len(ids) == limit:
+                    break
+            if not ids:
+                return 0
+            placeholders = ",".join("?" for _ in ids)
+            with conn:
+                changed = conn.execute(
+                    f"UPDATE jobs SET state = 'blocked', updated_at = ? WHERE id IN ({placeholders})",
+                    (time.time(), *ids),
+                ).rowcount
+                return int(changed)
+        finally:
+            conn.close()
+
     def recover_sharing_failures(self) -> int:
         """Requeue only exact historical sidecar sharing failures below the limit."""
         conn = self._connect()
@@ -872,6 +943,60 @@ class MediaJobStore:
         finally:
             conn.close()
 
+    def compute_runtime_jobs(self, *, limit: int = STATUS_JOB_LIMIT) -> list[MediaJob]:
+        """Bounded compute rows without generic failed-row prefix starvation."""
+        if isinstance(limit, bool) or limit <= 0:
+            raise ValueError("media retry limit must be a positive integer")
+        clauses = " OR ".join("lower(last_error) LIKE ?" for _ in COMPUTE_RUNTIME_MARKERS)
+        clauses += " OR last_error LIKE 'ASRRuntimeRefusal:%'"
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                f"SELECT * FROM jobs WHERE state IN ('blocked', 'failed') AND ({clauses}) "
+                "ORDER BY id",
+                tuple(f"%{marker}%" for marker in COMPUTE_RUNTIME_MARKERS),
+            )
+            selected: list[MediaJob] = []
+            for row in rows:
+                if not is_compute_runtime_error(row["last_error"]):
+                    continue
+                selected.append(self._row_to_job(row))
+                if len(selected) == limit:
+                    break
+            return selected
+        finally:
+            conn.close()
+
+    def blocked_compute_presentations_needing_convergence(
+        self, *, limit: int = STATUS_JOB_LIMIT
+    ) -> list[MediaJob]:
+        """Return only stale/missing compute-blocked presentations, bounded after filtering."""
+        selected: list[MediaJob] = []
+        clauses = " OR ".join("lower(last_error) LIKE ?" for _ in COMPUTE_RUNTIME_MARKERS)
+        clauses += " OR last_error LIKE 'ASRRuntimeRefusal:%'"
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                f"SELECT * FROM jobs WHERE state = 'blocked' AND ({clauses}) ORDER BY id",
+                tuple(f"%{marker}%" for marker in COMPUTE_RUNTIME_MARKERS),
+            )
+            for row in rows:
+                if not is_compute_runtime_error(row["last_error"]):
+                    continue
+                job = self._row_to_job(row)
+                try:
+                    content = job.sidecar_path.read_text(encoding="utf-8")
+                except (OSError, UnicodeError):
+                    content = ""
+                if _blocked_presentation_is_current(content, job.last_error):
+                    continue
+                selected.append(job)
+                if len(selected) == limit:
+                    break
+            return selected
+        finally:
+            conn.close()
+
     def pending_jobs(self, *, limit: int | None = None) -> list[MediaJob]:
         """Return a bounded snapshot for runtime-unavailable state convergence."""
         conn = self._connect()
@@ -919,14 +1044,27 @@ class MediaJobStore:
         """Whether work exists without another live child already owning the vault."""
         conn = self._connect()
         try:
+            clauses = " OR ".join("lower(last_error) LIKE ?" for _ in COMPUTE_RUNTIME_MARKERS)
             work = conn.execute(
                 "SELECT 1 FROM jobs WHERE state IN ('pending', 'running') LIMIT 1"
             ).fetchone()
+            if work is None:
+                candidates = conn.execute(
+                    f"SELECT last_error FROM jobs WHERE state = 'failed' AND ({clauses}) ORDER BY id",
+                    tuple(f"%{marker}%" for marker in COMPUTE_RUNTIME_MARKERS),
+                )
+                for candidate in candidates:
+                    if is_compute_runtime_error(candidate["last_error"]):
+                        work = candidate
+                        break
             row = conn.execute(
                 "SELECT worker_pid FROM runtime WHERE singleton = 1"
             ).fetchone()
         finally:
             conn.close()
+        if work is None:
+            stale = self.blocked_compute_presentations_needing_convergence(limit=1)
+            work = stale[0] if stale else None
         active_pid = int(row[0]) if row and row[0] else None
         return work is not None and not pid_alive(active_pid)
 
@@ -977,7 +1115,7 @@ class MediaJobStore:
 
 def _read_status_rows(
     conn: sqlite3.Connection,
-) -> tuple[list[Any], Any, list[Any], list[Any], list[Any]]:
+) -> tuple[list[Any], Any, list[Any], list[Any], int, int]:
     rows = conn.execute("SELECT state, count(*) AS n FROM jobs GROUP BY state").fetchall()
     runtime = conn.execute(
         "SELECT worker_pid, idle_seconds FROM runtime WHERE singleton = 1"
@@ -991,10 +1129,17 @@ def _read_status_rows(
         "FROM jobs ORDER BY updated_at DESC, id DESC LIMIT ?",
         (STATUS_JOB_LIMIT,),
     ).fetchall()
-    reconciliation_rows = conn.execute(
-        "SELECT last_error FROM jobs WHERE state IN ('blocked', 'failed')"
-    ).fetchall()
-    return rows, runtime, errors, jobs, reconciliation_rows
+    reconciliation_required_count = sum(
+        _classify_batch_write_failure(row["last_error"]) is not None
+        for row in conn.execute("SELECT last_error FROM jobs WHERE state IN ('blocked', 'failed')")
+    )
+    compute_runtime_count = sum(
+        is_compute_runtime_error(row["last_error"])
+        for row in conn.execute(
+            "SELECT last_error FROM jobs WHERE state IN ('blocked', 'failed')"
+        )
+    )
+    return rows, runtime, errors, jobs, reconciliation_required_count, compute_runtime_count
 
 
 def _sqlite_file_identity(path: Path) -> tuple[int, int, int, int]:
@@ -1012,13 +1157,15 @@ def _sqlite_sidecar_exists(sidecars: tuple[Path, Path]) -> bool:
 
 def _diagnostic_snapshot_rows(
     path: Path,
-) -> tuple[list[Any], Any, list[Any], list[Any], list[Any]]:
+    *,
+    vault_root: Path,
+) -> tuple[list[Any], Any, list[Any], list[Any], int, int]:
     target = Path(os.path.abspath(path))
-    vault_root = target.parent.parent
     with reserved_paths._subsystem_authority_scope("media_jobs"):
         with reserved_paths._identity_coordination_scope(
             vault_root,
             descriptor_ids=("media-jobs-store",),
+            identity_may_change=False,
         ):
             with reserved_paths._sqlite_owner_target_scope(
                 vault_root,
@@ -1033,7 +1180,7 @@ def _diagnostic_snapshot_rows(
 
 def _diagnostic_snapshot_rows_retained(
     path: Path,
-) -> tuple[list[Any], Any, list[Any], list[Any], list[Any]]:
+) -> tuple[list[Any], Any, list[Any], list[Any], int, int]:
     sidecars = _sqlite_sidecars(path)
     if _sqlite_sidecar_exists(sidecars):
         raise OSError("media job database has live SQLite companions")
@@ -1071,6 +1218,7 @@ def status(
         "worker_pid": None,
         "idle_seconds": None,
         "reconciliation_required_count": 0,
+        "compute_runtime_count": 0,
         "jobs": [],
         "errors": [],
     }
@@ -1081,22 +1229,20 @@ def status(
         return empty
     try:
         if diagnostic_snapshot:
-            rows, runtime, errors, jobs, reconciliation_rows = _diagnostic_snapshot_rows(path)
+            rows, runtime, errors, jobs, reconciliation_required_count, compute_runtime_count = _diagnostic_snapshot_rows(
+                path, vault_root=Path(vault_root)
+            )
         else:
             store = MediaJobStore(vault_root, create=False)
             conn = store._connect(readonly=True)
             try:
-                rows, runtime, errors, jobs, reconciliation_rows = _read_status_rows(conn)
+                rows, runtime, errors, jobs, reconciliation_required_count, compute_runtime_count = _read_status_rows(conn)
             finally:
                 conn.close()
         counts = {state: 0 for state in STATES}
         counts.update({str(row["state"]): int(row["n"]) for row in rows})
         pid = int(runtime["worker_pid"]) if runtime and runtime["worker_pid"] else None
         active = pid_alive(pid)
-        reconciliation_required_count = sum(
-            _classify_batch_write_failure(row["last_error"]) is not None
-            for row in reconciliation_rows
-        )
         return {
             "store": str(path),
             "healthy": reconciliation_required_count == 0,
@@ -1107,6 +1253,7 @@ def status(
             if runtime and runtime["idle_seconds"] is not None
             else None,
             "reconciliation_required_count": reconciliation_required_count,
+            "compute_runtime_count": compute_runtime_count,
             "jobs": [_status_job(row) for row in jobs],
             "errors": [_status_error(row) for row in errors],
         }
@@ -1132,6 +1279,18 @@ def _status_job(row: Any) -> dict[str, Any]:
         )
     if state == BLOCKED and error and error.startswith("MediaRuntimeUnavailable:"):
         actions[BLOCKED] = "fix the media runtime configuration, restart the service, then retry"
+    if state == BLOCKED and error and error.startswith("AMBIGUOUS_SIDECAR_BOUNDARY:"):
+        actions[BLOCKED] = "review the sidecar's preserved-notes boundary, then retry"
+    if state == BLOCKED and (
+        is_compute_runtime_error(error) or (error or "").startswith("ASRRuntimeRefusal:")
+    ):
+        actions[BLOCKED] = (
+            "repair the CUDA/cuBLAS/cuDNN runtime or explicitly select bounded CPU, then retry"
+        )
+    if state == FAILED and is_compute_runtime_error(error):
+        actions[FAILED] = (
+            "repair the CUDA/cuBLAS/cuDNN runtime or explicitly select bounded CPU, then retry"
+        )
     if state == FAILED and error and "sidecar content changed" in error:
         actions[FAILED] = "review the sidecar changes, then retry media processing"
     elif state == FAILED and error and error.startswith("stale extraction:"):

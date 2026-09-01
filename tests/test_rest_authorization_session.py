@@ -119,6 +119,10 @@ def test_unknown_canonical_header_wins_before_rest_json_parsing(
             f"/api/ask_memory?authorization_session_credential={BEARER}",
             {"query": "x"},
         ),
+        (
+            "/api/ask_memory",
+            {"query": f"retrieved text {BEARER}"},
+        ),
     ],
 )
 def test_rest_body_and_query_bearer_carriers_refuse_content_free(

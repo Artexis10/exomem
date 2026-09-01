@@ -7,7 +7,9 @@ OpenAPI document, and the CLI, so adding or removing an operation requires no
 per-surface code and MCP tool schemas stay byte-identical to their committed
 baseline. The CLI and REST facade share one result/error envelope so a given
 failure carries the same machine-readable code on both surfaces.
+
 ## Requirements
+
 ### Requirement: Single Command Registry Generates Every Surface
 
 The system SHALL define a single declarative command registry (`commands.py`) that enumerates each operation with its name, leaf function, description, parameter specs, and exposed surfaces, and the MCP tools, the REST facade, the OpenAPI document, and the CLI SHALL all be generated from it. No surface may maintain its own separate list of operations. The governed entity-type registry save SHALL be exposed by mirroring the existing relation-registry save command as operation `save-entity-types`, with the same validate-first proposal, rationale, and expected-hash argument shape.
@@ -159,6 +161,31 @@ REST binary-blob guard for text fields SHALL be preserved.
 - **WHEN** a REST request passes an oversized base64 blob in a text field
 - **THEN** it is rejected with the existing `BINARY_BLOB_REJECTED`-class error,
   as before
+
+### Requirement: Connector-encoded batch edits preserve canonical validation
+
+The public `edit_memory` tool SHALL advertise batch items as an object array.
+At runtime, its typed pre-validation adapter SHALL also accept connector-supplied JSON-object strings
+for individual items. Each such string SHALL be decoded
+before canonical edit validation; malformed JSON, non-object JSON, missing
+fields, and all other unsupported item types SHALL be rejected through the
+existing `INVALID_EDIT` path. Encoding SHALL NOT relax content safety: decoded text still passes the binary-blob guard in both middleware and the edit leaf.
+Expected hashes, semantic preflight, idempotency, and guarded commit behavior
+remain unchanged.
+
+#### Scenario: Connector stringifies valid batch items
+
+- **WHEN** a connector sends an `edit_memory` batch whose items are valid
+  JSON-object strings representing the advertised object shape
+- **THEN** the adapter decodes them and the canonical edit validator processes
+  them exactly as object items
+
+#### Scenario: Encoded input cannot bypass edit validation
+
+- **WHEN** a connector sends malformed JSON, non-object JSON, an incomplete
+  object, or encoded binary-blob content as a batch item
+- **THEN** the request is rejected through `INVALID_EDIT` or the unchanged
+  binary-blob rejection path before mutation
 
 ### Requirement: Bootstrap Is Exposed On Every Generated Surface
 The system SHALL expose `bootstrap` through the single command registry on MCP,
@@ -609,41 +636,64 @@ unchanged-draft, hash-match, reason, or replay requirements.
 - **AND** the stored receipt remains underscore-only
 
 ### Requirement: One multiplexed Planning product command
-The product surface SHALL expose one `plan_memory` command rather than separate capture, horizon, hierarchy, or storage-specific tools. Its finite selector SHALL contain exactly six first-delivery actions: `inspect`, `create`, `query`, `add`, `update`, and `triage`. Query SHALL cover bounded horizon/date/history/hierarchy/render/export-shaped responses through explicit arguments; generic derived-index repair SHALL remain under `maintain_memory`.
+The product surface SHALL expose one `plan_memory` command rather than separate capture, horizon, hierarchy, manifest-lifecycle, or storage-specific tools. Its finite selector SHALL contain exactly nine actions: read-only `inspect`, `validate`, and `query`, plus mutating `create`, `add`, `update`, `triage`, `revise`, and `rebaseline`. `inspect` without a collection SHALL return the Planning inventory; with a collection it SHALL inspect that collection. Query SHALL cover bounded horizon/date/history/hierarchy/render/export-shaped responses through explicit arguments; generic derived-index repair and previewed structured-file migration SHALL remain under `maintain_memory`.
 
 #### Scenario: Natural planning intent uses one front door
-- **WHEN** an agent receives “save this feature idea”, “file this bug for later”, “make this a quarterly initiative”, “what matters this week”, or “show my multi-year outcomes”
+- **WHEN** an agent receives “save this feature idea”, “file this bug for later”, “make this a quarterly initiative”, “what matters this week”, “show my multi-year outcomes”, or “revise this Planning collection”
 - **THEN** bootstrap routes the intent through `plan_memory` with the appropriate finite action instead of advertising a family of narrow tools
 
 #### Scenario: Planning storage is not a tool choice
-- **WHEN** an agent captures or queries Planning intent
-- **THEN** the same command resolves the Planning collection and first-delivery Markdown-item adapter without asking the user to select an internal storage operation
+- **WHEN** an agent captures, queries, validates, or revises Planning intent
+- **THEN** the same command resolves the Planning collection and Markdown-item adapter without asking the user to select an internal storage operation
+
+#### Scenario: Existing manifest uses the same front door
+- **WHEN** an agent needs to validate, revise, or explicitly rebaseline an existing Planning collection manifest
+- **THEN** it uses the finite lifecycle actions on `plan_memory` rather than a generic file editor or storage-specific tool
+
+#### Scenario: Inventory before a collection is known
+- **WHEN** an agent calls `plan_memory(action="inspect")` with no collection
+- **THEN** the response is the bounded Planning inventory and nothing is created or resolved
 
 #### Scenario: Review does not hide inside query
 - **WHEN** a caller queries a plan that carries Records evidence descriptors
 - **THEN** `plan_memory` returns authored Planning state and descriptors without evaluating planned-versus-recorded progress or silently invoking epistemic `review_memory`
 
 ### Requirement: Planning actions validate arguments explicitly
-The generated signature SHALL expose exactly `action`, `collection`, `manifest_path`, `manifest_text`, `why`, `scaffold`, `view`, `filters`, `columns`, `sort_by`, `descending`, `limit`, `aggregate`, `date_from`, `date_to`, `date_column`, `lifecycle`, `hierarchy_mode`, `hierarchy_depth`, `hierarchy_limit`, `continuation`, `include_agent_history`, `output_format`, `item`, `plan_id`, `expected_container_hash`, `body`, `changes`, `transition`, and `expected_item_version`. `action` SHALL be required and select the following exact matrix; every non-listed argument SHALL be forbidden rather than ignored:
+The generated signature SHALL expose exactly `action`, `collection`, `manifest_path`, `manifest_text`, `why`, `scaffold`, `view`, `filters`, `columns`, `sort_by`, `descending`, `limit`, `aggregate`, `date_from`, `date_to`, `date_column`, `lifecycle`, `hierarchy_mode`, `hierarchy_depth`, `hierarchy_limit`, `continuation`, `include_agent_history`, `output_format`, `item`, `plan_id`, `expected_manifest_hash`, `expected_container_hash`, `acknowledged_gap_codes`, `body`, `changes`, `transition`, and `expected_item_version`. `action` SHALL be required and select the following exact matrix; every non-listed argument SHALL be forbidden rather than ignored:
 
 | Action | Required | Optional and defaults |
 | --- | --- | --- |
-| `inspect` | `collection: string` | none |
+| `inspect` | none | `collection: string` — omitted returns the Planning inventory |
+| `validate` | create mode: `manifest_path: string`, `manifest_text: string`; revision mode: `collection: string`, `manifest_text: string` | none |
 | `create` | `manifest_path: string`, `manifest_text: string`, `why: string` | `scaffold: boolean=true` |
 | `query` | `collection: string` | `view: string`; existing structured `filters`, `columns`, `sort_by`, `aggregate`, `date_from`, `date_to`, `date_column`; `descending: boolean=false`; `limit: integer=100` capped at 1,000; `lifecycle: active|archived|all=active`; `hierarchy_mode: none|ancestors|descendants=none`; `hierarchy_depth: integer=3` capped at 8; `hierarchy_limit: integer=100` capped at 500; `continuation: string`; `include_agent_history: boolean=false`; `output_format: json|markdown|csv=json` |
-| `add` | `collection: string`, `item: object`, `why: string` | `plan_id: UUID`, `expected_container_hash: sha256`, `body: string=""` |
+| `add` | `collection: string`, `item: object`, `why: string` | `plan_id: UUID` — omitted derives the identity from the declared natural key when every key field is present, `expected_container_hash: sha256`, `body: string=""` |
 | `update` | `collection: string`, `plan_id: UUID`, `expected_container_hash: sha256`, `expected_item_version: sha256`, `why: string`, at least one of `changes` or `body` | `changes: non-empty object` using the Planning spec's exact null-as-delete rules; `body: complete string replacement` |
 | `triage` | `collection: string`, `plan_id: UUID`, `transition: non-empty object`, `expected_container_hash: sha256`, `expected_item_version: sha256`, `why: string` | none |
+| `revise` | `collection: string`, `manifest_text: string`, `expected_manifest_hash: sha256`, `expected_container_hash: sha256`, `why: string` | none |
+| `rebaseline` | `collection: string`, `expected_manifest_hash: sha256`, `expected_container_hash: sha256`, `acknowledged_gap_codes: non-empty array[string]`, `why: string` | none |
 
-Saved view SHALL exclude inline filter/projection/sort/date/aggregate/lifecycle shaping, but MAY combine with hierarchy, continuation, history, and output controls. Hierarchy SHALL be forbidden with aggregate or CSV output. `transition` SHALL contain only `kind`, `status`, `priority`, `commitment`, `horizon`, `area`, or `parent`; only `area` and `parent` may be null, and kind changes stay among outcome/initiative/work-item. `update` SHALL reject `transition`; `triage` SHALL reject area source items, item, changes, lifecycle, body, health, dates, tags, evidence, execution, and domain-field convenience arguments. `why` SHALL be non-empty single-line text capped at 512 UTF-8 bytes. No action SHALL ignore explicit false, empty, or zero values before validation.
+The two `validate` forms SHALL be mutually exclusive and read-only. Revision-mode `validate` SHALL return lifecycle guards only as the closed object `{"expected_manifest_hash":"<sha256>","expected_container_hash":"<sha256>"}` when the collection can be safely exposed. Saved view SHALL exclude inline filter/projection/sort/date/aggregate/lifecycle shaping, but MAY combine with hierarchy, continuation, history, and output controls. Hierarchy SHALL be forbidden with aggregate or CSV output. `transition` SHALL contain only `kind`, `status`, `priority`, `commitment`, `horizon`, `area`, or `parent`; only `area` and `parent` may be null, and kind changes stay among outcome/initiative/work-item. `update` SHALL reject `transition`; `triage` SHALL reject area source items, item, changes, lifecycle, body, health, dates, tags, evidence, execution, and domain-field convenience arguments. `why` SHALL be non-empty single-line text capped at 512 UTF-8 bytes. No action SHALL ignore explicit false, empty, or zero values before validation.
 
 #### Scenario: Read action rejects mutation payload
-- **WHEN** `inspect` or `query` receives item changes, transition fields, a mutation reason, or another write-only argument
+- **WHEN** `inspect`, `validate`, or `query` receives an argument outside its declared shape
 - **THEN** validation refuses rather than ignoring the ambiguous payload
+
+#### Scenario: Collection-bound actions do not treat inventory as a fallback
+- **WHEN** `query`, `add`, `update`, `triage`, `revise`, or `rebaseline` omits `collection`
+- **THEN** validation refuses, while `inspect` without a collection returns the inventory
 
 #### Scenario: Create refuses existing canonical files
 - **WHEN** the requested manifest target or its declared canonical source already exists, including an ordinary note at either target
 - **THEN** create-only guards refuse and do not adopt, overwrite, or relocate that content while unrelated sibling files remain out of scope
+
+#### Scenario: Validate forms cannot be mixed
+- **WHEN** `validate` receives both `manifest_path` and `collection`, or receives neither selector form
+- **THEN** it refuses with actionable argument guidance and performs no mutation
+
+#### Scenario: Revision guards are mandatory
+- **WHEN** `revise` or `rebaseline` omits an expected manifest hash, expected container hash, exact required gap acknowledgements, or reason
+- **THEN** argument validation refuses before writer authority can publish canonical state
 
 #### Scenario: Update and triage remain distinct
 - **WHEN** `triage` receives an arbitrary body replacement or `update` receives triage-only convenience fields in the wrong shape
@@ -658,15 +708,19 @@ Saved view SHALL exclude inline filter/projection/sort/date/aggregate/lifecycle 
 - **THEN** the saved view owns row shaping, hierarchy expands only the authorized returned page, and supplying any inline shaping field refuses
 
 ### Requirement: Planning command parity and selector safety
-`plan_memory` SHALL have one Python leaf/signature and SHALL be registered consistently in the repository's canonical command and product metadata registries so MCP, REST, CLI, OpenAPI, capability documentation, and schema-fidelity fixtures are generated from that implementation. Read-only actions SHALL remain read-only at invocation classification; mutating actions SHALL enter writer authority, idempotency, terminal-response, governance-projector, and retry coverage. Unknown or unclassified actions SHALL fail closed at startup or invocation.
+`plan_memory` SHALL have one Python leaf/signature and SHALL be registered consistently in the repository's canonical command and product metadata registries so MCP, REST, CLI, OpenAPI, capability documentation, and schema-fidelity fixtures are generated from that implementation. `inspect`, `validate`, and `query` SHALL remain read-only at invocation classification; `create`, `add`, `update`, `triage`, `revise`, and `rebaseline` SHALL enter writer authority, idempotency, terminal-response, governance-projector, and retry coverage. Unknown or unclassified actions SHALL fail closed at startup or invocation.
+
+#### Scenario: Planning reads do not acquire writer authority
+- **WHEN** `plan_memory` runs `inspect`, either `validate` form, or `query`
+- **THEN** invocation classification treats it as read-only and does not contact the writer coordinator
 
 #### Scenario: Query does not acquire writer authority
 - **WHEN** `plan_memory` runs `query` or `inspect`
 - **THEN** invocation classification treats it as read-only and does not contact the writer coordinator
 
 #### Scenario: Planning mutation enters writer authority
-- **WHEN** `plan_memory` runs `create`, `add`, `update`, or `triage`
-- **THEN** it uses the existing same-vault writer lease, idempotency, committed terminal envelope, and retry identity
+- **WHEN** `plan_memory` runs `create`, `add`, `update`, `triage`, `revise`, or `rebaseline`
+- **THEN** it uses the existing same-vault writer lease, idempotency, committed terminal envelope, governance projector, and retry identity
 
 #### Scenario: Unknown selector cannot bypass coverage
 - **WHEN** an unregistered Planning action reaches the command boundary
@@ -674,7 +728,7 @@ Saved view SHALL exclude inline filter/projection/sort/date/aggregate/lifecycle 
 
 #### Scenario: Mixed command is advertised conservatively
 - **WHEN** MCP exposes annotations for `plan_memory`
-- **THEN** the command-level annotation remains write-capable even though selector dispatch keeps `inspect` and `query` lease-free
+- **THEN** the command-level annotation remains write-capable even though selector dispatch keeps `inspect`, `validate`, and `query` lease-free
 
 #### Scenario: Generated surfaces stay identical
 - **WHEN** the Planning command schema is inspected through MCP, REST, CLI, OpenAPI, and generated capability artifacts
@@ -714,7 +768,7 @@ The product command surface SHALL describe `preserve_artifacts` as the canonical
 
 ### Requirement: The generic Records command exposes exact child expansion and presentation refresh
 
-The existing `record_memory` command SHALL keep one finite product surface and SHALL add `expand_child` only to query plus `refresh_presentation` only to update. Query SHALL accept either an explicit child-field string or the backward-compatible boolean selector under their declared compatibility rules. Update SHALL accept `refresh_presentation: true` with normal changes or as the sole semantic request, but SHALL refuse false/no-op refresh, refresh on a collection without a valid presentation recipe, and all use outside update. MCP, CLI, REST, action allowlists, saved views, bootstrap guidance, schema fixtures, and generated contracts SHALL expose the same argument names and behavior.
+The existing `record_memory` command SHALL keep one finite product surface and SHALL expose `expand_child` only to query plus `refresh_presentation` only to update. Query SHALL accept either an explicit child-field string or the backward-compatible boolean selector under their declared compatibility rules. Update SHALL accept `refresh_presentation: true` with normal changes or as the sole semantic request, but SHALL refuse false/no-op refresh, refresh on a collection without a valid presentation recipe, and all use outside update. MCP, CLI, REST, action allowlists, saved views, bootstrap guidance, schema fixtures, and generated contracts SHALL expose the same argument names and behavior. Collection-wide readable-path and presentation migration SHALL use the profile-neutral `maintain_memory(mode="structured-files")` surface rather than adding another Records command action or Records-specific renderer.
 
 #### Scenario: Explicit child selector is discoverable everywhere
 - **WHEN** a client inspects the public Records schema or calls query over MCP, CLI, or REST
@@ -724,9 +778,17 @@ The existing `record_memory` command SHALL keep one finite product surface and S
 - **WHEN** a caller needs to backfill a readable body for an existing item
 - **THEN** it uses guarded `record_memory(action="update", refresh_presentation=true, ...)` and no separate renderer, migration, or YAML tool is added
 
+#### Scenario: Presentation repair does not add another Records tool
+- **WHEN** a caller needs to backfill a readable body for one existing item
+- **THEN** it uses guarded `record_memory(action="update", refresh_presentation=true, ...)`, while collection-wide migration uses the shared maintenance mode and neither path exposes a YAML editor
+
 #### Scenario: Selector leakage is refused
 - **WHEN** `expand_child` is supplied to a non-query action or `refresh_presentation` is supplied to a non-update action
 - **THEN** the command rejects the request as invalid arguments before opening collection or item contents
+
+#### Scenario: Collection migration stays profile-neutral
+- **WHEN** a caller previews or applies filenames and presentation across a Records collection
+- **THEN** the registry routes it through `maintain_memory(mode="structured-files")` and does not grow the finite `record_memory` selector
 
 ### Requirement: Observe Memory Accepts Governed Unit Metadata
 The single command registry SHALL expose `verdict`, `check_by`, and `id` on `observe_memory` consistently across MCP, REST, CLI, OpenAPI, and generated capability documentation. `verdict` and `check_by` SHALL require an explicit governed non-observation kind, because the compact form carries no metadata rows, and SHALL be refused with a stable machine-readable code otherwise. `id` SHALL set the unit's authored anchor, SHALL be validated against the existing anchor grammar, and SHALL be refused when it would collide with another unit's anchor on the same parent.
@@ -1584,11 +1646,707 @@ A journey driver SHALL execute the f23 scenario's operations against an installe
 - **WHEN** the f23 journey runs against the current runtime
 - **THEN** `dismissal_respected_across_passes` passes for the dismissed subject
 - **AND** `counter_emission_not_repeated_per_write` is evaluated on the emission delta between the two snapshots, so it is decided only for a batch that delivered at least one block, and otherwise reports `unsupported` rather than passing vacuously or inheriting an earlier batch's delivery
-- **AND** on this runtime it reports `unsupported`, because no product leaf reaches the write carrier, so the bulk batch delivers no block and its emission delta is zero
-- **AND** the batch-once requirement is proven where it is decidable: twelve write carriers inside one batch scope emit at most one block, plus the measured zero carrier trips at every product leaf
+- **AND** on this runtime it is decided: the bulk ingest commits through a carrying operation leaf, the batch delivers exactly one block, and the assertion passes on an emission delta of one against a write delta of twelve
+- **AND** the batch-once requirement is proven where it is decidable: twelve write carriers inside one batch scope emit at most one block
 
 #### Scenario: Removing the batch scope turns the counter assertion red
 
 - **WHEN** the batch scope is disabled and twelve write carriers run over one vault
 - **THEN** `counter_emission_not_repeated_per_write` fails with twelve emissions for twelve writes
 
+### Requirement: Every compiled writer shares one source-closure leaf
+
+`remember_memory`, `replace_memory`, `edit_memory`, and governed Tier-2 compiled-note creation SHALL call one shared source-closure validator at the semantic precommit boundary. MCP, REST, CLI, OpenAPI, bootstrap guidance, and schema-fidelity fixtures SHALL derive the same behaviour and remediation from the canonical command registry; no facade SHALL implement its own resolver or warning-only exception.
+
+#### Scenario: Equivalent unresolved write has surface parity
+
+- **WHEN** the same compiled-note mutation with an unresolved explicit source is invoked through MCP, REST, CLI JSON, and the governed Tier-2 route
+- **THEN** every surface refuses with the same stable application data and no surface commits the note
+
+#### Scenario: Future writer cannot omit closure classification
+
+- **WHEN** a new registry command is classified as a compiled semantic writer
+- **THEN** registry or contract validation fails closed unless it enters the shared source-closure precommit path
+
+### Requirement: Source-closure refusal uses one stable application envelope
+
+The public error registry SHALL define `UNRESOLVED_SOURCE_CITATION` with a non-empty bounded message, capture-first remediation, unresolved total, deterministic capped caller-supplied values, and truncation state. MCP SHALL return the deliberate refusal as normal tool content; REST and CLI JSON SHALL return the identical shared envelope; human CLI SHALL render the same code, message, and remediation with the canonical operation-error exit status.
+
+#### Scenario: Deliberate source refusal is not an internal error
+
+- **WHEN** source closure rejects a non-empty unresolved citation
+- **THEN** each generated facade presents the stable application refusal and does not relabel it as an unexpected execution failure
+
+#### Scenario: Refusal guidance teaches capture then retry
+
+- **WHEN** capability or bootstrap guidance describes a writer that accepts `sources`
+- **THEN** it states that external material must first be captured and the derived write retried with the governed source reference
+
+### Requirement: Capture remains independent from derived compilation
+
+Source and Evidence capture commands SHALL remain valid without a pending derived note and SHALL preserve existing raw-material and provenance contracts. A compiled writer SHALL NOT call a connector, fetch a remote locator, or silently invoke capture while validating source closure.
+
+#### Scenario: Compiled write does not fetch an external ID
+
+- **WHEN** a source entry resembles a connector URL or object identifier
+- **THEN** the writer refuses locally without network access or a hidden capture side effect
+
+### Requirement: Structured-file maintenance is one generated preview and apply surface
+
+The canonical registry SHALL expose `maintain_memory(mode="structured-files")` consistently through MCP, CLI, REST, OpenAPI, capability guidance, and schema-fidelity fixtures. It SHALL require exactly one collection selector and SHALL default to read-only preview. Mutating apply SHALL additionally require the deterministic preview plan identity and unchanged source snapshot. Preview SHALL remain lease-free; apply SHALL be explicitly classified mutating and SHALL enter the normal writer, idempotency, terminal-response, and projector paths.
+
+#### Scenario: Preview is safe to inspect
+
+- **WHEN** structured-file maintenance is invoked for a collection without an apply plan identity
+- **THEN** every surface returns the same bounded read-only representation plan and no canonical file changes
+
+#### Scenario: Apply cannot be inferred from falsey arguments
+
+- **WHEN** a caller supplies an empty, false, unknown, or partial apply selector
+- **THEN** validation refuses rather than guessing whether a migration was authorized
+
+#### Scenario: Exact plan applies through every facade
+
+- **WHEN** the same current plan identity and source snapshot are applied through any generated facade
+- **THEN** each reaches the same leaf, writer boundary, and terminal result semantics
+
+### Requirement: Generated Surfaces Inject Trusted Authorization Context
+
+The single command registry SHALL declare which operation variants require a principal,
+authorization session, and authorization-session lifecycle action. Generated MCP, REST,
+Hosted, CLI, and OpenAPI surfaces SHALL expose the same public session capability
+credential and lifecycle semantics while resolving canonical principal and trusted
+issuer/surface family inside their adapters. The dispatcher SHALL inject one immutable
+verified request context; governance leaves SHALL NOT accept a public `principal`,
+`principal_scope`, issuer, or internal session-id parameter.
+
+The registry SHALL classify every generated command, legacy leaf, finite selector
+variant, retrieve/inject hook, and content-bearing writer result into the closed
+credential matrix in `authorization-session-binding`: session open forbids a credential;
+status/rotate/close plus session grant/revoke/declare require one; self-inspection and all
+content/resolution routes accept it optionally with absent meaning standing-only and
+present-invalid rejecting; owner-only/standing authoring does not derive authority from
+it. No route may infer another behavior, and startup SHALL fail if a route has zero or
+multiple classifications.
+
+MCP SHALL expose one optional placeholder named exactly
+`authorization_session_credential`. Bounded raw JSON-RPC/ASGI middleware SHALL extract
+`params.arguments.authorization_session_credential`, remove/redact it from the envelope
+and every logging/error copy, resolve trusted transport authentication, verify it, and
+install immutable context before FastMCP request logging, `FunctionTool`, or Pydantic
+validation. The middleware SHALL return the common credential refusal for a duplicate,
+non-string, malformed, or invalid value even when ordinary arguments are malformed. It
+SHALL pass a sanitized argument map to FastMCP; generated wrappers/leaves MUST NOT receive
+the bearer parameter. FastMCP transport/session/request identity SHALL remain
+non-authoritative.
+
+REST and Hosted SHALL accept the credential only through the sensitive
+`X-Exomem-Authorization-Session` header, separate from service/gateway `Authorization`;
+body/query carriers SHALL be forbidden. Raw ASGI middleware SHALL remove/redact it before
+access logging, exception copies, validation, and dispatch, then verify only after the
+trusted access/gateway principal resolves. Hosted SHALL reject conflicting caller
+principal headers. CLI SHALL expose only `--authorization-session-fd <fd|->`, read one
+bounded bearer from a protected already-open descriptor or stdin, and clear it after
+verification; literal argv and environment bearer carriers SHALL be forbidden. Generated
+MCP schema, REST/Hosted OpenAPI, and CLI help SHALL advertise only their appropriate
+placeholder/header/descriptor carrier.
+
+Across all surfaces, raw extraction/redaction SHALL precede framework logging and
+validation. Trusted principal resolution and capability verification SHALL then precede
+ordinary coercion/validation, cache lookup/key creation, idempotency lookup, release
+decision, receipt allocation, or leaf dispatch. Only an exact successful session
+open/rotate response may carry the typed `issued_credential` through the non-disableable
+terminal scrubber after response-schema and just-minted-value validation.
+
+#### Scenario: Registry parity includes session lifecycle
+
+- **WHEN** the registry and generated artifacts are inspected
+- **THEN** authorization-session open, status, rotate, close, and protected resume
+  semantics match across MCP, REST, Hosted, CLI, and OpenAPI
+
+#### Scenario: Leaf cannot accept caller identity
+
+- **WHEN** the live MCP schema, REST/OpenAPI schema, Hosted admission schema, and CLI help
+  are generated
+- **THEN** none exposes principal, principal scope, issuer, or internal session id as a
+  caller-authoritative governance parameter
+
+#### Scenario: Stateless MCP request id is not a session
+
+- **WHEN** stateless MCP HTTP reconnects with a repeated or changed framework session or
+  request id
+- **THEN** session authority changes only when a valid server-issued capability is
+  verified
+
+#### Scenario: Unbound adapter fails closed
+
+- **WHEN** a generated or in-process route reaches the dispatcher without the trusted
+  principal/session context its registry variant requires
+- **THEN** the invocation refuses before governance state or content is read and does not
+  default to owner
+
+#### Scenario: Bearer is absent from observability
+
+- **WHEN** a request carrying a valid or invalid authorization capability is logged,
+  traced, retried, rejected, or included in an idempotency calculation
+- **THEN** the raw bearer is absent from all observability and persisted replay material
+
+#### Scenario: Invalid credential wins before validation and cache
+
+- **WHEN** a generated route receives both an invalid session credential and malformed or
+  cacheable content arguments
+- **THEN** it returns the common credential refusal before validation detail, cache or
+  idempotency access, governance decision, receipt, or leaf effect
+
+#### Scenario: MCP raw middleware precedes FastMCP validation
+
+- **WHEN** an installed FastMCP stateless-HTTP request carries an invalid
+  `params.arguments.authorization_session_credential` and a separately malformed tool
+  argument
+- **THEN** raw middleware scrubs the bearer, returns the common credential refusal, and
+  FastMCP logging, `FunctionTool`, Pydantic validation, wrapper, and leaf receive no raw
+  bearer or validation copy
+
+#### Scenario: Surface carriers are distinct and protected
+
+- **WHEN** clients inspect generated MCP, REST/Hosted, and CLI contracts
+- **THEN** MCP exposes only the optional consumed placeholder, REST/Hosted expose only
+  `X-Exomem-Authorization-Session` separate from `Authorization`, and CLI exposes only
+  `--authorization-session-fd`; body/query/env/literal-argv alternatives refuse
+
+#### Scenario: Actual-wire failures leave no observability copy
+
+- **WHEN** valid, invalid, duplicate, non-string, or malformed bearers traverse installed
+  MCP/FastMCP, REST, Hosted, and CLI adapters and trigger access logs, validation errors,
+  exceptions, retries, traces, and debug serialization
+- **THEN** an exact scan finds no bearer outside protected input/typed issuance and every
+  wrapper/leaf invocation sees only trusted internal context
+
+#### Scenario: Issuance is the only terminal scrubber exception
+
+- **WHEN** a bearer-shaped value appears on any route or field other than the exact typed
+  `issued_credential.bearer` of successful session open/rotate
+- **THEN** the terminal scrubber removes it and malformed issuance refuses rather than
+  weakening global bearer redaction
+
+### Requirement: Governed Find Continuations Are Surface-Equivalent
+
+The generated `ask_memory` and legacy `find` signatures SHALL expose the same optional
+bounded string `continuation` across MCP, REST, Hosted, CLI, OpenAPI, and in-process
+dispatch. The field SHALL be absent by default and SHALL NOT change never-governed
+response bytes. A supplied continuation on a route without an active governed projected
+runtime, or any malformed/unknown/expired/cross-binding continuation, SHALL return the
+same `INVALID_CONTINUATION` application refusal. No adapter may decode the token into
+caller-selectable offset, principal, session, purpose, policy, catalog, or runtime
+authority.
+
+Governed projected success SHALL use the existing envelope and MAY include exactly one
+`continuation` string when another authorized page exists. Exhaustion SHALL omit the
+field. The generated schemas SHALL declare that optional field without changing
+ungoverned default payloads. MCP, REST, Hosted, CLI, and in-process calls with the same
+trusted principal and request SHALL return the same page and continuation bytes, modulo
+the already registered outer transport framing exclusions.
+
+#### Scenario: Cross-surface continuation parity
+
+- **WHEN** the same trusted principal requests consecutive governed pages through MCP,
+  REST, Hosted, CLI, and in-process dispatch
+- **THEN** each surface accepts the same bounded continuation contract and returns the
+  same canonical page membership, order, exhaustion, and continuation bytes
+
+#### Scenario: Caller cannot choose a page offset
+
+- **WHEN** a caller edits, fabricates, replays after expiry, or moves a continuation
+  across vault/principal/session/purpose/request bindings
+- **THEN** the dispatcher returns `INVALID_CONTINUATION` and no decoded token field or
+  registry detail reaches validation, logs, errors, or the leaf
+
+### Requirement: Reserved Path Classification Is Registry-Total
+
+The command registry SHALL identify every path/ref-bearing argument for every operation
+and finite-selector variant, including whether it is a source, destination,
+metadata-derived recovery destination, recursive root, dataset, media artifact, frame,
+transfer target, or alias. Startup coverage SHALL fail when any registered public route
+or selector can reach a path without a classification. The shared dispatcher SHALL apply
+the canonical reserved administration-path classifier before existence checks, parsing,
+counting, mutation planning, lease acquisition that exposes target state, or leaf
+dispatch.
+
+This is a boundary on Exomem commands and cooperating Exomem subsystems: untrusted
+principals reach vault state only through that boundary. Direct filesystem or block-device
+access as the OS vault owner is owner-equivalent and outside zero-effect and
+universal-detection claims; it may disclose, corrupt, move, or delete state. The boundary
+SHALL fail closed when drift is observable against retained logical, catalogue, registry,
+or filesystem-identity anchors, but SHALL NOT claim to detect or reverse an unobservable
+out-of-band owner action.
+
+Classification SHALL cover one closed versioned internal-state registry. Its initial set
+SHALL include `_Governance/**`, `_Consolidation/**`, the exact root-level
+`Knowledge Base/` names `.governance.sqlite`, `.embeddings.sqlite`, `.clip.sqlite`,
+`.lexical.sqlite`, `.graph.sqlite`, `.claims.sqlite`, `.references.sqlite`,
+`.refs.sqlite`, `.freshness.sqlite`, `.deferred-index.sqlite`,
+`.deferred_index.sqlite`, `.media-jobs.sqlite`, `.media_jobs.sqlite`,
+`.idempotency.sqlite`, `.idempotency.json`, `.idempotency.jsonl`,
+`.media-jobs.json`, `.deferred-index.json`, `.voice_profiles.json`,
+`.media-worker.lock`, `.graph-sync.json`, `.graph-sync-floor.json`,
+`.graph-commit-receipts/**`, and `.review-state.json`; current review-state temps matching
+exactly `..review-state.json.[a-z0-9_]{8}.tmp`; lexical rebuild state matching exactly
+`.lexical.sqlite.rebuild-[0-9a-f]{32}.tmp` plus that temp database's `-wal`, `-shm`, and
+`-journal` siblings; lexical quarantine members matching exactly
+`.lexical.sqlite.quarantine-[0-9a-f]{32}`,
+`.lexical.sqlite-wal.quarantine-[0-9a-f]{32}`, and
+`.lexical.sqlite-shm.quarantine-[0-9a-f]{32}`; plus
+`Knowledge Base/.authorization-projections/**`. Every ordinary SQLite
+entry SHALL include its exact `-wal`, `-shm`, and `-journal` family and the graph entry
+its bounded registered rebuild-temp family. This closed set covers governance/session
+authority, journals, raw lexical/vector/CLIP/reference/graph state, immutable projected
+indexes, and active catalog descriptors. A new internal store/index/temp/lock cannot run
+until it is registered and registry-total tests pass.
+For both `/**` descriptors the root directory itself and every descendant SHALL be
+reserved, including unknown/future child names; recognizing only today's receipt format
+is insufficient for the ordinary-operation boundary.
+
+The initial descriptor set SHALL be generated/audited against every current private-
+state owning module and path factory, not copied from the hosted-portability list. The
+audit SHALL enumerate primary files, directories, transactional siblings, owner-created
+temps/quarantines/receipts, and runtime physical identities for governance, lexical,
+vector, CLIP, graph/handoff, refs/claims, review, deferred/media/idempotency, voice, and
+projection owners. Every owner-produced form SHALL map to exactly one descriptor; an
+unmapped or multiply mapped private path SHALL fail startup and registry tests before
+the owner may create/open it. Portability/export rules SHALL consume this security
+registry or be checked against it, never define a smaller authority boundary.
+
+Logical names are reserved before they exist. At protected acquisition, a stable
+pre-existing symlink, reparse point, hard link, or physical alias to a reserved family
+member SHALL be refused. Each owning subsystem SHALL retain and publish stable identities
+of open primary/WAL/SHM/journal/temp/index files under the leaf coordination primitive.
+SQLite primary/WAL/SHM identities SHALL be published before cooperative coordination is
+released, not before filesystem reachability. Secure resolution SHALL compare retained
+identities where `realpath` alone cannot expose an alias and SHALL reject multiply linked
+or ambiguous internal-state files. It SHALL check both ends of move/copy/replace, trash
+source and every possible restore destination, and every child of a recursive operation.
+An observable anchor discrepancy or non-canonical resolution SHALL fail closed. A private
+owning-subsystem authority MAY pass the dispatcher check; no serialized argument,
+generic alias, surface, owner/L6 decision, non-Markdown classification, or Tier-2 flag
+may do so.
+
+Logical classification SHALL route/refuse early but SHALL NOT authorize a later pathname
+reopen. Every generic filesystem leaf SHALL execute through a descriptor-bound,
+handle-relative reserved-path transaction: open the vault root and parents without
+following links, hold them through the leaf operation, classify stable volume/device and
+file identities, and use relative create/read/write/rename/link/unlink primitives. POSIX
+SHALL use `openat2` beneath/no-symlink/no-magic-link constraints or an equivalent
+iterative dirfd/`openat`/`O_NOFOLLOW` implementation. Windows SHALL use `NtCreateFile`
+with `RootDirectory` and a relative name plus `NtSetInformationFile` rename/disposition
+semantics, reparse-aware handles, and final volume/file identity; the route SHALL remain
+disabled unless a runtime actual-filesystem capability probe proves those exact relative
+handle operations, no-follow/reparse behaviour, and final identity checks. Failure or
+absence of that probe SHALL disable the route and return the registered refusal without a
+fallback. A windows-latest required CI gate SHALL exercise NTFS junction, reparse,
+hard-link, 8.3, rename/disposition, and fallback-disable fixtures, and SHALL be wired
+into combined release verification. Same-device rename, trash, and recovery SHALL hold
+both parent handles and run under cooperative coordination; cross-device move, trash,
+and recovery SHALL refuse. A copy SHALL read the held source and publish atomically only
+at the held destination; it SHALL NOT claim source-and-destination atomicity. Recursive
+and multi-entry power-loss handling SHALL use a saga and recovery, not cross-file or
+recursive atomicity. Parent swaps, rename/link races, hard links, reparse points, and
+bind aliases SHALL be checked at the kernel read/mutation operation against retained
+anchors, not by check-then-`realpath`. A platform without equivalent primitives SHALL
+disable the affected generic route.
+
+Enumeration and retrieval routes—including list/walk/browse/search/find/get/fetch,
+dataset/Records/media/frame, download/export/transfer, graph/provenance, audit/repair,
+trash/recovery, and recursive packaging—SHALL remove registered internal state before
+existence, candidate, count, ordering, or manifest computation. Generic mutation routes
+SHALL refuse a reserved target before touching that target. Multi-entry mutation and
+recovery SHALL use an ordered, descriptor-bound preflight and saga: each entry is
+revalidated immediately before its durable effect, each completed entry records durable
+receipt/journal state, and later refusal or interruption is handled by recorded recovery,
+not by treating all entries as one transaction. A private state file MUST NOT enter the
+governance membership evaluator as an ordinary non-Markdown artifact at L6.
+
+#### Scenario: Case Unicode and separator variants remain reserved
+
+- **WHEN** a route spells a reserved component with case variants, NFKC-equivalent
+  Unicode, backslashes, mixed separators, or a knowledge-base-prefix variant
+- **THEN** every generated surface classifies it as the same reserved root
+
+#### Scenario: Stable aliases and symlinks cannot bypass the root
+
+- **WHEN** protected acquisition finds a canonical ref, managed alias, short-name alias,
+  or stable pre-existing symlink resolving into a reserved tree without spelling its name
+  in the public input
+- **THEN** the dispatcher and secure leaf resolution both refuse or hide the target within
+  the command boundary
+
+#### Scenario: Filesystem identity alias cannot bypass the root
+
+- **WHEN** protected acquisition finds a stable pre-existing hard link, bind-style alias,
+  or multiply linked file outside the reserved spelling that refers to
+  administration-tree state
+- **THEN** retained filesystem-identity checks refuse it as reserved or fail closed on an
+  observable anchor discrepancy
+
+#### Scenario: Move checks source and destination
+
+- **WHEN** either end of a move, copy, replace, or transfer resolves inside a reserved
+  tree
+- **THEN** the entire operation refuses before any source or destination mutation
+
+#### Scenario: Recovery checks explicit implicit and recursive destinations
+
+- **WHEN** a recover operation uses a trash path, explicit restore path, original path
+  from metadata, alias, or recursive child that resolves to a reserved tree
+- **THEN** the ordered preflight refuses before that entry is restored; entries already
+  durably completed by the recovery saga are reconciled from their receipt/journal state,
+  and recovery remains per-entry rather than transactional across its full set
+
+#### Scenario: Dataset and media selectors are covered
+
+- **WHEN** query/dataset, Records, process/read media, video-frame, upload/download, and
+  multiplexed management variants are enumerated
+- **THEN** every path/ref selector is registry-classified and none can reach a reserved
+  tree through an unclassified branch
+
+#### Scenario: Private activation family is never ordinary L6
+
+- **WHEN** `.governance.sqlite`, any exact WAL/SHM/journal sibling, or a retained/
+  published physical alias is targeted through list/walk/search/get/download/dataset/
+  export/transfer/recovery at owner/L6
+- **THEN** it is structurally absent before membership/projection and no byte, row,
+  count, name, hash, timing signal, or existence bit is returned
+
+#### Scenario: Raw and projected index families are equally reserved
+
+- **WHEN** a generic route targets `.embeddings.sqlite`, `.clip.sqlite`, `.lexical.sqlite`,
+  `.graph.sqlite`, `.refs.sqlite`, `.authorization-projections/**`, a registered legacy
+  spelling, journal sibling, rebuild temp, or retained/published physical alias
+- **THEN** reads/enumeration hide it and generic mutation refuses independently of
+  whether the file currently exists
+
+#### Scenario: Graph handoff and review-state families are reserved
+
+- **WHEN** a route targets `.graph-sync.json`, `.graph-sync-floor.json`, the
+  `.graph-commit-receipts/` root or any descendant, `.review-state.json`, or an exact current
+  `..review-state.json.<8-char-token>.tmp`, before or after owner creation
+- **THEN** list/search/get/download/export/dataset/recovery treats it as absent and every
+  generic create/move/delete/recover refuses without revealing stable existence
+
+#### Scenario: Lexical rebuild and quarantine generations are reserved
+
+- **WHEN** a route targets an exact `.lexical.sqlite.rebuild-<32-lowerhex>.tmp` family or
+  the main/WAL/SHM `.quarantine-<same-32-lowerhex>` group during publish/rollback
+- **THEN** dispatcher and held-leaf identity checks hide/refuse every member, including a
+  pre-create spelling and an alias raced between quarantine and restore
+
+#### Scenario: Every private-state owner is inventoried
+
+- **WHEN** current owner path factories and write/temp/quarantine/receipt paths are
+  enumerated independently of hosted portability
+- **THEN** each maps to exactly one internal-state descriptor and a missing/duplicate
+  mapping fails before startup or owner creation
+
+#### Scenario: WAL creation and checkpoint race stay reserved
+
+- **WHEN** a cooperating internal subsystem creates, checkpoints, renames, or removes a
+  WAL/SHM/journal/staged-index file while a generic read, move, link, delete, recovery,
+  or export observes the same retained logical or physical identity
+- **THEN** shared held-leaf coordination classifies the identity as internal or fails the
+  generic operation closed; SQLite identities are published before coordination release
+
+#### Scenario: Internal-state registry is closed
+
+- **WHEN** code introduces an internal database, journal, lock, temp pattern, raw lane,
+  projected lane, graph, or catalog file without a descriptor
+- **THEN** startup/schema coverage fails before the owning subsystem or generic command
+  can open it
+
+#### Scenario: New path-bearing command fails until classified
+
+- **WHEN** a command, action, operation, mode, or alias with a new path/ref field is added
+  to the registry
+- **THEN** registry/startup coverage fails until its role and reserved-path behavior are
+  declared
+
+#### Scenario: Parent swap cannot cross the reserved boundary
+
+- **WHEN** a stable pre-existing or anchor-observable parent swap resolves to a symlink,
+  junction, reparse point, or bind mount into a reserved tree before the leaf
+- **THEN** the held-handle operation refuses before the protected acquisition or mutation
+
+#### Scenario: Rename and hard-link races cannot bypass identity
+
+- **WHEN** a source/destination rename, hard link, or alias exchange produces an
+  observable retained-anchor mismatch after logical classification
+- **THEN** the leaf refuses; no portable final-component filesystem guarantee is assumed
+  beyond the platform primitives named above
+
+#### Scenario: Unsupported platform primitives fail closed
+
+- **WHEN** a platform cannot provide no-follow handle-relative traversal and mutation
+  through the leaf for a possibly reserved target
+- **THEN** the generic route returns the content-free reserved-path refusal and MUST NOT
+  fall back to check-then-path-use
+
+#### Scenario: Cross-device and multi-entry operations have bounded semantics
+
+- **WHEN** a generic move, trash, or recovery crosses devices, or recursive/multi-entry
+  work is interrupted by power loss
+- **THEN** the cross-device move/trash/recovery refuses, while copy publishes only its
+  destination atomically and recursive/multi-entry work uses ordered preflight, per-entry
+  durable effects, and recorded saga recovery rather than claiming all-or-none atomicity
+
+### Requirement: Reserved Path Outcomes Are Surface-Consistent
+
+MCP, REST, Hosted, and CLI SHALL produce the shared content-free outcome for the same
+reserved-path request. Ordinary read/enumeration operations SHALL use the same missing
+contract as structural absence. Generic mutations SHALL use one stable reserved-path
+code and remediation naming only the owning command, without probing or reporting
+whether the requested reserved target exists. The caller-supplied spelling MAY be echoed
+only where the existing caller-input error contract permits it; no resolved alias,
+canonical administration path, child count, or metadata-derived destination may be
+returned.
+
+#### Scenario: Read parity hides existence
+
+- **WHEN** the exact same ordinary reserved-path read is issued through MCP, REST,
+  Hosted, and CLI, first with the target present and then absent
+- **THEN** all surface envelopes match their missing-path contract and reveal no
+  existence difference
+
+#### Scenario: Mutation parity names only the owning command
+
+- **WHEN** the exact same generic reserved-path mutation is issued on each surface
+- **THEN** each returns the shared stable code/remediation, performs no write, and emits
+  no resolved path or tree metadata
+
+### Requirement: Structured-collection mutations are due-state carriers
+
+`record_memory` `append` and `update` and `plan_memory` `add`, `update` and `triage` responses SHALL carry the bounded advisory due-state block under the same carrier contract and emission governance as page writes: the write applies its delta, the block is served through the release plane, emission is recorded once per delivered block, a batch scope delivers at most once, family dispositions apply, and an unreadable review state yields no block while the write still commits. The leaves SHALL reuse the shared due-state helpers rather than re-deriving any of it.
+
+#### Scenario: The append that opens a gap reports it
+
+- **WHEN** a record append joins an open Planning item for the first time
+- **THEN** that append's own response carries a due-state block counting one `unreflected_outcomes` item
+
+#### Scenario: A batch of appends delivers once
+
+- **WHEN** twelve appends run inside one batch scope
+- **THEN** at most one block is delivered and the emission ledger records one emission
+
+#### Scenario: Silence on an unreadable store
+
+- **WHEN** the review state cannot be read
+- **THEN** the append commits, the response carries no block, and no error is raised for the advisory
+
+### Requirement: Planned-versus-recorded review is discoverable in the tool surface
+
+The `review_memory` `mode` documentation in the generated tool surface SHALL list `plan-progress` with its one-line purpose, and the `plan_memory` description SHALL document the inventory form of `inspect`. The pinned tool-surface digest SHALL move once for both, with the packaged contract, the schema fixture, the release-identities fixture, the hosted generated locks and directory packets, and the ChatGPT plugin contract's pending digest regenerated together; no input parameter is added or removed.
+
+#### Scenario: An MCP client can find plan-progress
+
+- **WHEN** a client reads the `review_memory` tool description from the packaged contract
+- **THEN** `plan-progress` is listed among the modes
+
+#### Scenario: One pin move
+
+- **WHEN** the tool surface is regenerated for this change
+- **THEN** exactly one digest change is recorded and every generated consumer the repository gates agrees on it; the OpenAI directory packet binds a release input rather than the tool-surface pin and is regenerated at that release step
+
+### Requirement: Write-path advisories are suppressed for exactly-dismissed fingerprints
+
+Each write-path advisory — the near-duplicate warning and the overlap
+warning — SHALL carry a stable review reference and a signal fingerprint
+derived from the advisory's endpoints and their content signal versions.
+Before emitting an advisory, the system SHALL consult the portable review
+state: an advisory whose exact `(review identity, fingerprint)` pair was
+dismissed SHALL NOT be emitted; a snoozed pair SHALL NOT be emitted before its
+expiry.
+
+The `contradiction-band` advisory kind is retired: write-time warning
+generation SHALL invoke no polarity classification, so no advisory
+distinguishes a proximity pair by claimed stance. A dismissal recorded against
+a retired contradiction-band identity SHALL NOT suppress the same pair's
+overlap advisory; such a pair may resurface once under the overlap identity.
+
+A material change to the counterpart endpoint SHALL produce a different
+fingerprint, and the advisory SHALL then be emitted again. A change to the
+written page itself SHALL resurface a dismissed advisory only when it changes
+the detected signal class for the pair. Ranking drift, unrelated writes, the
+triggering write's own change to the written page, and repeated identical page
+states SHALL NOT change the fingerprint.
+
+Suppression SHALL be failure-isolated in the emitting direction: review state
+that cannot be read or parsed SHALL cause the advisory to be emitted, and
+SHALL NOT fail, delay, or alter the committed mutation.
+
+#### Scenario: A dismissed duplicate warning stays quiet on the next write
+
+- **WHEN** a near-duplicate advisory for a page pair is dismissed through triage, and a further write commits to the same page with the counterpart materially unchanged and the detected signal class unchanged
+- **THEN** the committed result carries no near-duplicate advisory for that pair
+- **AND** the mutation outcome, status, and path are unchanged from an emission-free write
+
+#### Scenario: A material change resurfaces the advisory
+
+- **WHEN** a previously dismissed advisory's counterpart page is materially edited, and a further write commits to the original page
+- **THEN** the advisory is emitted again with a new fingerprint
+- **AND** the earlier dismissal record does not suppress it
+
+#### Scenario: Unreadable review state fails open to emission
+
+- **WHEN** the portable review state cannot be read during a compiled write that would emit an advisory
+- **THEN** the advisory is emitted
+- **AND** the write commits with its existing terminal unchanged
+
+#### Scenario: A declared rival pair produces no duplicate advisory
+
+- **WHEN** a page pair carries a recorded competing-alternatives stance and a further write commits to either page
+- **THEN** no near-duplicate advisory is emitted for that pair
+- **AND** the suppression follows from the stance contract, not from a dismissal record
+
+#### Scenario: The claim-level gate no longer changes write-path advisories
+
+- **WHEN** the claim-level subsystem is enabled and a draft lands in the proximity band against an active note
+- **THEN** the advisory emitted is the overlap kind with no polarity clause, exactly as on the default path
+
+### Requirement: Write feedback and the audit report the same relation-debt predicate
+
+The write-result feedback SHALL report relation debt using the same predicate as the audit's relation-debt category and the semantic connectivity lane: the presence of `sources:` provenance alone SHALL NOT clear the debt flag. The feedback SHALL report provenance presence as its own fact, distinct from debt, so a page with citations but no connections is described as exactly that.
+
+#### Scenario: A cited but unconnected page reports debt consistently
+
+- **WHEN** a compiled write commits to a page whose only outward reference is its `sources:` frontmatter, with no typed relations and no body wikilinks
+- **THEN** the write-result feedback reports relation debt
+- **AND** a subsequent audit reports the same page under the same debt condition
+- **AND** the feedback separately reports that provenance is present
+
+### Requirement: Compact responses may carry one bounded advisory due-state block
+
+Default compact mutating responses and recall responses MAY carry one `due_state` block: per-category open counts and a bounded list of top item references drawn from the maintained projection for the requesting audience. The block SHALL follow the established advisory posture: validated and projected from the leaf, bounded in size, never a key a client branches on for mutation outcome, and absent — never null or empty — when there is nothing to report. It SHALL NOT alter `status`, `mutated`, `path`, `warnings_count`, mutation identity, or replay behaviour. The legacy response detail SHALL omit the block. Tool input schemas SHALL NOT change.
+
+#### Scenario: A due prediction reaches the agent on an unrelated write
+
+- **WHEN** a prediction became due earlier in the session and any compiled write commits
+- **THEN** the default compact response carries a `due_state` block naming the category count and the item reference
+- **AND** the mutation outcome keys are byte-identical to a projection-free response apart from the advisory block
+
+#### Scenario: Recall responses carry deltas only
+
+- **WHEN** consecutive recall calls execute with no change in the projection between them
+- **THEN** at most the first response carries the `due_state` block
+- **AND** a later call after the projection changes carries the block again
+
+#### Scenario: The legacy detail omits the block
+
+- **WHEN** a mutation is invoked with the legacy response detail
+- **THEN** the response carries no `due_state` block and is otherwise unchanged
+
+### Requirement: Emission is governed so the carrier cannot nag
+
+The block SHALL be emitted on change of count, or on the first qualifying response of a session; identical totals SHALL NOT be repeated on consecutive responses. A bulk or batch operation SHALL emit at most one block, at its end, regardless of how many writes it contains. Emission governance SHALL be deterministic and testable without an agent.
+
+#### Scenario: A bulk import does not emit forty blocks
+
+- **WHEN** a batch operation commits forty compiled writes while the projection's totals change once
+- **THEN** at most one `due_state` block is emitted for the batch
+
+#### Scenario: An unchanged total goes quiet
+
+- **WHEN** three consecutive writes commit with no change in any category count
+- **THEN** at most the first of the three responses carries the block
+
+### Requirement: Operation leaves are due-state carriers
+
+An invocation of the operation leaves — `adopt_vault` mutating modes,
+`adoption_studio` `apply` and `apply-proposal`, `maintain_memory` in `fix`
+with `dry_run=false`, `reconcile`, `backfill-ids` with `dry_run=false`, or
+`structured-files` with `apply=true`, `preserve_artifacts`, and
+`process_media` mutating operations — that commits at least one governed
+write SHALL carry the bounded advisory due-state block under the same
+carrier contract as page writes: served from the committed terminal
+projection, validated and bounded, never a key a client branches on for
+operation outcome, family dispositions applied, emission recorded in the
+ledger once per delivered block, and an unreadable review state yielding no
+block while the operation still completes. Emission SHALL follow the
+canonical emission-governance and emission-ledger requirements unchanged —
+the invocation is one batch scope, change-only, delivered at the end.
+
+An invocation that commits no governed write — a clean-vault repair pass,
+already-valid media, a `retry` re-enqueue — SHALL carry no block even when
+the projection has open items: it produces no committed terminal, and
+extending carriage to non-committing responses is a response-contract change
+outside this requirement. A partially failed invocation that committed at
+least one governed write SHALL still carry under the change-only rule.
+Read-only and dry-run invocations of these leaves SHALL NOT carry the block.
+The leaves SHALL reuse the shared due-state projection helpers (the
+`due_state.block_for_write` family behind the due-state helpers'
+`due_state_advisory` disclosure boundary) rather than re-deriving any of it,
+and tool input schemas SHALL NOT change.
+
+#### Scenario: A bulk apply reports accumulation exactly once, at the end
+
+- **WHEN** an `adoption_studio` `apply` commits twelve governed writes whose
+  deltas change the due-state counts
+- **THEN** the invocation's response carries exactly one `due_state` block
+  reflecting the projection after the batch
+- **AND** the operation outcome keys are byte-identical to a projection-free
+  response apart from the advisory block
+
+#### Scenario: Unchanged totals stay quiet on a carrying leaf
+
+- **WHEN** a `preserve_artifacts` invocation commits its artifacts while no
+  category count differs from the last delivered block
+- **THEN** the response carries no `due_state` block
+
+#### Scenario: A committing-nothing invocation carries nothing
+
+- **WHEN** `maintain_memory` in `fix` with `dry_run=false` runs over a clean
+  vault and commits no write, while the projection holds open items
+- **THEN** the response carries no `due_state` block and the operation's
+  existing terminal is unchanged
+
+#### Scenario: Previews and scans stay clean
+
+- **WHEN** `adopt_vault` runs in scan-only mode, or `maintain_memory` `fix`
+  runs with its default dry-run preview
+- **THEN** the response carries no `due_state` block
+
+#### Scenario: Unreadable review state never blocks the operation
+
+- **WHEN** the review state cannot be read while a `process_media` processing
+  invocation commits a transcript sidecar
+- **THEN** the invocation completes with its existing terminal unchanged and
+  no `due_state` block
+
+### Requirement: The dispositions view carries the envelope beside the families
+
+The dispositions review mode SHALL list the envelope's action classes in a
+block structurally separate from the signal-family rows, so the two
+vocabularies never share a column and the word `off` is never ambiguous
+between them: a family `off` is annotated review-state, an envelope `off` is
+"the agent does not initiate this class". Each envelope row SHALL carry the
+class, its ceiling, its disposition or governance-owned marker, and whether the
+disposition is fixed, derived, or overridden. If landing this changes a
+recorded response contract or moves the packaged tool-surface digest, the
+documented two-phase rollout SHALL be followed; no tool schema changes.
+
+#### Scenario: One view, two clearly separated vocabularies
+
+- **WHEN** the dispositions view is read while one family is `quiet` and one
+  envelope class is overridden
+- **THEN** the family appears in the family block with its review-state
+  disposition, the class appears in the envelope block with its ceiling and
+  override marker, and neither block contains rows of the other kind
+
+### Requirement: Resource diagnostics expose the active compute envelope
+No-allocation resource status and doctor output SHALL report the effective native CPU budget, synchronous request-worker budget, bounded model-admission posture, whether each came from a default or override, any unsafe native-thread escape hatch, the background scheduling posture, and the configured ASR device/computation policy. Collecting these fields MUST NOT import model stacks, initialize an accelerator, or start a media worker.
+
+#### Scenario: Idle status on a CPU-only host
+- **WHEN** resource status is requested before a media job has run
+- **THEN** it reports the bounded CPU posture and unresolved or CPU ASR policy
+- **AND** no model or accelerator state is created
+
+#### Scenario: Accelerator job is blocked
+- **WHEN** a durable media job is blocked by a compute-runtime failure
+- **THEN** status reports the failure class and bounded remediation
+- **AND** it does not present source-file repair as the next action

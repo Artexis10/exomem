@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Ranking auto-tune - the closed feedback loop
 
 Exomem's hybrid ranker (`RankingConfig` in `src/exomem/ranking_config.py`) self-tunes from

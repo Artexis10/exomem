@@ -31,6 +31,7 @@ param(
     [string]$PackageVersion = "",
     [ValidateSet("auto", "always", "never")]
     [string]$CudaTorch = "auto",
+    [switch]$ResumeStoppedTransition,
     [switch]$LegacyMcpCompat
 )
 
@@ -60,11 +61,70 @@ if (-not $isAdmin) {
     if ($ServiceRoot) { $relaunchArgs += @("-ServiceRoot", "`"$ServiceRoot`"") }
     if ($PackageVersion) { $relaunchArgs += @("-PackageVersion", "`"$PackageVersion`"") }
     if ($LegacyMcpCompat) { $relaunchArgs += "-LegacyMcpCompat" }
+    if ($ResumeStoppedTransition) { $relaunchArgs += "-ResumeStoppedTransition" }
     Start-Process -FilePath $hostExe -Verb RunAs -ArgumentList $relaunchArgs
     exit
 }
 
 . "$PSScriptRoot\_service-common.ps1"
+
+$script:StateRootTransitionBegan = $false
+$workerBefore = 0
+$workerAfter = 0
+$transitionReceipt = $null
+$transitionIdentity = $null
+$existingTransition = $false
+
+function Wait-ServiceState {
+    param([string]$Name, [string]$Target, [int]$TimeoutSec = 60)
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        $service = Get-Service -Name $Name -ErrorAction SilentlyContinue
+        if ($service -and $service.Status -eq $Target) { return }
+        Start-Sleep -Milliseconds 400
+    }
+    throw "Timed out waiting for $Name to reach $Target."
+}
+
+function Stop-FailedStateRootTransition {
+    if (-not $script:StateRootTransitionBegan) { return }
+    $observedWorker = Get-ExomemServiceWorkerPid -ServiceName $ServiceName
+    if ($observedWorker -and $observedWorker -ne $workerBefore) { $workerAfter = $observedWorker }
+    if ($existingTransition -and $transitionIdentity) {
+        try {
+            Publish-ExomemFailedTransitionReceipt `
+                @transitionIdentity `
+                -ObservedWorkerPid $workerAfter | Out-Null
+        } catch {
+            Write-Host "Could not update the retained transition receipt: $($_.Exception.Message)" -ForegroundColor Red
+        }
+    }
+    & $NssmPath stop $ServiceName | Out-Null
+    try {
+        if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) {
+            Wait-ServiceState -Name $ServiceName -Target 'Stopped' -TimeoutSec 30
+        }
+        if ($existingTransition) {
+            $transitionReceipt = Read-ExomemTransitionReceipt @transitionIdentity
+            Assert-ExomemStoppedResumeAuthority -ServiceName $ServiceName -Receipt $transitionReceipt
+        } else {
+            if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) {
+                Assert-ExomemServiceStopped -ServiceName $ServiceName -CapturedPids @($workerAfter) -Ports @($Port)
+            } else {
+                Assert-ExomemConfiguredPortUnbound -ServiceName $ServiceName -Port $Port
+            }
+        }
+        Write-Host "State-root transition failed; service remains stopped." -ForegroundColor Yellow
+    } catch {
+        Write-Host "Could not prove the failed transition stopped the service: $($_.Exception.Message)" -ForegroundColor Red
+    }
+}
+
+trap {
+    Stop-FailedStateRootTransition
+    Write-Host "SERVICE INSTALL FAILED: $($_.Exception.Message)" -ForegroundColor Red
+    exit 1
+}
 
 $repoRoot = (Resolve-Path "$PSScriptRoot\..").Path
 $logDir = Join-Path $repoRoot "logs"
@@ -118,11 +178,35 @@ function Set-ProcessEnvFromMap {
 
 function Set-NssmEnvironment {
     param([System.Collections.IDictionary]$Map)
-    $args = @("set", $ServiceName, "AppEnvironmentExtra")
+    # Merge by name so an in-place upgrade preserves opaque entries that are
+    # not represented in this checkout's dotenv. Never render the values.
+    $merged = [ordered]@{}
+    $key = "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName\Parameters"
+    try {
+        $parameters = Get-ItemProperty -Path $key -ErrorAction Stop
+        if ($parameters.PSObject.Properties.Name -contains "AppEnvironmentExtra") {
+            foreach ($entry in @($parameters.AppEnvironmentExtra)) {
+                $text = [string]$entry
+                $separator = $text.IndexOf('=')
+                if ($separator -gt 0) {
+                    $merged[$text.Substring(0, $separator)] = $text.Substring($separator + 1)
+                }
+            }
+        }
+    } catch {
+        $merged = [ordered]@{}
+    }
     foreach ($entry in $Map.GetEnumerator()) {
+        $merged[$entry.Key] = [string]$entry.Value
+    }
+    $args = @("set", $ServiceName, "AppEnvironmentExtra")
+    foreach ($entry in $merged.GetEnumerator()) {
         $args += "$($entry.Key)=$($entry.Value)"
     }
-    & $NssmPath @args
+    & $NssmPath @args | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to update the service environment (nssm exit $LASTEXITCODE)."
+    }
 }
 
 function Test-McpEndpoint {
@@ -182,6 +266,77 @@ function Install-ReleaseVenv {
     return $venvPython
 }
 
+# --- STATE-ROOT MAIN TRANSITION: stop/prove/install/migrate/doctor/start -------
+# An in-place install is an offline state transition. Capture the exact legacy
+# worker before stopping; SCM state alone cannot reveal an orphan after NSSM's
+# parent pid has disappeared.
+$existingService = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+$vault = Get-DotenvValue "EXOMEM_VAULT_PATH"
+if (-not $vault) {
+    throw "EXOMEM_VAULT_PATH is required in .env for explicit offline state migration."
+}
+$bindingPath = Join-Path $repoRoot ".env"
+$pinnedStateRoot = Resolve-ExomemDotenvStateRootBinding -AppDirectory $repoRoot
+if ($existingService) {
+    $existingAppDirectory = Get-ExomemServiceAppDirectory -ServiceName $ServiceName
+    if (-not $existingAppDirectory -or [System.IO.Path]::GetFullPath($existingAppDirectory) -ne [System.IO.Path]::GetFullPath($repoRoot)) {
+        throw "Existing service '$ServiceName' uses a different AppDirectory; its sticky state binding cannot be re-authored by this installer."
+    }
+    $receiptPython = Get-ExomemServicePython -ServiceName $ServiceName
+    if (-not $receiptPython) {
+        throw "Could not resolve the existing service interpreter for its durable transition receipt."
+    }
+    $oldEndpoint = Get-ExomemServiceEndpoint -ServiceName $ServiceName
+    $transitionIdentity = @{
+        PythonPath = $receiptPython
+        ServiceName = $ServiceName
+        BindingPath = $bindingPath
+        StateRoot = $pinnedStateRoot
+        VaultPath = $vault
+        TargetPort = $Port
+    }
+    $existingTransition = $true
+    if ($existingService.Status -eq 'Running') {
+        $workerBefore = Get-ExomemServiceWorkerPid -ServiceName $ServiceName
+        if (-not $workerBefore) {
+            throw "Could not capture the running service worker pid; refusing an unprovable offline migration window."
+        }
+        $listenerPidsBefore = @(Get-ExomemConfiguredListenerPids -ServiceName $ServiceName)
+        $transitionReceipt = New-ExomemTransitionReceipt @transitionIdentity `
+            -Port ([int]$oldEndpoint.Port) `
+            -WorkerPid $workerBefore `
+            -ListenerPids $listenerPidsBefore
+        $script:StateRootTransitionBegan = $true
+        Write-Host "Stopping '$ServiceName' before replacing its interpreter..."
+        & $NssmPath stop $ServiceName | Out-Null
+        Wait-ServiceState -Name $ServiceName -Target 'Stopped'
+        Assert-ExomemServiceStopped `
+            -ServiceName $ServiceName `
+            -CapturedPids $transitionReceipt.proof_pids `
+            -Ports @($transitionReceipt.port, $transitionReceipt.target_port)
+    } elseif ($ResumeStoppedTransition -and $existingService.Status -eq 'Stopped') {
+        $transitionReceipt = Read-ExomemTransitionReceipt @transitionIdentity
+        Assert-ExomemStoppedResumeAuthority -ServiceName $ServiceName -Receipt $transitionReceipt
+        $workerBefore = [int]$transitionReceipt.worker_pid
+        $script:StateRootTransitionBegan = $true
+    } else {
+        throw "Existing service '$ServiceName' must be running for first entry; use -ResumeStoppedTransition only to continue a previously failed, proven-stopped transition."
+    }
+    Set-ExomemTransitionReceiptPhase @transitionIdentity -Phase "stopped"
+} else {
+    Assert-ExomemConfiguredPortUnbound -ServiceName $ServiceName -Port $Port
+    $script:StateRootTransitionBegan = $true
+}
+
+$receiptStateRoot = if ($transitionReceipt) { [string]$transitionReceipt.state_root } else { $pinnedStateRoot }
+$pinnedStateRoot = Ensure-ExomemDotenvStateRootBinding `
+    -AppDirectory $repoRoot `
+    -ExpectedStateRoot $receiptStateRoot
+[Environment]::SetEnvironmentVariable("EXOMEM_STATE_ROOT", $pinnedStateRoot, "Process")
+if ($existingTransition) {
+    Set-ExomemTransitionReceiptPhase @transitionIdentity -Phase "bound"
+}
+
 if ($Release) {
     $python = Install-ReleaseVenv
     # Wheel-backed service venv: `resolve_log_dir()` resolves an unset
@@ -206,6 +361,14 @@ if ($Release) {
     $pinnedLogDir = $logDir
 }
 
+$installedVersion = Get-ExomemInstalledVersion -PythonPath $python
+if (-not $installedVersion) {
+    throw "The target interpreter has no importable Exomem version after installation."
+}
+if ($existingTransition) {
+    Set-ExomemTransitionReceiptPhase @transitionIdentity -Phase "installed"
+}
+
 # Pin EXOMEM_LOG_DIR explicitly rather than let the running service
 # independently re-derive its own fallback. `$pinnedLogDir` is computed per
 # install mode above to be the SAME value `resolve_log_dir()` (issue #552)
@@ -227,34 +390,41 @@ if (-not $serviceEnv.Contains("EXOMEM_LOG_DIR")) {
 $appLogDir = $serviceEnv["EXOMEM_LOG_DIR"]
 Set-ProcessEnvFromMap -Map $serviceEnv
 
-$doctorArgs = @("-m", "exomem", "doctor", "--profile", $Profile)
-$vault = Get-DotenvValue "EXOMEM_VAULT_PATH"
-if ($vault) { $doctorArgs += @("--vault", $vault) }
+$script:StateRootTransitionBegan = $true
+Write-Host "Migrating machine-local state under the proven offline window..."
+$migration = Invoke-ExomemNative -CommandArgs @(
+    $python, "-m", "exomem", "maintain", "--vault", $vault,
+    "--migrate-state", "--offline", "--json"
+)
+if ($migration.ExitCode -ne 0) {
+    throw "Offline state migration failed; '$ServiceName' remains stopped."
+}
+if ($existingTransition) {
+    Set-ExomemTransitionReceiptPhase @transitionIdentity -Phase "migrated"
+}
+
+$doctorArgs = @("-m", "exomem", "doctor", "--profile", $Profile, "--vault", $vault)
 Write-Host "Preflight: exomem doctor --profile $Profile..."
 & $python @doctorArgs
 if ($LASTEXITCODE -ne 0) {
-    throw "Doctor preflight failed for profile '$Profile'. Install the missing extras (for example: uv sync --frozen --extra embeddings) before installing the service."
+    throw "Doctor preflight failed for profile '$Profile'; '$ServiceName' remains stopped."
 }
 
-$remoteDoctorArgs = @("-m", "exomem", "doctor", "--profile", "remote")
-if ($vault) { $remoteDoctorArgs += @("--vault", $vault) }
+$remoteDoctorArgs = @("-m", "exomem", "doctor", "--profile", "remote", "--vault", $vault)
 Write-Host "Preflight: exomem doctor --profile remote..."
 & $python @remoteDoctorArgs
 if ($LASTEXITCODE -ne 0) {
-    throw "Remote doctor preflight failed. Fix the vault and OAuth environment before installing the service."
+    throw "Remote doctor preflight failed; '$ServiceName' remains stopped."
 }
 
 # Install, or reconfigure in place when already registered. `nssm install` against
 # an existing service fails, which made re-running this script -- the documented
 # way to upgrade -- unsafe, so nobody re-ran it and the service drifted 5 releases
-# behind. Every `set` below is idempotent, so the two paths converge.
-$existingService = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+# behind. Every `set` below is idempotent, so the two paths converge. Registration
+# stays after both doctor gates so a fresh failed preflight leaves no auto-start
+# service behind and the next ordinary invocation remains a fresh install.
 if ($existingService) {
     Write-Host "Service '$ServiceName' is already registered; reconfiguring in place."
-    if ($existingService.Status -ne 'Stopped') {
-        Write-Host "  stopping it first so the new interpreter is picked up..."
-        & $NssmPath stop $ServiceName | Out-Null
-    }
     & $NssmPath set $ServiceName Application $python
     & $NssmPath set $ServiceName AppParameters "-m exomem --transport streamable-http --host $BindHost --port $Port"
 } else {
@@ -272,14 +442,43 @@ if ($existingService) {
 & $NssmPath set $ServiceName Description "exomem: Obsidian Knowledge Base MCP server for mobile claude.ai"
 Set-NssmEnvironment -Map $serviceEnv
 
+if ($existingTransition) {
+    Set-ExomemTransitionReceiptPhase @transitionIdentity -Phase "doctor-passed"
+    Set-ExomemTransitionReceiptPhase @transitionIdentity -Phase "starting"
+}
+
 & $NssmPath start $ServiceName
+Wait-ServiceState -Name $ServiceName -Target 'Running'
+$workerAfter = Get-ExomemServiceWorkerPid -ServiceName $ServiceName
+if ($existingTransition) {
+    Set-ExomemTransitionReceiptPhase @transitionIdentity -Phase "starting" -ObservedPids @($workerAfter)
+}
+if ($workerBefore) {
+    Assert-ExomemServiceRestarted -Before $workerBefore -After $workerAfter -ServiceName $ServiceName
+} elseif (-not $workerAfter) {
+    throw "The new service has no observable worker process after start."
+}
+Assert-ExomemListenerOwnedByWorker -ServiceName $ServiceName -WorkerPid $workerAfter
+$verifyHost = if ($BindHost -in @("0.0.0.0", "::", "[::]")) { "127.0.0.1" } else { $BindHost }
+$healthUrl = "http://${verifyHost}:${Port}/health"
+$health = Wait-ExomemHealthVersion `
+    -HealthUrl $healthUrl `
+    -ExpectedVersion $installedVersion `
+    -TimeoutSec 90
+if ($existingTransition) {
+    Set-ExomemTransitionReceiptPhase @transitionIdentity -Phase "started"
+}
 
 try {
     Test-McpEndpoint -HostName $BindHost -EndpointPort $Port
 } catch {
-    & $NssmPath stop $ServiceName | Out-Null
-    throw "Service endpoint verification failed and '$ServiceName' was stopped: $_"
+    throw "Service endpoint verification failed: $_"
 }
+if ($existingTransition) {
+    Set-ExomemTransitionReceiptPhase @transitionIdentity -Phase "accepted"
+    Remove-ExomemTransitionReceipt @transitionIdentity
+}
+$script:StateRootTransitionBegan = $false
 
 # Grant the invoking user start/stop rights on this service so future restarts
 # don't require UAC. The ACL keeps SYSTEM/Admins/AuthenticatedUsers as-is and

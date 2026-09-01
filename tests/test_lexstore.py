@@ -290,7 +290,7 @@ def test_bounded_delete_witness_does_not_bless_interleaved_live_event(tmp_path, 
             _write_page(tmp_path, "Knowledge Base/b.md", "nectarspinfresh")
             os.utime(b, ns=(before.st_atime_ns, before.st_mtime_ns))
             freshness.on_files_changed(tmp_path, changed=[b])
-            remember(*args, **kwargs)
+            return remember(*args, **kwargs)
 
         monkeypatch.setattr(store, "_remember_live_witnesses", _interleave_b)
         assert store.delete_rel_paths(["Knowledge Base/a.md"])
@@ -374,6 +374,677 @@ def test_bounded_delete_witness_rejects_prior_uncovered_live_event(tmp_path):
         hits = lexstore.search_bm25(tmp_path, "greencircuitfresh", k=3, scope="kb")
         assert hits and hits[0][0] == "Knowledge Base/b.md"
         assert lexstore.search_bm25(tmp_path, "greencircuitstale", k=3, scope="kb") == []
+    finally:
+        freshness.clear()
+
+
+def test_reconciled_missed_event_persists_catalog_proof_across_restart(
+    tmp_path, monkeypatch
+):
+    """A periodic-walk repair is an exact delta, not a reason to forget proof.
+
+    The watcher can miss a filesystem event and discover it in its safety-net
+    reconcile.  Once that exact changed/deleted set has been replayed into the
+    lexical catalog, a fresh process must be able to trust the persisted
+    checkpoint instead of launching a whole-vault rebuild.
+    """
+    from exomem import freshness
+    from exomem import vault as vault_module
+
+    freshness.clear()
+    monkeypatch.setattr(lexstore, "_admit_after_bounded_runtime_repair", lambda *_: None)
+    monkeypatch.setattr(lexstore, "_schedule_runtime_catalog_repair", lambda *_a, **_k: None)
+    try:
+        page = _write_page(tmp_path, "Knowledge Base/a.md", "beforemissedevent")
+        kb_dir = tmp_path / "Knowledge Base"
+
+        def _seed() -> None:
+            freshness.seed(
+                tmp_path,
+                "kb",
+                (
+                    (str(path), freshness.stat_signature(path))
+                    for path in find_module._walk_md(kb_dir)
+                ),
+            )
+            freshness.seed(
+                tmp_path,
+                "vault",
+                (
+                    (str(path), freshness.stat_signature(path))
+                    for path in vault_module.walk_vault_md(tmp_path)
+                ),
+            )
+
+        _seed()
+        assert lexstore.search_bm25(tmp_path, "beforemissedevent", k=3, scope="kb")
+
+        _write_page(tmp_path, "Knowledge Base/a.md", "aftermissedevent")
+        kb_drift = freshness.reconcile(
+            tmp_path,
+            "kb",
+            (
+                (str(path), freshness.stat_signature(path))
+                for path in find_module._walk_md(kb_dir)
+            ),
+        )
+        vault_drift = freshness.reconcile(
+            tmp_path,
+            "vault",
+            (
+                (str(path), freshness.stat_signature(path))
+                for path in vault_module.walk_vault_md(tmp_path)
+            ),
+        )
+        assert kb_drift.changed == [str(page)]
+        assert vault_drift.changed == [str(page)]
+
+        assert lexstore.get_store(tmp_path).apply_watcher_batch([page], [])
+
+        # Simulate a process restart: discard every in-memory witness and mint
+        # a fresh registry instance from disk.  Read-only admission must still
+        # accept the persisted catalog without scheduling or performing repair.
+        lexstore.clear_stores()
+        freshness.clear()
+        _seed()
+        assert (
+            lexstore.runtime_retrieval_catalog_proof(
+                tmp_path,
+                schedule_repair=False,
+            )
+            is not None
+        )
+        assert lexstore.search_bm25(tmp_path, "aftermissedevent", k=3, scope="kb")
+        assert lexstore.search_bm25(tmp_path, "beforemissedevent", k=3, scope="kb") == []
+    finally:
+        freshness.clear()
+
+
+def test_reconciled_mixed_walk_cannot_bless_stale_catalog(
+    tmp_path, monkeypatch
+):
+    """A reconcile delta needs a second source proof before it is authoritative."""
+    from exomem import freshness
+    from exomem import vault as vault_module
+
+    freshness.clear()
+    monkeypatch.setattr(lexstore, "_admit_after_bounded_runtime_repair", lambda *_: None)
+    monkeypatch.setattr(lexstore, "_schedule_runtime_catalog_repair", lambda *_a, **_k: None)
+    try:
+        a = _write_page(tmp_path, "Knowledge Base/a.md", "stalewalkalpha")
+        b = _write_page(tmp_path, "Knowledge Base/b.md", "stalewalkbeta")
+        kb_dir = tmp_path / "Knowledge Base"
+        freshness.seed(
+            tmp_path,
+            "kb",
+            (
+                (str(path), freshness.stat_signature(path))
+                for path in find_module._walk_md(kb_dir)
+            ),
+        )
+        freshness.seed(
+            tmp_path,
+            "vault",
+            (
+                (str(path), freshness.stat_signature(path))
+                for path in vault_module.walk_vault_md(tmp_path)
+            ),
+        )
+        assert lexstore.search_bm25(tmp_path, "stalewalkalpha", k=3, scope="kb")
+        store = lexstore.get_store(tmp_path)
+
+        # Model an off-lock walk that already statted A, then sees B's missed
+        # change, while a second missed change lands on A after its stat.
+        a_old = freshness.stat_signature(a)
+        _write_page(tmp_path, "Knowledge Base/b.md", "freshwalkbeta")
+        mixed = [
+            (str(a), a_old),
+            (str(b), freshness.stat_signature(b)),
+        ]
+        _write_page(tmp_path, "Knowledge Base/a.md", "freshwalkalpha")
+        assert freshness.reconcile(tmp_path, "kb", mixed).changed == [str(b)]
+        assert freshness.reconcile(tmp_path, "vault", mixed).changed == [str(b)]
+
+        assert store.apply_watcher_batch([b], [])
+
+        # The registry target itself is a mixed, superseded walk. Replaying B
+        # cannot make it an admissible catalogue: a fresh source proof sees A's
+        # later change and refuses the checkpoint.
+        assert (
+            lexstore.runtime_retrieval_catalog_proof(
+                tmp_path,
+                schedule_repair=False,
+            )
+            is None
+        )
+    finally:
+        freshness.clear()
+
+
+def _seed_live_scopes(vault_root: Path) -> None:
+    """Seed both live scopes exactly the way the watcher startup does."""
+    from exomem import freshness
+    from exomem import vault as vault_module
+
+    kb_dir = vault_root / "Knowledge Base"
+    freshness.seed(
+        vault_root,
+        "kb",
+        (
+            (str(path), freshness.stat_signature(path))
+            for path in find_module._walk_md(kb_dir)
+        ),
+    )
+    freshness.seed(
+        vault_root,
+        "vault",
+        (
+            (str(path), freshness.stat_signature(path))
+            for path in vault_module.walk_vault_md(vault_root)
+        ),
+    )
+
+
+def _reconcile_live_scopes(vault_root: Path) -> list:
+    """Run the safety-net reconcile over fresh walks for both live scopes."""
+    from exomem import freshness
+    from exomem import vault as vault_module
+
+    kb_dir = vault_root / "Knowledge Base"
+    return [
+        freshness.reconcile(
+            vault_root,
+            "kb",
+            (
+                (str(path), freshness.stat_signature(path))
+                for path in find_module._walk_md(kb_dir)
+            ),
+        ),
+        freshness.reconcile(
+            vault_root,
+            "vault",
+            (
+                (str(path), freshness.stat_signature(path))
+                for path in vault_module.walk_vault_md(vault_root)
+            ),
+        ),
+    ]
+
+
+def test_reconcile_source_proof_walk_never_holds_publication_barrier(
+    tmp_path, monkeypatch
+):
+    """The tainted-delta source proof is O(vault) work: it must run before the
+    publication barrier is taken, never while it is held, so a watcher batch
+    can never turn the barrier hold into a whole-vault scan."""
+    from exomem import freshness
+    from exomem.vault import VaultLockError, vault_creation_lock
+
+    freshness.clear()
+    monkeypatch.setattr(lexstore, "_admit_after_bounded_runtime_repair", lambda *_: None)
+    monkeypatch.setattr(lexstore, "_schedule_runtime_catalog_repair", lambda *_a, **_k: None)
+    try:
+        page = _write_page(tmp_path, "Knowledge Base/a.md", "barrierwalkbefore")
+        _seed_live_scopes(tmp_path)
+        assert lexstore.search_bm25(tmp_path, "barrierwalkbefore", k=3, scope="kb")
+        store = lexstore.get_store(tmp_path)
+
+        _write_page(tmp_path, "Knowledge Base/a.md", "barrierwalkafter")
+        for drift in _reconcile_live_scopes(tmp_path):
+            assert drift.changed == [str(page)]
+
+        real_walk = store._walk_entries
+        barrier_states: list[str] = []
+
+        def probing_walk():
+            # Same-thread probe: while THIS thread holds the publication
+            # barrier, a nested acquire raises; off-barrier it succeeds.
+            try:
+                with vault_creation_lock(
+                    tmp_path, "lexical-catalog-publication", timeout=0.2
+                ):
+                    barrier_states.append("free")
+            except VaultLockError:
+                barrier_states.append("held")
+            return real_walk()
+
+        monkeypatch.setattr(store, "_walk_entries", probing_walk)
+        assert store.apply_watcher_batch([page], [])
+        assert barrier_states, "replaying a tainted delta must prove the source"
+        assert barrier_states == ["free"] * len(barrier_states)
+    finally:
+        freshness.clear()
+
+
+def test_tainted_scope_refusal_still_blesses_untainted_scope(tmp_path, monkeypatch):
+    """Per-scope refusal: one unprovable tainted scope must not drop the other
+    scope's exact observed watcher witness."""
+    from exomem import freshness
+
+    freshness.clear()
+    monkeypatch.setattr(lexstore, "_admit_after_bounded_runtime_repair", lambda *_: None)
+    monkeypatch.setattr(lexstore, "_schedule_runtime_catalog_repair", lambda *_a, **_k: None)
+    try:
+        a = _write_page(tmp_path, "Knowledge Base/a.md", "scopedblessold")
+        v = _write_page(tmp_path, "Reference/v.md", "vaultonlybefore")
+        _seed_live_scopes(tmp_path)
+        assert lexstore.search_bm25(tmp_path, "scopedblessold", k=3, scope="kb")
+        store = lexstore.get_store(tmp_path)
+
+        # A vault-only missed event discovered by the safety net taints only
+        # the vault scope's bridge.
+        _write_page(tmp_path, "Reference/v.md", "vaultonlymissed")
+        kb_drift, vault_drift = _reconcile_live_scopes(tmp_path)
+        assert kb_drift.changed == []
+        assert vault_drift.changed == [str(v)]
+        # A second unobserved edit makes that tainted target unprovable: the
+        # registry retains the superseded signature, so no fresh source walk
+        # can ever match its triple.
+        _write_page(tmp_path, "Reference/v.md", "vaultonlynewer")
+
+        # An exact observed watcher event on the kb page.
+        _write_page(tmp_path, "Knowledge Base/a.md", "scopedblessnew")
+        freshness.on_files_changed(tmp_path, changed=[a])
+
+        assert store.apply_watcher_batch([a, v], [])
+
+        kb_ready = store.catalog_readiness(
+            "kb",
+            freshness.triple(tmp_path, "kb"),
+            allow_delta=False,
+            schedule_repair=False,
+        )
+        vault_ready = store.catalog_readiness(
+            "vault",
+            freshness.triple(tmp_path, "vault"),
+            allow_delta=False,
+            schedule_repair=False,
+        )
+        assert kb_ready.complete is True
+        assert vault_ready.complete is False
+    finally:
+        freshness.clear()
+
+
+def test_source_proof_invalidated_by_intervening_event_refuses_then_converges(
+    tmp_path, monkeypatch
+):
+    """An event landing between the off-barrier proof and the barrier fails the
+    proof closed: rows still apply, no request can sneak the bless in, and the
+    next watcher batch converges."""
+    from exomem import freshness
+
+    freshness.clear()
+    monkeypatch.setattr(lexstore, "_admit_after_bounded_runtime_repair", lambda *_: None)
+    monkeypatch.setattr(lexstore, "_schedule_runtime_catalog_repair", lambda *_a, **_k: None)
+    monkeypatch.setattr(lexstore, "_schedule_repair", lambda *_a, **_k: None)
+    try:
+        page = _write_page(tmp_path, "Knowledge Base/a.md", "intervenebefore")
+        _seed_live_scopes(tmp_path)
+        assert lexstore.search_bm25(tmp_path, "intervenebefore", k=3, scope="kb")
+        store = lexstore.get_store(tmp_path)
+
+        _write_page(tmp_path, "Knowledge Base/a.md", "intervenemissed")
+        for drift in _reconcile_live_scopes(tmp_path):
+            assert drift.changed == [str(page)]
+
+        real_apply = store._apply_paths_locked
+        fired = False
+
+        def _interleave_event(*args, **kwargs):
+            nonlocal fired
+            if not fired:
+                fired = True
+                _write_page(tmp_path, "Knowledge Base/a.md", "intervenenewest")
+                freshness.on_files_changed(tmp_path, changed=[page])
+            return real_apply(*args, **kwargs)
+
+        monkeypatch.setattr(store, "_apply_paths_locked", _interleave_event)
+        assert store.apply_watcher_batch([page], [])
+        assert fired
+
+        # The first attempt applied rows but must NOT have blessed: its proof
+        # was prepared against the pre-event registry state.
+        kb_after_first = store.catalog_readiness(
+            "kb",
+            freshness.triple(tmp_path, "kb"),
+            allow_delta=False,
+            schedule_repair=False,
+        )
+        assert kb_after_first.complete is False
+
+        # A read-only request cannot sneak the refused bless in either: a
+        # tainted checkpoint never enters the in-process witness map.
+        assert (
+            lexstore.search_bm25(
+                tmp_path, "intervenenewest", k=3, scope="kb", repair=False
+            )
+            is None
+        )
+        kb_after_probe = store.catalog_readiness(
+            "kb",
+            freshness.triple(tmp_path, "kb"),
+            allow_delta=False,
+            schedule_repair=False,
+        )
+        assert kb_after_probe.complete is False
+        assert lexstore.source_proof_telemetry()["ticket_stale"] >= 1
+
+        # The next watcher batch re-proves against the current registry state
+        # and converges without any rebuild.
+        monkeypatch.setattr(store, "_apply_paths_locked", real_apply)
+        assert store.apply_watcher_batch([page], [])
+        assert (
+            lexstore.runtime_retrieval_catalog_proof(tmp_path, schedule_repair=False)
+            is not None
+        )
+    finally:
+        freshness.clear()
+
+
+def test_source_proof_walk_failure_applies_rows_and_converges_without_rebuild(
+    tmp_path, monkeypatch
+):
+    """A failing proof walk fails closed on the bless ONLY: the batch's rows
+    still land durably, nothing schedules an O(vault) rebuild, and the next
+    batch converges once the walk works again."""
+    from exomem import freshness
+
+    freshness.clear()
+    monkeypatch.setattr(lexstore, "_admit_after_bounded_runtime_repair", lambda *_: None)
+    scheduled = {"n": 0}
+    monkeypatch.setattr(
+        lexstore,
+        "_schedule_runtime_catalog_repair",
+        lambda *_a, **_k: scheduled.__setitem__("n", scheduled["n"] + 1),
+    )
+    try:
+        page = _write_page(tmp_path, "Knowledge Base/a.md", "walkfailbefore")
+        _seed_live_scopes(tmp_path)
+        assert lexstore.search_bm25(tmp_path, "walkfailbefore", k=3, scope="kb")
+        store = lexstore.get_store(tmp_path)
+
+        rebuilds = {"n": 0}
+        real_rebuild = lexstore.LexicalStore._rebuild
+
+        def _counting_rebuild(self, conn):
+            rebuilds["n"] += 1
+            return real_rebuild(self, conn)
+
+        monkeypatch.setattr(lexstore.LexicalStore, "_rebuild", _counting_rebuild)
+
+        _write_page(tmp_path, "Knowledge Base/a.md", "walkfailafter")
+        for drift in _reconcile_live_scopes(tmp_path):
+            assert drift.changed == [str(page)]
+
+        real_walk = store._walk_entries
+        failures = {"n": 0}
+
+        def _failing_walk():
+            if failures["n"] == 0:
+                failures["n"] += 1
+                raise OSError("simulated stat failure during the proof walk")
+            return real_walk()
+
+        monkeypatch.setattr(store, "_walk_entries", _failing_walk)
+        scheduled["n"] = 0
+        assert store.apply_watcher_batch([page], []) is True
+        assert failures["n"] == 1
+        assert scheduled["n"] == 0
+
+        # Rows are durable even though the bless was refused.
+        conn = sqlite3.connect(lexstore.lexical_path(tmp_path))
+        try:
+            row = conn.execute(
+                "SELECT mtime_ns FROM pages WHERE path = ?", ("Knowledge Base/a.md",)
+            ).fetchone()
+        finally:
+            conn.close()
+        assert row is not None
+        assert row[0] == page.stat().st_mtime_ns
+        assert lexstore.source_proof_telemetry()["walk_failed"] >= 1
+
+        assert store.apply_watcher_batch([page], []) is True
+        assert (
+            lexstore.runtime_retrieval_catalog_proof(tmp_path, schedule_repair=False)
+            is not None
+        )
+        assert rebuilds["n"] == 0
+    finally:
+        freshness.clear()
+
+
+def test_walk_refuted_stale_proof_cannot_bless(tmp_path, monkeypatch):
+    """A prepared proof must never outlive its refutation.
+
+    Two guards carry this: a walk that refutes a checkpoint EVICTS any stale
+    stored proof for that scope (the newest walk's verdict is authoritative),
+    and a proof never outlives its own batch (cleared on every exit path).
+    Act 1 pins the cross-batch leak: a batch fails transiently after its proof
+    was prepared, the source mutates unobserved (generation unchanged), and
+    the next batch's walk refutes that exact checkpoint — nothing may bless.
+    Act 2 pins the intra-batch leak: a concurrent prepare refutes the target
+    while the first batch already holds the barrier with its proof pending.
+    """
+    from exomem import freshness
+
+    freshness.clear()
+    monkeypatch.setattr(lexstore, "_admit_after_bounded_runtime_repair", lambda *_: None)
+    monkeypatch.setattr(lexstore, "_schedule_runtime_catalog_repair", lambda *_a, **_k: None)
+    try:
+        page = _write_page(tmp_path, "Knowledge Base/a.md", "staleproofbase")
+        _seed_live_scopes(tmp_path)
+        assert lexstore.search_bm25(tmp_path, "staleproofbase", k=3, scope="kb")
+        store = lexstore.get_store(tmp_path)
+
+        # --- Act 1 (cross-batch): batch N proves checkpoint C, then fails
+        # transiently AFTER the proof was prepared.
+        _write_page(tmp_path, "Knowledge Base/a.md", "staleproofmissed")
+        for drift in _reconcile_live_scopes(tmp_path):
+            assert drift.changed == [str(page)]
+
+        real_apply = store._apply_paths_locked
+        boom = {"armed": True}
+
+        def _failing_apply(*args, **kwargs):
+            if boom["armed"]:
+                boom["armed"] = False
+                raise sqlite3.OperationalError("simulated transient batch failure")
+            return real_apply(*args, **kwargs)
+
+        monkeypatch.setattr(store, "_apply_paths_locked", _failing_apply)
+        blessed_before = lexstore.source_proof_telemetry()["blessed"]
+        assert store.apply_watcher_batch([page], []) is False
+        leaked_after_failure = dict(store._reconciled_source_proofs)
+
+        # Unobserved edit: no event, no reconcile — the registry keeps the
+        # pre-edit signature, so the NEXT walk refutes checkpoint C.
+        _write_page(tmp_path, "Knowledge Base/a.md", "staleproofunobserved")
+
+        assert store.apply_watcher_batch([page], []) is True
+        assert lexstore.source_proof_telemetry()["blessed"] == blessed_before
+        for scope in ("kb", "vault"):
+            readiness = store.catalog_readiness(
+                scope,
+                freshness.triple(tmp_path, scope),
+                allow_delta=False,
+                schedule_repair=False,
+            )
+            assert readiness.complete is False
+
+        # --- Act 2 (intra-batch): while a batch holds the barrier with its
+        # own proof pending, a concurrent prepare observes newer truth and
+        # refutes that exact target. The refutation must evict the pending
+        # proof; the batch must refuse, never bless.
+        for drift in _reconcile_live_scopes(tmp_path):
+            assert drift.changed == [str(page)]
+        interleaved = {"fired": False}
+
+        def _interleave_refuting_prepare(*args, **kwargs):
+            if not interleaved["fired"]:
+                interleaved["fired"] = True
+                _write_page(tmp_path, "Knowledge Base/a.md", "staleproofnewest")
+                store._prepare_reconcile_source_proof([page], [])
+            return real_apply(*args, **kwargs)
+
+        monkeypatch.setattr(store, "_apply_paths_locked", _interleave_refuting_prepare)
+        blessed_before = lexstore.source_proof_telemetry()["blessed"]
+        assert store.apply_watcher_batch([page], []) is True
+        assert interleaved["fired"]
+        assert lexstore.source_proof_telemetry()["blessed"] == blessed_before
+        for scope in ("kb", "vault"):
+            readiness = store.catalog_readiness(
+                scope,
+                freshness.triple(tmp_path, scope),
+                allow_delta=False,
+                schedule_repair=False,
+            )
+            assert readiness.complete is False
+
+        # A proof never outlives its batch — success, refusal, or failure.
+        assert leaked_after_failure == {}
+        assert store._reconciled_source_proofs == {}
+    finally:
+        freshness.clear()
+
+
+def test_tainted_bridge_readiness_never_walks_and_schedules_repair(
+    tmp_path, monkeypatch
+):
+    """Property-7 pin: readiness over a pending tainted bridge stays a
+    read-only O(1) proof — stale plus a scheduled repair, never a vault walk."""
+    from exomem import freshness
+
+    freshness.clear()
+    monkeypatch.setattr(lexstore, "_admit_after_bounded_runtime_repair", lambda *_: None)
+    scheduled = {"n": 0}
+    monkeypatch.setattr(
+        lexstore,
+        "_schedule_runtime_catalog_repair",
+        lambda *_a, **_k: scheduled.__setitem__("n", scheduled["n"] + 1),
+    )
+    try:
+        page = _write_page(tmp_path, "Knowledge Base/a.md", "readinesswalkfree")
+        _seed_live_scopes(tmp_path)
+        assert lexstore.search_bm25(tmp_path, "readinesswalkfree", k=3, scope="kb")
+        store = lexstore.get_store(tmp_path)
+
+        _write_page(tmp_path, "Knowledge Base/a.md", "readinesswalkdrift")
+        for drift in _reconcile_live_scopes(tmp_path):
+            assert drift.changed == [str(page)]
+
+        def _forbidden_walk():
+            raise AssertionError("readiness must never walk the vault")
+
+        monkeypatch.setattr(store, "_walk_entries", _forbidden_walk)
+        scheduled["n"] = 0
+        for scope in ("kb", "vault"):
+            readiness = store.catalog_readiness(scope, freshness.triple(tmp_path, scope))
+            assert readiness.status == "stale"
+            assert readiness.complete is False
+        assert scheduled["n"] >= 1
+    finally:
+        freshness.clear()
+
+
+def test_uncovered_tainted_delta_does_not_pay_a_proof_walk(tmp_path, monkeypatch):
+    """Walk only when a bless could result: a batch that does not cover the
+    tainted delta cannot bless it, so it must not pay the O(vault) proof walk
+    either (ordinary watcher batches stay O(batch))."""
+    from exomem import freshness
+
+    freshness.clear()
+    monkeypatch.setattr(lexstore, "_admit_after_bounded_runtime_repair", lambda *_: None)
+    monkeypatch.setattr(lexstore, "_schedule_runtime_catalog_repair", lambda *_a, **_k: None)
+    try:
+        a = _write_page(tmp_path, "Knowledge Base/a.md", "uncoveredwalkold")
+        v = _write_page(tmp_path, "Reference/v.md", "uncoveredvaultonly")
+        _seed_live_scopes(tmp_path)
+        assert lexstore.search_bm25(tmp_path, "uncoveredwalkold", k=3, scope="kb")
+        store = lexstore.get_store(tmp_path)
+
+        # Vault-only missed event discovered by the safety net.
+        _write_page(tmp_path, "Reference/v.md", "uncoveredvaultmissed")
+        kb_drift, vault_drift = _reconcile_live_scopes(tmp_path)
+        assert kb_drift.changed == []
+        assert vault_drift.changed == [str(v)]
+
+        # An ordinary observed watcher event on the kb page only.
+        _write_page(tmp_path, "Knowledge Base/a.md", "uncoveredwalknew")
+        freshness.on_files_changed(tmp_path, changed=[a])
+
+        walks = {"n": 0}
+        real_walk = store._walk_entries
+
+        def _counting_walk():
+            walks["n"] += 1
+            return real_walk()
+
+        monkeypatch.setattr(store, "_walk_entries", _counting_walk)
+        # The batch names only `a`; the vault scope's tainted delta also
+        # carries `v`, so no bless can result there and no walk is owed.
+        assert store.apply_watcher_batch([a], [])
+        assert walks["n"] == 0
+
+        kb_ready = store.catalog_readiness(
+            "kb",
+            freshness.triple(tmp_path, "kb"),
+            allow_delta=False,
+            schedule_repair=False,
+        )
+        vault_ready = store.catalog_readiness(
+            "vault",
+            freshness.triple(tmp_path, "vault"),
+            allow_delta=False,
+            schedule_repair=False,
+        )
+        assert kb_ready.complete is True
+        assert vault_ready.complete is False
+    finally:
+        freshness.clear()
+
+
+def test_source_proof_telemetry_is_stable_and_content_free(tmp_path, monkeypatch):
+    """Source-proof telemetry is a stable counter set: ints only, no vault
+    paths or note content, reset by `clear_stores`."""
+    from exomem import freshness
+
+    freshness.clear()
+    monkeypatch.setattr(lexstore, "_admit_after_bounded_runtime_repair", lambda *_: None)
+    monkeypatch.setattr(lexstore, "_schedule_runtime_catalog_repair", lambda *_a, **_k: None)
+    try:
+        page = _write_page(tmp_path, "Knowledge Base/a.md", "telemetrybefore")
+        _seed_live_scopes(tmp_path)
+        assert lexstore.search_bm25(tmp_path, "telemetrybefore", k=3, scope="kb")
+        store = lexstore.get_store(tmp_path)
+
+        _write_page(tmp_path, "Knowledge Base/a.md", "telemetryafter")
+        for drift in _reconcile_live_scopes(tmp_path):
+            assert drift.changed == [str(page)]
+        assert store.apply_watcher_batch([page], [])
+
+        telemetry = lexstore.source_proof_telemetry()
+        assert set(telemetry) == {
+            "prepared",
+            "proof_mismatch",
+            "walk_failed",
+            "ticket_stale",
+            "proof_missing",
+            "blessed",
+        }
+        assert all(type(value) is int for value in telemetry.values())
+        assert telemetry["prepared"] >= 1
+        assert telemetry["blessed"] >= 1
+        rendered = repr(telemetry)
+        assert str(tmp_path) not in rendered
+        assert "Knowledge Base" not in rendered
+        # The accessor returns a copy; mutating it cannot poison the counters.
+        telemetry["blessed"] = 10_000
+        assert lexstore.source_proof_telemetry()["blessed"] != 10_000
+        lexstore.clear_stores()
+        assert all(
+            value == 0 for value in lexstore.source_proof_telemetry().values()
+        )
     finally:
         freshness.clear()
 
@@ -710,6 +1381,79 @@ def test_bm25_vault_scope_reaches_outside_kb(tmp_path):
     assert kb_hits == []
     vault_hits = lexstore.search_bm25(tmp_path, "curator", k=5, scope="vault")
     assert vault_hits and vault_hits[0][0] == "Projects/out.md"
+
+
+def test_emitted_parent_hints_return_every_scoped_path(tmp_path):
+    parent = _write_page(tmp_path, "Knowledge Base/media/demo.mp4.md", "transcript")
+    child = _write_page(
+        tmp_path,
+        "Knowledge Base/media/demo.mp4.frames/scene-000-005.000.jpg.md",
+        "frame OCR",
+    )
+    child.write_text(
+        "---\n"
+        "type: source\n"
+        "parent_media: Knowledge Base/media/demo.mp4\n"
+        "evidence_file: Knowledge Base/media/demo.mp4.frames/scene-000-005.000.jpg\n"
+        "---\n# frame\n\nframe OCR\n",
+        encoding="utf-8",
+    )
+    _write_page(tmp_path, "Projects/ordinary.md", "outside scope")
+
+    # Establish the sidecar through its normal maintenance seam, then query the
+    # readiness-bound normal-table catalog directly.
+    assert lexstore.search_bm25(tmp_path, "transcript", k=3, scope="kb")
+    result = lexstore.emitted_parent_hints_result(
+        tmp_path,
+        {
+            parent.relative_to(tmp_path).as_posix(),
+            child.relative_to(tmp_path).as_posix(),
+        },
+        scope="kb",
+    )
+
+    assert result.readiness.complete
+    assert result.value == {
+        "Knowledge Base/media/demo.mp4.md": None,
+        "Knowledge Base/media/demo.mp4.frames/scene-000-005.000.jpg.md": "Knowledge Base/media/demo.mp4.md",
+    }
+
+
+def test_emitted_parent_hints_use_json_for_large_path_sets(tmp_path):
+    paths = {
+        f"Knowledge Base/large/page-{number:04d}.md"
+        for number in range(1_100)
+    }
+    for rel in paths:
+        _write_page(tmp_path, rel, "ordinary page")
+
+    assert lexstore.search_bm25(tmp_path, "ordinary", k=3, scope="kb")
+    result = lexstore.emitted_parent_hints_result(tmp_path, paths, scope="kb")
+
+    assert result.readiness.complete
+    assert result.value == {path: None for path in paths}
+
+
+def test_emitted_parent_hints_missing_row_is_incomplete(tmp_path):
+    known = _write_page(tmp_path, "Knowledge Base/known.md", "known page")
+    out_of_scope = _write_page(tmp_path, "Projects/out-of-scope.md", "outside page")
+    assert lexstore.search_bm25(tmp_path, "known", k=3, scope="kb")
+
+    result = lexstore.emitted_parent_hints_result(
+        tmp_path,
+        {known.relative_to(tmp_path).as_posix(), "Knowledge Base/missing.md"},
+        scope="kb",
+    )
+
+    assert not result.readiness.complete
+    assert result.readiness.status == "stale"
+    assert result.value is None
+
+    scoped_out = lexstore.emitted_parent_hints_result(
+        tmp_path, {out_of_scope.relative_to(tmp_path).as_posix()}, scope="kb"
+    )
+    assert not scoped_out.readiness.complete
+    assert scoped_out.value is None
 
 
 # ---------------------------------------------------------------- substring primitive

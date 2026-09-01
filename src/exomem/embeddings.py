@@ -3,8 +3,8 @@
 Loads `BAAI/bge-base-en-v1.5` lazily (heavy import — torch +
 sentence-transformers stays off the keyword-mode hot path). Chunks each
 KB page paragraph-wise with title prepended, normalizes vectors so
-cosine = dot product, and persists to a per-machine sqlite sidecar at
-`<vault>/Knowledge Base/.embeddings.sqlite`.
+cosine = dot product, and persists to a per-machine sqlite sidecar
+(`.embeddings.sqlite` under the machine-local state root; see `state_paths`).
 
 Sidecar lives outside `_Schema/` deliberately:
 - Dotfile → Obsidian Sync ignores it (each machine maintains its own)
@@ -29,7 +29,15 @@ from typing import Any, BinaryIO
 
 import numpy as np
 
-from . import accel, embedding_backend, index_paths, model_cache, recall_policy, vecstore
+from . import (
+    accel,
+    embedding_backend,
+    index_paths,
+    model_cache,
+    recall_policy,
+    runtime_resources,
+    vecstore,
+)
 from .clip_index import CLIP_DIM, ClipIndex
 from .embedding_index import VECTOR_DIM, EmbeddingIndex
 from .vector_index_common import vec_gate as _vec_gate
@@ -223,34 +231,37 @@ def get_model():
     for the same reason this function did — a lean install must not pay it.
     """
     global _MODEL
-    if _MODEL is not None:
-        return _MODEL
-    with _MODEL_LOCK:
+    with runtime_resources.model_execution():
         if _MODEL is not None:
             return _MODEL
-        _MODEL = embedding_backend.load_encoder(MODEL_NAME)
-    BGE_GUARD.touch()  # start the idle clock at load, not epoch 0
-    return _MODEL
+        with _MODEL_LOCK:
+            if _MODEL is not None:
+                return _MODEL
+            _MODEL = embedding_backend.load_encoder(MODEL_NAME)
+        BGE_GUARD.touch()  # start the idle clock at load, not epoch 0
+        return _MODEL
 
 
 def get_reranker():
     """Lazy cross-encoder reranker sharing the configured text-path device."""
     global _RERANKER
-    if _RERANKER is not None:
-        return _RERANKER
-    with _RERANKER_LOCK:
+    with runtime_resources.model_execution():
         if _RERANKER is not None:
             return _RERANKER
-        from sentence_transformers import CrossEncoder
+        with _RERANKER_LOCK:
+            if _RERANKER is not None:
+                return _RERANKER
+            runtime_resources.configure_torch()
+            from sentence_transformers import CrossEncoder
 
-        device = accel.select_device(override_env="EXOMEM_EMBED_DEVICE")
-        log.info("loading reranker %s on %s", RERANKER_NAME, device)
-        _RERANKER = model_cache.load_offline_first(
-            RERANKER_NAME,
-            lambda **kw: CrossEncoder(RERANKER_NAME, device=device, **kw),
-        )
-    RERANKER_GUARD.touch()
-    return _RERANKER
+            device = accel.select_device(override_env="EXOMEM_EMBED_DEVICE")
+            log.info("loading reranker %s on %s", RERANKER_NAME, device)
+            _RERANKER = model_cache.load_offline_first(
+                RERANKER_NAME,
+                lambda **kw: CrossEncoder(RERANKER_NAME, device=device, **kw),
+            )
+        RERANKER_GUARD.touch()
+        return _RERANKER
 
 
 # Run bge/CLIP in fp16 on Apple Silicon (MPS): ~half the memory and faster encodes, and
@@ -295,24 +306,26 @@ def _clip_device() -> str:
 def get_clip_model():
     """Lazy CLIP singleton (encodes BOTH images and text). Device via _clip_device()."""
     global _CLIP_MODEL
-    if _CLIP_MODEL is not None:
-        return _CLIP_MODEL
-    with _CLIP_LOCK:
+    with runtime_resources.model_execution():
         if _CLIP_MODEL is not None:
             return _CLIP_MODEL
-        from sentence_transformers import SentenceTransformer
+        with _CLIP_LOCK:
+            if _CLIP_MODEL is not None:
+                return _CLIP_MODEL
+            runtime_resources.configure_torch()
+            from sentence_transformers import SentenceTransformer
 
-        device = _clip_device()
-        log.info("loading CLIP model %s on %s", CLIP_MODEL_NAME, device)
-        _CLIP_MODEL = _maybe_half(
-            model_cache.load_offline_first(
-                CLIP_MODEL_NAME,
-                lambda **kw: SentenceTransformer(CLIP_MODEL_NAME, device=device, **kw),
-            ),
-            device,
-        )
-    CLIP_GUARD.touch()
-    return _CLIP_MODEL
+            device = _clip_device()
+            log.info("loading CLIP model %s on %s", CLIP_MODEL_NAME, device)
+            _CLIP_MODEL = _maybe_half(
+                model_cache.load_offline_first(
+                    CLIP_MODEL_NAME,
+                    lambda **kw: SentenceTransformer(CLIP_MODEL_NAME, device=device, **kw),
+                ),
+                device,
+            )
+        CLIP_GUARD.touch()
+        return _CLIP_MODEL
 
 
 def embed_image(path: Path) -> np.ndarray:
@@ -328,7 +341,7 @@ def embed_image(path: Path) -> np.ndarray:
         model = get_clip_model()
     except ImportError as e:
         raise ClipUnavailable(f"sentence-transformers not installed: {e}") from e
-    with Image.open(path) as img, CLIP_GUARD.active():
+    with Image.open(path) as img, CLIP_GUARD.active(), runtime_resources.model_execution():
         vec = model.encode(img.convert("RGB"), convert_to_numpy=True, normalize_embeddings=True)
     return vec.astype(np.float32, copy=False)
 
@@ -339,7 +352,7 @@ def embed_clip_text(query: str) -> np.ndarray:
         model = get_clip_model()
     except ImportError as e:
         raise ClipUnavailable(f"sentence-transformers not installed: {e}") from e
-    with CLIP_GUARD.active():
+    with CLIP_GUARD.active(), runtime_resources.model_execution():
         vec = model.encode([query], convert_to_numpy=True, normalize_embeddings=True)[0]
     return vec.astype(np.float32, copy=False)
 
@@ -357,7 +370,7 @@ def embed_clip_texts(texts: list[str]) -> np.ndarray:
         model = get_clip_model()
     except ImportError as e:
         raise ClipUnavailable(f"sentence-transformers not installed: {e}") from e
-    with CLIP_GUARD.active():
+    with CLIP_GUARD.active(), runtime_resources.model_execution():
         vecs = model.encode(texts, convert_to_numpy=True, normalize_embeddings=True)
     return vecs.astype(np.float32, copy=False)
 
@@ -770,7 +783,7 @@ def embed_video_scenes(
     pairs = sample_video_scenes(path)
     if not pairs:
         raise ClipUnavailable(f"no decodable video frames in {path.name}")
-    with CLIP_GUARD.active():
+    with CLIP_GUARD.active(), runtime_resources.model_execution():
         vecs = model.encode(
             [img for _, img in pairs], convert_to_numpy=True, normalize_embeddings=True
         )
@@ -814,7 +827,7 @@ def embed_video_frames(path: Path) -> list[tuple[float, np.ndarray]]:
         idx = sorted(set(np.linspace(0, len(kept) - 1, cap).round().astype(int).tolist()))
         kept = [kept[i] for i in idx]
     images = [img for _, img in kept]
-    with CLIP_GUARD.active():
+    with CLIP_GUARD.active(), runtime_resources.model_execution():
         vecs = model.encode(images, convert_to_numpy=True, normalize_embeddings=True)
     return [(float(ts), vecs[i].astype(np.float32, copy=False)) for i, (ts, _) in enumerate(kept)]
 
@@ -829,7 +842,7 @@ def rerank_pairs(query: str, passages: list[str]) -> np.ndarray:
         return np.zeros(0, dtype=np.float32)
     model = get_reranker()
     pairs = [(query, p) for p in passages]
-    with RERANKER_GUARD.active():
+    with RERANKER_GUARD.active(), runtime_resources.model_execution():
         scores = model.predict(
             pairs,
             batch_size=32,
@@ -930,7 +943,7 @@ def embed_texts(texts: list[str], *, is_query: bool = False) -> np.ndarray:
     model = get_model()
     if is_query:
         texts = [QUERY_PREFIX + t for t in texts]
-    with BGE_GUARD.active():
+    with BGE_GUARD.active(), runtime_resources.model_execution():
         vecs = model.encode(
             texts,
             batch_size=encode_batch_size(model),
@@ -1132,7 +1145,13 @@ def upsert_after_write_status(
                     len(md_paths),
                 )
                 return EmbeddingSyncStatus(
-                    "deferred", "deferred_warmup", eligible_count
+                    "deferred",
+                    # The durable receipts above are the coverage evidence the
+                    # batch report trusts.  When recording them failed, say so
+                    # in the code so a stale queue entry for the same path can
+                    # never bless this batch as durably covered.
+                    "deferred_warmup" if race_receipts else "deferred_warmup_volatile",
+                    eligible_count,
                 )
 
     def finish(status: EmbeddingSyncStatus) -> EmbeddingSyncStatus:

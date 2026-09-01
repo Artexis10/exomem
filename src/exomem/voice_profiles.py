@@ -1,9 +1,9 @@
 """Local voice-profile store — operational infra, NOT note content.
 
-Persists enrolled speaker voiceprints in a single JSON file beside the embedding sidecar
-(`<vault>/Knowledge Base/.voice_profiles.json`, dot-prefixed like `.embeddings.sqlite` /
-`.clip.sqlite`, excluded from `find`/`audit`). It is NOT a queryable markdown sidecar and is
-never indexed — it is server state, the same class as the embedding sidecar.
+Persists enrolled speaker voiceprints in a single JSON file under the external
+per-vault state root, beside the embedding sidecar.  It is NOT a queryable
+markdown sidecar and is never indexed — it is server state, the same class as
+the embedding sidecar.
 
 Schema: `{ "<name>": {"centroid": [floats], "threshold": float, "samples": int,
 "is_self": bool, "updated": iso8601} }`. Enrolling the same name again folds the new sample
@@ -14,7 +14,7 @@ Pure (numpy + stdlib). Soft: a missing or corrupt store reads as empty (never ra
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -22,8 +22,7 @@ import numpy as np
 
 from exomem.speaker_attribution import Profile
 
-from . import reserved_paths
-from .kbdir import kb_dirname
+from . import reserved_paths, state_paths
 
 DEFAULT_THRESHOLD = 0.40
 _STORE_READ_LIMIT = 16 * 1024 * 1024
@@ -31,14 +30,17 @@ _STORE_READ_LIMIT = 16 * 1024 * 1024
 
 def voice_profiles_path(vault_root: Path) -> Path:
     """Per-machine voice-profile store, beside the embedding sidecars (operational infra)."""
-    return vault_root / kb_dirname() / ".voice_profiles.json"
+    return state_paths.vault_state_dir(vault_root) / ".voice_profiles.json"
 
 
-def load_store(path: Path) -> dict[str, dict[str, Any]]:
+def load_store(
+    path: Path,
+    *,
+    vault_root: Path | None = None,
+) -> dict[str, dict[str, Any]]:
     """Raw store dict. Missing or corrupt/unreadable file → empty dict (never raises)."""
     try:
-        if path.name == ".voice_profiles.json" and path.parent.name == kb_dirname():
-            vault_root = path.parent.parent
+        if vault_root is not None and path == voice_profiles_path(vault_root):
             with reserved_paths._subsystem_authority_scope("voice_profiles"):
                 raw = reserved_paths._read_owner_bytes(
                     vault_root,
@@ -58,10 +60,14 @@ def load_store(path: Path) -> dict[str, dict[str, Any]]:
     return data if isinstance(data, dict) else {}
 
 
-def load_profiles(path: Path) -> dict[str, Profile]:
+def load_profiles(
+    path: Path,
+    *,
+    vault_root: Path | None = None,
+) -> dict[str, Profile]:
     """Store → `{name: Profile}` for `attribute_clusters`. Skips malformed entries."""
     profiles: dict[str, Profile] = {}
-    for name, rec in load_store(path).items():
+    for name, rec in load_store(path, vault_root=vault_root).items():
         if not isinstance(rec, dict):
             continue
         centroid = rec.get("centroid")
@@ -73,10 +79,15 @@ def load_profiles(path: Path) -> dict[str, Profile]:
     return profiles
 
 
-def _write_store(path: Path, store: dict[str, dict[str, Any]]) -> None:
+def _write_store(
+    path: Path,
+    store: dict[str, dict[str, Any]],
+    *,
+    vault_root: Path | None = None,
+) -> None:
     encoded = json.dumps(store, indent=2, sort_keys=True).encode("utf-8")
-    if path.name == ".voice_profiles.json" and path.parent.name == kb_dirname():
-        vault_root = path.parent.parent
+    if vault_root is not None and path == voice_profiles_path(vault_root):
+        state_paths.ensure_vault_state_dir(vault_root)
         with reserved_paths._subsystem_authority_scope("voice_profiles"):
             reserved_paths._publish_owner_bytes(
                 vault_root,
@@ -96,11 +107,12 @@ def save_profile(
     *,
     threshold: float = DEFAULT_THRESHOLD,
     is_self: bool = False,
+    vault_root: Path | None = None,
 ) -> dict[str, Any]:
     """Enroll/extend a profile. A repeat name folds `centroid` into the running-average centroid
     and increments `samples`. Returns the stored record."""
     centroid = np.asarray(centroid, dtype=float).ravel()
-    store = load_store(path)
+    store = load_store(path, vault_root=vault_root)
     existing = store.get(name)
     if isinstance(existing, dict) and existing.get("centroid"):
         prev = np.asarray(existing["centroid"], dtype=float).ravel()
@@ -117,27 +129,36 @@ def save_profile(
         "threshold": float(threshold),
         "samples": samples,
         "is_self": bool(is_self),
-        "updated": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "updated": datetime.now(UTC).isoformat(timespec="seconds"),
     }
     store[name] = rec
-    _write_store(path, store)
+    _write_store(path, store, vault_root=vault_root)
     return rec
 
 
-def remove_profile(path: Path, name: str) -> bool:
+def remove_profile(
+    path: Path,
+    name: str,
+    *,
+    vault_root: Path | None = None,
+) -> bool:
     """Delete a profile. Returns True if it existed."""
-    store = load_store(path)
+    store = load_store(path, vault_root=vault_root)
     if name in store:
         del store[name]
-        _write_store(path, store)
+        _write_store(path, store, vault_root=vault_root)
         return True
     return False
 
 
-def list_profiles(path: Path) -> list[dict[str, Any]]:
+def list_profiles(
+    path: Path,
+    *,
+    vault_root: Path | None = None,
+) -> list[dict[str, Any]]:
     """Summaries (no centroid) for the CLI, sorted by name."""
     out = []
-    for name, rec in load_store(path).items():
+    for name, rec in load_store(path, vault_root=vault_root).items():
         if not isinstance(rec, dict):
             continue
         out.append({

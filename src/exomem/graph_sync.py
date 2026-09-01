@@ -8,6 +8,7 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -34,6 +35,9 @@ _TEMP_PREFIX = ".graph-rebuild-"
 _CHECKPOINT_FILENAME = ".graph-sync.json"
 _FLOOR_FILENAME = ".graph-sync-floor.json"
 _RECEIPT_DIRNAME = ".graph-commit-receipts"
+#: Durable start instant of a continuous `recovery_required` condition. Durable
+#: on purpose: a restart loop must not keep resetting the alarm clock.
+_RECOVERY_MARKER_FILENAME = ".graph-sync-recovery.json"
 _RESET_PREFIX = ".graph-reset-"
 _RESET_MANIFEST = ".manifest.json"
 _RESET_MEMBERS = (
@@ -827,8 +831,8 @@ def begin_deletion_transition(
     captured_prior = False
     epoch_staging_mutated = False
     try:
-        prior_floor = _prior_artifact_bytes(floor_path(root))
-        prior_checkpoint = _prior_artifact_bytes(checkpoint_path(root))
+        prior_floor = _prior_artifact_bytes(root, floor_path(root))
+        prior_checkpoint = _prior_artifact_bytes(root, checkpoint_path(root))
         captured_prior = True
         epoch = prepare_deletion_epoch(vault_root, removed_rel_paths)
     except Exception as error:
@@ -875,8 +879,8 @@ def begin_recovery_transition(
     captured_prior = False
     epoch_staging_mutated = False
     try:
-        prior_floor = _prior_artifact_bytes(floor_path(root))
-        prior_checkpoint = _prior_artifact_bytes(checkpoint_path(root))
+        prior_floor = _prior_artifact_bytes(root, floor_path(root))
+        prior_checkpoint = _prior_artifact_bytes(root, checkpoint_path(root))
         captured_prior = True
         epoch = prepare_recovery_epoch(vault_root, restored_paths)
     except Exception as error:
@@ -926,24 +930,169 @@ def next_checkpoint(
 
 
 def checkpoint_path(vault_root: Path) -> Path:
-    from .kbdir import kb_dirname
+    from . import state_paths
 
-    return Path(vault_root) / kb_dirname() / _CHECKPOINT_FILENAME
+    return state_paths.vault_state_dir(vault_root) / _CHECKPOINT_FILENAME
 
 
 def floor_path(vault_root: Path) -> Path:
-    from .kbdir import kb_dirname
+    from . import state_paths
 
-    return Path(vault_root) / kb_dirname() / _FLOOR_FILENAME
+    return state_paths.vault_state_dir(vault_root) / _FLOOR_FILENAME
+
+
+def recovery_marker_path(vault_root: Path) -> Path:
+    from . import state_paths
+
+    return state_paths.vault_state_dir(vault_root) / _RECOVERY_MARKER_FILENAME
+
+
+def observe_recovery_state(vault_root: Path) -> float | None:
+    """Record and return how long recovery has CONTINUOUSLY been required.
+
+    `recovery_required` is correct for minutes and pathological for hours, so
+    the alarm needs elapsed time, not a boolean. The start instant is durable:
+    a restart must not reset the clock, because a restart loop is exactly the
+    shape the 2026-08 incident took.
+
+    Idempotent. Entering recovery stamps the marker; leaving it removes the
+    marker, so the condition can never be sticky. Returns None whenever
+    recovery is not currently required.
+    """
+    root = Path(vault_root)
+    marker = recovery_marker_path(root)
+    if status(root)["state"] != "recovery_required":
+        try:
+            marker.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            logger.warning("could not clear the graph recovery marker", exc_info=True)
+        return None
+    state, age = _recovery_clock(root)
+    if state == "valid":
+        # A well-formed clock is authoritative: leave it exactly as it is, or a
+        # restart loop would keep resetting the age and the bound could never
+        # be crossed.
+        return age
+    # Absent OR corrupt. A corrupt clock must be REPLACED, never accepted: read
+    # as "just now" it silences the alarm permanently, because the age can then
+    # never exceed the bound.
+    try:
+        _write_recovery_marker(root, time.time())
+    except Exception:  # noqa: BLE001 - an unwritable marker must not break writes
+        logger.warning("could not record the graph recovery marker", exc_info=True)
+    return 0.0
+
+
+def _recovery_clock(vault_root: Path) -> tuple[str, float | None]:
+    """Classify the durable recovery clock: absent, valid, or corrupt.
+
+    The three states are genuinely different, and collapsing them is what made
+    the alarm silenceable. Absent means the condition is not recorded. Valid
+    carries an age. Corrupt means the condition WAS recorded but its clock is
+    unreadable -- a fault in its own right, never an age of zero.
+    """
+    marker = recovery_marker_path(Path(vault_root))
+    try:
+        raw = marker.read_text(encoding="utf-8")
+    except (FileNotFoundError, NotADirectoryError):
+        return "absent", None
+    except OSError:
+        return "corrupt", None
+    try:
+        since = float(json.loads(raw)["since"])
+    except (ValueError, TypeError, KeyError, json.JSONDecodeError):
+        return "corrupt", None
+    if not math.isfinite(since):
+        return "corrupt", None
+    return "valid", max(0.0, time.time() - since)
+
+
+def recovery_clock_state(vault_root: Path) -> str:
+    """``absent``, ``valid`` or ``corrupt`` for the durable recovery clock."""
+    return _recovery_clock(vault_root)[0]
+
+
+def recovery_age_seconds(vault_root: Path) -> float | None:
+    """Seconds since recovery was first continuously required, else None.
+
+    A pure read: doctor and health call this without writing. It reports an age
+    ONLY for a well-formed clock. A corrupt clock returns None and is surfaced
+    through :func:`recovery_clock_state` instead, because answering 0.0 there
+    let a torn marker hold the age permanently below the alarm bound.
+    """
+    return _recovery_clock(vault_root)[1]
+
+
+def _write_recovery_marker(vault_root: Path, since: float) -> None:
+    """Publish the recovery clock atomically through the graph_sync owner path.
+
+    The same owner-bound publication as `.graph-sync.json`, and it matters more
+    here than for ordinary state: this marker is written during exactly the
+    crashes the subsystem monitors, so an in-place `write_text` could tear and
+    leave behind the corrupt clock that silences the alarm.
+    """
+    from . import reserved_paths
+
+    payload = json.dumps({"since": since}, separators=(",", ":")).encode("utf-8")
+    with reserved_paths._subsystem_authority_scope("graph_sync"):
+        reserved_paths._publish_owner_bytes(
+            vault_root,
+            recovery_marker_path(vault_root),
+            "graph-handoff",
+            payload,
+        )
+
+
+#: Mutation-boundary holder kind used by every epistemic-graph operation.
+_GRAPH_HOLDER_KIND = "graph"
+
+
+def live_graph_owner(vault_root: Path) -> dict[str, object] | None:
+    """The cross-process holder currently doing GRAPH work for this vault.
+
+    A pure probe of the mutation boundary that takes NO graph claim, so a
+    caller can decide whether to start before contending for one. That ordering
+    is the whole point: the 2026-08 soft-deadlock was an out-of-process drain
+    holding the graph claim at 0 CPU while the live service minted receipts
+    behind it.
+
+    Deliberately narrow. Only a holder whose kind is `graph` counts — refusing
+    on ANY holder would make the drain unusable on a vault that merely has
+    write traffic. Returns None when nothing holds the boundary, when the
+    holder is doing something else, or when the boundary cannot be probed at
+    all: a drain must not be blocked by an unreadable runtime root.
+    """
+    try:
+        from . import mutation_lock
+        from .writer_lease import active_manager
+
+        coordinator = mutation_lock.VaultMutationCoordinator(
+            active_manager().config.state_dir, vault_root
+        )
+        snapshot = coordinator.snapshot()
+    except Exception:  # noqa: BLE001 - an unprobeable boundary is not a refusal
+        logger.debug("could not probe the graph mutation boundary", exc_info=True)
+        return None
+    if snapshot.get("state") != "held":
+        return None
+    if str(snapshot.get("holder_kind")) != _GRAPH_HOLDER_KIND:
+        return None
+    return snapshot
 
 
 def graph_commit_receipt_path(vault_root: Path, commit_token: str) -> Path:
     """Return the hidden portable receipt location for one opaque claim token."""
     if _MUTATION_ID.fullmatch(commit_token) is None:
         raise ValueError("receipt commit token must be lowercase 24-hex")
-    from .kbdir import kb_dirname
+    from . import state_paths
 
-    return Path(vault_root) / kb_dirname() / _RECEIPT_DIRNAME / f"{commit_token}.json"
+    return (
+        state_paths.vault_state_dir(vault_root)
+        / _RECEIPT_DIRNAME
+        / f"{commit_token}.json"
+    )
 
 
 def read_graph_commit_receipt(
@@ -1019,7 +1168,13 @@ def checkpoint_state(vault_root: Path) -> tuple[str, GraphSyncCheckpoint | None]
 def is_graph_input_path(relative_path: str) -> bool:
     normalized = relative_path.replace("\\", "/")
     return (
-        not normalized.endswith((f"/{_CHECKPOINT_FILENAME}", f"/{_FLOOR_FILENAME}"))
+        not normalized.endswith(
+            (
+                f"/{_CHECKPOINT_FILENAME}",
+                f"/{_FLOOR_FILENAME}",
+                f"/{_RECOVERY_MARKER_FILENAME}",
+            )
+        )
         and f"/{_RECEIPT_DIRNAME}/" not in f"/{normalized.lstrip('/')}"
     )
 
@@ -1388,6 +1543,10 @@ def _epoch_writes_with_predecessor(
             or recall_policy.is_structured_only_path(root, relative)
         ):
             continue
+        if not isinstance(write.content, str):
+            raise GraphEpochIncoherent(
+                "graph-relevant batch content is not Markdown text"
+            )
         paths.append((relative, content_hash(write.content)))
         if not write.path.exists():
             created_paths.append(relative)
@@ -1546,10 +1705,10 @@ def _write_checkpoint(vault_root: Path, checkpoint: GraphSyncCheckpoint) -> None
         )
 
 
-def _prior_artifact_bytes(path: Path) -> bytes | None:
+def _prior_artifact_bytes(vault_root: Path, path: Path) -> bytes | None:
     try:
         limit = _FLOOR_READ_LIMIT if path.name == _FLOOR_FILENAME else _CHECKPOINT_READ_LIMIT
-        return _read_bounded_bytes(path, limit=limit, vault_root=path.parent.parent)
+        return _read_bounded_bytes(path, limit=limit, vault_root=Path(vault_root))
     except FileNotFoundError:
         return None
 
@@ -1559,8 +1718,9 @@ def _epoch_artifacts_changed(
 ) -> bool:
     """Whether failed epoch staging changed either bounded protocol artifact."""
     return (
-        _prior_artifact_bytes(floor_path(vault_root)) != prior_floor_bytes
-        or _prior_artifact_bytes(checkpoint_path(vault_root)) != prior_checkpoint_bytes
+        _prior_artifact_bytes(vault_root, floor_path(vault_root)) != prior_floor_bytes
+        or _prior_artifact_bytes(vault_root, checkpoint_path(vault_root))
+        != prior_checkpoint_bytes
     )
 
 
@@ -1569,10 +1729,20 @@ def _read_bounded_bytes(path: Path, *, limit: int, vault_root: Path | None = Non
     from . import reserved_paths
 
     root = Path(vault_root) if vault_root is not None else Path(path).parent
+    # A machine-local artifact lives under the external per-vault state root;
+    # its bare state-dir-relative name classifies through the same closed
+    # registry, and that anchor is the more specific one when a state root is
+    # nested inside the vault root.
+    from . import state_paths
+
+    state_dir = Path(state_paths.vault_state_dir(root)).absolute()
     try:
-        relative = Path(path).absolute().relative_to(root.absolute()).as_posix()
+        relative = Path(path).absolute().relative_to(state_dir).as_posix()
     except ValueError:
-        relative = ""
+        try:
+            relative = Path(path).absolute().relative_to(root.absolute()).as_posix()
+        except ValueError:
+            relative = ""
     classification = reserved_paths.classify_logical(relative)
     if classification.descriptor_id in {"graph-handoff", "graph-receipts"}:
         descriptor_id = classification.descriptor_id
@@ -1624,21 +1794,22 @@ def prepare_deletion_epoch(
 ) -> GraphDeletionEpoch | None:
     """Publish deletion floor before the lifecycle rename, retaining rollback proof."""
     from . import recall_policy
+    from .kbdir import kb_dirname
 
     root = Path(vault_root).resolve()
     paths: list[tuple[str, str | None]] = [
         (rel, None)
         for raw in removed_rel_paths
         if (rel := str(raw).replace("\\", "/")).endswith(".md")
-        and rel.startswith(f"{checkpoint_path(root).parent.name}/")
+        and rel.startswith(f"{kb_dirname()}/")
         and is_graph_input_path(rel)
         and not recall_policy.is_structured_only_path(root, rel)
         and recall_policy.is_recall_candidate(root, root / rel)
     ]
     if not paths:
         return None
-    prior_bytes = _prior_artifact_bytes(floor_path(root))
-    prior_checkpoint_bytes = _prior_artifact_bytes(checkpoint_path(root))
+    prior_bytes = _prior_artifact_bytes(root, floor_path(root))
+    prior_checkpoint_bytes = _prior_artifact_bytes(root, checkpoint_path(root))
     epoch = _admit_epoch_inputs(root)
     checkpoint = next_checkpoint(
         current=epoch.checkpoint,
@@ -1661,13 +1832,14 @@ def prepare_recovery_epoch(
 ) -> GraphDeletionEpoch | None:
     """Publish the restore floor before moving graph-relevant Markdown from trash."""
     from . import recall_policy
+    from .kbdir import kb_dirname
 
     root = Path(vault_root).resolve()
     paths: list[tuple[str, str | None]] = [
         (rel, content_hash)
         for raw_rel, raw_content in restored_paths
         if (rel := str(raw_rel).replace("\\", "/")).endswith(".md")
-        and rel.startswith(f"{checkpoint_path(root).parent.name}/")
+        and rel.startswith(f"{kb_dirname()}/")
         and is_graph_input_path(rel)
         and not recall_policy.is_structured_only_path(root, rel)
         and isinstance(raw_content, str)
@@ -1675,8 +1847,8 @@ def prepare_recovery_epoch(
     ]
     if not paths:
         return None
-    prior_bytes = _prior_artifact_bytes(floor_path(root))
-    prior_checkpoint_bytes = _prior_artifact_bytes(checkpoint_path(root))
+    prior_bytes = _prior_artifact_bytes(root, floor_path(root))
+    prior_checkpoint_bytes = _prior_artifact_bytes(root, checkpoint_path(root))
     epoch = _admit_epoch_inputs(root)
     checkpoint = next_checkpoint(
         current=epoch.checkpoint,
@@ -1797,6 +1969,16 @@ class GraphRebuildStopped(GraphRebuildRegistrationError):
         )
 
 
+class GraphRebuildInProgress(GraphRebuildRegistrationError):
+    """A verified rebuild owner is live, so this caller should retry later."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "GRAPH_SYNC_REBUILD_IN_PROGRESS",
+            "Retry after the active graph rebuild owner publishes or releases its claim.",
+        )
+
+
 class GraphSidecarReplaceUnavailable(GraphRebuildRegistrationError):
     """Windows has an open reader; retain the old sidecar and recover later."""
 
@@ -1851,9 +2033,9 @@ class GraphReset:
 
 
 def _reset_directory(vault_root: Path, operation_id: str) -> Path:
-    from .vault import kb_root
+    from . import state_paths
 
-    return kb_root(vault_root) / f"{_RESET_PREFIX}{operation_id}"
+    return state_paths.vault_state_dir(vault_root) / f"{_RESET_PREFIX}{operation_id}"
 
 
 def _reset_manifest_raw(reset: GraphReset, identities: dict[str, tuple[int, ...]]) -> bytes:
@@ -2507,6 +2689,18 @@ class GraphRebuildCoordinator:
             try:
                 outcome = builder(required)
             except BaseException as error:  # noqa: BLE001 - integration path
+                if isinstance(error, GraphRebuildInProgress):
+                    logger.info(
+                        "graph rebuild coalesced with active external owner "
+                        "checkpoint_sha256=%s generation=%s",
+                        required.checkpoint_sha256,
+                        required.generation,
+                    )
+                    with self._condition:
+                        self._error = error
+                        self._running = False
+                        self._condition.notify_all()
+                    return
                 if isinstance(error, GraphRebuildRegistrationError):
                     projection = self._advice_for(error)
                 else:
@@ -2887,7 +3081,7 @@ def replace_sidecar(
     temporary: Path,
     live: Path,
     *,
-    vault_root: Path | None = None,
+    vault_root: Path,
 ) -> None:
     """Publish the proven temporary as the live sidecar.
 
@@ -2905,7 +3099,7 @@ def replace_sidecar(
     """
     from . import epistemic_graph
 
-    root = Path(vault_root) if vault_root is not None else live.parent.parent
+    root = Path(vault_root)
     started = time.monotonic()
     attempts: list[str] = []
     if _publish_sidecar_in_place(
@@ -2951,7 +3145,7 @@ def _publish_sidecar_in_place(
     temporary: Path,
     live: Path,
     *,
-    vault_root: Path | None = None,
+    vault_root: Path,
     attempts_out: list[str] | None = None,
 ) -> bool:
     """Copy a proven temp sidecar over the live file without moving the entry.
@@ -2968,7 +3162,7 @@ def _publish_sidecar_in_place(
     """
     from . import epistemic_graph
 
-    root = Path(vault_root) if vault_root is not None else live.parent.parent
+    root = Path(vault_root)
     for attempt in range(PUBLISH_IN_PLACE_ATTEMPTS):
         if attempt:
             time.sleep(PUBLISH_IN_PLACE_RETRY_SECONDS)

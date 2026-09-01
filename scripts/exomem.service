@@ -13,6 +13,8 @@ WorkingDirectory=__WORKING_DIRECTORY__
 ExecStart="__VENV_PYTHON__" -m exomem --transport streamable-http --host __BIND_HOST__ --port __PORT__
 Restart=always
 RestartSec=5
+CPUWeight=20
+CPUQuota=__CPU_QUOTA__
 
 [Install]
 WantedBy=default.target

@@ -53,7 +53,21 @@ SEQUENCE_TWO_FAMILIES = ("f20", "f21", "f22", "f23", "f24", "f25", "f26")
 #: Families a *later* unacknowledged amendment introduced. The withhold gate is
 #: repo-wide, so a test that pinned its answer to sequence 2 alone would fail the
 #: day another amendment filed — which is drift in the test, not in the gate.
-LATER_WITHHELD_FAMILIES = ("f27",)
+#: Sequence 3 (f27) left this tuple when its acknowledgment landed on 2026-08-30.
+LATER_WITHHELD_FAMILIES: tuple[str, ...] = ()
+
+
+def _seed_journey_vault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Seed one CLI journey under its own completed external state root."""
+
+    from epistemic.journeys import f26_carrier
+    from exomem import state_migration
+
+    state_root = tmp_path / "journey-state"
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(state_root))
+    vault = f26_carrier.seed_journey_vault(tmp_path / "vault", repo_root=ROOT)
+    assert state_migration.migration_completed(vault)
+    return vault
 
 
 @pytest.fixture
@@ -706,7 +720,9 @@ def test_unreadable_help_refuses_rather_than_passing_the_argv_check_vacuously() 
         f26_carrier._required_options_from_usage("some unexpected help format\n")
 
 
-def test_the_journey_runs_against_the_installed_envelope(tmp_path: Path) -> None:
+def test_the_journey_runs_against_the_installed_envelope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """F5: the whole point is that this executes. So it executes.
 
     Every step is run against the discovered CLI, on a throwaway copy of the
@@ -723,7 +739,7 @@ def test_the_journey_runs_against_the_installed_envelope(tmp_path: Path) -> None
     except f26_carrier.EnvelopeNotDiscovered as error:
         pytest.skip(f"no installed CLI envelope: {error}")
 
-    vault = f26_carrier.seed_journey_vault(tmp_path / "vault", repo_root=ROOT)
+    vault = _seed_journey_vault(tmp_path, monkeypatch)
     captured = f26_carrier.capture_responses(envelope, vault=vault)
     assert set(captured) == {"mutation", "reconstruction"}
     assert all(payload.get("success") is True for payload in captured.values())
@@ -1150,21 +1166,17 @@ def test_the_f23_journey_runs_against_the_installed_envelope(
     genuine engine restarts. If no envelope is installed the test says so and
     skips; an in-process run would measure the library rather than the runtime.
 
-    **The two halves get different verdicts, and that is the point.** The
-    dismissal half must pass. The counter half must report `unsupported`: no
-    product leaf reaches `due_state.block_for_write` (measured — see
-    `.task/measurements/leaf_carrier_counts.py`), so the bulk batch delivers no
-    block, its emission delta across the snapshot pair is 0, and a `pass` here
-    would be the assertion agreeing that twelve writes produced no repeat when
-    nothing was ever produced to repeat. Asserting `unsupported` pins the honest
-    verdict AND fails the day a leaf starts carrying, which is when the family
-    becomes decidable and someone must revisit this.
+    Both halves must now pass. The bulk leaf still reaches
+    `due_state.block_for_write` zero times, but it carries one batch block from
+    `due_state.block_for_batch` at the invocation terminal. That makes the
+    counter assertion decidable on an emission delta of one against twelve
+    governed writes.
     """
 
     from epistemic.journeys import f23_dismissal
 
     envelope = _lane_envelope(monkeypatch)
-    vault = f23_dismissal.seed_journey_vault(tmp_path / "vault", repo_root=ROOT)
+    vault = _seed_journey_vault(tmp_path, monkeypatch)
     run = f23_dismissal.run_journey(
         envelope,
         vault=vault,
@@ -1175,14 +1187,15 @@ def test_the_f23_journey_runs_against_the_installed_envelope(
     assert run.passes == f23_dismissal.DEFAULT_PASSES + len(
         f23_dismissal.PROMINENCE_LEVELS
     )
+    prior_ledger = run.prior.item("surface-due_state_counters")
     ledger = run.later.item("surface-due_state_counters")
+    assert prior_ledger is not None and prior_ledger.raw["projection"] == "complete"
     assert ledger is not None and ledger.raw["projection"] == "complete"
-    assert int(ledger.raw["writes"]) == f23_dismissal.BULK_DOCUMENTS
-    # The measured zero, recorded rather than smoothed: nothing was delivered,
-    # so the served denominator is 0 and no emission happened.
-    assert int(ledger.raw["emissions"]) == 0
-    # Informational, and 0 here only because this vault never delivered at all.
-    assert int(ledger.raw["due_total"]) == 0
+    assert int(ledger.raw["writes"]) - int(prior_ledger.raw["writes"]) == (
+        f23_dismissal.BULK_DOCUMENTS
+    )
+    # The operation leaf delivers one batch block, never one per governed write.
+    assert int(ledger.raw["emissions"]) - int(prior_ledger.raw["emissions"]) == 1
 
     context = AssertionContext(
         snapshot=run.later, prior=run.prior, subject=run.subject, family="f23"
@@ -1191,13 +1204,11 @@ def test_the_f23_journey_runs_against_the_installed_envelope(
     assert dismissal.outcome == "pass", dismissal.evidence
 
     counters = resolve("counter_emission_not_repeated_per_write")(context)
-    assert counters.outcome == "unsupported", counters.evidence
-    # The evidence must name WHY it could not decide, or an `unsupported` is
-    # indistinguishable from a projector that simply did not look. The reason
-    # is the zero emission DELTA across the batch, not the persisted
-    # `due_total`, which says nothing about this batch either way.
-    assert "delivered 0 block(s)" in counters.evidence, counters.evidence
-    assert str(f23_dismissal.BULK_DOCUMENTS) in counters.evidence, counters.evidence
+    assert counters.outcome == "pass", counters.evidence
+    assert "emitted 1 counters block(s)" in counters.evidence, counters.evidence
+    assert (
+        f"batch of {f23_dismissal.BULK_DOCUMENTS} write(s)" in counters.evidence
+    ), counters.evidence
 
 
 def _f23_carrier_pages(vault: Path, count: int) -> list[str]:
@@ -1232,7 +1243,7 @@ def _f23_carrier_pages(vault: Path, count: int) -> list[str]:
 @pytest.mark.timeout(600)
 @pytest.mark.parametrize("scoped", [True, False])
 def test_the_batch_scope_is_what_keeps_the_counter_assertion_green(
-    tmp_path: Path, scoped: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scoped: bool
 ) -> None:
     """The mechanism-removal pair, at the level the mechanism operates on.
 
@@ -1264,7 +1275,7 @@ def test_the_batch_scope_is_what_keeps_the_counter_assertion_green(
 
     from exomem import commands, due_state
 
-    vault = f23_dismissal.seed_journey_vault(tmp_path / "vault", repo_root=ROOT)
+    vault = _seed_journey_vault(tmp_path, monkeypatch)
     commands.op_remember(
         vault,
         title=f23_dismissal.OPEN_TITLE,
@@ -1314,7 +1325,7 @@ def test_the_batch_scope_is_what_keeps_the_counter_assertion_green(
 
 
 def test_an_earlier_delivery_cannot_carry_a_later_batch_that_delivered_nothing(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The probe that used to score `pass` on somebody else's block.
 
@@ -1333,7 +1344,7 @@ def test_an_earlier_delivery_cannot_carry_a_later_batch_that_delivered_nothing(
 
     from exomem import commands, due_state
 
-    vault = f23_dismissal.seed_journey_vault(tmp_path / "vault", repo_root=ROOT)
+    vault = _seed_journey_vault(tmp_path, monkeypatch)
     commands.op_remember(
         vault,
         title=f23_dismissal.OPEN_TITLE,

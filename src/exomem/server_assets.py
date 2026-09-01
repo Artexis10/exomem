@@ -5,10 +5,12 @@ from __future__ import annotations
 import base64
 import json
 import logging
+from collections.abc import Callable
 from pathlib import Path
 
 import mcp.types
 from fastmcp import FastMCP
+from starlette.background import BackgroundTask
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, RedirectResponse
 
@@ -87,7 +89,12 @@ def server_icons() -> list[mcp.types.Icon]:
     ]
 
 
-def register_asset_routes(mcp_app: FastMCP, *, traffic_monitor=None) -> None:
+def register_asset_routes(
+    mcp_app: FastMCP,
+    *,
+    traffic_monitor=None,
+    on_liveness: Callable[[], None] | None = None,
+) -> None:
     """Serve inert public assets outside MCP auth; vault data stays behind REST."""
     asset_dir = Path(__file__).parent
     if traffic_monitor is None:
@@ -119,7 +126,27 @@ def register_asset_routes(mcp_app: FastMCP, *, traffic_monitor=None) -> None:
             payload.update(deploy_provenance.provenance(include_local=False))
         except Exception:  # noqa: BLE001 — provenance must never fail the probe
             payload["version"] = "unknown"
-        return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+        # Content-free machine-local state placement.  This route is public:
+        # absolute roots belong only in the local doctor surface.
+        try:
+            from . import state_migration
+            from . import vault as vault_module
+
+            vault_root = vault_module.resolve_vault()
+            payload["state"] = {
+                "placement": "external-state",
+                "migration": state_migration.migration_status(vault_root),
+            }
+        except Exception:  # noqa: BLE001 — placement must never fail the probe
+            payload["state"] = {
+                "placement": "external-state",
+                "migration": "unavailable",
+            }
+        return JSONResponse(
+            payload,
+            headers={"Cache-Control": "no-store"},
+            background=(BackgroundTask(on_liveness) if on_liveness is not None else None),
+        )
 
     @mcp_app.custom_route("/health/ready", methods=["GET"])
     async def _runtime_ready(request: Request) -> JSONResponse:  # noqa: ARG001

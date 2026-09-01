@@ -20,6 +20,8 @@ spec:
     metadata:
       labels:
         {{- include "exomem-cell.selectorLabels" . | nindent 8 }}
+      annotations:
+        exomem.io/authorization-session-revision: {{ required "authorizationSessionRevision is required" .Values.authorizationSessionRevision | quote }}
     spec:
       serviceAccountName: {{ .Values.resourceName }}
       automountServiceAccountToken: false
@@ -28,6 +30,37 @@ spec:
       securityContext:
         seccompProfile:
           type: RuntimeDefault
+      initContainers:
+        - name: authorization-session-custody
+          image: {{ .Values.image }}
+          imagePullPolicy: IfNotPresent
+          command: ["python"]
+          args:
+            - -m
+            - exomem.governance.authorization_hosted_mount
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+              ephemeral-storage: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+              ephemeral-storage: 16Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: {{ .Values.runtimeUid }}
+            runAsGroup: {{ .Values.runtimeGid }}
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: authorization-session-source
+              mountPath: /run/exomem/authorization-session-source
+              readOnly: true
+            - name: authorization-session-custody
+              mountPath: /run/exomem/authorization-session
       containers:
         - name: exomem
           image: {{ .Values.image }}
@@ -74,6 +107,16 @@ spec:
               value: {{ printf "%.0f" .Values.recordsReaderVersion | quote }}
             - name: EXOMEM_HOSTED_LIFECYCLE_ACTIONS_ENABLED
               value: {{ .Values.lifecycleActionsEnabled | quote }}
+            - name: EXOMEM_AUTH_SESSION_KEYRING_FILE
+              value: /run/exomem/authorization-session/private/keyring.json
+            - name: EXOMEM_AUTH_SESSION_CONTROL_FILE
+              value: /run/exomem/authorization-session/private/control.json
+            - name: EXOMEM_AUTH_SESSION_MEMBERSHIP_FILE
+              value: /run/exomem/authorization-session/private/serving-membership.json
+            - name: EXOMEM_AUTH_SESSION_REPLICA_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
             - name: EXOMEM_HOSTED_STORAGE_LIMIT_BYTES
               value: {{ printf "%.0f" .Values.storageLimitBytes | quote }}
             - name: EXOMEM_HOSTED_UPLOAD_LIMIT_BYTES
@@ -165,6 +208,9 @@ spec:
             - name: credentials
               mountPath: /run/exomem/credentials
               readOnly: true
+            - name: authorization-session-custody
+              mountPath: /run/exomem/authorization-session
+              readOnly: true
       volumes:
         - name: data
           persistentVolumeClaim:
@@ -173,4 +219,12 @@ spec:
           secret:
             secretName: {{ .Values.credentialsSecretName }}
             defaultMode: 0444
+        - name: authorization-session-source
+          secret:
+            secretName: {{ .Values.authorizationSessionSecretName }}
+            defaultMode: 0444
+        - name: authorization-session-custody
+          emptyDir:
+            medium: Memory
+            sizeLimit: 256Ki
 {{- end }}

@@ -29,6 +29,7 @@ import shutil
 from pathlib import Path
 
 import pytest
+from conftest import initialize_vault_state_offline
 from starlette.testclient import TestClient
 
 from exomem import project_keys as project_keys_module
@@ -55,6 +56,7 @@ def _build_server(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     """Build the server exactly as the fixture was captured (see module docstring)."""
     vault_root = tmp_path / "schema_vault"
     shutil.copytree(FIXTURE_VAULT, vault_root)
+    initialize_vault_state_offline(vault_root, source="MCP schema fixture")
     monkeypatch.setattr(server_module, "load_dotenv", lambda *a, **k: None)
     monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
     monkeypatch.setenv("EXOMEM_DISABLE_RELEVANCE_CHECK", "1")
@@ -215,7 +217,10 @@ def test_readiness_fingerprint_matches_actual_registered_surface(
 
     response = TestClient(mcp.http_app()).get("/health/ready")
 
-    assert response.status_code == 200
+    # This fixture intentionally selects the legacy Python lexical backend, so
+    # retrieval admission may truthfully remain unavailable.  The readiness
+    # payload must expose the registered tool fingerprint in either state.
+    assert response.status_code in {200, 503}
     assert response.json()["mcp_tool_surface_sha256"] == actual_digest
 
 

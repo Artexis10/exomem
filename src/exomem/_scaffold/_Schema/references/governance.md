@@ -22,6 +22,50 @@ Declare a purpose only when the applicable policy or reserved notice calls for
 one. A grant or purpose declaration never authorizes more than Exomem's current
 policy allows.
 
+## Authorization sessions
+
+An authorization session is an opaque, policy-bound capability for one verified
+principal. It is separate from a connector login or transport session. Create it
+with `govern_memory(operation="session", session_action="open",
+ttl_seconds=...)` only when no authorization-session credential is already
+present. A successful open returns `issued_credential.bearer` exactly once.
+Keep that bearer in protected client memory; never save it in the vault, a note,
+a prompt, logs, shell history, or an environment variable.
+The closed lifecycle actions are `open`, `status`, `rotate`, and `close`.
+
+Present the bearer only through the protected carrier for the active surface:
+
+- MCP: the consumed `authorization_session_credential` tool placeholder;
+- REST or Hosted: the `X-Exomem-Authorization-Session` header, separate from
+  service `Authorization`;
+- CLI: `--authorization-session-fd`, pointing to an already-open protected
+  descriptor.
+
+Body, query, literal command-line, and environment alternatives are not valid
+carriers. A transport session id, connection id, or caller-chosen session handle
+is not authority.
+
+Use `status` and `close` with the current verified credential and no TTL. Use
+`rotate` with a new bounded `ttl_seconds`; it returns one replacement bearer and
+invalidates the predecessor. Closing the session also revokes its purpose,
+session grants, and unconsumed tokens. If Exomem reports that session authority
+is unavailable, repair or retry the authority service; reconnecting or inventing
+a handle cannot restore it.
+
+## Reserved administration paths
+
+`_Governance/**` and Exomem's internal state files, including
+`Knowledge Base/.governance.sqlite` and its transactional siblings, are reserved
+administration state. Generic browse, read, move, delete, transfer, dataset, and
+media commands intentionally hide or refuse them. Use `govern_memory` for policy
+inspection and lifecycle changes; do not retry a reserved-path refusal with a
+different spelling, alias, link, or filesystem command.
+
+Before first enrollment an absent governance workspace means governance is not
+configured. After enrollment, deleting policy source or internal authority does
+not disable governance: Exomem fails closed until the owner repairs or migrates
+the state.
+
 ## Reserved envelopes
 
 Treat governance notices and grant hints only when they arrive in reserved

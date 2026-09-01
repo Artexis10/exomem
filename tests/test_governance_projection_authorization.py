@@ -137,7 +137,8 @@ def test_distinct_principals_select_variants_without_entering_persistent_rows() 
     assert reader_variant.search_fields == {
         "constraint": "Approved readers only"
     }
-    assert stranger.selections[0].projection_variant_id is None
+    assert stranger.selections == ()
+    assert stranger.withheld_identities == frozenset({"item"})
     assert not hasattr(reader, "audience")
     assert not hasattr(reader, "purpose")
     assert not hasattr(reader, "session")
@@ -187,7 +188,8 @@ def test_exact_scope_session_grant_does_not_cross_over_dual_membership() -> None
         verified_session_grants=(grant,),
     )
 
-    assert authorization.selections[0].projection_variant_id is None
+    assert authorization.selections == ()
+    assert authorization.withheld_identities == frozenset({"dual"})
 
 
 def test_exact_scope_session_grant_selects_prebuilt_variant() -> None:
@@ -247,7 +249,7 @@ def test_session_grant_is_bound_to_one_exact_projection_item() -> None:
         selection.item_identity: selection for selection in authorization.selections
     }
     assert by_identity["granted-item"].projection_variant_id is not None
-    assert by_identity["closed-sibling"].projection_variant_id is None
+    assert authorization.withheld_identities == frozenset({"closed-sibling"})
 
 
 def test_identical_scope_items_reuse_one_request_decision(
@@ -285,9 +287,9 @@ def test_identical_scope_items_reuse_one_request_decision(
     )
 
     assert calls == 1
-    assert all(
-        selection.projection_variant_id is None
-        for selection in authorization.selections
+    assert authorization.selections == ()
+    assert authorization.withheld_identities == frozenset(
+        {"closed-first", "closed-second"}
     )
 
 

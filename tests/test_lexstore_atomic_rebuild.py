@@ -24,8 +24,8 @@ parts of 1.4 — the exact contracts the atomic rebuild must uphold:
 Publication is serialized against foreground deltas and single-file-safe:
 
 * a foreground delta that advances the live catalog after this build captured
-  its temp target aborts the replace under the publication lock, leaving the
-  newer live rows and checkpoint intact rather than regressing them;
+  its temp target is replayed into the replacement under the publication lock,
+  so ordinary traffic cannot starve a logically current build;
 * a temp WAL that cannot be folded to a single self-contained file (the
   checkpoint/``journal_mode=DELETE`` proof fails, or a temp ``-wal`` survives)
   discards the temp and never publishes, preserving live;
@@ -45,6 +45,7 @@ import sqlite3
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -193,6 +194,89 @@ def test_edit_after_start_is_replayed_and_target_checkpoint_is_exact(
     stored = store.catalog_checkpoint("kb")
     assert stored == freshness.recall_checkpoint(tmp_path, "kb")
     assert stored.generation > pre_gen
+
+
+def test_final_publish_wait_catches_up_after_a_large_foreground_batch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A writer burst landing while publish waits must not waste the full build."""
+    a = _kb_file(tmp_path, "a.md", "- [config] stablecontent ^u1")
+    _seed(tmp_path, [a])
+    lexstore.ensure_fresh(tmp_path)
+    store = lexstore.get_store(tmp_path)
+    real_walk = store._walk_entries
+    real_lock = store._publication_lock
+    timeouts: list[float] = []
+    changed: list[Path] = []
+    writer_started = threading.Event()
+    release_writer = threading.Event()
+    writer_errors: list[Exception] = []
+    writer_thread: threading.Thread | None = None
+    walk_calls = 0
+
+    def blocking_writer_burst() -> None:
+        try:
+            with real_lock():
+                changed.extend(
+                    _kb_file(
+                        tmp_path,
+                        f"blocked-burst-{index}.md",
+                        f"- [config] blocked-burst-{index} ^u{index + 2}",
+                    )
+                    for index in range(lexstore.CATALOG_FOREGROUND_DELTA_CAP + 1)
+                )
+                freshness.on_files_changed(tmp_path, changed=changed)
+                writer_started.set()
+                assert release_writer.wait(timeout=_HOLD_SECONDS)
+                # Keep ownership long enough for the publisher to enter its wait.
+                time.sleep(0.05)
+        except Exception as exc:  # noqa: BLE001 - relayed to the parent test thread
+            writer_errors.append(exc)
+            writer_started.set()
+
+    def walk_then_start_blocking_writer() -> Any:
+        nonlocal walk_calls, writer_thread
+        walk_calls += 1
+        result = real_walk()
+        if walk_calls == 2:
+            writer_thread = threading.Thread(target=blocking_writer_burst)
+            writer_thread.start()
+            assert writer_started.wait(timeout=_OBSERVE_SECONDS)
+            assert not writer_errors
+        return result
+
+    @contextmanager
+    def traced_lock(timeout: float = lexstore._PUBLICATION_TIMEOUT_BACKGROUND):
+        timeouts.append(timeout)
+        if writer_started.is_set() and not release_writer.is_set():
+            release_writer.set()
+        with real_lock(timeout=timeout):
+            yield
+
+    monkeypatch.setattr(store, "_walk_entries", walk_then_start_blocking_writer)
+    monkeypatch.setattr(store, "_publication_lock", traced_lock)
+    try:
+        assert store.rebuild_atomic() is True
+    finally:
+        release_writer.set()
+        if writer_thread is not None:
+            writer_thread.join(timeout=_OBSERVE_SECONDS)
+
+    assert writer_thread is not None and not writer_thread.is_alive()
+    assert not writer_errors
+    assert timeouts == [
+        lexstore._PUBLICATION_TIMEOUT_BACKGROUND,
+        lexstore._PUBLICATION_TIMEOUT_PUBLISH,
+        lexstore._PUBLICATION_TIMEOUT_PUBLISH,
+    ]
+    assert store.catalog_checkpoint("kb") == freshness.recall_checkpoint(
+        tmp_path, "kb"
+    )
+    contents = {hit.content.strip() for hit in _units_in_category(tmp_path, "config")}
+    assert all(
+        any(f"blocked-burst-{index}" in content for content in contents)
+        for index in range(len(changed))
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -407,12 +491,14 @@ def test_foreign_instance_publication_aborts_incomparable_older_build(
         live.close()
 
 
-def test_live_db_set_token_change_aborts_even_when_checkpoints_match(
+def test_live_db_set_token_churn_does_not_veto_current_replacement(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A foreign writer can change the live DB set without publishing a useful
-    comparable checkpoint. The private bounded DB token still makes the stale
-    temp ineligible, preserving the writer's committed marker."""
+    """The live SQLite set is disposable, not source-of-truth state.
+
+    WAL/main churn that leaves the authoritative checkpoints and identity
+    unchanged must not veto a logically current detached replacement.
+    """
     a = _kb_file(tmp_path, "a.md", "- [config] stablecontent ^u1")
     _seed(tmp_path, [a])
     lexstore.ensure_fresh(tmp_path)
@@ -438,14 +524,14 @@ def test_live_db_set_token_change_aborts_even_when_checkpoints_match(
         return folded
 
     monkeypatch.setattr(store, "_fold_to_single_file", fold_then_mutate_live_set)
-    assert store.rebuild_atomic() is False
+    assert store.rebuild_atomic() is True
 
     live = store._connect()
     try:
         assert store._meta_checkpoint(live, "kb") == before
         assert live.execute(
             "SELECT value FROM meta WHERE key = 'db_set_marker'"
-        ).fetchone() == ("committed",)
+        ).fetchone() is None
     finally:
         live.close()
 
@@ -798,15 +884,18 @@ def test_wal_mode_main_without_sidecars_is_persistently_switched_to_delete(
     assert not wal.exists() and not shm.exists()
 
 
-def test_foreground_delta_after_temp_target_aborts_replacement(
+def test_foreground_delta_after_temp_target_rebases_replacement(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A background rebuild must never overwrite a NEWER live catalog. If a
-    foreground delta advances the live sidecar past the temp build's captured
-    target while the build is finishing, publication aborts under the publication
-    lock and the newer live rows/checkpoint are preserved."""
+    """A normal live delta must not starve a completed detached rebuild.
+
+    If the watcher advances the live catalogue after the temp target was
+    captured, publication rebases the temp to that exact retained generation
+    under the barrier and publishes the current replacement.
+    """
     a = _kb_file(tmp_path, "a.md", "- [config] startcontent ^u1")
-    _seed(tmp_path, [a])
+    b = _kb_file(tmp_path, "b.md", "- [config] deletedcontent ^u2")
+    _seed(tmp_path, [a, b])
     lexstore.ensure_fresh(tmp_path)
     store = lexstore.get_store(tmp_path)
 
@@ -820,7 +909,8 @@ def test_foreground_delta_after_temp_target_aborts_replacement(
             state["injected"] = True
             a.write_text(_page_text("a", "- [config] newercontent ^u1"), encoding="utf-8")
             _touch_future(a)
-            freshness.on_files_changed(tmp_path, changed=[a])
+            b.unlink()
+            freshness.on_files_changed(tmp_path, changed=[a], deleted=[b])
             newer = freshness.recall_triple(tmp_path, "kb")
             state["newer"] = newer
             readiness = store.catalog_readiness("kb", newer)
@@ -831,12 +921,95 @@ def test_foreground_delta_after_temp_target_aborts_replacement(
     published = store.rebuild_atomic()
     monkeypatch.undo()
 
-    # The publish aborted rather than regress the newer live catalog.
-    assert published is False
+    assert published is True
+    assert store.catalog_checkpoint("kb") == freshness.recall_checkpoint(
+        tmp_path, "kb"
+    )
     assert store.catalog_checkpoint("kb").triple == state["newer"]
     contents = {hit.content.strip() for hit in _units_in_category(tmp_path, "config")}
     assert any("newercontent" in c for c in contents)
     assert not any("startcontent" in c for c in contents)
+    assert not any("deletedcontent" in c for c in contents)
+
+
+def test_large_off_barrier_rebase_converges_without_another_full_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The first catch-up is background work, so it must absorb a sync burst."""
+    a = _kb_file(tmp_path, "a.md", "- [config] preservedtoken ^u1")
+    _seed(tmp_path, [a])
+    lexstore.ensure_fresh(tmp_path)
+    store = lexstore.get_store(tmp_path)
+    real_fold = store._fold_to_single_file
+    changed: list[Path] = []
+
+    def fold_then_sync_burst(conn: sqlite3.Connection) -> bool:
+        folded = real_fold(conn)
+        if not changed:
+            changed.extend(
+                _kb_file(
+                    tmp_path,
+                    f"burst-{index}.md",
+                    f"- [config] burst-{index} ^u{index + 2}",
+                )
+                for index in range(lexstore.CATALOG_FOREGROUND_DELTA_CAP + 1)
+            )
+            freshness.on_files_changed(tmp_path, changed=changed)
+        return folded
+
+    monkeypatch.setattr(store, "_fold_to_single_file", fold_then_sync_burst)
+    assert store.rebuild_atomic() is True
+    assert store._last_rebuild_result == "published"
+    assert store.catalog_checkpoint("kb") == freshness.recall_checkpoint(
+        tmp_path, "kb"
+    )
+    contents = {hit.content.strip() for hit in _units_in_category(tmp_path, "config")}
+    assert all(any(f"burst-{index}" in content for content in contents) for index in range(len(changed)))
+
+
+def test_sustained_oversized_final_rebases_are_bounded_and_preserve_live_catalog(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    a = _kb_file(tmp_path, "a.md", "- [config] preservedtoken ^u1")
+    _seed(tmp_path, [a])
+    lexstore.ensure_fresh(tmp_path)
+    store = lexstore.get_store(tmp_path)
+    before = store.catalog_checkpoint("kb")
+    real_rebase = store._rebase_detached_catalog
+    rebase_calls = 0
+    final_rebase_calls = 0
+
+    def rebase_then_overflow_delta(*args: Any, **kwargs: Any) -> Any:
+        nonlocal final_rebase_calls, rebase_calls
+        rebase_calls += 1
+        if kwargs.get("max_paths", lexstore.CATALOG_FOREGROUND_DELTA_CAP) is not None:
+            final_rebase_calls += 1
+            changed = [
+                _kb_file(
+                    tmp_path,
+                    f"late-{final_rebase_calls}-{index}.md",
+                    f"- [config] late-{final_rebase_calls}-{index} "
+                    f"^u{final_rebase_calls}-{index}",
+                )
+                for index in range(lexstore.CATALOG_FOREGROUND_DELTA_CAP + 1)
+            ]
+            freshness.on_files_changed(tmp_path, changed=changed)
+        return real_rebase(*args, **kwargs)
+
+    monkeypatch.setattr(store, "_rebase_detached_catalog", rebase_then_overflow_delta)
+    assert store.rebuild_atomic() is False
+    assert store._last_rebuild_result == "delta_unavailable"
+    assert final_rebase_calls == lexstore._PUBLICATION_CATCHUP_RETRIES + 1
+    assert rebase_calls == 1 + final_rebase_calls + lexstore._PUBLICATION_CATCHUP_RETRIES
+    assert store.catalog_checkpoint("kb") == before
+    assert not list(store.path.parent.glob("*rebuild*"))
+    live = store._connect()
+    try:
+        assert live.execute(
+            "SELECT 1 FROM semantic_units WHERE content LIKE '%preservedtoken%'"
+        ).fetchone() == (1,)
+    finally:
+        live.close()
 
 
 def test_readiness_and_query_stay_snapshot_consistent_across_replacement(
@@ -1044,6 +1217,48 @@ def test_await_repairs_idle_waits_for_an_in_flight_repair() -> None:
 
     # Idle on a key nobody ever registered.
     assert lexstore.await_repairs_idle(root, timeout=30.0) is True
+
+
+def test_repair_progress_reports_bounded_phase_duration_and_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    store = lexstore.get_store(tmp_path)
+
+    def rebuild() -> bool:
+        store._last_rebuild_result = "published"
+        entered.set()
+        assert release.wait(_HOLD_SECONDS)
+        return True
+
+    monkeypatch.setattr(store, "rebuild_atomic", rebuild)
+    monkeypatch.setattr(
+        lexstore,
+        "runtime_retrieval_catalog_proof",
+        lambda *_args, **_kwargs: {"kb": object(), "vault": object()},
+    )
+    lexstore._schedule_repair(tmp_path)
+    assert entered.wait(_OBSERVE_SECONDS)
+
+    active = lexstore.repair_progress(tmp_path)
+    assert active is not None
+    assert active["phase"] == "building"
+    assert isinstance(active["age_seconds"], float)
+    assert set(active) == {
+        "phase",
+        "age_seconds",
+        "last_duration_seconds",
+        "last_result",
+    }
+
+    release.set()
+    assert lexstore.await_repairs_idle(tmp_path, timeout=5)
+    finished = lexstore.repair_progress(tmp_path)
+    assert finished is not None
+    assert finished["phase"] == "idle"
+    assert finished["last_result"] == "published"
+    assert isinstance(finished["last_duration_seconds"], float)
 
 
 def test_await_repairs_idle_keys_on_the_resolved_path(tmp_path: Path) -> None:

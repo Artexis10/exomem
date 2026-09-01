@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Hosted Terraform backend
 
 ## Preconditions

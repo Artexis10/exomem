@@ -305,6 +305,7 @@ def test_actual_stdio_refuses_before_validation_without_logging_bearer(
     env.update(
         {
             "EXOMEM_VAULT_PATH": str(vault),
+            "EXOMEM_STATE_ROOT": os.environ["EXOMEM_STATE_ROOT"],
             "EXOMEM_LOG_DIR": str(exomem_log_dir),
             "EXOMEM_WRITER_LEASE_STATE_DIR": str(tmp_path / "writer-state"),
             "EXOMEM_CONFIG_PATH": str(tmp_path / "config.json"),

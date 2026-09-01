@@ -28,6 +28,16 @@ def _append(vault_root: Path, manifest: collections.CollectionManifest) -> dict[
     )
 
 
+def _shared_manifest_text() -> str:
+    recipe = """item_presentation:
+  version: 1
+  title: subject
+  summary: [observed_on]
+  long_text: [note, provenance]
+"""
+    return manifest_text(presentation=False).removesuffix("---\n") + recipe + "---\n"
+
+
 def _item(
     root: Path, manifest: collections.CollectionManifest
 ) -> tuple[record_formats.AdapterSnapshot, record_formats.Record, Path]:
@@ -111,13 +121,17 @@ def test_direct_selected_yaml_edit_rebaseline_then_refresh_keeps_yaml_authoritat
     manifest = setup_collection(tmp_path)
     _append(tmp_path, manifest)
     _snapshot, _record, item_path = _item(tmp_path, manifest)
-    direct = item_path.read_text(encoding="utf-8").replace("subject: Sample <A>", "subject: Direct edit", 1)
+    direct = item_path.read_text(encoding="utf-8").replace(
+        "subject: Sample <A>", "subject: Direct edit", 1
+    )
     item_path.write_text(direct, encoding="utf-8")
 
     stale = record_governance.inspect_collection(tmp_path, manifest.path)
     assert stale["presentation"]["items"][0]["state"] == "stale"
     assert stale["audit"]["status"] == "gap"
-    query = record_formats.query_collection(tmp_path, collections.load_manifest(tmp_path, manifest.path))
+    query = record_formats.query_collection(
+        tmp_path, collections.load_manifest(tmp_path, manifest.path)
+    )
     assert query.rows[0]["subject"] == "Direct edit"
     assert "Sample &lt;A&gt;" in item_path.read_text(encoding="utf-8")
 
@@ -144,8 +158,104 @@ def test_direct_selected_yaml_edit_rebaseline_then_refresh_keeps_yaml_authoritat
 
     assert refreshed["operation"] == "update"
     assert after_rebaseline["presentation"]["items"][0]["state"] == "stale"
-    assert record_governance.inspect_collection(tmp_path, manifest.path)["presentation"]["items"] == []
+    assert (
+        record_governance.inspect_collection(tmp_path, manifest.path)["presentation"]["items"] == []
+    )
     assert "Direct edit" in item_path.read_text(encoding="utf-8")
+
+
+def test_revision_removes_owned_presentation_from_every_item_without_touching_prose(
+    tmp_path: Path,
+) -> None:
+    manifest = setup_collection(tmp_path)
+    _append(tmp_path, manifest)
+    snapshot, _record, item_path = _item(tmp_path, manifest)
+    before = item_path.read_text(encoding="utf-8")
+    span = record_formats._presentation_span(before)
+    assert span is not None
+    expected = before[: span[0]] + before[span[1] :]
+    proposal = manifest_text(presentation=False)
+    validation = records.validate_collection_revision(tmp_path, manifest.path, proposal)
+
+    receipt = records.revise_collection(
+        tmp_path,
+        manifest.path,
+        manifest_text=proposal,
+        **validation["lifecycle_guards"],
+        why="return item bodies to authored Markdown only",
+    )
+
+    assert item_path.read_text(encoding="utf-8") == expected
+    assert item_path.relative_to(tmp_path).as_posix() in receipt["affected_paths"]
+    revised = collections.load_manifest(tmp_path, manifest.path)
+    assert revised.record_presentation is None
+    assert record_formats.inspect_collection(tmp_path, revised).presentation == ()
+    assert snapshot.records[0].body.endswith("Authored prose.\n")
+
+
+def test_revision_converts_legacy_presentation_to_shared_in_one_guarded_batch(
+    tmp_path: Path,
+) -> None:
+    manifest = setup_collection(tmp_path)
+    _append(tmp_path, manifest)
+    _snapshot, record, item_path = _item(tmp_path, manifest)
+    before = item_path.read_text(encoding="utf-8")
+    span = record_formats._presentation_span(before)
+    assert span is not None
+    authored = before[: span[0]] + before[span[1] :]
+    proposal = _shared_manifest_text()
+    validation = records.validate_collection_revision(tmp_path, manifest.path, proposal)
+
+    records.revise_collection(
+        tmp_path,
+        manifest.path,
+        manifest_text=proposal,
+        **validation["lifecycle_guards"],
+        why="adopt the shared readable item body",
+    )
+
+    revised = collections.load_manifest(tmp_path, manifest.path)
+    expected = record_formats.splice_item_presentation(authored, revised, record.values)
+    assert item_path.read_text(encoding="utf-8") == expected
+    assert record_formats._presentation_span(expected) is None
+    assert record_formats._item_presentation_span(expected) is not None
+
+
+@pytest.mark.parametrize("prefix", [1, 2, 3])
+def test_revision_presentation_cleanup_rolls_back_every_caught_publication_cut(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prefix: int
+) -> None:
+    manifest = setup_collection(tmp_path)
+    _append(tmp_path, manifest)
+    _snapshot, _record, item_path = _item(tmp_path, manifest)
+    proposal = manifest_text(presentation=False)
+    validation = records.validate_collection_revision(tmp_path, manifest.path, proposal)
+    manifest_path = tmp_path / manifest.path
+    log_path = tmp_path / "Knowledge Base/log.md"
+    paths = (item_path, manifest_path, log_path)
+    before = tuple(path.read_bytes() for path in paths)
+    real_replace = vault._BatchWorkspace.replace_artifact
+    calls = 0
+
+    def deny(workspace, artifact, target):  # noqa: ANN001, ANN202
+        nonlocal calls
+        if Path(target) in paths:
+            calls += 1
+            if calls == prefix:
+                raise PermissionError(13, "denied", str(target))
+        return real_replace(workspace, artifact, target)
+
+    monkeypatch.setattr(vault._BatchWorkspace, "replace_artifact", deny)
+    with pytest.raises(collections.CollectionError, match="RECORD_PUBLICATION_FAILED"):
+        records.revise_collection(
+            tmp_path,
+            manifest.path,
+            manifest_text=proposal,
+            **validation["lifecycle_guards"],
+            why="exercise presentation cleanup rollback",
+        )
+
+    assert tuple(path.read_bytes() for path in paths) == before
 
 
 @pytest.mark.parametrize("damage", ["malformed", "unrenderable"])
@@ -242,10 +352,14 @@ def test_refresh_baseexception_cuts_leave_only_auditable_prefixes(
     def interrupt(workspace, artifact, target):  # noqa: ANN001, ANN202
         nonlocal calls
         result = real_replace(workspace, artifact, target)
-        if Path(target) not in {graph_sync.floor_path(tmp_path), graph_sync.checkpoint_path(tmp_path)}:
+        if Path(target) not in {
+            graph_sync.floor_path(tmp_path),
+            graph_sync.checkpoint_path(tmp_path),
+        }:
             calls += 1
         if (
-            Path(target) not in {graph_sync.floor_path(tmp_path), graph_sync.checkpoint_path(tmp_path)}
+            Path(target)
+            not in {graph_sync.floor_path(tmp_path), graph_sync.checkpoint_path(tmp_path)}
             and calls == prefix
         ):
             raise KeyboardInterrupt("abrupt refresh publication")

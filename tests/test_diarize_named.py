@@ -48,7 +48,11 @@ def _wire(monkeypatch, *, profiles, embed):
     monkeypatch.setattr(extract, "_get_whisper", lambda: _FakeWhisper(list(_SEGS)))
     monkeypatch.setattr(extract, "_run_diarization", lambda p: list(_TURNS))
     monkeypatch.setattr(vault, "resolve_vault", lambda: Path("/vault"))
-    monkeypatch.setattr(voice_profiles, "load_profiles", lambda path: dict(profiles))
+    monkeypatch.setattr(
+        voice_profiles,
+        "load_profiles",
+        lambda _path, **_kwargs: dict(profiles),
+    )
     monkeypatch.setattr(voice_embed, "embed_spans", embed)
 
 

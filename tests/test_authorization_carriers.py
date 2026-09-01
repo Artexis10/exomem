@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from asyncio import run
 
 import pytest
 
@@ -233,3 +234,98 @@ def test_cli_fd_reader_marks_oversized_or_malformed_input_invalid(payload: bytes
         os.close(read_fd)
         if write_fd >= 0:
             os.close(write_fd)
+
+
+@pytest.mark.parametrize(
+    ("path", "query_string", "body"),
+    [
+        (
+            "/api/ask_memory",
+            f"authorization_session_credential={BEARER}".encode(),
+            b'{"query":"governance"}',
+        ),
+        (
+            "/private/exomem/v1/command/ask_memory",
+            b"",
+            json.dumps(
+                {
+                    "query": "governance",
+                    "authorization_session_credential": BEARER,
+                }
+            ).encode(),
+        ),
+        (
+            "/private/exomem/v1/agent/hosted-alpha-agent-v2/command/ask_memory",
+            b"",
+            json.dumps({"query": f"show inert text {BEARER}"}).encode(),
+        ),
+    ],
+)
+def test_forbidden_http_carrier_is_redacted_before_downstream_request_copies(
+    path: str,
+    query_string: bytes,
+    body: bytes,
+) -> None:
+    from exomem.governance.authorization_transport import AuthorizationCarrierMiddleware
+
+    downstream: list[object] = []
+    sent: list[dict[str, object]] = []
+
+    async def app(scope, receive, send) -> None:
+        downstream.append(scope)
+        downstream.append(await receive())
+        await send({"type": "http.response.start", "status": 204, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    received = False
+
+    async def receive() -> dict[str, object]:
+        nonlocal received
+        if received:
+            return {"type": "http.disconnect"}
+        received = True
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    async def send(message: dict[str, object]) -> None:
+        sent.append(message)
+
+    run(
+        AuthorizationCarrierMiddleware(app)(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": path,
+                "query_string": query_string,
+                "headers": [(b"content-type", b"application/json")],
+            },
+            receive,
+            send,
+        )
+    )
+
+    rendered = repr((downstream, sent))
+    assert "authorization_session_credential" in rendered
+    assert BEARER not in rendered
+
+
+def test_mcp_bearer_outside_protected_placeholder_is_redacted_and_invalid() -> None:
+    from exomem.governance import authorization_request
+    from exomem.governance.authorization_transport import sanitize_mcp_http_body
+
+    raw = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": "tools/call",
+            "params": {
+                "name": "ask_memory",
+                "arguments": {"query": f"retrieved text {BEARER}"},
+            },
+        }
+    ).encode()
+
+    sanitized = sanitize_mcp_http_body(raw)
+
+    assert sanitized.carrier.consume() is authorization_request.INVALID_CREDENTIAL
+    assert BEARER not in sanitized.body.decode()
+    assert BEARER not in repr(sanitized.arguments)

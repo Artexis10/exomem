@@ -3,7 +3,7 @@
   "name": "io.github.Artexis10/exomem",
   "title": "Exomem",
   "description": "Local Markdown/Obsidian knowledge substrate for MCP agents with governed memory and hybrid search.",
-  "version": "0.58.0",
+  "version": "0.68.2",
   "websiteUrl": "https://substratesystems.io/exomem",
   "repository": {
     "url": "https://github.com/Artexis10/exomem",
@@ -13,7 +13,7 @@
     {
       "registryType": "pypi",
       "identifier": "exomem",
-      "version": "0.58.0",
+      "version": "0.68.2",
       "transport": {
         "type": "stdio"
       }

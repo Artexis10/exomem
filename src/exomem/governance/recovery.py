@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import sqlite3
 import stat
@@ -14,9 +15,10 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
-from .. import reserved_paths
+from .. import reserved_paths, semantic_contract
+from . import catalog_publication, graph_producer
 from . import policy as policy_module
-from . import receipts, store
+from . import receipts, schema_v4, store
 from .operations import RECOVERY_STRATEGY_KEYS, journal_variant, recovery_strategy
 from .transaction import (
     GovernanceError,
@@ -224,10 +226,16 @@ def _journal_snapshot(conn: sqlite3.Connection, event_id: str) -> dict[str, Any]
     row = conn.execute(
         "SELECT event_id, operation, prior_digest, prepared_digest, final_digest, "
         "required_child_intents, required_child_terminals, proposal_id, marker_required, "
-        "affected_ids, phase FROM governance_operation_journals WHERE event_id=?",
+        "affected_ids, phase, created_at FROM governance_operation_journals WHERE event_id=?",
         (event_id,),
     ).fetchone()
-    if row is None or any(not isinstance(row[index], str) for index in (0, 1, 2, 3, 4, 5, 6, 9, 10)):
+    if (
+        row is None
+        or any(not isinstance(row[index], str) for index in (0, 1, 2, 3, 4, 5, 6, 9, 10))
+        or isinstance(row[11], bool)
+        or not isinstance(row[11], (int, float))
+        or not math.isfinite(float(row[11]))
+    ):
         return None
     return {
         "event_id": row[0],
@@ -241,6 +249,7 @@ def _journal_snapshot(conn: sqlite3.Connection, event_id: str) -> dict[str, Any]
         "marker_required": bool(row[8]),
         "affected_ids": row[9],
         "phase": row[10],
+        "created_at": float(row[11]),
     }
 
 
@@ -312,6 +321,11 @@ def _actual_component_value(
     expected: Mapping[str, Any] | None = None,
     event_id: str | None = None,
 ) -> dict[str, Any]:
+    if kind == "catalog":
+        try:
+            return catalog_publication.current_catalog_component_value(vault_root)
+        except catalog_publication.CatalogPublicationError:
+            return {"status": "unsafe"}
     if kind == "companion":
         try:
             snapshot = reserved_paths.read_generic_bytes(vault_root, key)
@@ -359,6 +373,36 @@ def _actual_component_value(
             )
         )
     if kind == "token":
+        version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+        if version >= schema_v4.SCHEMA_USER_VERSION:
+            row = conn.execute(
+                "SELECT authorization_session_id, principal_id, issuer_family, audience, "
+                "max_level, fingerprints, paths, scope_ids, purpose, org_ceiling, status, "
+                "prepared_event_id, expires_at, minted_at, consumed_at "
+                "FROM withhold_tokens WHERE jti=?",
+                (key,),
+            ).fetchone()
+            return (
+                {"status": "absent"}
+                if row is None
+                else authorization_row(
+                    authorization_session_id=str(row[0]),
+                    principal_id=str(row[1]),
+                    issuer_family=str(row[2]),
+                    audience=str(row[3]),
+                    max_level=int(row[4]),
+                    fingerprints=str(row[5]),
+                    paths=str(row[6]),
+                    scope_ids=str(row[7]),
+                    purpose=row[8],
+                    org_ceiling=int(row[9]),
+                    status=str(row[10]),
+                    prepared_event_id=row[11],
+                    expires_at=int(row[12]),
+                    minted_at=int(row[13]),
+                    consumed_at=row[14],
+                )
+            )
         row = conn.execute(
             "SELECT audience, max_level, fingerprints, paths, expires_at, minted_at, consumed_at, "
             "authorization_session, purpose, org_ceiling, status, prepared_event_id "
@@ -378,6 +422,38 @@ def _actual_component_value(
             }
         )
     if kind in {"grant", "dependent_grant"}:
+        version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+        if version >= schema_v4.SCHEMA_USER_VERSION:
+            row = conn.execute(
+                "SELECT authorization_session_id, principal_id, issuer_family, audience, "
+                "purpose, ceiling, paths, fingerprints, scope_ids, membership_manifest, "
+                "policy_fingerprint, token_jti, status, prepared_event_id, created_at, "
+                "expires_at, revoked_at FROM governance_session_grants WHERE grant_id=?",
+                (key,),
+            ).fetchone()
+            return (
+                {"status": "absent"}
+                if row is None
+                else authorization_row(
+                    authorization_session_id=str(row[0]),
+                    principal_id=str(row[1]),
+                    issuer_family=str(row[2]),
+                    audience=str(row[3]),
+                    purpose=row[4],
+                    ceiling=int(row[5]),
+                    paths=str(row[6]),
+                    fingerprints=str(row[7]),
+                    scope_ids=str(row[8]),
+                    membership_manifest=str(row[9]),
+                    policy_fingerprint=str(row[10]),
+                    token_jti=str(row[11]),
+                    status=str(row[12]),
+                    prepared_event_id=row[13],
+                    created_at=int(row[14]),
+                    expires_at=int(row[15]),
+                    revoked_at=row[16],
+                )
+            )
         row = conn.execute(
             "SELECT authorization_session, audience, purpose, ceiling, paths, fingerprints, token_jti, "
             "status, prepared_event_id, created_at, expires_at, revoked_at, membership_manifest, "
@@ -813,7 +889,167 @@ def _recovery_matches_components(
     kinds = {
         row["component_kind"] for row in _phase_rows(conn, event_id, "prepared")
     }
+    if policy == "composite_companion":
+        version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+        required = {"companion", "proposal"}
+        if version >= schema_v4.SCHEMA_USER_VERSION:
+            required.add("catalog")
+        return kinds == required
     return bool(kinds) and kinds <= strategy.component_kinds
+
+
+def _phase_component(
+    conn: sqlite3.Connection,
+    event_id: str,
+    phase: str,
+    kind: str,
+) -> tuple[str, dict[str, Any]] | None:
+    matches = [
+        row
+        for row in _phase_rows(conn, event_id, phase)
+        if row["component_kind"] == kind
+    ]
+    if len(matches) != 1:
+        return None
+    row = matches[0]
+    try:
+        value = json.loads(row["value_json"])
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(value, dict):
+        return None
+    return row["component_key"], value
+
+
+def _recover_companion_catalog_publication(
+    vault_root: Path,
+    journal: Mapping[str, Any],
+    terminals: set[str],
+) -> bool | None:
+    """Finish the exact catalog successor after companion bytes committed."""
+
+    if journal.get("operation") != "commit_backfill_companion":
+        return None
+    required_terminals = _string_list(journal.get("required_child_terminals"))
+    if required_terminals is None:
+        return False
+    event_id = str(journal["event_id"])
+    conn = store.open_connection(vault_root)
+    try:
+        if int(conn.execute("PRAGMA user_version").fetchone()[0]) < 4:
+            return None
+        prior_catalog = _phase_component(conn, event_id, "prior", "catalog")
+        prior_companion = _phase_component(conn, event_id, "prior", "companion")
+        prepared_catalog = _phase_component(conn, event_id, "prepared", "catalog")
+        prepared_companion = _phase_component(
+            conn, event_id, "prepared", "companion"
+        )
+        prepared_proposal = _phase_component(conn, event_id, "prepared", "proposal")
+        if any(
+            component is None
+            for component in (
+                prior_catalog,
+                prior_companion,
+                prepared_catalog,
+                prepared_companion,
+                prepared_proposal,
+            )
+        ):
+            return False
+        assert prior_catalog is not None
+        assert prior_companion is not None
+        assert prepared_catalog is not None
+        assert prepared_companion is not None
+        assert prepared_proposal is not None
+        if (
+            _actual_component_value(
+                vault_root,
+                conn,
+                "catalog",
+                prior_catalog[0],
+                phase="prior",
+                expected=prior_catalog[1],
+                event_id=event_id,
+            )
+            != prior_catalog[1]
+            or _actual_component_value(
+                vault_root,
+                conn,
+                "companion",
+                prepared_companion[0],
+                phase="prepared",
+                expected=prepared_companion[1],
+                event_id=event_id,
+            )
+            != prepared_companion[1]
+            or _actual_component_value(
+                vault_root,
+                conn,
+                "proposal",
+                prepared_proposal[0],
+                phase="prepared",
+                expected=prepared_proposal[1],
+                event_id=event_id,
+            )
+            != prepared_proposal[1]
+        ):
+            return None
+        if set(required_terminals) & terminals:
+            return False
+    finally:
+        conn.close()
+
+    try:
+        snapshot = reserved_paths.read_generic_bytes(
+            vault_root, prepared_companion[0]
+        )
+        source = snapshot.data.decode("utf-8")
+        expected_before_hash = prior_companion[1].get("sha256")
+        if not isinstance(expected_before_hash, str):
+            return False
+
+        def graph_replacement_provider() -> tuple[
+            catalog_publication.GraphMeasurementReplacement, ...
+        ]:
+            current_corpus = semantic_contract.build_corpus_context(vault_root)
+            return graph_producer.replacements_for_current_markdown(
+                vault_root,
+                current_corpus=current_corpus,
+                paths=(prepared_companion[0],),
+            )
+
+        prepared = catalog_publication.prepare_markdown_upsert(
+            vault_root,
+            path=prepared_companion[0],
+            source=source,
+            expected_before_hash=expected_before_hash,
+            graph_replacement_provider=graph_replacement_provider,
+            now=int(time.time()),
+            activated_at=int(float(journal["created_at"])),
+        )
+        if prepared is None:
+            return False
+        catalog_prior, catalog_target = catalog_publication.catalog_component_values(
+            prepared
+        )
+        if (
+            catalog_prior != prior_catalog[1]
+            or catalog_target != prepared_catalog[1]
+        ):
+            return False
+        catalog_publication.publish_markdown_batch(prepared)
+        return True
+    except (
+        UnicodeDecodeError,
+        catalog_publication.CatalogPublicationError,
+        reserved_paths.ReservedPathLeafError,
+        KeyError,
+        OSError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+    ):
+        return False
 
 
 def _activate_event(
@@ -968,6 +1204,24 @@ def _reconcile_orphan_reservations(vault_root: Path) -> tuple[int, bool]:
         ).fetchall()
     finally:
         conn.close()
+    legacy_rows = []
+    for row in rows:
+        try:
+            payload = json.loads(str(row[1]))
+        except (TypeError, ValueError):
+            legacy_rows.append(row)
+            continue
+        binding = payload.get("authority_binding") if isinstance(payload, dict) else None
+        if isinstance(binding, dict) and binding.get("schema") in {
+            "exomem.governance-policy-proposal/v3",
+            "exomem.governance-policy-proposal/v4",
+        }:
+            # Immutable-generation proposals own receipt reservation and recovery in
+            # the v4 policy publisher.  They intentionally have no legacy YAML
+            # operation journal and must not be classified as orphaned here.
+            continue
+        legacy_rows.append(row)
+    rows = legacy_rows
     if not rows:
         return 0, False
     if _marker_path(vault_root).exists():
@@ -1166,6 +1420,14 @@ def reconcile_governance_operations(vault_root: Path) -> dict[str, Any]:
             blocked = True
             continue
         if journal["marker_required"] and not _validated_marker(vault_root, journal):
+            blocked = True
+            continue
+        catalog_recovery = _recover_companion_catalog_publication(
+            vault_root,
+            journal,
+            terminals,
+        )
+        if catalog_recovery is False:
             blocked = True
             continue
         conn = store.open_connection(vault_root)

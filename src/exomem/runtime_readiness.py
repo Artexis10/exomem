@@ -23,6 +23,16 @@ log = logging.getLogger(__name__)
 # cadence of at least one probe per five minutes rather than one late burst.
 SILENT_TRAFFIC_WINDOW_SECONDS = 24 * 60 * 60
 SILENT_TRAFFIC_MINIMUM_HEALTH_PROBES = 288
+# A 2.4k-note Windows vault needs about 0.27 seconds to read its mutation
+# boundary plus graph epoch under memory pressure.  The former 0.25-second
+# ceiling therefore rejected ordinary work and made successive readiness
+# probes alternate 503/200 as the second probe reused the first one's late
+# result.  Keep a hard sub-second bound, with enough headroom for the measured
+# steady state; genuinely blocked graph publication still fails closed.
+COORDINATION_STATUS_TIMEOUT_SECONDS = 0.75
+
+_COORDINATION_PROBES_LOCK = threading.Lock()
+_COORDINATION_PROBES: dict[str, tuple[threading.Event, dict[str, object]]] = {}
 
 
 class SilentTrafficMonitor:
@@ -185,7 +195,7 @@ def _public_last_holder(value: object) -> dict[str, Any] | None:
             value.get("holder_kind"), fallback="unknown"
         ),
         "observed_at": float(observed_at)
-        if isinstance(observed_at, (int, float)) and not isinstance(observed_at, bool)
+        if isinstance(observed_at, int | float) and not isinstance(observed_at, bool)
         else 0.0,
         "source": source if source in {"refusal", "release"} else "unknown",
     }
@@ -206,7 +216,7 @@ def _public_contention(value: object) -> dict[str, Any] | None:
         "busy_refusals": _non_negative_int(value.get("busy_refusals")),
         "busy_refusals_recent": _non_negative_int(value.get("busy_refusals_recent")),
         "recent_window_seconds": float(window)
-        if isinstance(window, (int, float)) and not isinstance(window, bool)
+        if isinstance(window, int | float) and not isinstance(window, bool)
         else 0.0,
         # Stated, not implied: the counters describe this process only, so a
         # zero refusal count is not evidence that the boundary is uncontended.
@@ -226,6 +236,7 @@ def _public_mutation_boundary(value: object) -> dict[str, Any]:
       `reason` naming why (`process_local_only` when no vault identity was
       configured so only this process's own holds were visible,
       `status_error` when the coordination probe itself failed,
+      `status_timeout` when it did not complete inside the readiness budget,
       `unavailable` when no boundary block was reported at all).
 
     A missing or unrecognised block is `unknown`, never `free`.  "We did not
@@ -290,6 +301,47 @@ _DEFAULT_OBSERVABILITY: dict[str, Any] = {
     "journal_ok": None,
 }
 
+_LEXICAL_REPAIR_PHASES = frozenset(
+    {"queued", "targeted", "building", "publishing", "promoting", "idle"}
+)
+_LEXICAL_REPAIR_RESULTS = frozenset(
+    {
+        "published",
+        "targeted",
+        "delta_unavailable",
+        "identity_changed",
+        "source_changed",
+        "publish_conflict",
+        "wal_busy",
+        "fold_failed",
+        "transient_failure",
+        "error",
+    }
+)
+
+
+def _public_lexical_repair(value: object) -> dict[str, object] | None:
+    """Project fixed, content-free repair progress into public readiness."""
+    if not isinstance(value, Mapping):
+        return None
+    raw_phase = value.get("phase")
+    phase = raw_phase if raw_phase in _LEXICAL_REPAIR_PHASES else "idle"
+    raw_result = value.get("last_result")
+    result = raw_result if raw_result in _LEXICAL_REPAIR_RESULTS else None
+
+    def duration(name: str) -> float | None:
+        raw = value.get(name)
+        if isinstance(raw, bool) or not isinstance(raw, int | float):
+            return None
+        return round(min(max(float(raw), 0.0), 604800.0), 3)
+
+    return {
+        "phase": phase,
+        "age_seconds": duration("age_seconds"),
+        "last_duration_seconds": duration("last_duration_seconds"),
+        "last_result": result,
+    }
+
 
 def build_runtime_readiness(
     *,
@@ -299,6 +351,7 @@ def build_runtime_readiness(
     session_store: Mapping[str, Any] | None = None,
     observability: Mapping[str, Any] | None = None,
     traffic: Mapping[str, Any] | None = None,
+    retrieval: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the public readiness payload from already-measured coordination state."""
     enabled = bool(coordination.get("enabled"))
@@ -310,6 +363,8 @@ def build_runtime_readiness(
     reasons: list[str] = []
     if mcp_tool_surface_sha256 is None:
         reasons.append("mcp_tool_surface_unavailable")
+    if coordination.get("status_timed_out") is True:
+        reasons.append("coordination_status_timeout")
     if enabled:
         if not healthy:
             reasons.append("coordinator_unavailable")
@@ -317,6 +372,20 @@ def build_runtime_readiness(
             reasons.append("coordination_role_unknown")
         if replica_id is None:
             reasons.append("replica_identity_missing")
+
+    retrieval_payload: dict[str, object] | None = None
+    retrieval_admitted = True
+    if retrieval is not None:
+        state = str(retrieval.get("state") or "unverified")
+        if state not in {"ready", "warming", "unavailable", "unverified"}:
+            state = "unverified"
+        retrieval_admitted = bool(retrieval.get("admitted")) and state == "ready"
+        retrieval_payload = {"state": state, "admitted": retrieval_admitted}
+        repair = _public_lexical_repair(retrieval.get("repair"))
+        if repair is not None:
+            retrieval_payload["repair"] = repair
+        if not retrieval_admitted:
+            reasons.append(f"retrieval_{state}")
 
     takeover_eligible = not reasons
     session_store_state = (
@@ -342,7 +411,7 @@ def build_runtime_readiness(
     if graph_sync is not None:
         coordination_payload["graph_sync"] = graph_sync
     payload = {
-        "status": "ready" if takeover_eligible else "not_ready",
+        "status": "ready" if takeover_eligible and retrieval_admitted else "not_ready",
         "service": "exomem",
         "release": release,
         "mcp_tool_surface_sha256": mcp_tool_surface_sha256,
@@ -359,6 +428,8 @@ def build_runtime_readiness(
         "takeover_eligible": takeover_eligible,
         "reasons": reasons,
     }
+    if retrieval_payload is not None:
+        payload["retrieval"] = retrieval_payload
     if traffic is not None:
         payload["traffic"] = dict(traffic)
     return payload
@@ -413,15 +484,73 @@ def _measure_observability() -> dict[str, Any]:
     }
 
 
+def _bounded_coordination_status(
+    vault_root: Path | None,
+    probe: Callable[[Path | None], Mapping[str, Any]],
+    *,
+    timeout_seconds: float = COORDINATION_STATUS_TIMEOUT_SECONDS,
+) -> Mapping[str, Any] | None:
+    """Run at most one status probe per vault and fail closed on its deadline.
+
+    The underlying diagnostic traverses graph state and can encounter a live
+    publication hold.  Readiness cannot inherit that unbounded wait: the public
+    endpoint must answer within the edge budget, and repeated health polls must
+    not create an unbounded thread pile while the first probe is still blocked.
+    """
+    key = (
+        "<process-local>"
+        if vault_root is None
+        else os.path.normcase(str(vault_root.resolve(strict=False)))
+    )
+    with _COORDINATION_PROBES_LOCK:
+        current = _COORDINATION_PROBES.get(key)
+        if current is None:
+            completed = threading.Event()
+            result: dict[str, object] = {}
+            current = (completed, result)
+            _COORDINATION_PROBES[key] = current
+
+            def run_probe() -> None:
+                try:
+                    result["value"] = probe(vault_root)
+                except Exception as error:  # noqa: BLE001 - re-raised on request thread
+                    result["error"] = error
+                finally:
+                    completed.set()
+
+            threading.Thread(
+                target=run_probe,
+                name="exomem-readiness-coordination",
+                daemon=True,
+            ).start()
+
+    completed, result = current
+    if not completed.wait(timeout_seconds):
+        return None
+    with _COORDINATION_PROBES_LOCK:
+        if _COORDINATION_PROBES.get(key) is current:
+            _COORDINATION_PROBES.pop(key, None)
+    error = result.get("error")
+    if isinstance(error, Exception):
+        raise error
+    value = result.get("value")
+    if not isinstance(value, Mapping):
+        raise RuntimeError("coordination status returned an invalid payload")
+    return value
+
+
 def runtime_readiness(
     *,
     mcp_tool_surface_sha256: str | None,
     traffic: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Measure this process's eligibility without exposing vault or credential state."""
+    from . import readiness
     from .session_validation_cache import session_store_readiness
     from .writer_lease import coordination_status
 
+    coordination: Mapping[str, Any]
+    configured_vault: Path | None = None
     try:
         configured_raw = os.environ.get("EXOMEM_VAULT_PATH", "").strip()
         # Only an absolute path names a boundary this process can probe. A
@@ -434,7 +563,24 @@ def runtime_readiness(
             if configured_raw and Path(configured_raw).is_absolute()
             else None
         )
-        coordination = coordination_status(configured_vault)
+        measured = _bounded_coordination_status(
+            configured_vault,
+            coordination_status,
+        )
+        if measured is None:
+            coordination = {
+                "enabled": bool(os.environ.get("EXOMEM_WRITER_LEASE_URL", "").strip()),
+                "role": "unknown",
+                "replica_id": os.environ.get("EXOMEM_WRITER_LEASE_REPLICA_ID") or None,
+                "coordinator_healthy": False,
+                "status_timed_out": True,
+                "mutation_boundary": {
+                    "state": "unknown",
+                    "reason": "status_timeout",
+                },
+            }
+        else:
+            coordination = measured
     except Exception:  # noqa: BLE001 - readiness must return structured 503 state
         coordination = {
             "enabled": bool(os.environ.get("EXOMEM_WRITER_LEASE_URL", "").strip()),
@@ -445,6 +591,16 @@ def runtime_readiness(
             # here is what made MUTATION_LOCK_UNAVAILABLE read as healthy.
             "mutation_boundary": {"state": "unknown", "reason": "status_error"},
         }
+    retrieval = readiness.retrieval_admission(configured_vault)
+    if configured_vault is not None:
+        try:
+            from . import lexstore
+
+            progress = lexstore.repair_progress(configured_vault)
+        except Exception:  # noqa: BLE001 - diagnostics must not break readiness
+            progress = None
+        if progress is not None:
+            retrieval = {**retrieval, "repair": progress}
     return build_runtime_readiness(
         coordination=coordination,
         release=package_release(),
@@ -456,4 +612,5 @@ def runtime_readiness(
             if traffic is not None
             else get_silent_traffic_monitor().snapshot()
         ),
+        retrieval=retrieval,
     )

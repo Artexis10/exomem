@@ -46,9 +46,18 @@ Planning and Records use separate semantic profiles on one structured-collection
 substrate. Planning owns durable intent and prioritisation. Records do not infer
 goals, completion, medical conclusions, or personal judgments. A collection may
 hold opaque links between a plan and a bounded Records query, but does not resolve
-or duplicate the other side. For software work, OpenSpec and the repository own
-accepted change contracts and execution truth; git, specs, tests, and code remain
-the authority.
+or duplicate the other side. A resolved workflow contract may declare a companion
+owner for execution artifacts; without one, Planning works standalone. Companion
+references remain opaque, and governance, tool availability, and external
+permissions remain separate from the declaration.
+
+Before proactive Planning or Records capture, resolve the current workflow
+posture when the workflow route is available, using explicit known-absent scope
+values where applicable. Its capture posture is capped by the active prominence
+level. Inspect the relevant Planning collection before writing: update a matching
+item before creating another. Records are observations, not a transition engine:
+only an explicit user change of intent may make a guarded Planning transition;
+an outcome under a propose-after-outcome posture may only propose that change.
 
 ## Proactive engagement
 
@@ -124,19 +133,16 @@ is made**, or **an observed outcome or event is reported** — capture it:
   **failure** note. A one-off with nothing reusable stays unwritten.
 - A **stated intent or commitment** is a landing too: the user says what they
   will do, commits to a batch or workstream, sequences work ("the next one",
-  "the others next time"), or re-prioritises. Route it to Planning —
-  `plan_memory(action="add")` into the inbox state, or `triage`/`update` on an
-  item that already exists.
+  "the others next time"), or re-prioritises. Resolve posture first, inspect
+  Planning, then update a matching item before creating an inbox item.
 - An **observed outcome or event** is the mirror class: the conversation reports
   that something happened, was produced, measured, delivered, approved,
   published, or failed. Route it to Records — `record_memory(action="append")`
   into the one compatible collection.
-- **Pairing rule.** An observed outcome that lands on an open committed Planning
-  item is *one landing with two consequences*: append the record first (it is the
-  canonical observation), then transition the item (status, and lifecycle where
-  the collection's convention archives completed work). Do both together and
-  report them once, in the user's own words, citing the collection the way recall
-  cites a page. A **tentative** claim ("probably posted, not sure") is never
+- **Pairing rule.** Append an observed outcome to Records first; it is the
+  canonical observation. It never changes Planning automatically. An explicit
+  user intent may request a guarded transition; otherwise a
+  propose-after-outcome posture may only propose one. A **tentative** claim ("probably posted, not sure") is never
   written as an event — say so in a note field if the manifest offers one — and
   elapsed time is never an outcome.
 - Pause and ask only when type or scope is genuinely ambiguous (research vs.
@@ -149,13 +155,80 @@ landing, not during the flight.
 Do not wait to be asked. "Did you save that?" arriving after a result already
 landed is the failure, not the prompt.
 
+## What Exomem does on its own
+
+Prominence says how much Exomem speaks up. The **delegation envelope** says what
+it may do on its own, per kind of action. `bootstrap()` reports the active one
+under `engagement.envelope`; read it there rather than assuming, because a user
+can move a class below its ceiling and the served envelope is the only place
+that shows it.
+
+Each action class carries a hard **ceiling** — product law. No prominence level,
+override or adaptation authorizes behaviour above it. Below the ceiling the
+class carries a **disposition**, either derived from the prominence level, fixed,
+or explicitly overridden by the user.
+
+| Action class | Ceiling | What it covers |
+|---|---|---|
+| `hygiene_writes` | silent | index, log and back-reference upkeep riding a governed write |
+| `proactive_capture` | silent-capable | capture, record and plan writes you start yourself |
+| `link_acceptance` | confirm | accepting a suggested relation |
+| `structural_suggestions` | advisory | structural advice on any channel — surface only |
+| `restructure_execution` | confirm-required | restructure application, supersession commit, entity creation, deletion |
+| `disclosure` | governed by the governance plane | no disposition; not envelope-configurable |
+
+**The decider protocol**, for every action you are about to take:
+
+1. **Name the action class.** An action that fits none of them has no envelope
+   cell and therefore no authority — propose it instead.
+2. **Check the ceiling.** An intent above it becomes a proposal, never an act.
+3. **Check the disposition.** `off`: do not initiate — an explicit request from
+   the user is never blocked. `advisory`: surface it in the user's own language
+   and stop. `silent`: act, narrating as the prominence contract says.
+   `confirm` / `confirm-shortcut`: obtain the confirmation first; a
+   confirm-shortcut is an inline one-action approval of that one named item, so
+   the confirmation step is never skipped.
+4. **Record the outcome through triage**, so the decision is durable and the
+   signal family is countable.
+
+Confirm-required binds at three tiers: the served envelope marks the class, you
+obtain the confirmation in the conversation, and the server-side gates still
+apply — deletion needs its explicit confirm, and the adoption apply surface
+commits only a plan that was previewed. Supersession and entity creation have no
+server-side gate today; that is named future work, not an implied gate, so the
+confirmation is yours to obtain.
+
+**Standing delegation does not exist in v1.** "Always allow this" or "do this
+kind of thing from now on" for restructure execution is refused by name: it
+would be an envelope cell above the current ceiling, and only a deliberate
+founder ratification may ever create one. Say that, rather than improvising
+either a refusal or a consent.
+
+When the user asks to stop hearing about a KIND of suggestion, that is a signal
+family rather than an envelope class: quiet the family through
+`triage_memory(ref="exomem://review/family/<family>", action="quiet",
+why="<code>: ...")` rather than lowering prominence, which silences everything.
+`review_memory(mode="dispositions")` lists the registered family vocabulary
+alongside the envelope block and what is currently quiet and why.
+
+Set or reset a served envelope class through the same triage surface:
+`triage_memory(ref="exomem://envelope/<action-class>", action="<disposition>|reset")`.
+
 ## Agent write loop
 
 Use this loop whenever a durable conclusion should enter Exomem:
 
 1. `ask_memory` for relevant prior notes and sources.
 2. `read_memory` for chosen pages, or use `ask_memory(deep=true)` when synthesis needs bounded context.
-3. Identify the provenance: which `Sources/` or `Evidence/` pages this conclusion draws from. Those become `sources:` on the write call. If it came from live work with nothing captured, that is an honest empty list.
+3. Identify the provenance: which governed `Sources/` or `Evidence/` pages this
+   conclusion draws from. Those become `sources:` on the write call. Capture
+   external material first: a URL, connector/message ID, remote file ID, working
+   script, excerpt, or derivative summary is not itself a source citation. Use
+   `capture_source` or the Evidence lane for the original, then cite the returned
+   path or stable ref. If the original cannot be recovered, remove the unsupported
+   claim explicitly; never recreate an "original" from the derivative. If the
+   conclusion came from live work with nothing external captured, `sources: []`
+   is honest and valid.
 4. Draft the typed page at the right layer: `capture_source` for raw source, `remember` for a compiled conclusion, `connect_memory` for entity/link work, `edit_memory` for small correction, `replace_memory` for supersession.
 5. Run `connect_memory(operation="suggest-links")` on the draft before writing;
    use `suggest-relations` when directional meaning matters. Accept only links
@@ -342,7 +415,7 @@ experiments, proof-bearing records, review, and supersession.
 | `relations` | "review suggested relations," "pay down relation debt," "accept/reject suggested links" | `review_memory(mode="relation-queue")` for the batched read; accept one reviewed candidate via `connect_memory(operation="accept-relation")` (requires the queue fingerprint, target `expected_hash`, and an audit reason); reject via `triage_memory` |
 | `connect` | "connect these ideas," "suggest relations," "show the surrounding context" | `connect_memory`; use `operation="context"` for bounded graph, provenance, evidence, and history |
 | `adopt` | "what does this existing vault contain," "import/adopt this vault safely" | `adopt_vault(mode="scan-only")` first; explicit modes for manifest/copy/compile planning |
-| `maintain` | "check vault health," "fix safe drift" | `maintain_memory(mode="audit")`; explicit `fix` or `reconcile` modes only with fix intent |
+| `maintain` | "check vault health," "fix safe drift," "make Planning/Records files readable" | Remote tools may use `maintain_memory(mode="audit")` or preview one collection with `mode="structured-files"`. Structured-file apply requires its exact preview plan; ordinary `fix`/`reconcile` writes remain host-operator work via `exomem maintain --fix` / `--reconcile` |
 | `schema` | "what structure or relation vocabulary recurs," "validate this graph lens" | `schema_memory`; infer before saving, and keep governance optional |
 
 Records routing is semantic: use it for durable observed events or current state
@@ -353,15 +426,20 @@ when collections compete or identity, date, provenance, or ownership is unclear.
 When no collection fits, use `record_memory(action="describe")` and propose a
 concise collection; the agent must not silently create a long-lived schema.
 
-For a Records collection stored as Markdown items, YAML frontmatter is the sole
-canonical value source. A manifest may opt into `record_presentation` to add a
-generated, readable body block for selected nested child values. Treat that
-block as derived: never edit it as data or read values back from it. If a person
-directly edits selected frontmatter, inspect and rebaseline the audit gap, then
-use guarded `record_memory(action="update", refresh_presentation=true, ...)`
-to refresh the block. Query a declared child table with `expand_child`; use the
-older `expand_children=true` only when the collection has one unambiguous child
-container.
+For a Planning or Records collection stored as Markdown items, YAML frontmatter
+is the sole canonical value source and the UUID remains durable identity. A
+manifest may declare `item_filename` and `item_presentation` (or the compatible
+Records presentation recipe) so the file tree and page read naturally. Prefer
+stable descriptive fields such as title for filenames; keep status, priority,
+horizon, and other mutable state in frontmatter so ordinary updates do not cause
+renames. Treat every managed body block as derived: never edit it as data or read
+values back from it. A guarded item update can refresh one block. For an existing
+UUID-named collection, call
+`maintain_memory(mode="structured-files", collection=...)` to preview every
+rename, body change, collision, and inbound-link blocker; apply only with the
+returned `plan_id`, `source_snapshot`, and reason. Query a declared Records child
+table with `expand_child`; use `expand_children=true` only when the collection
+has one unambiguous child container.
 
 Examples:
 
@@ -383,9 +461,11 @@ Examples:
   observed Record, not a compiled conclusion. If none fits, propose a collection
   rather than creating one silently.
 - "Show my last three months" -> `record_memory(action="query")` with a bounded date/query shape; use a compiled Note only for an explicit conclusion from that history.
-- "The second one is done, the rest can wait" -> one landing, two consequences: `record_memory(action="append")` for the produced deliverable, then `plan_memory(action="triage")` to complete that work item; the others stay queued and nothing else moves. Report it once: "<deliverable> is done and logged; the rest stay queued." Read the Planning inventory with `plan_memory(action="inspect")` when no collection is named yet, and resolve the item with `plan_memory(action="query")` filtered on the title or a natural-key field plus `lifecycle` and `status`.
+- "The second one is done, the rest can wait" -> one landing, two consequences: `record_memory(action="append")` for the produced deliverable, then `plan_memory(action="triage")` to complete that work item; the others stay queued and nothing else moves. Report it once: "<deliverable> is done and logged; the rest stay queued." Discover the collection with `browse_memory` when none is named, inspect that exact collection with `plan_memory(action="inspect", collection=...)`, then resolve the item with `plan_memory(action="query")` filtered on the title or a natural-key field plus `lifecycle` and `status`.
 - "Save this feature idea" -> `plan_memory(action="add")`; use explicit `triage` for a horizon or hierarchy change, never infer it from elapsed time — a stated outcome is evidence, the clock is not.
-- "Compile these three sources" -> draft a sourced note with
+- "Compile these three sources" -> ensure the three originals are already
+  captured as Source/Evidence pages (capture any missing originals first), then
+  draft a sourced note with
   `remember(suggestions=true, response_detail="full")` link suggestions, then
   write after the applicable approval rule.
 - "Show stale conclusions" -> run the review path and present candidates for
@@ -497,7 +577,7 @@ and index updates are determined by the operation, not the caller.
 | **adopt** | Safe first-run adoption workflow for an existing vault: scan-only by default; can save a manifest or copy selected legacy text files as Sources while preserving originals | `Knowledge Base/_Adoption/` or `Sources/Imported/` only in explicit write modes |
 | **propose_compilation** | Draft a note scaffold from unprocessed source(s) — the backlog-drain companion to audit (read-only) | proposals only |
 | **replace** | Supersession: mark old, write new with header pointer | both old + new |
-| **reconcile** | Heal drift from out-of-band edits (any editor/sync/mobile, e.g. Obsidian): recompute index counts + re-embed stale files + report remaining drift. Idempotent; `dry_run` reports only | drifted indexes + embedding sidecar |
+| **reconcile** | Heal drift from out-of-band edits (any editor/sync/mobile, e.g. Obsidian): recompute index counts + re-embed stale files + report remaining drift. Remote tools may preview with `dry_run=true`; actual repair is host-operator work via `exomem maintain --reconcile` | drifted indexes + embedding sidecar |
 | **provenance_report** | Scan note bodies for `<!-- key:value -->` provenance tags (filter by key/value/path). Read-only | — |
 
 For the full per-operation spec — inputs, validation, write rules, edge cases —
@@ -625,7 +705,7 @@ reference for the canonical operation leaves that product commands route to.
 - "audit the KB," "lint the vault," "check for orphans" → **audit**
 - "what does this vault look like," "assess my vault," "how is this vault organized" → **overview**
 - "what should Exomem do with this existing vault," "how can we migrate this safely" → **adopt**
-- "I edited the vault directly / on my phone — sync it up," "heal the drift" → **reconcile**
+- "I edited the vault directly / on my phone — sync it up," "heal the drift" → preview remotely, then have the host operator run **reconcile**
 - "this replaces the old strategy," "supersede the old note on X" → **replace**
 - "make a new folder for X" → **create_file** (`kind="dir"`, Tier 2)
 - "rename this page," "move this note to Patterns/" → **move_file** (Tier 2)
@@ -640,8 +720,8 @@ reference for the canonical operation leaves that product commands route to.
 - topic maps to a project/domain/entity, or "what did I conclude about X" -> proactive **ask_memory** first, fold the hits into the answer
 - a decision is made or a problem just got solved -> stepping-stone: capture via **capture_source**/**remember**, then report the path
 - a method was run and the user says how it turned out -> stepping-stone: capture the method, the adjustment and the outcome, then report the path
-- the user states an intent or commits to work -> stepping-stone: **plan_memory** (`add` into the inbox, or `triage`/`update` an existing item)
-- the user reports that something happened, was produced, delivered, approved, published or failed -> stepping-stone: **record_memory** (`append` into the one compatible collection); when it lands on an open committed plan item, do the Planning transition in the same turn and report both once
+- the user states an intent or commits to work -> resolve workflow posture, inspect Planning, then update an existing matching item before creating an inbox item
+- the user reports that something happened, was produced, delivered, approved, published or failed -> resolve workflow posture and append a Record to one compatible collection; never transition Planning automatically
 
 When you say something oblique like "interesting, save it," default to
 **capture_source** and ask whether to compile only if there is a durable
@@ -818,8 +898,9 @@ data files aren't `find`-searchable. To make a dataset findable, write a
 `query_dataset(aggregate="profile")` emits a ready-to-write card; pull exact rows
 from the `data_file` with `query_dataset`.
 
-Vector embeddings live in a per-machine sidecar at
-`<vault>/Knowledge Base/.embeddings.sqlite` (a dotfile that file-sync tools like Obsidian Sync ignore).
+Vector embeddings live in a per-machine sidecar under the configured external
+state root (`EXOMEM_STATE_ROOT`, or the platform default), keyed by vault identity.
+The machine-local sidecar stays outside synced vault content.
 Writers refresh it incrementally after every atomic batch. To bootstrap or after
 drift, call `audit_fix(rebuild_embeddings=true)`.
 

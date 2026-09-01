@@ -16,6 +16,7 @@ Subcommands:
   (requires the optional `tui` extra; needs an interactive terminal)
 - `doctor` — read-only local install/setup preflight
 - `auth sessions|revoke` — operator-only durable MCP session administration
+- `governance-schema status|plan-migration|stage-migration|commit-migration|restore-migration-backup|downmigrate` — offline schema control
 - `status` — resource posture/residency diagnostics without loading models
 - `warm` — pre-download/load the search models (bge, reranker, CLIP) so the first
   server start doesn't pay the download in the background; optional `--vault`
@@ -35,6 +36,8 @@ import importlib.util
 import json
 import os
 import sys
+import time
+from dataclasses import replace
 from pathlib import Path
 
 from .kbdir import kb_dirname, kb_prefix
@@ -108,6 +111,7 @@ _CLI_ONLY_SUBCOMMANDS: frozenset[str] = frozenset(
         "trace",
         "logs",
         "lease",
+        "governance-schema",
     }
 )
 
@@ -124,6 +128,10 @@ def _is_cli_only_invocation(raw: list[str]) -> bool:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from .runtime_resources import bootstrap, preload_local_dotenv_policy
+
+    preload_local_dotenv_policy()
+    bootstrap()
     # Wrapped so *every* exit drains, including the early returns above
     # `_run_cli`. A graph rebuild no longer blocks the write that caused it, and
     # it runs on a daemon thread. That is right for the long-lived server and
@@ -265,6 +273,8 @@ def _dispatch_main(raw: list[str]) -> int:
         return _logs_main(raw[1:])
     if raw and raw[0] == "lease":
         return _lease_main(raw[1:])
+    if raw and raw[0] == "governance-schema":
+        return _governance_schema_main(raw[1:])
     # Registry-driven product operations (reads + writes): `exomem ask_memory "..."`,
     # `exomem remember ...`, etc. Product commands take precedence over old
     # short aliases when a name overlaps.
@@ -586,7 +596,11 @@ def _backfill_media_main(argv: list[str]) -> int:
         return 2
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    from . import backfill
+    from . import backfill, state_migration
+
+    # Ordinary CLI entry is a read-only placement gate. Legacy state must be
+    # moved by the explicit offline maintenance command before stores open.
+    state_migration.require_vault_state_ready(Path(args.vault).expanduser())
 
     backfill.backfill_media(
         Path(args.vault).expanduser(),
@@ -648,6 +662,31 @@ def _index_main(argv: list[str]) -> int:
     if not args.vault:
         print("index: set --vault or EXOMEM_VAULT_PATH", file=sys.stderr)
         return 2
+    # Refuse BEFORE any graph claim is taken. Two processes contending for the
+    # same graph ownership is not slow, it soft-deadlocks: the 2026-08 incident
+    # had this CLI holding the claim at 0 CPU while the live service minted
+    # ~2,143 receipts in 40 minutes, of which draining re-embedded 3 files.
+    # Contending is never the right move, so make it unrepresentable.
+    from . import graph_sync as _graph_sync
+    from . import state_migration
+
+    # Placement must resolve before even the graph-owner probe reads its
+    # coordination state.
+    state_migration.require_vault_state_ready(Path(args.vault).expanduser())
+
+    owner = _graph_sync.live_graph_owner(Path(args.vault).expanduser())
+    if owner is not None:
+        print(
+            "index: refusing to start — a live service currently owns graph work "
+            f"for this vault (operation={owner.get('operation')!r}, "
+            f"held {owner.get('age_seconds')}s). Two processes contending for the "
+            "graph claim soft-deadlock rather than sharing it.\n"
+            "index: take a stop window — stop the exomem service, run this drain "
+            "to completion, then restart the service.",
+            file=sys.stderr,
+        )
+        return 2
+
     # Scope override flows through the env var the whole stack reads, so a single
     # source of truth governs the walk, the drift check, and freshness.
     if args.scope:
@@ -878,9 +917,11 @@ def _status_main(argv: list[str]) -> int:
     parser.add_argument("--json", action="store_true", help="emit stable JSON")
     args = parser.parse_args(argv)
 
-    from . import resource_status
+    from . import resource_status, state_migration
 
     vault_root = Path(args.vault).expanduser() if args.vault else None
+    if vault_root is not None:
+        state_migration.require_vault_state_ready(vault_root)
     status = resource_status.collect(vault_root)
     if args.json:
         print(json.dumps(status))
@@ -1041,6 +1082,12 @@ def _warm_main(argv: list[str]) -> int:
 
     from . import embedding_backend, embeddings
 
+    vault_root = Path(args.vault).expanduser() if args.vault else None
+    if vault_root is not None:
+        from . import state_migration
+
+        state_migration.require_vault_state_ready(vault_root)
+
     # Which models this install can actually load. The reranker and CLIP are
     # sentence-transformers models, so the `embeddings-onnx` lane withholds both
     # by design. Reporting their absence as a warm failure means a correct ONNX
@@ -1094,11 +1141,11 @@ def _warm_main(argv: list[str]) -> int:
     else:
         print("  CLIP: skipped (EXOMEM_DISABLE_CLIP)")
 
-    if args.vault:
+    if vault_root is not None:
         from . import warmup
 
         t0 = time.perf_counter()
-        warmup.warm_caches(Path(args.vault).expanduser())
+        warmup.warm_caches(vault_root)
         print(f"  lexical caches: warmed ({time.perf_counter() - t0:.1f}s)")
 
     if failed:
@@ -1124,11 +1171,14 @@ def _warm_main(argv: list[str]) -> int:
     return 0
 
 
-def _speaker_vault(args) -> Path | None:
-    """Vault root for the voice-profile store: --vault, else $EXOMEM_VAULT_PATH, else resolve."""
-    if args.vault:
-        return Path(args.vault).expanduser()
-    return None  # enroll_speaker resolves via EXOMEM_VAULT_PATH
+def _speaker_vault(args) -> Path:
+    """Resolve the vault and require completed external-state placement."""
+    from . import state_migration
+    from .vault import resolve_vault
+
+    root = Path(args.vault).expanduser() if args.vault else resolve_vault()
+    state_migration.require_vault_state_ready(root)
+    return root
 
 
 def _enroll_speaker_main(argv: list[str]) -> int:
@@ -1410,13 +1460,51 @@ def _lease_release_main(config, *, confirmed: bool, as_json: bool) -> int:  # no
     return 0
 
 
+def _lease_schema_admission_main(
+    config, *, schema_version: int, as_json: bool  # noqa: ANN001
+) -> int:
+    from . import writer_lease
+
+    operator_token = os.environ.get("EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN", "").strip()
+    if not operator_token:
+        _lease_print_error(
+            "schema admission requires EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN.",
+            as_json=as_json,
+        )
+        return 1
+    try:
+        admission = writer_lease.LeaseCoordinatorClient(
+            replace(config, token=operator_token)
+        ).schema_admission(schema_version)
+    except writer_lease.OpError as error:
+        _lease_print_error(f"{error.code}: {error.message}", as_json=as_json)
+        return 1
+    payload = admission.as_dict()
+    if as_json:
+        print(json.dumps(payload))
+    elif admission.admitted:
+        print(
+            f"schema {schema_version} is admitted by external fence generation "
+            f"{admission.schema_fence_generation}."
+        )
+    else:
+        required = admission.required_schema_version
+        print(
+            f"schema {schema_version} is refused; external fence requires "
+            f"{required if required is not None else 'an enrolled schema'}.",
+            file=sys.stderr,
+        )
+    return 0 if admission.admitted else 1
+
+
 def _lease_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="exomem lease",
         description=(
-            "Ops-only writer-lease inspection and manual release. Not an MCP or REST "
-            "product command; 'steal'/'force-acquire' are deliberately absent — release "
-            "plus preferred-writer reclaim already hands over within roughly one lease TTL."
+            "Ops-only writer-lease inspection, schema admission, and manual release. "
+            "Not an MCP or REST product command; 'steal'/'force-acquire' are deliberately "
+            "absent — release plus preferred-writer reclaim already hands over within "
+            "roughly one lease TTL."
         ),
     )
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -1434,6 +1522,19 @@ def _lease_main(argv: list[str]) -> int:
     )
     release_parser.add_argument("--json", action="store_true", help="emit stable JSON")
 
+    admission_parser = subcommands.add_parser(
+        "schema-admission",
+        help="fail unless a release schema may join the externally fenced cell",
+    )
+    admission_parser.add_argument(
+        "--schema-version",
+        type=int,
+        choices=(3, 4),
+        required=True,
+        help="schema contract declared by the release being admitted",
+    )
+    admission_parser.add_argument("--json", action="store_true", help="emit stable JSON")
+
     args = parser.parse_args(argv)
 
     from . import writer_lease
@@ -1448,7 +1549,475 @@ def _lease_main(argv: list[str]) -> int:
 
     if args.command == "status":
         return _lease_status_main(config, as_json=args.json)
+    if args.command == "schema-admission":
+        return _lease_schema_admission_main(
+            config,
+            schema_version=args.schema_version,
+            as_json=args.json,
+        )
     return _lease_release_main(config, confirmed=args.yes, as_json=args.json)
+
+
+def _governance_schema_print_error(
+    code: str,
+    message: str,
+    *,
+    as_json: bool,
+) -> None:
+    if as_json:
+        print(json.dumps({"error": code, "message": message}))
+    else:
+        print(f"{code}: {message}", file=sys.stderr)
+
+
+def _governance_schema_status(vault: Path, *, now: int) -> dict[str, object]:
+    from .governance import authorization_custody, store
+
+    custody = authorization_custody.load_authorization_custody(vault, now=now)
+    control = custody.control
+    membership = custody.serving_membership
+    replicas = [] if membership is None else [
+        {
+            "replica_id": item.replica_id,
+            "state": item.state,
+            "schema_version": item.schema_version,
+            "issuance_stopped": item.issuance_stopped,
+            "no_in_flight": item.no_in_flight,
+        }
+        for item in membership.replicas
+    ]
+    return {
+        "schema_version": store.authorization_session_schema_version(vault),
+        "governance_enrolled": control.governance_enrolled,
+        "logical_vault_id": control.logical_vault_id,
+        "activation_store_id": control.activation_store_id,
+        "activation_epoch": control.activation_epoch,
+        "activation_state_digest": control.activation_state_digest,
+        "serving_membership_epoch": control.serving_membership_epoch,
+        "replicas": replicas,
+    }
+
+
+def _governance_schema_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="exomem governance-schema",
+        description=(
+            "Ops-only governance schema inspection, planning, and explicit rollback. "
+            "This command is not exposed through MCP, REST, or Hosted agent surfaces."
+        ),
+    )
+    subcommands = parser.add_subparsers(dest="command", required=True)
+
+    status_parser = subcommands.add_parser(
+        "status",
+        help="show the content-free schema, activation, and drain basis",
+    )
+    status_parser.add_argument("--vault", required=True, help="explicit absolute vault root")
+    status_parser.add_argument("--json", action="store_true", help="emit stable JSON")
+
+    plan_parser = subcommands.add_parser(
+        "plan-migration",
+        help="stage and review an inert exact-v3 to exact-v4 migration target",
+    )
+    plan_parser.add_argument("--vault", required=True, help="explicit absolute vault root")
+    plan_parser.add_argument("--json", action="store_true", help="emit stable JSON")
+
+    stage_parser = subcommands.add_parser(
+        "stage-migration",
+        help="publish the exact reviewed immutable namespace without activating it",
+    )
+    stage_parser.add_argument("--vault", required=True, help="explicit absolute vault root")
+    stage_parser.add_argument(
+        "--expected-plan-digest",
+        required=True,
+        help="64-character digest copied from the reviewed migration plan",
+    )
+    stage_parser.add_argument(
+        "--yes", action="store_true", help="confirm the reviewed inert publication"
+    )
+    stage_parser.add_argument("--json", action="store_true", help="emit stable JSON")
+
+    commit_parser = subcommands.add_parser(
+        "commit-migration",
+        help="back up exact v3 and commit the reviewed staged v4 target",
+    )
+    commit_parser.add_argument(
+        "--vault", required=True, help="explicit absolute vault root"
+    )
+    commit_parser.add_argument(
+        "--expected-plan-digest",
+        required=True,
+        help="64-character digest copied from the reviewed migration plan",
+    )
+    commit_parser.add_argument(
+        "--yes", action="store_true", help="confirm the irreversible reviewed cutover"
+    )
+    commit_parser.add_argument("--json", action="store_true", help="emit stable JSON")
+
+    restore_parser = subcommands.add_parser(
+        "restore-migration-backup",
+        help="restore the exact immediate pre-migration v3 backup under a drained fence",
+    )
+    restore_parser.add_argument(
+        "--vault", required=True, help="explicit absolute vault root"
+    )
+    restore_parser.add_argument(
+        "--expected-plan-digest",
+        required=True,
+        help="64-character digest copied from the committed migration terminal",
+    )
+    restore_parser.add_argument(
+        "--expected-backup-reference",
+        required=True,
+        help="private backup reference copied from the committed migration terminal",
+    )
+    restore_parser.add_argument(
+        "--yes", action="store_true", help="confirm the reviewed predecessor restore"
+    )
+    restore_parser.add_argument("--json", action="store_true", help="emit stable JSON")
+
+    downmigrate_parser = subcommands.add_parser(
+        "downmigrate",
+        help="restore exact schema v3 after every v4 replica is drained",
+    )
+    downmigrate_parser.add_argument(
+        "--vault", required=True, help="explicit absolute vault root"
+    )
+    downmigrate_parser.add_argument(
+        "--expected-activation-state-digest",
+        required=True,
+        help="64-character digest copied from the reviewed status output",
+    )
+    downmigrate_parser.add_argument(
+        "--yes", action="store_true", help="confirm the reviewed destructive rollback"
+    )
+    downmigrate_parser.add_argument("--json", action="store_true", help="emit stable JSON")
+
+    args = parser.parse_args(argv)
+    vault = Path(args.vault).expanduser()
+    as_json = bool(args.json)
+    if not vault.is_absolute() or not vault.is_dir():
+        _governance_schema_print_error(
+            "GOVERNANCE_SCHEMA_VAULT_INVALID",
+            "--vault must name an existing absolute vault root",
+            as_json=as_json,
+        )
+        return 1
+
+    from .governance import authorization_custody, schema_downmigration, schema_migration
+
+    moment = int(time.time())
+    if args.command == "plan-migration":
+        try:
+            plan = schema_migration.prepare_forward_migration(vault, now=moment)
+            summary = schema_migration.plan_summary(plan)
+        except schema_migration.ForwardMigrationUnavailable:
+            _governance_schema_print_error(
+                "GOVERNANCE_SCHEMA_MIGRATION_UNAVAILABLE",
+                "the exact quiesced v3 policy and catalog could not be prepared",
+                as_json=as_json,
+            )
+            return 1
+        if as_json:
+            print(json.dumps(summary))
+        else:
+            for key, value in summary.items():
+                print(f"{key}: {value}")
+        return 0
+
+    if args.command == "stage-migration":
+        expected_plan_digest = args.expected_plan_digest
+        if not args.yes:
+            confirmation = {
+                "staged": False,
+                "reason": "confirmation_required",
+                "plan_digest": expected_plan_digest,
+            }
+            if as_json:
+                print(json.dumps(confirmation))
+            else:
+                for key, value in confirmation.items():
+                    print(f"{key}: {value}")
+            return 2
+        try:
+            terminal = schema_migration.stage_forward_migration(
+                vault,
+                expected_plan_digest=expected_plan_digest,
+                now=moment,
+            )
+        except schema_migration.ForwardMigrationPlanMismatch:
+            _governance_schema_print_error(
+                "GOVERNANCE_SCHEMA_PLAN_MISMATCH",
+                "the reviewed migration plan changed; no activation was attempted",
+                as_json=as_json,
+            )
+            return 1
+        except schema_migration.ForwardMigrationUnavailable:
+            _governance_schema_print_error(
+                "GOVERNANCE_SCHEMA_MIGRATION_UNAVAILABLE",
+                "the exact v3 migration namespace could not be staged",
+                as_json=as_json,
+            )
+            return 1
+        result = {
+            "staged": True,
+            "schema_version": 3,
+            "plan_digest": terminal.plan_digest,
+            "projection_namespace_id": terminal.projection_namespace_id,
+            "projection_rows_digest": terminal.projection_rows_digest,
+            "item_count": terminal.item_count,
+        }
+        if as_json:
+            print(json.dumps(result))
+        else:
+            for key, value in result.items():
+                print(f"{key}: {value}")
+        return 0
+
+    if args.command == "commit-migration":
+        expected_plan_digest = args.expected_plan_digest
+        if not args.yes:
+            confirmation = {
+                "migrated": False,
+                "reason": "confirmation_required",
+                "plan_digest": expected_plan_digest,
+            }
+            if as_json:
+                print(json.dumps(confirmation))
+            else:
+                print(
+                    "migration cutover requires --yes after reviewing this exact plan: "
+                    f"{expected_plan_digest}",
+                    file=sys.stderr,
+                )
+            return 2
+        try:
+            result = schema_migration.commit_forward_migration(
+                vault,
+                expected_plan_digest=expected_plan_digest,
+                now=moment,
+            )
+        except schema_migration.ForwardMigrationPlanMismatch:
+            _governance_schema_print_error(
+                "GOVERNANCE_SCHEMA_PLAN_MISMATCH",
+                "the reviewed migration plan changed; no activation was attempted",
+                as_json=as_json,
+            )
+            return 1
+        except schema_migration.ForwardMigrationUnavailable:
+            _governance_schema_print_error(
+                "GOVERNANCE_SCHEMA_MIGRATION_UNAVAILABLE",
+                "the verified backup and exact v3-to-v4 cutover could not complete",
+                as_json=as_json,
+            )
+            return 1
+        target = result.target
+        terminal = {
+            "migrated": True,
+            "schema_version": result.schema_version,
+            "logical_vault_id": target.logical_vault_id,
+            "activation_store_id": target.activation_store_id,
+            "activation_epoch": target.activation_epoch,
+            "activation_state_digest": target.activation_state_digest,
+            "policy_generation_id": target.policy_generation_id,
+            "policy_fingerprint": target.policy_fingerprint,
+            "projector_schema_version": target.projector_schema_version,
+            "catalog_generation": target.catalog_generation,
+            "projection_namespace_id": target.projection_namespace_id,
+            "plan_digest": result.plan_digest,
+            "source_store_digest": result.source_store_digest,
+            "backup_reference": result.backup_reference,
+            "replayed": result.replayed,
+        }
+        if as_json:
+            print(json.dumps(terminal))
+        else:
+            delivery = "replayed" if result.replayed else "committed"
+            print(
+                f"schema v4 migration {delivery}; backup {result.backup_reference}"
+            )
+        return 0
+
+    if args.command == "restore-migration-backup":
+        expected_plan_digest = args.expected_plan_digest
+        expected_backup_reference = args.expected_backup_reference
+        if not args.yes:
+            confirmation = {
+                "restored": False,
+                "reason": "confirmation_required",
+                "plan_digest": expected_plan_digest,
+                "backup_reference": expected_backup_reference,
+            }
+            if as_json:
+                print(json.dumps(confirmation))
+            else:
+                print(
+                    "pre-migration backup restore requires --yes after reviewing "
+                    f"plan {expected_plan_digest} and backup {expected_backup_reference}",
+                    file=sys.stderr,
+                )
+            return 2
+        try:
+            result = schema_migration.restore_forward_migration_backup(
+                vault,
+                expected_plan_digest=expected_plan_digest,
+                expected_backup_reference=expected_backup_reference,
+                now=moment,
+            )
+        except schema_migration.ForwardMigrationRestoreUnavailable:
+            _governance_schema_print_error(
+                "GOVERNANCE_SCHEMA_BACKUP_RESTORE_UNAVAILABLE",
+                "the immediate predecessor backup could not be restored safely; "
+                "use reviewed v4-to-v3 downmigration after later durable changes",
+                as_json=as_json,
+            )
+            return 1
+        terminal = {
+            "restored": True,
+            "schema_version": result.schema_version,
+            "plan_digest": result.plan_digest,
+            "source_store_digest": result.source_store_digest,
+            "backup_reference": result.backup_reference,
+            "recovery_event_id": result.recovery_event_id,
+            "recovery_plan_digest": result.recovery_plan_digest,
+            "replayed": result.replayed,
+        }
+        if as_json:
+            print(json.dumps(terminal))
+        else:
+            delivery = "replayed" if result.replayed else "committed"
+            print(
+                f"schema v3 predecessor restore {delivery}; recovery event "
+                f"{result.recovery_event_id}"
+            )
+        return 0
+
+    try:
+        status = _governance_schema_status(vault, now=moment)
+    except (
+        authorization_custody.AuthorizationCustodyUnavailable,
+        OSError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+    ):
+        _governance_schema_print_error(
+            "GOVERNANCE_SCHEMA_UNAVAILABLE",
+            "the external custody and local schema basis could not be verified",
+            as_json=as_json,
+        )
+        return 1
+
+    if args.command == "status":
+        if as_json:
+            print(json.dumps(status))
+        else:
+            for key in (
+                "schema_version",
+                "governance_enrolled",
+                "logical_vault_id",
+                "activation_store_id",
+                "activation_epoch",
+                "activation_state_digest",
+                "serving_membership_epoch",
+            ):
+                print(f"{key}: {status[key]}")
+            for replica in status["replicas"]:
+                assert isinstance(replica, dict)
+                print(
+                    "replica: "
+                    f"{replica['replica_id']} state={replica['state']} "
+                    f"schema={replica['schema_version']} "
+                    f"issuance_stopped={replica['issuance_stopped']} "
+                    f"no_in_flight={replica['no_in_flight']}"
+                )
+        return 0
+
+    expected_digest = args.expected_activation_state_digest
+    if (
+        len(expected_digest) != 64
+        or any(character not in "0123456789abcdef" for character in expected_digest)
+        or expected_digest != status["activation_state_digest"]
+    ):
+        _governance_schema_print_error(
+            "GOVERNANCE_SCHEMA_TARGET_MISMATCH",
+            "the reviewed activation state changed; no downmigration was attempted",
+            as_json=as_json,
+        )
+        return 1
+    if status["schema_version"] != 4:
+        _governance_schema_print_error(
+            "GOVERNANCE_SCHEMA_NOT_V4",
+            "the reviewed vault is not an exact schema-v4 downmigration source",
+            as_json=as_json,
+        )
+        return 1
+    if not args.yes:
+        payload = {
+            "downmigrated": False,
+            "reason": "confirmation_required",
+            "schema_version": status["schema_version"],
+            "logical_vault_id": status["logical_vault_id"],
+            "activation_state_digest": status["activation_state_digest"],
+        }
+        if as_json:
+            print(json.dumps(payload))
+        else:
+            print(
+                "downmigration requires --yes after reviewing this exact activation "
+                f"state: {status['activation_state_digest']}",
+                file=sys.stderr,
+            )
+        return 2
+
+    try:
+        result = schema_downmigration.downmigrate_enrolled_v4_store(
+            vault,
+            now=moment,
+        )
+    except schema_downmigration.DownmigrationUnavailable:
+        _governance_schema_print_error(
+            "GOVERNANCE_SCHEMA_DOWNMIGRATION_UNAVAILABLE",
+            "the drained schema-v4 rollback basis did not verify; no unsafe recovery was attempted",
+            as_json=as_json,
+        )
+        return 1
+    active = result.active
+    if (
+        result.schema_version != 3
+        or active.logical_vault_id != status["logical_vault_id"]
+        or active.activation_store_id != status["activation_store_id"]
+        or active.activation_epoch != status["activation_epoch"]
+        or active.activation_state_digest != status["activation_state_digest"]
+    ):
+        _governance_schema_print_error(
+            "GOVERNANCE_SCHEMA_DOWNMIGRATION_UNAVAILABLE",
+            "the durable downmigration terminal did not match the reviewed activation state",
+            as_json=as_json,
+        )
+        return 1
+    terminal = {
+        "downmigrated": True,
+        "schema_version": result.schema_version,
+        "logical_vault_id": active.logical_vault_id,
+        "activation_store_id": active.activation_store_id,
+        "activation_epoch": active.activation_epoch,
+        "activation_state_digest": active.activation_state_digest,
+        "recovery_event_id": result.recovery_event_id,
+        "recovery_plan_digest": result.recovery_plan_digest,
+        "recovery_target_digest": result.recovery_target_digest,
+        "recovery_terminal_digest": result.recovery_terminal_digest,
+        "replayed": result.replayed,
+    }
+    if as_json:
+        print(json.dumps(terminal))
+    else:
+        delivery = "replayed" if result.replayed else "committed"
+        print(
+            f"schema v3 downmigration {delivery}; recovery terminal "
+            f"{result.recovery_terminal_digest}"
+        )
+    return 0
 
 
 def _reclaim_schema_main(argv: list[str]) -> int:
@@ -2300,6 +2869,64 @@ def _simple_adopt_main(argv: list[str]) -> int:
     return _core_op_main(_with_json(core, args.json))
 
 
+def _run_offline_state_migration(
+    *,
+    vault: str | None,
+    adopt: str | None,
+):
+    """Run the sole state-mutating entrypoint under explicit offline authority."""
+
+    from . import state_migration
+    from .hosted_runtime import (
+        HostedBindingV2,
+        HostedCellConfig,
+        hosted_mode_enabled,
+    )
+
+    if hosted_mode_enabled():
+        from .hosted_restore import acquire_hosted_lifetime_lock
+
+        config = HostedCellConfig.from_env(require_provisioned=True)
+        if vault is not None and Path(vault).expanduser().resolve(strict=False) != (
+            config.vault_root.resolve(strict=False)
+        ):
+            raise ValueError("--vault must match the immutable hosted vault binding")
+        config.apply_process_environment()
+        binding = None
+        if config.requires_dynamic_security:
+            assert config.vault_id is not None
+            binding = HostedBindingV2(
+                cell_id=config.cell_id,
+                vault_id=config.vault_id,
+                vault_root=config.vault_root,
+                state_root=config.state_root,
+                log_root=config.log_root,
+                runtime_uid=config.runtime_uid,
+                runtime_gid=config.runtime_gid,
+            )
+        with acquire_hosted_lifetime_lock(config.state_root, binding=binding):
+            authority = state_migration.assert_offline_migration_authority(
+                source="hosted target-image offline migration job",
+            )
+            return state_migration.migrate_vault_state_offline(
+                config.vault_root,
+                authority=authority,
+                adopt=adopt,
+            )
+
+    from .vault import resolve_vault
+
+    vault_root = Path(vault).expanduser() if vault is not None else resolve_vault()
+    authority = state_migration.assert_offline_migration_authority(
+        source="exomem maintain --migrate-state --offline",
+    )
+    return state_migration.migrate_vault_state_offline(
+        vault_root,
+        authority=authority,
+        adopt=adopt,
+    )
+
+
 def _simple_maintain_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="exomem maintain",
@@ -2337,6 +2964,33 @@ def _simple_maintain_main(argv: list[str]) -> int:
         default=None,
         help="audit category (repeatable)",
     )
+    parser.add_argument(
+        "--vault",
+        help="vault whose machine-local state is being migrated offline",
+    )
+    parser.add_argument(
+        "--migrate-state",
+        action="store_true",
+        help="run the explicit machine-local state migration",
+    )
+    parser.add_argument(
+        "--offline",
+        action="store_true",
+        help="assert that every legacy writer has been stopped and proven gone",
+    )
+    parser.add_argument(
+        "--adopt-state",
+        dest="adopt_state",
+        choices=("vault", "external", "governance-store=vault"),
+        default=None,
+        help=(
+            "resolve a dual machine-local-state conflict by keeping one copy: "
+            "'external' removes the in-vault leftovers, 'vault' discards the "
+            "external state root before this explicit offline migration; "
+            "'governance-store=vault' re-externalizes only a completed v3 "
+            "rollback governance store"
+        ),
+    )
     parser.add_argument("--json", action="store_true", help="emit the shared JSON envelope")
     args = parser.parse_args(argv)
 
@@ -2344,6 +2998,45 @@ def _simple_maintain_main(argv: list[str]) -> int:
         parser.error("choose only one of --fix or --reconcile")
     if args.rebuild_graph and not args.reconcile:
         parser.error("--rebuild-graph requires --reconcile")
+    if args.offline and not args.migrate_state:
+        parser.error("--offline requires --migrate-state")
+    if args.vault and not args.migrate_state:
+        parser.error("--vault requires --migrate-state --offline")
+    if args.adopt_state and not args.migrate_state:
+        parser.error("--adopt-state requires --migrate-state --offline")
+    if args.migrate_state:
+        if not args.offline:
+            parser.error("--migrate-state requires --offline")
+        if args.fix or args.reconcile:
+            parser.error("--migrate-state cannot be combined with --fix or --reconcile")
+        try:
+            resolution = _run_offline_state_migration(
+                vault=args.vault,
+                adopt=args.adopt_state,
+            )
+        except (OSError, RuntimeError, ValueError) as error:
+            if args.json:
+                print(json.dumps({"success": False, "error": {"message": str(error)}}))
+            else:
+                print(f"Error: {error}", file=sys.stderr)
+            return 1
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "success": True,
+                        "data": {
+                            "state_root": str(resolution.state_dir),
+                            "migrated": resolution.migrated,
+                            "dual_state": resolution.dual_state,
+                            "adopted": args.adopt_state,
+                        },
+                    }
+                )
+            )
+        else:
+            print(f"Machine-local state is ready at {resolution.state_dir}")
+        return 0
     if args.fix:
         core = ["maintain_memory", "--mode", "fix"]
         if args.dry_run:

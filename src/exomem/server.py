@@ -36,7 +36,7 @@ from .server_auth import (  # noqa: F401 - re-exported for compatibility
 )
 from .server_hosted import register_hosted_routes
 from .server_rest import register_rest_facade
-from .server_runtime import initialize_runtime
+from .server_runtime import LocalRuntimeActivation, initialize_runtime
 from .server_transfer import register_transfer_routes
 from .server_transport import PrimeMcpSSEMiddleware
 
@@ -458,6 +458,8 @@ def _find_call_summary(message) -> str:
 
 def build_server(*, require_auth: bool) -> FastMCP:
     """Construct and return the FastMCP app, ready to run."""
+    from . import runtime_resources
+
     runtime = initialize_runtime(load_dotenv_func=load_dotenv)
     from .governance.authorization_request import validate_credential_registry
     from .governance.authorization_transport import AuthorizationSessionMiddleware
@@ -480,6 +482,7 @@ def build_server(*, require_auth: bool) -> FastMCP:
             "exomem",
             auth=auth,
             parse_mcp_authorization=False,
+            lifespan=runtime_resources.lifespan(),
         )
         mcp.add_middleware(AuthorizationSessionMiddleware(runtime.vault_root))
         mcp.add_middleware(CallTraceMiddleware(hosted=True))
@@ -494,12 +497,19 @@ def build_server(*, require_auth: bool) -> FastMCP:
             transfer_security_authority=security_authority,
         )
     else:
+        runtime_activation = LocalRuntimeActivation(runtime.vault_root)
         auth = build_oauth(require_auth=require_auth, base_url=runtime.base_url)
-        mcp = ExomemFastMCP("exomem", auth=auth, icons=server_icons())
+        mcp = ExomemFastMCP(
+            "exomem",
+            auth=auth,
+            icons=server_icons(),
+            lifespan=runtime_resources.lifespan(runtime_activation.lifespan()),
+        )
         mcp.add_middleware(AuthorizationSessionMiddleware(runtime.vault_root))
         mcp.add_middleware(CallTraceMiddleware())
 
-        register_asset_routes(mcp)
+        register_asset_routes(mcp, on_liveness=runtime_activation.start)
+        mcp._exomem_local_runtime_activation = runtime_activation
         register_oauth_metadata_route(mcp, base_url=runtime.base_url, auth_enabled=auth is not None)
         transfer_config = register_transfer_routes(
             mcp, vault_root=runtime.vault_root, media_worker=runtime.media_worker

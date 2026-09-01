@@ -35,6 +35,7 @@ from . import (
     vault,
 )
 from . import find as find_module
+from .cli_ops import OpError
 from .memory_refs import ID_FIELD, normalize_id
 from .semantic_units import SemanticUnitDocument, SourceSpan
 
@@ -750,25 +751,38 @@ def _path_parts(path: str) -> tuple[str, ...]:
     return tuple(part.casefold() for part in PurePosixPath(path.replace("\\", "/")).parts)
 
 
-def _path_excluded_from_semantic_minimum(path: str) -> bool:
+def _path_excluded_from_compiled_destination(path: str) -> bool:
     parts = _path_parts(path)
     if any(part in _SEMANTIC_UNIT_EXEMPT_PARTS for part in parts):
         return True
     name = parts[-1] if parts else ""
-    if name in {"hub.md", "index.md", "log.md"}:
+    return name in {"hub.md", "index.md", "log.md"}
+
+
+def _path_excluded_from_semantic_minimum(path: str) -> bool:
+    if _path_excluded_from_compiled_destination(path):
         return True
+    parts = _path_parts(path)
+    name = parts[-1] if parts else ""
     stem = PurePosixPath(name).stem
     return any(stem.endswith(suffix) for suffix in _SEMANTIC_UNIT_EXEMPT_SUFFIXES)
+
+
+def _structural_compiled_destination(path: str) -> str | None:
+    """Return a compiled route without applying minimum-unit-only exemptions."""
+    if _path_excluded_from_compiled_destination(path):
+        return None
+    parts = _path_parts(path)
+    if len(parts) < 3 or parts[:2] != ("knowledge base", "notes"):
+        return None
+    return _COMPILED_ROOT_TYPES.get(parts[2])
 
 
 def canonical_compiled_destination(path: str) -> str | None:
     """Return the compiled type selected by one canonical destination, if any."""
     if _path_excluded_from_semantic_minimum(path):
         return None
-    parts = _path_parts(path)
-    if len(parts) < 3 or parts[:2] != ("knowledge base", "notes"):
-        return None
-    return _COMPILED_ROOT_TYPES.get(parts[2])
+    return _structural_compiled_destination(path)
 
 
 def _frontmatter_tags(page: SemanticPageState) -> frozenset[str]:
@@ -799,8 +813,10 @@ def compiled_intent(page: SemanticPageState) -> bool:
 
 def compiled_structure_finding(page: SemanticPageState) -> ContractFinding | None:
     """Return a deterministic path/type mismatch before semantic applicability."""
-    destination_type = canonical_compiled_destination(page.path)
+    destination_type = _structural_compiled_destination(page.path)
     page_type = normalized_compiled_type(page.page_type)
+    if _path_excluded_from_semantic_minimum(page.path) and page_type not in COMPILED_TYPES:
+        return None
     if destination_type is not None and page_type != destination_type:
         return ContractFinding(
             code="COMPILED_TYPE_MISMATCH",
@@ -1247,6 +1263,12 @@ class _CorpusContextFlight:
 
 
 _CORPUS_CONTEXT_FLIGHTS: dict[tuple[str, str], _CorpusContextFlight] = {}
+
+#: A waiter owns an interactive request budget, not the owner's vault-sized
+#: build duration.  Two seconds is fixed and deliberately non-configurable: it
+#: is far below the measured 103.6-second median post-commit interval and the
+#: 15-second connector timeout while leaving room for ordinary scheduling noise.
+_CORPUS_CONTEXT_JOIN_TIMEOUT_SECONDS = 2.0
 
 
 def corpus_context_cache_enabled() -> bool:
@@ -2457,7 +2479,19 @@ def build_corpus_context_with_census(
                 and flight.registry_identity == registry_identity
                 and flight.language_identity == language_identity
             )
-            flight.done.wait()
+            completed = flight.done.is_set()
+            if not completed:
+                completed = flight.done.wait(timeout=_CORPUS_CONTEXT_JOIN_TIMEOUT_SECONDS)
+            if not completed:
+                raise OpError(
+                    "MUTATION_WARMING",
+                    "semantic corpus context is still being built",
+                    details={
+                        "status": "retryable",
+                        "committed": False,
+                        "retry_after_ms": 2000,
+                    },
+                )
             if not same_inputs:
                 return build_corpus_context_with_census(
                     root,

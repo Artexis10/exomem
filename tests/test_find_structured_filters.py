@@ -621,14 +621,15 @@ def test_auto_widen_pushes_exact_outside_eligibility_into_lexstore(
         _query: str,
         k: int,
         **kwargs: object,
-    ) -> list[tuple[str, float]]:
+    ) -> lexstore.CatalogQueryResult[list[tuple[str, float]]]:
         captured["k"] = k
         captured["allowed_paths"] = kwargs.get("allowed_paths")
-        return [("Projects/active.md", 1.0)]
+        return lexstore.CatalogQueryResult(
+            [("Projects/active.md", 1.0)],
+            lexstore.CatalogReadiness("available", True, "fts5"),
+        )
 
-    from exomem import lexstore
-
-    monkeypatch.setattr(lexstore, "search_bm25", fake_lexstore_search)
+    monkeypatch.setattr(lexstore, "search_bm25_result", fake_lexstore_search)
     hits = find_module._find_outside_kb(
         filter_vault,
         query="outside-marker",

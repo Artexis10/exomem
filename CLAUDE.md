@@ -83,6 +83,19 @@ by later work when refreshing a stale `MODIFIED` block, and run
 `openspec validate --all --strict` before and after the archive. A task-complete
 active change is archive debt and CI rejects it.
 
+## OpenSpec is the sole specification system
+
+<!-- spec-system:openspec-only -->
+
+Use `openspec/` for durable change proposals, designs, requirements, and task
+plans. Do not create, read as current authority, or revive
+`docs/superpowers/` or any parallel specification tree. Before deleting legacy
+planning documents, migrate any unique durable contract into the relevant
+existing OpenSpec artifact; leave routine implementation history to code,
+tests, runbooks, and Git. Routine restorative fixes and operational repair do
+not need a new OpenSpec change. New capabilities, contract changes, and
+non-trivial repairs do.
+
 ## Memory boundary
 
 Treat Claude, ChatGPT, Codex, and other assistants' native memory as short-term
@@ -159,3 +172,35 @@ pass: clean tree, diff within the brief's allowlist, guarded files untouched
 On failure: write `.task/FEEDBACK.md`, retry once, escalate Terra→Sol, then
 reassign to a Claude executor. Cap concurrent workers at 4–6; run benchmarks
 only on a quiesced machine.
+
+## Live-cell guardrails (2026-08 incident; standing until `bound-graph-recovery-funnel` lands in code)
+
+- **Never run an out-of-process drain (`exomem index --scope vault`) while the
+  service is running.** The CLI takes the graph claim, blocks at 0 CPU on the
+  live boundary, and the service mints full-index receipts on every write
+  meanwhile — a measured soft-deadlock (~2,100 receipts in 40 minutes).
+  Stop-window only: `Stop-Service exomem` → drain → `Start-Service exomem`.
+  Note: `exomem maintain --reconcile` does NOT drain the deferred queue;
+  `exomem index` does.
+- **Test kill-switch env INSIDE the venv python, never in the shell.** Unowned
+  site-packages `.pth` files inject `EXOMEM_*` flags at interpreter startup, so
+  shell/user/machine/NSSM scopes all show them unset while every venv process
+  has them. The 5-second test:
+  `<venv>\Scripts\python.exe -c "import os; print(os.environ.get('EXOMEM_DISABLE_GRAPH_SCHEDULING'))"`.
+  A cell whose graph work is disabled while a durable recovery checkpoint
+  exists can never converge, and every write mints a full-index receipt.
+- **Chained builds + "index upsert incomplete" warnings while `graph_sync` is
+  `recovery_required` are the graph accounting funnel** (openspec change
+  `bound-graph-recovery-funnel`), not a regression of the 0.63.x fixes. Read
+  `.deferred-index.sqlite` `full_upserts` and the graph state before
+  diagnosing anything else; the fixed-era signature is full receipts at 0 and
+  the graph converging within minutes of each write.
+- **Machine-local state lives OUTSIDE the vault** (openspec change
+  `relocate-machine-local-state`): the index stores, `.graph-sync*.json`,
+  receipts, deferred queue, and due/review projections resolve under
+  `EXOMEM_STATE_ROOT`, else `%LOCALAPPDATA%\exomem\state\<vault-key>` on
+  Windows. When inspecting a live cell, read them there — a `.sqlite` or
+  `.graph-sync*.json` found under `Knowledge Base/` on a migrated cell is a
+  dual-state leftover the doctor `state.placement` section will FAIL on
+  (`exomem maintain --adopt-state <which>` resolves it; never delete either
+  copy by hand).

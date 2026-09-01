@@ -192,6 +192,8 @@ def test_reconcile_repairs_a_persisted_graph_read_barrier(
         freshness.clear()
 
     watcher._reconcile_once(seed=restart)
+    if restart:
+        watcher.finish_startup_recovery()
 
     assert graph.available() is True
 
@@ -225,6 +227,7 @@ def test_startup_hash_validation_repairs_a_pre_barrier_crash(
 
     restarted = file_watcher.FileWatcher(vault)
     restarted._reconcile_once(seed=True)
+    restarted.finish_startup_recovery()
 
     assert graph.available() is True
     assert not any(
@@ -703,6 +706,121 @@ def test_modify_then_delete_only_deletes(vault, monkeypatch: pytest.MonkeyPatch)
     assert dels == [["Knowledge Base/Notes/x.md"]]
 
 
+def test_mixed_vault_batch_uses_one_complete_lexical_handoff(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    upsert_calls: list[tuple[list[Path], dict]] = []
+    delete_calls: list[tuple[list[str], dict]] = []
+
+    def complete_upsert(root: Path, paths: list[Path], **kwargs):  # noqa: ANN001
+        upsert_calls.append((list(paths), dict(kwargs)))
+        rels = tuple(path.relative_to(root).as_posix() for path in paths)
+        return file_watcher.index_sync.IndexSyncReport(
+            "upsert",
+            rels,
+            rels,
+            (
+                file_watcher.index_sync.IndexComponentOutcome(
+                    "lexstore",
+                    "completed",
+                    "dispatch_completed",
+                ),
+            ),
+        )
+
+    def complete_delete(_root: Path, rels: list[str], **kwargs):  # noqa: ANN001
+        delete_calls.append((list(rels), dict(kwargs)))
+
+    monkeypatch.setattr(file_watcher.index_sync, "upsert_after_write", complete_upsert)
+    monkeypatch.setattr(file_watcher.index_sync, "delete_after_remove", complete_delete)
+    changed = vault / "Knowledge Base" / "Notes" / "changed.md"
+    changed.parent.mkdir(parents=True, exist_ok=True)
+    changed.write_text("# Changed\n", encoding="utf-8")
+    removed = vault / "Knowledge Base" / "Notes" / "removed.md"
+    outside_changed = vault / "Sources" / "changed.md"
+    outside_changed.parent.mkdir(parents=True, exist_ok=True)
+    outside_changed.write_text("# Outside changed\n", encoding="utf-8")
+    outside_removed = vault / "Sources" / "removed.md"
+    watcher = file_watcher.FileWatcher(vault)
+
+    watcher._record(changed, deleted=False)
+    watcher._record(removed, deleted=True)
+    watcher._record(outside_changed, deleted=False)
+    watcher._record(outside_removed, deleted=True)
+    watcher._flush()
+
+    removed_rel = removed.relative_to(vault).as_posix()
+    outside_removed_rel = outside_removed.relative_to(vault).as_posix()
+    assert upsert_calls == [
+        (
+            [changed, outside_changed],
+            {
+                "defer_semantic": False,
+                "publish_corpus_change": False,
+                "watcher_deleted_rel_paths": [removed_rel, outside_removed_rel],
+            },
+        )
+    ]
+    assert delete_calls == [
+        (
+            [removed_rel],
+            {
+                "publish_corpus_change": False,
+                "dispatch_lexstore": False,
+            },
+        )
+    ]
+
+
+def test_outside_kb_delete_only_uses_lexical_handoff(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    upsert_calls: list[tuple[list[Path], dict]] = []
+    delete_calls: list[tuple[list[str], dict]] = []
+
+    def complete_upsert(_root: Path, paths: list[Path], **kwargs):  # noqa: ANN001
+        upsert_calls.append((list(paths), dict(kwargs)))
+        return file_watcher.index_sync.IndexSyncReport(
+            "upsert",
+            (),
+            (),
+            (
+                file_watcher.index_sync.IndexComponentOutcome(
+                    "lexstore",
+                    "completed",
+                    "dispatch_completed",
+                ),
+            ),
+        )
+
+    def observe_delete(_root: Path, rels: list[str], **kwargs):  # noqa: ANN001
+        delete_calls.append((list(rels), dict(kwargs)))
+
+    monkeypatch.setattr(file_watcher.index_sync, "upsert_after_write", complete_upsert)
+    monkeypatch.setattr(file_watcher.index_sync, "delete_after_remove", observe_delete)
+    removed = vault / "Sources" / "removed.md"
+    watcher = file_watcher.FileWatcher(vault)
+
+    watcher._record(removed, deleted=True)
+    watcher._flush()
+
+    assert upsert_calls == [
+        (
+            [],
+            {
+                "defer_semantic": False,
+                "publish_corpus_change": False,
+                "watcher_deleted_rel_paths": [
+                    removed.relative_to(vault).as_posix()
+                ],
+            },
+        )
+    ]
+    assert delete_calls == []
+
+
 def test_delete_then_recreate_only_upserts(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     ups, dels = _stub_embeddings(monkeypatch)
     w = file_watcher.FileWatcher(vault)
@@ -799,6 +917,7 @@ def test_live_import_burst_defers_semantic_indexing(
     assert calls[0][1] == {
         "defer_semantic": True,
         "publish_corpus_change": False,
+        "watcher_deleted_rel_paths": [],
     }
     assert "live import/sync burst" in caplog.text
 
@@ -849,14 +968,203 @@ def test_dispatch_thread_uses_quiet_policy_for_burst_coalescing(
         t.join(timeout=2)
 
 
-def test_start_soft_fails_when_watchdog_missing(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_start_without_watchdog_runs_reconcile_only_polling(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     def _boom():
         raise ImportError("No module named 'watchdog'")
 
     monkeypatch.setattr(file_watcher, "_import_watchdog", _boom)
+    monkeypatch.setattr(file_watcher.index_sync, "drain_deferred_work", lambda *_a, **_k: None)
+    freshness.invalidate(vault)
     w = file_watcher.FileWatcher(vault)
-    assert w.start() is False  # no-op, server keeps running
-    assert w._thread is None and w._observer is None
+    monkeypatch.setattr(w, "_reconcile_interval_seconds", lambda: 0.01)
+    monkeypatch.setattr(w, "_dispatch_reconcile_delta", lambda *_a, **_k: 0)
+    monkeypatch.setattr(w, "_recover_external_pending", lambda *_a, **_k: None)
+    monkeypatch.setattr(w, "_recover_suspended_graph", lambda: None)
+    started = w.start()
+    try:
+        assert started is True
+        assert w._thread is None and w._observer is None
+        assert w.wait_until_seeded(timeout=2.0)
+        created = vault / "Knowledge Base" / "Notes" / "poll-only.md"
+        created.parent.mkdir(parents=True, exist_ok=True)
+        created.write_text("# polling fallback\n", encoding="utf-8")
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            entries = freshness.live_recall_entries(vault, "kb") or {}
+            if str(created) in entries:
+                break
+            time.sleep(0.02)
+        assert str(created) in (freshness.live_recall_entries(vault, "kb") or {})
+    finally:
+        w.stop()
+
+
+def test_dispatch_replays_observed_edit_after_seed_publication(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = vault / "Knowledge Base" / "Notes" / "seed-race.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("# before\n", encoding="utf-8")
+    stale_signature = freshness.stat_signature(target)
+    freshness.invalidate(vault)
+    watcher = file_watcher.FileWatcher(vault, debounce_seconds=0.01)
+    watcher._dispatch_waits_for_seed = True
+    replay_started = threading.Event()
+    release_replay = threading.Event()
+
+    def publish_only(ups, _up_rels, del_rels, **_kwargs):  # noqa: ANN001
+        replay_started.set()
+        assert release_replay.wait(timeout=2.0)
+        freshness.on_files_changed(
+            vault,
+            changed=ups,
+            deleted=[vault / rel for rel in del_rels],
+        )
+
+    monkeypatch.setattr(watcher, "_dispatch_batch", publish_only)
+    dispatch = threading.Thread(target=watcher._run_dispatch, daemon=True)
+    dispatch.start()
+    try:
+        target.write_text("# after seed scan\n", encoding="utf-8")
+        current_signature = freshness.stat_signature(target)
+        assert current_signature != stale_signature
+        watcher._record(target, deleted=False)
+        time.sleep(0.05)
+
+        for scope in freshness.SCOPES:
+            freshness.seed(vault, scope, [(str(target), stale_signature)])
+        watcher._seed_succeeded = True
+        watcher._seed_published.set()
+
+        assert replay_started.wait(timeout=2.0)
+        assert not watcher.wait_until_seeded(timeout=0.05)
+        assert (freshness.live_recall_entries(vault, "kb") or {})[str(target)] == (
+            stale_signature
+        )
+        release_replay.set()
+        assert watcher.wait_until_seeded(timeout=2.0)
+
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            published = (freshness.live_recall_entries(vault, "kb") or {}).get(str(target))
+            if published == current_signature:
+                break
+            time.sleep(0.02)
+        assert (freshness.live_recall_entries(vault, "kb") or {})[str(target)] == (
+            current_signature
+        )
+    finally:
+        release_replay.set()
+        watcher._stop.set()
+        watcher._wake.set()
+        dispatch.join(timeout=2.0)
+
+
+@pytest.mark.parametrize("operation", ["upsert", "delete"])
+def test_seed_replays_suppressed_self_write(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    """A server write racing the initial walk must land in the published seed."""
+    target = vault / "Knowledge Base" / "Notes" / "self-write-seed-race.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("# before\n", encoding="utf-8")
+    stale_signature = freshness.stat_signature(target)
+    freshness.invalidate(vault)
+    file_watcher.clear_self_write_registry()
+    enumerated = threading.Event()
+    release_seed = threading.Event()
+
+    def publish_registry_only(root, *, changed=(), deleted=(), **_kwargs):
+        freshness.on_files_changed(
+            root,
+            changed=changed,
+            deleted=[root / Path(value) for value in deleted],
+        )
+        return True
+
+    monkeypatch.setattr(file_watcher.index_sync, "publish_corpus_delta", publish_registry_only)
+    monkeypatch.setattr(vault_module, "on_inbound_files_changed", lambda *_a, **_k: None)
+    monkeypatch.setattr(find_module, "on_resolver_files_changed", lambda *_a, **_k: None)
+
+    def stale_walk():
+        yield str(target), stale_signature
+        enumerated.set()
+        assert release_seed.wait(timeout=2.0)
+
+    seed_thread = threading.Thread(
+        target=lambda: freshness.seed(vault, "kb", stale_walk()),
+        daemon=True,
+    )
+    seed_thread.start()
+    try:
+        assert enumerated.wait(timeout=2.0)
+        watcher = file_watcher.FileWatcher(vault)
+        if operation == "upsert":
+            target.write_text("# after the seed scan\n\nnew bytes\n", encoding="utf-8")
+            expected_signature = freshness.stat_signature(target)
+            assert expected_signature != stale_signature
+            file_watcher.register_self_write(vault, [target])
+            watcher._record(target, deleted=False)
+        else:
+            target.unlink()
+            expected_signature = None
+            rel = target.relative_to(vault).as_posix()
+            file_watcher.register_self_delete(vault, [rel])
+            watcher._record(target, deleted=True)
+        assert watcher._drain() == ([], [], [], 0, False)
+    finally:
+        release_seed.set()
+        seed_thread.join(timeout=2.0)
+
+    assert not seed_thread.is_alive()
+    entries = freshness.live_recall_entries(vault, "kb") or {}
+    assert entries.get(str(target)) == expected_signature
+
+
+def test_stopped_startup_seed_does_not_publish_a_later_scope(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A timeout downgrade cancels the whole remaining startup seed pass."""
+    target = next(find_module._walk_md(vault / "Knowledge Base"))
+    freshness.invalidate(vault)
+    watcher = file_watcher.FileWatcher(vault)
+    enumerated = threading.Event()
+    release_seed = threading.Event()
+    walked: list[str] = []
+    results: list[bool] = []
+
+    def stalled_kb_entries():
+        yield str(target), freshness.stat_signature(target)
+        enumerated.set()
+        assert release_seed.wait(timeout=2.0)
+
+    def walk_entries(scope: str):
+        walked.append(scope)
+        return stalled_kb_entries() if scope == "kb" else ()
+
+    monkeypatch.setattr(watcher, "_walk_entries", walk_entries)
+    seed_thread = threading.Thread(
+        target=lambda: results.append(watcher._reconcile_once(seed=True)),
+        daemon=True,
+    )
+    seed_thread.start()
+    try:
+        assert enumerated.wait(timeout=2.0)
+        freshness.invalidate(vault)
+        watcher._stop.set()
+    finally:
+        release_seed.set()
+        seed_thread.join(timeout=2.0)
+
+    assert not seed_thread.is_alive()
+    assert results == [False]
+    assert walked == ["kb"]
+    assert not any(freshness.recall_is_live(vault, scope) for scope in freshness.SCOPES)
 
 
 def test_start_no_op_when_kb_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1001,7 +1309,16 @@ def test_external_batch_retries_the_complete_vault_delta_before_fanout(
 
     assert len(calls) == 2
     assert all(sorted(changed) == sorted([source, kb_note]) for changed, _ in calls)
-    assert upserts == [([kb_note], {"defer_semantic": False, "publish_corpus_change": False})]
+    assert upserts == [
+        (
+            [kb_note, source],
+            {
+                "defer_semantic": False,
+                "publish_corpus_change": False,
+                "watcher_deleted_rel_paths": [],
+            },
+        )
+    ]
     resolver = find_module.writer_resolver_snapshot(vault)
     resolved, warning = vault_module.normalize_wikilink(
         "New target", vault, resolver=resolver, strict=False
@@ -1220,9 +1537,59 @@ def test_reconcile_seed_dispatches_nothing(vault, monkeypatch: pytest.MonkeyPatc
     calls = _spy_reconcile_fanout(monkeypatch)
     w = file_watcher.FileWatcher(vault)
 
-    w._reconcile_once(seed=True)
+    seeded = w._reconcile_once(seed=True)
 
+    assert seeded is True
+    assert all(freshness.recall_is_live(vault, scope) for scope in freshness.SCOPES)
     assert calls == {"inbound": [], "resolver": [], "upsert": [], "delete": [], "warm": []}
+
+
+def test_reconcile_seed_completion_is_observable(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+    watcher = file_watcher.FileWatcher(vault)
+    seed_entered = threading.Event()
+    release_seed = threading.Event()
+
+    def reconcile_once(*, seed: bool) -> bool:
+        assert seed is True
+        seed_entered.set()
+        assert release_seed.wait(timeout=1.0)
+        watcher._stop.set()
+        return True
+
+    monkeypatch.setattr(watcher, "_reconcile_once", reconcile_once)
+    thread = threading.Thread(target=watcher._run_reconcile)
+    thread.start()
+    try:
+        assert seed_entered.wait(timeout=1.0)
+        assert watcher.wait_until_seeded(timeout=0.01) is False
+        release_seed.set()
+        assert watcher.wait_until_seeded(timeout=1.0) is True
+    finally:
+        release_seed.set()
+        thread.join(timeout=1.0)
+    assert not thread.is_alive()
+
+
+def test_stop_unblocks_an_inflight_seed_wait(vault) -> None:
+    watcher = file_watcher.FileWatcher(vault)
+    waiting = threading.Event()
+    result: list[bool] = []
+
+    def wait_for_seed() -> None:
+        waiting.set()
+        result.append(watcher.wait_until_seeded(timeout=60.0))
+
+    thread = threading.Thread(target=wait_for_seed)
+    thread.start()
+    try:
+        assert waiting.wait(timeout=1.0)
+        watcher.stop()
+        thread.join(timeout=0.5)
+        assert not thread.is_alive()
+        assert result == [False]
+    finally:
+        watcher._seed_complete.set()
+        thread.join(timeout=1.0)
 
 
 def test_reconcile_no_drift_dispatches_nothing(vault, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1311,7 +1678,7 @@ def test_missing_baseline_and_post_reconcile_watcher_do_not_phantom_fanout(
     target.unlink()
     watcher._reconcile_once(seed=False)
 
-    assert calls["upsert"] == []
+    assert calls["upsert"] == [[]]
     assert calls["delete"] == [[rel]]
     assert calls["inbound"] == [([], [rel])]
     assert calls["resolver"] == [([], [rel])]
@@ -1468,7 +1835,7 @@ def test_reconcile_delete_routes_to_delete_after_remove(
     w._reconcile_once(seed=False)
 
     assert calls["delete"] == [[rel]]
-    assert calls["upsert"] == []
+    assert calls["upsert"] == [[]]
     assert calls["resolver"] == [([], [rel])]
     assert calls["inbound"] == [([], [rel])]
 
@@ -1667,3 +2034,270 @@ def test_reconcile_delta_dual_form_collapse_missing_file_routes_as_deleted_only(
 
     assert ups == []
     assert dels == [[rel]]
+
+
+# --- Graph startup validation is bounded (task 1.4) -------------------------
+#
+# The startup pass suspended reads and rebuilt the WHOLE graph on every process
+# start whenever the sidecar existed (measured: ~30 min of suspended reads per
+# restart on a 3.3k-file vault). Durable evidence that the published sidecar
+# already acknowledges the graph_sync checkpoint must admit instead.
+
+
+def _startup_rebuild_spy(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record whole-graph rebuilds without suppressing them."""
+    calls: list[str] = []
+    real = epistemic_graph.EpistemicGraphIndex._rebuild_all_locked
+
+    def spy(self: epistemic_graph.EpistemicGraphIndex, *args: object, **kwargs: object) -> object:
+        calls.append("rebuild_all")
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(epistemic_graph.EpistemicGraphIndex, "_rebuild_all_locked", spy)
+    return calls
+
+
+def _suspend_spy(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    calls: list[str] = []
+    real = epistemic_graph.EpistemicGraphIndex.suspend_reads
+
+    def spy(self: epistemic_graph.EpistemicGraphIndex) -> object:
+        calls.append("suspend_reads")
+        return real(self)
+
+    monkeypatch.setattr(epistemic_graph.EpistemicGraphIndex, "suspend_reads", spy)
+    return calls
+
+
+def test_startup_over_a_coherent_graph_admits_without_a_rebuild(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A restart over a coherent durable checkpoint must not rebuild."""
+    watcher = file_watcher.FileWatcher(vault)
+    watcher._reconcile_once(seed=True)
+    graph = epistemic_graph.EpistemicGraphIndex(vault)
+    graph.rebuild_all()
+    assert graph.available() is True
+
+    freshness.clear()  # process restart: the in-memory epoch is gone
+    restarted = file_watcher.FileWatcher(vault)
+    restarted._reconcile_once(seed=True)
+
+    rebuilds = _startup_rebuild_spy(monkeypatch)
+    suspensions = _suspend_spy(monkeypatch)
+    restarted.finish_startup_recovery()
+
+    assert rebuilds == [], "a coherent restart rebuilt the whole graph"
+    assert suspensions == [], "a coherent restart suspended reads"
+    assert graph.available() is True
+    assert graph.reads_suspended() is False
+
+
+def test_startup_over_an_unacknowledged_checkpoint_still_rebuilds(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Genuine incoherence (unacknowledged checkpoint) still rebuilds.
+
+    The published sidecar carries no graph_sync acknowledgement, so a durable
+    checkpoint written behind it is exactly the digest-mismatch class: the
+    graph has not been built up to the handoff that checkpoint records.
+    """
+    from exomem import graph_sync
+
+    watcher = file_watcher.FileWatcher(vault)
+    watcher._reconcile_once(seed=True)
+    graph = epistemic_graph.EpistemicGraphIndex(vault)
+    graph.rebuild_all()
+    assert graph.available() is True
+
+    checkpoint = graph_sync.GraphSyncCheckpoint.create(
+        generation=1,
+        mutation_id="a1b2c3d4e5f6a7b8c9d0e1f2",
+        paths=(("Knowledge Base/Notes/startup-incoherent.md", "0" * 64),),
+        created_paths=("Knowledge Base/Notes/startup-incoherent.md",),
+    )
+    graph_sync._write_checkpoint(vault, checkpoint)
+    assert graph_sync.read_checkpoint(vault) == checkpoint
+
+    freshness.clear()
+    restarted = file_watcher.FileWatcher(vault)
+    restarted._reconcile_once(seed=True)
+
+    rebuilds = _startup_rebuild_spy(monkeypatch)
+    restarted.finish_startup_recovery()
+
+    assert rebuilds, "an unacknowledged durable checkpoint did not rebuild"
+
+
+def test_startup_over_a_persisted_barrier_still_rebuilds(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A recorded crash marker is genuine incoherence and still rebuilds."""
+    watcher = file_watcher.FileWatcher(vault)
+    watcher._reconcile_once(seed=True)
+    graph = epistemic_graph.EpistemicGraphIndex(vault)
+    graph.rebuild_all()
+    graph.suspend_reads()
+    assert graph.reads_suspended() is True
+
+    freshness.clear()
+    restarted = file_watcher.FileWatcher(vault)
+    restarted._reconcile_once(seed=True)
+
+    rebuilds = _startup_rebuild_spy(monkeypatch)
+    restarted.finish_startup_recovery()
+
+    assert rebuilds, "a persisted read barrier did not rebuild"
+    assert graph.available() is True
+
+
+def test_durable_coherence_classifies_each_incoherence_class(vault: Path) -> None:
+    """Pin the O(1) predicate directly.
+
+    `available()` independently rejects every one of these, so the predicate
+    changes no startup OUTCOME — its job is to reach that verdict without the
+    O(corpus) source-bytes proof, and only these four classes may do so.
+    """
+    from exomem import graph_sync
+
+    watcher = file_watcher.FileWatcher(vault)
+    watcher._reconcile_once(seed=True)
+    graph = epistemic_graph.EpistemicGraphIndex(vault)
+    graph.rebuild_all()
+
+    # Legacy: no durable checkpoint and no acknowledgement rows.
+    assert graph_sync.checkpoint_state(vault)[0] == "absent"
+    assert graph.durable_checkpoint_is_coherent() is True
+
+    # A recorded crash marker.
+    graph.suspend_reads()
+    assert graph.durable_checkpoint_is_coherent() is False
+    graph.rebuild_all()
+    assert graph.durable_checkpoint_is_coherent() is True
+
+    # Acknowledgement rows with no durable checkpoint are recovery state.
+    conn = graph._connect_existing(readonly=False)
+    try:
+        with conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
+                ("graph_sync_generation", "7"),
+            )
+    finally:
+        conn.close()
+    assert graph.durable_checkpoint_is_coherent() is False
+    conn = graph._connect_existing(readonly=False)
+    try:
+        with conn:
+            conn.execute("DELETE FROM graph_meta WHERE key = ?", ("graph_sync_generation",))
+    finally:
+        conn.close()
+    assert graph.durable_checkpoint_is_coherent() is True
+
+    # A durable checkpoint this sidecar never acknowledged.
+    checkpoint = graph_sync.GraphSyncCheckpoint.create(
+        generation=1,
+        mutation_id="a1b2c3d4e5f6a7b8c9d0e1f2",
+        paths=(("Knowledge Base/Notes/unacknowledged.md", "0" * 64),),
+        created_paths=("Knowledge Base/Notes/unacknowledged.md",),
+    )
+    graph_sync._write_checkpoint(vault, checkpoint)
+    assert graph.durable_checkpoint_is_coherent() is False
+
+    # A malformed durable checkpoint.
+    graph_sync.checkpoint_path(vault).write_bytes(b"{not a checkpoint")
+    assert graph_sync.checkpoint_state(vault)[0] == "malformed"
+    assert graph.durable_checkpoint_is_coherent() is False
+
+
+def test_access_policy_blip_does_not_withdraw_graph_availability(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pin the in-process availability wedge to its real cause.
+
+    `_open_read_snapshot` compares the sidecar's stored
+    `recall_access_fingerprint` against `recall_policy.recall_policy_identity`.
+    A transient read error on `_access.yaml` used to move that fingerprint, so
+    `available()` went False while the durable sidecar metadata was complete
+    and barrier-free — reported live, and misattributed to a stale retained
+    owner-leaf connection. It is the access loader, not the connection.
+    """
+    from exomem import access
+
+    config = vault / "Knowledge Base" / "_access.yaml"
+    config.write_text("excluded:\n  - Private\n", encoding="utf-8")
+
+    watcher = file_watcher.FileWatcher(vault)
+    watcher._reconcile_once(seed=True)
+    graph = epistemic_graph.EpistemicGraphIndex(vault)
+    graph.rebuild_all()
+    assert graph.available() is True
+    assert graph.reads_suspended() is False
+    assert graph.durable_checkpoint_is_coherent() is True
+    good = access.policy_fingerprint(vault)
+
+    real_read_bytes = Path.read_bytes
+    target = os.path.normcase(str(config))
+
+    def blipping(self: Path) -> bytes:
+        if os.path.normcase(str(self)) == target:
+            raise PermissionError(13, "The process cannot access the file")
+        return real_read_bytes(self)
+
+    stamp = config.stat().st_mtime + 10
+    os.utime(config, (stamp, stamp))
+    monkeypatch.setattr(Path, "read_bytes", blipping)
+
+    assert access.policy_fingerprint(vault) == good
+    assert graph.available() is True, "an access-policy blip withdrew graph availability"
+
+
+def test_incoherent_startup_short_circuits_before_the_source_proof(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pin the call site, not just the predicate.
+
+    `durable_checkpoint_is_coherent()` earns its place only as a cheap
+    NEGATIVE pre-filter: when durable state already proves a rebuild is
+    needed, the startup pass must reach that verdict without paying
+    `available()`'s O(corpus) source-bytes proof first. Dropping the conjunct
+    leaves behaviour identical and costs a full corpus hash before every
+    rebuild, so only call ORDER can pin it.
+    """
+    watcher = file_watcher.FileWatcher(vault)
+    watcher._reconcile_once(seed=True)
+    graph = epistemic_graph.EpistemicGraphIndex(vault)
+    graph.rebuild_all()
+    graph.suspend_reads()  # a recorded crash marker: durably incoherent
+    assert graph.durable_checkpoint_is_coherent() is False
+
+    freshness.clear()
+    restarted = file_watcher.FileWatcher(vault)
+    restarted._reconcile_once(seed=True)
+
+    events: list[str] = []
+    real_available = epistemic_graph.EpistemicGraphIndex.available
+    real_suspend = epistemic_graph.EpistemicGraphIndex.suspend_reads
+
+    def spy_available(self: epistemic_graph.EpistemicGraphIndex) -> bool:
+        events.append("available")
+        return real_available(self)
+
+    def spy_suspend(self: epistemic_graph.EpistemicGraphIndex) -> None:
+        events.append("suspend_reads")
+        return real_suspend(self)
+
+    monkeypatch.setattr(epistemic_graph.EpistemicGraphIndex, "available", spy_available)
+    monkeypatch.setattr(epistemic_graph.EpistemicGraphIndex, "suspend_reads", spy_suspend)
+    restarted.finish_startup_recovery()
+
+    assert events, "the startup pass took neither branch"
+    assert events[0] == "suspend_reads", (
+        "durable incoherence must short-circuit ahead of the O(corpus) source proof; "
+        f"observed call order: {events}"
+    )

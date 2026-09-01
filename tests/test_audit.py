@@ -12,7 +12,7 @@ import pytest
 
 from exomem import attention as attention_module
 from exomem import audit as audit_module
-from exomem import commands
+from exomem import commands, index_paths
 from exomem import entity_types as entity_types_module
 from exomem import review_state as review_state_module
 
@@ -60,6 +60,26 @@ def _save_proposal(
         expected_hash=expected_hash,
     )
     assert result["valid"] is True
+
+
+def test_duplicated_blank_sidecar_requires_source_reextraction(vault: Path) -> None:
+    sidecar = vault / "Knowledge Base" / "Evidence" / "Case" / "repeated.pdf.md"
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    block = "# Repeated document\n\n## Body\n\nExact content."
+    sidecar.write_text(
+        "---\ntype: source\nmedia_type: pdf\n---\n"
+        "# Evidence: repeated.pdf\n\nPreserved under `Evidence/Case/`.\n\n"
+        "## Extracted text\n\n## Preserved notes\n\n"
+        + "\n\n".join([block] * 3)
+        + "\n",
+        encoding="utf-8",
+    )
+
+    [finding] = audit_module.audit(vault, categories=["duplicated_sidecar"]).findings
+
+    assert finding.severity == "error"
+    assert "source re-extraction required" in finding.detail
+    assert "retry media processing" in (finding.proposed_fix or "")
 
 
 def test_unregistered_entity_type_is_an_attention_finding_with_proposed_entry(
@@ -711,7 +731,8 @@ def test_embedding_drift_flags_never_embedded_file(vault: Path) -> None:
     import sqlite3
 
     kb = vault / "Knowledge Base"
-    sidecar = kb / ".embeddings.sqlite"
+    sidecar = index_paths.sidecar_path(vault)
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
     embedded = kb / "Notes" / "Insights" / "progressive-disclosure-without-mode-fragmentation.md"
     embedded_rel = (
         "Knowledge Base/Notes/Insights/"

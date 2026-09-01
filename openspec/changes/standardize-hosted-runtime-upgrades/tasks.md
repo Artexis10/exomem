@@ -43,6 +43,10 @@
 - [x] 4.9 Return a pre-record failure to the prior Helm revision and identity; after target observation, stop and require explicit recovery rather than downgrading or relabelling
 - [x] 4.10 Add cross-language contract fixtures and K3s acceptance proving same-cell/same-volume operation, bounded unavailability, vault preservation, runtime confirmation, and replay safety
 - [x] 4.11 Make committed Helm rollback replay-safe across multiple same-operation revisions with one unique prior revision, restore prior fleet intent after finalized rollback, accept compatibility-bearing inventory, and preserve historical full v2 identities plus optional compatibility for pre-upgrade health
+- [x] 4.12 Add red-first custody, Helm, and exact-admission tests that expose serving `fsGroup` rewrites, broad authorization projection modes, and direct use of the Kubernetes memory-volume wrapper
+- [x] 4.13 Remove serving pod filesystem-group rewrites, keep projected credentials root-owned/read-only, and copy the governed authorization source into one securely created owner-only child beneath the memory-volume wrapper
+- [x] 4.14 Prove on K3s that a fresh pod and a replacement pod preserve tenant PVC ownership, owner-only modes, and canonical bytes while producing only the expected owner-only authorization custody files
+- [x] 4.15 Reconcile the hardened operator probe with the closed authorization-session readiness schema and reject absent, malformed, unavailable, or draining membership without recording proof
 
 ## 5. Generic expand, drain, and contract orchestration
 
@@ -73,15 +77,15 @@
 - [ ] 7.4 Review both repository diffs for tenant-data safety, authorization boundaries, secret handling, compatibility, rollback truthfulness, and unintended release/profile changes
 - [ ] 7.5 Verify the complete workflow end to end from a fresh execution record before authorizing production
 
-## 8. First execution: runtime 0.57.2
+## 8. First execution: runtime 0.68.1
 
-- [x] 8.1 Verify the exact `v0.57.2` source commit, amd64 image digest, signed runtime candidate, source closure, attestations, protocol, profile, command fingerprint, schema digest, and compatibility digest
-- [x] 8.2 Import the exact `0.57.2` agent and gateway fixtures into every Substrate release-pinned production site while retaining every release found by the live legacy inventory
+- [ ] 8.1 Verify the exact `v0.68.1` source commit, amd64 image digest, signed runtime candidate, source closure, attestations, protocol, profile, command fingerprint, schema digest, and compatibility digest
+- [ ] 8.2 Import the exact `0.68.1` agent and gateway fixtures into every Substrate release-pinned production site while retaining every release found by the live legacy inventory
 - [ ] 8.3 Land and deploy the reviewed Substrate trusted-release, rollforward, reviewer-client, migration, and operator changes; record the immutable consumer commit
-- [ ] 8.4 Compose, verify, review, and land the Exomem `0.57.2` expand/contract lock pair and provisioner image from the exact Substrate consumer and signed target evidence
-- [ ] 8.5 Create the schema-valid `0.57.2` execution record, run the live reconciled inventory, and resolve every ghost, divergence, stale assignment, unfinished operation, or capacity mismatch before mutation
+- [ ] 8.4 Compose, verify, review, and land the Exomem `0.68.1` expand/contract lock pair and provisioner image from the exact Substrate consumer and signed target evidence
+- [ ] 8.5 Create the schema-valid `0.68.1` execution record, run the live reconciled inventory, and resolve every ghost, divergence, stale assignment, unfinished operation, or capacity mismatch before mutation
 - [ ] 8.6 Deploy Substrate and the Exomem expand lock, then prove adoption changed no existing tenant resource or data
 - [ ] 8.7 If the reconciled fleet is empty, record the no-op; otherwise roll one canary and every remaining legacy cell sequentially with preservation and exact-runtime evidence
 - [ ] 8.8 Prove zero legacy dependencies and deploy the reviewed contract lock
 - [ ] 8.9 Run free preflight, prepare the explicit eligible reviewer client, and conduct the human-timed Claude/OpenAI promotion ceremony
-- [ ] 8.10 Complete personal-account OAuth and full read/write/reconnect acceptance on `0.57.2`, keep the personal tenant live, and record final fleet, lock, cohort, authority, capacity, and operation state
+- [ ] 8.10 Complete personal-account OAuth and full read/write/reconnect acceptance on `0.68.1`, keep the personal tenant live, and record final fleet, lock, cohort, authority, capacity, and operation state

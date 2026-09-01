@@ -11,11 +11,14 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import threading
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+import anyio
 
 from . import (
     env_compat,
@@ -26,7 +29,8 @@ from . import (
     project_keys,
     schema,
 )
-from .governance import projection_runtime
+from .governance import authorization_session_lifecycle, projection_runtime
+from .governance.authorization_serving_membership import unavailable_readiness
 from .hosted_runtime import (
     HostedBindingV2,
     HostedCellConfig,
@@ -36,6 +40,11 @@ from .hosted_runtime import (
 from .vault import resolve_vault
 
 log = logging.getLogger(__name__)
+
+# The production Windows seed has measured about 49 seconds under pressure.
+# Give it substantial headroom, but never let one blocked watcher prevent the
+# background catalogue warm/repair path from starting indefinitely.
+RECALL_SEED_WAIT_SECONDS = 120.0
 
 
 @dataclass(frozen=True)
@@ -69,26 +78,222 @@ def initialize_runtime(*, load_dotenv_func: Callable[..., object]) -> ServerRunt
     env_compat.promote_legacy()
 
     vault_root = resolve_vault()
+    from . import state_migration
+
+    state_migration.require_vault_state_ready(vault_root)
     source_schema = schema.load_source_schema(vault_root)
     log.info("vault=%s source_types=%s", vault_root, source_schema.source_types)
 
     project_keys_hint = project_keys.keys_hint(vault_root)
     projection_runtime.preactivate_projection_runtime(vault_root)
     _start_metrics_persistence()
-    _start_compute_runtime(vault_root)
-    media_worker = _start_media_worker(vault_root)
-    file_watcher = _start_file_watcher(vault_root)
-    _start_graph_drain(vault_root)
-
     base_url = os.environ.get("EXOMEM_BASE_URL", "").strip().rstrip("/")
     return ServerRuntime(
         vault_root=vault_root,
         source_schema=source_schema,
         project_keys_hint=project_keys_hint,
         base_url=base_url,
-        media_worker=media_worker,
-        file_watcher=file_watcher,
     )
+
+
+class LocalRuntimeActivation:
+    """Start local background workers after transport liveness is observable."""
+
+    def __init__(self, vault_root: Path, *, fallback_seconds: float = 5.0) -> None:
+        from . import readiness, warmup
+
+        if warmup.warmup_enabled():
+            readiness.manage_runtime()
+        self.vault_root = vault_root
+        self.fallback_seconds = fallback_seconds
+        self._lock = threading.Lock()
+        self._started = False
+        self._shutdown = threading.Event()
+        self._timer: threading.Timer | None = None
+        self._thread: threading.Thread | None = None
+        self.media_worker: Any | None = None
+        self.file_watcher: Any | None = None
+
+    def start(self) -> None:
+        """Launch local workers once; safe from health and timer races."""
+        with self._lock:
+            if self._started or self._shutdown.is_set():
+                return
+            self._started = True
+            timer = self._timer
+            thread = threading.Thread(
+                target=self._activate,
+                name="exomem-local-activation",
+                daemon=True,
+            )
+            self._thread = thread
+            thread.start()
+        if timer is not None:
+            timer.cancel()
+
+    def _activate(self) -> None:
+        if self._shutdown.is_set():
+            return
+        self._start_component("file watcher", self._start_file_watcher)
+        if self._shutdown.is_set():
+            self._stop_background_workers()
+            return
+        if self.file_watcher is None:
+            # A maintained projection is authoritative only while something is
+            # actually maintaining it.  The explicit watcher-off mode and a
+            # watcher startup failure retain the supported walk-backed path.
+            self._downgrade_recall_runtime()
+        self._wait_for_recall_seed()
+        if self._shutdown.is_set():
+            self._stop_background_workers()
+            return
+        self._start_component("retrieval", _start_compute_runtime)
+        if self._shutdown.is_set():
+            self._stop_background_workers()
+            return
+        self._wait_for_required_admission()
+        if self._shutdown.is_set():
+            self._stop_background_workers()
+            return
+        self._start_component(
+            "file watcher recovery",
+            self._finish_file_watcher_startup,
+        )
+        starters = (
+            ("graph drain", _start_graph_drain),
+            ("media", self._start_media_worker),
+        )
+        for label, starter in starters:
+            if self._shutdown.is_set():
+                break
+            self._start_component(label, starter)
+        if self._shutdown.is_set():
+            self._stop_background_workers()
+
+    def _wait_for_recall_seed(self) -> None:
+        """Order maintained-catalog verification behind watcher authority."""
+        from . import freshness
+
+        watcher = self.file_watcher
+        if watcher is None or not freshness.event_indexes_enabled():
+            return
+        try:
+            seeded = watcher.wait_until_seeded(timeout=RECALL_SEED_WAIT_SECONDS)
+        except Exception:  # noqa: BLE001 - retrieval fallback stays background-only
+            log.warning("file watcher seed wait failed", exc_info=True)
+            self._downgrade_recall_runtime()
+            return
+        if not seeded:
+            log.warning(
+                "file watcher did not establish both recall projections; "
+                "switching this process to exact walk-backed recall"
+            )
+            self._downgrade_recall_runtime()
+
+    def _downgrade_recall_runtime(self) -> None:
+        """Revoke an unavailable watcher generation and retain exact fallback."""
+        from . import freshness, readiness
+
+        watcher = self.file_watcher
+        # Invalidation cancels any replacement walk that is still in flight;
+        # if it eventually returns it cannot re-publish an unmaintained map.
+        freshness.invalidate(self.vault_root)
+        readiness.unmanage_runtime()
+        self.file_watcher = None
+        stop = getattr(watcher, "stop", None)
+        if callable(stop):
+            try:
+                stop()
+            except Exception:  # noqa: BLE001 - fallback is already authoritative
+                log.warning(
+                    "file watcher shutdown after recall downgrade failed",
+                    exc_info=True,
+                )
+
+    def _wait_for_required_admission(self) -> None:
+        """Keep reconcilers out until retrieval and mutation state are admitted."""
+        from . import readiness, warmup
+
+        if not warmup.warmup_enabled():
+            return
+        while not self._shutdown.is_set():
+            catalog_ready = readiness.is_ready("retrieval_catalog")
+            semantic_ready = readiness.is_ready("semantic_corpus")
+            if catalog_ready and (semantic_ready or not readiness.is_warming()):
+                # Semantic corpus has no independent post-warm repair signal.
+                # Let it serialize behind retrieval while the one-shot warm is
+                # active, then preserve the historical soft-failure behavior
+                # instead of stranding graph/media recovery forever.
+                return
+            if not readiness.warm_started():
+                # A custom/hosted starter elected not to open a managed warm.
+                return
+            missing = "retrieval_catalog" if not catalog_ready else "semantic_corpus"
+            readiness.wait(missing, timeout=0.1)
+
+    def _stop_background_workers(self) -> None:
+        """Stop workers already owned by this activation during shutdown."""
+        for label, worker in (
+            ("media", self.media_worker),
+            ("file watcher", self.file_watcher),
+        ):
+            stop = getattr(worker, "stop", None)
+            if not callable(stop):
+                continue
+            try:
+                stop()
+            except Exception:  # noqa: BLE001 - shutdown still has to join activation
+                log.warning("%s runtime shutdown failed", label, exc_info=True)
+
+    def _start_component(self, label: str, starter: Callable[[Path], Any]) -> None:
+        try:
+            starter(self.vault_root)
+        except Exception:  # noqa: BLE001 - workers cannot deny transport liveness
+            log.warning(
+                "%s runtime startup failed; transport continuing",
+                label,
+                exc_info=True,
+            )
+
+    def _start_media_worker(self, vault_root: Path) -> None:
+        self.media_worker = _start_media_worker(vault_root)
+
+    def _start_file_watcher(self, vault_root: Path) -> None:
+        self.file_watcher = _start_file_watcher(vault_root)
+
+    def _finish_file_watcher_startup(self, _vault_root: Path) -> None:
+        watcher = self.file_watcher
+        finish = getattr(watcher, "finish_startup_recovery", None)
+        if callable(finish):
+            finish()
+
+    def lifespan(self):
+        """Arm a fallback for clients that never call the liveness endpoint."""
+        from fastmcp.server.lifespan import lifespan
+
+        @lifespan
+        async def _lifespan(_server):
+            timer = threading.Timer(self.fallback_seconds, self.start)
+            timer.daemon = True
+            with self._lock:
+                if not self._started:
+                    self._timer = timer
+                    timer.start()
+            try:
+                yield {}
+            finally:
+                with self._lock:
+                    self._shutdown.set()
+                    timer = self._timer
+                    self._timer = None
+                    thread = self._thread
+                if timer is not None:
+                    timer.cancel()
+                self._stop_background_workers()
+                if thread is not None and thread is not threading.current_thread():
+                    await anyio.to_thread.run_sync(thread.join)
+
+        return _lifespan
 
 
 def _initialize_hosted_runtime() -> ServerRuntime:
@@ -119,6 +324,25 @@ def _initialize_hosted_runtime() -> ServerRuntime:
         raise
 
 
+def _hosted_authorization_session_readiness_provider(
+    config: HostedCellConfig,
+) -> Callable[[], Any]:
+    """Bind Hosted membership checks to deployment-owned identity, never liveness."""
+
+    if config.vault_id is None or config.authorization_session_replica_id is None:
+        return unavailable_readiness
+
+    def readiness() -> Any:
+        return authorization_session_lifecycle.hosted_serving_membership_readiness(
+            config.vault_root,
+            expected_cell_id=config.cell_id,
+            expected_logical_vault_id=config.vault_id,
+            expected_replica_id=config.authorization_session_replica_id,
+        )
+
+    return readiness
+
+
 def _initialize_locked_hosted_runtime(
     config: HostedCellConfig,
     lifetime_lock: AbstractContextManager[None],
@@ -126,8 +350,16 @@ def _initialize_locked_hosted_runtime(
     """Finish hosted startup while retaining exclusive target-root ownership."""
 
     config.apply_process_environment()
+    from . import state_migration
+
+    state_migration.require_vault_state_ready(config.vault_root)
     _start_metrics_persistence()
-    lifecycle = HostedCellLifecycle(config)
+    lifecycle = HostedCellLifecycle(
+        config,
+        authorization_session_readiness_provider=(
+            _hosted_authorization_session_readiness_provider(config)
+        ),
+    )
     security_authority = _initialize_hosted_security(config)
     vault_root = config.vault_root
 
@@ -145,7 +377,9 @@ def _initialize_locked_hosted_runtime(
     startup = lifecycle.complete_startup(
         vault_ready=True,
         mutation_authority_ready=mutation_ready,
-        service_auth_ready=(security_authority is not None or config.service_credential is not None),
+        service_auth_ready=(
+            security_authority is not None or config.service_credential is not None
+        ),
     )
     if config.has_feature("diarization"):
         lifecycle.set_worker_status(
@@ -158,6 +392,14 @@ def _initialize_locked_hosted_runtime(
 
     media_worker = None
     file_watcher = None
+    if mutation_ready and startup.phase == "active":
+        # Retrieval catalog warm-up is core service work, not an optional
+        # hosted worker.  A zero optional-worker budget must still converge
+        # truthful retrieval admission for lean cells.
+        if config.has_feature("embeddings") and config.resource_limits.worker_count > 0:
+            _start_compute_runtime(vault_root)
+        else:
+            _start_retrieval_runtime(vault_root)
     if not mutation_ready:
         for feature in ("embeddings", "file-watcher", "media"):
             if config.has_feature(feature):
@@ -205,8 +447,6 @@ def _initialize_locked_hosted_runtime(
                     reason_code="HOSTED_CELL_NOT_ACTIVE",
                 )
     else:
-        if config.has_feature("embeddings"):
-            _start_compute_runtime(vault_root)
         if config.has_feature("media"):
             media_worker = _start_media_worker(vault_root)
             lifecycle.set_worker_status(
@@ -308,16 +548,29 @@ def _start_metrics_persistence() -> None:
         log.warning("metrics persistence unavailable at startup: %s", exc)
 
 
-def _start_compute_runtime(vault_root: Path) -> None:
-    """Start warmup, model unloading, and live compute-mode watching."""
-    from . import mode, warmup
+def _start_retrieval_runtime(vault_root: Path) -> None:
+    """Start core catalog/cache warm-up independently of optional models."""
+    from . import warmup
 
-    log.info("compute policy: %s", mode.resolved())
     if warmup.warmup_enabled():
         if os.environ.get("EXOMEM_EAGER_BOOT"):
-            warmup.warm_all(vault_root)
+            from . import readiness
+
+            readiness.begin_warm()
+            try:
+                warmup.warm_all(vault_root)
+            finally:
+                readiness.finish_warm()
         else:
             warmup.start_background(vault_root)
+
+
+def _start_compute_runtime(vault_root: Path) -> None:
+    """Start retrieval warm-up, model unloading, and live compute-mode watching."""
+    from . import mode
+
+    log.info("compute policy: %s", mode.resolved())
+    _start_retrieval_runtime(vault_root)
 
     if mode.release_when_idle():
         from . import model_reaper
@@ -460,9 +713,11 @@ def _start_file_watcher(vault_root: Path) -> Any | None:
     if watcher is None:
         return None
     try:
-        watcher.start()
+        if not watcher.start():
+            return None
     except Exception as exc:  # noqa: BLE001 - watcher must not break startup
         log.warning("file watcher start failed: %s", exc)
+        return None
     return watcher
 
 

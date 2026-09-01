@@ -394,12 +394,19 @@ def test_lift_refuses_labels_the_canonical_relation_grammar_rejects(
 ) -> None:
     """Registry standing is not the same question as bullet writability.
 
-    Four vault-authored shapes resolve to `extension` or `alias` standing and
+    Three vault-authored shapes resolve to `extension` or `alias` standing and
     would still author a bullet the governed write refuses: a key longer than
-    the grammar's 81-character cap, a one-character alias (the grammar needs at
-    least two), an over-length alias, and a non-ASCII alias. A candidate that
-    can never be accepted is worse than no candidate, so the normalized label is
+    the grammar's 81-character cap, a one-character alias (the canonical bullet
+    grammar needs at least two), and an over-length alias. A candidate that can
+    never be accepted is worse than no candidate, so the normalized label is
     checked against the canonical grammar itself before emission.
+
+    A non-ASCII alias was a fourth shape here, and is kept as a fixture with the
+    opposite expectation: the registry now refuses it at registration rather
+    than recording an `invalid_alias` finding and registering it anyway, so it
+    never reaches this guard. That is a narrower registry, not a weaker guard —
+    the three shapes above pass the registry's own label grammar and are exactly
+    what this check exists for.
     """
     vault = tmp_path / "vault"
     path = vault / "Knowledge Base" / "_Schema" / "relation-registry.yaml"
@@ -461,8 +468,10 @@ def test_lift_refuses_labels_the_canonical_relation_grammar_rejects(
     # Every refused shape carries standing the status gate admits.
     assert standing[_OVERLONG_KEY] == "extension"
     assert standing["a"] == "alias"
-    assert standing["ré"] == "alias"
     assert standing["v" * 84] == "alias"
+    # The non-ASCII alias is refused by the registry itself, so it never gains
+    # the standing this guard would have had to strip.
+    assert standing.get("ré") != "alias"
     assert [c["relation_type"] for c in lifted] == [
         "lab.answers_partially",
         "lab.answers_second",

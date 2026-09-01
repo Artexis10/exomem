@@ -1,4 +1,11 @@
+<!-- authority:non-specification -->
+
+<!-- authority:implementation-reference -->
+
 # Planning
+
+Product and command usage reference derived from the OpenSpec contract. It is
+not a repository task plan or a separate specification authority.
 
 Planning is human-authored intended future state. A collection lives under
 `Knowledge Base/Planning/` and stores one readable Markdown item per plan; no
@@ -13,7 +20,10 @@ Kinds are area, outcome, initiative, and work-item. Areas are ongoing
 membership. The goal hierarchy is outcome → initiative → work-item. Planning
 may keep opaque Records evidence descriptors and opaque external execution
 pointers, but `plan_memory` itself does not resolve them or infer progress.
-OpenSpec and the repository remain software execution truth.
+Planning works standalone by default. A resolved user-authored workflow contract
+may declare a companion owner for an execution artifact; the pointer remains
+opaque, and neither the declaration nor the pointer proves tool availability or
+external state.
 
 Queries are bounded derived output, tagged with their canonical snapshot and
 source versions. Direct editor changes are immediately visible; inspection

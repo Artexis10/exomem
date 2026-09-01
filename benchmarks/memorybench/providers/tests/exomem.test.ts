@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import type { UnifiedSession } from "../../types/unified"
-import { ExomemProvider } from "../exomem"
+import { ExomemProvider, prepareExomemRetirement } from "../exomem"
 
 const sessions: UnifiedSession[] = [
   {
@@ -174,6 +174,117 @@ describe("Exomem guest provider", () => {
     expect(peak).toBe(1)
     expect(active).toEqual(new Set(["container-5"]))
     expect(retired).toEqual(["container-1", "container-2", "container-3", "container-4"])
+  })
+
+  test("residency proves derived state before retiring an evicted service", async () => {
+    const h = harness()
+    const events: string[] = []
+    const provider = new ExomemProvider({
+      ensureService: async (tag) => ({
+        ...h.service,
+        container_tag: tag,
+        work_root: `/fixture/work/${tag}`,
+        evidence_root: `/fixture/evidence/${tag}`,
+      }),
+      post: h.post,
+      doctor: h.doctor,
+      prepareRetirement: async (service) => events.push(`prepare:${service.container_tag}`),
+      retireService: async (service) => events.push(`retire:${service.container_tag}`),
+      clearService: async () => {},
+    })
+
+    await provider.ingest(sessions.slice(0, 1), { containerTag: "container-a" })
+    await provider.ingest(sessions.slice(0, 1), { containerTag: "container-b" })
+
+    expect(events).toEqual(["prepare:container-a", "retire:container-a"])
+  })
+
+  test("a failed retirement barrier refuses eviction and clears every live service", async () => {
+    const h = harness()
+    const events: string[] = []
+    const provider = new ExomemProvider({
+      ensureService: async (tag) => ({
+        ...h.service,
+        container_tag: tag,
+        work_root: `/fixture/work/${tag}`,
+        evidence_root: `/fixture/evidence/${tag}`,
+      }),
+      post: h.post,
+      doctor: h.doctor,
+      prepareRetirement: async () => { throw new Error("derived state not current") },
+      retireService: async () => events.push("retired"),
+      clearService: async () => {},
+      clearAllServices: async () => events.push("cleared-all"),
+    })
+
+    await provider.ingest(sessions.slice(0, 1), { containerTag: "container-a" })
+    await expect(
+      provider.ingest(sessions.slice(0, 1), { containerTag: "container-b" })
+    ).rejects.toThrow("derived state not current")
+
+    expect(events).toEqual(["cleared-all"])
+  })
+
+  test("the default retirement barrier performs and verifies a graph-current reconcile", async () => {
+    const h = harness()
+    const calls: Array<{ path: string; body: Record<string, unknown> }> = []
+
+    await prepareExomemRetirement(h.service, async (_service, path, body) => {
+      calls.push({ path, body })
+      return { graph_status: "refreshed" }
+    })
+
+    expect(calls).toHaveLength(1)
+    expect(calls[0].path).toBe("/api/maintain_memory")
+    expect(calls[0].body).toMatchObject({
+      mode: "reconcile",
+      dry_run: false,
+      rebuild_graph: false,
+    })
+    expect(calls[0].body.request_id).toMatch(/^[0-9a-f-]{36}$/)
+    expect(calls[0].body.idempotency_key).toBe(calls[0].body.request_id)
+
+    await expect(
+      prepareExomemRetirement(h.service, async () => ({ graph_status: "unavailable" }))
+    ).rejects.toThrow("graph-current")
+  })
+
+  test("the retirement barrier retries only exact stabilization exhaustion", async () => {
+    const h = harness()
+    const requestIds: string[] = []
+    let attempts = 0
+
+    await prepareExomemRetirement(h.service, async (_service, _path, body) => {
+      attempts += 1
+      requestIds.push(body.request_id as string)
+      if (attempts === 1) {
+        return {
+          graph_status: "unavailable",
+          graph_sync_code: "GRAPH_SYNC_STABILIZATION_EXHAUSTED",
+        }
+      }
+      return { graph_status: "current" }
+    })
+
+    expect(attempts).toBe(2)
+    expect(new Set(requestIds).size).toBe(2)
+  })
+
+  test("the retirement barrier bounds repeated stabilization exhaustion", async () => {
+    const h = harness()
+    let attempts = 0
+
+    await expect(
+      prepareExomemRetirement(h.service, async () => {
+        attempts += 1
+        return {
+          graph_status: "unavailable",
+          graph_sync_code: "GRAPH_SYNC_STABILIZATION_EXHAUSTED",
+        }
+      })
+    ).rejects.toThrow("graph-current")
+
+    expect(attempts).toBe(3)
   })
 
   test("a separate stage instance reattaches the requested container service", async () => {

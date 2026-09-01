@@ -99,6 +99,7 @@ class AuthorizationProjectionMap:
 
     namespace_key: projections.ProjectionNamespaceKey
     selections: tuple[ProjectionSelection, ...]
+    withheld_identities: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         if not isinstance(self.namespace_key, projections.ProjectionNamespaceKey):
@@ -120,11 +121,24 @@ class AuthorizationProjectionMap:
                     "authorization map contains a duplicate item identity"
                 )
             by_identity[selection.item_identity] = selection
+        if not isinstance(self.withheld_identities, frozenset):
+            raise projections.ProjectionCanonicalizationError(
+                "authorization map withheld identities must be an immutable set"
+            )
+        withheld = frozenset(
+            _bounded_text(identity, "withheld item identity", maximum=4096)
+            for identity in self.withheld_identities
+        )
+        if withheld.intersection(by_identity):
+            raise projections.ProjectionCanonicalizationError(
+                "authorization map selects and withholds the same item"
+            )
         object.__setattr__(
             self,
             "selections",
             tuple(by_identity[key] for key in sorted(by_identity, key=_sort_key)),
         )
+        object.__setattr__(self, "withheld_identities", withheld)
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,8 +151,16 @@ class ProjectedLexicalHit:
     score: float
     search_fields: Mapping[str, str]
     snippet: str
+    clip_frame_timestamp_ms: int | None = None
 
     def __post_init__(self) -> None:
+        if self.clip_frame_timestamp_ms is not None and (
+            type(self.clip_frame_timestamp_ms) is not int
+            or not 0 <= self.clip_frame_timestamp_ms <= 4_294_967_295
+        ):
+            raise projections.ProjectionCanonicalizationError(
+                "projected CLIP hit timestamp must be a bounded integer millisecond value"
+            )
         object.__setattr__(self, "search_fields", MappingProxyType(dict(self.search_fields)))
 
 
@@ -147,6 +169,7 @@ class _SelectedDocument:
     variant: projections.ProjectionVariant
     text: str
     tokens: tuple[str, ...]
+    keyword_tokens: frozenset[str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,11 +197,62 @@ class ProjectionVectorMeasurement:
 
 
 @dataclass(frozen=True, slots=True)
+class ProjectionClipSample:
+    """One canonical pixel/keyframe vector within a projected media row."""
+
+    frame_timestamp_ms: int | None
+    vector: tuple[float, ...]
+
+    def __post_init__(self) -> None:
+        if self.frame_timestamp_ms is not None and (
+            type(self.frame_timestamp_ms) is not int
+            or not 0 <= self.frame_timestamp_ms <= 4_294_967_295
+        ):
+            raise projections.ProjectionCanonicalizationError(
+                "CLIP frame timestamp must be a bounded integer millisecond value"
+            )
+        vector = _vector(self.vector, "CLIP projection vector")
+        if math.sqrt(sum(value * value for value in vector)) == 0:
+            raise projections.ProjectionCanonicalizationError(
+                "CLIP projection vector must have non-zero magnitude"
+            )
+        object.__setattr__(self, "vector", vector)
+
+
+MAX_PROJECTED_CLIP_SAMPLES_PER_VARIANT = 40
+
+
+@dataclass(frozen=True, slots=True, init=False)
 class ProjectionClipMeasurement:
-    """One principal-free CLIP measurement beneath an L6 projection row."""
+    """One principal-free image or multi-keyframe video measurement row."""
 
     measurement_key: projections.MeasurementKey
-    vector: tuple[float, ...]
+    samples: tuple[ProjectionClipSample, ...]
+
+    def __init__(
+        self,
+        measurement_key: projections.MeasurementKey,
+        vector: tuple[float, ...] | None = None,
+        *,
+        samples: tuple[ProjectionClipSample, ...] | None = None,
+    ) -> None:
+        if (vector is None) == (samples is None):
+            raise projections.ProjectionCanonicalizationError(
+                "CLIP measurement requires either one image vector or canonical samples"
+            )
+        if vector is not None:
+            normalized = (
+                ProjectionClipSample(frame_timestamp_ms=None, vector=vector),
+            )
+        else:
+            if samples is None:
+                raise projections.ProjectionCanonicalizationError(
+                    "CLIP measurement samples are unavailable"
+                )
+            normalized = samples
+        object.__setattr__(self, "measurement_key", measurement_key)
+        object.__setattr__(self, "samples", normalized)
+        self.__post_init__()
 
     def __post_init__(self) -> None:
         if not isinstance(self.measurement_key, projections.MeasurementKey):
@@ -189,12 +263,44 @@ class ProjectionClipMeasurement:
             raise projections.ProjectionCanonicalizationError(
                 "CLIP measurement key has an invalid lane"
             )
-        vector = _vector(self.vector, "CLIP projection vector")
-        if math.sqrt(sum(value * value for value in vector)) == 0:
+        if not isinstance(self.samples, tuple) or not self.samples:
             raise projections.ProjectionCanonicalizationError(
-                "CLIP projection vector must have non-zero magnitude"
+                "CLIP measurement samples must be a non-empty immutable tuple"
             )
-        object.__setattr__(self, "vector", vector)
+        if len(self.samples) > MAX_PROJECTED_CLIP_SAMPLES_PER_VARIANT:
+            raise projections.ProjectionCapacityExceeded(
+                "projected CLIP samples exceed the fixed per-variant capacity"
+            )
+        if any(not isinstance(sample, ProjectionClipSample) for sample in self.samples):
+            raise projections.ProjectionCanonicalizationError(
+                "CLIP measurement sample has an invalid type"
+            )
+        if len({len(sample.vector) for sample in self.samples}) != 1:
+            raise projections.ProjectionCanonicalizationError(
+                "CLIP measurement samples have inconsistent dimensions"
+            )
+        timestamps = tuple(sample.frame_timestamp_ms for sample in self.samples)
+        if any(timestamp is None for timestamp in timestamps):
+            if timestamps != (None,):
+                raise projections.ProjectionCanonicalizationError(
+                    "CLIP image measurement must be one untimestamped sample"
+                )
+        elif tuple(sorted(timestamps)) != timestamps or len(set(timestamps)) != len(
+            timestamps
+        ):
+            raise projections.ProjectionCanonicalizationError(
+                "CLIP samples must use strict canonical timestamp order"
+            )
+
+    @property
+    def vector(self) -> tuple[float, ...]:
+        """Compatibility view for a legacy singleton image measurement."""
+
+        if len(self.samples) != 1:
+            raise projections.ProjectionCanonicalizationError(
+                "multi-sample CLIP measurements do not have one vector"
+            )
+        return self.samples[0].vector
 
 
 def _vector(value: object, name: str) -> tuple[float, ...]:
@@ -262,15 +368,27 @@ def _selected_variants(
     selections = {
         selection.item_identity: selection for selection in authorization.selections
     }
-    if frozenset(selections) != frozenset(items):
+    inline_withheld = frozenset(
+        identity
+        for identity, selection in selections.items()
+        if selection.projection_variant_id is None
+    )
+    explicit_withheld = authorization.withheld_identities
+    if (
+        inline_withheld.intersection(explicit_withheld)
+        or frozenset(selections).union(explicit_withheld) != frozenset(items)
+    ):
         raise ProjectedRetrievalUnavailable(
             "authorization map does not cover the exact projection catalog"
         )
 
     selected: list[projections.ProjectionVariant] = []
-    for identity in sorted(items, key=_sort_key):
-        item = items[identity]
-        selection = selections[identity]
+    for identity, selection in selections.items():
+        item = items.get(identity)
+        if item is None:
+            raise ProjectedRetrievalUnavailable(
+                "authorization map does not cover the exact projection catalog"
+            )
         if selection.content_hash != item.content_hash:
             raise ProjectedRetrievalUnavailable(
                 "authorization selection content hash does not match catalog"
@@ -296,11 +414,20 @@ class ProjectionCatalog:
 
     def __init__(
         self,
-        namespace: projection_store.VerifiedProjectionNamespace,
+        namespace: (
+            projection_store.VerifiedProjectionNamespace
+            | projection_store.PreparedProjectionNamespace
+        ),
     ) -> None:
-        if not isinstance(namespace, projection_store.VerifiedProjectionNamespace):
+        if not isinstance(
+            namespace,
+            (
+                projection_store.VerifiedProjectionNamespace,
+                projection_store.PreparedProjectionNamespace,
+            ),
+        ):
             raise ProjectedRetrievalUnavailable(
-                "projected retrieval requires a verified active namespace"
+                "projected retrieval requires a verified namespace"
             )
         self.namespace = namespace
         self.namespace_key = namespace.namespace_key
@@ -344,7 +471,13 @@ class ProjectionCatalog:
         return variants.get(descriptor)
 
 
-def _variant_text(variant: projections.ProjectionVariant) -> str:
+def projection_text(variant: projections.ProjectionVariant) -> str:
+    """Return the canonical text measured for one immutable projection row."""
+
+    if not isinstance(variant, projections.ProjectionVariant):
+        raise projections.ProjectionCanonicalizationError(
+            "projection text requires one immutable variant"
+        )
     return " ".join(
         variant.search_fields[key]
         for key in sorted(variant.search_fields, key=_sort_key)
@@ -364,8 +497,10 @@ def clip_variant_applicable(variant: projections.ProjectionVariant) -> bool:
 def _projected_hit(
     variant: projections.ProjectionVariant,
     score: float,
+    *,
+    clip_frame_timestamp_ms: int | None = None,
 ) -> ProjectedLexicalHit:
-    compact = " ".join(_variant_text(variant).split())
+    compact = " ".join(projection_text(variant).split())
     return ProjectedLexicalHit(
         item_identity=variant.item_identity,
         projection_variant_id=variant.projection_variant_id,
@@ -373,6 +508,7 @@ def _projected_hit(
         score=score,
         search_fields=variant.search_fields,
         snippet=compact[:_SNIPPET_CHARS].rstrip(),
+        clip_frame_timestamp_ms=clip_frame_timestamp_ms,
     )
 
 
@@ -395,9 +531,14 @@ class ProjectedLexicalIndex:
         postings: dict[str, set[str]] = {}
         for item in self._items.values():
             for variant in item.variants:
-                text = _variant_text(variant)
+                text = projection_text(variant)
                 tokens = tuple(bm25.tokenize(text))
-                document = _SelectedDocument(variant, text, tokens)
+                document = _SelectedDocument(
+                    variant,
+                    text,
+                    tokens,
+                    frozenset(token for token in text.casefold().split() if token),
+                )
                 documents[variant.projection_variant_id] = document
                 for token in frozenset(tokens):
                     postings.setdefault(token, set()).add(
@@ -429,12 +570,16 @@ class ProjectedLexicalIndex:
         selected_ids = frozenset(
             document.variant.projection_variant_id for document in documents
         )
-        posting_sets = [self._postings.get(token, frozenset()) for token in query_tokens]
-        if not posting_sets:
+        unique_query_tokens = frozenset(query_tokens)
+        if not unique_query_tokens:
             return ()
-        candidate_ids = selected_ids.intersection(
-            frozenset().union(*posting_sets)
-        )
+        candidate_ids: set[str] = set()
+        for token in unique_query_tokens:
+            candidate_ids.update(
+                selected_ids.intersection(
+                    self._postings.get(token, frozenset())
+                )
+            )
         return tuple(
             document
             for document in documents
@@ -471,6 +616,14 @@ class ProjectedLexicalIndex:
             token: len(self._postings.get(token, frozenset()) & selected_ids)
             for token in frozenset(query_tokens)
         }
+        inverse_frequencies = {
+            token: math.log(
+                1
+                + (len(documents) - document_frequency + 0.5)
+                / (document_frequency + 0.5)
+            )
+            for token, document_frequency in frequencies.items()
+        }
         average_length = max(
             sum(len(document.tokens) for document in documents) / len(documents),
             1.0,
@@ -479,18 +632,12 @@ class ProjectedLexicalIndex:
         for document in candidates:
             term_counts = Counter(document.tokens)
             score = 0.0
+            length_normalization = 1 - _BM25_B + _BM25_B * (
+                len(document.tokens) / average_length
+            )
             for token in query_tokens:
                 frequency = term_counts[token]
-                document_frequency = frequencies[token]
-                inverse_document_frequency = math.log(
-                    1
-                    + (len(documents) - document_frequency + 0.5)
-                    / (document_frequency + 0.5)
-                )
-                length_normalization = 1 - _BM25_B + _BM25_B * (
-                    len(document.tokens) / average_length
-                )
-                score += inverse_document_frequency * (
+                score += inverse_frequencies[token] * (
                     frequency * (_BM25_K1 + 1)
                 ) / (frequency + _BM25_K1 * length_normalization)
             if score > 0:
@@ -522,11 +669,14 @@ class ProjectedLexicalIndex:
         )
         if not query_tokens:
             return ()
-        matches = [
-            document
-            for document in documents
-            if all(token in document.text.casefold() for token in query_tokens)
-        ]
+        exact_query_tokens = frozenset(query_tokens)
+        matches: list[_SelectedDocument] = []
+        for document in documents:
+            folded_text = document.text.casefold()
+            if exact_query_tokens.issubset(document.keyword_tokens) or all(
+                token in folded_text for token in query_tokens
+            ):
+                matches.append(document)
         matches.sort(
             key=lambda document: (
                 _sort_key(document.variant.item_identity),
@@ -678,8 +828,8 @@ class ProjectedClipIndex:
             "CLIP model version",
             maximum=256,
         )
-        clip_variant_ids = {
-            variant.projection_variant_id
+        clip_variants = {
+            variant.projection_variant_id: variant
             for item in self._items.values()
             for variant in item.variants
             if clip_variant_applicable(variant)
@@ -700,7 +850,7 @@ class ProjectedClipIndex:
                 raise projections.ProjectionCanonicalizationError(
                     "CLIP measurement model version does not match index"
                 )
-            if key.projection_variant_id not in clip_variant_ids:
+            if key.projection_variant_id not in clip_variants:
                 raise projections.ProjectionCanonicalizationError(
                     "CLIP measurement variant is not an applicable L6 pixel catalog projection"
                 )
@@ -708,9 +858,26 @@ class ProjectedClipIndex:
                 raise projections.ProjectionCanonicalizationError(
                     "projected CLIP index contains a duplicate variant measurement"
                 )
+            variant = clip_variants[key.projection_variant_id]
+            timestamps = tuple(
+                sample.frame_timestamp_ms for sample in measurement.samples
+            )
+            if variant.search_fields.get("media_type") == "image" and timestamps != (
+                None,
+            ):
+                raise projections.ProjectionCanonicalizationError(
+                    "projected image CLIP measurement must be one untimestamped sample"
+                )
+            if variant.search_fields.get("media_type") == "video" and any(
+                timestamp is None for timestamp in timestamps
+            ):
+                raise projections.ProjectionCanonicalizationError(
+                    "projected video CLIP measurements require frame timestamps"
+                )
+            row_dimension = len(measurement.samples[0].vector)
             if dimension is None:
-                dimension = len(measurement.vector)
-            elif len(measurement.vector) != dimension:
+                dimension = row_dimension
+            elif row_dimension != dimension:
                 raise projections.ProjectionCanonicalizationError(
                     "projected CLIP measurements have inconsistent dimensions"
                 )
@@ -752,21 +919,31 @@ class ProjectedClipIndex:
         if query_magnitude == 0:
             raise ProjectedLaneUnavailable("CLIP query vector has zero magnitude")
 
-        scored: list[tuple[projections.ProjectionVariant, float]] = []
+        scored: list[tuple[projections.ProjectionVariant, float, int | None]] = []
         for variant in selected:
             measurement = self._measurements.get(variant.projection_variant_id)
             if measurement is None:
                 raise ProjectedLaneUnavailable(
                     "selected projection CLIP measurement is unavailable"
                 )
-            measurement_magnitude = math.sqrt(
-                sum(value * value for value in measurement.vector)
+            sample_scores: list[tuple[float, int | None]] = []
+            for sample in measurement.samples:
+                measurement_magnitude = math.sqrt(
+                    sum(value * value for value in sample.vector)
+                )
+                score = sum(
+                    left * right
+                    for left, right in zip(query, sample.vector, strict=True)
+                ) / (query_magnitude * measurement_magnitude)
+                sample_scores.append((score, sample.frame_timestamp_ms))
+            score, timestamp_ms = min(
+                sample_scores,
+                key=lambda item: (
+                    -item[0],
+                    -1 if item[1] is None else item[1],
+                ),
             )
-            score = sum(
-                left * right
-                for left, right in zip(query, measurement.vector, strict=True)
-            ) / (query_magnitude * measurement_magnitude)
-            scored.append((variant, score))
+            scored.append((variant, score, timestamp_ms))
         scored.sort(
             key=lambda item: (
                 -item[1],
@@ -774,7 +951,14 @@ class ProjectedClipIndex:
                 item[0].projection_variant_id,
             )
         )
-        return tuple(_projected_hit(variant, score) for variant, score in scored[:limit])
+        return tuple(
+            _projected_hit(
+                variant,
+                score,
+                clip_frame_timestamp_ms=timestamp_ms,
+            )
+            for variant, score, timestamp_ms in scored[:limit]
+        )
 
 
 class ProjectedReranker:
@@ -888,7 +1072,7 @@ class ProjectedReranker:
                 "rerank candidate is outside the selected projected corpus"
             )
         variants = tuple(selected_by_identity[identity] for identity in candidates)
-        passages = [_variant_text(variant) for variant in variants]
+        passages = [projection_text(variant) for variant in variants]
         try:
             raw_scores = scorer(query, passages)
             scores = tuple(raw_scores)  # type: ignore[arg-type]
@@ -922,6 +1106,7 @@ class ProjectedReranker:
 
 __all__ = [
     "AuthorizationProjectionMap",
+    "MAX_PROJECTED_CLIP_SAMPLES_PER_VARIANT",
     "ProjectedClipIndex",
     "ProjectedLaneUnavailable",
     "ProjectedLexicalHit",
@@ -929,9 +1114,11 @@ __all__ = [
     "ProjectedReranker",
     "ProjectedRetrievalUnavailable",
     "ProjectedVectorIndex",
+    "ProjectionClipSample",
     "ProjectionClipMeasurement",
     "ProjectionCatalog",
     "ProjectionVectorMeasurement",
     "ProjectionSelection",
     "clip_variant_applicable",
+    "projection_text",
 ]

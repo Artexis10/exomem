@@ -1,6 +1,9 @@
+<!-- authority:non-specification -->
+
 # ADR 0001 — Structured in-repo benchmark package (`benchmarks/membench`)
 
-- Status: accepted (2026-07-31)
+- Historical status: accepted (2026-07-31); the related OpenSpec capability is
+  the current durable authority
 - Deciders: founder + benchmark architecture review
 - Related: OpenSpec `add-memory-proof-benchmark`; supersedes the comparison
   scope of `add-memory-server-comparison-benchmark`
@@ -32,7 +35,7 @@ Constraints that decided it:
   lean CI, OpenSpec validation, ruff), would split the OpenSpec change from
   the code it governs, and could not even be pushed from this environment.
 
-## Decision
+## Historical decision record
 
 Create a top-level `benchmarks/` directory owning everything benchmark-shaped:
 
