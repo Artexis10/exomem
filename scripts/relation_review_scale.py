@@ -18,6 +18,7 @@ import time
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -30,6 +31,7 @@ from exomem import (
     relation_queue,
     semantic_contract,
     vault,
+    writer_lease,
 )
 
 _KB = "Knowledge Base/Notes/Insights"
@@ -189,16 +191,25 @@ def _monitor_queue_cost(measurement: threading.local) -> ExitStack:
 
 
 def _mutate_eligible_page(root: Path, page: Path, sequence: int) -> int:
+    """Use the same request/fanout boundary an interactive writer uses."""
     before = graph_sync.read_checkpoint(root)
     original = page.read_text(encoding="utf-8")
     replacement = f"\nSynthetic canonical mutation {sequence}.\n"
     if replacement in original:
         raise ScaleGateError("invalid substitute: synthetic mutation became a no-op")
-    vault.batch_atomic_write(
-        [vault.PlannedWrite(page, original + replacement)],
-        vault_root=root,
-        post_commit_fanout=False,
-    )
+    def leaf(vault_root: Path, **_kwargs: Any) -> dict[str, Any]:
+        vault.batch_atomic_write(
+            [vault.PlannedWrite(page, original + replacement)],
+            vault_root=vault_root,
+            post_commit_fanout=True,
+        )
+        writer_lease.mark_active_mutation_committed()
+        return {"status": "committed", "mutated": True}
+
+    command = SimpleNamespace(name="remember", read_only=False, leaf=leaf)
+    terminal = writer_lease.get_manager().invoke(command, (root,), {})
+    if not isinstance(terminal, dict) or terminal.get("status") != "committed":
+        raise ScaleGateError("mutation did not reach a committed production terminal")
     after = graph_sync.read_checkpoint(root)
     if after is None or (before is not None and after.generation <= before.generation):
         raise ScaleGateError("unchanged checkpoint generation after canonical mutation")
@@ -217,6 +228,11 @@ def run_calibrated(
     root.mkdir(parents=True)
     _, mutation_pages = _write_corpus(root, config.pages)
     _prebuild_current_graph(root)
+    setup_queue = relation_queue.build_queue(root, limit_pages=config.groups, limit_per_page=1)
+    coverage = dict(setup_queue.get("coverage") or {})
+    eligible_pages = int(coverage.get("eligible_pages", 0))
+    if setup_queue.get("status") != "available" or eligible_pages < config.pages:
+        raise ScaleGateError("synthetic corpus did not publish eligible graph pages")
 
     start = threading.Barrier(config.streams)
     first_commit = threading.Event()
@@ -241,6 +257,7 @@ def run_calibrated(
         "queue_read_during_graph_mutation": False,
     }
     hold_first_commit = threading.Event()
+    boundary_held = threading.Event()
     original_locked_write = vault._batch_atomic_write_locked
 
     def held_first_commit(*args: Any, **kwargs: Any) -> Any:
@@ -251,9 +268,13 @@ def run_calibrated(
         if hold_first_commit.is_set() and writes_mutation_page:
             with mutation_lock:
                 overlap["commit_boundary_entered"] = True
+            boundary_held.set()
             first_commit.set()
-            if not overlap_reads_done.wait(30):
-                raise ScaleGateError("non-overlapping mixed phase")
+            try:
+                if not overlap_reads_done.wait(30):
+                    raise ScaleGateError("non-overlapping mixed phase")
+            finally:
+                boundary_held.clear()
         return original_locked_write(*args, **kwargs)
 
     def record_error(error: BaseException) -> None:
@@ -282,12 +303,13 @@ def run_calibrated(
                     raise ScaleGateError("missing graph-relevant commit boundary")
                 queue_read()
                 with mutation_lock:
-                    overlap["queue_reads_completed_while_commit_boundary_held"] += 1
+                    if boundary_held.is_set():
+                        overlap["queue_reads_completed_while_commit_boundary_held"] += 1
                     overlap["queue_read_during_graph_mutation"] = (
-                        overlap["commit_boundary_entered"] is True
+                        overlap["queue_reads_completed_while_commit_boundary_held"] >= 2
                     )
-                if stream == 1:
-                    overlap_reads_done.set()
+                    if overlap["queue_read_during_graph_mutation"]:
+                        overlap_reads_done.set()
             if not final_recovered.wait(30):
                 raise ScaleGateError("missing recovery after final graph-relevant commit")
             for _ in range(_POST_RECOVERY_READS):
@@ -302,9 +324,6 @@ def run_calibrated(
             generation = _mutate_eligible_page(root, mutation_pages[0], 1)
             with mutation_lock:
                 committed_generations.append(generation)
-            publication = epistemic_graph.upsert_after_write(root, [mutation_pages[0]])
-            if publication.outcome != "completed":
-                raise ScaleGateError("missing recovery: first graph publication did not complete")
             first_recovered.set()
         except BaseException as error:  # noqa: BLE001 - transport thread errors
             record_error(error)
@@ -320,9 +339,6 @@ def run_calibrated(
             with mutation_lock:
                 committed_generations.append(generation)
                 final_commit_ns.append(time.perf_counter_ns())
-            publication = epistemic_graph.upsert_after_write(root, list(mutation_pages))
-            if publication.outcome != "completed":
-                raise ScaleGateError("missing recovery: graph publication did not complete")
             final_recovered.set()
             for _ in range(_POST_RECOVERY_READS):
                 queue_read()
@@ -358,7 +374,10 @@ def run_calibrated(
     total = len(statuses)
     report: dict[str, Any] = {
         "schema": "relation-review-scale/v1",
-        "corpus": {"eligible_pages": config.pages + 1, "candidate_denominator": config.pages},
+        "corpus": {
+            "eligible_pages": eligible_pages,
+            "candidate_denominator": int(coverage.get("eligible_pages", 0)),
+        },
         "workload": {"streams": config.streams, "requested_groups": config.groups},
         "overlap": overlap,
         "substitutes": {"validation_only": 0, "no_op": 0, "graph_excluded": 0},

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import inspect
 
 import pytest
 
@@ -84,3 +85,26 @@ def test_report_is_privacy_safe_and_cli_renders_only_aggregate_fields() -> None:
     rendered = relation_review_scale.render_report(report)
     assert "source-" not in rendered
     assert "hostname" not in rendered.lower()
+
+
+def test_mutation_path_uses_the_governed_request_and_real_fanout() -> None:
+    source = inspect.getsource(relation_review_scale._mutate_eligible_page)
+
+    assert "get_manager().invoke" in source
+    assert "post_commit_fanout=True" in source
+    assert "mark_active_mutation_committed" in source
+    assert "upsert_after_write" not in source
+
+
+def test_cli_dispatches_the_executable_calibrated_api(monkeypatch, capsys, tmp_path) -> None:
+    expected = relation_review_scale.reference_report()
+    called = []
+
+    def run(*, root, config):
+        called.append((root, config.pages, config.streams))
+        return expected
+
+    monkeypatch.setattr(relation_review_scale, "run_calibrated", run)
+    assert relation_review_scale.main(["--root", str(tmp_path / "synthetic")]) == 0
+    assert called == [(tmp_path / "synthetic", 3_600, 20)]
+    assert capsys.readouterr().out == relation_review_scale.render_report(expected) + "\n"
