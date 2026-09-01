@@ -204,10 +204,10 @@ def test_curate_skill_routes_reviewed_plans_through_the_delegation_envelope() ->
 def test_hookless_core_carrier_keeps_explicit_curation_available_when_suggestions_are_off() -> None:
     text = (workflow_skills.WORKFLOW_SKILLS_DIR.parent / "SKILL.md").read_text(encoding="utf-8")
     compact = " ".join(text.lower().split())
-    assert "an explicit request from the user is never blocked" in text
+    assert "an explicit request from the user is never blocked" in compact
     assert "curation `work-item`, `propose`, `preview`, `status`, and `propose-compensation`" in compact
     assert "curation `apply`, `resume`, and `apply-compensation`" in compact
-    assert "one immutable plan fingerprint" in text
+    assert "one immutable plan fingerprint" in compact
 
 
 def test_core_skill_tool_loading_mentions_current_product_surface() -> None:

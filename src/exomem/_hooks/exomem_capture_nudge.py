@@ -60,30 +60,23 @@ _KB_WRITE = re.compile(
 )
 
 REMINDER = (
-    "[Exomem capture check] This turn did substantial work. If your Exomem knowledge-base "
-    "skill is available, let the active agent check for a durable conclusion, recurring "
-    "entity, or durable personal baseline: stable preference, recurring routine, historical "
-    "baseline, or durable affiliation only when stability or recurrence and reusable "
-    "comparison, interpretation, or decision value are clear. Route a uniquely resolved "
-    "Entity facet or affiliation there; otherwise one concise compiled observation; use "
-    "Records only for a compatible existing observed measurement. Fleeting preferences, "
-    "one-off activity, incidental associations, trivial metrics, and tentative claims stay "
-    "quiet. First resolve an entity against the active entity registry and selected knowledge packs with "
-    'connect_memory(operation="resolve-entity", name=...); edit_memory updates '
-    'an active match, while connect_memory(operation="create-entity") needs a stable, '
-    "recurring, central identity useful beyond this source. A single incidental mention stays "
-    "in source/note context. Capture conclusions as distilled "
-    "compiled notes, not transcripts. To supersede an active conclusion, use replace_memory, "
-    "not a correction beside it. Route stated intent to Planning with plan_memory and "
-    "observed outcome to Records with record_memory. A concise observation or narrow Entity "
-    "facet follows proactive_capture; an affiliation relation requires link_acceptance; Entity "
-    "creation or substantial curation requires confirmed restructure_execution. "
-    "Generated draft stays ephemeral. Selected is not write consent: proactive_capture "
-    "preserves exact bytes as Source/Evidence by role, never MIME. No handle means "
-    "non-committing handoff. Delivery requires Evidence receipt/Record; no remote byte "
-    "inference. Missing schema uses structural_suggestions/restructure_execution; "
-    "relations use link_acceptance. "
-    "If neither case applies, or no Knowledge Base is configured, do nothing and stop."
+    "[Exomem capture check] After substantial work, active agent checks for durable "
+    "conclusion, recurring entity, or durable personal baseline. Stable preference/"
+    "recurring routine/historical baseline/durable affiliation needs stability or recurrence "
+    "plus reusable comparison/interpretation/decision value. Uniquely resolved Entity: narrow "
+    "Entity facet/proactive_capture; affiliation relation/link_acceptance; else compiled "
+    "observation; Records only if compatible. One-off/incidental/trivial/tentative stays quiet. "
+    "Resolve against the active entity registry and selected knowledge packs with "
+    'connect_memory(operation="resolve-entity", name=...); edit_memory one match, or '
+    'connect_memory(operation="create-entity") only for a stable, recurring, central identity '
+    "useful beyond this source. A single incidental mention stays in context. Entity creation/"
+    "substantial curation: confirmed restructure_execution. Distilled notes, not transcripts. "
+    "Use replace_memory to supersede contradicted conclusion, not a correction beside it. Stated "
+    "intent -> Planning/plan_memory; observed outcome -> Records/record_memory. Generated draft "
+    "stays ephemeral. Selected is not write consent: proactive_capture preserves exact bytes as "
+    "Source/Evidence by role, never MIME. No handle: non-committing handoff. Delivery needs "
+    "Evidence receipt/Record; no remote byte inference. Missing schema: structural_suggestions/"
+    "restructure_execution; relations: link_acceptance. Else/no Knowledge Base: do nothing."
 )
 
 
