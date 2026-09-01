@@ -413,12 +413,13 @@ def op_bootstrap(
         # projections teach the new class without spending the compact budget twice
         # on adjacent lifecycle doctrine carried by their dedicated contracts.
         engagement_policy["contract"]["capture"] = (
-            "Capture a stable preference, recurring routine, historical baseline, or durable "
-            "affiliation only when stable/recurrent and of reusable comparison, interpretation, "
-            "or decision value. A uniquely resolved Entity gets facet/affiliation; otherwise "
-            "concise compiled observation; only compatible existing Records gets observed "
-            "measurement. Fleeting preference, one-off activity, incidental association, trivia, "
-            "tentative claim stay quiet."
+            "Stable preference, recurring routine, historical baseline, durable affiliation require "
+            "stable/recurrent and reusable comparison/interpretation/decision value. Unique Entity "
+            "facet; else concise compiled observation; compatible existing measurement only to "
+            "Records. Fleeting/one-off/incidental/trivial/tentative stays quiet. Concise observation/"
+            "narrow Entity facet: proactive_capture; affiliation relation: link_acceptance; Entity "
+            "creation/"
+            "structural change: confirmed restructure_execution."
         )
     # The delegation envelope rides INSIDE the engagement block rather than beside
     # it: prominence sets its defaults, so a client reading one without the other

@@ -322,6 +322,9 @@ or recurrence and reusable comparison, interpretation, or decision value are cle
 Use a uniquely resolved Entity facet or one concise compiled observation; use Records
 only for a compatible existing observed measurement. Fleeting preferences, one-off
 activity, incidental associations, trivial metrics, and tentative claims stay quiet.
+An eligible concise observation or narrow Entity facet follows `proactive_capture`;
+an affiliation relation requires `link_acceptance`; Entity creation or structural
+change requires confirmed `restructure_execution`.
 Save concise compiled notes, not transcripts. Preserve raw sources or proof-bearing records separately
 when provenance matters. Use `edit_memory` for small corrections and
 `replace_memory` when a newer conclusion supersedes an older one.

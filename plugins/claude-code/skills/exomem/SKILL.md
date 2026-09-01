@@ -108,7 +108,7 @@ is made**, or **an observed outcome or event is reported** — capture it:
   observed measurement accepted by a compatible existing collection. Fleeting
   preferences, one-off activity, incidental associations, trivial metrics, and
   tentative claims stay quiet. Eligibility never creates an Entity, collection, or
-  schema: a relation uses `link_acceptance`; entity creation or substantial curation
+  schema: an affiliation relation uses `link_acceptance`; entity creation or substantial curation
   uses confirmed `restructure_execution`; concise observations and narrow additive
   facts follow `proactive_capture` and its active disposition.
 

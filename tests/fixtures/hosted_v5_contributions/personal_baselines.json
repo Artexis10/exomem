@@ -1,62 +1,83 @@
 {
   "schema_version": 1,
   "family": "durable-personal-baselines",
+  "authority_context": {
+    "proactive_capture": "silent",
+    "link_acceptance": "confirm-shortcut",
+    "restructure_execution": "confirm"
+  },
   "cases": [
     {
-      "id": "stable-preference-entity",
+      "id": "stable-preference-entity-facet",
       "class": "stable_preference",
       "turn": "For years and still now, this person prefers an early review before important decisions.",
-      "evidence": {"stability_or_recurrence": true, "reusable_comparison_value": true, "entity_resolution": "unique", "observed_measurement": false, "compatible_existing_records_collection": false, "tentative_or_unresolved": false},
-      "expected": {"route": "entity", "forbidden_routes": ["compiled_observation", "records", "no_write"], "forbidden_tools": ["remember", "record_memory"], "require_explicit_request": false}
+      "starting_context": {"entity_resolution": "unique", "entity_write_shape": "additive_facet", "compatible_existing_records_collection": false, "exact_relation_confirmation": false},
+      "evidence": {"stability_or_recurrence": true, "reusable_comparison_value": true, "observed_measurement": false, "tentative_or_unresolved": false},
+      "expected": {"route": "entity_facet", "expected_tools": ["edit_memory"], "operation": {"tool": "edit_memory", "arguments": {}}, "authority": {"action_class": "proactive_capture", "disposition": "silent", "requires_confirmation": false}, "forbidden_routes": ["accepted_relation", "compiled_observation", "records", "no_write"], "forbidden_tools": ["capture_source", "connect_memory", "observe_memory", "plan_memory", "preserve_artifacts", "preserve_evidence", "record_memory", "remember", "replace_memory", "transfer_artifact"], "forbidden_operations": [{"tool": "connect_memory", "arguments": {"operation": "create-entity"}}], "require_explicit_request": false}
     },
     {
       "id": "fleeting-preference-quiet",
       "class": "stable_preference",
       "turn": "Today, this person prefers the shorter option, with no claim that it will last.",
-      "evidence": {"stability_or_recurrence": false, "reusable_comparison_value": true, "entity_resolution": "none", "observed_measurement": false, "compatible_existing_records_collection": false, "tentative_or_unresolved": false},
-      "expected": {"route": "no_write", "forbidden_routes": ["entity", "compiled_observation", "records"], "forbidden_tools": ["edit_memory", "remember", "record_memory"], "require_explicit_request": true}
+      "starting_context": {"entity_resolution": "none", "entity_write_shape": null, "compatible_existing_records_collection": false, "exact_relation_confirmation": false},
+      "evidence": {"stability_or_recurrence": false, "reusable_comparison_value": true, "observed_measurement": false, "tentative_or_unresolved": false},
+      "expected": {"route": "no_write", "expected_tools": [], "operation": null, "authority": {"action_class": null, "disposition": null, "requires_confirmation": false}, "forbidden_routes": ["entity_facet", "accepted_relation", "compiled_observation", "records"], "forbidden_tools": ["capture_source", "connect_memory", "edit_memory", "observe_memory", "plan_memory", "preserve_artifacts", "preserve_evidence", "record_memory", "remember", "replace_memory", "transfer_artifact"], "forbidden_operations": [{"tool": "connect_memory", "arguments": {"operation": "create-entity"}}], "require_explicit_request": true}
     },
     {
       "id": "recurring-routine-compiled-observation",
       "class": "recurring_routine",
       "turn": "Each week for the last year, the same review routine has made later workload changes easier to interpret.",
-      "evidence": {"stability_or_recurrence": true, "reusable_comparison_value": true, "entity_resolution": "none", "observed_measurement": false, "compatible_existing_records_collection": false, "tentative_or_unresolved": false},
-      "expected": {"route": "compiled_observation", "forbidden_routes": ["entity", "records", "no_write"], "forbidden_tools": ["edit_memory", "record_memory"], "require_explicit_request": false}
+      "starting_context": {"entity_resolution": "none", "entity_write_shape": null, "compatible_existing_records_collection": false, "exact_relation_confirmation": false},
+      "evidence": {"stability_or_recurrence": true, "reusable_comparison_value": true, "observed_measurement": false, "tentative_or_unresolved": false},
+      "expected": {"route": "compiled_observation", "expected_tools": ["remember"], "operation": {"tool": "remember", "arguments": {}}, "authority": {"action_class": "proactive_capture", "disposition": "silent", "requires_confirmation": false}, "forbidden_routes": ["entity_facet", "accepted_relation", "records", "no_write"], "forbidden_tools": ["capture_source", "connect_memory", "edit_memory", "observe_memory", "plan_memory", "preserve_artifacts", "preserve_evidence", "record_memory", "replace_memory", "transfer_artifact"], "forbidden_operations": [{"tool": "connect_memory", "arguments": {"operation": "create-entity"}}], "require_explicit_request": false}
     },
     {
       "id": "one-off-routine-quiet",
       "class": "recurring_routine",
       "turn": "This person tried a review routine once during a busy week.",
-      "evidence": {"stability_or_recurrence": false, "reusable_comparison_value": true, "entity_resolution": "none", "observed_measurement": false, "compatible_existing_records_collection": false, "tentative_or_unresolved": false},
-      "expected": {"route": "no_write", "forbidden_routes": ["entity", "compiled_observation", "records"], "forbidden_tools": ["edit_memory", "remember", "record_memory"], "require_explicit_request": true}
+      "starting_context": {"entity_resolution": "none", "entity_write_shape": null, "compatible_existing_records_collection": false, "exact_relation_confirmation": false},
+      "evidence": {"stability_or_recurrence": false, "reusable_comparison_value": true, "observed_measurement": false, "tentative_or_unresolved": false},
+      "expected": {"route": "no_write", "expected_tools": [], "operation": null, "authority": {"action_class": null, "disposition": null, "requires_confirmation": false}, "forbidden_routes": ["entity_facet", "accepted_relation", "compiled_observation", "records"], "forbidden_tools": ["capture_source", "connect_memory", "edit_memory", "observe_memory", "plan_memory", "preserve_artifacts", "preserve_evidence", "record_memory", "remember", "replace_memory", "transfer_artifact"], "forbidden_operations": [{"tool": "connect_memory", "arguments": {"operation": "create-entity"}}], "require_explicit_request": true}
     },
     {
       "id": "historical-baseline-records",
       "class": "historical_baseline",
       "turn": "This month's observed measurement is comparable with the same established monthly series from last year.",
-      "evidence": {"stability_or_recurrence": true, "reusable_comparison_value": true, "entity_resolution": "none", "observed_measurement": true, "compatible_existing_records_collection": true, "tentative_or_unresolved": false},
-      "expected": {"route": "records", "forbidden_routes": ["entity", "compiled_observation", "no_write"], "forbidden_tools": ["edit_memory", "remember"], "require_explicit_request": false}
+      "starting_context": {"entity_resolution": "none", "entity_write_shape": null, "compatible_existing_records_collection": true, "exact_relation_confirmation": false},
+      "evidence": {"stability_or_recurrence": true, "reusable_comparison_value": true, "observed_measurement": true, "tentative_or_unresolved": false},
+      "expected": {"route": "records", "expected_tools": ["record_memory"], "operation": {"tool": "record_memory", "arguments": {"action": "append"}}, "authority": {"action_class": "proactive_capture", "disposition": "silent", "requires_confirmation": false}, "forbidden_routes": ["entity_facet", "accepted_relation", "compiled_observation", "no_write"], "forbidden_tools": ["capture_source", "connect_memory", "edit_memory", "observe_memory", "plan_memory", "preserve_artifacts", "preserve_evidence", "remember", "replace_memory", "transfer_artifact"], "forbidden_operations": [{"tool": "connect_memory", "arguments": {"operation": "create-entity"}}], "require_explicit_request": false}
     },
     {
-      "id": "mundane-metric-quiet",
+      "id": "stable-low-reuse-trivia-quiet",
       "class": "historical_baseline",
-      "turn": "The ordinary count was 17 today, with no later comparison or decision it would inform.",
-      "evidence": {"stability_or_recurrence": true, "reusable_comparison_value": false, "entity_resolution": "none", "observed_measurement": true, "compatible_existing_records_collection": false, "tentative_or_unresolved": false},
-      "expected": {"route": "no_write", "forbidden_routes": ["entity", "compiled_observation", "records"], "forbidden_tools": ["edit_memory", "remember", "record_memory"], "require_explicit_request": true}
+      "turn": "For years, this person has kept an unused blue token in the left drawer; that enduring arbitrary detail has no comparison, interpretation, or decision value.",
+      "starting_context": {"entity_resolution": "none", "entity_write_shape": null, "compatible_existing_records_collection": false, "exact_relation_confirmation": false},
+      "evidence": {"stability_or_recurrence": true, "reusable_comparison_value": false, "observed_measurement": false, "tentative_or_unresolved": false},
+      "expected": {"route": "no_write", "expected_tools": [], "operation": null, "authority": {"action_class": null, "disposition": null, "requires_confirmation": false}, "forbidden_routes": ["entity_facet", "accepted_relation", "compiled_observation", "records"], "forbidden_tools": ["capture_source", "connect_memory", "edit_memory", "observe_memory", "plan_memory", "preserve_artifacts", "preserve_evidence", "record_memory", "remember", "replace_memory", "transfer_artifact"], "forbidden_operations": [{"tool": "connect_memory", "arguments": {"operation": "create-entity"}}], "require_explicit_request": true}
     },
     {
-      "id": "durable-affiliation-entity",
+      "id": "durable-affiliation-entity-facet",
       "class": "durable_affiliation",
-      "turn": "This person has held the same enduring membership for several years and it explains later choices.",
-      "evidence": {"stability_or_recurrence": true, "reusable_comparison_value": true, "entity_resolution": "unique", "observed_measurement": false, "compatible_existing_records_collection": false, "tentative_or_unresolved": false},
-      "expected": {"route": "entity", "forbidden_routes": ["compiled_observation", "records", "no_write"], "forbidden_tools": ["remember", "record_memory"], "require_explicit_request": false}
+      "turn": "For several years, this person has belonged to the same professional association, and that membership explains later choices.",
+      "starting_context": {"entity_resolution": "unique", "entity_write_shape": "additive_facet", "compatible_existing_records_collection": false, "exact_relation_confirmation": false},
+      "evidence": {"stability_or_recurrence": true, "reusable_comparison_value": true, "observed_measurement": false, "tentative_or_unresolved": false},
+      "expected": {"route": "entity_facet", "expected_tools": ["edit_memory"], "operation": {"tool": "edit_memory", "arguments": {}}, "authority": {"action_class": "proactive_capture", "disposition": "silent", "requires_confirmation": false}, "forbidden_routes": ["accepted_relation", "compiled_observation", "records", "no_write"], "forbidden_tools": ["capture_source", "connect_memory", "observe_memory", "plan_memory", "preserve_artifacts", "preserve_evidence", "record_memory", "remember", "replace_memory", "transfer_artifact"], "forbidden_operations": [{"tool": "connect_memory", "arguments": {"operation": "create-entity"}}], "require_explicit_request": false}
+    },
+    {
+      "id": "durable-affiliation-accepted-relation",
+      "class": "durable_affiliation",
+      "turn": "For several years, this person has belonged to the same professional association, and that membership explains later choices.",
+      "starting_context": {"entity_resolution": "unique", "entity_write_shape": "accepted_relation", "compatible_existing_records_collection": false, "exact_relation_confirmation": true},
+      "evidence": {"stability_or_recurrence": true, "reusable_comparison_value": true, "observed_measurement": false, "tentative_or_unresolved": false},
+      "expected": {"route": "accepted_relation", "expected_tools": ["connect_memory"], "operation": {"tool": "connect_memory", "arguments": {"operation": "accept-relation"}}, "authority": {"action_class": "link_acceptance", "disposition": "confirm-shortcut", "requires_confirmation": true}, "forbidden_routes": ["entity_facet", "compiled_observation", "records", "no_write"], "forbidden_tools": ["capture_source", "edit_memory", "observe_memory", "plan_memory", "preserve_artifacts", "preserve_evidence", "record_memory", "remember", "replace_memory", "transfer_artifact"], "forbidden_operations": [{"tool": "connect_memory", "arguments": {"operation": "create-entity"}}], "require_explicit_request": false}
     },
     {
       "id": "tentative-unresolved-affiliation-quiet",
       "class": "durable_affiliation",
       "turn": "This person may still belong to the long-running group, but the identity and membership are not confirmed.",
-      "evidence": {"stability_or_recurrence": true, "reusable_comparison_value": true, "entity_resolution": "unresolved", "observed_measurement": false, "compatible_existing_records_collection": false, "tentative_or_unresolved": true},
-      "expected": {"route": "no_write", "forbidden_routes": ["entity", "compiled_observation", "records"], "forbidden_tools": ["edit_memory", "remember", "record_memory"], "require_explicit_request": true}
+      "starting_context": {"entity_resolution": "none", "entity_write_shape": null, "compatible_existing_records_collection": false, "exact_relation_confirmation": false},
+      "evidence": {"stability_or_recurrence": true, "reusable_comparison_value": true, "observed_measurement": false, "tentative_or_unresolved": true},
+      "expected": {"route": "no_write", "expected_tools": [], "operation": null, "authority": {"action_class": null, "disposition": null, "requires_confirmation": false}, "forbidden_routes": ["entity_facet", "accepted_relation", "compiled_observation", "records"], "forbidden_tools": ["capture_source", "connect_memory", "edit_memory", "observe_memory", "plan_memory", "preserve_artifacts", "preserve_evidence", "record_memory", "remember", "replace_memory", "transfer_artifact"], "forbidden_operations": [{"tool": "connect_memory", "arguments": {"operation": "create-entity"}}], "require_explicit_request": true}
     }
   ],
   "separate_executed_method_cases": [
