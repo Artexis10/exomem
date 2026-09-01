@@ -1,7 +1,7 @@
 ---
 name: exomem-curate
 description: Improve Exomem note quality by adding links, clarifying compiled notes, and organizing safely without editing raw Sources or Evidence.
-version: 0.1.0
+version: 0.2.0
 ---
 
 # exomem-curate
@@ -15,10 +15,13 @@ Use when the user asks to clean up, organize, link, tidy, or improve a set of Ex
 ## Workflow
 1. Search related notes with `ask_memory`; use `connect_memory(operation="suggest-links")` for link candidates, `"suggest-relations"` when direction matters, and `"graph-context"` for graph shape or inbound links.
 2. Identify safe improvements — missing links, stale wording, weak titles, duplicate tags, or unlinked entities — starting from `review_memory(mode="relation-debt")` for pages with no outbound edges and `mode="relation-queue"` for already-reviewed candidates.
-3. Use `edit_memory` for small compiled-note fixes.
-4. Use `replace_memory` for substantial rewrites or changed conclusions.
-5. Leave raw `Sources/` and `Evidence/` untouched except for metadata the core contract explicitly allows.
-6. Check `review_memory(mode="audit", categories=["unregistered_relation"])` for relation labels that recur but are not registered; promote the ones that have earned it with `schema_memory(subject="relations")`, which turns them into real typed edges instead of standing review debt.
+3. For a bounded set of explicitly selected pages, call `maintain_memory(mode="curation", curation_action="work-item", refs=[...], paths=[...])`. This is `structural_suggestions`: it assembles recorded context and never chooses semantics or writes content.
+4. Author the typed plan yourself, then call `maintain_memory(mode="curation", curation_action="propose", plan={...})`. Inspect it with `maintain_memory(mode="curation", curation_action="preview", run_id=...)`; preview the immutable plan once and surface its exact actions, blockers, fingerprint, and compensation classes.
+5. Before any execution, treat the plan as `restructure_execution`: obtain one explicit confirmation for that exact plan fingerprint. Do not infer confirmation from the request to inspect or improve notes, and do not accept standing approval.
+6. On confirmation, call `maintain_memory(mode="curation", curation_action="apply", run_id=..., plan_id=..., expected_plan_fingerprint=..., why=...)`. If the phase remains `executing`, resume automatically one step per request with `maintain_memory(mode="curation", curation_action="resume", run_id=..., plan_id=...)` until terminal; stop on `partial` or `blocked` and report the durable evidence instead of improvising.
+7. Compensation is a new reviewed plan, never rollback. `curation_action="propose-compensation"` is `structural_suggestions`: use it to derive the plan, then preview it and obtain a fresh exact-plan confirmation before `maintain_memory(mode="curation", curation_action="apply-compensation", run_id=..., plan_id=..., expected_plan_fingerprint=..., why=...)`. Continue the already-approved compensation plan only through the same one-step `resume` route; resume does not need a fresh confirmation for each step.
+8. Leave raw `Sources/` and `Evidence/` untouched except for metadata the core contract explicitly allows.
+9. Check `review_memory(mode="audit", categories=["unregistered_relation"])` for relation labels that recur but are not registered; promote the ones that have earned it with `schema_memory(subject="relations")`, which turns them into real typed edges instead of standing review debt.
 
 ## Output contract
 Summarize changes made or proposed, citing affected paths. Flag risky changes instead of applying them silently.
@@ -27,7 +30,7 @@ Summarize changes made or proposed, citing affected paths. Flag risky changes in
 Preserve history. Prefer supersession when meaning changes. Keep links useful, not decorative.
 
 ## Mistakes to avoid
-Do not rewrite raw sources or evidence. Do not mass-edit without reading the relevant notes. Do not collapse distinct conclusions just because they share keywords.
+Do not rewrite raw sources or evidence. Do not mass-edit without reading the relevant notes. Do not collapse distinct conclusions just because they share keywords. Do not reuse a forward approval for compensation, silently continue a partial or blocked run, or turn one confirmation into standing approval.
 
 <!-- exomem-semantic-authoring:v4 sha256:837b03b15c3d83f6c6eeb50771f4eaa04e4beaaae0f7d54be249be40ce7685f7 -->
 ## Semantic authoring contract
