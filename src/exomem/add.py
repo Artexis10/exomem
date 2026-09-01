@@ -288,6 +288,14 @@ def add(
     segments = source_taxonomy.source_segments(kind, domain_resolution)
     folder_name = segments[1]
     folder_path = kb_root(vault_root).joinpath(*segments)
+    if adoption_seed is not None:
+        actual_destination = folder_path.relative_to(vault_root).as_posix()
+        if adoption_seed.get("destination") != actual_destination:
+            raise AddError(
+                code="ADOPTION_DESTINATION_CHANGED",
+                missing=["destination"],
+                reason="source taxonomy changed the adoption destination before commit",
+            )
 
     # Vocabulary and project keys register in this capture's own batch, so a
     # source and the labels it introduced land together or not at all.

@@ -514,7 +514,7 @@ def _validate_adoption(value: object) -> AdoptionEnvelope:
 
 
 def _selected_index(files: list[Mapping[str, object]], envelope: AdoptionEnvelope) -> int:
-    matches: list[int] = []
+    selected_index: int | None = None
     for index, file in enumerate(files):
         if not isinstance(file, Mapping):
             continue
@@ -523,20 +523,55 @@ def _selected_index(files: list[Mapping[str, object]], envelope: AdoptionEnvelop
         except SafeFetchError:
             continue
         if file_id == envelope.selected_file_id:
-            matches.append(index)
-    if len(matches) != 1:
+            if selected_index is not None:
+                raise SafeFetchError(
+                    "INVALID_ADOPTION",
+                    "selected_file_id must match exactly one supplied handle",
+                )
+            selected_index = index
+    if selected_index is None:
         raise SafeFetchError(
             "INVALID_ADOPTION",
             "selected_file_id must match exactly one supplied handle",
         )
-    return matches[0]
+    return selected_index
 
 
 def _adoption_error_result(
     files: list[Mapping[str, object]], error: SafeFetchError | PreserveError
 ) -> dict:
-    outcomes = [_failed(_bounded_file_id(file), error) for file in files]
-    return {"files": outcomes, "summary": {"stored": 0, "failed": len(outcomes)}}
+    outcomes = [_failed(_bounded_file_id(file), error) for file in files[:MAX_FILES]]
+    summary = {"stored": 0, "failed": len(files)}
+    if len(files) > len(outcomes):
+        summary["omitted"] = len(files) - len(outcomes)
+    return {"files": outcomes, "summary": summary}
+
+
+def _oversized_adoption_result(
+    files: list[Mapping[str, object]],
+    envelope: AdoptionEnvelope,
+    selected_index: int,
+) -> dict:
+    represented = list(range(MAX_FILES))
+    if selected_index >= MAX_FILES:
+        represented[-1] = selected_index
+    error = SafeFetchError("TOO_MANY_FILES", "too many files in one request")
+    outcomes = [
+        _failed(envelope.selected_file_id, error)
+        if index == selected_index
+        else {"file_id": _bounded_file_id(files[index]), "outcome": "unselected"}
+        for index in represented
+    ]
+    return {
+        "files": outcomes,
+        "summary": {
+            "stored": 0,
+            "replayed": 0,
+            "failed": 1,
+            "unselected": len(files) - 1,
+            "omitted": len(files) - len(outcomes),
+        },
+    }
 
 
 def _adoption_outcomes(
@@ -883,14 +918,13 @@ def _adoption_inputs(
     if not isinstance(files, list) or not files:
         error = SafeFetchError("INVALID_ADOPTION", "adoption requires supplied file handles")
         return _adoption_error_result(files if isinstance(files, list) else [], error)
-    if len(files) > MAX_FILES:
-        error = SafeFetchError("TOO_MANY_FILES", "too many files in one request")
-        return _adoption_error_result(files, error)
     try:
         envelope = _validate_adoption(adoption)
         selected_index = _selected_index(files, envelope)
     except SafeFetchError as error:
         return _adoption_error_result(files, error)
+    if len(files) > MAX_FILES:
+        return _oversized_adoption_result(files, envelope, selected_index)
     return envelope, selected_index
 
 

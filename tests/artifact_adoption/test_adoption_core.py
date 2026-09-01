@@ -692,6 +692,124 @@ def test_source_destination_change_is_bound_to_the_resolved_source_folder(
     assert result["files"][0]["code"] == "ADOPTION_KEY_REUSED"
 
 
+def test_source_taxonomy_change_during_staging_fails_closed_then_retries_and_replays(
+    vault: Path,
+    source_schema,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import client_artifacts, source_taxonomy
+
+    old_taxonomy = source_taxonomy.taxonomy_from_data(
+        {
+            "source_kinds": {
+                "field-notebook": {"path_label": "Field Notes"},
+            },
+            "domains": {},
+        }
+    )
+    new_taxonomy = source_taxonomy.taxonomy_from_data(
+        {
+            "source_kinds": {
+                "field-notebook": {"path_label": "Field Journals"},
+            },
+            "domains": {},
+        }
+    )
+    taxonomy_reads = 0
+
+    def change_after_pre_stage_resolution(_vault_root: Path):
+        nonlocal taxonomy_reads
+        taxonomy_reads += 1
+        return old_taxonomy if taxonomy_reads == 1 else new_taxonomy
+
+    monkeypatch.setattr(source_taxonomy, "load_taxonomy", change_after_pre_stage_resolution)
+    data = b"selected field notes"
+    payloads = {"file-b": ("field-notes.bin", "application/octet-stream", data)}
+    calls: list[str] = []
+    monkeypatch.setattr(client_artifacts, "stage_artifact", _stage_factory(tmp_path, payloads, calls))
+    kwargs = {
+        "source_schema": source_schema,
+        "title": "Selected field notes",
+        "source_type": "field-notebook",
+        "files": [_handle("file-b", "field-notes.bin", "application/octet-stream")],
+        "adoption": _adoption("taxonomy-race"),
+    }
+
+    raced = client_artifacts.capture_source_artifacts(vault, **kwargs)
+
+    assert raced["files"][0]["outcome"] == "failed"
+    assert raced["files"][0]["code"] == "ADOPTION_DESTINATION_CHANGED"
+    assert calls == ["file-b"]
+    assert not (vault / "Knowledge Base" / "Sources" / "Field Notes").exists()
+    assert not (vault / "Knowledge Base" / "Sources" / "Field Journals").exists()
+
+    monkeypatch.setattr(source_taxonomy, "load_taxonomy", lambda _root: new_taxonomy)
+    committed = client_artifacts.capture_source_artifacts(vault, **kwargs)
+    replayed = client_artifacts.capture_source_artifacts(vault, **kwargs)
+
+    receipt = _receipt_from_result(committed)
+    assert committed["files"][0]["outcome"] == "stored"
+    assert replayed["files"][0]["outcome"] == "replayed"
+    assert replayed["files"][0]["adoption"] == receipt
+    assert receipt["destination"] == "Knowledge Base/Sources/Field Journals"
+    assert receipt["stored_path"].rsplit("/", 1)[0] == receipt["destination"]
+    assert calls == ["file-b", "file-b", "file-b"]
+    assert not (vault / "Knowledge Base" / "Sources" / "Field Notes").exists()
+
+
+def test_source_replay_refuses_a_later_taxonomy_projection_change_before_fetch(
+    vault: Path,
+    source_schema,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import client_artifacts, source_taxonomy
+
+    old_taxonomy = source_taxonomy.taxonomy_from_data(
+        {
+            "source_kinds": {"field-notebook": {"path_label": "Field Notes"}},
+            "domains": {},
+        }
+    )
+    new_taxonomy = source_taxonomy.taxonomy_from_data(
+        {
+            "source_kinds": {"field-notebook": {"path_label": "Field Journals"}},
+            "domains": {},
+        }
+    )
+    data = b"durable field notes"
+    payloads = {"file-b": ("field-notes.bin", "application/octet-stream", data)}
+    calls: list[str] = []
+    monkeypatch.setattr(source_taxonomy, "load_taxonomy", lambda _root: old_taxonomy)
+    monkeypatch.setattr(client_artifacts, "stage_artifact", _stage_factory(tmp_path, payloads, calls))
+    kwargs = {
+        "source_schema": source_schema,
+        "title": "Durable field notes",
+        "source_type": "field-notebook",
+        "files": [_handle("file-b", "field-notes.bin", "application/octet-stream")],
+        "adoption": _adoption("taxonomy-replay"),
+    }
+    committed = client_artifacts.capture_source_artifacts(vault, **kwargs)
+    receipt = _receipt_from_result(committed)
+    calls.clear()
+    monkeypatch.setattr(source_taxonomy, "load_taxonomy", lambda _root: new_taxonomy)
+    monkeypatch.setattr(
+        client_artifacts,
+        "stage_artifact",
+        lambda *_args, **_kwargs: pytest.fail("changed projection must fail before restaging"),
+    )
+
+    replay = client_artifacts.capture_source_artifacts(vault, **kwargs)
+
+    assert replay["files"][0]["outcome"] == "failed"
+    assert replay["files"][0]["code"] == "ADOPTION_KEY_REUSED"
+    assert calls == []
+    assert (vault / receipt["stored_path"]).read_bytes() == data
+    assert receipt["destination"] == "Knowledge Base/Sources/Field Notes"
+    assert not (vault / "Knowledge Base" / "Sources" / "Field Journals").exists()
+
+
 def test_first_time_fetch_failure_keeps_safe_fetch_code_and_siblings_stay_unselected(
     vault: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -926,6 +1044,90 @@ def test_invalid_adoption_envelope_never_fetches(
     )
 
     assert result["files"][0]["code"] == "INVALID_ADOPTION"
+
+
+def test_oversized_adoption_is_bounded_and_only_the_selected_handle_fails(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import client_artifacts
+
+    total = client_artifacts.MAX_FILES * 1024 + 1
+    selected = f"file-{total - 1}"
+    files = [
+        _handle(f"file-{index}", f"variant-{index}.bin", "application/octet-stream")
+        for index in range(total)
+    ]
+    monkeypatch.setattr(
+        client_artifacts,
+        "stage_artifact",
+        lambda *_args, **_kwargs: pytest.fail("oversized adoption must not fetch"),
+    )
+
+    result = client_artifacts.preserve_artifacts(
+        vault,
+        scope="case",
+        category="outputs",
+        files=files,
+        adoption=_adoption("oversized-selection", selected=selected),
+    )
+
+    assert len(result["files"]) == client_artifacts.MAX_FILES
+    selected_rows = [row for row in result["files"] if row["file_id"] == selected]
+    assert selected_rows == [
+        {
+            "file_id": selected,
+            "outcome": "failed",
+            "code": "TOO_MANY_FILES",
+            "reason": "too many files in one request",
+        }
+    ]
+    assert all(
+        row["outcome"] == "unselected"
+        for row in result["files"]
+        if row["file_id"] != selected
+    )
+    assert result["summary"] == {
+        "stored": 0,
+        "replayed": 0,
+        "failed": 1,
+        "unselected": total - 1,
+        "omitted": total - client_artifacts.MAX_FILES,
+    }
+
+
+def test_huge_invalid_adoption_error_projection_is_also_bounded(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import client_artifacts
+
+    total = client_artifacts.MAX_FILES * 1024 + 1
+    files = [
+        _handle(f"file-{index}", f"variant-{index}.bin", "application/octet-stream")
+        for index in range(total)
+    ]
+    monkeypatch.setattr(
+        client_artifacts,
+        "stage_artifact",
+        lambda *_args, **_kwargs: pytest.fail("invalid oversized adoption must not fetch"),
+    )
+
+    result = client_artifacts.preserve_artifacts(
+        vault,
+        scope="case",
+        category="outputs",
+        files=files,
+        adoption={},
+    )
+
+    assert len(result["files"]) == client_artifacts.MAX_FILES
+    assert all(row["code"] == "INVALID_ADOPTION" for row in result["files"])
+    assert result["summary"] == {
+        "stored": 0,
+        "failed": total,
+        "omitted": total - client_artifacts.MAX_FILES,
+    }
 
 
 def test_selected_identifier_must_match_exactly_one_handle_without_fetching(
