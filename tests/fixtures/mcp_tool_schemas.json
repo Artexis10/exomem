@@ -1033,7 +1033,7 @@
       "properties": {
         "operation": {
           "default": "suggest-links",
-          "description": "context, suggest-links, suggest-relations, graph-context, inbound-links, resolve-entity, create-entity, or accept-relation.",
+          "description": "context, suggest-links, suggest-relations, graph-context, inbound-links, resolve-relation, resolve-entity, create-entity, or accept-relation.",
           "type": "string"
         },
         "path": {
@@ -1046,7 +1046,7 @@
             }
           ],
           "default": null,
-          "description": "Existing page path for link, graph, or relation context."
+          "description": "Existing page path for link, graph, or relation context; resolve-relation\nreports it unchanged as optional source context without reading the page."
         },
         "target": {
           "anyOf": [
@@ -1058,7 +1058,7 @@
             }
           ],
           "default": null,
-          "description": "Target path for inbound-links; defaults to path."
+          "description": "Target path for inbound-links; resolve-relation reports it unchanged\nas optional target context without reading the page."
         },
         "query": {
           "anyOf": [
@@ -1070,7 +1070,31 @@
             }
           ],
           "default": null,
-          "description": "Query seed for graph-context."
+          "description": "Query seed for graph-context or plain-language resolve-relation intent."
+        },
+        "requested_relation": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional clean, canonical, or alias label for\nresolve-relation. At least query or requested_relation is required."
+        },
+        "continuation": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Opaque continuation returned by resolve-relation."
         },
         "unit_ref": {
           "anyOf": [
@@ -1140,8 +1164,8 @@
         },
         "limit": {
           "default": 8,
-          "description": "Candidate cap for suggestion modes.",
-          "type": "integer"
+          "type": "integer",
+          "description": "Candidate cap for suggestion and relation-resolution modes."
         },
         "scope": {
           "default": "kb",
@@ -5629,7 +5653,7 @@
       "additionalProperties": false,
       "properties": {
         "operation": {
-          "description": "For `workflow-contracts`, exactly one of: inventory (no workflow fields); inspect (name); validate (exactly one of name or proposal); resolve (context plus at most one of name or proposal); preview (proposal, optional name); save (proposal and why, optional name plus expected_hash for updates); or refresh (name, expected_hash, and why). Other subjects retain their existing operations.",
+          "description": "For `relations`, `propose-relation` returns a reviewed delta without writing and `save-relations` commits that delta with expected_hash and why. For `workflow-contracts`, exactly one of: inventory (no workflow fields); inspect (name); validate (exactly one of name or proposal); resolve (context plus at most one of name or proposal); preview (proposal, optional name); save (proposal and why, optional name plus expected_hash for updates); or refresh (name, expected_hash, and why). Other subjects retain their existing operations.",
           "type": "string"
         },
         "name": {
@@ -5688,7 +5712,7 @@
             }
           ],
           "default": null,
-          "description": "Required for workflow save updates and refresh; rejected by every other workflow operation."
+          "description": "Current relation registry hash required by save-relations, or\ncurrent workflow hash required for workflow save updates and refresh."
         },
         "strict": {
           "default": false,
@@ -5710,7 +5734,6 @@
         "proposal": {
           "anyOf": [
             {
-              "additionalProperties": true,
               "type": "object"
             },
             {
@@ -5718,7 +5741,7 @@
             }
           ],
           "default": null,
-          "description": "Required for workflow preview/save; validate and resolve accept it as the exact alternative to `name`."
+          "description": "Reviewed relation definition for propose-relation, reviewed delta\nfor save-relations, or workflow proposal for workflow modes."
         },
         "why": {
           "anyOf": [
@@ -5730,7 +5753,7 @@
             }
           ],
           "default": null,
-          "description": "Required audit reason for workflow save/refresh and entity-type saves."
+          "description": "Required audit reason for relation delta save, workflow save/refresh,\nand entity-type saves."
         },
         "include_model_suggestions": {
           "default": false,
@@ -5781,6 +5804,47 @@
           ],
           "default": null,
           "description": "Exact optional workflow resolve mapping. Its only keys are project,\ndomain, and activity; omit a key for unknown or set it null for known absent."
+        },
+        "date_from": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional inclusive ISO origin-date bound for relation evidence."
+        },
+        "date_to": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional inclusive ISO origin-date bound for relation evidence."
+        },
+        "continuation": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Opaque relation candidate continuation."
+        },
+        "limit": {
+          "default": 20,
+          "type": "integer",
+          "description": "Relation extension and observation candidate budget."
         },
         "response_detail": {
           "default": "compact",
@@ -5900,6 +5964,18 @@
           ],
           "default": null,
           "description": "Optional reviewed fingerprint; a mismatch refuses the write and asks the caller to refresh."
+        },
+        "source_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Source-page hint returned by relation review. Required for\nnewly returned relation items; omitted legacy requests use only the\nbounded compatibility prefix."
         },
         "response_detail": {
           "default": "compact",

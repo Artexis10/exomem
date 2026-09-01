@@ -2711,6 +2711,7 @@ def test_every_mixed_selector_uses_one_complete_receipt_registry() -> None:
             "graph-context": True,
             "inbound-links": True,
             "resolve-entity": True,
+            "resolve-relation": True,
             "create-entity": False,
             "accept-relation": False,
         },
@@ -2803,6 +2804,8 @@ def test_conditional_mixed_selectors_are_in_the_same_registry() -> None:
         "save": "mutation",
         "refresh": "mutation",
         "save-entity-types": "mutation",
+        "propose-relation": "structure",
+        "save-relations": "mutation",
     }
     schema = product["schema_memory"]
     assert commands.invocation_is_read_only(schema, {"operation": "infer"})

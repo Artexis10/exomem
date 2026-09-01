@@ -219,11 +219,11 @@ def _durable_graph_outcome(vault_root: Path) -> Any:
 
 
 def _windows_library(ctypes_module: Any, name: str) -> Any:
-    return getattr(ctypes_module, "WinDLL")(name, use_last_error=True)
+    return getattr(ctypes_module, "WinDLL")(name, use_last_error=True)  # noqa: B009
 
 
 def _windows_last_error(ctypes_module: Any) -> int:
-    return int(getattr(ctypes_module, "get_last_error")())
+    return int(getattr(ctypes_module, "get_last_error")())  # noqa: B009
 
 
 def _log_mutation_event(phase: str, *, level: int = logging.INFO, **fields: Any) -> None:
@@ -2098,7 +2098,7 @@ class IdempotencyStore:
             for expired_key, expired_payload in expired_completed:
                 try:
                     completed = pickle.loads(expired_payload)  # noqa: S301 - trusted runtime state
-                except Exception:
+                except Exception:  # noqa: BLE001 - legacy cache payloads are decoded below
                     try:
                         _deserialize_committed_failure_payload(expired_payload)
                     except Exception:  # noqa: BLE001 - corrupt terminals remain fail-closed
@@ -2135,7 +2135,7 @@ class IdempotencyStore:
         if row[1] == "completed":
             try:
                 completed = pickle.loads(row[2])  # noqa: S301 - trusted runtime state
-            except Exception:
+            except Exception:  # noqa: BLE001 - legacy cache payloads are decoded below
                 try:
                     _deserialize_committed_failure_payload(row[2])
                 except Exception:  # noqa: BLE001 - corrupt terminals remain fail-closed
@@ -2168,7 +2168,7 @@ class IdempotencyStore:
         if state == "completed":
             try:
                 completed = pickle.loads(row[2])  # noqa: S301 - trusted runtime state
-            except Exception:
+            except Exception:  # noqa: BLE001 - legacy cache payloads are decoded below
                 try:
                     failure = _CachedCommittedFailure(
                         _deserialize_committed_failure_payload(row[2])
@@ -3592,10 +3592,17 @@ class LeaseManager:
             and bool(kwargs.get("files"))
             and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
         )
+        narrow_relation_registry_commit = (
+            command.name == "schema_memory"
+            and kwargs.get("subject", "contract") == "relations"
+            and kwargs.get("operation") == "save-relations"
+            and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
+        )
         narrow_boundary = (
             narrow_media_commit
             or narrow_tier2_file_commit
             or narrow_source_artifact_commit
+            or narrow_relation_registry_commit
             or (
                 command.name in _NARROW_BOUNDARY_COMMANDS
                 and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")

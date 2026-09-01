@@ -16,3 +16,9 @@ The sample vault demonstrates the product layers in miniature:
 - `Notes/` keeps compiled knowledge.
 - `Entities/` keeps reusable typed nodes.
 - `Evidence/` keeps proof artifacts for a case or claim.
+
+Typed relations follow the public governance loop: resolve with
+`connect_memory(operation="resolve-relation")`, reuse a specific truthful match,
+or choose an honest `relates_to`/no edge fallback. A durable recurring distinction
+is proposal-first through `propose-relation` and hash-guarded `save-relations`;
+meaning corrections create a new canonical key and deprecate the old one.

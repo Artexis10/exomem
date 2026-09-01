@@ -91,6 +91,9 @@ _ENVELOPE_KEYS = (
 #: `delete_directory` emits one warning per path.
 _MAX_WARNINGS = 8
 _MAX_WARNING_CHARS = 300
+_MAX_RELATION_ADVISORY_LABELS = 8
+_MAX_RELATION_ADVISORY_EXAMPLES = 5
+_MAX_RELATION_ADVISORY_LABEL_CHARS = 128
 
 
 def _operation_id(result: Any) -> str | None:
@@ -567,6 +570,149 @@ def _without_advisory_due_state(result: Any) -> Any:
     return stripped if changed else result
 
 
+def _relation_advisory_projection(leaf: Any) -> dict[str, Any] | None:
+    """Project just-parsed unregistered facts plus optional indexed recurrence.
+
+    The fact scan is bounded by the semantic feedback renderer. Recurrence is a
+    point lookup against one already-current graph snapshot and is deliberately
+    fail-open: unavailable or malformed evidence leaves the committed advisory
+    useful without changing the mutation outcome.
+    """
+    if not isinstance(leaf, Mapping):
+        return None
+    context = leaf.get("_relation_advisory_context")
+    labels: set[str] = set()
+    facts_truncated = False
+    registry_hash: str | None = None
+    vault_hint: str | None = None
+    if isinstance(context, Mapping):
+        candidate_hash = context.get("registry_hash")
+        if isinstance(candidate_hash, str) and 0 < len(candidate_hash) <= 256:
+            registry_hash = candidate_hash
+        candidate_vault = context.get("vault")
+        if isinstance(candidate_vault, str) and candidate_vault:
+            vault_hint = candidate_vault
+    for container_key in ("creation", "semantic", None):
+        container = leaf if container_key is None else leaf.get(container_key)
+        if not isinstance(container, Mapping):
+            continue
+        contract = container.get("contract_result")
+        if not isinstance(contract, Mapping):
+            continue
+        disposition = contract.get("relation_disposition")
+        if not isinstance(disposition, Mapping):
+            continue
+        omitted = disposition.get("omitted_counts")
+        if isinstance(omitted, Mapping) and type(omitted.get("rejected_facts")) is int:
+            facts_truncated = omitted["rejected_facts"] > 0
+        rejected = disposition.get("rejected_facts")
+        if not isinstance(rejected, (list, tuple)):
+            continue
+        for rejected_fact in rejected:
+            if not isinstance(rejected_fact, Mapping):
+                continue
+            fact = rejected_fact.get("fact")
+            if not isinstance(fact, Mapping) or fact.get("registry_status") != "unregistered":
+                continue
+            raw = fact.get("raw_relation")
+            if not isinstance(raw, str):
+                continue
+            normalized = raw.strip().lower().replace("-", "_").replace(" ", "_")
+            if (
+                normalized
+                and normalized != "relates_to"
+                and len(normalized) <= _MAX_RELATION_ADVISORY_LABEL_CHARS
+            ):
+                labels.add(normalized)
+    if not labels:
+        return None
+    ordered = sorted(labels)
+    retained = ordered[:_MAX_RELATION_ADVISORY_LABELS]
+    truncated = facts_truncated or len(ordered) > len(retained)
+    occurrences: list[dict[str, Any]] = []
+    recurrence_available = False
+    if vault_hint:
+        try:
+            from pathlib import Path
+
+            from . import memory_schema
+
+            indexed = memory_schema.indexed_relation_observations(
+                Path(vault_hint), raw_relations=retained
+            )
+            recurrence_available = indexed is not None
+            for row in indexed or ():
+                if not isinstance(row, Mapping):
+                    continue
+                label = row.get("raw_relation")
+                count = row.get("count")
+                examples = row.get("examples")
+                if (
+                    not isinstance(label, str)
+                    or label not in retained
+                    or type(count) is not int
+                    or count < 0
+                    or not isinstance(examples, (list, tuple))
+                ):
+                    continue
+                safe_examples: list[dict[str, str | None]] = []
+                for example in examples[:_MAX_RELATION_ADVISORY_EXAMPLES]:
+                    if not isinstance(example, Mapping):
+                        continue
+                    path = example.get("path")
+                    anchor = example.get("anchor")
+                    if not isinstance(path, str) or not (
+                        anchor is None or isinstance(anchor, str)
+                    ):
+                        continue
+                    safe_examples.append({"path": path, "anchor": anchor})
+                occurrences.append(
+                    {
+                        "raw_relation": label,
+                        "count": count,
+                        "examples": safe_examples,
+                    }
+                )
+            occurrences.sort(key=lambda item: (-item["count"], item["raw_relation"]))
+        except Exception:  # noqa: BLE001 - advisory evidence never breaks a commit
+            recurrence_available = False
+            occurrences = []
+    return {
+        "raw_relations": retained,
+        "registry_hash": registry_hash,
+        "recurrence_available": recurrence_available,
+        "occurrences": occurrences,
+        "truncated": truncated,
+        "message": "Raw observations are preserved but untraversed until registered.",
+        "next_action": {
+            "tool": "connect_memory",
+            "args": {"operation": "resolve-relation"},
+        },
+    }
+
+
+def _without_relation_advisory_context(result: Any) -> Any:
+    """Remove local lookup hints from legacy and diagnostic representations."""
+    if not isinstance(result, Mapping):
+        return result
+    changed = False
+    stripped: dict[str, Any] = {}
+    for key, value in result.items():
+        if key == "_relation_advisory_context":
+            changed = True
+            continue
+        if isinstance(value, Mapping) and "_relation_advisory_context" in value:
+            stripped[key] = {
+                inner: value[inner]
+                for inner in value
+                if inner != "_relation_advisory_context"
+            }
+            changed = True
+            continue
+        stripped[key] = value
+    return stripped if changed else result
+
+
 def _bounded_tokens(value: Any, limit: int) -> bool:
     return (
         isinstance(value, (list, tuple))
@@ -737,7 +883,14 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
         return result
     raw_leaf = result["leaf_result"]
     due_state, due_state_vault = _due_state_projection(raw_leaf)
-    leaf = _without_advisory_due_state(_without_graph_rebuild_handoff(raw_leaf))
+    relation_advisory = (
+        _relation_advisory_projection(raw_leaf)
+        if result.get("state") == "committed"
+        else None
+    )
+    leaf = _without_relation_advisory_context(
+        _without_advisory_due_state(_without_graph_rebuild_handoff(raw_leaf))
+    )
     if detail == "legacy":
         return leaf
     compact = {key: result[key] for key in _ENVELOPE_KEYS if key in result}
@@ -810,6 +963,8 @@ def project_terminal(result: Any, detail: ResponseDetail = "compact") -> Any:
         compact["structure_suggestion"] = structure_suggestion
     if due_state is not None and _admit_due_state(due_state, due_state_vault):
         compact["due_state"] = due_state
+    if relation_advisory is not None:
+        compact["relation_advisory"] = relation_advisory
     compact["warnings_count"] = result["warnings_count"]
     # Projected from the leaf, never from the receipt. Receipt recovery replaces
     # `leaf_result` with `{}` on purpose (the portable receipt must not retain

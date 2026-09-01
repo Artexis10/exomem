@@ -6,7 +6,7 @@ import datetime as dt
 import math
 import re
 from collections import Counter
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -611,6 +611,110 @@ def relation_observations(
     )[1]
 
 
+def indexed_relation_observations(
+    vault_root: Path,
+    *,
+    raw_relations: Iterable[str] | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+) -> list[dict[str, Any]] | None:
+    """Read recurrence from one current graph snapshot, or report unavailable.
+
+    This is the hot-path counterpart to :func:`relation_observations`: it never
+    builds an index, scans Markdown, or invokes embeddings. Callers may pass a
+    bounded set of just-parsed raw labels for a point lookup. ``None`` means a
+    current projection was unavailable; an available projection with no rows
+    returns ``[]``.
+    """
+    from .epistemic_graph import EpistemicGraphIndex
+
+    try:
+        start = dt.date.fromisoformat(date_from) if date_from is not None else None
+        end = dt.date.fromisoformat(date_to) if date_to is not None else None
+    except ValueError as exc:
+        raise ValueError("INVALID_DATE_SCOPE: date bounds must be ISO dates") from exc
+    if start is not None and end is not None and start > end:
+        raise ValueError("INVALID_DATE_SCOPE: date_from must not be after date_to")
+    requested = tuple(
+        sorted(
+            {
+                relation_registry.normalize_relation(item)
+                for item in (raw_relations or ())
+                if relation_registry.normalize_relation(item)
+            }
+        )
+    )
+    try:
+        snapshot = EpistemicGraphIndex(vault_root)._open_read_snapshot()
+        if snapshot is None:
+            return None
+        try:
+            predicate = "registry_status = 'unregistered'"
+            parameters: tuple[Any, ...] = ()
+            if raw_relations is not None:
+                if not requested:
+                    return []
+                predicate += (
+                    " AND lower(replace(replace(trim(raw_relation), '-', '_'), ' ', '_')) IN ("
+                    + ",".join("?" for _ in requested)
+                    + ")"
+                )
+                parameters = requested
+            if start is not None:
+                predicate += (
+                    " AND EXISTS (SELECT 1 FROM graph_nodes AS source "
+                    "WHERE source.kind = 'file' AND source.path = graph_edges.source_path "
+                    "AND source.origin_date >= ?)"
+                )
+                parameters = (*parameters, start.isoformat())
+            if end is not None:
+                predicate += (
+                    " AND EXISTS (SELECT 1 FROM graph_nodes AS source "
+                    "WHERE source.kind = 'file' AND source.path = graph_edges.source_path "
+                    "AND source.origin_date <= ?)"
+                )
+                parameters = (*parameters, end.isoformat())
+            rows = snapshot.execute(
+                f"""
+                WITH occurrences AS (
+                    SELECT raw_relation, source_path, source_anchor,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY raw_relation
+                               ORDER BY source_path, COALESCE(source_anchor, '')
+                           ) AS occurrence_rank,
+                           COUNT(*) OVER (PARTITION BY raw_relation) AS occurrence_count
+                    FROM graph_edges
+                    WHERE {predicate}
+                )
+                SELECT raw_relation, source_path, source_anchor, occurrence_count
+                FROM occurrences
+                WHERE occurrence_rank <= 5
+                ORDER BY occurrence_count DESC, raw_relation, source_path,
+                         COALESCE(source_anchor, '')
+                """,
+                parameters,
+            ).fetchall()
+        finally:
+            snapshot.close()
+    except Exception:  # noqa: BLE001 - optional recurrence must never break a caller
+        return None
+    grouped: dict[str, dict[str, Any]] = {}
+    for raw_relation, source_path, source_anchor, count in rows:
+        item = grouped.setdefault(
+            str(raw_relation),
+            {
+                "raw_relation": str(raw_relation),
+                "registry_status": "unregistered",
+                "count": int(count),
+                "examples": [],
+            },
+        )
+        item["examples"].append(
+            {"path": str(source_path), "anchor": source_anchor}
+        )
+    return list(grouped.values())
+
+
 def _scan_relation_observations(
     vault_root: Path,
     *,
@@ -746,7 +850,6 @@ def relation_registry_proposal(registry: relation_registry.RelationRegistry) -> 
         if item.family and item.parent and item.family != registry.core[item.parent].family:
             value["family"] = item.family
         for field, candidate in (
-            ("direction", item.direction),
             ("inverse", item.inverse),
             ("origins", sorted(item.origins)),
             ("aliases", list(item.aliases)),
@@ -757,6 +860,10 @@ def relation_registry_proposal(registry: relation_registry.RelationRegistry) -> 
         ):
             if candidate not in (None, [], "active", "directed", ["semantic_relation"]):
                 value[field] = candidate
+        # Direction is meaning-bearing. Omitting the format default is unsafe
+        # when a directed extension refines symmetric ``relates_to``: loading
+        # the emitted proposal would silently inherit the parent's direction.
+        value["direction"] = item.direction
         scope = {}
         if item.projects:
             scope["projects"] = sorted(item.projects)

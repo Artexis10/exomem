@@ -20,6 +20,12 @@ Use when the user asks to defrag a topic, reconcile notes, resolve contradiction
 5. Preserve raw sources and evidence; keep superseded history visible.
 6. When you supersede or merge, carry the merged notes' `sources:` and outbound links onto the survivor — a merge that drops edges loses graph value the superseded page can no longer carry. Check `review_memory(mode="relation-debt")` on the survivor afterwards.
 
+## Relation governance
+Resolve typed meaning with `resolve-relation` before authoring. Reuse a specific
+truthful match; otherwise choose honest `relates_to` or no edge. Durable recurring
+meaning is proposal-first through `propose-relation` and hash-guarded
+`save-relations`; corrections use a new canonical key and deprecate the old one.
+
 ## Output contract
 Return the reconciliation decision for each candidate and the paths changed or left alone.
 
