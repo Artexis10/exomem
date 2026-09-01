@@ -219,11 +219,11 @@ def _durable_graph_outcome(vault_root: Path) -> Any:
 
 
 def _windows_library(ctypes_module: Any, name: str) -> Any:
-    return getattr(ctypes_module, "WinDLL")(name, use_last_error=True)
+    return ctypes_module.WinDLL(name, use_last_error=True)
 
 
 def _windows_last_error(ctypes_module: Any) -> int:
-    return int(getattr(ctypes_module, "get_last_error")())
+    return int(ctypes_module.get_last_error())
 
 
 def _log_mutation_event(phase: str, *, level: int = logging.INFO, **fields: Any) -> None:
@@ -2098,7 +2098,7 @@ class IdempotencyStore:
             for expired_key, expired_payload in expired_completed:
                 try:
                     completed = pickle.loads(expired_payload)  # noqa: S301 - trusted runtime state
-                except Exception:
+                except Exception:  # noqa: BLE001 - probe the alternate fail-closed encoding
                     try:
                         _deserialize_committed_failure_payload(expired_payload)
                     except Exception:  # noqa: BLE001 - corrupt terminals remain fail-closed
@@ -2135,7 +2135,7 @@ class IdempotencyStore:
         if row[1] == "completed":
             try:
                 completed = pickle.loads(row[2])  # noqa: S301 - trusted runtime state
-            except Exception:
+            except Exception:  # noqa: BLE001 - probe the alternate fail-closed encoding
                 try:
                     _deserialize_committed_failure_payload(row[2])
                 except Exception:  # noqa: BLE001 - corrupt terminals remain fail-closed
@@ -2168,7 +2168,7 @@ class IdempotencyStore:
         if state == "completed":
             try:
                 completed = pickle.loads(row[2])  # noqa: S301 - trusted runtime state
-            except Exception:
+            except Exception:  # noqa: BLE001 - probe the alternate fail-closed encoding
                 try:
                     failure = _CachedCommittedFailure(
                         _deserialize_committed_failure_payload(row[2])
