@@ -95,6 +95,18 @@ def test_indexed_observations_page_in_sql_with_exact_offset_metadata(
             return rows
 
     class Snapshot:
+        def create_function(
+            self,
+            name: str,
+            num_params: int,
+            func,
+            *,
+            deterministic: bool = False,
+        ) -> None:  # noqa: ANN001
+            connection.create_function(
+                name, num_params, func, deterministic=deterministic
+            )
+
         def execute(self, sql: str, parameters=()):  # noqa: ANN001, ANN201
             statements.append(sql)
             return Cursor(connection.execute(sql, parameters))
@@ -108,9 +120,7 @@ def test_indexed_observations_page_in_sql_with_exact_offset_metadata(
         lambda _self: Snapshot(),
     )
 
-    page = memory_schema.indexed_relation_observations(
-        tmp_path, limit=3, offset=2
-    )
+    page = memory_schema.indexed_relation_observations(tmp_path, limit=3, offset=129)
 
     assert page == {
         "items": [
@@ -125,16 +135,132 @@ def test_indexed_observations_page_in_sql_with_exact_offset_metadata(
                     }
                 ],
             }
-            for index in range(2, 5)
+            for index in range(129, 132)
         ],
         "total": 257,
         "returned": 3,
         "omitted": 254,
-        "offset": 2,
+        "offset": 129,
     }
     assert fetched_row_counts
     assert max(fetched_row_counts) <= 15
     assert any("LIMIT" in statement.upper() for statement in statements)
+
+
+def test_indexed_observations_use_canonical_unbounded_separator_normalization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import epistemic_graph
+
+    connection = sqlite3.connect(":memory:")
+    connection.execute(
+        "CREATE TABLE graph_edges ("
+        "registry_status TEXT, raw_relation TEXT, source_path TEXT, "
+        "source_anchor TEXT, metadata TEXT)"
+    )
+    connection.executemany(
+        "INSERT INTO graph_edges VALUES ('unregistered', ?, ?, ?, ?)",
+        [
+            ("applies-to", "b.md", "second", None),
+            ("applies-----to", "a.md", None, None),
+            ("applies to", "a.md", None, None),
+            ("applies_to", "c.md", "third", None),
+            ("applies_to", "d.md", None, None),
+            ("applies-to", "e.md", None, None),
+            ("applies to", "f.md", None, None),
+            (
+                "applies_____to",
+                "g.md",
+                None,
+                '{"line":"- applies-----to: [[target]]"}',
+            ),
+            (
+                "applies__to",
+                "h.md",
+                None,
+                '{"line":"- applies__to: [[target]]"}',
+            ),
+        ],
+    )
+    registrations: list[tuple[str, int, object, bool]] = []
+    statements: list[str] = []
+
+    class Snapshot:
+        def create_function(
+            self,
+            name: str,
+            num_params: int,
+            func,
+            *,
+            deterministic: bool = False,
+        ) -> None:  # noqa: ANN001
+            registrations.append((name, num_params, func, deterministic))
+            connection.create_function(
+                name, num_params, func, deterministic=deterministic
+            )
+
+        def execute(self, sql: str, parameters=()):  # noqa: ANN001, ANN201
+            statements.append(sql)
+            return connection.execute(sql, parameters)
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        epistemic_graph.EpistemicGraphIndex,
+        "_open_read_snapshot",
+        lambda _self: Snapshot(),
+    )
+
+    page = memory_schema.indexed_relation_observations(
+        tmp_path, raw_relations=["applies-----to"], limit=8, offset=0
+    )
+
+    assert page == {
+        "items": [
+            {
+                "raw_relation": "applies_to",
+                "registry_status": "unregistered",
+                "count": 8,
+                "examples": [
+                    {"path": "a.md", "anchor": None},
+                    {"path": "b.md", "anchor": "second"},
+                    {"path": "c.md", "anchor": "third"},
+                    {"path": "d.md", "anchor": None},
+                    {"path": "e.md", "anchor": None},
+                ],
+            }
+        ],
+        "total": 1,
+        "returned": 1,
+        "omitted": 0,
+        "offset": 0,
+    }
+    double_underscore = memory_schema.indexed_relation_observations(
+        tmp_path, raw_relations=["applies__to"], limit=8, offset=0
+    )
+
+    assert double_underscore is not None
+    assert double_underscore["total"] == 1
+    assert double_underscore["items"][0]["raw_relation"] == "applies__to"
+    assert double_underscore["items"][0]["count"] == 1
+    assert len(registrations) == 2
+    name, num_params, normalizer, deterministic = registrations[0]
+    assert (name, num_params, deterministic) == (
+        "exomem_normalize_relation",
+        2,
+        True,
+    )
+    assert {
+        normalizer(value, None)
+        for value in ("Applies-To", "applies-----to", "applies to", "applies_to")
+    } == {"applies_to"}
+    assert normalizer(
+        "applies_____to", "- applies-----to: [[target]]"
+    ) == "applies_to"
+    assert normalizer("applies__to", "- applies__to: [[target]]") == "applies__to"
+    assert statements
+    assert all("replace(" not in statement.lower() for statement in statements)
 
 
 def test_resolver_refuses_bad_continuation() -> None:

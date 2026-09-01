@@ -612,6 +612,36 @@ def relation_observations(
     )[1]
 
 
+def _normalize_indexed_relation(
+    raw_relation: object,
+    authored_line: object = None,
+) -> str:
+    """Recover the authored label, then use the registry's canonical normalizer.
+
+    Markdown parsing stores hyphens as underscores in ``raw_relation``. The
+    graph's persisted source-line provenance keeps the original spelling and
+    distinguishes authored ``applies-----to`` from authored ``applies__to``.
+    Rows without that provenance use their exact stored spelling; guessing a
+    lossy origin would incorrectly merge valid authored underscore runs.
+    """
+    stored = str(raw_relation or "")
+    authored = _authored_note_relation_label(str(authored_line or ""), stored)
+    return relation_registry.normalize_relation(authored)
+
+
+def _register_indexed_relation_normalizer(snapshot: Any) -> None:
+    """Register the deterministic scalar on the existing read snapshot."""
+    registrar = getattr(snapshot, "create_function", None)
+    if not callable(registrar):
+        raise TypeError("current graph snapshot cannot register SQLite scalars")
+    registrar(
+        "exomem_normalize_relation",
+        2,
+        _normalize_indexed_relation,
+        deterministic=True,
+    )
+
+
 def indexed_relation_observations(
     vault_root: Path,
     *,
@@ -651,16 +681,25 @@ def indexed_relation_observations(
             }
         )
     )
-    normalized_relation_sql = (
-        "replace(replace(replace(replace("
-        "lower(trim(rtrim(raw_relation, ':'))), '-', '_'), ' ', '_'), "
-        "'__', '_'), '__', '_')"
-    )
     try:
         snapshot = EpistemicGraphIndex(vault_root)._open_read_snapshot()
         if snapshot is None:
             return None
         try:
+            metadata_row = snapshot.execute(
+                "SELECT COUNT(*) FROM pragma_table_info('graph_edges') "
+                "WHERE name = 'metadata'"
+            ).fetchone()
+            has_authored_provenance = bool(metadata_row and metadata_row[0])
+            _register_indexed_relation_normalizer(snapshot)
+            authored_line_sql = (
+                "json_extract(metadata, '$.line')"
+                if has_authored_provenance
+                else "NULL"
+            )
+            normalized_relation_sql = (
+                f"exomem_normalize_relation(raw_relation, {authored_line_sql})"
+            )
             predicate = "registry_status = 'unregistered'"
             parameters: tuple[Any, ...] = ()
             if raw_relations is not None:

@@ -382,56 +382,55 @@ def test_advisory_can_read_point_recurrence_from_one_current_graph_snapshot(
 def test_real_graph_spelling_variants_form_one_advisory_occurrence(vault) -> None:
     from exomem import epistemic_graph, memory_schema
 
-    committed = _invoke_public(
-        vault,
-        "remember",
-        {
-            "title": "Indexed relation spelling variants",
-            "slug": "indexed-relation-spelling-variants",
-            "content": (
-                "# Indexed relation spelling variants\n\n"
-                "## Observations\n\n"
-                "- [constraint] Keep spelling evidence normalized.\n\n"
-                "## Relations\n"
-                f"- relates_to [[{_TARGET}]]\n"
-                f"- applies_to [[{_TARGET}]]\n"
-                f"- applies_to [[{_TARGET}-second]]\n"
-                f"- applies_to [[{_TARGET}-third]]\n"
-            ),
-        },
+    source_relative = "Knowledge Base/Notes/indexed-relation-spelling-variants.md"
+    source = vault / source_relative
+    source.write_text(
+        "---\ntype: insight\n---\n# Indexed relation spelling variants\n\n"
+        f"- applies-to: [[{_TARGET}]]\n"
+        f"- applies-----to: [[{_TARGET}-second]]\n"
+        f"- applies_to: [[{_TARGET}-third]]\n"
+        f"- applies_to: [[{_TARGET}-fourth]]\n"
+        f"- applies__to: [[{_TARGET}-double-underscore]]\n",
+        encoding="utf-8",
     )
     index = epistemic_graph.EpistemicGraphIndex(vault)
     index.rebuild_all()
     with index._connect() as connection:
         rows = connection.execute(
-            "SELECT edge_key FROM graph_edges "
+            "SELECT edge_key, raw_relation, dst_key FROM graph_edges "
             "WHERE source_path = ? AND registry_status = 'unregistered' "
             "ORDER BY edge_key",
-            (committed["path"],),
+            (source_relative,),
         ).fetchall()
-        assert len(rows) == 3
-        for (edge_key,), spelling in zip(
-            rows, ("Applies-To", "applies to", "applies_to"), strict=True
-        ):
-            connection.execute(
-                "UPDATE graph_edges SET raw_relation = ? WHERE edge_key = ?",
-                (spelling, edge_key),
-            )
+        assert len(rows) == 5
+        assert [raw_relation for _, raw_relation, _ in rows].count(
+            "applies_____to"
+        ) == 1
+        assert [raw_relation for _, raw_relation, _ in rows].count("applies__to") == 1
+        connection.execute(
+            "UPDATE graph_edges SET raw_relation = 'applies to', "
+            "metadata = json_remove(metadata, '$.line') WHERE dst_key = ?",
+            (f"file:{_TARGET}-third.md",),
+        )
         connection.commit()
 
     page = memory_schema.indexed_relation_observations(
         vault, raw_relations=["applies_to"], limit=8, offset=0
     )
     raw = {
-        **_leaf("semantic", [_fact("Applies-To")]),
+        **_leaf("semantic", [_fact("applies-----to")]),
         "_relation_advisory_context": {"vault": str(vault)},
     }
     advisory = _compact(raw)["relation_advisory"]
+    double_underscore = memory_schema.indexed_relation_observations(
+        vault, raw_relations=["applies__to"], limit=8, offset=0
+    )
 
     assert page is not None
+    assert double_underscore is not None
     assert page["total"] == 1
     assert page["items"][0]["raw_relation"] == "applies_to"
-    assert page["items"][0]["count"] == 3
+    assert page["items"][0]["count"] == 4
     assert len(
         {
             (item["path"], item["anchor"])
@@ -439,8 +438,12 @@ def test_real_graph_spelling_variants_form_one_advisory_occurrence(vault) -> Non
         }
     ) == len(page["items"][0]["examples"])
     assert advisory["recurrence_available"] is True
+    assert advisory["raw_relations"] == ["applies_to"]
     assert advisory["occurrences"][0]["raw_relation"] == "applies_to"
-    assert advisory["occurrences"][0]["count"] == 3
+    assert advisory["occurrences"][0]["count"] == 4
+    assert double_underscore["total"] == 1
+    assert double_underscore["items"][0]["raw_relation"] == "applies__to"
+    assert double_underscore["items"][0]["count"] == 1
 
 
 def test_real_observe_public_terminal_projects_committed_unknown_relation(vault) -> None:
