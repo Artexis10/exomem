@@ -1638,6 +1638,8 @@ def _validate_optional(values: Mapping[str, Any], *, validate_motivation: bool =
         if name in values and (
             type(values[name]) is not str or parse_plan_ref(values[name]) is None
         ):
+            if name == "area":
+                _invalid("area must be exomem://plan/<collection-uuid>/<plan-uuid>")
             _invalid(f"{name} must be a Planning reference")
     if "tags" in values:
         tags = values["tags"]
@@ -1725,6 +1727,8 @@ def _date(value: Any, name: str) -> dt.date:
 
 def _enum(value: Any, allowed: set[str] | frozenset[str], name: str) -> None:
     if type(value) is not str or value not in allowed:
+        if name == "kind":
+            _invalid("kind must be one of: area, outcome, initiative, work-item")
         _invalid(f"{name} is invalid")
 
 
