@@ -34,6 +34,7 @@ def _recovery_environment(**overrides: str) -> dict[str, str]:
         "EXOMEM_RECOVERY_ENVELOPE_KEY": "e" * 32,
         "EXOMEM_RECOVERY_PROVIDER_RECOVERY_PUBLIC_KEY": "p" * 43,
         "EXOMEM_RECOVERY_DEPLOYMENT_LOCK_JSON": _selected_deployment_lock_json(),
+        "EXOMEM_RECOVERY_SOURCE_DEPLOYMENT_LOCK_JSON": _selected_deployment_lock_json(),
         "EXOMEM_RECOVERY_RUNTIME_SELECTION": "active",
         "EXOMEM_RECOVERY_HCLOUD_TOKEN": "h" * 32,
         "EXOMEM_RECOVERY_HCLOUD_LOCATION": "fsn1",
@@ -49,6 +50,7 @@ def test_recovery_settings_accept_only_the_exact_minimal_environment() -> None:
 
     assert settings.database_name == "recovery_db"
     assert settings.deployment_lock.components.provisioner.image.endswith("b" * 64)
+    assert settings.source_deployment_lock == settings.deployment_lock
     assert settings.runtime_selection == "active"
     assert settings.hcloud_location == "fsn1"
     for name, value in (
@@ -235,7 +237,7 @@ def test_recovery_marker_is_content_free_and_exact() -> None:
             recovery.parse_recovery_marker({**marker, **changed})
 
 
-def test_retarget_request_changes_only_the_legacy_runtime_pair() -> None:
+def test_retarget_request_changes_only_the_v1_legacy_runtime_pair() -> None:
     recovery = _module()
     source = {
         "operationId": "provider-alpha",
@@ -250,31 +252,78 @@ def test_retarget_request_changes_only_the_legacy_runtime_pair() -> None:
         "provisionMode": "serve",
     }
 
-    target = recovery.retarget_legacy_provision_request(
+    target = recovery.retarget_provision_request(
         source,
-        release_version="0.68.1",
-        protocol_version="1",
+        wire_protocol="exomem-cell-provisioner.v1",
+        runtime_target={"releaseVersion": "0.68.1", "protocolVersion": "1"},
     )
 
     assert target == {**source, "releaseVersion": "0.68.1", "protocolVersion": "1"}
     assert source["releaseVersion"] == "0.66.0"
     with pytest.raises(recovery.RecoveryRefusal):
-        recovery.retarget_legacy_provision_request(
+        recovery.retarget_provision_request(
             {**source, "provisionMode": "restore-candidate"},
-            release_version="0.68.1",
-            protocol_version="1",
+            wire_protocol="exomem-cell-provisioner.v1",
+            runtime_target={"releaseVersion": "0.68.1", "protocolVersion": "1"},
         )
     with pytest.raises(recovery.RecoveryRefusal):
-        recovery.retarget_legacy_provision_request(
+        recovery.retarget_provision_request(
             {**source, "runtimeTarget": {}},
-            release_version="0.68.1",
-            protocol_version="1",
+            wire_protocol="exomem-cell-provisioner.v1",
+            runtime_target={"releaseVersion": "0.68.1", "protocolVersion": "1"},
         )
     with pytest.raises(recovery.RecoveryRefusal, match="already targets"):
-        recovery.retarget_legacy_provision_request(
+        recovery.retarget_provision_request(
             target,
-            release_version="0.68.1",
-            protocol_version="1",
+            wire_protocol="exomem-cell-provisioner.v1",
+            runtime_target={"releaseVersion": "0.68.1", "protocolVersion": "1"},
+        )
+
+
+def test_retarget_request_changes_only_the_complete_v2_runtime_target() -> None:
+    recovery = _module()
+    source_target = {
+        "releaseVersion": "0.66.0",
+        "protocolVersion": "1",
+        "agentProfile": "hosted-alpha-agent-v4",
+        "gatewayContractDigest": "a" * 64,
+        "commandFingerprint": "b" * 64,
+        "schemaDigest": "c" * 64,
+        "compatibilityDigest": "d" * 64,
+    }
+    selected = {
+        **source_target,
+        "releaseVersion": "0.68.1",
+        "gatewayContractDigest": "e" * 64,
+        "schemaDigest": "f" * 64,
+        "compatibilityDigest": "1" * 64,
+    }
+    source = {
+        "operationId": "provider-alpha",
+        "checkpoint": "requested",
+        "fenceGeneration": 7,
+        "tenantId": "tenant-alpha",
+        "cellId": "cell-alpha",
+        "serviceCredential": "secret-alpha",
+        "workerPolicy": {"workerCount": 0, "semantic": False, "media": False},
+        "provisionMode": "serve",
+        "runtimeTarget": source_target,
+        "_providerRecoveryEnvelopes": {"namespace": "opaque"},
+    }
+
+    target = recovery.retarget_provision_request(
+        source,
+        wire_protocol="exomem-cell-provisioner.v2",
+        runtime_target=selected,
+    )
+
+    assert target == {**source, "runtimeTarget": selected}
+    assert source["runtimeTarget"] is source_target
+    with pytest.raises(recovery.RecoveryRefusal):
+        recovery.retarget_provision_request(
+            {**source, "releaseVersion": "0.66.0"},
+            wire_protocol="exomem-cell-provisioner.v2",
+            runtime_target=selected,
         )
 
 

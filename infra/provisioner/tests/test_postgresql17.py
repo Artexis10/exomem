@@ -435,7 +435,7 @@ async def test_postgresql17_recovery_cas_inserts_one_immutable_receipt(
                         "schemaDigest": "c" * 64,
                     }
 
-            return type("Selected", (), {"runtimeTarget": Target()})()
+            return type("Selected", (), {"runtimeTarget": Target(), "compatibilityDigest": None})()
 
     class Observer:
         async def observe(

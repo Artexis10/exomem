@@ -288,28 +288,43 @@ def retarget_transition_values(before: RetargetPreState, *, now: datetime) -> di
     }
 
 
-def retarget_legacy_provision_request(
-    request: dict[str, object], *, release_version: str, protocol_version: str
+def retarget_provision_request(
+    request: dict[str, object], *, wire_protocol: str, runtime_target: dict[str, object]
 ) -> dict[str, object]:
-    if (
-        request.get("provisionMode") != "serve"
-        or "runtimeTarget" in request
-        or not isinstance(request.get("releaseVersion"), str)
-        or not isinstance(request.get("protocolVersion"), str)
-        or not release_version
-        or not protocol_version
-    ):
+    if request.get("provisionMode") != "serve" or not runtime_target:
         raise RecoveryRefusal("retarget request is invalid")
-    if (
-        request["releaseVersion"] == release_version
-        and request["protocolVersion"] == protocol_version
-    ):
-        raise RecoveryRefusal("request already targets selected runtime")
-    return {
-        **request,
-        "releaseVersion": release_version,
-        "protocolVersion": protocol_version,
-    }
+    if wire_protocol == "exomem-cell-provisioner.v1":
+        release_version = runtime_target.get("releaseVersion")
+        protocol_version = runtime_target.get("protocolVersion")
+        if (
+            "runtimeTarget" in request
+            or not isinstance(request.get("releaseVersion"), str)
+            or not isinstance(request.get("protocolVersion"), str)
+            or not isinstance(release_version, str)
+            or not isinstance(protocol_version, str)
+        ):
+            raise RecoveryRefusal("retarget request is invalid")
+        if (
+            request["releaseVersion"] == release_version
+            and request["protocolVersion"] == protocol_version
+        ):
+            raise RecoveryRefusal("request already targets selected runtime")
+        return {
+            **request,
+            "releaseVersion": release_version,
+            "protocolVersion": protocol_version,
+        }
+    if wire_protocol == "exomem-cell-provisioner.v2":
+        if (
+            "releaseVersion" in request
+            or "protocolVersion" in request
+            or not isinstance(request.get("runtimeTarget"), dict)
+        ):
+            raise RecoveryRefusal("retarget request is invalid")
+        if request["runtimeTarget"] == runtime_target:
+            raise RecoveryRefusal("request already targets selected runtime")
+        return {**request, "runtimeTarget": dict(runtime_target)}
+    raise RecoveryRefusal("retarget request is invalid")
 
 
 def recovery_marker(
@@ -436,6 +451,7 @@ class RecoveryService:
         database_schema: str,
         database_lock_timeout_seconds: int,
         deployment_lock: DeploymentLock,
+        source_deployment_lock: DeploymentLock | None = None,
         observer: RecoveryLiveObserver,
         runtime_selection: Literal["active", "rollback"] | None = None,
     ) -> None:
@@ -446,6 +462,7 @@ class RecoveryService:
         self._database_schema = database_schema
         self._database_lock_timeout_seconds = database_lock_timeout_seconds
         self._deployment_lock = deployment_lock
+        self._source_deployment_lock = source_deployment_lock or deployment_lock
         self._runtime_selection = runtime_selection
         self._observer = observer
         self._helper_source_sha256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
@@ -844,8 +861,7 @@ class RecoveryService:
             or request.get("fenceGeneration") != operation.fence_generation
             or request.get("checkpoint") != operation.caller_checkpoint
             or request.get("provisionMode") != "serve"
-            or operation.wire_protocol.value != "exomem-cell-provisioner.v1"
-            or not self._deployment_lock.matches_runtime_request(
+            or not self._source_deployment_lock.matches_runtime_request(
                 request,
                 wire_protocol=operation.wire_protocol.value,
                 selection=self._runtime_selection,
@@ -854,10 +870,12 @@ class RecoveryService:
             raise RecoveryRefusal("retarget preflight failed")
         selected = self._deployment_lock.selected_runtime(self._runtime_selection)
         target_runtime = selected.runtimeTarget.model_dump(mode="json")
-        target_request = retarget_legacy_provision_request(
+        if selected.compatibilityDigest is not None:
+            target_runtime["compatibilityDigest"] = selected.compatibilityDigest
+        target_request = retarget_provision_request(
             request,
-            release_version=selected.runtimeTarget.releaseVersion,
-            protocol_version=selected.runtimeTarget.protocolVersion,
+            wire_protocol=operation.wire_protocol.value,
+            runtime_target=target_runtime,
         )
         resources = await self._resources(session, operation)
         reservation = await self._reservation(session, operation)
@@ -1365,6 +1383,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
             database_schema=settings.database_schema,
             database_lock_timeout_seconds=settings.database_lock_timeout_seconds,
             deployment_lock=settings.deployment_lock,
+            source_deployment_lock=settings.source_deployment_lock,
             runtime_selection=settings.runtime_selection,
             observer=observer,
         )
