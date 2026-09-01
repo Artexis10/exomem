@@ -69,6 +69,8 @@ def test_registry_exposes_closed_curation_arguments_and_actions() -> None:
         "plan",
         "refs",
         "paths",
+        "review_ref",
+        "hydration_recheck",
         "expected_plan_fingerprint",
     } <= params.keys()
     assert params["curation_action"].choices == (
@@ -208,7 +210,11 @@ def test_shared_leaf_routes_every_curation_action(vault: Path, monkeypatch) -> N
 
     plan = {"version": 1, "title": "x", "steps": []}
     commands.op_maintain_memory(
-        vault, mode="curation", curation_action="work-item", refs=["abc"], paths=["x.md"]
+        vault,
+        mode="curation",
+        curation_action="work-item",
+        review_ref="exomem://review/aaaaaaaaaaaaaaaaaaaaaaaa",
+        hydration_recheck=3,
     )
     commands.op_maintain_memory(vault, mode="curation", curation_action="propose", plan=plan)
     commands.op_maintain_memory(vault, mode="curation", curation_action="preview", run_id="r")
@@ -248,6 +254,12 @@ def test_shared_leaf_routes_every_curation_action(vault: Path, monkeypatch) -> N
         "propose-compensation",
         "apply-compensation",
     ]
+    assert calls[0][1] == {
+        "refs": None,
+        "paths": None,
+        "review_ref": "exomem://review/aaaaaaaaaaaaaaaaaaaaaaaa",
+        "hydration_recheck": 3,
+    }
 
 
 def test_unknown_action_and_foreign_mode_arguments_fail_before_curation_dispatch(

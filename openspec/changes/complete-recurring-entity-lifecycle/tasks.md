@@ -16,12 +16,12 @@
 
 ## 3. Integrate attention and governed curation
 
-- [ ] 3.0 Treat `add-governed-curation-lane` as a hard prerequisite: require its implementation commit, independent review, merged evidence, and green contract tests before starting 3.2–3.5.
-- [ ] 3.1 Add attention tests for one row per identity, all states, dispositions, material reopen, state-change closure, and absence from default attention and due-state before f21 acknowledgment.
-- [ ] 3.2 Extend curation work-item resolution to bind an Entity candidate's review ref, signal version, first disconnected-context batch, remaining count, batch fingerprint, target refs, grammar identity, and registry identity.
-- [ ] 3.3 Add proposal tests allowing only existing governed step kinds, refusing an executable ambiguity default, refusing `_Schema` type registration through curation, and refusing stale candidate, target, or registry bindings.
-- [ ] 3.4 Add a three-batch hydration fixture that mutates three separately confirmed batches, consumes one same-identity recheck after each terminal receipt, reaches zero without duplicate/starved contexts, and reopens when a connection is removed; add a nine-batch fixture proving exactly eight mutations and eight rechecks, with the eighth closure-only and batch nine first exposed by the next session's ordinary read.
-- [ ] 3.5 Run governed curation proposal, preview, apply, recovery, and compensation suites unchanged to prove no second executor or weakened leaf guard was introduced.
+- [x] 3.0 Treat `add-governed-curation-lane` as a hard prerequisite: require its implementation commit, independent review, merged evidence, and green contract tests before starting 3.2–3.5.
+- [x] 3.1 Add attention tests for one row per identity, all states, dispositions, material reopen, state-change closure, and absence from default attention and due-state before f21 acknowledgment.
+- [x] 3.2 Extend curation work-item resolution to bind an Entity candidate's review ref, signal version, first disconnected-context batch, remaining count, batch fingerprint, target refs, grammar identity, and registry identity.
+- [x] 3.3 Add proposal tests allowing only existing governed step kinds, refusing an executable ambiguity default, refusing `_Schema` type registration through curation, and refusing stale candidate, target, or registry bindings.
+- [x] 3.4 Add a three-batch hydration fixture that mutates three separately confirmed batches, consumes one same-identity recheck after each terminal receipt, reaches zero without duplicate/starved contexts, and reopens when a connection is removed; add a nine-batch fixture proving exactly eight mutations and eight rechecks, with the eighth closure-only and batch nine first exposed by the next session's ordinary read.
+- [x] 3.5 Run governed curation proposal, preview, apply, recovery, and compensation suites unchanged to prove no second executor or weakened leaf guard was introduced.
 
 ## 4. Operationalise entity-type families
 
@@ -33,12 +33,12 @@
 
 ## 5. Update active-agent guidance
 
-- [ ] 5.1 Add red bootstrap, portable-contract, and scaffold drift tests for the exact first-turn-after-primary-work-before-final-response ordinary cadence, once-per-general-mutation recheck, same-identity hydration continuation, eight-batch session budget, three-candidate/eight-context bounds, capability-honest skip, resolve-before-create, ambiguity stop, hydrate-before-duplicate, governed unknown-kind registration, family metadata, and kind-neutral wording.
-- [ ] 5.2 Add a clean hookless-client journey whose first non-topical ordinary prompt triggers one explicit category call, returns the stable positive without its frequency twin, whose second prompt does not rescan, whose general mutation permits one recheck, and whose separately confirmed hydration batches each permit one bounded same-identity continuation.
-- [ ] 5.3 Update bootstrap and the generic scaffold directly from the registry-derived contract without a frozen kind enumeration or private term.
-- [ ] 5.4 Add delegation-envelope contract tests for `structural_suggestions`, registry-save and curation `restructure_execution`, standalone `link_acceptance`, and the stricter enclosing curation confirmation.
-- [ ] 5.5 Run scaffold privacy and leak, generated-schema, MCP, REST, CLI fingerprint, bootstrap budget, and entity-capture guidance suites.
-- [ ] 5.6 Add the generic synthetic entity-lifecycle contribution input at `tests/fixtures/hosted_v5_contributions/recurring_entity_lifecycle.json`; do not edit v5 files, and require the owner to canonicalise/freeze the input and prove the complete v1-v4 immutability manifest.
+- [x] 5.1 Add red bootstrap, portable-contract, and scaffold drift tests for the exact first-turn-after-primary-work-before-final-response ordinary cadence, once-per-general-mutation recheck, same-identity hydration continuation, eight-batch session budget, three-candidate/eight-context bounds, capability-honest skip, resolve-before-create, ambiguity stop, hydrate-before-duplicate, governed unknown-kind registration, family metadata, and kind-neutral wording.
+- [x] 5.2 Add a clean hookless-client journey whose first non-topical ordinary prompt triggers one explicit category call, returns the stable positive without its frequency twin, whose second prompt does not rescan, whose general mutation permits one recheck, and whose separately confirmed hydration batches each permit one bounded same-identity continuation.
+- [x] 5.3 Update bootstrap and the generic scaffold directly from the registry-derived contract without a frozen kind enumeration or private term.
+- [x] 5.4 Add delegation-envelope contract tests for `structural_suggestions`, registry-save and curation `restructure_execution`, standalone `link_acceptance`, and the stricter enclosing curation confirmation.
+- [x] 5.5 Run scaffold privacy and leak, generated-schema, MCP, REST, CLI fingerprint, bootstrap budget, and entity-capture guidance suites.
+- [x] 5.6 Add the generic synthetic entity-lifecycle contribution input at `tests/fixtures/hosted_v5_contributions/recurring_entity_lifecycle.json`; do not edit v5 files, and require the owner to canonicalise/freeze the input and prove the complete v1-v4 immutability manifest.
 
 ## 6. Prove f21 and kill shortcuts
 

@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "family": "recurring-entity-lifecycle",
+  "primitive": "stable-recurring-identity",
+  "ordinary_read": {
+    "boundary": "first-turn-after-primary-work-before-final-response",
+    "maximum_per_session": 1,
+    "arguments": {
+      "mode": "attention",
+      "categories": [
+        "entity_recurrence"
+      ],
+      "limit": 3
+    }
+  },
+  "bounds": {
+    "candidates_per_read": 3,
+    "contexts_per_candidate": 8,
+    "hydration_mutations_per_session": 8,
+    "hydration_rechecks_per_session": 8
+  },
+  "decision_order": [
+    "resolve-exact-and-alias",
+    "stop-on-ambiguity",
+    "hydrate-one-match-before-duplicate",
+    "promote-only-no-match"
+  ],
+  "hydration_continuation": {
+    "fresh_confirmation_per_batch": true,
+    "same_identity_only": true,
+    "terminal_receipt_required": true,
+    "eighth_recheck": "closure-only",
+    "later_batches": "next-session-ordinary-read"
+  },
+  "authority": {
+    "candidate_read": "structural_suggestions",
+    "registry_save": "restructure_execution",
+    "curation_apply": "restructure_execution",
+    "standalone_relation_acceptance": "link_acceptance"
+  },
+  "cases": [
+    {
+      "id": "generic-promotion",
+      "identity": "amber guild",
+      "candidate_state": "promotion",
+      "expected_route": "governed-create-entity"
+    },
+    {
+      "id": "existing-identity-hydration",
+      "identity": "cobalt workshop",
+      "candidate_state": "hydration",
+      "expected_route": "governed-edit-or-accept-relation"
+    },
+    {
+      "id": "ambiguous-identity-stop",
+      "identity": "river archive",
+      "candidate_state": "ambiguous",
+      "expected_route": "no-executable-default"
+    },
+    {
+      "id": "frequency-matched-twin",
+      "identity": "passing reference",
+      "candidate_state": "quiet",
+      "expected_route": "absent"
+    }
+  ],
+  "compatibility": {
+    "hosted_v1_v4": "immutable",
+    "hosted_v5": "candidate-owner-composes-this-contribution"
+  }
+}

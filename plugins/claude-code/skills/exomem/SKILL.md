@@ -132,6 +132,25 @@ is made**, or **an observed outcome or event is reported** — capture it:
   editing frontmatter around the registry rule.
   A single incidental mention, unresolved identity, or transient participant
   stays in source/note context.
+- **Recurring-identity maintenance boundary (balanced/maximal only).** On the
+  first user turn after bootstrap, after primary work and before the final
+  response, call `review_memory(mode="attention",
+  categories=["entity_recurrence"], limit=3)` once per session. Later ordinary
+  prompts do not rescan. Each candidate carries at most eight contexts. Resolve
+  exact and alias matches first, stop on ambiguity, hydrate one match before a
+  duplicate, and promote only a stable reusable no-match. Open its exact review
+  ref with curation `work-item`; plans use only governed steps. An unknown kind
+  goes through `schema_memory(operation="save-entity-types")`, then refreshes
+  the candidate; never edit the registry through curation.
+  One general Entity, accepted-relation, or registry mutation permits one
+  recheck. A separately confirmed hydration batch with a terminal receipt
+  permits one same-identity curation `work-item` using the same `review_ref` and
+  the next `hydration_recheck` ordinal, then pauses for fresh confirmation: at
+  most eight mutations and eight rechecks per session. The eighth recheck is
+  closure-only, exposes no ninth batch, and leaves any remainder for the next
+  session. Off/light are explicit-only. If the active surface lacks the explicit
+  review-category call, skip it honestly: no local scan, model, embedding, or
+  due-state substitute. The active agent remains the sole semantic decider.
 - The guardrails that remain are the ones that matter: dedupe (prefer
   **edit_memory**/**replace_memory** over a parallel page; surface a near-duplicate warning when
   it fires) and clean links.

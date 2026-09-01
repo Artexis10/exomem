@@ -61,9 +61,31 @@ MAX_WORK_ITEM_CHARS: Final[int] = 24_000
 _STEP_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _HEX24 = re.compile(r"^[0-9a-f]{24}$")
-_PLAN_FIELDS = frozenset({"version", "title", "steps"})
+_PLAN_FIELDS = frozenset({"version", "title", "steps", "entity_candidate"})
 _STEP_FIELDS = frozenset({"step_id", "kind", "args"})
 _SEALED_FIELDS = frozenset({"binding_manifest", "registry_ids", "plan_type", "forward_plan_id"})
+_ENTITY_CANDIDATE_FIELDS = frozenset(
+    {
+        "review_ref",
+        "review_fingerprint",
+        "candidate_state",
+        "identity",
+        "signal_version",
+        "first_disconnected_context_batch",
+        "remaining_disconnected_count",
+        "batch_fingerprint",
+        "target_refs",
+        "grammar_identity",
+        "registry_identity",
+        # Presentation-only fields returned by a hydration recheck.  They are
+        # validated here and removed from the immutable plan binding below.
+        "executable",
+        "closure_only",
+        "deferred_remaining_count",
+    }
+)
+_ENTITY_CONTEXT_BINDING_FIELDS = frozenset({"path", "context_hash"})
+_ENTITY_GRAMMAR_FIELDS = frozenset({"version", "predicate_table_digest"})
 
 _CREATE_NOTE_FIELDS = frozenset(
     {
@@ -389,6 +411,124 @@ def _validate_args(kind: str, raw: Any, ordinal: int) -> dict[str, Any]:
     return json.loads(canonical_json(args))
 
 
+def _validate_entity_candidate_binding(raw: Any) -> dict[str, Any]:
+    """Validate the exact deterministic review binding an agent round-trips."""
+    if not isinstance(raw, Mapping):
+        raise _error("INVALID_CURATION_PLAN", "entity_candidate must be an object")
+    value = dict(raw)
+    _unknown_fields(value, _ENTITY_CANDIDATE_FIELDS, "entity_candidate")
+    required = _ENTITY_CANDIDATE_FIELDS - {
+        "executable",
+        "closure_only",
+        "deferred_remaining_count",
+    }
+    missing = sorted(required - set(value))
+    if missing:
+        raise _error("INVALID_CURATION_PLAN", f"entity_candidate misses {missing}")
+    review_ref = _require_string(value.get("review_ref"), "entity_candidate.review_ref")
+    if not re.fullmatch(r"exomem://review/[0-9a-f]{24}", review_ref.casefold()):
+        raise _error("INVALID_CURATION_PLAN", "entity_candidate.review_ref is invalid")
+    review_fingerprint = _require_string(
+        value.get("review_fingerprint"), "entity_candidate.review_fingerprint"
+    )
+    if not _HEX24.fullmatch(review_fingerprint):
+        raise _error("INVALID_CURATION_PLAN", "entity candidate review fingerprint is invalid")
+    state = value.get("candidate_state")
+    if state not in {"promotion", "hydration", "ambiguous"}:
+        raise _error("INVALID_CURATION_PLAN", "entity candidate state is invalid")
+    identity = _require_string(value.get("identity"), "entity_candidate.identity")
+    signal = _require_string(value.get("signal_version"), "entity_candidate.signal_version")
+    if not re.fullmatch(r"(?:[0-9a-f]{16}|[0-9a-f]{64})", signal):
+        raise _error("INVALID_CURATION_PLAN", "entity candidate signal version is invalid")
+    contexts = value.get("first_disconnected_context_batch")
+    if not isinstance(contexts, list) or len(contexts) > 8:
+        raise _error("INVALID_CURATION_PLAN", "entity candidate context batch is invalid")
+    normalized_contexts: list[dict[str, str]] = []
+    for index, raw_context in enumerate(contexts):
+        if not isinstance(raw_context, Mapping):
+            raise _error("INVALID_CURATION_PLAN", "entity candidate context is invalid")
+        context = dict(raw_context)
+        _unknown_fields(
+            context,
+            _ENTITY_CONTEXT_BINDING_FIELDS,
+            f"entity_candidate.first_disconnected_context_batch[{index}]",
+        )
+        if set(context) != _ENTITY_CONTEXT_BINDING_FIELDS:
+            raise _error("INVALID_CURATION_PLAN", "entity candidate context binding is incomplete")
+        path = _require_string(
+            context["path"],
+            f"entity_candidate.first_disconnected_context_batch[{index}].path",
+        ).replace("\\", "/").lstrip("/")
+        context_hash = _require_string(
+            context["context_hash"],
+            f"entity_candidate.first_disconnected_context_batch[{index}].context_hash",
+        )
+        if not _HEX64.fullmatch(context_hash):
+            raise _error("INVALID_CURATION_PLAN", "entity candidate context hash is invalid")
+        normalized_contexts.append({"path": path, "context_hash": context_hash})
+    if normalized_contexts != sorted(
+        normalized_contexts, key=lambda item: (item["path"], item["context_hash"])
+    ):
+        raise _error("INVALID_CURATION_PLAN", "entity candidate context batch is not canonical")
+    remaining = value.get("remaining_disconnected_count")
+    if type(remaining) is not int or remaining < 0:
+        raise _error("INVALID_CURATION_PLAN", "entity candidate remaining count is invalid")
+    batch_fingerprint = value.get("batch_fingerprint")
+    if batch_fingerprint is not None and (
+        not isinstance(batch_fingerprint, str) or not _HEX64.fullmatch(batch_fingerprint)
+    ):
+        raise _error("INVALID_CURATION_PLAN", "entity candidate batch fingerprint is invalid")
+    targets = value.get("target_refs")
+    if not isinstance(targets, list) or not all(
+        isinstance(target, str) and target.strip() for target in targets
+    ):
+        raise _error("INVALID_CURATION_PLAN", "entity candidate targets are invalid")
+    normalized_targets = sorted(set(targets))
+    if normalized_targets != targets or len(targets) > 8:
+        raise _error("INVALID_CURATION_PLAN", "entity candidate targets are not canonical")
+    grammar = value.get("grammar_identity")
+    if not isinstance(grammar, Mapping):
+        raise _error("INVALID_CURATION_PLAN", "entity candidate grammar identity is invalid")
+    grammar_value = dict(grammar)
+    _unknown_fields(grammar_value, _ENTITY_GRAMMAR_FIELDS, "entity_candidate.grammar_identity")
+    if set(grammar_value) != _ENTITY_GRAMMAR_FIELDS:
+        raise _error("INVALID_CURATION_PLAN", "entity candidate grammar identity is incomplete")
+    grammar_version = _require_string(
+        grammar_value.get("version"), "entity_candidate.grammar_identity.version"
+    )
+    predicate_digest = grammar_value.get("predicate_table_digest")
+    if predicate_digest is not None and (
+        not isinstance(predicate_digest, str) or not _HEX64.fullmatch(predicate_digest)
+    ):
+        raise _error("INVALID_CURATION_PLAN", "entity candidate predicate digest is invalid")
+    registry_identity = _require_string(
+        value.get("registry_identity"), "entity_candidate.registry_identity"
+    )
+    if not _HEX64.fullmatch(registry_identity):
+        raise _error("INVALID_CURATION_PLAN", "entity candidate registry identity is invalid")
+    if value.get("closure_only") is True or value.get("executable") is False:
+        raise _error(
+            "CURATION_ENTITY_BATCH_DEFERRED",
+            "a closure-only hydration recheck cannot bind a curation plan",
+        )
+    return {
+        "review_ref": review_ref,
+        "review_fingerprint": review_fingerprint,
+        "candidate_state": state,
+        "identity": identity,
+        "signal_version": signal,
+        "first_disconnected_context_batch": normalized_contexts,
+        "remaining_disconnected_count": remaining,
+        "batch_fingerprint": batch_fingerprint,
+        "target_refs": normalized_targets,
+        "grammar_identity": {
+            "version": grammar_version,
+            "predicate_table_digest": predicate_digest,
+        },
+        "registry_identity": registry_identity,
+    }
+
+
 def validate_forward_plan(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, Mapping):
         raise _error("INVALID_CURATION_PLAN", "plan must be an object")
@@ -428,6 +568,10 @@ def validate_forward_plan(raw: Any) -> dict[str, Any]:
             }
         )
     normalized = {"version": 1, "title": title, "steps": normalized_steps}
+    if "entity_candidate" in value:
+        normalized["entity_candidate"] = _validate_entity_candidate_binding(
+            value["entity_candidate"]
+        )
     if len(canonical_json_bytes(normalized)) > MAX_PLAN_BYTES:
         raise _error("CURATION_PLAN_TOO_LARGE", f"canonical plan exceeds {MAX_PLAN_BYTES} bytes")
     return normalized
@@ -548,14 +692,246 @@ def _read_page(vault_root: Path, raw: str) -> tuple[str, str]:
     return path, source
 
 
+def _entity_candidate_binding(item: Any, *, registry_fallback: str) -> dict[str, Any]:
+    reasons = [
+        reason
+        for reason in list(getattr(item, "reasons", None) or [])
+        if reason.get("category") == "entity_recurrence"
+    ]
+    if len(reasons) != 1:
+        raise _error(
+            "CURATION_ENTITY_CANDIDATE_INVALID",
+            "review ref does not resolve to exactly one recurring identity signal",
+        )
+    meta = dict(reasons[0].get("meta") or {})
+    contexts = [
+        {
+            "path": str(context.get("path") or "").replace("\\", "/").lstrip("/"),
+            "context_hash": str(context.get("context_hash") or ""),
+        }
+        for context in list(meta.get("disconnected_contexts") or [])[:8]
+    ]
+    contexts.sort(key=lambda row: (row["path"], row["context_hash"]))
+    target_refs = sorted(
+        {
+            str(candidate.get("path") or "")
+            for candidate in list(meta.get("resolution_candidates") or [])
+            if candidate.get("path")
+        }
+    )
+    grammar_version = str(meta.get("grammar_version") or "unresolved-wikilink-v1")
+    predicate_digest = meta.get("predicate_table_digest")
+    registry_identity = str(meta.get("registry_fingerprint") or registry_fallback)
+    binding = {
+        "review_ref": str(getattr(item, "ref", None) or ""),
+        "review_fingerprint": str(getattr(item, "fingerprint", None) or ""),
+        "candidate_state": str(meta.get("candidate_state") or "promotion"),
+        "identity": str(meta.get("identity") or ""),
+        "signal_version": str(meta.get("signal_version") or ""),
+        "first_disconnected_context_batch": contexts,
+        "remaining_disconnected_count": int(meta.get("remaining_disconnected_count") or 0),
+        "batch_fingerprint": meta.get("batch_fingerprint"),
+        "target_refs": target_refs,
+        "grammar_identity": {
+            "version": grammar_version,
+            "predicate_table_digest": predicate_digest,
+        },
+        "registry_identity": registry_identity,
+    }
+    return _validate_entity_candidate_binding(binding)
+
+
+def project_entity_candidate_binding(
+    binding: Mapping[str, Any], *, hydration_recheck: int
+) -> dict[str, Any]:
+    """Project one identity-bound continuation under the eight-batch budget.
+
+    The active agent owns the session counter.  The eighth terminal receipt may
+    buy one final state read, but that read cannot expose an executable ninth
+    batch.  Redacting the batch here makes the bound true at the API boundary,
+    not merely an instruction to ignore bytes already returned.
+    """
+    if type(hydration_recheck) is not int or not 1 <= hydration_recheck <= 8:
+        raise _error(
+            "INVALID_HYDRATION_RECHECK",
+            "hydration_recheck must be an integer from 1 through 8",
+        )
+    projected = json.loads(canonical_json(dict(binding)))
+    if projected.get("candidate_state") != "hydration":
+        raise _error(
+            "INVALID_HYDRATION_RECHECK",
+            "identity-bound continuation requires a hydration candidate",
+        )
+    if hydration_recheck < 8:
+        projected.update(executable=True, closure_only=False)
+        return projected
+    batch = list(projected.get("first_disconnected_context_batch") or [])
+    deferred = len(batch) + int(projected.get("remaining_disconnected_count") or 0)
+    projected.update(
+        first_disconnected_context_batch=[],
+        remaining_disconnected_count=deferred,
+        batch_fingerprint=None,
+        executable=False,
+        closure_only=True,
+        deferred_remaining_count=deferred,
+    )
+    return projected
+
+
+def _current_entity_candidate_binding(
+    vault_root: Path, review_ref: str
+) -> tuple[Any, dict[str, Any]]:
+    from . import attention as attention_module
+    from . import entity_types as entity_types_module
+
+    try:
+        item = attention_module.entity_candidate_by_ref(vault_root, review_ref)
+    except ValueError as error:
+        raise _error(
+            "CURATION_ENTITY_CANDIDATE_STALE",
+            "entity candidate no longer resolves to the reviewed signal",
+        ) from error
+    registry_fallback = entity_types_module.load_entity_types(vault_root).fingerprint
+    return item, _entity_candidate_binding(item, registry_fallback=registry_fallback)
+
+
+def _candidate_step_kinds(state: str) -> list[str]:
+    return {
+        "promotion": ["create-entity"],
+        "hydration": ["accept-relation", "edit"],
+        "ambiguous": [],
+    }[state]
+
+
 def work_item(
     vault_root: Path,
     *,
     refs: list[str] | None = None,
     paths: list[str] | None = None,
+    review_ref: str | None = None,
+    hydration_recheck: int | None = None,
     max_chars_per_page: int = 6_000,
 ) -> dict[str, Any]:
     """Assemble only explicitly named recorded context; never select or rank it."""
+    if type(max_chars_per_page) is not int or not 1 <= max_chars_per_page <= MAX_WORK_ITEM_CHARS:
+        raise _error("CURATION_WORK_ITEM_TOO_LARGE", "per-page character cap is invalid")
+    if review_ref is not None:
+        if refs or paths:
+            raise _error(
+                "CURATION_WORK_ITEM_MIXED",
+                "an entity-candidate work item cannot add unrelated refs or paths",
+            )
+        if hydration_recheck is not None:
+            if type(hydration_recheck) is not int or not 1 <= hydration_recheck <= 8:
+                raise _error(
+                    "INVALID_HYDRATION_RECHECK",
+                    "hydration_recheck must be an integer from 1 through 8",
+                )
+            from . import review_state as review_state_module
+
+            try:
+                review_state_module.parse_review_ref(str(review_ref))
+            except ValueError as error:
+                raise _error(
+                    "INVALID_HYDRATION_RECHECK",
+                    "hydration_recheck requires a valid entity candidate review ref",
+                ) from error
+        try:
+            item, binding = _current_entity_candidate_binding(
+                Path(vault_root), str(review_ref)
+            )
+        except CurationError as error:
+            if hydration_recheck is None or error.code != "CURATION_ENTITY_CANDIDATE_STALE":
+                raise
+            # A continuation is read-only and identity-bound.  When the exact
+            # row disappears after the terminal batch receipt, the useful
+            # result is bounded closure rather than a misleading stale error.
+            # Validate both inputs even though no executable binding is exposed.
+            return {
+                "action": "work-item",
+                "mutated": False,
+                "pages": [],
+                "truncation": {"pages": [], "disclosed": False},
+                "entity_candidate": {
+                    "review_ref": str(review_ref),
+                    "candidate_state": "quiet",
+                    "closed": True,
+                    "executable": False,
+                    "closure_only": True,
+                    "deferred_remaining_count": 0,
+                },
+                "candidate_evidence": {"candidate_state": "quiet", "closed": True},
+                "allowed_candidate_step_kinds": [],
+                "mutation_authority": "restructure_execution",
+                "unknown_kind_route": {
+                    "tool": "schema_memory",
+                    "operation": "save-entity-types",
+                    "authority": "restructure_execution",
+                    "refresh_candidate_after_save": True,
+                },
+                "registry_ids": registry_identities(Path(vault_root)),
+                "step_schemas": step_schemas(),
+            }
+        projected = (
+            project_entity_candidate_binding(binding, hydration_recheck=hydration_recheck)
+            if hydration_recheck is not None
+            else binding
+        )
+        evidence = dict(item.reasons[0].get("meta") or {})
+        context_paths = [
+            context["path"]
+            for context in binding["first_disconnected_context_batch"]
+        ]
+        selected_pages: list[dict[str, Any]] = []
+        truncated_pages: list[str] = []
+        for path in context_paths:
+            try:
+                source, digest = _guarded_text(Path(vault_root), path, stale=False)
+            except CurationError:
+                # The review evidence itself remains sufficient and bounded for
+                # append-only/protected contexts that curation is forbidden to
+                # mutate.  Never weaken target policy merely to return full text.
+                continue
+            was_truncated = len(source) > max_chars_per_page
+            if was_truncated:
+                truncated_pages.append(path)
+            selected_pages.append(
+                {
+                    "path": path,
+                    "content": source[:max_chars_per_page],
+                    "content_hash": digest,
+                    "chars": len(source),
+                    "truncated": was_truncated,
+                }
+            )
+        return {
+            "action": "work-item",
+            "mutated": False,
+            "pages": selected_pages,
+            "truncation": {
+                "pages": truncated_pages,
+                "disclosed": bool(truncated_pages),
+            },
+            "entity_candidate": projected,
+            "candidate_evidence": evidence,
+            "allowed_candidate_step_kinds": _candidate_step_kinds(
+                binding["candidate_state"]
+            ),
+            "mutation_authority": "restructure_execution",
+            "unknown_kind_route": {
+                "tool": "schema_memory",
+                "operation": "save-entity-types",
+                "authority": "restructure_execution",
+                "refresh_candidate_after_save": True,
+            },
+            "registry_ids": registry_identities(Path(vault_root)),
+            "step_schemas": step_schemas(),
+        }
+    if hydration_recheck is not None:
+        raise _error(
+            "INVALID_HYDRATION_RECHECK",
+            "hydration_recheck requires one exact entity candidate review_ref",
+        )
     selected = [*(refs or []), *(paths or [])]
     if not selected:
         raise _error("CURATION_WORK_ITEM_EMPTY", "work-item requires explicit refs or paths")
@@ -564,8 +940,6 @@ def work_item(
             "CURATION_WORK_ITEM_TOO_LARGE",
             f"work-item may contain at most {MAX_WORK_ITEM_PAGES} explicit pages",
         )
-    if type(max_chars_per_page) is not int or not 1 <= max_chars_per_page <= MAX_WORK_ITEM_CHARS:
-        raise _error("CURATION_WORK_ITEM_TOO_LARGE", "per-page character cap is invalid")
     pages: list[dict[str, Any]] = []
     truncated: list[str] = []
     seen: set[str] = set()
@@ -830,12 +1204,108 @@ def _prepare_step(vault_root: Path, step: Mapping[str, Any], ordinal: int) -> di
     }
 
 
+def _validate_entity_candidate_plan(
+    vault_root: Path, plan: Mapping[str, Any]
+) -> None:
+    binding = plan.get("entity_candidate")
+    if not isinstance(binding, Mapping):
+        return
+    _item, current = _current_entity_candidate_binding(
+        vault_root, str(binding["review_ref"])
+    )
+    if canonical_json(current) != canonical_json(binding):
+        raise _error(
+            "CURATION_ENTITY_CANDIDATE_STALE",
+            "candidate, target, grammar, registry, or context batch changed",
+        )
+    state = str(binding["candidate_state"])
+    steps = list(plan["steps"])
+    kinds = [str(step["kind"]) for step in steps]
+    if state == "ambiguous":
+        raise _error(
+            "CURATION_ENTITY_AMBIGUOUS",
+            "an ambiguous recurring identity has no executable default target",
+        )
+    if state == "promotion":
+        if kinds != ["create-entity"]:
+            code = (
+                "CURATION_ENTITY_DUPLICATE_CREATE"
+                if kinds.count("create-entity") > 1
+                else "CURATION_ENTITY_ROUTE_INVALID"
+            )
+            raise _error(
+                code,
+                "promotion requires exactly one governed create-entity step",
+            )
+        from .entity_candidates import identity_key
+
+        if identity_key(steps[0]["args"].get("name")) != identity_key(
+            binding["identity"]
+        ):
+            raise _error(
+                "CURATION_ENTITY_ROUTE_INVALID",
+                "promotion name must preserve the reviewed normalized identity",
+            )
+        return
+    assert state == "hydration"
+    if not 1 <= len(steps) <= 8 or any(
+        kind not in {"edit", "accept-relation"} for kind in kinds
+    ):
+        raise _error(
+            "CURATION_ENTITY_ROUTE_INVALID",
+            "hydration permits one to eight guarded edit or accept-relation steps",
+        )
+    context_paths = {
+        str(context["path"])
+        for context in binding["first_disconnected_context_batch"]
+    }
+    target_paths = set(binding["target_refs"])
+    for step in steps:
+        if step["kind"] != "edit":
+            continue
+        path = str(step["args"].get("path") or "")
+        if path not in context_paths | target_paths:
+            raise _error(
+                "CURATION_ENTITY_BATCH_STALE",
+                "hydration edit is outside the reviewed context batch and target",
+            )
+
+
 def propose(vault_root: Path, plan: Mapping[str, Any]) -> dict[str, Any]:
     root = Path(vault_root)
     validated = validate_forward_plan(plan)
+    # Candidate identity and state are re-read before any plan artifact is
+    # published.  A stale review must not leave an inert but misleading plan in
+    # the governed run store.
+    _validate_entity_candidate_plan(root, validated)
     manifest = [
         _prepare_step(root, step, ordinal) for ordinal, step in enumerate(validated["steps"])
     ]
+    binding = validated.get("entity_candidate")
+    if isinstance(binding, Mapping) and binding.get("candidate_state") == "hydration":
+        allowed_paths = {
+            str(context["path"])
+            for context in binding["first_disconnected_context_batch"]
+        } | set(binding["target_refs"])
+        if any(str(item.get("path") or "") not in allowed_paths for item in manifest):
+            raise _error(
+                "CURATION_ENTITY_BATCH_STALE",
+                "hydration leaf resolved outside the reviewed context batch and target",
+            )
+        target_stems = {
+            str(target).replace("\\", "/").removesuffix(".md")
+            for target in binding["target_refs"]
+        }
+        for step, prepared in zip(validated["steps"], manifest, strict=True):
+            if step["kind"] != "accept-relation":
+                continue
+            candidate = dict(prepared.get("prepared", {}).get("candidate") or {})
+            relation_target = str(candidate.get("to") or "").replace("\\", "/").removesuffix(".md")
+            if relation_target not in target_stems:
+                raise _error(
+                    "CURATION_ENTITY_BATCH_STALE",
+                    "hydration relation target is outside the reviewed Entity targets",
+                )
     _require_plan_relocation_history(root, validated)
     registries = registry_identities(root)
     return CurationStore(root).create_forward(
@@ -922,6 +1392,14 @@ def preview(vault_root: Path, *, run_id: str) -> dict[str, Any]:
     plan = store.load_plan(run_id)
     identity, fingerprint = store.identities(run_id)
     blockers = _binding_blockers(root, plan, registry_identities(root))
+    if (
+        isinstance(plan.get("entity_candidate"), Mapping)
+        and not _committed_step_ids(store.reconstruct(run_id))
+    ):
+        try:
+            _validate_entity_candidate_plan(root, plan)
+        except CurationError as error:
+            blockers.insert(0, {"code": error.code, "reason": error.reason})
     return {
         "action": "preview",
         "mutated": False,
@@ -934,6 +1412,11 @@ def preview(vault_root: Path, *, run_id: str) -> dict[str, Any]:
         "binding_health": "stale" if blockers else "current",
         "blockers": blockers,
         "compensation_classes": [compensation_kind(step["kind"]) for step in plan["steps"]],
+        **(
+            {"entity_candidate": plan["entity_candidate"]}
+            if isinstance(plan.get("entity_candidate"), Mapping)
+            else {}
+        ),
     }
 
 
@@ -1460,6 +1943,11 @@ def _next_step(
 def _blockers_for_uncommitted(
     vault_root: Path, plan: Mapping[str, Any], committed: set[str]
 ) -> list[dict[str, Any]]:
+    if not committed and isinstance(plan.get("entity_candidate"), Mapping):
+        try:
+            _validate_entity_candidate_plan(vault_root, plan)
+        except CurationError as error:
+            return [{"code": error.code, "reason": error.reason}]
     filtered = {
         **plan,
         "binding_manifest": [

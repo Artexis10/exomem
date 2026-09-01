@@ -2778,6 +2778,30 @@
           "default": null,
           "description": "Explicit vault-relative paths for curation work-item."
         },
+        "review_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Exact recurring-identity review ref for a candidate work-item."
+        },
+        "hydration_recheck": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Same-identity continuation ordinal, 1 through 8; the eighth is closure-only and cannot bind another plan."
+        },
         "expected_plan_fingerprint": {
           "anyOf": [
             {

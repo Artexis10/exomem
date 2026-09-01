@@ -438,6 +438,37 @@ an explicit reviewed operation because paths are graph addresses.
 
 ---
 
+## recurring entity lifecycle
+
+At balanced or maximal prominence, spend one ordinary recurrence read on the
+first turn after bootstrap, after primary work and before the final response:
+`review_memory(mode="attention", categories=["entity_recurrence"], limit=3)`.
+Do not repeat it on later ordinary prompts. The response is deterministic
+evidence for the active agent, not an Entity decision. It returns at most three
+candidates and eight contexts each; absence from default attention or due-state
+does not mean the explicit category is clean.
+
+For a candidate, resolve exact and alias matches, stop on ambiguity, hydrate a
+single match before considering a duplicate, and promote only a stable reusable
+no-match. Open the exact review ref with
+`maintain_memory(mode="curation", curation_action="work-item",
+review_ref=...)`; the returned signal, context batch, target, grammar, and
+registry bindings must round-trip unchanged into the agent-authored plan.
+Register an unknown durable kind separately through guarded
+`schema_memory(operation="save-entity-types")`, then refresh; curation never
+edits `_Schema`.
+
+After one separately confirmed hydration batch reaches a terminal receipt, one
+same-identity curation `work-item` with that `review_ref` and the next
+`hydration_recheck` ordinal may expose the next batch, which needs a fresh plan
+and confirmation. Cap one session at eight hydration mutations and eight rechecks;
+the eighth recheck is closure-only and any ninth batch waits for the next
+session. One unrelated Entity, accepted-relation, or registry mutation permits
+one general recheck. Stop on refusal, ambiguity, target/registry change,
+non-terminal outcome, closure, or user exit. Off/light are explicit-only. If the
+explicit category route is unavailable, skip it—never substitute a local scan,
+model, embedding, or due-state claim.
+
 ## create entity
 
 **Goal:** Create a registered typed entity without duplicating an existing identity.

@@ -623,6 +623,83 @@ def op_bootstrap(
             "status": workflow_public_status,
         }
     entity_type_registry = entity_types_module.load_entity_types(vault_root)
+    entity_recurrence_available = "review_memory" in active_product_names
+    if entity_recurrence_available:
+        ordinary_mode = (
+            "once"
+            if engagement_policy["level"] in {"balanced", "maximal"}
+            else "explicit-only"
+        )
+        entity_lifecycle = {
+            "available": True,
+            "ordinary_read": {
+                "mode": ordinary_mode,
+                "boundary": "first-turn-after-primary-work-before-final-response",
+                "maximum_per_session": 1 if ordinary_mode == "once" else 0,
+                "route": {
+                    "tool": "review_memory",
+                    "arguments": {
+                        "mode": "attention",
+                        "categories": ["entity_recurrence"],
+                        "limit": 3,
+                    },
+                },
+            },
+            "general_mutation_recheck": {
+                "after": ["entity", "accepted-relation", "entity-type-registry"],
+                "maximum_per_session": 1,
+                "requires_terminal_receipt": True,
+            },
+            "hydration_continuation": {
+                "same_identity_only": True,
+                "requires_terminal_receipt": True,
+                "fresh_confirmation_per_batch": True,
+                "route": {
+                    "tool": "maintain_memory",
+                    "arguments": {
+                        "mode": "curation",
+                        "curation_action": "work-item",
+                        "review_ref": "same-review-ref",
+                        "hydration_recheck": "next-ordinal-1-through-8",
+                    },
+                },
+                "eighth_recheck": "closure-only",
+                "later_batches": "next-session-ordinary-read",
+            },
+            "bounds": {
+                "candidates_per_read": 3,
+                "contexts_per_candidate": 8,
+                "hydration_mutations_per_session": 8,
+                "hydration_rechecks_per_session": 8,
+            },
+            "decision_order": [
+                "resolve-exact-and-alias",
+                "stop-on-ambiguity",
+                "hydrate-one-match-before-duplicate",
+                "promote-only-no-match",
+            ],
+            "authority": {
+                "sensor": "deterministic-read-only",
+                "semantic_decider": "active-agent-only",
+                "candidate": "structural_suggestions",
+                "mutation": "governed-curation-restructure_execution",
+                "relation_outside_curation": "link_acceptance",
+            },
+        }
+    else:
+        entity_lifecycle = {
+            "available": False,
+            "ordinary_read": "unavailable-skip",
+            "unavailable_reason": (
+                "The active surface cannot request an explicit review category."
+            ),
+            "forbidden_substitutes": [
+                "local-scan",
+                "model-inference",
+                "embedding",
+                "due-state",
+            ],
+        }
     source_taxonomy_projection = _source_taxonomy_projection(vault_root, profile=profile)
     simple_actions = simple_action_catalog(selected_packs, available_tools=active_product_names)
     front_door_actions = product_front_door_catalog(
@@ -975,6 +1052,9 @@ def op_bootstrap(
                     "id": definition.id,
                     "label": definition.label,
                     "folder": definition.folder,
+                    "family": (
+                        entity_type_registry.family_of(definition.id) or definition.id
+                    ),
                     "aliases": list(definition.aliases),
                     "capture_guidance": definition.capture_guidance,
                 }
@@ -988,6 +1068,7 @@ def op_bootstrap(
                 "with a why, never by editing frontmatter around the registry rule."
             ),
             "candidate_route": "connect_memory(operation='resolve-entity')",
+            "lifecycle": entity_lifecycle,
         },
         "workflow": {
             "requested": requested_workflow,
@@ -1126,7 +1207,17 @@ def op_bootstrap(
                 ),
             },
             "semantic_units": {
-                "contract": semantic_authoring_projection,
+                # Compact already carries these exact bytes at the top-level
+                # `semantic_authoring` key. Keep a stable pointer here instead of
+                # spending the hookless payload budget on a second 9 KiB copy.
+                # Only compact is deduplicated: it is the profile under a byte
+                # ceiling. Full and diagnostics stay self-contained, which is
+                # also what keeps diagnostics a superset of full by size.
+                "contract": (
+                    {"same_as": "semantic_authoring"}
+                    if profile == "compact"
+                    else semantic_authoring_projection
+                ),
                 "compact_syntax": semantic_authoring_module.AUTHORING_CONTRACT.compact["syntax"],
                 "compact_kind": semantic_authoring_module.AUTHORING_CONTRACT.compact["kind"],
                 "category_rule": semantic_authoring_module.AUTHORING_CONTRACT.semantic_roles[
@@ -7080,6 +7171,8 @@ def op_maintain_memory(
     plan: dict[str, Any] | None = None,
     refs: list[str] | None = None,
     paths: list[str] | None = None,
+    review_ref: str | None = None,
+    hydration_recheck: int | None = None,
     expected_plan_fingerprint: str | None = None,
 ) -> dict:
     """Maintain vault health with explicit write-capable modes.
@@ -7140,6 +7233,9 @@ def op_maintain_memory(
         plan: Agent-authored closed forward plan for curation propose.
         refs: Explicit memory refs for curation work-item.
         paths: Explicit vault-relative paths for curation work-item.
+        review_ref: Exact recurring-identity review ref for a candidate work-item.
+        hydration_recheck: Same-identity continuation ordinal, 1 through 8; the
+            eighth is closure-only and cannot bind another plan.
         expected_plan_fingerprint: Exact reviewed plan fingerprint for approval.
     """
     if rebuild_graph and mode != "reconcile":
@@ -7173,11 +7269,13 @@ def op_maintain_memory(
             "plan": plan,
             "refs": refs,
             "paths": paths,
+            "review_ref": review_ref,
+            "hydration_recheck": hydration_recheck,
             "expected_plan_fingerprint": expected_plan_fingerprint,
             "why": why,
         }
         allowed_by_action = {
-            "work-item": {"refs", "paths"},
+            "work-item": {"refs", "paths", "review_ref", "hydration_recheck"},
             "propose": {"plan"},
             "preview": {"run_id"},
             "status": {"run_id"},
@@ -7218,7 +7316,13 @@ def op_maintain_memory(
 
         def invoke_curation() -> dict[str, Any]:
             if curation_action == "work-item":
-                return curation_module.work_item(vault_root, refs=refs, paths=paths)
+                return curation_module.work_item(
+                    vault_root,
+                    refs=refs,
+                    paths=paths,
+                    review_ref=review_ref,
+                    hydration_recheck=hydration_recheck,
+                )
             if curation_action == "propose":
                 assert plan is not None
                 return curation_module.propose(vault_root, plan)
