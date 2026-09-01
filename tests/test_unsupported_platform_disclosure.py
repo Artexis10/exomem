@@ -15,6 +15,7 @@ no darwin implementation, and nothing here pretends otherwise.
 
 from __future__ import annotations
 
+import os
 import sys
 import tomllib
 from pathlib import Path
@@ -26,10 +27,27 @@ from exomem import held_fs
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
+class _BackendWithNoPlatform:
+    """A backend that serves no platform, standing in for the absent darwin one."""
+
+    @staticmethod
+    def platform_supported() -> bool:
+        return False
+
+
 @pytest.fixture
 def unsupported(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Run the body as though this host were darwin."""
+    """Run the body as though this host had no backend.
+
+    Patching `sys.platform` alone is not enough and Windows proved it: `_backend()`
+    dispatches on `os.name`, so a Windows host still selects the Windows backend,
+    whose `platform_supported()` is unconditionally true — the fixture asked for an
+    unserved host and got a served one. Substituting the backend states the
+    condition directly and holds on every host; `sys.platform` is patched as well
+    only so the reason names a platform.
+    """
     monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(held_fs, "_backend", lambda: _BackendWithNoPlatform)
     held_fs.reset_capability_cache_for_tests()
     yield
     held_fs.reset_capability_cache_for_tests()
@@ -55,14 +73,16 @@ def test_the_reason_is_empty_when_supported() -> None:
     assert held_fs.platform_support().reason == ""
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="the POSIX backend imports the stdlib `posix` module, absent on Windows",
+)
 def test_the_probe_and_the_host_question_share_one_predicate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`_probe` must not carry a second, drifting copy of the platform rule."""
     from exomem import _held_fs_posix
 
-    if sys.platform.startswith("win"):
-        pytest.skip("the POSIX backend is not the one selected here")
     monkeypatch.setattr(_held_fs_posix, "platform_supported", lambda: False)
     held_fs.reset_capability_cache_for_tests()
 
@@ -73,14 +93,16 @@ def test_the_probe_and_the_host_question_share_one_predicate(
     held_fs.reset_capability_cache_for_tests()
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="the POSIX backend imports the stdlib `posix` module, absent on Windows",
+)
 def test_acquire_refuses_rather_than_falling_back(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """No fallback: a host with no backend gets a refusal, never a weaker route."""
     from exomem import _held_fs_posix
 
-    if sys.platform.startswith("win"):
-        pytest.skip("the POSIX backend is not the one selected here")
     monkeypatch.setattr(_held_fs_posix, "platform_supported", lambda: False)
     held_fs.reset_capability_cache_for_tests()
 
@@ -231,3 +253,40 @@ def test_the_package_does_not_advertise_os_independence() -> None:
     assert "Operating System :: OS Independent" not in classifiers
     assert "Operating System :: POSIX :: Linux" in classifiers
     assert "Operating System :: Microsoft :: Windows" in classifiers
+
+
+# --- the regression Windows found, reproduced without Windows ---------------
+
+
+def test_the_windows_backend_serves_whatever_sys_platform_claims(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`sys.platform` is not the condition, and this is why.
+
+    The first version of this module expressed "unserved host" by setting
+    `sys.platform = "darwin"`. That held on Linux, where the POSIX backend reads
+    `sys.platform` — and asserted nothing on Windows, where `_backend()` dispatches
+    on `os.name` and selects a backend that serves unconditionally. Windows CI
+    caught it; this pins it everywhere.
+
+    Asserted against the backend rather than by faking `os.name`, because patching
+    that globally sends pytest's own teardown down a Windows path and into
+    `ctypes.windll`, which does not exist here.
+    """
+    from exomem import _held_fs_windows
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    assert _held_fs_windows.platform_supported(), (
+        "the Windows backend serves by construction, so a test that expects a "
+        "refusal from patching sys.platform is asserting nothing on Windows"
+    )
+
+
+def test_the_fixture_states_the_condition_rather_than_the_host(unsupported) -> None:
+    """The fixture substitutes the backend, so backend selection cannot undo it."""
+    support = held_fs.platform_support()
+
+    assert not support.supported
+    assert "darwin" in support.reason
+    assert held_fs._backend().platform_supported() is False
