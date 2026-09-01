@@ -112,7 +112,14 @@ def test_recovery_command_has_only_fixed_modes_and_environment_free_help(
     )
     parser = recovery._parser()
     assert parser.parse_args(["preflight", "--stdin"]).mode == "preflight"
-    for mode in ("reopen", "inspect", "verify-recovery"):
+    for mode in (
+        "reopen",
+        "inspect",
+        "verify-recovery",
+        "retarget-preflight",
+        "retarget",
+        "verify-retarget",
+    ):
         assert parser.parse_args([mode, "--stdin"]).mode == mode
     with pytest.raises(recovery.RecoveryRefusal):
         parser.parse_args(["anything-else", "--stdin"])
@@ -226,6 +233,121 @@ def test_recovery_marker_is_content_free_and_exact() -> None:
     ):
         with pytest.raises(recovery.RecoveryRefusal):
             recovery.parse_recovery_marker({**marker, **changed})
+
+
+def test_retarget_request_changes_only_the_legacy_runtime_pair() -> None:
+    recovery = _module()
+    source = {
+        "operationId": "provider-alpha",
+        "checkpoint": "requested",
+        "fenceGeneration": 7,
+        "tenantId": "tenant-alpha",
+        "cellId": "cell-alpha",
+        "protocolVersion": "1",
+        "releaseVersion": "0.66.0",
+        "serviceCredential": "secret-alpha",
+        "workerPolicy": {"workerCount": 0, "semantic": False, "media": False},
+        "provisionMode": "serve",
+    }
+
+    target = recovery.retarget_legacy_provision_request(
+        source,
+        release_version="0.68.1",
+        protocol_version="1",
+    )
+
+    assert target == {**source, "releaseVersion": "0.68.1", "protocolVersion": "1"}
+    assert source["releaseVersion"] == "0.66.0"
+    with pytest.raises(recovery.RecoveryRefusal):
+        recovery.retarget_legacy_provision_request(
+            {**source, "provisionMode": "restore-candidate"},
+            release_version="0.68.1",
+            protocol_version="1",
+        )
+    with pytest.raises(recovery.RecoveryRefusal):
+        recovery.retarget_legacy_provision_request(
+            {**source, "runtimeTarget": {}},
+            release_version="0.68.1",
+            protocol_version="1",
+        )
+    with pytest.raises(recovery.RecoveryRefusal, match="already targets"):
+        recovery.retarget_legacy_provision_request(
+            target,
+            release_version="0.68.1",
+            protocol_version="1",
+        )
+
+
+def test_retarget_transition_accepts_only_unfinished_recovered_work() -> None:
+    recovery = _module()
+    now = datetime(2030, 1, 2, 3, 4, 5, tzinfo=UTC)
+    pending = recovery.RetargetPreState(
+        action="provision",
+        state="pending",
+        checkpoint="volume-owned",
+        error_code=None,
+        claim_owner=None,
+        claim_token=None,
+        claim_expires_at=None,
+        has_result=False,
+        finalized=False,
+        has_recovery_marker=True,
+        has_retarget_marker=False,
+    )
+
+    assert (
+        recovery.retarget_transition_values(pending, now=now)["state"]
+        is recovery.OperationState.PENDING
+    )
+    expired = replace(
+        pending,
+        state="claimed",
+        claim_owner="worker-alpha",
+        claim_token="a" * 64,
+        claim_expires_at=datetime(2030, 1, 2, 3, 4, 4, tzinfo=UTC),
+    )
+    assert recovery.retarget_transition_values(expired, now=now)["claim_owner"] is None
+    with pytest.raises(recovery.RecoveryRefusal, match="active claim"):
+        recovery.retarget_transition_values(
+            replace(expired, claim_expires_at=datetime(2030, 1, 2, 3, 4, 6, tzinfo=UTC)),
+            now=now,
+        )
+    for changed in (
+        {"checkpoint": "queued"},
+        {"has_recovery_marker": False},
+        {"has_result": True},
+        {"finalized": True},
+    ):
+        with pytest.raises(recovery.RecoveryRefusal):
+            recovery.retarget_transition_values(replace(pending, **changed), now=now)
+
+
+def test_retarget_marker_is_exact_content_free_and_one_way() -> None:
+    recovery = _module()
+    marker = recovery.retarget_marker(
+        preflight_sha256="a" * 64,
+        source_request_sha256="b" * 64,
+        target_request_sha256="c" * 64,
+        target_runtime_sha256="d" * 64,
+        helper_source_sha256="e" * 64,
+        claim_generation=4,
+        committed_at=datetime(2030, 1, 2, 3, 4, 5, tzinfo=UTC),
+    )
+
+    assert set(marker) == {
+        "schema",
+        "preflight_sha256",
+        "source_request_sha256",
+        "target_request_sha256",
+        "target_runtime_sha256",
+        "helper_source_sha256",
+        "claim_generation",
+        "committed_at",
+    }
+    assert recovery.parse_retarget_marker(marker) == marker
+    assert b"secret" not in recovery.canonical_receipt_bytes(marker)
+    with pytest.raises(recovery.RecoveryRefusal):
+        recovery.parse_retarget_marker({**marker, "tenantId": "tenant-alpha"})
 
 
 def test_database_stays_at_0006_without_recovery_receipt_table() -> None:

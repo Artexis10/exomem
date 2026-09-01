@@ -165,6 +165,23 @@ This makes rollback a safe stop-and-recover procedure rather than a promise that
 
 The generic specification contains target/current roles and invariants. A release execution records the actual version, source commit, image/candidate digests, Substrate and Exomem commits, expand/contract lock hashes, fleet inventory hashes, per-cell operation IDs and preservation evidence, promotion evidence, acceptance results, and final state. Later releases reuse the same schema and workflow with new reviewed values.
 
+### 12. Retarget only stranded, never-routed provisions through a signed recovery
+
+An initial private-alpha provision can be stranded after its exact resource identities and
+retained volume exist but before any route or binding is admitted. When the selected legacy
+runtime cannot consume the already-enrolled governed state, an operator may explicitly
+authorize one forward retarget to the reviewed upgrade target. The signed provisioner helper
+accepts only the same operation that already carries the one-way init-retry recovery receipt,
+is at `PENDING|CLAIMED / volume-owned` with no live claim, result, route, or admitted runtime,
+and still owns the exact authenticated namespace, Helm release, PVC, provider volume, tenant
+fence, and unreleased reservation. It decrypts and verifies the existing v1 request against the
+expand lock's retained catalog, changes only `releaseVersion` and `protocolVersion`, and commits
+the new ciphertext, canonical hash, pending state, and a content-free one-way retarget receipt
+in one compare-and-swap transaction. It never changes or replaces the operation, tenant, cell,
+fence, reservation, resource, PVC, PV, provider-volume, service credential, worker policy, or
+caller checkpoint. The target remains cataloged for this persisted v1 operation until its
+unfinished and desired-state evidence no longer requires that compatibility path.
+
 ## Risks / Trade-offs
 
 - **[Control-plane and cluster state disagree]** → Stop before mutation and require explicit reconciliation; never infer an empty fleet from one table.
