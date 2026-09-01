@@ -77,15 +77,15 @@
 - [ ] 7.4 Review both repository diffs for tenant-data safety, authorization boundaries, secret handling, compatibility, rollback truthfulness, and unintended release/profile changes
 - [ ] 7.5 Verify the complete workflow end to end from a fresh execution record before authorizing production
 
-## 8. First execution: runtime 0.68.0
+## 8. First execution: runtime 0.68.1
 
-- [ ] 8.1 Verify the exact `v0.68.0` source commit, amd64 image digest, signed runtime candidate, source closure, attestations, protocol, profile, command fingerprint, schema digest, and compatibility digest
-- [ ] 8.2 Import the exact `0.68.0` agent and gateway fixtures into every Substrate release-pinned production site while retaining every release found by the live legacy inventory
+- [ ] 8.1 Verify the exact `v0.68.1` source commit, amd64 image digest, signed runtime candidate, source closure, attestations, protocol, profile, command fingerprint, schema digest, and compatibility digest
+- [ ] 8.2 Import the exact `0.68.1` agent and gateway fixtures into every Substrate release-pinned production site while retaining every release found by the live legacy inventory
 - [ ] 8.3 Land and deploy the reviewed Substrate trusted-release, rollforward, reviewer-client, migration, and operator changes; record the immutable consumer commit
-- [ ] 8.4 Compose, verify, review, and land the Exomem `0.68.0` expand/contract lock pair and provisioner image from the exact Substrate consumer and signed target evidence
-- [ ] 8.5 Create the schema-valid `0.68.0` execution record, run the live reconciled inventory, and resolve every ghost, divergence, stale assignment, unfinished operation, or capacity mismatch before mutation
+- [ ] 8.4 Compose, verify, review, and land the Exomem `0.68.1` expand/contract lock pair and provisioner image from the exact Substrate consumer and signed target evidence
+- [ ] 8.5 Create the schema-valid `0.68.1` execution record, run the live reconciled inventory, and resolve every ghost, divergence, stale assignment, unfinished operation, or capacity mismatch before mutation
 - [ ] 8.6 Deploy Substrate and the Exomem expand lock, then prove adoption changed no existing tenant resource or data
 - [ ] 8.7 If the reconciled fleet is empty, record the no-op; otherwise roll one canary and every remaining legacy cell sequentially with preservation and exact-runtime evidence
 - [ ] 8.8 Prove zero legacy dependencies and deploy the reviewed contract lock
 - [ ] 8.9 Run free preflight, prepare the explicit eligible reviewer client, and conduct the human-timed Claude/OpenAI promotion ceremony
-- [ ] 8.10 Complete personal-account OAuth and full read/write/reconnect acceptance on `0.68.0`, keep the personal tenant live, and record final fleet, lock, cohort, authority, capacity, and operation state
+- [ ] 8.10 Complete personal-account OAuth and full read/write/reconnect acceptance on `0.68.1`, keep the personal tenant live, and record final fleet, lock, cohort, authority, capacity, and operation state

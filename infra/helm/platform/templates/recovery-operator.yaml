@@ -13,7 +13,7 @@ metadata:
   name: exomem-init-retry-recovery
 rules:
   - apiGroups: [""]
-    resources: ["namespaces", "persistentvolumeclaims", "persistentvolumes", "configmaps"]
+    resources: ["namespaces", "persistentvolumeclaims", "persistentvolumes", "configmaps", "pods"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["apps"]
     resources: ["statefulsets"]
