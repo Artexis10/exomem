@@ -42,6 +42,7 @@ if PROVISIONER_TEST_IMAGE is None:
         CapacityLedger,
         CapacityReservation,
         CapacityReservationClass,
+        CellOperationLock,
         Operation,
         OperationAction,
         OperationState,
@@ -401,14 +402,40 @@ async def test_postgresql17_recovery_cas_inserts_one_immutable_receipt(
 
     class Lock:
         def matches_runtime_request(
-            self, request: dict[str, object], *, wire_protocol: str
+            self,
+            request: dict[str, object],
+            *,
+            wire_protocol: str,
+            selection: str | None = None,
         ) -> bool:
+            assert selection is None
             return (
                 wire_protocol == "exomem-cell-provisioner.v1"
                 and request["provisionMode"] == "serve"
                 and request["releaseVersion"] == "0.39.2"
                 and request["protocolVersion"] == "1"
             )
+
+        def selected_runtime(self, selection: str | None):
+            assert selection is None
+
+            class Target:
+                releaseVersion = "0.68.1"
+                protocolVersion = "1"
+
+                @staticmethod
+                def model_dump(*, mode: str) -> dict[str, str]:
+                    assert mode == "json"
+                    return {
+                        "releaseVersion": "0.68.1",
+                        "protocolVersion": "1",
+                        "agentProfile": "hosted-alpha-agent-v4",
+                        "gatewayContractDigest": "a" * 64,
+                        "commandFingerprint": "b" * 64,
+                        "schemaDigest": "c" * 64,
+                    }
+
+            return type("Selected", (), {"runtimeTarget": Target()})()
 
     class Observer:
         async def observe(
@@ -714,6 +741,45 @@ async def test_postgresql17_recovery_cas_inserts_one_immutable_receipt(
                 "helper_source_sha256",
                 "claim_generation",
                 "committed_at",
+            }
+        async with database.session_factory.begin() as session:
+            session.add(
+                CellOperationLock(
+                    cell_id="cell-recovery-postgresql",
+                    tenant_id="tenant-recovery-postgresql",
+                    operation_id="provider-recovery-postgresql",
+                    fence_generation=7,
+                    lease_expires_at=datetime.now(UTC) - timedelta(minutes=1),
+                )
+            )
+        retargeted, replayed = await asyncio.gather(
+            service.retarget(operation_id), service.retarget(operation_id)
+        )
+        assert {retargeted["status"], replayed["status"]} == {
+            "retargeted",
+            "already-retargeted",
+        }
+        async with database.session_factory() as session:
+            operation = await session.get(Operation, operation_id)
+            assert operation is not None
+            decoded = codec.decrypt_json(
+                operation.request_ciphertext,
+                purpose="operation-request:provision:recovery-postgresql-key",
+            )
+            assert decoded == {
+                **request,
+                "releaseVersion": "0.68.1",
+                "protocolVersion": "1",
+            }
+            assert operation.canonical_request_sha256 == repository_module.canonical_request_sha256(
+                decoded
+            )
+            assert operation.state is OperationState.PENDING
+            assert operation.checkpoint == "volume-owned"
+            assert "_runtime_retarget_recovery_v1" in operation.progress
+            assert await service.verify_retarget(operation_id) == {
+                **retargeted,
+                "status": "retarget-verified",
             }
         for role, schema in (("wrong-role", target.schema), (target.role, "wrong_schema")):
             wrong_identity = RecoveryService(
