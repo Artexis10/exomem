@@ -28,7 +28,15 @@ from .preserve import (
     _sanitize_segment,
     preserve_stream,
 )
-from .vault import FrontmatterError, kb_root, parse_frontmatter, walk_vault_md
+from .vault import (
+    FrontmatterError,
+    PathGuardError,
+    kb_root,
+    parse_frontmatter,
+    read_bounded_guarded_bytes,
+    read_guarded_text,
+    walk_vault_md,
+)
 from .writer_lease import active_manager, active_mutation_request_id, mark_active_mutation_committed
 
 MAX_FILES = 8
@@ -300,6 +308,13 @@ def _validate_destination(scope: str, category: str) -> None:
         raise SafeFetchError("INVALID_PRESERVE", "category is empty or invalid")
 
 
+def _yaml_page_path_safe(value: str) -> bool:
+    return not any(
+        0x7F <= ord(char) <= 0x9F or ord(char) in {0x2028, 0x2029}
+        for char in value
+    )
+
+
 def stage_artifact(
     file: Mapping[str, object], budget: FetchBudget, *, batch_deadline: float | None = None
 ) -> StagedArtifact:
@@ -461,8 +476,9 @@ def _validate_adoption(value: object) -> AdoptionEnvelope:
     selected_file_id = value.get("selected_file_id")
     if (
         not isinstance(key, str)
-        or not key.strip()
-        or len(key.strip()) > _MAX_ADOPTION_KEY_CHARS
+        or not key
+        or key != key.strip()
+        or len(key) > _MAX_ADOPTION_KEY_CHARS
         or any(ord(char) < 32 for char in key)
     ):
         raise SafeFetchError("INVALID_ADOPTION", "adoption key is invalid")
@@ -478,7 +494,7 @@ def _validate_adoption(value: object) -> AdoptionEnvelope:
     except SafeFetchError as error:
         raise SafeFetchError("INVALID_ADOPTION", "selected_file_id is invalid") from error
     return AdoptionEnvelope(
-        key_digest=hashlib.sha256(key.strip().encode("utf-8")).hexdigest(),
+        key_digest=hashlib.sha256(key.encode("utf-8")).hexdigest(),
         trigger=trigger.strip(),
         selected_file_id=selected,
     )
@@ -562,6 +578,38 @@ def _receipt_error(code: str, reason: str) -> SafeFetchError:
     return SafeFetchError(code, reason)
 
 
+def _portable_logical_path(value: object) -> PurePosixPath | None:
+    if not isinstance(value, str) or not value or "\\" in value or "\0" in value:
+        return None
+    if re.match(r"^[A-Za-z]:", value):
+        return None
+    parts = tuple(value.split("/"))
+    logical = PurePosixPath(value)
+    if logical.is_absolute() or any(part in {"", ".", ".."} for part in parts):
+        return None
+    return logical
+
+
+def _canonical_page_lane(vault_root: Path, page_path: Path) -> str | None:
+    roots = {
+        "source": kb_root(vault_root) / "Sources",
+        "evidence": kb_root(vault_root) / "Evidence",
+    }
+    for lane, root in roots.items():
+        try:
+            page_path.relative_to(root)
+        except ValueError:
+            continue
+        return lane
+    return None
+
+
+def _expected_companion_path(stored: PurePosixPath, *, lane: str) -> PurePosixPath:
+    if lane == "evidence" and stored.name.lower().endswith(".md"):
+        return stored.with_name(f"{stored.name[:-3]}-notes.md")
+    return PurePosixPath(f"{stored}.md")
+
+
 def _validate_receipt(
     value: object,
     *,
@@ -602,22 +650,60 @@ def _validate_receipt(
         or receipt["media_id"] != f"sha256:{receipt['hash']}"
     ):
         raise _receipt_error("ADOPTION_KEY_REUSED", "stored adoption receipt is invalid")
+    actual_lane = _canonical_page_lane(vault_root, page_path)
+    if actual_lane is None or receipt["lane"] != actual_lane:
+        raise _receipt_error("ADOPTION_KEY_REUSED", "stored adoption receipt lane is inconsistent")
     actual_page = page_path.relative_to(vault_root).as_posix()
     if receipt["page_path"] != actual_page:
         raise _receipt_error("ADOPTION_KEY_REUSED", "stored adoption receipt page is inconsistent")
-    for field in ("stored_path", "page_path", "destination"):
-        logical = PurePosixPath(str(receipt[field]))
-        if logical.is_absolute() or ".." in logical.parts:
-            raise _receipt_error("ADOPTION_KEY_REUSED", "stored adoption receipt path is invalid")
-    stored = PurePosixPath(str(receipt["stored_path"]))
-    page = PurePosixPath(str(receipt["page_path"]))
-    destination = PurePosixPath(str(receipt["destination"]))
+    stored = _portable_logical_path(receipt["stored_path"])
+    page = _portable_logical_path(receipt["page_path"])
+    destination = _portable_logical_path(receipt["destination"])
+    if stored is None or page is None or destination is None:
+        raise _receipt_error("ADOPTION_KEY_REUSED", "stored adoption receipt path is invalid")
+    lane_root = _portable_logical_path(
+        _destination(vault_root, "Sources" if actual_lane == "source" else "Evidence")
+    )
+    assert lane_root is not None
+    destination_depth = len(destination.parts) - len(lane_root.parts)
+    valid_depth = (
+        1 <= destination_depth <= 2
+        if actual_lane == "source"
+        else destination_depth == 2
+    )
     if (
-        stored.parts[: len(destination.parts)] != destination.parts
-        or page.parts[: len(destination.parts)] != destination.parts
+        destination.parts[: len(lane_root.parts)] != lane_root.parts
+        or not valid_depth
+        or stored.parent != destination
+        or page.parent != destination
+        or page != _expected_companion_path(stored, lane=actual_lane)
     ):
-        raise _receipt_error("ADOPTION_KEY_REUSED", "stored adoption receipt destination is inconsistent")
+        raise _receipt_error(
+            "ADOPTION_KEY_REUSED", "stored adoption receipt companion pairing is inconsistent"
+        )
     return receipt
+
+
+def _verify_canonical_artifact(
+    vault_root: Path, receipt: Mapping[str, object]
+) -> None:
+    try:
+        content, _guard = read_bounded_guarded_bytes(
+            vault_root,
+            str(receipt["stored_path"]),
+            limit=int(receipt["size"]),
+            expected_hash=str(receipt["hash"]),
+        )
+    except (FileNotFoundError, OSError, PathGuardError, ValueError) as error:
+        raise _receipt_error(
+            "ADOPTION_REPLAY_UNVERIFIABLE",
+            "stored adoption artifact could not be reverified",
+        ) from error
+    if len(content) != receipt["size"]:
+        raise _receipt_error(
+            "ADOPTION_REPLAY_UNVERIFIABLE",
+            "stored adoption artifact could not be reverified",
+        )
 
 
 def _find_adoption_receipt(
@@ -625,13 +711,19 @@ def _find_adoption_receipt(
 ) -> dict[str, object] | None:
     """Locate portable receipt truth from canonical vault-owned pages."""
     matches: list[dict[str, object]] = []
-    needle = f"key_digest: {key_digest}"
     for page in walk_vault_md(vault_root):
-        try:
-            source = page.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
+        if _canonical_page_lane(vault_root, page) is None:
             continue
-        if f"{_ADOPTION_RECEIPT_FIELD}:" not in source or needle not in source:
+        try:
+            source, _guard = read_guarded_text(vault_root, page)
+        except (FileNotFoundError, OSError, PathGuardError, UnicodeDecodeError):
+            continue
+        _loose, _body, raw_frontmatter = parse_frontmatter(source)
+        if (
+            raw_frontmatter is None
+            or f"{_ADOPTION_RECEIPT_FIELD}:" not in raw_frontmatter
+            or key_digest not in raw_frontmatter
+        ):
             continue
         try:
             frontmatter, _body, marker = parse_frontmatter(source, strict=True)
@@ -644,7 +736,9 @@ def _find_adoption_receipt(
         value = frontmatter.get(_ADOPTION_RECEIPT_FIELD)
         if not isinstance(value, Mapping) or value.get("key_digest") != key_digest:
             continue
-        matches.append(_validate_receipt(value, page_path=page, vault_root=vault_root))
+        receipt = _validate_receipt(value, page_path=page, vault_root=vault_root)
+        _verify_canonical_artifact(vault_root, receipt)
+        matches.append(receipt)
     if len(matches) > 1:
         raise _receipt_error("ADOPTION_KEY_REUSED", "adoption key has multiple stored receipts")
     return matches[0] if matches else None
@@ -693,7 +787,11 @@ def _validate_staged_adoption(
 
 
 def _assert_replay_identity(
-    receipt: Mapping[str, object], artifact: StagedArtifact, *, lane: str
+    vault_root: Path,
+    receipt: Mapping[str, object],
+    artifact: StagedArtifact,
+    *,
+    lane: str,
 ) -> None:
     identity = {
         "hash_algorithm": "sha256",
@@ -704,6 +802,7 @@ def _assert_replay_identity(
     }
     if any(receipt[field] != value for field, value in identity.items()):
         raise _receipt_error("ADOPTION_KEY_REUSED", "adoption key was reused for different bytes")
+    _verify_canonical_artifact(vault_root, receipt)
 
 
 def _replayed_outcome(receipt: Mapping[str, object]) -> dict[str, object]:
@@ -828,7 +927,7 @@ def _capture_source_adoption(
 
         if receipt is not None:
             try:
-                _assert_replay_identity(receipt, artifact, lane="source")
+                _assert_replay_identity(vault_root, receipt, artifact, lane="source")
             except SafeFetchError as error:
                 outcomes[selected_index] = _failed(artifact.file_id, error)
                 return _finish_adoption(outcomes)
@@ -847,7 +946,7 @@ def _capture_source_adoption(
                     vault_root, envelope, lane="source", destination=destination
                 )
                 if raced is not None:
-                    _assert_replay_identity(raced, artifact, lane="source")
+                    _assert_replay_identity(vault_root, raced, artifact, lane="source")
                     payload = None
                 else:
                     result = add_module.add(
@@ -896,15 +995,23 @@ def _preserve_evidence_adoption(
     files: list[Mapping[str, object]],
     adoption: object,
 ) -> dict:
-    try:
-        _validate_destination(scope, category)
-    except SafeFetchError as error:
-        return _adoption_error_result(files, error)
     prepared = _adoption_inputs(files, adoption)
     if isinstance(prepared, dict):
         return prepared
     envelope, selected_index = prepared
     outcomes = _adoption_outcomes(files, selected_index)
+    try:
+        _validate_destination(scope, category)
+        if not all(
+            _yaml_page_path_safe(value)
+            for value in (_sanitize_segment(scope), _sanitize_segment(category))
+        ):
+            raise SafeFetchError(
+                "INVALID_PRESERVE", "adoption destination contains unsafe characters"
+            )
+    except SafeFetchError as error:
+        outcomes[selected_index] = _failed(envelope.selected_file_id, error)
+        return _finish_adoption(outcomes)
     destination = _destination(
         vault_root, "Evidence", _sanitize_segment(scope), _sanitize_segment(category)
     )
@@ -943,7 +1050,7 @@ def _preserve_evidence_adoption(
 
         if receipt is not None:
             try:
-                _assert_replay_identity(receipt, artifact, lane="evidence")
+                _assert_replay_identity(vault_root, receipt, artifact, lane="evidence")
             except SafeFetchError as error:
                 outcomes[selected_index] = _failed(artifact.file_id, error)
                 return _finish_adoption(outcomes)
@@ -962,7 +1069,7 @@ def _preserve_evidence_adoption(
                     vault_root, envelope, lane="evidence", destination=destination
                 )
                 if raced is not None:
-                    _assert_replay_identity(raced, artifact, lane="evidence")
+                    _assert_replay_identity(vault_root, raced, artifact, lane="evidence")
                     payload = None
                 else:
                     with artifact.path.open("rb") as stream:

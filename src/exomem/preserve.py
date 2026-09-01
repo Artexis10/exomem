@@ -26,6 +26,7 @@ import base64
 import datetime as dt
 import hashlib
 import io
+import json
 import logging
 import mimetypes
 import os
@@ -169,7 +170,11 @@ def _render_adoption_receipt_lines(receipt: Mapping[str, object]) -> list[str]:
         elif value is None:
             rendered = "null"
         else:
-            rendered = str(value) if isinstance(value, int) else yaml_scalar(str(value))
+            rendered = (
+                str(value)
+                if isinstance(value, int)
+                else json.dumps(str(value), ensure_ascii=True)
+            )
         lines.append(f"  {field}: {rendered}")
     return lines
 

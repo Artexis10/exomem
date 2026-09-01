@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -71,6 +72,19 @@ def _adoption(key: str, selected: str = "file-b", trigger: str = "selected") -> 
 def _receipt_from_result(result: dict, selected: str = "file-b") -> dict:
     row = next(item for item in result["files"] if item["file_id"] == selected)
     return row["adoption"]
+
+
+def _replace_receipt_scalar(page: Path, field: str, before: str, after: str) -> None:
+    source = page.read_text(encoding="utf-8")
+    frontmatter, _body, _marker = parse_frontmatter(source, strict=True)
+    assert frontmatter["artifact_adoption"][field] == before
+    prefix = f"  {field}: "
+    lines = source.splitlines(keepends=True)
+    indexes = [index for index, line in enumerate(lines) if line.startswith(prefix)]
+    assert len(indexes) == 1
+    ending = "\n" if lines[indexes[0]].endswith("\n") else ""
+    lines[indexes[0]] = prefix + json.dumps(after, ensure_ascii=True) + ending
+    page.write_text("".join(lines), encoding="utf-8")
 
 
 @pytest.mark.parametrize(("filename", "content_type", "data"), _ARTIFACTS)
@@ -777,3 +791,336 @@ def test_staged_result_cannot_swap_the_selected_identifier(
     selected = next(row for row in result["files"] if row["file_id"] == "file-b")
     assert selected["code"] == "INVALID_FILE"
     assert not list((vault / "Knowledge Base" / "Evidence" / "case").rglob("variant-c.bin"))
+
+
+@pytest.mark.parametrize("mutation", ("missing", "same-size", "changed-size", "symlink"))
+def test_durable_replay_requires_the_canonical_stored_bytes_no_follow(
+    vault: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    from exomem import client_artifacts, media_processing
+
+    data = b"canonical custody bytes"
+    payloads = {"file-b": ("selected.bin", "application/octet-stream", data)}
+    calls: list[str] = []
+    monkeypatch.setattr(client_artifacts, "stage_artifact", _stage_factory(tmp_path, payloads, calls))
+    monkeypatch.setattr(media_processing, "classify_media", lambda _path: None)
+    kwargs = {
+        "scope": "case",
+        "category": "outputs",
+        "files": [_handle("file-b", "selected.bin", "application/octet-stream")],
+        "adoption": _adoption(f"canonical-custody-{mutation}"),
+    }
+    committed = client_artifacts.preserve_artifacts(vault, **kwargs)
+    receipt = _receipt_from_result(committed)
+    stored = vault / receipt["stored_path"]
+    if mutation == "missing":
+        stored.unlink()
+    elif mutation == "same-size":
+        stored.write_bytes(b"X" * len(data))
+    elif mutation == "changed-size":
+        stored.write_bytes(data + b"-changed")
+    else:
+        external = tmp_path / "external-selected.bin"
+        external.write_bytes(data)
+        stored.unlink()
+        try:
+            stored.symlink_to(external)
+        except OSError:
+            pytest.skip("symlinks are unavailable")
+
+    replay = client_artifacts.preserve_artifacts(vault, **kwargs)
+
+    selected = next(row for row in replay["files"] if row["file_id"] == "file-b")
+    assert selected["outcome"] == "failed"
+    assert selected["code"] == "ADOPTION_REPLAY_UNVERIFIABLE"
+    assert calls == ["file-b"], "invalid canonical custody must fail before remote restaging"
+
+
+@pytest.mark.parametrize("lane", ("source", "evidence"))
+def test_receipt_path_must_be_the_lane_specific_canonical_companion_pair(
+    vault: Path,
+    source_schema,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    lane: str,
+) -> None:
+    from exomem import client_artifacts, media_processing
+
+    data = b"canonical pairing matters"
+    payloads = {"file-b": ("selected.bin", "application/octet-stream", data)}
+    monkeypatch.setattr(client_artifacts, "stage_artifact", _stage_factory(tmp_path, payloads, []))
+    monkeypatch.setattr(media_processing, "classify_media", lambda _path: None)
+    common = {
+        "files": [_handle("file-b", "selected.bin", "application/octet-stream")],
+        "adoption": _adoption(f"canonical-pair-{lane}"),
+    }
+    if lane == "source":
+        invoke = lambda: client_artifacts.capture_source_artifacts(  # noqa: E731
+            vault,
+            source_schema=source_schema,
+            title="Canonical pair",
+            **common,
+        )
+    else:
+        invoke = lambda: client_artifacts.preserve_artifacts(  # noqa: E731
+            vault,
+            scope="case",
+            category="outputs",
+            **common,
+        )
+    committed = invoke()
+    receipt = _receipt_from_result(committed)
+    page = vault / receipt["page_path"]
+    forged = (vault / receipt["stored_path"]).with_name("forged.bin")
+    forged.write_bytes(data)
+    _replace_receipt_scalar(page, "stored_path", receipt["stored_path"], forged.relative_to(vault).as_posix())
+
+    replay = invoke()
+
+    assert replay["files"][0]["outcome"] == "failed"
+    assert replay["files"][0]["code"] == "ADOPTION_KEY_REUSED"
+
+
+def test_windows_style_receipt_traversal_is_rejected_before_retrieval(
+    vault: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import client_artifacts, media_processing
+
+    data = b"portable path custody"
+    payloads = {"file-b": ("selected.bin", "application/octet-stream", data)}
+    calls: list[str] = []
+    monkeypatch.setattr(client_artifacts, "stage_artifact", _stage_factory(tmp_path, payloads, calls))
+    monkeypatch.setattr(media_processing, "classify_media", lambda _path: None)
+    kwargs = {
+        "scope": "case",
+        "category": "outputs",
+        "files": [_handle("file-b", "selected.bin", "application/octet-stream")],
+        "adoption": _adoption("windows-traversal"),
+    }
+    committed = client_artifacts.preserve_artifacts(vault, **kwargs)
+    receipt = _receipt_from_result(committed)
+    page = vault / receipt["page_path"]
+    unsafe = f'{receipt["destination"]}/..\\..\\secrets.txt'
+    _replace_receipt_scalar(page, "stored_path", receipt["stored_path"], unsafe)
+    calls.clear()
+
+    replay = client_artifacts.preserve_artifacts(vault, **kwargs)
+
+    assert replay["files"][0]["code"] == "ADOPTION_KEY_REUSED"
+    assert calls == []
+
+
+def test_noncanonical_matching_markdown_cannot_claim_an_adoption_key(
+    vault: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import client_artifacts, media_processing, preserve
+
+    key = "noncanonical-key"
+    data = b"selected canonical bytes"
+    payloads = {"file-b": ("selected.bin", "application/octet-stream", data)}
+    monkeypatch.setattr(client_artifacts, "stage_artifact", _stage_factory(tmp_path, payloads, []))
+    monkeypatch.setattr(media_processing, "classify_media", lambda _path: None)
+    notes = vault / "Knowledge Base" / "Notes"
+    notes.mkdir(parents=True, exist_ok=True)
+    fake_artifact = notes / "fake.bin"
+    fake_artifact.write_bytes(data)
+    fake_page = notes / "fake.bin.md"
+    digest = hashlib.sha256(data).hexdigest()
+    fake_receipt = {
+        "version": 1,
+        "committed": True,
+        "key_digest": hashlib.sha256(key.encode()).hexdigest(),
+        "trigger": "selected",
+        "selected_file_id": "file-b",
+        "lane": "evidence",
+        "destination": "Knowledge Base/Notes",
+        "stored_path": "Knowledge Base/Notes/fake.bin",
+        "page_path": "Knowledge Base/Notes/fake.bin.md",
+        "hash_algorithm": "sha256",
+        "hash": digest,
+        "size": len(data),
+        "content_type": "application/octet-stream",
+        "media_id": f"sha256:{digest}",
+    }
+    fake_page.write_text(
+        "---\ntype: insight\n" + "\n".join(preserve._render_adoption_receipt_lines(fake_receipt)) + "\n---\n",
+        encoding="utf-8",
+    )
+
+    result = client_artifacts.preserve_artifacts(
+        vault,
+        scope="case",
+        category="outputs",
+        files=[_handle("file-b", "selected.bin", "application/octet-stream")],
+        adoption=_adoption(key),
+    )
+
+    assert result["files"][0]["outcome"] == "stored"
+
+
+def test_legacy_body_prose_cannot_poison_frontmatter_receipt_discovery(
+    vault: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import client_artifacts, media_processing
+
+    key = "legacy-body-key"
+    data = b"selected bytes"
+    payloads = {"file-b": ("selected.bin", "application/octet-stream", data)}
+    monkeypatch.setattr(client_artifacts, "stage_artifact", _stage_factory(tmp_path, payloads, []))
+    monkeypatch.setattr(media_processing, "classify_media", lambda _path: None)
+    legacy = vault / "Knowledge Base" / "Evidence" / "legacy.md"
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text(
+        "---\ntitle: [legacy malformed frontmatter\n---\n\n"
+        "Body prose only:\nartifact_adoption:\n"
+        f"  key_digest: {hashlib.sha256(key.encode()).hexdigest()}\n",
+        encoding="utf-8",
+    )
+
+    result = client_artifacts.preserve_artifacts(
+        vault,
+        scope="case",
+        category="outputs",
+        files=[_handle("file-b", "selected.bin", "application/octet-stream")],
+        adoption=_adoption(key),
+    )
+
+    assert result["files"][0]["outcome"] == "stored"
+
+
+@pytest.mark.parametrize(
+    "field",
+    ("trigger", "selected_file_id", "content_type", "destination"),
+)
+def test_receipt_string_identities_round_trip_yaml_line_characters_losslessly(
+    vault: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+) -> None:
+    from exomem import client_artifacts, media_processing
+
+    selected = "file-b" if field != "selected_file_id" else "file\u2028b"
+    trigger = "selected" if field != "trigger" else "sel\u0085ected"
+    content_type = "application/octet-stream" if field != "content_type" else "application/x-\u007f"
+    scope = "case" if field != "destination" else "case\u2029name"
+    data = f"lossless-{field}".encode()
+    payloads = {selected: ("selected.bin", content_type, data)}
+    calls: list[str] = []
+    monkeypatch.setattr(client_artifacts, "stage_artifact", _stage_factory(tmp_path, payloads, calls))
+    monkeypatch.setattr(media_processing, "classify_media", lambda _path: None)
+    kwargs = {
+        "scope": scope,
+        "category": "outputs",
+        "files": [_handle(selected, "selected.bin", content_type)],
+        "adoption": _adoption(f"lossless-{field}", selected=selected, trigger=trigger),
+    }
+
+    committed = client_artifacts.preserve_artifacts(vault, **kwargs)
+    if field == "destination":
+        assert committed["files"][0]["outcome"] == "failed"
+        assert committed["files"][0]["code"] == "INVALID_PRESERVE"
+        assert calls == []
+        return
+    replay = client_artifacts.preserve_artifacts(vault, **kwargs)
+
+    assert replay["files"][0]["outcome"] == "replayed"
+    assert replay["files"][0]["adoption"] == committed["files"][0]["adoption"]
+
+
+def test_invalid_evidence_destination_only_fails_the_selected_handle(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import client_artifacts
+
+    monkeypatch.setattr(
+        client_artifacts,
+        "stage_artifact",
+        lambda *_args, **_kwargs: pytest.fail("invalid destination must not fetch"),
+    )
+    result = client_artifacts.preserve_artifacts(
+        vault,
+        scope="..",
+        category="outputs",
+        files=[
+            _handle("file-a", "a.bin", "application/octet-stream"),
+            _handle("file-b", "b.bin", "application/octet-stream"),
+            _handle("file-c", "c.bin", "application/octet-stream"),
+        ],
+        adoption=_adoption("invalid-destination"),
+    )
+
+    assert [row["outcome"] for row in result["files"]] == [
+        "unselected",
+        "failed",
+        "unselected",
+    ]
+
+
+def test_adoption_key_surrounding_whitespace_is_not_an_identity_alias(
+    vault: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import client_artifacts, media_processing
+
+    data = b"opaque key bytes"
+    payloads = {"file-b": ("selected.bin", "application/octet-stream", data)}
+    calls: list[str] = []
+    monkeypatch.setattr(client_artifacts, "stage_artifact", _stage_factory(tmp_path, payloads, calls))
+    monkeypatch.setattr(media_processing, "classify_media", lambda _path: None)
+    base = {
+        "scope": "case",
+        "category": "outputs",
+        "files": [_handle("file-b", "selected.bin", "application/octet-stream")],
+    }
+    first = client_artifacts.preserve_artifacts(vault, adoption=_adoption("opaque"), **base)
+    aliased = client_artifacts.preserve_artifacts(vault, adoption=_adoption(" opaque "), **base)
+
+    assert first["files"][0]["outcome"] == "stored"
+    assert aliased["files"][0]["outcome"] == "failed"
+    assert aliased["files"][0]["code"] == "INVALID_ADOPTION"
+    assert calls == ["file-b"]
+
+
+def test_durable_receipt_page_is_not_read_through_path_read_text(
+    vault: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import client_artifacts, media_processing
+
+    data = b"guarded companion bytes"
+    payloads = {"file-b": ("selected.bin", "application/octet-stream", data)}
+    monkeypatch.setattr(client_artifacts, "stage_artifact", _stage_factory(tmp_path, payloads, []))
+    monkeypatch.setattr(media_processing, "classify_media", lambda _path: None)
+    kwargs = {
+        "scope": "case",
+        "category": "outputs",
+        "files": [_handle("file-b", "selected.bin", "application/octet-stream")],
+        "adoption": _adoption("guarded-companion"),
+    }
+    committed = client_artifacts.preserve_artifacts(vault, **kwargs)
+    receipt_page = vault / _receipt_from_result(committed)["page_path"]
+    original_read_text = Path.read_text
+
+    def refuse_plain_receipt_read(self: Path, *args, **kwargs):
+        if self == receipt_page:
+            raise AssertionError("receipt lookup must use a guarded canonical read")
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", refuse_plain_receipt_read)
+
+    replay = client_artifacts.preserve_artifacts(vault, **kwargs)
+
+    assert replay["files"][0]["outcome"] == "replayed"
